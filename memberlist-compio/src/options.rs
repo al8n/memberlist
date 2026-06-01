@@ -4,8 +4,7 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use memberlist_machine::config::EndpointConfig;
-use memberlist_wire::{CheapClone, typed::Meta};
+use memberlist_proto::{CheapClone, config::EndpointConfig, typed::Meta};
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
@@ -14,7 +13,7 @@ use crate::{
 };
 
 /// SWIM-protocol-level options applied to the machine-layer
-/// [`EndpointConfig`](memberlist_machine::config::EndpointConfig) inside each
+/// [`EndpointConfig`](memberlist_proto::config::EndpointConfig) inside each
 /// `Transport::run`.
 ///
 /// Each field is an override layered over the `EndpointConfig` default:
@@ -52,7 +51,7 @@ impl MemberlistOptions {
 
   /// Builder: override the plaintext gossip-datagram MTU. `None` (the
   /// default) keeps the `EndpointConfig` default
-  /// ([`DEFAULT_GOSSIP_MTU`](memberlist_machine::config::DEFAULT_GOSSIP_MTU),
+  /// ([`DEFAULT_GOSSIP_MTU`](memberlist_proto::config::DEFAULT_GOSSIP_MTU),
   /// 1400 bytes).
   ///
   /// A gossip packet is emitted as a single UDP datagram, so `mtu` must leave
@@ -75,7 +74,7 @@ impl MemberlistOptions {
 
   /// Builder: override the LOCAL node's `Meta` byte ceiling. `None` (the
   /// default) keeps the `EndpointConfig` default
-  /// ([`DEFAULT_META_MAX_SIZE`](memberlist_machine::config::DEFAULT_META_MAX_SIZE),
+  /// ([`DEFAULT_META_MAX_SIZE`](memberlist_proto::config::DEFAULT_META_MAX_SIZE),
   /// 512 bytes). This is a local-broadcast cap, not a peer-rejection filter.
   #[must_use]
   #[inline]
@@ -87,7 +86,7 @@ impl MemberlistOptions {
   /// Builder: override the reliable-stream frame ceiling — the largest
   /// push/pull or reliable user-message payload accepted on a reliable stream.
   /// `None` (the default) keeps the `EndpointConfig` default
-  /// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_machine::config::DEFAULT_MAX_STREAM_FRAME_SIZE),
+  /// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE),
   /// 64 MiB). This bounds the per-event size of `RemoteStateReceived` /
   /// reliable `UserPacket` payloads, and so — together with the
   /// observation-channel byte backstop — the memory a peer can drive through
@@ -167,7 +166,7 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// valid maximum plaintext `gossip_mtu` is
 /// `UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD`.
 pub(crate) const GOSSIP_MTU_MAX: usize =
-  UDP_PAYLOAD_MAX - memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD;
+  UDP_PAYLOAD_MAX - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
 
 /// The lower bound on the plaintext `gossip_mtu`. A gossip packet is the
 /// transport for the SWIM protocol's mandatory single-datagram control
@@ -176,7 +175,7 @@ pub(crate) const GOSSIP_MTU_MAX: usize =
 /// broadcast at join). Each is emitted as ONE UDP datagram with no split
 /// point, and when compression OR encryption is enabled the receive side caps
 /// the decompressed/decrypted plaintext at `gossip_mtu`
-/// ([`memberlist_wire::unwrap_transforms_with_encryption`]'s `max_orig_len`),
+/// ([`memberlist_proto::unwrap_transforms_with_encryption`]'s `max_orig_len`),
 /// so a `gossip_mtu` below the largest mandatory control packet makes normal
 /// probes deterministically rejected → false suspicion. On the send side a
 /// self-`Alive` smaller than `gossip_mtu` is required for the gossip scheduler
@@ -187,9 +186,9 @@ pub(crate) const GOSSIP_MTU_MAX: usize =
 /// (minimal `Alive`), and ~70 B (`Ping` over IPv6), so 512 covers them with
 /// generous headroom for larger node-id / address encodings, matches the
 /// codebase's established small-but-functional size anchor
-/// ([`memberlist_machine::config::DEFAULT_META_MAX_SIZE`] / the legacy
+/// ([`memberlist_proto::config::DEFAULT_META_MAX_SIZE`] / the legacy
 /// `META_MAX_SIZE`, both 512), and sits far below the
-/// [`DEFAULT_GOSSIP_MTU`](memberlist_machine::config::DEFAULT_GOSSIP_MTU)
+/// [`DEFAULT_GOSSIP_MTU`](memberlist_proto::config::DEFAULT_GOSSIP_MTU)
 /// (1400), so the default and any sane value pass. Reject (don't clamp) so the
 /// operator learns and fixes the misconfiguration.
 pub(crate) const GOSSIP_MTU_MIN: usize = 512;
@@ -394,10 +393,10 @@ pub(crate) fn validate_advertise_addr(
 /// falsely suspect it.
 ///
 /// The receive side caps the decompressed/decrypted plaintext at `gossip_mtu`
-/// ([`memberlist_wire::unwrap_transforms_with_encryption`]'s `max_orig_len`),
+/// ([`memberlist_proto::unwrap_transforms_with_encryption`]'s `max_orig_len`),
 /// and the send-side gossip scheduler only selects an Alive whose plain frame
 /// is `<= gossip_mtu` (mirrored by the machine's own
-/// [`set_ack_payload`](memberlist_machine::endpoint) cap, which charges the
+/// [`set_ack_payload`](memberlist_proto::endpoint) cap, which charges the
 /// plain `encode_message` length directly against `gossip_mtu`). So each
 /// mandatory packet's PLAINTEXT framed length must fit `gossip_mtu`; the
 /// encryption wrapper is charged separately against the UDP ceiling
@@ -450,7 +449,7 @@ pub(crate) fn validate_advertise_addr(
 ///
 /// When encoding succeeds, the largest required plaintext is compared against
 /// the effective `gossip_mtu` (the override, or
-/// [`DEFAULT_GOSSIP_MTU`](memberlist_machine::config::DEFAULT_GOSSIP_MTU) when
+/// [`DEFAULT_GOSSIP_MTU`](memberlist_proto::config::DEFAULT_GOSSIP_MTU) when
 /// unset — an oversized id is rejected even at the default). Over-budget is
 /// rejected (not clamped) with [`MemberlistError::GossipMtuTooSmall`] carrying
 /// the effective `gossip_mtu` and the required minimum.
@@ -467,17 +466,17 @@ pub(crate) fn validate_gossip_mtu_for_identity<I>(
   opts: &MemberlistOptions,
 ) -> Result<(), crate::error::MemberlistError>
 where
-  I: memberlist_wire::Data + CheapClone,
+  I: memberlist_proto::Data + CheapClone,
 {
   use memberlist::codec::{EncodeOptions, encode_outgoing};
-  use memberlist_wire::{
+  use memberlist_proto::{
     Node,
     typed::{Ack, Alive, Message, Ping},
   };
 
   let budget = opts
     .gossip_mtu()
-    .unwrap_or(memberlist_machine::config::DEFAULT_GOSSIP_MTU);
+    .unwrap_or(memberlist_proto::config::DEFAULT_GOSSIP_MTU);
 
   // The LOCAL node carries the node's ACTUAL resolved advertise address: every
   // mandatory packet below is one the node really emits about itself, so its
@@ -580,14 +579,14 @@ pub(crate) fn validate_stream_frame_for_identity<I>(
   opts: &MemberlistOptions,
 ) -> Result<(), crate::error::MemberlistError>
 where
-  I: memberlist_wire::Data + CheapClone,
+  I: memberlist_proto::Data + CheapClone,
 {
   use memberlist::codec::{EncodeOptions, encode_outgoing};
-  use memberlist_wire::typed::{Message, PushNodeState, PushPull, State};
+  use memberlist_proto::typed::{Message, PushNodeState, PushPull, State};
 
   let max_frame = opts
     .max_stream_frame_size()
-    .unwrap_or(memberlist_machine::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    .unwrap_or(memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
 
   // The node's own state is the minimum any join / anti-entropy PushPull carries.
   // Size it for the WORST-CASE meta the node could ever broadcast — its
@@ -599,7 +598,7 @@ where
   // incarnation varint (`u32::MAX`) too.
   let meta_cap = opts
     .meta_max_size()
-    .unwrap_or(memberlist_machine::config::DEFAULT_META_MAX_SIZE)
+    .unwrap_or(memberlist_proto::config::DEFAULT_META_MAX_SIZE)
     .min(Meta::MAX_SIZE);
   let worst_case_meta = Meta::try_from(Bytes::from(vec![0u8; meta_cap])).unwrap_or_default();
   let local_state = PushNodeState::new(
@@ -631,13 +630,13 @@ where
   Ok(())
 }
 
-/// Trial-validate an [`EncryptionOptions`](memberlist_wire::EncryptionOptions)
+/// Trial-validate an [`EncryptionOptions`](memberlist_proto::EncryptionOptions)
 /// for usability in THIS build BEFORE it is applied as the live policy.
 ///
 /// A keyring naming an AEAD algorithm whose backend feature is not compiled in
 /// (e.g. a `SecretKey::Aes128` key in a build without the `aes-gcm` feature) is
 /// constructible, but every later `encrypt_gossip` would return
-/// [`UnsupportedAlgorithm`](memberlist_wire::EncryptionError::UnsupportedAlgorithm)
+/// [`UnsupportedAlgorithm`](memberlist_proto::EncryptionError::UnsupportedAlgorithm)
 /// (gossip datagram dropped) and every reliable-stream encode would fail — the
 /// cluster silently breaks after "successfully" enabling encryption.
 ///
@@ -647,18 +646,18 @@ where
 /// paired with an unsupported-algorithm secondary (a common key-rotation state)
 /// would silently drop every frame a peer encrypted under that secondary. Each
 /// key is probed with a trial encryption of a tiny payload through the EXISTING
-/// wire API ([`memberlist_wire::encode_encrypted_frame`]); a backend not built
+/// wire API ([`memberlist_proto::encode_encrypted_frame`]); a backend not built
 /// into this binary surfaces `UnsupportedAlgorithm` exactly as the live
 /// `encrypt_gossip` / reliable-stream encode / decrypt-trial would. The result
 /// bytes are discarded — this is a usability probe, not a real send. The whole
 /// policy is rejected ATOMICALLY if ANY key is unsupported (the caller leaves
 /// the live policy unchanged); a disabled (no keyring) policy is always usable.
-/// Returns the wire [`EncryptionError`](memberlist_wire::EncryptionError) when
+/// Returns the wire [`EncryptionError`](memberlist_proto::EncryptionError) when
 /// the policy is unusable so the caller can reject the reconfiguration instead
 /// of acking a false `Ok`.
 pub(crate) fn validate_encryption_options(
-  opts: &memberlist_wire::EncryptionOptions,
-) -> Result<(), memberlist_wire::EncryptionError> {
+  opts: &memberlist_proto::EncryptionOptions,
+) -> Result<(), memberlist_proto::EncryptionError> {
   let Some(keyring) = opts.keyring() else {
     // No keyring ⇒ encryption disabled ⇒ always usable (identity codec).
     return Ok(());
@@ -667,7 +666,7 @@ pub(crate) fn validate_encryption_options(
   // first key whose algorithm's backend is absent surfaces `UnsupportedAlgorithm`
   // and aborts the whole validation — the live policy is never swapped.
   for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
-    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, b"")?;
+    memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")?;
   }
   Ok(())
 }
@@ -692,7 +691,7 @@ pub(crate) fn validate_initial_meta(
   };
   let cap = opts
     .meta_max_size()
-    .unwrap_or(memberlist_machine::config::DEFAULT_META_MAX_SIZE)
+    .unwrap_or(memberlist_proto::config::DEFAULT_META_MAX_SIZE)
     .min(Meta::MAX_SIZE);
   if meta.as_bytes().len() > cap {
     return Err(crate::error::MemberlistError::InvalidOption(
@@ -715,7 +714,7 @@ pub(crate) fn validate_initial_meta(
 /// The initial local-state snapshot rides every push/pull exchange (including
 /// the initial join) as the PushPull `user_data`, and receivers reject any
 /// reliable-stream frame whose declared length exceeds
-/// [`max_stream_frame_size`](memberlist_machine::config::EndpointConfig::max_stream_frame_size).
+/// [`max_stream_frame_size`](memberlist_proto::config::EndpointConfig::max_stream_frame_size).
 /// A snapshot whose framed PushPull would exceed that cap is
 /// deterministically untransmittable — every push/pull carrying it would be
 /// rejected and the application state would never reach a peer. Reject it at
@@ -726,7 +725,7 @@ pub(crate) fn validate_initial_meta(
 /// The snapshot is validated against the EFFECTIVE cap: the configured
 /// [`max_stream_frame_size`](MemberlistOptions::max_stream_frame_size) override
 /// when set, else the machine default
-/// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_machine::config::DEFAULT_MAX_STREAM_FRAME_SIZE)).
+/// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE)).
 /// That is exactly the ceiling `apply_memberlist_options` installs into every
 /// `Transport::run`'s `EndpointConfig`, so the up-front check matches the
 /// runtime frame-length gate.
@@ -734,14 +733,14 @@ pub(crate) fn validate_initial_local_state<I, A>(
   opts: &MemberlistOptions,
 ) -> Result<(), crate::error::MemberlistError>
 where
-  I: memberlist_wire::Data,
-  A: memberlist_wire::Data,
+  I: memberlist_proto::Data,
+  A: memberlist_proto::Data,
 {
   if let Some(state) = opts.initial_local_state() {
     let cap = opts
       .max_stream_frame_size()
-      .unwrap_or(memberlist_machine::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
-    memberlist_machine::endpoint::validate_local_state_snapshot::<I, A>(state, cap)
+      .unwrap_or(memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    memberlist_proto::endpoint::validate_local_state_snapshot::<I, A>(state, cap)
       .map_err(|e| crate::error::MemberlistError::PayloadTooLarge(e.to_string()))?;
   }
   Ok(())

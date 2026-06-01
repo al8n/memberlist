@@ -1,4 +1,4 @@
-//! Deterministic virtual clock in [`memberlist_machine::Instant`] time.
+//! Deterministic virtual clock in [`memberlist_proto::Instant`] time.
 //!
 //! `Clock::new()` anchors at a fixed, large offset past the machine-time
 //! origin (not a wall-clock sample, so the harness is fully deterministic).
@@ -9,7 +9,7 @@
 //! backward aging ([`Cluster::age_node`](crate::Cluster::age_node)) ample
 //! headroom: `Instant - Duration` saturates at the origin.
 
-use memberlist_machine::Instant;
+use memberlist_proto::Instant;
 use std::time::Duration;
 
 /// Fixed offset of the simulation origin past the machine-time origin. Large

@@ -41,12 +41,10 @@ use std::{
   time::Duration,
 };
 
-use memberlist_machine::{
+use memberlist_proto::{
   Endpoint, EndpointConfig, Event, Instant, PushPullKind, RawRecords, TcpOptions, Transmit,
-  streams::{ExchangeId, StreamAction, StreamEndpoint},
-};
-use memberlist_wire::{
   framing, message_from_any, message_to_any,
+  streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
 };
 use smol_str::SmolStr;
@@ -140,7 +138,7 @@ pub struct TcpCluster {
   /// same name.
   skip_inbound_label_check_hosts: HashSet<SocketAddr>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
   /// unwrap on ingress regardless (which strips both the Encrypted and the
@@ -148,14 +146,14 @@ pub struct TcpCluster {
   /// disabled configuration makes the egress compression an identity, so
   /// the suite stays byte-unchanged. The `*_compressed` constructors
   /// install an enabled configuration.
-  compression: memberlist_wire::CompressionOptions,
+  compression: memberlist_proto::CompressionOptions,
   /// Cross-transport encryption applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::EncryptionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
   /// configuration makes both identity, so the suite stays byte-unchanged.
   /// The `*_encrypted` constructors install an enabled configuration.
-  encryption: memberlist_wire::EncryptionOptions,
+  encryption: memberlist_proto::EncryptionOptions,
 }
 
 impl TcpCluster {
@@ -181,8 +179,8 @@ impl TcpCluster {
       label_overrides: HashMap::new(),
       unlabeled_hosts: HashSet::new(),
       skip_inbound_label_check_hosts: HashSet::new(),
-      compression: memberlist_wire::CompressionOptions::new(),
-      encryption: memberlist_wire::EncryptionOptions::new(),
+      compression: memberlist_proto::CompressionOptions::new(),
+      encryption: memberlist_proto::EncryptionOptions::new(),
     }
   }
 
@@ -261,10 +259,10 @@ impl TcpCluster {
   pub fn two_node_join_compressed(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -283,11 +281,11 @@ impl TcpCluster {
   pub fn two_node_join_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    primary_key: memberlist_wire::SecretKey,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -304,15 +302,15 @@ impl TcpCluster {
   pub fn two_node_join_compressed_and_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
-    primary_key: memberlist_wire::SecretKey,
+    algorithm: memberlist_proto::CompressAlgorithm,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -402,11 +400,11 @@ impl TcpCluster {
     a: SocketAddr,
     b: SocketAddr,
     extra_peers: usize,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -666,7 +664,7 @@ impl TcpCluster {
   }
 
   /// Begin a graceful leave on `host` (delegates to [`StreamEndpoint::leave`]).
-  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
+  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_proto::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
       Some(n) => n.leave(now),
@@ -698,7 +696,7 @@ impl TcpCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_wire::typed::State::Alive)
+    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
@@ -706,7 +704,7 @@ impl TcpCluster {
     &self,
     host: SocketAddr,
     peer: &SmolStr,
-  ) -> Option<memberlist_wire::typed::State> {
+  ) -> Option<memberlist_proto::typed::State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -1437,10 +1435,10 @@ impl TcpCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_wire::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Dead)
-            | Some(memberlist_wire::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Dead)
+            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }
@@ -1514,7 +1512,7 @@ mod tests {
 
   #[test]
   fn tcp_cluster_compression_mode_configures_nodes() {
-    use memberlist_wire::CompressAlgorithm;
+    use memberlist_proto::CompressAlgorithm;
     let a = "127.0.0.1:9301".parse().unwrap();
     let b = "127.0.0.1:9302".parse().unwrap();
     let c = TcpCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);

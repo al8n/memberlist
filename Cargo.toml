@@ -1,24 +1,21 @@
 [workspace]
 members = [
-  "memberlist",
+  "memberlist-proto",
   "memberlist-compio",
   "memberlist-reactor",
   "memberlist-smoltcp",
-  "memberlist-core",
-  "memberlist-machine",
-  "memberlist-proto",
   "memberlist-simulation",
-  "memberlist-wire",
   "fuzz",
+  "legacy/memberlist",
+  "legacy/memberlist-core",
+  "legacy/memberlist-wire",
 ]
-# memberlist-net, memberlist-quic and examples/toydb are frozen Phase-7
-# backups: their driver code targets the pre-Phase-9 machine API and no
-# longer compiles against memberlist-wire. They stay on disk as reference
-# only (no re-export path from the umbrella) and are excluded from the
-# active workspace build.
+# Frozen reference crates (the legacy net/quic transports and the toydb
+# example). They do not compile against the current workspace stack and are
+# kept on disk for reference only, excluded from the active build.
 exclude = [
-  "memberlist-net",
-  "memberlist-quic",
+  "legacy/memberlist-net",
+  "legacy/memberlist-quic",
   "examples/toydb",
 ]
 resolver = "3"
@@ -91,13 +88,12 @@ viewit = "0.1.5"
 arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
-memberlist-core = { version = "0.8", path = "memberlist-core", default-features = false }
-memberlist-machine = { version = "0.1", path = "memberlist-machine", default-features = false }
-memberlist-net = { version = "0.8", path = "memberlist-net", default-features = false }
-memberlist-proto = { version = "0.3", path = "memberlist-proto", default-features = false }
-memberlist-wire = { version = "0.1", path = "memberlist-wire", default-features = false }
-memberlist-quic = { version = "0.8", path = "memberlist-quic", default-features = false }
-memberlist = { version = "0.8", path = "memberlist", default-features = false }
+memberlist-core = { version = "0.8", path = "legacy/memberlist-core", default-features = false }
+memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
+memberlist-net = { version = "0.8", path = "legacy/memberlist-net", default-features = false }
+memberlist-wire = { version = "0.3", path = "legacy/memberlist-wire", default-features = false }
+memberlist-quic = { version = "0.8", path = "legacy/memberlist-quic", default-features = false }
+memberlist = { version = "0.8", path = "legacy/memberlist", default-features = false }
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"

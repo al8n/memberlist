@@ -13,8 +13,7 @@ use std::{
 
 use flume::{Receiver, Sender, TrySendError};
 use futures_util::FutureExt;
-use memberlist_machine::event::Event;
-use memberlist_wire::CheapClone;
+use memberlist_proto::{CheapClone, event::Event};
 
 use crate::{NodeId, delegate::Delegate, shared::Shared};
 

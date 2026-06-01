@@ -1,6 +1,6 @@
 use varing::{encode_u32_varint_to, encoded_u32_varint_len};
 
-use crate::utils::{merge, skip};
+use crate::wire_type::{merge, skip};
 
 use super::{Data, DataRef, DecodeError, EncodeError};
 
@@ -163,7 +163,7 @@ where
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]
-    super::super::debug_assert_write_eq::<Self>(offset, self.encoded_len_with_length_delimited());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len_with_length_delimited());
 
     Ok(offset)
   }

@@ -39,12 +39,10 @@ use std::{
   time::Duration,
 };
 
-use memberlist_machine::{
+use memberlist_proto::{
   Endpoint, EndpointConfig, Event, Instant, PushPullKind, TlsOptions, TlsRecords, Transmit,
-  streams::{ExchangeId, StreamAction, StreamEndpoint},
-};
-use memberlist_wire::{
   framing, message_from_any, message_to_any,
+  streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
 };
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -108,7 +106,7 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
 }
 
 /// A fresh self-signed leaf + PKCS#8 key with `"localhost"` as the SAN (the
-/// same construction the memberlist-machine tls crypto tests use).
+/// same construction the memberlist-proto tls crypto tests use).
 fn self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
   let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
   let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
@@ -236,7 +234,7 @@ pub struct TlsCluster {
   /// the mTLS-required responder bundle instead of the trusted-network bundle.
   mtls_responder: Option<SocketAddr>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
   /// unwrap on ingress regardless (which strips both the Encrypted and the
@@ -244,9 +242,9 @@ pub struct TlsCluster {
   /// disabled configuration makes the egress compression an identity, so
   /// the suite stays byte-unchanged. The `*_compressed` constructors
   /// install an enabled configuration.
-  compression: memberlist_wire::CompressionOptions,
+  compression: memberlist_proto::CompressionOptions,
   /// Cross-transport encryption applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::EncryptionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
   /// configuration makes both identity, so the suite stays byte-unchanged.
@@ -255,11 +253,11 @@ pub struct TlsCluster {
   /// `TlsRecords` bridge's `is_secure() == true` guarantee forces the
   /// reliable-side `EncryptionOptions` back to disabled inside the bridge,
   /// so this knob influences only the gossip codec on the harness side.
-  encryption: memberlist_wire::EncryptionOptions,
+  encryption: memberlist_proto::EncryptionOptions,
   /// Reliable-wire observation tap. Every payload routed through the virtual
   /// reliable pipe is appended here so the encrypted conformance suite can
   /// assert the wire never carries an `Encrypted` wrapper (a TLS reliable
-  /// record must NOT begin with [`memberlist_wire::ENCRYPTED_TAG`]: the bridge
+  /// record must NOT begin with [`memberlist_proto::ENCRYPTED_TAG`]: the bridge
   /// skips reliable-path encryption when `R::is_secure() == true`). Only
   /// compiled under the encryption-conformance feature — the standard suite
   /// stays byte-unchanged.
@@ -288,8 +286,8 @@ impl TlsCluster {
       probe_window: None,
       tcp_window: None,
       mtls_responder: None,
-      compression: memberlist_wire::CompressionOptions::new(),
-      encryption: memberlist_wire::EncryptionOptions::new(),
+      compression: memberlist_proto::CompressionOptions::new(),
+      encryption: memberlist_proto::EncryptionOptions::new(),
       #[cfg(feature = "__sim-encryption-aes-gcm")]
       observed_reliable_wire_bytes: Vec::new(),
     }
@@ -359,10 +357,10 @@ impl TlsCluster {
   pub fn two_node_join_compressed(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -384,11 +382,11 @@ impl TlsCluster {
   pub fn two_node_join_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    primary_key: memberlist_wire::SecretKey,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -405,15 +403,15 @@ impl TlsCluster {
   pub fn two_node_join_compressed_and_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
-    primary_key: memberlist_wire::SecretKey,
+    algorithm: memberlist_proto::CompressAlgorithm,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -503,11 +501,11 @@ impl TlsCluster {
     a: SocketAddr,
     b: SocketAddr,
     extra_peers: usize,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -733,7 +731,7 @@ impl TlsCluster {
   }
 
   /// Begin a graceful leave on `host` (delegates to [`StreamEndpoint::leave`]).
-  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
+  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_proto::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
       Some(n) => n.leave(now),
@@ -765,7 +763,7 @@ impl TlsCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_wire::typed::State::Alive)
+    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
@@ -773,7 +771,7 @@ impl TlsCluster {
     &self,
     host: SocketAddr,
     peer: &SmolStr,
-  ) -> Option<memberlist_wire::typed::State> {
+  ) -> Option<memberlist_proto::typed::State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -808,7 +806,7 @@ impl TlsCluster {
 
   /// Every payload the harness routed through the virtual reliable pipe so
   /// far. The encryption-conformance suite asserts that no entry begins with
-  /// [`memberlist_wire::ENCRYPTED_TAG`] — the TLS bridge skips reliable-path
+  /// [`memberlist_proto::ENCRYPTED_TAG`] — the TLS bridge skips reliable-path
   /// encryption (`TlsRecords::is_secure() == true`), so the wire never carries
   /// an `[Encrypted[..]]` wrapper. Only compiled under the
   /// `__sim-encryption-aes-gcm` feature.
@@ -1505,10 +1503,10 @@ impl TlsCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_wire::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Dead)
-            | Some(memberlist_wire::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Dead)
+            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }

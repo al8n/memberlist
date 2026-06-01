@@ -40,8 +40,8 @@
 //! timing as the existing non-quic suite, proving the composition does not
 //! perturb SWIM timing.
 
+use memberlist_proto::typed::State;
 use memberlist_simulation::quic_net::QuicCluster;
-use memberlist_wire::typed::State;
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -1686,7 +1686,7 @@ fn dial_requested_is_coordinator_internal_external_drain_does_not_orphan_dial() 
 /// converge. (The harness's idle drain transitions the connection
 /// `Established → Drained` via quinn-proto's `kill`-on-idle, so the exact
 /// `Closed`/`Draining` window is not reproducible end-to-end without a
-/// `Connection::close` seam; the unit tests in `memberlist-machine`
+/// `Connection::close` seam; the unit tests in `memberlist-proto`
 /// `quic::conn` cover that precise state. This conformance test pins the
 /// parity invariant: the system recovers correctly after a drained-reap and
 /// a subsequent dial succeeds.)
@@ -1941,7 +1941,7 @@ fn peer_opened_uni_stream_is_refused_no_remote_state() {
 ///
 /// Negative-control proof (REQUIRED). Comment out
 /// `self.flush_outbound(now)` from `QuicEndpoint::start_push_pull` (in
-/// `memberlist-machine/src/quic/mod.rs`) and re-run this test. Observable
+/// `memberlist-proto/src/quic/mod.rs`) and re-run this test. Observable
 /// (1) fails first: `pop_transmit_of(a)` returns `None` because the
 /// fresh quinn connection's Initial is never collected into `out` (the
 /// fresh-dial case — `Connection::poll_transmit` is only polled inside
@@ -1974,7 +1974,7 @@ fn start_push_pull_self_sufficient_under_strict_poll_driving() {
   // high-level wrapper is the ONLY public action that initiates the
   // exchange.
   let mut c = QuicCluster::two_node_bare(a, b);
-  c.start_push_pull_via_high_level_api(a, b, memberlist_machine::PushPullKind::Join);
+  c.start_push_pull_via_high_level_api(a, b, memberlist_proto::PushPullKind::Join);
   let initial = c.pop_transmit_of(a);
   assert!(
     initial.is_some(),
@@ -1999,7 +1999,7 @@ fn start_push_pull_self_sufficient_under_strict_poll_driving() {
   // push/pull initiated by the high-level wrapper must converge end-
   // to-end without that pre-pump.
   let mut c = QuicCluster::two_node_bare(a, b);
-  c.start_push_pull_via_high_level_api(a, b, memberlist_machine::PushPullKind::Join);
+  c.start_push_pull_via_high_level_api(a, b, memberlist_proto::PushPullKind::Join);
   for _ in 0..40_000 {
     if c.sees_alive(a, &id("b")) && c.sees_alive(b, &id("a")) {
       break;
@@ -2046,10 +2046,9 @@ mod per_peer_server_name {
     time::Duration,
   };
 
-  use memberlist_machine::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint,
+  use memberlist_proto::{
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, typed::State,
   };
-  use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
 
@@ -2120,7 +2119,7 @@ mod per_peer_server_name {
   /// rcgen 0.14: `generate_simple_self_signed` returns
   /// `CertifiedKey<KeyPair>` with the private key in `signing_key`
   /// (PKCS#8 DER via `serialize_der()`) — same construction the
-  /// `memberlist-machine` quic crypto tests use.
+  /// `memberlist-proto` quic crypto tests use.
   fn cert_with_san(san: &str) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
     let ck = rcgen::generate_simple_self_signed(vec![san.to_string()]).unwrap();
     let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
@@ -2264,14 +2263,14 @@ mod per_peer_server_name {
       // assertions below).
       while let Some(tx) = a.poll_memberlist_transmit() {
         match tx {
-          memberlist_machine::Transmit::Packet(p) => {
+          memberlist_proto::Transmit::Packet(p) => {
             let (to, message) = p.into_parts();
             if to == b_addr {
               b.handle_packet(a_addr, message, t);
               moved = true;
             }
           }
-          memberlist_machine::Transmit::Compound(cmp) => {
+          memberlist_proto::Transmit::Compound(cmp) => {
             let (to, messages) = cmp.into_parts();
             if to == b_addr {
               for m in messages {
@@ -2284,14 +2283,14 @@ mod per_peer_server_name {
       }
       while let Some(tx) = b.poll_memberlist_transmit() {
         match tx {
-          memberlist_machine::Transmit::Packet(p) => {
+          memberlist_proto::Transmit::Packet(p) => {
             let (to, message) = p.into_parts();
             if to == a_addr {
               a.handle_packet(b_addr, message, t);
               moved = true;
             }
           }
-          memberlist_machine::Transmit::Compound(cmp) => {
+          memberlist_proto::Transmit::Compound(cmp) => {
             let (to, messages) = cmp.into_parts();
             if to == a_addr {
               for m in messages {
@@ -2403,10 +2402,9 @@ mod per_peer_server_name {
 mod mtls_cluster_auth {
   use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-  use memberlist_machine::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint,
+  use memberlist_proto::{
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, typed::State,
   };
-  use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;
 
@@ -2657,7 +2655,7 @@ mod mtls_cluster_auth {
 
 #[test]
 fn compressed_two_node_join_over_quic_reaches_alive_both_sides() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9801".parse().unwrap();
   let b = "127.0.0.1:9802".parse().unwrap();
   let mut c = QuicCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
@@ -2679,7 +2677,7 @@ fn compressed_two_node_join_over_quic_reaches_alive_both_sides() {
 
 #[test]
 fn compressed_join_over_quic_matches_uncompressed_membership_outcome() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9811".parse().unwrap();
   let b = "127.0.0.1:9812".parse().unwrap();
   let mut plain = QuicCluster::two_node_join(a, b);
@@ -2708,7 +2706,7 @@ fn compressed_join_over_quic_matches_uncompressed_membership_outcome() {
 
 #[test]
 fn compressed_large_state_push_pull_completes_under_backpressure() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9821".parse().unwrap();
   let b = "127.0.0.1:9822".parse().unwrap();
   // Tiny quinn stream-receive window + a 24-extra-peer push snapshot: the
@@ -2747,10 +2745,10 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // sequence does not consume the full decompressed payload is treated the same
   // as a datagram with a corrupt compression wrapper (i.e. dropped with no
   // partial application of the prefix frames that did decode cleanly).
-  use memberlist_simulation::{Alive, Message, Node};
-  use memberlist_wire::{
+  use memberlist_proto::{
     CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
   };
+  use memberlist_simulation::{Alive, Message, Node};
 
   let a: std::net::SocketAddr = "127.0.0.1:9831".parse().unwrap();
   let b: std::net::SocketAddr = "127.0.0.1:9832".parse().unwrap();
@@ -2808,7 +2806,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_quic_reaches_alive_both_sides() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9951".parse().unwrap();
   let b = "127.0.0.1:9952".parse().unwrap();
   let mut c = QuicCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x88; 32]));
@@ -2831,7 +2829,7 @@ fn encrypted_two_node_join_over_quic_reaches_alive_both_sides() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_join_over_quic_matches_unencrypted_membership_outcome() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9961".parse().unwrap();
   let b = "127.0.0.1:9962".parse().unwrap();
 
@@ -2871,7 +2869,7 @@ fn encrypted_quic_reliable_wire_carries_no_encrypted_wrapper() {
   // units into datagrams whose first byte has `b & 0xC0 != 0` (>= `0x40`) by
   // the QUIC long/short-header bit pattern, disjoint from the memberlist
   // tag space (`1..=15`) that contains `ENCRYPTED_TAG`.
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9971".parse().unwrap();
   let b = "127.0.0.1:9972".parse().unwrap();
   let mut c = QuicCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0xAA; 32]));
@@ -2888,7 +2886,7 @@ fn encrypted_quic_reliable_wire_carries_no_encrypted_wrapper() {
   for chunk in observed {
     assert_ne!(
       chunk.first().copied(),
-      Some(memberlist_wire::ENCRYPTED_TAG),
+      Some(memberlist_proto::ENCRYPTED_TAG),
       "QUIC reliable wire bytes must NOT carry an Encrypted wrapper (quinn already encrypts)"
     );
   }
@@ -2899,7 +2897,7 @@ fn encrypted_quic_reliable_wire_carries_no_encrypted_wrapper() {
 #[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_quic_matches_unencrypted_uncompressed_membership_outcome() {
-  use memberlist_wire::{CompressAlgorithm, SecretKey};
+  use memberlist_proto::{CompressAlgorithm, SecretKey};
   let a = "127.0.0.1:9993".parse().unwrap();
   let b = "127.0.0.1:9994".parse().unwrap();
   let mut plain = QuicCluster::two_node_join(a, b);

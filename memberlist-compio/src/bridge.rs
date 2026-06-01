@@ -106,7 +106,7 @@
 
 use std::{future::Future, io, time::Duration};
 
-use memberlist_machine::Instant;
+use memberlist_proto::Instant;
 
 use compio::{
   buf::{BufResult, IntoInner, IoBuf},
@@ -499,7 +499,7 @@ mod tests {
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
   };
-  use memberlist_machine::{
+  use memberlist_proto::{
     Instant, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
     streams::StreamEndpoint,
   };

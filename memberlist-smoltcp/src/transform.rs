@@ -1,9 +1,8 @@
 //! Wire-traffic transforms: compression, encryption, and the reliable-plane
 //! cluster label.
 
-pub use memberlist_machine::TcpOptions;
-pub use memberlist_wire::{
-  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+pub use memberlist_proto::{
+  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey, TcpOptions,
 };
 
 /// How the driver compresses, encrypts, and labels its wire traffic.

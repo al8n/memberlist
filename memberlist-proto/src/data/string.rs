@@ -1,4 +1,7 @@
-use super::{Data, DataRef};
+#[cfg(not(feature = "std"))]
+use std::string::ToString;
+
+use super::{Data, DataRef, check_encoded_message_size};
 
 macro_rules! impl_str {
   ($($ty:ty => $from:ident),+$(,)?) => {
@@ -43,7 +46,7 @@ macro_rules! impl_str {
             return Err(super::EncodeError::insufficient_buffer(len, buf_len));
           }
 
-          super::super::check_encoded_message_size(len)?;
+          check_encoded_message_size(len)?;
 
           buf[..len].copy_from_slice(bytes);
           Ok(len)

@@ -7,8 +7,8 @@
 //! broadcast for the local node at creation time. All `broadcast_queue_len`
 //! assertions therefore use `>= 1` rather than `== 1`.
 
+use memberlist_proto::typed::Message;
 use memberlist_simulation::{Alive, Cluster, Dead, Event, Meta, Node, State};
-use memberlist_wire::typed::Message;
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::typed::NodeState;
 
 // `async fn` in trait is intentional: compio is `!Send`-first, so we want
 // the bare-future desugaring, not `-> impl Future + Send`.

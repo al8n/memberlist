@@ -20,8 +20,7 @@ use memberlist_compio::{
   Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, StreamTransportOptions,
   TcpMemberlist, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_machine::{TcpOptions, event::Event};
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::{TcpOptions, event::Event, typed::NodeState};
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -538,10 +537,10 @@ async fn command_after_shutdown_returns_error_promptly() {
     .update_node_metadata(b"after-shutdown".to_vec())
     .await;
   let r_compr = m_clone
-    .set_compression_options(memberlist_wire::CompressionOptions::new())
+    .set_compression_options(memberlist_proto::CompressionOptions::new())
     .await;
   let r_enc = m_clone
-    .set_encryption_options(memberlist_wire::EncryptionOptions::new())
+    .set_encryption_options(memberlist_proto::EncryptionOptions::new())
     .await;
   let r_leave = m_clone.leave().await;
   let elapsed = start.elapsed();
@@ -902,7 +901,7 @@ async fn post_join_stays_alive_through_probe_cycles() {
 /// the notice is on the wire) as a regression guard against a change
 /// that lets `leave()` resolve before the `Dead`-self is queued/handed
 /// off; the `LeftCluster`-withholding boundary is unit-tested in
-/// `memberlist-machine`.
+/// `memberlist-proto`.
 #[compio::test]
 async fn leave_completes_only_after_peer_is_notified() {
   let a_addr = loopback_addr(7520);
@@ -1414,7 +1413,7 @@ async fn set_policy_options_after_leave_is_rejected() {
   a.leave().await.expect("leave");
 
   let res_compr = a
-    .set_compression_options(memberlist_wire::CompressionOptions::new())
+    .set_compression_options(memberlist_proto::CompressionOptions::new())
     .await;
   assert!(
     matches!(
@@ -1425,7 +1424,7 @@ async fn set_policy_options_after_leave_is_rejected() {
   );
 
   let res_enc = a
-    .set_encryption_options(memberlist_wire::EncryptionOptions::new())
+    .set_encryption_options(memberlist_proto::EncryptionOptions::new())
     .await;
   assert!(
     matches!(res_enc, Err(memberlist_compio::MemberlistError::NotRunning)),

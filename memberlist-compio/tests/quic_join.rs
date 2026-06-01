@@ -23,7 +23,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, Options,
   QuicConfig, QuicMemberlist, QuicTransportOptions, Resolver, SocketAddrResolver, VoidDelegate,
 };
-use memberlist_wire::typed::{Meta, NodeState};
+use memberlist_proto::typed::{Meta, NodeState};
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
@@ -828,7 +828,7 @@ async fn two_node_join_converges_member_counts() {
 async fn quic_compound_gossip_is_decoded_after_join() {
   use compio::{buf::BufResult, net::UdpSocket};
   use memberlist::codec::{EncodeOptions, encode_outgoing_compound};
-  use memberlist_wire::{
+  use memberlist_proto::{
     Node,
     typed::{Alive, Message},
   };

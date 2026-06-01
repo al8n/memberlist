@@ -10,8 +10,8 @@
 //! the equivalent stage). All `broadcast_queue_len` assertions therefore use
 //! `>= 1` rather than `== 1` where the legacy asserts exactly 1.
 
+use memberlist_proto::typed::Message;
 use memberlist_simulation::{Alive, Cluster, EndpointConfig, Node, State, Suspect};
-use memberlist_wire::typed::Message;
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 

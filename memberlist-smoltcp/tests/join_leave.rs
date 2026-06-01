@@ -13,7 +13,7 @@ mod harness;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use memberlist_machine::{EndpointConfig, Event};
+use memberlist_proto::{EndpointConfig, Event};
 use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 

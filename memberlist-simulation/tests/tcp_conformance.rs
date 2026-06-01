@@ -71,8 +71,8 @@
 //! `tests/suspect_dead.rs`), and the existing non-tcp suite is byte-unchanged
 //! and still green under the parity gate `cargo test -p memberlist-simulation`.
 
+use memberlist_proto::typed::State;
 use memberlist_simulation::tcp_net::TcpCluster;
-use memberlist_wire::typed::State;
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -598,7 +598,7 @@ fn parity_suspect_transitions_to_dead_after_timeout() {
 
 #[test]
 fn compressed_two_node_join_over_tcp_reaches_alive_both_sides() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9601".parse().unwrap();
   let b = "127.0.0.1:9602".parse().unwrap();
   let mut c = TcpCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
@@ -620,7 +620,7 @@ fn compressed_two_node_join_over_tcp_reaches_alive_both_sides() {
 
 #[test]
 fn compressed_join_matches_uncompressed_membership_outcome() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9611".parse().unwrap();
   let b = "127.0.0.1:9612".parse().unwrap();
 
@@ -651,7 +651,7 @@ fn compressed_join_matches_uncompressed_membership_outcome() {
 
 #[test]
 fn compressed_large_state_push_pull_completes_under_tcp_backpressure() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9621".parse().unwrap();
   let b = "127.0.0.1:9622".parse().unwrap();
   // a's push snapshot is pre-loaded with 200 extra members and the virtual TCP
@@ -684,10 +684,10 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // sequence does not consume the full decompressed payload is treated the same
   // as a datagram with a corrupt compression wrapper (i.e. dropped with no
   // partial application of the prefix frames that did decode cleanly).
-  use memberlist_simulation::{Alive, Message, Node};
-  use memberlist_wire::{
+  use memberlist_proto::{
     CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
   };
+  use memberlist_simulation::{Alive, Message, Node};
 
   let a: std::net::SocketAddr = "127.0.0.1:9651".parse().unwrap();
   let b: std::net::SocketAddr = "127.0.0.1:9652".parse().unwrap();
@@ -747,7 +747,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_tcp_reaches_alive_both_sides() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9901".parse().unwrap();
   let b = "127.0.0.1:9902".parse().unwrap();
   let key = SecretKey::Aes256([0x42; 32]);
@@ -771,7 +771,7 @@ fn encrypted_two_node_join_over_tcp_reaches_alive_both_sides() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_join_over_tcp_matches_unencrypted_membership_outcome() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9911".parse().unwrap();
   let b = "127.0.0.1:9912".parse().unwrap();
 
@@ -808,7 +808,7 @@ fn encrypted_join_over_tcp_matches_unencrypted_membership_outcome() {
 #[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_tcp_matches_unencrypted_uncompressed_membership_outcome() {
-  use memberlist_wire::{CompressAlgorithm, SecretKey};
+  use memberlist_proto::{CompressAlgorithm, SecretKey};
   let a = "127.0.0.1:9981".parse().unwrap();
   let b = "127.0.0.1:9982".parse().unwrap();
   let mut plain = TcpCluster::two_node_join(a, b);
@@ -837,7 +837,7 @@ fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
   // original bytes, verifying that encrypt(compress(frame)) ordering holds.
   // For a small payload the leading varint fits in one byte, so unit[1] is
   // the first byte of the payload.
-  use memberlist_wire::{
+  use memberlist_proto::{
     CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption,
   };
@@ -851,7 +851,7 @@ fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
   // the byte at index 1 is the first byte of the encoded payload.
   assert_eq!(
     unit[1],
-    memberlist_wire::ENCRYPTED_TAG,
+    memberlist_proto::ENCRYPTED_TAG,
     "outer wrapper is Encrypted (ENCRYPTED_TAG comes before the Compressed wrapper)"
   );
   // Round-trip: decrypt + decompress recovers the original frame sequence.

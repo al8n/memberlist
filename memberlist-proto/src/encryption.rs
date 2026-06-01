@@ -1,1046 +1,1555 @@
-use std::borrow::Cow;
-
-use aead::{AeadInPlace, KeyInit};
-use aes_gcm::{
-  Aes128Gcm, Aes256Gcm, AesGcm,
-  aes::{Aes192, cipher::consts::U12},
-};
-use bytes::{Buf, BufMut};
-use generic_array::GenericArray;
-use rand::RngExt;
-use varing::decode_u32_varint;
-
-use crate::{WireType, utils::merge};
-
-use super::{Data, DataRef, DecodeError, EncodeError};
-
-const NOPADDING_TAG: u8 = 1;
-const PKCS7_TAG: u8 = 2;
-
-const NONCE_SIZE: usize = 12;
-const TAG_SIZE: usize = 16;
-const BLOCK_SIZE: usize = 16;
-
-type Aes192Gcm = AesGcm<Aes192, U12>;
-
-use std::str::FromStr;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
-
-/// An error type when parsing the encryption algorithm from str
-#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
-#[error("unknown encryption algorithm: {0}")]
-pub struct ParseEncryptionAlgorithmError(String);
-
-impl FromStr for EncryptionAlgorithm {
-  type Err = ParseEncryptionAlgorithmError;
-
-  fn from_str(s: &str) -> Result<Self, Self::Err> {
-    Ok(match s {
-      "aes-gcm-no-padding" | "aes-gcm-nopadding" | "nopadding" | "NOPADDING" | "no-padding"
-      | "NoPadding" | "no_padding" => Self::NoPadding,
-      "aes-gcm-pkcs7" | "PKCS7" | "pkcs7" => Self::Pkcs7,
-      s if s.starts_with("unknown") => {
-        let v = s
-          .trim_start_matches("unknown(")
-          .trim_end_matches(')')
-          .parse()
-          .map_err(|_| ParseEncryptionAlgorithmError(s.to_string()))?;
-        Self::Unknown(v)
-      }
-      e => return Err(ParseEncryptionAlgorithmError(e.to_string())),
-    })
-  }
-}
-
-/// Parse error for [`SecretKey`] from bytes slice
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
-#[error("invalid key length({0}) - must be 16, 24, or 32 bytes for AES-128/192/256")]
-pub struct InvalidKeyLength(pub(crate) usize);
-
-/// Parse error for [`SecretKey`] from a base64 string
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ParseSecretKeyError {
-  /// Invalid base64 string
-  #[cfg_attr(feature = "std", error(transparent))]
-  #[cfg_attr(not(feature = "std"), error("{0}"))]
-  Base64(#[cfg_attr(feature = "std", from)] base64::DecodeError),
-  /// Invalid key length
-  #[error(transparent)]
-  InvalidKeyLength(#[from] InvalidKeyLength),
-}
+//! Encryption — a tagged, feature-gated AEAD byte transform that wraps the
+//! plain-frame / compound / compression codec.
+//!
+//! An encrypted payload is a tagged wrapper frame nesting outside the message,
+//! compound, and compression framing:
+//!
+//! ```text
+//! [Encrypted tag][algorithm tag][nonce: 12 bytes][ciphertext + 16-byte auth tag]
+//! ```
+//!
+//! The algorithm tag identifies the AEAD backend; the 12-byte nonce is random
+//! per encryption (no counter, no per-peer state). The 16-byte authenticator
+//! is appended inline by the AEAD constructions (AES-GCM / ChaCha20-Poly1305).
+//!
+//! The two-byte AAD `[Encrypted tag, algorithm tag]` binds the wrapper
+//! identity and the cipher choice to AEAD authentication: a peer cannot
+//! downgrade-swap algorithms without breaking the tag check.
+//!
+//! Stage-in-the-codec stack: encryption nests OUTSIDE compression (compress
+//! the plaintext for ratio, then encrypt the result — compressing ciphertext
+//! yields no gain). The framing tag-driven unwrap loop strips `Encrypted`
+//! first, then `Compressed` (if present), then decodes the inner frame.
 
 #[cfg(not(feature = "std"))]
-impl From<base64::DecodeError> for ParseSecretKeyError {
-  fn from(e: base64::DecodeError) -> Self {
-    Self::Base64(e)
-  }
-}
+use std::vec::Vec;
 
-/// The key used while attempting to encrypt/decrypt a message
-#[derive(
-  Debug,
-  Copy,
-  Clone,
-  PartialEq,
-  Eq,
-  PartialOrd,
-  Ord,
-  derive_more::IsVariant,
-  derive_more::TryUnwrap,
-  derive_more::Unwrap,
-)]
-#[unwrap(ref, ref_mut)]
-#[try_unwrap(ref, ref_mut)]
-#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
-pub enum SecretKey {
-  /// secret key for AES128
-  Aes128([u8; 16]),
-  /// secret key for AES192
-  Aes192([u8; 24]),
-  /// secret key for AES256
-  Aes256([u8; 32]),
-}
-
-impl SecretKey {
-  /// Returns the base64 encoded secret key
-  ///
-  /// It is recommended to use [`SecretKey::encode_base64`] if you want to encode the key to a buffer
-  /// without allocating a new string.
-  pub fn to_base64(&self) -> String {
-    b64.encode(self)
-  }
-
-  /// Returns the base64 encoded length of the secret key
-  ///
-  /// ## Example
-  ///
-  /// ```rust
-  /// use memberlist_proto::encryption::SecretKey;
-  ///
-  /// let key = SecretKey::random_aes128();
-  /// assert_eq!(key.base64_len(), 24);
-  ///
-  /// let key = SecretKey::random_aes192();
-  /// assert_eq!(key.base64_len(), 32);
-  ///
-  /// let key = SecretKey::random_aes256();
-  /// assert_eq!(key.base64_len(), 44);
-  /// ```
-  #[inline]
-  pub const fn base64_len(&self) -> usize {
-    match self {
-      Self::Aes128(_) => 24,
-      Self::Aes192(_) => 32,
-      Self::Aes256(_) => 44,
-    }
-  }
-
-  /// Encodes the secret key to the buffer in base64 format
-  ///
-  /// ## Example
-  ///
-  /// ```rust
-  /// use memberlist_proto::encryption::SecretKey;
-  ///
-  /// let key = SecretKey::random_aes128();
-  /// let mut buf = [0u8; 24];
-  /// key.encode_base64(&mut buf).unwrap();
-  /// assert_eq!(&buf, key.to_base64().as_bytes());
-  ///
-  /// let key = SecretKey::random_aes192();
-  /// let mut buf = [0u8; 32];
-  /// key.encode_base64(&mut buf).unwrap();
-  /// assert_eq!(&buf, key.to_base64().as_bytes());
-  ///
-  /// let key = SecretKey::random_aes256();
-  /// let mut buf = [0u8; 44];
-  /// key.encode_base64(&mut buf).unwrap();
-  /// assert_eq!(&buf, key.to_base64().as_bytes());
-  /// ```
-  #[inline]
-  pub fn encode_base64(&self, buf: &mut [u8]) -> Result<usize, base64::EncodeSliceError> {
-    b64.encode_slice(self.as_ref(), buf)
-  }
-
-  /// Creates a random secret key
-  #[inline]
-  pub fn random_aes128() -> Self {
-    let mut key = [0u8; 16];
-    rand::rng().fill(&mut key);
-    Self::Aes128(key)
-  }
-
-  /// Creates a random secret key
-  #[inline]
-  pub fn random_aes192() -> Self {
-    let mut key = [0u8; 24];
-    rand::rng().fill(&mut key);
-    Self::Aes192(key)
-  }
-
-  /// Creates a random secret key
-  #[inline]
-  pub fn random_aes256() -> Self {
-    let mut key = [0u8; 32];
-    rand::rng().fill(&mut key);
-    Self::Aes256(key)
-  }
-}
-
-impl TryFrom<&str> for SecretKey {
-  type Error = ParseSecretKeyError;
-
-  fn try_from(s: &str) -> Result<Self, Self::Error> {
-    s.parse()
-  }
-}
-
-impl TryFrom<&[u8]> for SecretKey {
-  type Error = InvalidKeyLength;
-
-  fn try_from(k: &[u8]) -> Result<Self, Self::Error> {
-    Ok(match k.len() {
-      16 => Self::Aes128(k.try_into().unwrap()),
-      24 => Self::Aes192(k.try_into().unwrap()),
-      32 => Self::Aes256(k.try_into().unwrap()),
-      v => return Err(InvalidKeyLength(v)),
-    })
-  }
-}
-
-impl FromStr for SecretKey {
-  type Err = ParseSecretKeyError;
-
-  fn from_str(s: &str) -> Result<Self, Self::Err> {
-    let mut buf = [0u8; 44];
-    let readed = b64.decode_slice(s, &mut buf).map_err(|e| match e {
-      base64::DecodeSliceError::DecodeError(decode_error) => decode_error.into(),
-      base64::DecodeSliceError::OutputSliceTooSmall => {
-        ParseSecretKeyError::InvalidKeyLength(InvalidKeyLength(s.len()))
-      }
-    })?;
-
-    let bytes = &buf[..readed];
-    Ok(match readed {
-      16 => SecretKey::Aes128(bytes[..readed].try_into().unwrap()),
-      24 => SecretKey::Aes192(bytes[..readed].try_into().unwrap()),
-      32 => SecretKey::Aes256(bytes[..readed].try_into().unwrap()),
-      v => return Err(ParseSecretKeyError::InvalidKeyLength(InvalidKeyLength(v))),
-    })
-  }
-}
-
-impl core::hash::Hash for SecretKey {
-  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-    self.as_ref().hash(state);
-  }
-}
-
-impl core::borrow::Borrow<[u8]> for SecretKey {
-  fn borrow(&self) -> &[u8] {
-    self.as_ref()
-  }
-}
-
-impl PartialEq<[u8]> for SecretKey {
-  fn eq(&self, other: &[u8]) -> bool {
-    self.as_ref() == other
-  }
-}
-
-impl core::ops::Deref for SecretKey {
-  type Target = [u8];
-
-  fn deref(&self) -> &Self::Target {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl core::ops::DerefMut for SecretKey {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl From<[u8; 16]> for SecretKey {
-  fn from(k: [u8; 16]) -> Self {
-    Self::Aes128(k)
-  }
-}
-
-impl From<[u8; 24]> for SecretKey {
-  fn from(k: [u8; 24]) -> Self {
-    Self::Aes192(k)
-  }
-}
-
-impl From<[u8; 32]> for SecretKey {
-  fn from(k: [u8; 32]) -> Self {
-    Self::Aes256(k)
-  }
-}
-
-impl AsRef<[u8]> for SecretKey {
-  fn as_ref(&self) -> &[u8] {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl AsMut<[u8]> for SecretKey {
-  fn as_mut(&mut self) -> &mut [u8] {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl<'a> DataRef<'a, Self> for SecretKey {
-  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let buf_len = buf.len();
-    let mut key = None;
-
-    while offset < buf_len {
-      match buf[offset] {
-        AES128_BYTE => {
-          if key.is_some() {
-            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
-          }
-          offset += 1;
-
-          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read.get();
-
-          let val: [u8; 16] = buf[offset..offset + val as usize]
-            .try_into()
-            .map_err(|_| DecodeError::buffer_underflow())?;
-          offset += 16;
-          key = Some(SecretKey::Aes128(val));
-        }
-        AES192_BYTE => {
-          if key.is_some() {
-            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
-          }
-          offset += 1;
-
-          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read.get();
-
-          let val: [u8; 24] = buf[offset..offset + val as usize]
-            .try_into()
-            .map_err(|_| DecodeError::buffer_underflow())?;
-          offset += 24;
-
-          key = Some(SecretKey::Aes192(val));
-        }
-        AES256_BYTE => {
-          if key.is_some() {
-            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
-          }
-          offset += 1;
-
-          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read.get();
-
-          let val: [u8; 32] = buf[offset..offset + val as usize]
-            .try_into()
-            .map_err(|_| DecodeError::buffer_underflow())?;
-          offset += 32;
-
-          key = Some(SecretKey::Aes256(val));
-        }
-        _ => offset += super::skip("SecretKey", &buf[offset..])?,
-      }
-    }
-
-    let key = key.ok_or_else(|| DecodeError::missing_field("SecretKey", "key"))?;
-    Ok((offset, key))
-  }
-}
-
-const AES128_TAG: u8 = 1;
-const AES192_TAG: u8 = 2;
-const AES256_TAG: u8 = 3;
-
-const AES128_BYTE: u8 = merge(WireType::LengthDelimited, AES128_TAG);
-const AES192_BYTE: u8 = merge(WireType::LengthDelimited, AES192_TAG);
-const AES256_BYTE: u8 = merge(WireType::LengthDelimited, AES256_TAG);
-
-impl Data for SecretKey {
-  type Ref<'a> = Self;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(val)
-  }
-
-  fn encoded_len(&self) -> usize {
-    1 + varing::encoded_u32_varint_len(self.len() as u32).get() + self.len()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let buf_len = buf.len();
-    let mut offset = 0;
-
-    if buf_len < 1 {
-      return Err(EncodeError::insufficient_buffer(
-        self.encoded_len(),
-        buf_len,
-      ));
-    }
-
-    buf[offset] = match self {
-      Self::Aes128(_) => AES128_BYTE,
-      Self::Aes192(_) => AES192_BYTE,
-      Self::Aes256(_) => AES256_BYTE,
-    };
-    offset += 1;
-
-    let self_len = self.len();
-    let len = varing::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
-      .map_err(|_| EncodeError::insufficient_buffer(self.encoded_len(), buf_len))?;
-    offset += len.get();
-
-    buf[offset..offset + self_len].copy_from_slice(self.as_ref());
-    offset += self_len;
-
-    #[cfg(debug_assertions)]
-    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
-
-    Ok(offset)
-  }
-}
-
-smallvec_wrapper::smallvec_wrapper!(
-  /// A collection of secret keys, you can just treat it as a `Vec<SecretKey>`.
-  #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  #[repr(transparent)]
-  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-  #[cfg_attr(feature = "serde", serde(transparent))]
-  pub SecretKeys([SecretKey; 3]);
-);
-
-impl SecretKeys {
-  /// Returns `true` if the collection is empty
-  ///
-  /// # Example
-  ///
-  /// ```
-  /// use memberlist_proto::encryption::SecretKeys;
-  ///
-  /// let keys = SecretKeys::default();
-  /// assert!(keys.is_empty());
-  /// ```
-  #[inline]
-  pub fn is_empty(&self) -> bool {
-    self.0.is_empty()
-  }
-
-  /// Returns the length of the collection
-  ///
-  /// # Example
-  ///
-  /// ```
-  /// use memberlist_proto::encryption::SecretKeys;
-  ///
-  /// let keys = SecretKeys::default();
-  /// assert_eq!(keys.len(), 0);
-  /// ```
-  #[inline]
-  pub fn len(&self) -> usize {
-    self.0.len()
-  }
-}
-
-/// Security errors
-#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum EncryptionError {
-  /// Unknown encryption algorithm
-  #[error("unknown encryption algorithm: {0}")]
-  UnknownAlgorithm(EncryptionAlgorithm),
-  /// Encryt/Decrypt errors
-  #[error("failed to encrypt/decrypt")]
-  Encryptor,
-}
-
-impl From<aead::Error> for EncryptionError {
-  fn from(_: aead::Error) -> Self {
-    Self::Encryptor
-  }
-}
-
-/// The encryption algorithm used to encrypt the message.
-#[derive(
-  Debug, Default, Clone, Copy, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
-)]
-#[non_exhaustive]
-pub enum EncryptionAlgorithm {
-  /// AES-GCM, using no padding
-  #[default]
-  #[display("aes-gcm-nopadding")]
-  NoPadding,
-  /// AES-GCM, using PKCS7 padding
-  #[display("aes-gcm-pkcs7")]
-  Pkcs7,
-  /// Unknwon encryption version
-  #[display("unknown({_0})")]
+/// Identifies the AEAD backend an encrypted frame was produced with. Each
+/// backend is opt-in behind its own feature; a node that decodes a tag it was
+/// not built with yields [`EncryptAlgorithm::Unknown`] and fails the decode
+/// cleanly rather than panicking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EncryptAlgorithm {
+  /// AES-GCM (96-bit nonce, 128-bit auth tag). The `SecretKey` variant
+  /// (`Aes128` / `Aes192` / `Aes256`) picks the AES key length. Feature
+  /// `aes-gcm`, backed by the `aes-gcm` crate.
+  AesGcm,
+  /// ChaCha20-Poly1305 (96-bit nonce, 128-bit auth tag, 256-bit key).
+  /// Feature `chacha20-poly1305`, backed by the `chacha20poly1305` crate.
+  ChaCha20Poly1305,
+  /// An algorithm tag the local node was not built with.
   Unknown(u8),
 }
 
-#[cfg(any(feature = "quickcheck", test))]
-const _: () = {
-  use quickcheck::Arbitrary;
+/// Algorithm wire tags. Stable across builds — a node built with one backend
+/// must agree with a peer built with another on the tag numbering.
+const AES_GCM_TAG: u8 = 1;
+const CHACHA20_POLY1305_TAG: u8 = 2;
 
-  impl EncryptionAlgorithm {
-    const MAX: Self = Self::NoPadding;
-    const MIN: Self = Self::Pkcs7;
-  }
-
-  impl Arbitrary for EncryptionAlgorithm {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-      let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
-      match val {
-        NOPADDING_TAG => Self::NoPadding,
-        PKCS7_TAG => Self::Pkcs7,
-        _ => unreachable!(),
-      }
-    }
-  }
-};
-
-impl EncryptionAlgorithm {
-  /// Returns the encryption version as a `u8`.
-  #[inline]
-  pub const fn as_u8(&self) -> u8 {
+impl EncryptAlgorithm {
+  /// The one-byte wire tag for this algorithm.
+  #[inline(always)]
+  pub const fn tag(&self) -> u8 {
     match self {
-      Self::NoPadding => NOPADDING_TAG,
-      Self::Pkcs7 => PKCS7_TAG,
+      Self::AesGcm => AES_GCM_TAG,
+      Self::ChaCha20Poly1305 => CHACHA20_POLY1305_TAG,
       Self::Unknown(v) => *v,
     }
   }
 
-  /// Returns the encryption version as a `&'static str`.
-  #[inline]
-  pub fn as_str(&self) -> Cow<'static, str> {
-    let val = match self {
-      Self::NoPadding => "aes-gcm-nopadding",
-      Self::Pkcs7 => "aes-gcm-pkcs7",
-      Self::Unknown(e) => return Cow::Owned(format!("unknown({})", e)),
-    };
-    Cow::Borrowed(val)
-  }
-}
-
-impl From<u8> for EncryptionAlgorithm {
-  fn from(value: u8) -> Self {
-    match value {
-      NOPADDING_TAG => Self::NoPadding,
-      PKCS7_TAG => Self::Pkcs7,
-      e => Self::Unknown(e),
+  /// Decode an algorithm from its one-byte wire tag. An unrecognized tag
+  /// becomes [`EncryptAlgorithm::Unknown`] — the decode fails cleanly
+  /// downstream rather than panicking.
+  #[inline(always)]
+  pub const fn from_tag(tag: u8) -> Self {
+    match tag {
+      AES_GCM_TAG => Self::AesGcm,
+      CHACHA20_POLY1305_TAG => Self::ChaCha20Poly1305,
+      other => Self::Unknown(other),
     }
   }
 }
 
-impl EncryptionAlgorithm {
-  /// Returns the nonce size of the encryption algorithm
-  #[inline]
-  pub const fn nonce_size(&self) -> usize {
-    // only 12 bytes for nonce accepted currently
-    NONCE_SIZE
+impl From<EncryptAlgorithm> for u8 {
+  fn from(a: EncryptAlgorithm) -> u8 {
+    a.tag()
+  }
+}
+
+impl From<u8> for EncryptAlgorithm {
+  fn from(b: u8) -> Self {
+    Self::from_tag(b)
+  }
+}
+
+/// The symmetric key used to encrypt / decrypt a frame. The variant
+/// *is* the cipher choice: an `Aes128` / `Aes192` / `Aes256` key drives
+/// AES-GCM (key length picks the AES key size); a `ChaCha20Poly1305` key
+/// drives ChaCha20-Poly1305. There is no independent "algorithm" field on
+/// the key.
+///
+/// Variants are newtype only (no struct / multi-field-tuple variants). Each
+/// carries the raw key bytes inline as a fixed-size array.
+///
+/// `Debug` is implemented manually so a log line printing a `SecretKey` (or
+/// any container that recursively derives `Debug`, like [`Keyring`] or
+/// [`EncryptionOptions`]) renders `SecretKey::<variant>(<redacted>)` instead
+/// of disclosing the raw key bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SecretKey {
+  /// AES-128-GCM (128-bit key).
+  Aes128([u8; 16]),
+  /// AES-192-GCM (192-bit key).
+  Aes192([u8; 24]),
+  /// AES-256-GCM (256-bit key).
+  Aes256([u8; 32]),
+  /// ChaCha20-Poly1305 (256-bit key).
+  ChaCha20Poly1305([u8; 32]),
+}
+
+impl core::fmt::Debug for SecretKey {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Aes128(_) => write!(f, "SecretKey::Aes128(<redacted>)"),
+      Self::Aes192(_) => write!(f, "SecretKey::Aes192(<redacted>)"),
+      Self::Aes256(_) => write!(f, "SecretKey::Aes256(<redacted>)"),
+      Self::ChaCha20Poly1305(_) => write!(f, "SecretKey::ChaCha20Poly1305(<redacted>)"),
+    }
+  }
+}
+
+impl SecretKey {
+  /// The AEAD algorithm this key drives.
+  #[inline(always)]
+  pub const fn algorithm(&self) -> EncryptAlgorithm {
+    match self {
+      Self::Aes128(_) | Self::Aes192(_) | Self::Aes256(_) => EncryptAlgorithm::AesGcm,
+      Self::ChaCha20Poly1305(_) => EncryptAlgorithm::ChaCha20Poly1305,
+    }
   }
 
-  /// Writes the nonce to the buffer, returning the random generated nonce
-  pub fn write_nonce(dst: &mut impl BufMut) -> [u8; NONCE_SIZE] {
-    // Add a random nonce
-    let mut nonce = [0u8; NONCE_SIZE];
-    rand::rng().fill(&mut nonce);
-    dst.put_slice(&nonce);
-
-    nonce
+  /// The raw key bytes (length 16 / 24 / 32 depending on the variant).
+  #[inline(always)]
+  pub fn as_bytes(&self) -> &[u8] {
+    match self {
+      Self::Aes128(k) => k.as_slice(),
+      Self::Aes192(k) => k.as_slice(),
+      Self::Aes256(k) => k.as_slice(),
+      Self::ChaCha20Poly1305(k) => k.as_slice(),
+    }
   }
 
-  /// Generates a random nonce
-  pub fn random_nonce() -> [u8; NONCE_SIZE] {
-    let mut nonce = [0u8; NONCE_SIZE];
-    rand::rng().fill(&mut nonce);
-    nonce
+  /// Generate a random AES-128-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes128`] instead.
+  #[cfg(feature = "encryption-aes-gcm")]
+  pub fn random_aes128() -> Self {
+    let mut k = [0u8; 16];
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
+    Self::Aes128(k)
   }
 
-  /// Reads the nonce from the buffer
-  pub fn read_nonce(src: &mut impl Buf) -> [u8; NONCE_SIZE] {
-    let mut nonce = [0u8; NONCE_SIZE];
-    nonce.copy_from_slice(&src.chunk()[..NONCE_SIZE]);
-    src.advance(NONCE_SIZE);
-    nonce
+  /// Generate a random AES-192-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes192`] instead.
+  #[cfg(feature = "encryption-aes-gcm")]
+  pub fn random_aes192() -> Self {
+    let mut k = [0u8; 24];
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
+    Self::Aes192(k)
   }
 
-  /// Encrypts the data using the provided secret key, nonce, and the authentication data
-  pub fn encrypt<B>(
-    &self,
-    pk: SecretKey,
-    nonce: [u8; NONCE_SIZE],
-    auth_data: &[u8],
-    buf: &mut B,
-  ) -> Result<(), EncryptionError>
+  /// Generate a random AES-256-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes256`] instead.
+  #[cfg(feature = "encryption-aes-gcm")]
+  pub fn random_aes256() -> Self {
+    let mut k = [0u8; 32];
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
+    Self::Aes256(k)
+  }
+
+  /// Generate a random ChaCha20-Poly1305 key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::ChaCha20Poly1305`] instead.
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  pub fn random_chacha20poly1305() -> Self {
+    let mut k = [0u8; 32];
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
+    Self::ChaCha20Poly1305(k)
+  }
+}
+
+/// The `(claimed, max)` post-decrypt plaintext-length pair carried by
+/// [`EncryptionError::Oversize`]. Newtype payload so the enum variant stays
+/// newtype-only (no struct variants in this codebase).
+///
+/// The carried `claimed` is the post-decrypt plaintext byte length the
+/// wrapper implies (`ciphertext.len() - AUTH_TAG_LEN`) — what the caller's
+/// `max_plaintext_len` ceiling actually bounds. The on-wire envelope is
+/// wider by [`ENCRYPTED_WRAPPER_OVERHEAD`]; the wrapper's outer length is
+/// gated separately by the caller's reliable / gossip framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OversizeCiphertext(usize, usize);
+
+impl OversizeCiphertext {
+  /// Build the payload from `(claimed, max)`. Fields are private; external
+  /// callers see read-only `claimed()` / `max()` accessors only.
+  #[inline(always)]
+  pub const fn new(claimed: usize, max: usize) -> Self {
+    Self(claimed, max)
+  }
+
+  /// The post-decrypt plaintext byte length the frame's ciphertext implies.
+  #[inline(always)]
+  pub const fn claimed(&self) -> usize {
+    self.0
+  }
+
+  /// The caller's hard ceiling on the plaintext length.
+  #[inline(always)]
+  pub const fn max(&self) -> usize {
+    self.1
+  }
+}
+
+/// An encryption or decryption failure. Variants are unit or newtype only.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum EncryptionError {
+  /// AEAD authentication failed — corrupt ciphertext, mismatched AAD, or a
+  /// wrong key. Surfaced for every algorithm; never a panic.
+  #[error("AEAD authentication failed")]
+  AuthFailed,
+  /// The algorithm tag is unknown or its backend feature is not built in.
+  #[error("unsupported encryption algorithm: tag {0}")]
+  UnsupportedAlgorithm(u8),
+  /// A frame's post-decrypt plaintext length exceeds the caller's hard
+  /// ceiling (gossip MTU or `max_stream_frame_size`). Rejected before any
+  /// AEAD allocation. The carried length is the plaintext length the
+  /// wrapper implies, not the on-wire envelope size.
+  #[error("plaintext length {} exceeds maximum {}", _0.claimed(), _0.max())]
+  Oversize(OversizeCiphertext),
+  /// Either zero variant-matching keys in the keyring (the wire algorithm tag
+  /// has no candidate to attempt) or two-or-more variant-matching candidates
+  /// all failing AEAD auth (the multi-key fallback was exhausted). A single
+  /// candidate failing AEAD surfaces as [`EncryptionError::AuthFailed`]
+  /// instead. Coordinators treat all of these identically — drop the frame.
+  #[error("no matching key in the keyring")]
+  NoMatchingKey,
+  /// The supplied key's cipher variant does not match the requested algorithm
+  /// (e.g. an AES key passed to the ChaCha20-Poly1305 dispatch path). This
+  /// is a caller programming error, never a wire-level condition.
+  #[error("key cipher variant does not match the requested algorithm")]
+  KeyMismatch,
+  /// The byte slice does not carry the expected encrypted-frame header
+  /// (wrong leading tag or shorter than the minimum wrapper size).
+  #[error("byte slice is not a valid encrypted frame")]
+  MalformedFrame,
+  /// Encryption is enforced on this path but the outermost frame is not
+  /// wrapped in [`MessageTag::Encrypted`]. Rejected before any decoding so
+  /// an unauthenticated datagram cannot inject SWIM membership traffic.
+  #[error("encryption is enabled but the inbound frame is not wrapped in Encrypted")]
+  EncryptionRequired,
+  /// The platform entropy source failed while drawing the per-frame AEAD
+  /// nonce. Recoverable: the frame is simply not produced. On no_std targets
+  /// this reflects an integrator-provided getrandom backend that errored or
+  /// was not yet ready.
+  #[error("entropy source failed while generating an encryption nonce")]
+  Entropy,
+}
+
+/// Returns `true` when `key`'s cipher variant matches `algo`. `Unknown`
+/// algorithms are accepted (the dispatch returns `UnsupportedAlgorithm` for
+/// them); a known algorithm paired with a wrong-cipher key is rejected.
+///
+/// This is the always-on precheck called at the top of `encrypt` and
+/// `decrypt` before the feature-gated `match algo` dispatch.
+const fn key_matches_algorithm(algo: EncryptAlgorithm, key: &SecretKey) -> bool {
+  matches!(
+    (algo, key),
+    (EncryptAlgorithm::AesGcm, SecretKey::Aes128(_))
+      | (EncryptAlgorithm::AesGcm, SecretKey::Aes192(_))
+      | (EncryptAlgorithm::AesGcm, SecretKey::Aes256(_))
+      | (
+        EncryptAlgorithm::ChaCha20Poly1305,
+        SecretKey::ChaCha20Poly1305(_)
+      )
+      | (EncryptAlgorithm::Unknown(_), _)
+  )
+}
+
+/// Encrypt `plaintext` with `algo` and `key` using `nonce` and `aad`. A pure
+/// transform — no I/O. Returns ciphertext with the 16-byte AEAD tag appended.
+///
+/// Returns [`EncryptionError::UnsupportedAlgorithm`] for an algorithm whose
+/// backend feature is not built in (including `EncryptAlgorithm::Unknown`).
+/// Returns [`EncryptionError::KeyMismatch`] if `key`'s cipher variant does not
+/// match `algo` (e.g. an AES key passed to the ChaCha20-Poly1305 path).
+#[allow(unused_variables)]
+pub fn encrypt(
+  algo: EncryptAlgorithm,
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  plaintext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  if !key_matches_algorithm(algo, key) {
+    return Err(EncryptionError::KeyMismatch);
+  }
+  match algo {
+    #[cfg(feature = "encryption-aes-gcm")]
+    EncryptAlgorithm::AesGcm => aes_gcm_encrypt(key, nonce, plaintext, aad),
+    #[cfg(feature = "encryption-chacha20-poly1305")]
+    EncryptAlgorithm::ChaCha20Poly1305 => chacha20poly1305_encrypt(key, nonce, plaintext, aad),
+    EncryptAlgorithm::Unknown(t) => Err(EncryptionError::UnsupportedAlgorithm(t)),
+    #[allow(unreachable_patterns)]
+    other => Err(EncryptionError::UnsupportedAlgorithm(other.tag())),
+  }
+}
+
+/// Decrypt `ciphertext` with `algo` and `key` using `nonce` and `aad`. A pure
+/// transform — no I/O. The AEAD tag is the trailing 16 bytes of `ciphertext`
+/// (the standard AES-GCM / ChaCha20-Poly1305 layout); a failing tag check
+/// surfaces as [`EncryptionError::AuthFailed`].
+#[allow(unused_variables)]
+pub fn decrypt(
+  algo: EncryptAlgorithm,
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  ciphertext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  if !key_matches_algorithm(algo, key) {
+    return Err(EncryptionError::KeyMismatch);
+  }
+  match algo {
+    #[cfg(feature = "encryption-aes-gcm")]
+    EncryptAlgorithm::AesGcm => aes_gcm_decrypt(key, nonce, ciphertext, aad),
+    #[cfg(feature = "encryption-chacha20-poly1305")]
+    EncryptAlgorithm::ChaCha20Poly1305 => chacha20poly1305_decrypt(key, nonce, ciphertext, aad),
+    EncryptAlgorithm::Unknown(t) => Err(EncryptionError::UnsupportedAlgorithm(t)),
+    #[allow(unreachable_patterns)]
+    other => Err(EncryptionError::UnsupportedAlgorithm(other.tag())),
+  }
+}
+
+#[cfg(feature = "encryption-aes-gcm")]
+fn aes_gcm_encrypt(
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  plaintext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  use aead::{AeadInPlace, KeyInit};
+  use aes_gcm::{
+    Aes128Gcm, Aes256Gcm, AesGcm,
+    aes::{Aes192, cipher::consts::U12},
+  };
+
+  type Aes192Gcm = AesGcm<Aes192, U12>;
+
+  // The owned key/nonce byte arrays convert into the cipher's `GenericArray`-backed
+  // `Key`/`Nonce` types through `From<[u8; N]>`, keeping us off the deprecated
+  // `GenericArray::from_slice` constructor (`generic-array` 0.14 nudges toward 1.x).
+  let mut buf = plaintext.to_vec();
+  match key {
+    SecretKey::Aes128(k) => {
+      let cipher = Aes128Gcm::new(&(*k).into());
+      cipher
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::Aes192(k) => {
+      let cipher = Aes192Gcm::new(&(*k).into());
+      cipher
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::Aes256(k) => {
+      let cipher = Aes256Gcm::new(&(*k).into());
+      cipher
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::ChaCha20Poly1305(_) => {
+      // Precheck in encrypt() guarantees this arm is never reached.
+      unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()")
+    }
+  }
+  Ok(buf)
+}
+
+#[cfg(feature = "encryption-aes-gcm")]
+fn aes_gcm_decrypt(
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  ciphertext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  use aead::{AeadInPlace, KeyInit};
+  use aes_gcm::{
+    Aes128Gcm, Aes256Gcm, AesGcm,
+    aes::{Aes192, cipher::consts::U12},
+  };
+
+  type Aes192Gcm = AesGcm<Aes192, U12>;
+
+  // See `aes_gcm_encrypt`: `From<[u8; N]>` builds the cipher key/nonce, avoiding
+  // the deprecated `GenericArray::from_slice`.
+  let mut buf = ciphertext.to_vec();
+  match key {
+    SecretKey::Aes128(k) => {
+      let cipher = Aes128Gcm::new(&(*k).into());
+      cipher
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::Aes192(k) => {
+      let cipher = Aes192Gcm::new(&(*k).into());
+      cipher
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::Aes256(k) => {
+      let cipher = Aes256Gcm::new(&(*k).into());
+      cipher
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
+        .map_err(|_| EncryptionError::AuthFailed)?;
+    }
+    SecretKey::ChaCha20Poly1305(_) => {
+      // Precheck in decrypt() guarantees this arm is never reached.
+      unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()")
+    }
+  }
+  Ok(buf)
+}
+
+#[cfg(feature = "encryption-chacha20-poly1305")]
+fn chacha20poly1305_encrypt(
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  plaintext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  use aead::{AeadInPlace, KeyInit};
+  use chacha20poly1305::ChaCha20Poly1305;
+
+  let k = match key {
+    SecretKey::ChaCha20Poly1305(k) => k,
+    // Precheck in encrypt() guarantees this arm is never reached.
+    _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
+  };
+  // `From<[u8; N]>` builds the key/nonce, avoiding the deprecated
+  // `GenericArray::from_slice` (see `aes_gcm_encrypt`).
+  let cipher = ChaCha20Poly1305::new(&(*k).into());
+  let mut buf = plaintext.to_vec();
+  cipher
+    .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
+    .map_err(|_| EncryptionError::AuthFailed)?;
+  Ok(buf)
+}
+
+#[cfg(feature = "encryption-chacha20-poly1305")]
+fn chacha20poly1305_decrypt(
+  key: &SecretKey,
+  nonce: &[u8; 12],
+  ciphertext: &[u8],
+  aad: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  use aead::{AeadInPlace, KeyInit};
+  use chacha20poly1305::ChaCha20Poly1305;
+
+  let k = match key {
+    SecretKey::ChaCha20Poly1305(k) => k,
+    // Precheck in decrypt() guarantees this arm is never reached.
+    _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
+  };
+  // See `chacha20poly1305_encrypt`: `From<[u8; N]>` avoids the deprecated
+  // `GenericArray::from_slice`.
+  let cipher = ChaCha20Poly1305::new(&(*k).into());
+  let mut buf = ciphertext.to_vec();
+  cipher
+    .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
+    .map_err(|_| EncryptionError::AuthFailed)?;
+  Ok(buf)
+}
+
+/// A `Keyring` operation rejection. Variants are unit-only.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum KeyringError {
+  /// The named key matched the primary — it cannot be removed (operators
+  /// `promote` a secondary first, then remove the former primary).
+  #[error("cannot remove the primary key; promote a secondary first")]
+  IsPrimary,
+  /// The named key is not present in the ring.
+  #[error("the named key is not in the keyring")]
+  NotInRing,
+}
+
+/// A primary key + an ordered list of secondaries. Lock-free plain data.
+///
+/// Encrypt always uses the primary. Decrypt filters keys by variant matching
+/// the wire algorithm tag, then tries each in order (primary first, then
+/// secondaries). Mixed-cipher rings are allowed — a deployment can carry an
+/// AES primary and a ChaCha20-Poly1305 secondary during a cipher migration;
+/// the variant filter selects which keys to try for a given inbound frame.
+///
+/// Zero `pub` fields — accessor-only.
+///
+/// `PartialEq` / `Eq` are derived so callers can compare two configurations
+/// (e.g. a config reconciler reapplying the same options): equality is
+/// primary-and-secondaries-in-order. A reordering of secondaries via
+/// `promote` makes two rings unequal even though they accept the same keys,
+/// which is correct — outbound traffic uses the primary, and a change in
+/// which key is primary is a policy change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keyring {
+  primary: SecretKey,
+  secondaries: Vec<SecretKey>,
+}
+
+impl Keyring {
+  /// Build a ring with just a primary key (no secondaries).
+  pub fn new(primary: SecretKey) -> Self {
+    Self {
+      primary,
+      secondaries: Vec::new(),
+    }
+  }
+
+  /// Build a ring with a primary and an iterator of seed secondaries.
+  /// Duplicates of the primary or of an earlier secondary are dropped.
+  #[must_use]
+  pub fn with_secondaries<I>(primary: SecretKey, secondaries: I) -> Self
   where
-    B: aead::Buffer,
+    I: IntoIterator<Item = SecretKey>,
   {
-    match self {
-      EncryptionAlgorithm::NoPadding => {}
-      EncryptionAlgorithm::Pkcs7 => {
-        let buf_len = buf.len();
-        pkcs7encode(buf, buf_len, 0)?;
-      }
-      _ => return Err(EncryptionError::UnknownAlgorithm(*self)),
+    let mut kr = Self::new(primary);
+    for s in secondaries {
+      kr.insert_secondary(s);
     }
-
-    match pk {
-      SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk).as_ref());
-        gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
-          .map_err(Into::into)
-      }
-      SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk).as_ref());
-        gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
-          .map_err(Into::into)
-      }
-      SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk).as_ref());
-        gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
-          .map_err(Into::into)
-      }
-    }
+    kr
   }
 
-  /// Decrypts the data using the provided secret key, nonce, and the authentication data
-  pub fn decrypt(
-    &self,
-    key: &SecretKey,
-    nonce: &[u8],
-    auth_data: &[u8],
-    dst: &mut impl aead::Buffer,
-  ) -> Result<(), EncryptionError> {
-    if self.is_unknown() {
-      return Err(EncryptionError::UnknownAlgorithm(*self));
-    }
-
-    // Get the AES block cipher
-    match key {
-      SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk).as_ref());
-        gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
-          .map_err(Into::into)
-      }
-      SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk).as_ref());
-        gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
-          .map_err(Into::into)
-      }
-      SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk).as_ref());
-        gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
-          .map_err(Into::into)
-      }
-    }
-    .inspect(|_| {
-      if self.is_pkcs_7() {
-        pkcs7decode(dst);
-      }
-    })
+  /// The primary key (used for every outbound encryption).
+  #[inline(always)]
+  pub const fn primary_ref(&self) -> &SecretKey {
+    &self.primary
   }
 
-  /// Returns the overhead of the encryption
-  #[inline]
-  pub(crate) const fn encrypt_overhead(&self) -> usize {
-    match self {
-      EncryptionAlgorithm::Pkcs7 => 44, // IV: 12, Padding: 16, Tag: 16
-      EncryptionAlgorithm::NoPadding => 28, // IV: 12, Tag: 16
-      _ => unreachable!(),
-    }
+  /// The secondary keys in decrypt-trial order. After `promote`, the former
+  /// primary appears at index 0; otherwise the order is insertion order.
+  #[inline(always)]
+  pub fn secondaries(&self) -> &[SecretKey] {
+    &self.secondaries
   }
 
-  /// Returns the encrypted suffix length of the input size
-  #[inline]
-  pub const fn encrypted_suffix_len(&self, inp: usize) -> usize {
-    match self {
-      EncryptionAlgorithm::Pkcs7 => {
-        // Determine the padding size
-        let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
-
-        // Sum the extra parts to get total size
-        padding + TAG_SIZE
-      }
-      EncryptionAlgorithm::NoPadding => TAG_SIZE,
-      _ => unreachable!(),
+  /// Add a secondary key. A duplicate of the primary or of an existing
+  /// secondary is dropped (idempotent insert; no error).
+  pub fn insert_secondary(&mut self, key: SecretKey) {
+    if self.primary == key {
+      return;
     }
+    if self.secondaries.contains(&key) {
+      return;
+    }
+    self.secondaries.push(key);
+  }
+
+  /// Remove a secondary key by its raw byte value. Errors if the byte value
+  /// matches the primary or is not in the ring.
+  ///
+  /// The lookup is byte-only: a 32-byte AES-256 key and a 32-byte ChaCha20-Poly1305
+  /// key whose inner arrays coincide are indistinguishable to this method; the
+  /// first secondary whose bytes match is removed. Matches the legacy
+  /// `memberlist-core::Keyring::remove` contract.
+  pub fn remove_secondary(&mut self, key: &[u8]) -> Result<(), KeyringError> {
+    if self.primary.as_bytes() == key {
+      return Err(KeyringError::IsPrimary);
+    }
+    let pos = self
+      .secondaries
+      .iter()
+      .position(|s| s.as_bytes() == key)
+      .ok_or(KeyringError::NotInRing)?;
+    self.secondaries.remove(pos);
+    Ok(())
+  }
+
+  /// Promote a secondary to primary; the old primary becomes a secondary at
+  /// index 0. Promoting the current primary is a no-op (returns `Ok(())`).
+  /// Errors if the named key is not in the ring.
+  ///
+  /// The lookup is byte-only — see `remove_secondary` for the collision note.
+  pub fn promote(&mut self, key: &[u8]) -> Result<(), KeyringError> {
+    if self.primary.as_bytes() == key {
+      return Ok(());
+    }
+    let pos = self
+      .secondaries
+      .iter()
+      .position(|s| s.as_bytes() == key)
+      .ok_or(KeyringError::NotInRing)?;
+    let new_primary = self.secondaries.remove(pos);
+    let old_primary = core::mem::replace(&mut self.primary, new_primary);
+    self.secondaries.insert(0, old_primary);
+    Ok(())
   }
 }
 
-/// pkcs7encode is used to pad a byte buffer to a specific block size using
-/// the PKCS7 algorithm. "Ignores" some bytes to compensate for IV
-#[inline]
-fn pkcs7encode(
-  buf: &mut impl aead::Buffer,
-  buf_len: usize,
-  ignore: usize,
-) -> Result<(), aead::Error> {
-  let n = buf_len - ignore;
-  let more = BLOCK_SIZE - (n % BLOCK_SIZE);
-  let mut block_buf = [0u8; BLOCK_SIZE];
-  block_buf
-    .iter_mut()
-    .take(more)
-    .for_each(|b| *b = more as u8);
-  buf.extend_from_slice(&block_buf[..more])
+/// Transport-agnostic encryption configuration handed to each coordinator at
+/// construction. Zero `pub` fields — accessor-only.
+///
+/// An `EncryptionOptions` with no keyring is the default: every payload is
+/// left unencrypted and the codec paths reduce to identity. The operator
+/// opts in by attaching a `Keyring` via `with_keyring` / `set_keyring`.
+///
+/// `PartialEq` / `Eq` are derived so a coordinator's `set_encryption_options`
+/// can detect a no-op reapply (config reconciler republishes the same
+/// effective policy) and skip its bridge-fan-out — without that early
+/// return an insecure-transport reapply would tear down every live
+/// reliable exchange for no security gain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionOptions {
+  keyring: Option<Keyring>,
 }
 
-/// pkcs7decode is used to decode a buffer that has been padded
-#[inline]
-fn pkcs7decode(buf: &mut impl aead::Buffer) {
-  if buf.is_empty() {
-    panic!("Cannot decode a PKCS7 buffer of zero length");
+impl Default for EncryptionOptions {
+  fn default() -> Self {
+    Self::new()
   }
-  let n = buf.len();
-  let last = buf.as_ref()[n - 1];
-  let n = n - (last as usize);
-  buf.truncate(n);
 }
 
-#[cfg(feature = "serde")]
-const _: () = {
-  use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-  impl Serialize for EncryptionAlgorithm {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-      S: Serializer,
-    {
-      if serializer.is_human_readable() {
-        serializer.serialize_str(self.as_str().as_ref())
-      } else {
-        serializer.serialize_u8(self.as_u8())
-      }
-    }
+impl EncryptionOptions {
+  /// A new, disabled configuration — no keyring. Every payload is left
+  /// unencrypted.
+  #[inline(always)]
+  pub const fn new() -> Self {
+    Self { keyring: None }
   }
 
-  impl<'de> Deserialize<'de> for EncryptionAlgorithm {
-    fn deserialize<D>(deserializer: D) -> Result<EncryptionAlgorithm, D::Error>
-    where
-      D: Deserializer<'de>,
-    {
-      if deserializer.is_human_readable() {
-        <&str>::deserialize(deserializer).and_then(|s| s.parse().map_err(serde::de::Error::custom))
-      } else {
-        u8::deserialize(deserializer).map(EncryptionAlgorithm::from)
-      }
+  /// Setter: attach a keyring in place (enables encryption). Replaces any
+  /// previously installed keyring; use `clear_keyring` to disable.
+  #[inline(always)]
+  pub fn set_keyring(&mut self, keyring: Keyring) -> &mut Self {
+    self.keyring = Some(keyring);
+    self
+  }
+
+  /// Builder: attach a keyring (enables encryption).
+  #[must_use]
+  #[inline(always)]
+  pub fn with_keyring(mut self, keyring: Keyring) -> Self {
+    self.keyring = Some(keyring);
+    self
+  }
+
+  /// Setter: assign the raw `Option<Keyring>` wrapper in place.
+  /// `None` disables encryption; `Some(keyring)` enables it.
+  #[inline(always)]
+  pub fn update_keyring(&mut self, val: Option<Keyring>) -> &mut Self {
+    self.keyring = val;
+    self
+  }
+
+  /// Builder: assign the raw `Option<Keyring>` wrapper (consuming).
+  /// `None` disables encryption; `Some(keyring)` enables it.
+  #[must_use]
+  #[inline(always)]
+  pub fn maybe_keyring(mut self, val: Option<Keyring>) -> Self {
+    self.keyring = val;
+    self
+  }
+
+  /// Setter: drop the keyring (disable encryption) in place.
+  #[inline(always)]
+  pub fn clear_keyring(&mut self) -> &mut Self {
+    self.keyring = None;
+    self
+  }
+
+  /// The attached keyring, or `None` when encryption is disabled.
+  #[inline(always)]
+  pub const fn keyring(&self) -> Option<&Keyring> {
+    self.keyring.as_ref()
+  }
+
+  /// `true` when a keyring is attached — encryption is enabled.
+  #[inline(always)]
+  pub const fn is_enabled(&self) -> bool {
+    self.keyring.is_some()
+  }
+}
+
+/// The one-byte wrapper tag that prefixes every encrypted frame. Pinned at
+/// 13 — the framing layer (`framing::MessageTag::Encrypted`) wires the same
+/// numeric value. A change here is a wire-protocol break.
+pub const ENCRYPTED_TAG: u8 = 13;
+
+/// The on-wire nonce length in bytes (96 bits — the standard for AES-GCM and
+/// ChaCha20-Poly1305).
+const NONCE_LEN: usize = 12;
+
+/// The AEAD authentication tag length in bytes (128 bits, appended inline by
+/// both backends).
+const AUTH_TAG_LEN: usize = 16;
+
+/// The fixed wrapper overhead: `[Encrypted tag][algorithm tag][nonce 12 B]`.
+/// The 16-byte AEAD tag rides inside `ciphertext_with_tag` so it is not part
+/// of the wrapper header.
+const WRAPPER_HEADER_LEN: usize = 2 + NONCE_LEN;
+
+/// The constant byte overhead an `Encrypted` wrapper adds on top of the
+/// plaintext payload — the wrapper header
+/// (`[ENCRYPTED_TAG][algorithm tag][nonce 12 B]`) plus the trailing 16-byte
+/// AEAD authentication tag. 14 + 16 = 30 bytes.
+///
+/// Callers use this when sizing the on-wire bound for a buffer whose
+/// plaintext bound is already known: a near-`max_orig_len` plaintext
+/// frame inflates by exactly `ENCRYPTED_WRAPPER_OVERHEAD` after
+/// encryption, so the on-wire envelope ceiling must allow that slack to
+/// round-trip cleanly.
+pub const ENCRYPTED_WRAPPER_OVERHEAD: usize = WRAPPER_HEADER_LEN + AUTH_TAG_LEN;
+
+/// Build an encrypted wrapper frame:
+/// `[ENCRYPTED_TAG][algorithm tag][nonce: 12 B][ciphertext + 16-B auth]`.
+///
+/// The 12-byte nonce is generated randomly per encryption; the receiver
+/// reads it back off the wire. The AAD is the two-byte
+/// `[ENCRYPTED_TAG, algorithm tag]` — binds the wrapper identity and the
+/// cipher choice to AEAD authentication so a peer cannot downgrade-swap
+/// algorithms without breaking the tag check.
+pub fn encode_encrypted_frame(
+  algo: EncryptAlgorithm,
+  key: &SecretKey,
+  plaintext: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  #[cfg(any(
+    feature = "encryption-aes-gcm",
+    feature = "encryption-chacha20-poly1305"
+  ))]
+  let nonce: [u8; NONCE_LEN] = {
+    let mut n = [0u8; NONCE_LEN];
+    // Recoverable on this fallible path: a failing entropy source surfaces an
+    // encryption error rather than aborting the process.
+    getrandom::fill(&mut n).map_err(|_| EncryptionError::Entropy)?;
+    n
+  };
+  #[cfg(not(any(
+    feature = "encryption-aes-gcm",
+    feature = "encryption-chacha20-poly1305"
+  )))]
+  let nonce: [u8; NONCE_LEN] = {
+    // No backend is built in; the encrypt call below will surface
+    // UnsupportedAlgorithm before we ever look at `nonce`.
+    [0u8; NONCE_LEN]
+  };
+
+  let aad = [ENCRYPTED_TAG, algo.tag()];
+  let ciphertext = encrypt(algo, key, &nonce, plaintext, &aad)?;
+  let mut out = Vec::with_capacity(WRAPPER_HEADER_LEN + ciphertext.len());
+  out.push(ENCRYPTED_TAG);
+  out.push(algo.tag());
+  out.extend_from_slice(&nonce);
+  out.extend_from_slice(&ciphertext);
+  Ok(out)
+}
+
+/// Decode an encrypted wrapper frame back into the original plaintext.
+///
+/// `max_plaintext_len` is the caller's hard ceiling on the POST-DECRYPT
+/// plaintext byte length — gossip MTU on the unreliable path,
+/// `max_stream_frame_size` on the reliable path. A frame whose implied
+/// plaintext length (ciphertext minus the 16-byte AEAD authentication tag)
+/// exceeds it is rejected with [`EncryptionError::Oversize`] BEFORE any
+/// AEAD allocation — the ciphertext-bomb guard, parallel to compression's
+/// `orig_len` bound.
+///
+/// The bound is on PLAINTEXT length, not on the wire envelope: the AEAD
+/// authentication tag adds [`AUTH_TAG_LEN`] bytes inline so a legitimate
+/// near-bound plaintext frame's ciphertext is slightly larger than the
+/// plaintext bound. Checking on the post-decrypt length keeps near-MTU
+/// plaintext frames round-tripping cleanly.
+///
+/// The keyring is consulted by variant: only keys whose
+/// [`SecretKey::algorithm`] matches the wire algorithm tag are tried; the
+/// primary is tried first, then each secondary in insertion order. Result
+/// disposition when no key decrypts:
+/// - zero variant-matching candidates → [`EncryptionError::NoMatchingKey`]
+/// - exactly one candidate, AEAD fails → [`EncryptionError::AuthFailed`]
+///   (the AEAD's own verdict; the caller had no alternative attempt)
+/// - two or more candidates, all AEAD fail → [`EncryptionError::NoMatchingKey`]
+///   (the multi-key fallback was exhausted)
+///
+/// The driver/coordinator treats all three identically on the gossip path
+/// (drop the datagram); the variant distinction is a debugging aid.
+pub fn decode_encrypted_frame(
+  opts: &EncryptionOptions,
+  frame: &[u8],
+  max_plaintext_len: usize,
+) -> Result<Vec<u8>, EncryptionError> {
+  // First pass: just enough to recognise the wrapper and read the algorithm
+  // byte. The algorithm-tag check runs BEFORE the full-header length bound
+  // so an unknown-algorithm frame surfaces as `UnsupportedAlgorithm`
+  // regardless of how short the payload is.
+  if frame.len() < 2 || frame[0] != ENCRYPTED_TAG {
+    return Err(EncryptionError::MalformedFrame);
+  }
+  let algo = EncryptAlgorithm::from_tag(frame[1]);
+  if let EncryptAlgorithm::Unknown(t) = algo {
+    return Err(EncryptionError::UnsupportedAlgorithm(t));
+  }
+  if frame.len() < WRAPPER_HEADER_LEN + AUTH_TAG_LEN {
+    return Err(EncryptionError::MalformedFrame);
+  }
+
+  let mut nonce = [0u8; NONCE_LEN];
+  nonce.copy_from_slice(&frame[2..2 + NONCE_LEN]);
+  let ciphertext = &frame[WRAPPER_HEADER_LEN..];
+  // The AEAD authentication tag rides as the trailing `AUTH_TAG_LEN` bytes
+  // of `ciphertext`; the post-decrypt plaintext length is therefore
+  // `ciphertext.len() - AUTH_TAG_LEN`. Saturate to 0 so a frame with no
+  // ciphertext beyond the tag bytes is treated as a zero-length plaintext
+  // rather than wrapping the subtract.
+  let plaintext_len = ciphertext.len().saturating_sub(AUTH_TAG_LEN);
+  if plaintext_len > max_plaintext_len {
+    return Err(EncryptionError::Oversize(OversizeCiphertext::new(
+      plaintext_len,
+      max_plaintext_len,
+    )));
+  }
+  let aad = [ENCRYPTED_TAG, algo.tag()];
+
+  let keyring = match opts.keyring() {
+    Some(kr) => kr,
+    // Encryption disabled but the frame is encrypted — the decoder cannot
+    // possibly decrypt it. Surface as NoMatchingKey (matches the disposition
+    // the driver takes on the gossip path: drop the datagram).
+    None => return Err(EncryptionError::NoMatchingKey),
+  };
+
+  let mut tried = 0usize;
+  if keyring.primary_ref().algorithm() == algo {
+    tried += 1;
+    match decrypt(algo, keyring.primary_ref(), &nonce, ciphertext, &aad) {
+      Ok(pt) => return Ok(pt),
+      // The primary failed auth; fall through and try the secondaries.
+      Err(EncryptionError::AuthFailed) => {}
+      Err(other) => return Err(other),
     }
   }
-};
+  for sec in keyring.secondaries() {
+    if sec.algorithm() != algo {
+      continue;
+    }
+    tried += 1;
+    match decrypt(algo, sec, &nonce, ciphertext, &aad) {
+      Ok(pt) => return Ok(pt),
+      Err(EncryptionError::AuthFailed) => continue,
+      Err(other) => return Err(other),
+    }
+  }
+  // Disposition: 0 variant-matching keys is "no matching key in the ring";
+  // 1 candidate failing AEAD is the AEAD's own verdict (`AuthFailed`) — the
+  // caller has no alternative attempt that could have succeeded, so a
+  // distinguishable corruption/wrong-key signal is more useful than a
+  // collapsed "no matching key"; 2+ candidates failing is the multi-key
+  // fallback exhausted (`NoMatchingKey`). The driver treats all three the
+  // same on the gossip path.
+  match tried {
+    0 | 2.. => Err(EncryptionError::NoMatchingKey),
+    1 => Err(EncryptionError::AuthFailed),
+  }
+}
 
 #[cfg(test)]
 mod tests {
-  use bytes::BytesMut;
-
-  use core::ops::{Deref, DerefMut};
-
-  use arbitrary::Arbitrary;
-
   use super::*;
 
-  impl super::EncryptionAlgorithm {
-    /// Returns the encrypted length of the input size
-    #[inline]
-    const fn encrypted_len(&self, inp: usize) -> usize {
-      match self {
-        EncryptionAlgorithm::Pkcs7 => {
-          // Determine the padding size
-          let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
-
-          // Sum the extra parts to get total size
-          4 + 1 + NONCE_SIZE + inp + padding + TAG_SIZE
-        }
-        EncryptionAlgorithm::NoPadding => 4 + 1 + NONCE_SIZE + inp + TAG_SIZE,
-        _ => unreachable!(),
-      }
+  #[test]
+  fn algorithm_tag_roundtrip() {
+    for algo in [EncryptAlgorithm::AesGcm, EncryptAlgorithm::ChaCha20Poly1305] {
+      assert_eq!(EncryptAlgorithm::from_tag(algo.tag()), algo);
+      assert_eq!(EncryptAlgorithm::from(u8::from(algo)), algo);
     }
   }
 
   #[test]
-  fn arbitrary_secret_key() {
-    let key = SecretKey::arbitrary(&mut arbitrary::Unstructured::new(&[0; 128])).unwrap();
+  fn unrecognized_tag_is_unknown() {
+    assert_eq!(EncryptAlgorithm::from_tag(0), EncryptAlgorithm::Unknown(0));
+    assert_eq!(
+      EncryptAlgorithm::from_tag(99),
+      EncryptAlgorithm::Unknown(99)
+    );
+    // `Unknown` round-trips its carried byte.
+    assert_eq!(EncryptAlgorithm::Unknown(99).tag(), 99);
+  }
+
+  /// Pinned numeric algorithm tags. A change here is a wire-protocol break:
+  /// a new-build node would decode a peer's old-build frame to the wrong
+  /// algorithm. The pinning is enforced as a unit test so a refactor that
+  /// reorders the constants is caught at test time, not at deploy time.
+  #[test]
+  fn algorithm_tags_have_pinned_numeric_values() {
+    assert_eq!(EncryptAlgorithm::AesGcm.tag(), 1);
+    assert_eq!(EncryptAlgorithm::ChaCha20Poly1305.tag(), 2);
+  }
+
+  #[test]
+  fn secret_key_variants_imply_algorithm() {
+    let aes128 = SecretKey::Aes128([0u8; 16]);
+    let aes192 = SecretKey::Aes192([0u8; 24]);
+    let aes256 = SecretKey::Aes256([0u8; 32]);
+    let chacha = SecretKey::ChaCha20Poly1305([0u8; 32]);
+    assert_eq!(aes128.algorithm(), EncryptAlgorithm::AesGcm);
+    assert_eq!(aes192.algorithm(), EncryptAlgorithm::AesGcm);
+    assert_eq!(aes256.algorithm(), EncryptAlgorithm::AesGcm);
+    assert_eq!(chacha.algorithm(), EncryptAlgorithm::ChaCha20Poly1305);
+  }
+
+  #[test]
+  fn secret_key_as_bytes_returns_full_key() {
+    let aes128 = SecretKey::Aes128([7u8; 16]);
+    let aes192 = SecretKey::Aes192([7u8; 24]);
+    let aes256 = SecretKey::Aes256([7u8; 32]);
+    let chacha = SecretKey::ChaCha20Poly1305([7u8; 32]);
+    assert_eq!(aes128.as_bytes().len(), 16);
+    assert_eq!(aes192.as_bytes().len(), 24);
+    assert_eq!(aes256.as_bytes().len(), 32);
+    assert_eq!(chacha.as_bytes().len(), 32);
+    assert!(aes128.as_bytes().iter().all(|b| *b == 7));
+  }
+
+  /// `Debug` on a `SecretKey` MUST NOT disclose the raw bytes — a single
+  /// `{:?}` of a configured `Keyring` / `EncryptionOptions` in a log line would
+  /// otherwise dump the symmetric key. The custom impl renders the variant
+  /// name with a `<redacted>` placeholder; the byte-leak guard spot-checks
+  /// both `0xXX` hex form and the array Debug's decimal form.
+  #[test]
+  fn secret_key_debug_redacts_raw_bytes() {
+    let aes128 = SecretKey::Aes128([0xAB; 16]);
+    let aes192 = SecretKey::Aes192([0xCD; 24]);
+    let aes256 = SecretKey::Aes256([0xEF; 32]);
+    let chacha = SecretKey::ChaCha20Poly1305([0x99; 32]);
+
+    for key in [aes128, aes192, aes256, chacha] {
+      let s = format!("{key:?}");
+      assert!(s.contains("<redacted>"), "{s:?}");
+      // The raw byte sequence must NOT appear in any form. Spot-check that
+      // the suspect byte does not appear as a hex literal or as the decimal
+      // form `[u8; N]`'s default Debug would emit.
+      assert!(!s.contains("0xAB"), "raw byte leak in {s:?}");
+      assert!(!s.contains("0xCD"), "raw byte leak in {s:?}");
+      assert!(!s.contains("0xEF"), "raw byte leak in {s:?}");
+      assert!(!s.contains("0x99"), "raw byte leak in {s:?}");
+      // `[u8; N]` default Debug uses decimal in a comma-separated array form
+      // (e.g. `[171, 171, ...]` for `[0xAB; 16]`). Check those don't appear.
+      assert!(!s.contains("171"), "raw byte (decimal) leak in {s:?}");
+      assert!(!s.contains("205"), "raw byte (decimal) leak in {s:?}");
+      assert!(!s.contains("239"), "raw byte (decimal) leak in {s:?}");
+      assert!(!s.contains("153"), "raw byte (decimal) leak in {s:?}");
+    }
+  }
+
+  /// The custom `SecretKey::Debug` impl composes through containers that
+  /// derive `Debug` field-wise — `Keyring` (and therefore `EncryptionOptions`
+  /// once it carries a `Keyring`) renders each `SecretKey` field via the
+  /// redacted impl, so the raw key bytes never reach a log line.
+  #[test]
+  fn keyring_debug_redacts_through_secret_key() {
+    let kr = Keyring::with_secondaries(
+      SecretKey::Aes256([0xAB; 32]),
+      vec![SecretKey::ChaCha20Poly1305([0xCD; 32])],
+    );
+    let s = format!("{kr:?}");
+    assert!(s.contains("<redacted>"), "{s:?}");
+    assert!(!s.contains("171"), "raw byte leak through Keyring");
+    assert!(!s.contains("205"), "raw byte leak through Keyring");
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn random_aes_constructors_produce_keys_of_the_right_length() {
+    assert_eq!(SecretKey::random_aes128().as_bytes().len(), 16);
+    assert_eq!(SecretKey::random_aes192().as_bytes().len(), 24);
+    assert_eq!(SecretKey::random_aes256().as_bytes().len(), 32);
+    // Random keys differ across calls — collision probability is ~2^-128.
+    assert_ne!(
+      SecretKey::random_aes128().as_bytes(),
+      SecretKey::random_aes128().as_bytes()
+    );
+  }
+
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  #[test]
+  fn random_chacha20poly1305_constructor_produces_key_of_the_right_length() {
+    let key = SecretKey::random_chacha20poly1305();
+    assert_eq!(key.as_bytes().len(), 32);
+    assert_eq!(key.algorithm(), EncryptAlgorithm::ChaCha20Poly1305);
+  }
+
+  #[test]
+  fn encryption_error_display_carries_expected_substrings() {
+    let e = EncryptionError::AuthFailed;
+    assert!(e.to_string().contains("auth"));
+
+    let e = EncryptionError::UnsupportedAlgorithm(99);
+    assert!(e.to_string().contains("99"));
+
+    let e = EncryptionError::Oversize(OversizeCiphertext::new(1024, 64));
+    let s = e.to_string();
+    assert!(s.contains("1024"), "display carries claimed length: {s}");
+    assert!(s.contains("64"), "display carries max ceiling: {s}");
+
+    let e = EncryptionError::NoMatchingKey;
+    assert!(!e.to_string().is_empty());
+
+    let e = EncryptionError::KeyMismatch;
+    assert!(!e.to_string().is_empty());
+
+    let e = EncryptionError::MalformedFrame;
+    assert!(!e.to_string().is_empty());
+
+    let e = EncryptionError::EncryptionRequired;
+    assert!(!e.to_string().is_empty());
+  }
+
+  #[test]
+  fn oversize_ciphertext_accessors_round_trip() {
+    let o = OversizeCiphertext::new(2048, 1024);
+    assert_eq!(o.claimed(), 2048);
+    assert_eq!(o.max(), 1024);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_aes128_roundtrip() {
+    let key = SecretKey::Aes128([1u8; 16]);
+    let nonce = [2u8; 12];
+    let plaintext = b"hello memberlist gossip";
+    let aad = b"\x0d\x01"; // [Encrypted tag = 13, AesGcm tag = 1]
+    let ct = encrypt(EncryptAlgorithm::AesGcm, &key, &nonce, plaintext, aad).expect("encrypt");
+    assert_eq!(
+      ct.len(),
+      plaintext.len() + 16,
+      "AES-GCM appends a 16-byte tag"
+    );
+    let pt = decrypt(EncryptAlgorithm::AesGcm, &key, &nonce, &ct, aad).expect("decrypt");
+    assert_eq!(pt, plaintext);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_aes192_roundtrip() {
+    let key = SecretKey::Aes192([3u8; 24]);
+    let nonce = [4u8; 12];
+    let plaintext = b"another payload";
+    let aad = b"\x0d\x01";
+    let ct = encrypt(EncryptAlgorithm::AesGcm, &key, &nonce, plaintext, aad).expect("encrypt");
+    let pt = decrypt(EncryptAlgorithm::AesGcm, &key, &nonce, &ct, aad).expect("decrypt");
+    assert_eq!(pt, plaintext);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_aes256_roundtrip() {
+    let key = SecretKey::Aes256([5u8; 32]);
+    let nonce = [6u8; 12];
+    let plaintext = b"a third payload to exercise AES-256";
+    let aad = b"\x0d\x01";
+    let ct = encrypt(EncryptAlgorithm::AesGcm, &key, &nonce, plaintext, aad).expect("encrypt");
+    let pt = decrypt(EncryptAlgorithm::AesGcm, &key, &nonce, &ct, aad).expect("decrypt");
+    assert_eq!(pt, plaintext);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_wrong_key_fails_auth() {
+    let k1 = SecretKey::Aes256([0xAA; 32]);
+    let k2 = SecretKey::Aes256([0xBB; 32]);
+    let nonce = [7u8; 12];
+    let aad = b"\x0d\x01";
+    let ct = encrypt(EncryptAlgorithm::AesGcm, &k1, &nonce, b"secret", aad).expect("encrypt");
+    let err = decrypt(EncryptAlgorithm::AesGcm, &k2, &nonce, &ct, aad).expect_err("auth must fail");
+    assert!(matches!(err, EncryptionError::AuthFailed));
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_aad_mismatch_fails_auth() {
+    let key = SecretKey::Aes256([0xCC; 32]);
+    let nonce = [8u8; 12];
+    let ct = encrypt(
+      EncryptAlgorithm::AesGcm,
+      &key,
+      &nonce,
+      b"protected",
+      b"\x0d\x01",
+    )
+    .expect("encrypt");
+    // AAD swapped (e.g. ChaCha20-Poly1305 tag = 2 instead of AES-GCM tag = 1).
+    let err = decrypt(EncryptAlgorithm::AesGcm, &key, &nonce, &ct, b"\x0d\x02")
+      .expect_err("AAD mismatch must fail auth");
+    assert!(matches!(err, EncryptionError::AuthFailed));
+  }
+
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  #[test]
+  fn chacha20poly1305_roundtrip() {
+    let key = SecretKey::ChaCha20Poly1305([0x42; 32]);
+    let nonce = [9u8; 12];
+    let plaintext = b"chacha20-poly1305 payload";
+    let aad = b"\x0d\x02";
+    let ct = encrypt(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &key,
+      &nonce,
+      plaintext,
+      aad,
+    )
+    .expect("encrypt");
+    assert_eq!(
+      ct.len(),
+      plaintext.len() + 16,
+      "ChaCha20-Poly1305 appends a 16-byte tag"
+    );
+    let pt = decrypt(EncryptAlgorithm::ChaCha20Poly1305, &key, &nonce, &ct, aad).expect("decrypt");
+    assert_eq!(pt, plaintext);
+  }
+
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  #[test]
+  fn chacha20poly1305_wrong_key_fails_auth() {
+    let k1 = SecretKey::ChaCha20Poly1305([0xAA; 32]);
+    let k2 = SecretKey::ChaCha20Poly1305([0xBB; 32]);
+    let nonce = [0x11; 12];
+    let aad = b"\x0d\x02";
+    let ct = encrypt(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &k1,
+      &nonce,
+      b"secret",
+      aad,
+    )
+    .expect("encrypt");
+    let err = decrypt(EncryptAlgorithm::ChaCha20Poly1305, &k2, &nonce, &ct, aad)
+      .expect_err("auth must fail");
+    assert!(matches!(err, EncryptionError::AuthFailed));
+  }
+
+  #[test]
+  fn key_variant_must_match_algorithm() {
+    // An AES key passed to the ChaCha algorithm path is a misuse caught by
+    // the key-mismatch branch — surfaced as KeyMismatch, never a panic.
+    let key = SecretKey::Aes128([0u8; 16]);
+    let err = encrypt(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &key,
+      &[0u8; 12],
+      b"data",
+      b"\x0d\x02",
+    )
+    .expect_err("variant/algo mismatch must err");
+    assert!(matches!(err, EncryptionError::KeyMismatch));
+  }
+
+  #[test]
+  fn unknown_algorithm_fails_both_directions() {
+    let algo = EncryptAlgorithm::Unknown(99);
+    let key = SecretKey::Aes128([0u8; 16]);
     assert!(matches!(
-      key,
-      SecretKey::Aes128(_) | SecretKey::Aes192(_) | SecretKey::Aes256(_)
+      encrypt(algo, &key, &[0u8; 12], b"data", b""),
+      Err(EncryptionError::UnsupportedAlgorithm(99))
+    ));
+    assert!(matches!(
+      decrypt(algo, &key, &[0u8; 12], b"data", b""),
+      Err(EncryptionError::UnsupportedAlgorithm(99))
     ));
   }
 
-  #[test]
-  fn test_secret_key() {
-    let mut key = SecretKey::from([0; 16]);
-    assert_eq!(key.deref(), &[0; 16]);
-    assert_eq!(key.deref_mut(), &mut [0; 16]);
-    assert_eq!(key.as_ref(), &[0; 16]);
-    assert_eq!(key.as_mut(), &mut [0; 16]);
-    assert_eq!(key.len(), 16);
-    assert!(!key.is_empty());
-    assert_eq!(key.to_vec(), vec![0; 16]);
-
-    let mut key = SecretKey::from([0; 24]);
-    assert_eq!(key.deref(), &[0; 24]);
-    assert_eq!(key.deref_mut(), &mut [0; 24]);
-    assert_eq!(key.as_ref(), &[0; 24]);
-    assert_eq!(key.as_mut(), &mut [0; 24]);
-    assert_eq!(key.len(), 24);
-    assert!(!key.is_empty());
-    assert_eq!(key.to_vec(), vec![0; 24]);
-
-    let mut key = SecretKey::from([0; 32]);
-    assert_eq!(key.deref(), &[0; 32]);
-    assert_eq!(key.deref_mut(), &mut [0; 32]);
-    assert_eq!(key.as_ref(), &[0; 32]);
-    assert_eq!(key.as_mut(), &mut [0; 32]);
-    assert_eq!(key.len(), 32);
-    assert!(!key.is_empty());
-    assert_eq!(key.to_vec(), vec![0; 32]);
-
-    let mut key = SecretKey::from([0; 16]);
-    assert_eq!(key.as_ref(), &[0; 16]);
-    assert_eq!(key.as_mut(), &mut [0; 16]);
-
-    let mut key = SecretKey::from([0; 24]);
-    assert_eq!(key.as_ref(), &[0; 24]);
-    assert_eq!(key.as_mut(), &mut [0; 24]);
-
-    let mut key = SecretKey::from([0; 32]);
-    assert_eq!(key.as_ref(), &[0; 32]);
-    assert_eq!(key.as_mut(), &mut [0; 32]);
-
-    let key = SecretKey::Aes128([0; 16]);
-    assert_eq!(key.to_vec(), vec![0; 16]);
-
-    let key = SecretKey::Aes192([0; 24]);
-    assert_eq!(key.to_vec(), vec![0; 24]);
-
-    let key = SecretKey::Aes256([0; 32]);
-    assert_eq!(key.to_vec(), vec![0; 32]);
+  fn k_a() -> SecretKey {
+    SecretKey::Aes128([0xAA; 16])
+  }
+  fn k_b() -> SecretKey {
+    SecretKey::Aes256([0xBB; 32])
+  }
+  fn k_c() -> SecretKey {
+    SecretKey::ChaCha20Poly1305([0xCC; 32])
   }
 
   #[test]
-  fn test_try_from() {
-    assert!(SecretKey::try_from([0; 15].as_slice()).is_err());
-    assert!(SecretKey::try_from([0; 16].as_slice()).is_ok());
-    assert!(SecretKey::try_from([0; 23].as_slice()).is_err());
-    assert!(SecretKey::try_from([0; 24].as_slice()).is_ok());
-    assert!(SecretKey::try_from([0; 31].as_slice()).is_err());
-    assert!(SecretKey::try_from([0; 32].as_slice()).is_ok());
+  fn keyring_new_has_only_primary() {
+    let kr = Keyring::new(k_a());
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
+    assert!(kr.secondaries().is_empty());
   }
 
-  fn encrypt_decrypt_versioned(vsn: EncryptionAlgorithm) {
-    let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    let plain_text = b"this is a plain text message";
-    let extra = b"random data";
-
-    let mut encrypted = BytesMut::new();
-    let nonce = EncryptionAlgorithm::write_nonce(&mut encrypted);
-    let data_offset = encrypted.len();
-    encrypted.put_slice(plain_text);
-
-    let mut dst = encrypted.split_off(data_offset);
-    println!("before encrypted: {} {:?}", dst.len(), dst.as_ref());
-    vsn.encrypt(k1, nonce, extra, &mut dst).unwrap();
-    println!("encrypted: {} {:?}", dst.len(), dst.as_ref());
-    encrypted.unsplit(dst);
-
-    let exp_len = vsn.encrypted_len(plain_text.len());
-    assert_eq!(encrypted.len(), exp_len - 5); // minus 5 for header
-
-    EncryptionAlgorithm::read_nonce(&mut encrypted);
-    vsn.decrypt(&k1, &nonce, extra, &mut encrypted).unwrap();
-    assert_eq!(encrypted.as_ref(), plain_text);
+  #[test]
+  fn keyring_with_secondaries_seeds_them() {
+    let kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
+    assert_eq!(kr.secondaries().len(), 2);
   }
 
-  fn decrypt_by_other_key(algo: EncryptionAlgorithm) {
-    let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    let plain_text = b"this is a plain text message";
-    let extra = b"random data";
+  #[test]
+  fn keyring_insert_secondary_grows_list() {
+    let mut kr = Keyring::new(k_a());
+    kr.insert_secondary(k_b());
+    kr.insert_secondary(k_c());
+    assert_eq!(kr.secondaries().len(), 2);
+  }
 
-    let mut encrypted = BytesMut::new();
-    let nonce = EncryptionAlgorithm::write_nonce(&mut encrypted);
-    let data_offset = encrypted.len();
-    encrypted.put_slice(plain_text);
+  #[test]
+  fn keyring_insert_secondary_is_no_op_if_already_present() {
+    let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
+    kr.insert_secondary(k_b());
+    assert_eq!(kr.secondaries().len(), 1, "duplicates are not added");
+  }
 
-    let mut dst = encrypted.split_off(data_offset);
-    algo.encrypt(k1, nonce, extra, &mut dst).unwrap();
-    encrypted.unsplit(dst);
-    let exp_len = algo.encrypted_len(plain_text.len());
-    assert_eq!(encrypted.len(), exp_len - 5); // minus 5 for header
-    EncryptionAlgorithm::read_nonce(&mut encrypted);
+  #[test]
+  fn keyring_remove_secondary_drops_the_named_key() {
+    let mut kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
+    kr.remove_secondary(k_b().as_bytes()).expect("remove ok");
+    assert_eq!(kr.secondaries().len(), 1);
+    assert_eq!(
+      kr.secondaries()[0].as_bytes(),
+      k_c().as_bytes(),
+      "the remaining secondary is k_c"
+    );
+  }
 
-    for (idx, k) in TEST_KEYS.iter().rev().enumerate() {
-      if idx == TEST_KEYS.len() - 1 {
-        algo.decrypt(k, &nonce, extra, &mut encrypted).unwrap();
-        assert_eq!(encrypted.as_ref(), plain_text);
-        return;
+  #[test]
+  fn keyring_remove_primary_errors() {
+    let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
+    let err = kr
+      .remove_secondary(k_a().as_bytes())
+      .expect_err("cannot remove primary");
+    assert!(matches!(err, KeyringError::IsPrimary));
+  }
+
+  #[test]
+  fn keyring_remove_unknown_errors() {
+    let mut kr = Keyring::new(k_a());
+    let err = kr
+      .remove_secondary(k_b().as_bytes())
+      .expect_err("missing key");
+    assert!(matches!(err, KeyringError::NotInRing));
+  }
+
+  #[test]
+  fn keyring_promote_swaps_primary_and_secondary() {
+    let mut kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
+    kr.promote(k_b().as_bytes()).expect("promote ok");
+    assert_eq!(kr.primary_ref().as_bytes(), k_b().as_bytes());
+    assert_eq!(kr.secondaries().len(), 2);
+    // Old primary lands at index 0 (prepend, not append).
+    assert_eq!(
+      kr.secondaries()[0].as_bytes(),
+      k_a().as_bytes(),
+      "old primary lands at index 0 after promote"
+    );
+    assert_eq!(
+      kr.secondaries()[1].as_bytes(),
+      k_c().as_bytes(),
+      "the un-promoted secondary shifts to index 1"
+    );
+  }
+
+  #[test]
+  fn keyring_promote_primary_is_no_op_ok() {
+    let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
+    kr.promote(k_a().as_bytes())
+      .expect("promote primary is a no-op");
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
+    assert_eq!(kr.secondaries().len(), 1);
+  }
+
+  #[test]
+  fn keyring_promote_unknown_errors() {
+    let mut kr = Keyring::new(k_a());
+    let err = kr.promote(k_b().as_bytes()).expect_err("missing key");
+    assert!(matches!(err, KeyringError::NotInRing));
+  }
+
+  #[test]
+  fn keyring_allows_mixed_ciphers() {
+    let kr = Keyring::with_secondaries(k_a(), vec![k_c()]);
+    assert_eq!(kr.primary_ref().algorithm(), EncryptAlgorithm::AesGcm);
+    assert_eq!(
+      kr.secondaries()[0].algorithm(),
+      EncryptAlgorithm::ChaCha20Poly1305
+    );
+  }
+
+  #[test]
+  fn keyring_insert_distinguishes_aes256_from_chacha20_with_same_bytes() {
+    // SecretKey::Aes256 and SecretKey::ChaCha20Poly1305 both carry [u8; 32]; the
+    // bytes can coincide but the cipher choice must not. PartialEq on the enum
+    // compares the variant tag too — so the second insert lands as a distinct key.
+    let bytes = [0xFF; 32];
+    let aes = SecretKey::Aes256(bytes);
+    let chacha = SecretKey::ChaCha20Poly1305(bytes);
+    let mut kr = Keyring::new(aes);
+    kr.insert_secondary(chacha);
+    assert_eq!(
+      kr.secondaries().len(),
+      1,
+      "different-variant same-byte keys are NOT duplicates"
+    );
+    assert_eq!(
+      kr.secondaries()[0].algorithm(),
+      EncryptAlgorithm::ChaCha20Poly1305,
+      "the chacha secondary survives the insert (it is not collapsed into the AES primary)"
+    );
+  }
+
+  #[test]
+  fn encryption_options_default_is_disabled() {
+    let opts = EncryptionOptions::new();
+    assert!(opts.keyring().is_none());
+    assert!(!opts.is_enabled());
+    // `Default::default()` is `new()` by explicit delegation.
+    assert!(!EncryptionOptions::default().is_enabled());
+    assert!(EncryptionOptions::default().keyring().is_none());
+  }
+
+  #[test]
+  fn encryption_options_with_keyring_enables() {
+    let kr = Keyring::new(SecretKey::Aes128([0u8; 16]));
+    let opts = EncryptionOptions::new().with_keyring(kr.clone());
+    assert!(opts.is_enabled());
+    assert!(opts.keyring().is_some());
+    assert_eq!(
+      opts.keyring().unwrap().primary_ref().as_bytes(),
+      kr.primary_ref().as_bytes()
+    );
+  }
+
+  #[test]
+  fn encryption_options_set_and_clear_keyring() {
+    let mut opts = EncryptionOptions::new();
+    assert!(!opts.is_enabled());
+    opts.set_keyring(Keyring::new(SecretKey::Aes256([1u8; 32])));
+    assert!(opts.is_enabled());
+    opts.clear_keyring();
+    assert!(!opts.is_enabled());
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn encrypted_frame_roundtrip_aes_gcm() {
+    let key = SecretKey::Aes256([0x42; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let plaintext = b"a memberlist gossip datagram body".repeat(4);
+    let frame = encode_encrypted_frame(EncryptAlgorithm::AesGcm, &key, &plaintext).expect("encode");
+    // [Encrypted tag][algo tag][nonce 12B][ciphertext + 16B tag]
+    assert_eq!(
+      frame[0], ENCRYPTED_TAG,
+      "leading byte is the Encrypted wrapper tag"
+    );
+    assert_eq!(
+      frame[1],
+      EncryptAlgorithm::AesGcm.tag(),
+      "second byte is the algorithm tag"
+    );
+    assert_eq!(
+      frame.len(),
+      2 + 12 + plaintext.len() + 16,
+      "wrapper overhead is 30 bytes"
+    );
+    let back = decode_encrypted_frame(&opts, &frame, 1 << 20).expect("decode");
+    assert_eq!(back, plaintext);
+  }
+
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  #[test]
+  fn encrypted_frame_roundtrip_chacha20poly1305() {
+    let key = SecretKey::ChaCha20Poly1305([0x9A; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let plaintext = b"a chacha-encrypted payload".to_vec();
+    let frame =
+      encode_encrypted_frame(EncryptAlgorithm::ChaCha20Poly1305, &key, &plaintext).expect("encode");
+    assert_eq!(frame[0], ENCRYPTED_TAG);
+    assert_eq!(frame[1], EncryptAlgorithm::ChaCha20Poly1305.tag());
+    let back = decode_encrypted_frame(&opts, &frame, 1 << 20).expect("decode");
+    assert_eq!(back, plaintext);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn oversize_ciphertext_is_rejected_before_allocation() {
+    // A hand-built frame: Encrypted tag, AES-GCM tag, 12-byte nonce, then a
+    // payload whose post-decrypt plaintext length is far over the ceiling.
+    // The decoder must reject on the `plaintext_len > max` bound BEFORE
+    // running AEAD (the test passing rather than OOM-aborting is the
+    // assertion). The carried `claimed` is the plaintext length implied by
+    // the wrapper, not the raw ciphertext length.
+    let key = SecretKey::Aes256([0u8; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let mut frame = vec![ENCRYPTED_TAG, EncryptAlgorithm::AesGcm.tag()];
+    frame.extend_from_slice(&[0u8; 12]);
+    // 100 KiB of zeros — ciphertext (100 KiB) - AUTH_TAG_LEN (16) =
+    // implied plaintext 100 KiB - 16; ceiling = 64 KiB.
+    frame.resize(frame.len() + 100 * 1024, 0);
+    let max = 64 * 1024;
+    let err = decode_encrypted_frame(&opts, &frame, max).expect_err("oversize must err");
+    match err {
+      EncryptionError::Oversize(o) => {
+        assert_eq!(o.claimed(), 100 * 1024 - AUTH_TAG_LEN);
+        assert_eq!(o.max(), max);
       }
-      let e = algo.decrypt(k, &nonce, extra, &mut encrypted).unwrap_err();
-      assert_eq!(e.to_string(), "failed to encrypt/decrypt");
+      other => panic!("expected Oversize, got {other:?}"),
     }
   }
 
   #[test]
-  fn test_encrypt_decrypt_v0() {
-    encrypt_decrypt_versioned(EncryptionAlgorithm::Pkcs7);
+  fn encrypted_frame_unknown_algorithm_fails_decode() {
+    let opts = EncryptionOptions::new();
+    let mut frame = vec![ENCRYPTED_TAG, 222u8];
+    frame.extend_from_slice(&[0u8; 12]); // nonce
+    frame.extend_from_slice(b"trailing"); // body
+    let err = decode_encrypted_frame(&opts, &frame, 1 << 20).expect_err("unknown algo must err");
+    assert!(matches!(err, EncryptionError::UnsupportedAlgorithm(222)));
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_trailing_junk_in_body_is_rejected() {
+    let key = SecretKey::Aes256([0x55; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let mut frame =
+      encode_encrypted_frame(EncryptAlgorithm::AesGcm, &key, b"data").expect("encode");
+    // Append a trailing byte; AES-GCM auth must reject (the appended byte
+    // either corrupts the tag or runs as un-authenticated overhang).
+    frame.push(0xFF);
+    let err = decode_encrypted_frame(&opts, &frame, 1 << 20).expect_err("trailing junk must err");
+    assert!(matches!(err, EncryptionError::AuthFailed));
+  }
+
+  #[cfg(feature = "encryption-chacha20-poly1305")]
+  #[test]
+  fn chacha20poly1305_trailing_junk_in_body_is_rejected() {
+    let key = SecretKey::ChaCha20Poly1305([0x77; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let mut frame =
+      encode_encrypted_frame(EncryptAlgorithm::ChaCha20Poly1305, &key, b"data").expect("encode");
+    frame.push(0xFF);
+    let err = decode_encrypted_frame(&opts, &frame, 1 << 20).expect_err("trailing junk must err");
+    assert!(matches!(err, EncryptionError::AuthFailed));
+  }
+
+  #[cfg(all(
+    feature = "encryption-aes-gcm",
+    feature = "encryption-chacha20-poly1305"
+  ))]
+  #[test]
+  fn mixed_cipher_keyring_decrypts_chacha_with_chacha_secondary() {
+    // Primary AES, secondary ChaCha20-Poly1305. A frame encrypted under the
+    // ChaCha secondary must decode (the variant filter selects the matching
+    // key; the primary is skipped because its variant does not match the wire
+    // algorithm tag).
+    let aes_primary = SecretKey::Aes256([0x12; 32]);
+    let chacha_sec = SecretKey::ChaCha20Poly1305([0x34; 32]);
+    let kr = Keyring::with_secondaries(aes_primary, vec![chacha_sec]);
+    let opts = EncryptionOptions::new().with_keyring(kr);
+    let frame = encode_encrypted_frame(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &chacha_sec,
+      b"protected by the secondary",
+    )
+    .expect("encode");
+    let back = decode_encrypted_frame(&opts, &frame, 1 << 20).expect("decode via secondary");
+    assert_eq!(back, b"protected by the secondary");
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn decode_with_no_matching_key_errs() {
+    // A frame encrypted under an outside key; the keyring carries two AES
+    // candidates (primary + one secondary), both wrong; the variant filter
+    // selects both, both fail AEAD, the loop exhausts → NoMatchingKey (the
+    // multi-key fallback's "we tried, none worked" verdict). With a single
+    // variant-matching candidate the decoder would surface the AEAD's own
+    // `AuthFailed` instead — see `aes_gcm_trailing_junk_in_body_is_rejected`.
+    let outside = SecretKey::Aes256([0x10; 32]);
+    let k_primary = SecretKey::Aes256([0x11; 32]);
+    let k_secondary = SecretKey::Aes256([0x22; 32]);
+    let kr = Keyring::with_secondaries(k_primary, vec![k_secondary]);
+    let opts = EncryptionOptions::new().with_keyring(kr);
+    let frame =
+      encode_encrypted_frame(EncryptAlgorithm::AesGcm, &outside, b"unrelated").expect("encode");
+    let err = decode_encrypted_frame(&opts, &frame, 1 << 20).expect_err("no matching key");
+    assert!(matches!(err, EncryptionError::NoMatchingKey));
   }
 
   #[test]
-  fn test_encrypt_decrypt_v1() {
-    encrypt_decrypt_versioned(EncryptionAlgorithm::NoPadding);
+  fn encrypted_wrapper_overhead_constant_is_correct() {
+    // Pinned value — a change is a wire-protocol or sizing-contract break.
+    assert_eq!(ENCRYPTED_WRAPPER_OVERHEAD, 30);
+    assert_eq!(
+      ENCRYPTED_WRAPPER_OVERHEAD,
+      WRAPPER_HEADER_LEN + AUTH_TAG_LEN
+    );
   }
 
+  #[cfg(feature = "encryption-aes-gcm")]
   #[test]
-  fn test_decrypt_by_other_key_v0() {
-    let algo = EncryptionAlgorithm::Pkcs7;
-    decrypt_by_other_key(algo);
-  }
-
-  #[test]
-  fn test_decrypt_by_other_key_v1() {
-    let algo = EncryptionAlgorithm::NoPadding;
-    decrypt_by_other_key(algo);
-  }
-
-  #[test]
-  fn test_encrypt_algorithm_from_str() {
-    assert_eq!(
-      "aes-gcm-no-padding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "aes-gcm-nopadding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "aes-gcm-pkcs7".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::Pkcs7
-    );
-    assert_eq!(
-      "NoPadding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "no-padding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "nopadding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "no_padding".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "NOPADDING".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::NoPadding
-    );
-    assert_eq!(
-      "unknown(33)".parse::<EncryptionAlgorithm>().unwrap(),
-      EncryptionAlgorithm::Unknown(33)
-    );
-    assert!("unknown".parse::<EncryptionAlgorithm>().is_err());
-  }
-
-  #[cfg(feature = "serde")]
-  #[quickcheck_macros::quickcheck]
-  fn encryption_algorithm_serde(algo: EncryptionAlgorithm) -> bool {
-    use bincode::config::standard;
-
-    let Ok(serialized) = serde_json::to_string(&algo) else {
-      return false;
-    };
-    let Ok(deserialized) = serde_json::from_str(&serialized) else {
-      return false;
-    };
-    if algo != deserialized {
-      return false;
+  fn encrypted_gossip_at_mtu_minus_overhead_roundtrips_and_at_mtu_does_too() {
+    // A plaintext payload sized `MTU - overhead` and a plaintext payload
+    // sized `MTU` both must round-trip when `max_plaintext_len = MTU`:
+    // the bound is on POST-DECRYPT plaintext length, not on the ciphertext
+    // envelope. Bounding on `ciphertext.len()` would spuriously reject a
+    // near-MTU plaintext because the AEAD tag inflates the envelope past
+    // `MTU` even though the plaintext is in-bounds.
+    let key = SecretKey::Aes256([0x42; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    const GOSSIP_MTU: usize = 1400;
+    for plaintext_len in [GOSSIP_MTU - ENCRYPTED_WRAPPER_OVERHEAD, GOSSIP_MTU] {
+      let plaintext = vec![0xCD; plaintext_len];
+      let frame =
+        encode_encrypted_frame(EncryptAlgorithm::AesGcm, &key, &plaintext).expect("encode");
+      let back = decode_encrypted_frame(&opts, &frame, GOSSIP_MTU)
+        .unwrap_or_else(|e| panic!("plaintext_len={plaintext_len} must round-trip, got {e}"));
+      assert_eq!(back, plaintext, "plaintext_len={plaintext_len}");
     }
-
-    let Ok(serialized) = bincode::serde::encode_to_vec(algo, standard()) else {
-      return false;
-    };
-
-    let Ok((deserialized, _)) = bincode::serde::decode_from_slice(&serialized, standard()) else {
-      return false;
-    };
-
-    algo == deserialized
   }
 
+  #[cfg(feature = "encryption-aes-gcm")]
   #[test]
-  fn test_encode_base64() {
-    for k in [
-      SecretKey::random_aes128(),
-      SecretKey::random_aes192(),
-      SecretKey::random_aes256(),
-    ] {
-      let mut buf = vec![0; k.base64_len()];
-      k.encode_base64(&mut buf).unwrap();
-      assert_eq!(&buf, k.to_base64().as_bytes());
+  fn encrypted_one_byte_past_plaintext_max_is_rejected() {
+    // Symmetric guard for the new bound: a plaintext sized `max + 1` must
+    // be rejected with `Oversize`, with the carried `claimed` equal to the
+    // post-decrypt plaintext length (not the on-wire ciphertext length).
+    let key = SecretKey::Aes256([0x77; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let max = 256;
+    let plaintext = vec![0xEF; max + 1];
+    let frame = encode_encrypted_frame(EncryptAlgorithm::AesGcm, &key, &plaintext).expect("encode");
+    let err = decode_encrypted_frame(&opts, &frame, max).expect_err("over-bound must err");
+    match err {
+      EncryptionError::Oversize(o) => {
+        assert_eq!(
+          o.claimed(),
+          max + 1,
+          "claimed is post-decrypt plaintext length"
+        );
+        assert_eq!(o.max(), max);
+      }
+      other => panic!("expected Oversize, got {other:?}"),
     }
   }
-
-  #[test]
-  fn test_try_from_str() {
-    for k in &[
-      SecretKey::random_aes128(),
-      SecretKey::random_aes192(),
-      SecretKey::random_aes256(),
-    ] {
-      let s = k.to_base64();
-      let key = SecretKey::try_from(s.as_str()).unwrap();
-      assert_eq!(k, key.as_ref());
-    }
-
-    let buf = "invalid base64 string";
-    let key = SecretKey::try_from(buf);
-    assert!(key.is_err());
-
-    let mut buf = SecretKey::random_aes256().to_base64();
-    buf.push_str(SecretKey::random_aes128().to_base64().as_str());
-    let key = SecretKey::try_from(buf.as_str());
-    assert!(key.is_err());
-  }
-
-  const TEST_KEYS: &[SecretKey] = &[
-    SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
-    SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
-    SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
-  ];
 }

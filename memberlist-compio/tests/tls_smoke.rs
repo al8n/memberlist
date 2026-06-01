@@ -6,7 +6,7 @@
 //!
 //! The TLS configs use a self-signed localhost-SAN certificate (generated at
 //! test time via `rcgen`) and an accept-any client verifier, matching the
-//! pattern in `memberlist-machine/src/tls/options.rs` tests.
+//! pattern in `memberlist-proto/src/tls/options.rs` tests.
 
 #![cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs"))]
 
@@ -21,7 +21,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver,
   StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
 };
-use memberlist_machine::TlsOptions;
+use memberlist_proto::TlsOptions;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -101,7 +101,7 @@ fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// Build a self-signed localhost-SAN `ServerConfig` + accept-any `ClientConfig`.
 ///
 /// Mirrors the `test_server` / `test_client` helpers in
-/// `memberlist-machine/src/tls/options.rs`, which are `pub(crate)` and
+/// `memberlist-proto/src/tls/options.rs`, which are `pub(crate)` and
 /// therefore not accessible from this crate's integration tests.
 fn smoke_tls_options() -> TlsOptions {
   let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()])

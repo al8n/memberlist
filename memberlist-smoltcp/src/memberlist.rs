@@ -10,13 +10,10 @@ use std::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use std::{boxed::Box, collections::VecDeque};
 
-use memberlist_machine::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, PushPullKind, RawRecords,
+use memberlist_proto::{
+  AliveDelegate, Endpoint, EndpointConfig, Instant, Node, PushPullKind, RawRecords,
   event::Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
-};
-use memberlist_wire::{
-  Node,
   typed::{Alive, NodeState, State},
 };
 use smoltcp::{
@@ -50,11 +47,11 @@ const TCP_RX_BUFFER_MAX: usize = 1 << 30;
 ///
 /// The machine caps an outbound gossip datagram's PLAINTEXT at the configured
 /// [`EndpointConfig::gossip_mtu`]; the on-wire datagram can then exceed that by
-/// up to [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper
+/// up to [`memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper
 /// header, nonce, and AEAD tag) when encryption is enabled. The buffer must
 /// hold the largest such on-wire datagram, so it is sized to
 /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`, floored at 1500 (the common
-/// Ethernet payload) so the default ([`memberlist_machine::DEFAULT_GOSSIP_MTU`],
+/// Ethernet payload) so the default ([`memberlist_proto::DEFAULT_GOSSIP_MTU`],
 /// 1400) keeps a little headroom and any sub-1500 MTU never under-sizes it.
 ///
 /// smoltcp's `udp::Socket::recv_slice` POPS the datagram before checking the
@@ -63,7 +60,7 @@ const TCP_RX_BUFFER_MAX: usize = 1 << 30;
 /// knob the machine uses to bound outbound gossip means a correctly-configured
 /// cluster never truncates an in-budget datagram.
 fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
-  (gossip_mtu + memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD).max(1500)
+  (gossip_mtu + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD).max(1500)
 }
 
 /// Whether `addr` is a destination the smoltcp stack can actually use.
@@ -111,7 +108,7 @@ struct RoutableAddrFilter;
 
 impl<I> AliveDelegate<I, SocketAddr> for RoutableAddrFilter
 where
-  I: memberlist_wire::Id,
+  I: memberlist_proto::Id,
 {
   fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
     endpoint_is_routable(peer.address_ref())
@@ -151,7 +148,7 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 /// production). `A` is pinned to `core::net::SocketAddr`.
 pub struct Memberlist<I, D: Device>
 where
-  I: memberlist_wire::Id,
+  I: memberlist_proto::Id,
 {
   iface: Interface,
   /// The seed handed to smoltcp's interface RNG at construction (TCP ISN /
@@ -190,7 +187,7 @@ where
 
 impl<I, D: Device> Memberlist<I, D>
 where
-  I: memberlist_wire::Id,
+  I: memberlist_proto::Id,
 {
   /// Construct a node, panicking on a misconfiguration or entropy failure.
   ///
@@ -364,7 +361,7 @@ where
     // makes every downstream `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` safe and
     // mirrors the async drivers' reject-not-clamp doctrine. Done before any UDP
     // allocation.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX - memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD;
+    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
     if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
       return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: ep_cfg.gossip_mtu(),
@@ -496,7 +493,7 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram = ep_cfg.gossip_mtu() + memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD;
+    let max_datagram = ep_cfg.gossip_mtu() + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -563,7 +560,7 @@ where
     // `EncryptionError::UnsupportedAlgorithm`.
     if let Some(keyring) = transform.encryption.keyring() {
       for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
-        memberlist_wire::encode_encrypted_frame(key.algorithm(), key, b"")
+        memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")
           .map_err(InitError::Encryption)?;
       }
     }
@@ -763,7 +760,7 @@ where
   /// Returns `None` when the event queue is empty; call again after the
   /// next `poll` tick.
   #[inline]
-  pub fn poll_event(&mut self) -> Option<memberlist_machine::event::Event<I, SocketAddr>> {
+  pub fn poll_event(&mut self) -> Option<memberlist_proto::event::Event<I, SocketAddr>> {
     self.endpoint.poll_event()
   }
 
@@ -854,7 +851,7 @@ where
   pub fn queue_user_broadcast(
     &mut self,
     data: bytes::Bytes,
-  ) -> Result<(), memberlist_machine::Error> {
+  ) -> Result<(), memberlist_proto::Error> {
     self.endpoint.queue_user_broadcast(data)
   }
 
@@ -867,7 +864,7 @@ where
   /// Returns an error if the node is not in a running state (e.g. already left
   /// or never started); the caller may choose to ignore this when tearing down
   /// unconditionally.
-  pub fn leave(&mut self, now: Instant) -> Result<(), memberlist_machine::Error> {
+  pub fn leave(&mut self, now: Instant) -> Result<(), memberlist_proto::Error> {
     self.endpoint.leave(now)
   }
 
@@ -1025,12 +1022,12 @@ where
         Ok(p) => bytes::Bytes::from(p),
         Err(_) => continue,
       };
-      let opts = memberlist_wire::codec::DecodeOptions::new(None);
+      let opts = memberlist_proto::codec::DecodeOptions::new(None);
       // Drop malformed inbound datagrams silently — bad network input must not
       // panic the node; SWIM is self-healing. (`decode_incoming` Err = label
       // mismatch / framing error; `parse_messages` Err = malformed frame.)
-      if let Ok(plain) = memberlist_wire::codec::decode_incoming(decrypted, &opts) {
-        if let Ok(msgs) = memberlist_wire::codec::parse_messages::<I, SocketAddr>(plain) {
+      if let Ok(plain) = memberlist_proto::codec::decode_incoming(decrypted, &opts) {
+        if let Ok(msgs) = memberlist_proto::codec::parse_messages::<I, SocketAddr>(plain) {
           for msg in msgs {
             self.endpoint.handle_packet(src, msg, now);
           }
@@ -1063,7 +1060,7 @@ where
     // Actions are drained BEFORE transport transmits because a Connect must
     // install the exchange↔socket mapping before this same tick's outbound
     // bytes for that exchange are written (see the stream-endpoint ordering
-    // contract in memberlist-machine/src/streams/mod.rs).
+    // contract in memberlist-proto/src/streams/mod.rs).
     self.drain_stream_actions(now);
 
     // 7b. Promote dialing connections whose handshake completed this tick to
@@ -1600,7 +1597,7 @@ where
   /// `Closing`). A `PendingDial` connection (pool was exhausted, no socket
   /// assigned) has nothing to reset or reclaim: removing it is the whole abort,
   /// so a failed exchange is never later dialed.
-  fn abort_exchange(&mut self, eid: memberlist_machine::streams::ExchangeId) {
+  fn abort_exchange(&mut self, eid: memberlist_proto::streams::ExchangeId) {
     let Some(conn) = self.plane.connections.remove(&eid) else {
       return;
     };
@@ -1671,7 +1668,7 @@ where
   /// A connection still in `PendingDial` (its bridge timed out before a socket
   /// freed) has no socket: removing it is the whole teardown, so a retired
   /// exchange is never later dialed.
-  fn teardown(&mut self, eid: memberlist_machine::streams::ExchangeId, now: Instant) {
+  fn teardown(&mut self, eid: memberlist_proto::streams::ExchangeId, now: Instant) {
     // Inspect the connection WITHOUT removing it: a graceful close that still has
     // bytes to deliver must stay mapped (transition to `Closing`) so the egress
     // pump can finish flushing them. Only the paths that complete the teardown
@@ -2185,7 +2182,7 @@ where
   /// compound frame. Encoding errors and a full tx ring both silently drop
   /// the datagram — gossip is best-effort and SWIM recovers on the next round.
   fn drain_gossip_transmits(&mut self) {
-    let enc = memberlist_wire::codec::EncodeOptions::new(None);
+    let enc = memberlist_proto::codec::EncodeOptions::new(None);
     while let Some(transmit) = self.endpoint.poll_memberlist_transmit() {
       let (dest, bytes) = match encode_transmit::<I>(transmit, &enc) {
         Some(pair) => pair,
@@ -2257,20 +2254,20 @@ fn min_opt(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 /// - `Transmit::Compound` → compound frame (two or more messages piggybacked).
 fn encode_transmit<I>(
   t: Transmit<I, SocketAddr>,
-  enc: &memberlist_wire::codec::EncodeOptions,
+  enc: &memberlist_proto::codec::EncodeOptions,
 ) -> Option<(SocketAddr, bytes::Bytes)>
 where
-  I: memberlist_wire::Data,
+  I: memberlist_proto::Data,
 {
   match t {
     Transmit::Packet(pkt) => {
       let (to, msg) = pkt.into_parts();
-      let bytes = memberlist_wire::codec::encode_outgoing(&msg, enc).ok()?;
+      let bytes = memberlist_proto::codec::encode_outgoing(&msg, enc).ok()?;
       Some((to, bytes))
     }
     Transmit::Compound(cmp) => {
       let (to, msgs) = cmp.into_parts();
-      let bytes = memberlist_wire::codec::encode_outgoing_compound(&msgs, enc).ok()?;
+      let bytes = memberlist_proto::codec::encode_outgoing_compound(&msgs, enc).ok()?;
       Some((to, bytes))
     }
   }
@@ -2298,9 +2295,9 @@ mod tests {
   fn new_node_is_sole_member() {
     let cfg = crate::Config::new();
     let ep_cfg =
-      memberlist_machine::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
+      memberlist_proto::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
     let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-    let now = memberlist_machine::Instant::from_origin(core::time::Duration::from_secs(1));
+    let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
     let m: Memberlist<SmolStr, _> = Memberlist::new(
       cfg,
       ip_iface(),
@@ -2315,9 +2312,9 @@ mod tests {
   #[test]
   fn poll_emits_initial_gossip_and_a_deadline() {
     let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-    let now = memberlist_machine::Instant::from_origin(core::time::Duration::from_secs(1));
+    let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
     let ep_cfg =
-      memberlist_machine::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
+      memberlist_proto::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
     let mut m: Memberlist<SmolStr, _> = Memberlist::new(
       crate::Config::new(),
       ip_iface(),

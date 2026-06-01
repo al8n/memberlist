@@ -32,7 +32,7 @@ use memberlist::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
 };
-use memberlist_machine::{
+use memberlist_proto::{
   Instant,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
@@ -231,7 +231,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
-      .saturating_add(memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     let (inbound_tx, inbound_rx) = flume::bounded(BRIDGE_INBOUND_CAP);
     let (dial_tx, dial_rx) = flume::unbounded();
@@ -1136,7 +1136,7 @@ mod tests {
     net::{Net, TcpListener, TcpStream},
     tokio::TokioRuntime,
   };
-  use memberlist_machine::{
+  use memberlist_proto::{
     Instant, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
     streams::StreamEndpoint,
   };

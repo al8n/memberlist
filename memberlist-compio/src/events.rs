@@ -2,7 +2,7 @@
 
 use flume::r#async::RecvStream;
 use futures_util::Stream;
-use memberlist_machine::event::Event;
+use memberlist_proto::event::Event;
 use std::{
   pin::Pin,
   task::{Context, Poll},

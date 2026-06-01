@@ -4,7 +4,7 @@
 use std::{future::Future, marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::typed::NodeState;
 
 /// Observation hooks, invoked off the driver loop by the observation task as
 /// events surface.

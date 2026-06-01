@@ -9,7 +9,7 @@
 //! datagram (handed to [`QuicEndpoint::handle_udp`], which demuxes it into
 //! quinn); a first byte in `1..=15` is a memberlist plain frame.
 //!
-//! `memberlist-machine` has no umbrella `codec` dependency, so the byte
+//! `memberlist-proto` has no umbrella `codec` dependency, so the byte
 //! encode/decode of the unreliable path lives here: outbound is drained
 //! through [`QuicEndpoint::poll_memberlist_transmit`] (NEVER
 //! `endpoint_mut().poll_transmit()` — that would double-drive the
@@ -33,10 +33,8 @@ use std::{
   time::Duration,
 };
 
-use memberlist_machine::{
+use memberlist_proto::{
   Endpoint, EndpointConfig, Event, Instant, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
-};
-use memberlist_wire::{
   framing, message_from_any, message_to_any,
   typed::{Ack, Alive, Message, Node, Suspect},
 };
@@ -94,7 +92,7 @@ pub fn sim_endpoint_config(reset_key: &[u8]) -> quinn_proto::EndpointConfig {
   quinn_proto::EndpointConfig::new(Arc::new(hmac))
 }
 
-/// Self-signed cert + accept-any verifier, matching the memberlist-machine
+/// Self-signed cert + accept-any verifier, matching the memberlist-proto
 /// quic crypto tests (sim/test only; behavioural determinism is the virtual
 /// clock, not crypto). Returns a fresh [`QuicConfig`] each call.
 fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
@@ -138,7 +136,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
 
   // rcgen 0.14: `generate_simple_self_signed` -> `CertifiedKey`; the private
   // key is the `signing_key` field, `serialize_der()` yields PKCS#8 DER (the
-  // same construction the memberlist-machine quic crypto tests use).
+  // same construction the memberlist-proto quic crypto tests use).
   let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
   let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
   let key = PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
@@ -278,7 +276,7 @@ pub struct QuicCluster {
   /// within the refreshed one.
   stream_timeout: Option<Duration>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
   /// unwrap on ingress regardless (which strips both the Encrypted and the
@@ -286,9 +284,9 @@ pub struct QuicCluster {
   /// disabled configuration makes the egress compression an identity, so
   /// the suite stays byte-unchanged. The `*_compressed` constructors
   /// install an enabled configuration.
-  compression: memberlist_wire::CompressionOptions,
+  compression: memberlist_proto::CompressionOptions,
   /// Cross-transport encryption applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_proto::EncryptionOptions::new)
   /// by default — the standard conformance suite drives gossip through
   /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
   /// configuration makes both identity, so the suite stays byte-unchanged.
@@ -297,12 +295,12 @@ pub struct QuicCluster {
   /// bridge force-disables reliable-path encryption (quinn-encrypted streams
   /// already provide confidentiality), so this knob influences only the
   /// gossip codec on the harness side.
-  encryption: memberlist_wire::EncryptionOptions,
+  encryption: memberlist_proto::EncryptionOptions,
   /// Reliable-wire observation tap. Every QUIC datagram routed through the
   /// virtual reliable pipe (quinn-encrypted UDP carrying the reliable streams)
   /// is appended here so the encrypted conformance suite can assert the wire
   /// never carries an `Encrypted` wrapper: a quinn datagram's first byte has
-  /// `b & 0xC0 != 0` (>= `0x40`), never [`memberlist_wire::ENCRYPTED_TAG`]
+  /// `b & 0xC0 != 0` (>= `0x40`), never [`memberlist_proto::ENCRYPTED_TAG`]
   /// (which is in `1..=15`) — the QUIC bridge skips reliable-path encryption,
   /// so no inner `[Encrypted[..]]` ever appears on the reliable path. Only
   /// compiled under the encryption-conformance feature — the standard suite
@@ -332,8 +330,8 @@ impl QuicCluster {
       probe_window: None,
       shrink_window: false,
       stream_timeout: None,
-      compression: memberlist_wire::CompressionOptions::new(),
-      encryption: memberlist_wire::EncryptionOptions::new(),
+      compression: memberlist_proto::CompressionOptions::new(),
+      encryption: memberlist_proto::EncryptionOptions::new(),
       #[cfg(feature = "__sim-encryption-aes-gcm")]
       observed_reliable_wire_bytes: Vec::new(),
     }
@@ -420,10 +418,10 @@ impl QuicCluster {
   pub fn two_node_join_compressed(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -445,11 +443,11 @@ impl QuicCluster {
   pub fn two_node_join_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    primary_key: memberlist_wire::SecretKey,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -466,15 +464,15 @@ impl QuicCluster {
   pub fn two_node_join_compressed_and_encrypted(
     a: SocketAddr,
     b: SocketAddr,
-    algorithm: memberlist_wire::CompressAlgorithm,
-    primary_key: memberlist_wire::SecretKey,
+    algorithm: memberlist_proto::CompressAlgorithm,
+    primary_key: memberlist_proto::SecretKey,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
-    c.encryption = memberlist_wire::EncryptionOptions::new()
-      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.encryption = memberlist_proto::EncryptionOptions::new()
+      .with_keyring(memberlist_proto::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -634,11 +632,11 @@ impl QuicCluster {
     a: SocketAddr,
     b: SocketAddr,
     extra_peers: usize,
-    algorithm: memberlist_wire::CompressAlgorithm,
+    algorithm: memberlist_proto::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
     c.shrink_window = true;
-    c.compression = memberlist_wire::CompressionOptions::new()
+    c.compression = memberlist_proto::CompressionOptions::new()
       .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
@@ -934,7 +932,7 @@ impl QuicCluster {
 
   /// Begin a graceful leave on `host` (delegates to
   /// [`QuicEndpoint::leave`]).
-  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
+  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_proto::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
       Some(n) => n.leave(now),
@@ -1007,7 +1005,7 @@ impl QuicCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_wire::typed::State::Alive)
+    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
@@ -1015,7 +1013,7 @@ impl QuicCluster {
     &self,
     host: SocketAddr,
     peer: &SmolStr,
-  ) -> Option<memberlist_wire::typed::State> {
+  ) -> Option<memberlist_proto::typed::State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -1079,7 +1077,7 @@ impl QuicCluster {
 
   /// Every QUIC datagram the harness routed through the virtual reliable pipe
   /// so far. The encryption-conformance suite asserts that no entry begins
-  /// with [`memberlist_wire::ENCRYPTED_TAG`] — the QUIC bridge skips
+  /// with [`memberlist_proto::ENCRYPTED_TAG`] — the QUIC bridge skips
   /// reliable-path encryption (quinn-encrypted streams already provide
   /// confidentiality), and a quinn UDP datagram's first byte has
   /// `b & 0xC0 != 0` (>= `0x40`) by the QUIC long/short-header bit pattern,
@@ -1680,10 +1678,10 @@ impl QuicCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_wire::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_wire::typed::State::Dead)
-            | Some(memberlist_wire::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(memberlist_proto::typed::State::Dead)
+            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }
@@ -1803,7 +1801,7 @@ impl QuicCluster {
       .filter(|ns| ns.id_ref() != &me)
       .any(|ns| {
         node.endpoint_ref().member_liveness(ns.id_ref())
-          == Some(memberlist_wire::typed::State::Alive)
+          == Some(memberlist_proto::typed::State::Alive)
       })
   }
 

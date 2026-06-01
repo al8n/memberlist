@@ -33,8 +33,8 @@ fn gossip_propagates_n1_knowledge_to_n2_and_n3() {
 /// should still record the target as Alive.
 #[test]
 fn probe_success_target_stays_alive() {
+  use memberlist_proto::typed::State;
   use memberlist_simulation::scenarios::probe::probe_success;
-  use memberlist_wire::typed::State;
 
   let prober = addr(19401);
   let target = addr(19402);
@@ -53,8 +53,8 @@ fn probe_success_target_stays_alive() {
 /// or Dead.
 #[test]
 fn indirect_probe_marks_unresponsive_target_suspect() {
+  use memberlist_proto::typed::State;
   use memberlist_simulation::scenarios::probe::indirect_probe_dead_target;
-  use memberlist_wire::typed::State;
 
   let prober = addr(19501);
   let helper = addr(19502);
@@ -72,8 +72,8 @@ fn indirect_probe_marks_unresponsive_target_suspect() {
 /// ghost node should be Dead.
 #[test]
 fn suspect_dead_transition() {
+  use memberlist_proto::typed::State;
   use memberlist_simulation::scenarios::suspect_dead::suspect_then_dead;
-  use memberlist_wire::typed::State;
 
   let observer = addr(19601);
   let ghost = addr(19699);

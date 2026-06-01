@@ -7,21 +7,21 @@ description = "reactor-I/O async driver for the Sans-I/O memberlist machine (tok
 
 [features]
 default = ["tcp"]
-tcp = ["memberlist-machine/tcp"]
+tcp = ["memberlist-proto/tcp"]
 # The shared TLS backend: enables the machine's rustls record layer (caller
 # supplies the configs). A crypto-backend feature (tls-rustls-*) adds a provider.
-tls = ["memberlist-machine/tls"]
-tls-rustls-ring = ["tls", "memberlist-machine/tls-rustls-ring"]
-tls-rustls-aws-lc-rs = ["tls", "memberlist-machine/tls-rustls-aws-lc-rs"]
-quic = ["memberlist-machine/quic"]
-quic-rustls-ring = ["quic", "memberlist-machine/quic-rustls-ring"]
-quic-rustls-aws-lc-rs = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs"]
-compression-lz4 = ["memberlist-machine/compression-lz4"]
-compression-snappy = ["memberlist-machine/compression-snappy"]
-compression-zstd = ["memberlist-machine/compression-zstd"]
-compression-brotli = ["memberlist-machine/compression-brotli"]
-encryption-aes-gcm = ["memberlist-machine/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["memberlist-machine/encryption-chacha20-poly1305"]
+tls = ["memberlist-proto/tls"]
+tls-rustls-ring = ["tls", "memberlist-proto/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["tls", "memberlist-proto/tls-rustls-aws-lc-rs"]
+quic = ["memberlist-proto/quic"]
+quic-rustls-ring = ["quic", "memberlist-proto/quic-rustls-ring"]
+quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs"]
+compression-lz4 = ["memberlist-proto/compression-lz4"]
+compression-snappy = ["memberlist-proto/compression-snappy"]
+compression-zstd = ["memberlist-proto/compression-zstd"]
+compression-brotli = ["memberlist-proto/compression-brotli"]
+encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
 # Runtime conveniences: pull in the concrete agnostic runtime impls.
 tokio = ["agnostic/tokio"]
 smol = ["agnostic/smol"]
@@ -29,8 +29,7 @@ dns = ["dep:hickory-proto", "dep:resolv-conf"]
 
 [dependencies]
 memberlist = { workspace = true }
-memberlist-machine = { workspace = true }
-memberlist-wire = { workspace = true }
+memberlist-proto = { workspace = true }
 agnostic = { workspace = true, features = ["net"] }
 agnostic-lite = { workspace = true }
 hostaddr = { workspace = true }

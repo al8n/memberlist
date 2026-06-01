@@ -27,15 +27,12 @@ use compio::{
 };
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
-use memberlist_machine::{
-  Instant,
+use memberlist_proto::{
+  Instant, Node,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
-  streams::{StreamAction, StreamEndpoint, StreamTransport},
-};
-use memberlist_wire::{
-  Node,
   framing::{MessageTag, decode_compound, decode_message, encode_message},
   message_from_any, message_to_any,
+  streams::{StreamAction, StreamEndpoint, StreamTransport},
   typed::Message,
 };
 
@@ -52,10 +49,10 @@ use crate::{
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
-/// Re-exported from `memberlist-machine` so the driver and the per-bridge
+/// Re-exported from `memberlist-proto` so the driver and the per-bridge
 /// task agree on the same opaque id without the driver having to expose
 /// the machine's `streams` module to the rest of the crate.
-pub(crate) type ExchangeId = memberlist_machine::streams::ExchangeId;
+pub(crate) type ExchangeId = memberlist_proto::streams::ExchangeId;
 
 /// Driver-side state for one outstanding synchronous-join call.
 ///
@@ -349,16 +346,16 @@ const GOSSIP_RECV_BUF_MAX: usize = 65507;
 /// silently truncated by the kernel.
 fn gossip_recv_buf_len<I, A, R>(endpoint: &StreamEndpoint<I, A, R>) -> usize
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -370,7 +367,7 @@ where
 {
   endpoint
     .gossip_mtu()
-    .saturating_add(memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
@@ -457,16 +454,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   delegate: D,
 ) where
   D: Delegate<Id = I, Address = A>,
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1238,16 +1235,16 @@ async fn dispatch_command<I, A, R>(
   cmd: Command,
   now: Instant,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1396,7 +1393,7 @@ async fn dispatch_command<I, A, R>(
       // will never leave the local node. The single-task driver makes the
       // check + apply atomic (no lifecycle race).
       let res: Result<()> = if endpoint.is_running() {
-        match memberlist_wire::typed::Meta::try_from(meta) {
+        match memberlist_proto::typed::Meta::try_from(meta) {
           Ok(m) => endpoint
             .update_meta(m)
             .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
@@ -1527,16 +1524,16 @@ async fn dispatch_command<I, A, R>(
 /// transport_data(eof=true)` call) can reach the still-alive bridge.
 fn dispatch_bridge_inbound<I, A, R>(endpoint: &mut StreamEndpoint<I, A, R>, inbound: BridgeInbound)
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1599,7 +1596,7 @@ where
 /// The coordinator's [`StreamEndpoint::handle_gossip`] only BUFFERS the
 /// raw datagram into its [`StreamEndpoint::poll_memberlist_ingress`]
 /// queue. The driver owns the codec hop (decrypt → decompress → decode
-/// → optionally split compound) because `memberlist-machine` has no
+/// → optionally split compound) because `memberlist-proto` has no
 /// codec dependency by design. After this function returns the gossip
 /// is fully applied to the coordinator's membership FSM.
 fn dispatch_gossip<I, A, R>(
@@ -1608,16 +1605,16 @@ fn dispatch_gossip<I, A, R>(
   datagram: &[u8],
   now: Instant,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1675,8 +1672,8 @@ fn dispatch_gossip<I, A, R>(
 /// would otherwise open.
 fn decode_plain<I, A>(buf: &[u8]) -> Option<Message<I, A>>
 where
-  I: memberlist_wire::Data,
-  A: memberlist_wire::Data,
+  I: memberlist_proto::Data,
+  A: memberlist_proto::Data,
 {
   let (consumed, any) = decode_message(buf).ok()?;
   if consumed != buf.len() {
@@ -1834,16 +1831,16 @@ fn drain_actions<I, A, R>(
   stream_opts: StreamTransportOptions,
 ) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1881,16 +1878,16 @@ fn drain_transport_transmits<I, A, R>(
   bridges: &HashMap<ExchangeId, BridgeHandle>,
 ) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1928,16 +1925,16 @@ async fn drain_transmits<I, A, R>(
   gossip_socket: &UdpSocket,
 ) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1980,14 +1977,14 @@ where
 
 /// Encode one outbound [`Transmit`] into `(peer_addr, datagram_bytes)`.
 /// A `Compound` carries 2+ messages packed into a single datagram via
-/// [`memberlist_wire::framing::encode_compound`]; a `Packet` is one
-/// plain frame via [`memberlist_wire::framing::encode_message`].
+/// [`memberlist_proto::framing::encode_compound`]; a `Packet` is one
+/// plain frame via [`memberlist_proto::framing::encode_message`].
 fn encode_transmit<I, A>(transmit: Transmit<I, A>) -> Option<(A, Vec<u8>)>
 where
-  I: memberlist_wire::Data,
-  A: memberlist_wire::Data,
+  I: memberlist_proto::Data,
+  A: memberlist_proto::Data,
 {
-  use memberlist_wire::framing::encode_compound;
+  use memberlist_proto::framing::encode_compound;
   match transmit {
     Transmit::Packet(pkt) => {
       let (to, msg) = pkt.into_parts();
@@ -2112,16 +2109,16 @@ async fn drain_events<I, A, R>(
   pending_leave: &mut Option<PendingLeave>,
 ) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -2320,16 +2317,16 @@ async fn observation_task<I, A, D>(
   obs_payload_bytes: Arc<std::sync::atomic::AtomicU64>,
 ) where
   D: Delegate<Id = I, Address = A>,
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -2494,16 +2491,16 @@ fn fire_timeout_with_drain<I, A, R>(
   stream_opts: StreamTransportOptions,
 ) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -2552,16 +2549,16 @@ fn refresh_snapshot<I, A, R>(
   endpoint: &StreamEndpoint<I, A, R>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -2579,7 +2576,7 @@ fn refresh_snapshot<I, A, R>(
       ns.id_ref().cheap_clone(),
       ns.address_ref().cheap_clone(),
     ));
-    if let Some(memberlist_wire::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
+    if let Some(memberlist_proto::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
       alive_count += 1;
     }
   }
@@ -2603,16 +2600,16 @@ fn handle_bridge_ready<I, A, R>(
   recv_buf_len: usize,
   close_timeout: core::time::Duration,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug

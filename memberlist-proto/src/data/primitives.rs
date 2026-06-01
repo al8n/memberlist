@@ -1,12 +1,13 @@
 use core::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  num::NonZeroUsize,
   time::Duration,
 };
-use std::num::NonZeroUsize;
 
 use varing::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
 
-use crate::{Data, DataRef, DecodeError, EncodeError, WireType};
+use super::{Data, DataRef, DecodeError, EncodeError};
+use crate::wire_type::WireType;
 
 const IPV4_ADDR_LEN: usize = 4;
 const IPV6_ADDR_LEN: usize = 16;
@@ -221,6 +222,18 @@ impl Data for SocketAddrV6 {
   #[inline]
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     const V6_REQUIRED: usize = IPV6_ADDR_LEN + 2;
+
+    // The compact wire layout is `[16B IP][2B port]` (byte-faithful to
+    // the frozen memberlist-proto format) and cannot carry `flowinfo` or
+    // `scope_id`; decode always yields both = 0. Silently encoding a
+    // scoped address would canonicalize it to an undialable value (a
+    // link-local `fe80::/10` peer needs its `scope_id`). Reject it
+    // loudly rather than corrupt it silently.
+    if self.flowinfo() != 0 || self.scope_id() != 0 {
+      return Err(EncodeError::custom(
+        "SocketAddrV6 flowinfo/scope_id cannot be represented on the compact wire layout",
+      ));
+    }
 
     if buf.len() < V6_REQUIRED {
       return Err(EncodeError::insufficient_buffer(V6_REQUIRED, buf.len()));

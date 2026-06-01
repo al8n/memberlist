@@ -93,8 +93,8 @@ impl core::fmt::Display for InvalidGossipMtu {
        packets deterministically unsendable",
       self.configured,
       self.ceiling,
-      self.ceiling + memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD,
-      memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD,
+      self.ceiling + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
+      memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
     )
   }
 }
@@ -255,11 +255,11 @@ pub enum MemberlistError {
 
   /// Encryption codec error from memberlist-wire.
   #[error("encryption: {0}")]
-  Encryption(#[from] memberlist_wire::EncryptionError),
+  Encryption(#[from] memberlist_proto::EncryptionError),
 
   /// Frame decode error from memberlist-wire.
   #[error("frame: {0}")]
-  Frame(#[from] memberlist_wire::FrameError),
+  Frame(#[from] memberlist_proto::FrameError),
 
   /// Address resolution failed (DNS error, etc.).
   #[error("address resolution: {0}")]

@@ -22,8 +22,7 @@ use memberlist_compio::{
   MemberlistError, NodeDelegate, Options, PingDelegate, QuicConfig, QuicMemberlist, QuicTransport,
   QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
-use memberlist_machine::event::Event;
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::{event::Event, typed::NodeState};
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
@@ -292,10 +291,10 @@ async fn command_after_shutdown_returns_error_promptly() {
     .update_node_metadata(b"after-shutdown".to_vec())
     .await;
   let r_compr = m_clone
-    .set_compression_options(memberlist_wire::CompressionOptions::new())
+    .set_compression_options(memberlist_proto::CompressionOptions::new())
     .await;
   let r_enc = m_clone
-    .set_encryption_options(memberlist_wire::EncryptionOptions::new())
+    .set_encryption_options(memberlist_proto::EncryptionOptions::new())
     .await;
   let r_leave = m_clone.leave().await;
   let elapsed = start.elapsed();
@@ -828,7 +827,7 @@ async fn quic_slow_observation_delegate_does_not_delay_leave_flush() {
 /// sent, so B observes the leave promptly either way. What it pins is
 /// the contract itself (leave-return implies the notice is on the wire)
 /// as a regression guard; the `LeftCluster`-withholding boundary is
-/// unit-tested in `memberlist-machine`.
+/// unit-tested in `memberlist-proto`.
 #[compio::test]
 async fn leave_completes_only_after_peer_is_notified() {
   let (cert, key) = support::generate_localhost_cert();

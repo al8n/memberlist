@@ -3,8 +3,7 @@
 
 use crate::error::Result;
 use bytes::Bytes;
-use memberlist_machine::Instant;
-use memberlist_wire::{CompressionOptions, EncryptionOptions};
+use memberlist_proto::{CompressionOptions, EncryptionOptions, Instant};
 use std::net::SocketAddr;
 
 /// Payload for [`JoinKind::WaitForCompletion`].

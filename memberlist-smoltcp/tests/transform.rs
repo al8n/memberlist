@@ -19,7 +19,7 @@ use core::{
   time::Duration,
 };
 
-use memberlist_machine::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointConfig, Instant};
 use memberlist_smoltcp::{
   CompressAlgorithm, CompressionOptions, Config, EncryptionOptions, Keyring, Memberlist, SecretKey,
   TransformOptions,

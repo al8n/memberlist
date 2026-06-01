@@ -4,7 +4,7 @@ use core::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
   time::Duration,
 };
-use memberlist_machine::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointConfig, Instant};
 use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 

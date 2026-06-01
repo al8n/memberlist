@@ -10,7 +10,7 @@ mod harness;
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use memberlist_machine::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointConfig, Instant};
 use memberlist_smoltcp::{
   Config, EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceConfig, IpCidr,
   Medium, Memberlist, Route, TransformOptions,

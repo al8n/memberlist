@@ -11,17 +11,17 @@ use agnostic::{
   net::{Net, UdpSocket},
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
-use memberlist_machine::streams::{StreamEndpoint, StreamTransport};
-use memberlist_machine::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, MergeDelegate, event::Event,
+use memberlist_proto::streams::{StreamEndpoint, StreamTransport};
+use memberlist_proto::{
+  AliveDelegate, Endpoint, EndpointConfig, Instant, MergeDelegate, Node, event::Event,
+  typed::NodeState,
 };
 #[cfg(feature = "quic")]
-use memberlist_machine::{QuicConfig, QuicEndpoint};
+use memberlist_proto::{QuicConfig, QuicEndpoint};
 #[cfg(feature = "tcp")]
-use memberlist_machine::{RawRecords, TcpOptions};
+use memberlist_proto::{RawRecords, TcpOptions};
 #[cfg(feature = "tls")]
-use memberlist_machine::{TlsOptions, TlsRecords};
-use memberlist_wire::{Node, typed::NodeState};
+use memberlist_proto::{TlsOptions, TlsRecords};
 
 #[cfg(feature = "quic")]
 use crate::quic_driver::QuicDriver;

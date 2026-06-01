@@ -1,4 +1,4 @@
-//! Deterministic single-threaded simulation harness for [`memberlist_machine`].
+//! Deterministic single-threaded simulation harness for [`memberlist_proto`].
 //!
 //! No async runtime. No real I/O. Tests run in microseconds.
 //!
@@ -40,7 +40,7 @@ pub use network::Network;
 
 // Re-export the protocol types most commonly needed by simulation tests so
 // that test code only needs `memberlist_simulation` as a dependency.
-pub use memberlist_machine::{
+pub use memberlist_proto::{
   EndpointConfig, Event, NodeConflict, PingCompleted, Reliability, UserPacket,
+  typed::{Alive, Dead, Message, Meta, Node, PushNodeState, State, Suspect},
 };
-pub use memberlist_wire::typed::{Alive, Dead, Message, Meta, Node, PushNodeState, State, Suspect};

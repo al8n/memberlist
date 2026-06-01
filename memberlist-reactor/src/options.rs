@@ -4,11 +4,10 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_machine::{AliveDelegate, MergeDelegate};
-use memberlist_wire::typed::Meta;
+use memberlist_proto::{AliveDelegate, MergeDelegate, typed::Meta};
 
 /// SWIM-protocol-level overrides applied to the machine-layer
-/// [`EndpointConfig`](memberlist_machine::EndpointConfig) at construction.
+/// [`EndpointConfig`](memberlist_proto::EndpointConfig) at construction.
 ///
 /// Every field is an override layered over the `EndpointConfig` default: a
 /// `None` leaves that knob at its machine default.
@@ -104,7 +103,7 @@ impl MemberlistOptions {
 }
 
 /// Capacity policy for the bounded observation channel carrying machine
-/// [`Event`](memberlist_machine::Event)s to the observation task.
+/// [`Event`](memberlist_proto::Event)s to the observation task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
   /// A bounded channel of the given capacity; when full, the driver yields and

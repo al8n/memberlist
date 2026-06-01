@@ -11,8 +11,8 @@
 //! `>= 1` or drain-based checks rather than `== 1` where the legacy asserts
 //! exactly 1.
 
+use memberlist_proto::typed::Message;
 use memberlist_simulation::{Alive, Cluster, Dead, Node, State};
-use memberlist_wire::typed::Message;
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
@@ -397,4 +397,4 @@ fn dead_node_refute() {
 //   `Dead::new(inc, peer_id, peer_id)` (node == from) → `State::Left`.
 //   `Dead::new(inc, peer_id, other_id)` (node != from) → `State::Dead`.
 //   This matches the simulation `process_dead` `self_marked` sentinel at
-//   `memberlist-machine/src/endpoint.rs:724`.
+//   `memberlist-proto/src/endpoint.rs:724`.

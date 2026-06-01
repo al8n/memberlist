@@ -25,7 +25,7 @@ use memberlist::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
 };
-use memberlist_machine::{
+use memberlist_proto::{
   Instant, QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
@@ -111,7 +111,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
-      .saturating_add(memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     Self {
       endpoint,

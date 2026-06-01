@@ -1,8 +1,8 @@
 //! Boundary conversions between the driver's `core::net::SocketAddr` /
-//! `memberlist_machine::Instant` and smoltcp's `IpEndpoint` / `Instant`.
+//! `memberlist_proto::Instant` and smoltcp's `IpEndpoint` / `Instant`.
 
 use core::net::SocketAddr;
-use memberlist_machine::Instant;
+use memberlist_proto::Instant;
 use smoltcp::{time::Instant as SmoltcpInstant, wire::IpEndpoint};
 
 /// Convert a `SocketAddr` to a smoltcp `IpEndpoint`.
@@ -21,7 +21,7 @@ pub(crate) fn from_endpoint(ep: IpEndpoint) -> SocketAddr {
   ep.into()
 }
 
-/// Convert a `memberlist_machine::Instant` to a smoltcp `Instant` (millisecond granularity).
+/// Convert a `memberlist_proto::Instant` to a smoltcp `Instant` (millisecond granularity).
 #[inline]
 pub(crate) fn to_smoltcp_instant(now: Instant) -> SmoltcpInstant {
   debug_assert!(
@@ -31,7 +31,7 @@ pub(crate) fn to_smoltcp_instant(now: Instant) -> SmoltcpInstant {
   SmoltcpInstant::from_millis(now.since_origin().as_millis() as i64)
 }
 
-/// Convert a smoltcp `Instant` back to a `memberlist_machine::Instant`.
+/// Convert a smoltcp `Instant` back to a `memberlist_proto::Instant`.
 #[inline]
 pub(crate) fn from_smoltcp_instant(t: SmoltcpInstant) -> Instant {
   debug_assert!(t.total_millis() >= 0, "smoltcp instant before origin");
@@ -59,7 +59,7 @@ mod tests {
 
   #[test]
   fn machine_instant_round_trips_through_smoltcp_instant() {
-    let now = memberlist_machine::Instant::from_origin(core::time::Duration::from_millis(123_456));
+    let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_millis(123_456));
     let s = to_smoltcp_instant(now);
     assert_eq!(from_smoltcp_instant(s), now);
   }
