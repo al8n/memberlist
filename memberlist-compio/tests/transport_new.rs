@@ -20,7 +20,7 @@ use memberlist_compio::{
   OsResolver, SocketAddrResolver, StreamTransportOptions, TcpMemberlist, TcpTransportOptions,
   VoidDelegate,
 };
-use memberlist_machine::TcpOptions;
+use memberlist_proto::TcpOptions;
 use smol_str::SmolStr;
 
 /// Spin-wait up to `deadline` for `predicate` to return true; returns the

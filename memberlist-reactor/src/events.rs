@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures_util::Stream;
-use memberlist_machine::event::Event;
+use memberlist_proto::event::Event;
 
 /// A stream of membership / control [`Event`]s for one subscriber, obtained from
 /// `Memberlist::events`.

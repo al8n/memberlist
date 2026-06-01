@@ -19,7 +19,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, Options, SocketAddrResolver, TcpMemberlist,
   TcpTransportOptions, VoidDelegate,
 };
-use memberlist_machine::TcpOptions;
+use memberlist_proto::TcpOptions;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {

@@ -1,7 +1,7 @@
 //! `memberlist-reactor` — reactor-I/O async driver for the Sans-I/O
-//! [`memberlist-machine`](memberlist_machine).
+//! [`memberlist-proto`](memberlist_proto).
 //!
-//! Drives memberlist-machine's Sans-I/O super-machines — `StreamEndpoint`
+//! Drives memberlist-proto's Sans-I/O super-machines — `StreamEndpoint`
 //! (TCP / TLS) and `QuicEndpoint` (QUIC, which embeds `quinn-proto`) — on
 //! **reactor-pattern** async runtimes (tokio, smol, ...) through the
 //! [`agnostic`] runtime abstraction, so one implementation serves every reactor
@@ -9,7 +9,7 @@
 //! machine and the underlying sockets, while a uniform `Memberlist` handle hands
 //! commands to it through shared state + a stored waker. It is the reactor
 //! sibling of `memberlist-compio` (completion I/O); both share only
-//! `memberlist-machine`.
+//! `memberlist-proto`.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
@@ -46,21 +46,21 @@ pub use events::EventStream;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist::Memberlist;
 #[cfg(feature = "quic")]
-pub use memberlist_machine::QuicConfig;
+pub use memberlist_proto::QuicConfig;
 #[cfg(feature = "tls")]
-pub use memberlist_machine::TlsOptions;
+pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-pub use memberlist_machine::event::Event;
+pub use memberlist_proto::event::Event;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-pub use memberlist_wire::typed::NodeState;
+pub use memberlist_proto::typed::NodeState;
 
 /// The node-identity bound shared across the driver and handle — everything the
 /// machine's `Endpoint<I, _>` requires of the identity type `I`. A blanket impl
 /// covers every type that satisfies the bounds, so users never implement it.
 pub trait NodeId:
-  memberlist_wire::Id
-  + memberlist_wire::Data
-  + memberlist_wire::CheapClone
+  memberlist_proto::Id
+  + memberlist_proto::Data
+  + memberlist_proto::CheapClone
   + core::fmt::Debug
   + core::fmt::Display
   + Send
@@ -71,9 +71,9 @@ pub trait NodeId:
 }
 
 impl<T> NodeId for T where
-  T: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  T: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send

@@ -26,7 +26,7 @@ use core::{
   time::Duration,
 };
 
-use memberlist_machine::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointConfig, Instant};
 use memberlist_smoltcp::{
   Config, EthernetAddress, HardwareAddress, InitError, InterfaceConfig, IpCidr, Memberlist,
   TransformOptions,

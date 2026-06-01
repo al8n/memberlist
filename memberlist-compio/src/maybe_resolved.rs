@@ -2,7 +2,7 @@
 //! pre-resolved. Used by `Transport::new` (advertise address) and
 //! `Memberlist::join` / `join_many` (seeds).
 
-use memberlist_wire::CheapClone;
+use memberlist_proto::CheapClone;
 
 /// An address that may or may not be resolved.
 ///
@@ -103,7 +103,7 @@ mod tests {
   fn cheap_clone_resolved() {
     let sa: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7946);
     let m: MaybeResolved<smol_str::SmolStr, SocketAddr> = MaybeResolved::resolved(sa);
-    use memberlist_wire::CheapClone;
+    use memberlist_proto::CheapClone;
     let m2 = m.cheap_clone();
     assert!(m2.is_resolved());
   }
@@ -112,7 +112,7 @@ mod tests {
   fn cheap_clone_unresolved() {
     let m: MaybeResolved<smol_str::SmolStr, SocketAddr> =
       MaybeResolved::unresolved(smol_str::SmolStr::new("host:7946"));
-    use memberlist_wire::CheapClone;
+    use memberlist_proto::CheapClone;
     let m2 = m.cheap_clone();
     assert!(m2.is_unresolved());
   }

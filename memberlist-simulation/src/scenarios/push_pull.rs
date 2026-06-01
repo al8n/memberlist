@@ -2,8 +2,10 @@
 
 use std::net::SocketAddr;
 
-use memberlist_machine::PushPullKind;
-use memberlist_wire::typed::{Alive, Node};
+use memberlist_proto::{
+  PushPullKind,
+  typed::{Alive, Node},
+};
 use smol_str::SmolStr;
 
 use crate::Cluster;

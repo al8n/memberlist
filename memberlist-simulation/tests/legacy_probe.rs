@@ -14,8 +14,8 @@
 //!   require awareness-history snapshots via `awareness_score()` which is not
 //!   yet part of the public Cluster API.
 
+use memberlist_proto::typed::Message;
 use memberlist_simulation::{Alive, Cluster, Node, State};
-use memberlist_wire::typed::Message;
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 

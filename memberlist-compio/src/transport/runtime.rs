@@ -20,7 +20,7 @@ use std::{
 use arc_swap::ArcSwap;
 use flume::{Receiver, Sender};
 
-use memberlist_machine::event::Event;
+use memberlist_proto::event::Event;
 
 use crate::{
   command::Command,

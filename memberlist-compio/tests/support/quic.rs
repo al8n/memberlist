@@ -26,7 +26,7 @@ pub fn generate_localhost_cert() -> (CertificateDer<'static>, PrivateKeyDer<'sta
 ///
 /// Returns the DER-encoded certificate and its PKCS#8 private key. Used by
 /// negative tests that need a cert whose subject-alt-names do NOT match the
-/// SNI value the [`memberlist_machine::QuicConfig`] SNI closure returns
+/// SNI value the [`memberlist_proto::QuicConfig`] SNI closure returns
 /// (which the compio test setup always wires to `"localhost"`), forcing
 /// rustls to reject the peer's certificate during the TLS handshake.
 pub fn generate_cert_with_sans(
@@ -77,7 +77,7 @@ pub fn build_quic_config(
   let client_cfg = ClientConfig::new(Arc::new(qcc));
 
   // Stateless-reset HMAC key via ring — matches the pattern in
-  // `memberlist-machine/src/quic/crypto.rs` test helpers and
+  // `memberlist-proto/src/quic/crypto.rs` test helpers and
   // `memberlist-simulation/src/quic_net.rs`.
   let reset_key = [0x5au8; 32];
   let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key);

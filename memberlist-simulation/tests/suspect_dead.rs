@@ -9,8 +9,8 @@
 //! timer (suspicion_mult * probe_interval = 4s) elapses, node1 marks the
 //! ghost Dead.
 
+use memberlist_proto::typed::State;
 use memberlist_simulation::Cluster;
-use memberlist_wire::typed::State;
 use smol_str::SmolStr;
 use std::time::Duration;
 

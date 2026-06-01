@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use memberlist_machine::EndpointInitError;
+use memberlist_proto::EndpointInitError;
 
 use crate::interface::{HardwareAddress, IpCidr, Medium, Route};
 
@@ -44,7 +44,7 @@ pub enum InitError {
   /// diagnostics.
   NonUnicastIpAddress(IpCidr),
   /// The configured advertise address
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_machine::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
   /// is not a routable destination.
   ///
   /// A node must advertise an address its peers can route a reply to. An
@@ -75,7 +75,7 @@ pub enum InitError {
   /// gossip UDP socket and the reliable TCP listener (the single-port memberlist
   /// model). On a direct smoltcp interface (no NAT) a node is reachable only at
   /// the port it binds, so its advertised port
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_machine::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
   /// must equal it. Otherwise every peer routes to a port nothing is listening on.
   AdvertisePortMismatch,
   /// The advertised IP is not one assigned to the interface.
@@ -114,10 +114,10 @@ pub enum InitError {
   /// Construction probes every configured key (primary then secondaries) by
   /// encrypting an empty frame. A key whose AEAD backend was not compiled into
   /// this binary surfaces here as
-  /// [`EncryptionError::UnsupportedAlgorithm`](memberlist_wire::EncryptionError::UnsupportedAlgorithm),
+  /// [`EncryptionError::UnsupportedAlgorithm`](memberlist_proto::EncryptionError::UnsupportedAlgorithm),
   /// turning what would otherwise be a silent runtime drop of every encrypted
   /// gossip datagram into a typed construction error.
-  Encryption(memberlist_wire::EncryptionError),
+  Encryption(memberlist_proto::EncryptionError),
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
   /// The driver sizes its UDP arenas from `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`
@@ -293,8 +293,8 @@ impl From<EndpointInitError> for InitError {
   }
 }
 
-impl From<memberlist_wire::EncryptionError> for InitError {
-  fn from(e: memberlist_wire::EncryptionError) -> Self {
+impl From<memberlist_proto::EncryptionError> for InitError {
+  fn from(e: memberlist_proto::EncryptionError) -> Self {
     InitError::Encryption(e)
   }
 }

@@ -1,6 +1,6 @@
 //! Lock-free snapshot of memberlist state, published via arc-swap.
 
-use memberlist_wire::Node;
+use memberlist_proto::Node;
 
 /// Snapshot of the memberlist's current observable state. Read via
 /// [`Memberlist::snapshot`](crate::Memberlist::snapshot). Snapshots are

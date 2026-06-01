@@ -231,7 +231,7 @@ impl Device for PairedDevice {
 
 /// Deterministic virtual clock anchored away from zero.
 ///
-/// `memberlist_machine::Instant - Duration` saturates at the origin; the
+/// `memberlist_proto::Instant - Duration` saturates at the origin; the
 /// 86 400 s offset gives backward-aging headroom for any suspicion or failure
 /// timers that need to subtract from `now`.
 pub struct Clock {
@@ -243,8 +243,8 @@ impl Clock {
     Self { ms: 86_400_000 }
   }
 
-  pub fn now(&self) -> memberlist_machine::Instant {
-    memberlist_machine::Instant::from_origin(core::time::Duration::from_millis(self.ms))
+  pub fn now(&self) -> memberlist_proto::Instant {
+    memberlist_proto::Instant::from_origin(core::time::Duration::from_millis(self.ms))
   }
 
   pub fn advance_ms(&mut self, by: u64) {
@@ -263,7 +263,7 @@ impl Clock {
   /// shy of a future deadline and a `now`-equal re-poll would spin in place.
   /// Never moves backwards: a `target` already at or before the current reading
   /// leaves the clock put, matching a clock that cannot rewind.
-  pub fn advance_to(&mut self, target: memberlist_machine::Instant) {
+  pub fn advance_to(&mut self, target: memberlist_proto::Instant) {
     let ns = target.since_origin().as_nanos();
     // Ceiling division to whole milliseconds.
     let target_ms = ns.div_ceil(1_000_000) as u64;

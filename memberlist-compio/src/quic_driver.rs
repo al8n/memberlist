@@ -35,12 +35,11 @@ use memberlist::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
 };
-use memberlist_machine::{
-  Instant, QuicEndpoint,
+use memberlist_proto::{
+  CheapClone, Instant, Node, QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
 };
-use memberlist_wire::{CheapClone, Node};
 
 use crate::{
   command::{
@@ -205,9 +204,9 @@ struct QuicDriverState<I> {
 /// `gossip_recv_buf_len`.
 fn gossip_recv_buf_len<I>(endpoint: &QuicEndpoint<I>) -> usize
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -216,7 +215,7 @@ where
 {
   endpoint
     .gossip_mtu()
-    .saturating_add(memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
@@ -240,9 +239,9 @@ pub(crate) async fn quic_driver_loop<I, D>(
   delegate: D,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -731,9 +730,9 @@ async fn observation_task<I, D>(
   obs_payload_bytes: Arc<AtomicU64>,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -795,9 +794,9 @@ async fn dispatch_command<I>(
   cmd: Command,
   now: Instant,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -841,7 +840,7 @@ async fn dispatch_command<I>(
           // `start_push_pull` returns a fresh machine `StreamId` that
           // coerces into the [`ExchangeId`] domain via the
           // [`From<StreamId> for ExchangeId`] impl in
-          // `memberlist-machine/src/event.rs`. The QUIC backend keys
+          // `memberlist-proto/src/event.rs`. The QUIC backend keys
           // its bridges by `StreamId`, so the coerced value is the
           // same one the bridge-reap path stamps onto its
           // `Event::ExchangeCompleted` payload — the reduction in
@@ -927,7 +926,7 @@ async fn dispatch_command<I>(
       // will never leave the local node. The single-task driver makes the
       // check + apply atomic (no lifecycle race).
       let res: Result<()> = if endpoint.is_running() {
-        match memberlist_wire::typed::Meta::try_from(meta) {
+        match memberlist_proto::typed::Meta::try_from(meta) {
           Ok(m) => endpoint
             .update_meta(m)
             .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
@@ -1092,9 +1091,9 @@ async fn dispatch_command<I>(
 /// progress), so the caller knows to republish the snapshot.
 async fn fire_timeout_with_drain<I>(state: &mut QuicDriverState<I>, recv_buf_len: usize) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -1194,9 +1193,9 @@ where
 /// same socket without codec wrap.
 async fn drain_actions<I>(state: &mut QuicDriverState<I>) -> bool
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -1555,9 +1554,9 @@ fn refresh_snapshot<I>(
   endpoint: &QuicEndpoint<I>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
 ) where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -1572,7 +1571,7 @@ fn refresh_snapshot<I>(
       ns.id_ref().cheap_clone(),
       ns.address_ref().cheap_clone(),
     ));
-    if let Some(memberlist_wire::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
+    if let Some(memberlist_proto::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
       alive_count += 1;
     }
   }

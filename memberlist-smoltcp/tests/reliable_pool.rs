@@ -15,7 +15,7 @@ use core::{
   time::Duration,
 };
 
-use memberlist_machine::EndpointConfig;
+use memberlist_proto::EndpointConfig;
 use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 

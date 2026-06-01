@@ -37,8 +37,7 @@ use memberlist_compio::{
   MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate, Options,
   PingDelegate, SocketAddrResolver, TcpMemberlist, TcpTransport, TcpTransportOptions,
 };
-use memberlist_machine::{TcpOptions, event::Event};
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::{TcpOptions, event::Event, typed::NodeState};
 use smol_str::SmolStr;
 
 /// Shared record of byte payloads a [`RecordingDelegate`] observed.
@@ -532,7 +531,7 @@ async fn post_join_metadata_update_disseminates() {
 #[cfg(not(feature = "encryption-aes-gcm"))]
 #[compio::test]
 async fn set_encryption_options_rejects_unsupported_algorithm() {
-  use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+  use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
 
   let node = make_seed("enc-reject").await;
 
@@ -579,7 +578,7 @@ async fn set_encryption_options_rejects_unsupported_algorithm() {
 ))]
 #[compio::test]
 async fn encryption_rejected_for_unsupported_secondary_key() {
-  use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+  use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
 
   let node = make_seed("enc-secondary").await;
 

@@ -7,24 +7,23 @@ description = "compio-based async driver for the Sans-I/O memberlist machine"
 
 [features]
 default = ["tcp"]
-tcp = ["memberlist-machine/tcp"]
-tls-rustls-ring = ["memberlist-machine/tls-rustls-ring", "compio/rustls"]
-tls-rustls-aws-lc-rs = ["memberlist-machine/tls-rustls-aws-lc-rs"]
-quic = ["memberlist-machine/quic"]
-quic-rustls-ring = ["quic", "memberlist-machine/quic-rustls-ring"]
-quic-rustls-aws-lc-rs = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs"]
-compression-lz4 = ["memberlist-machine/compression-lz4"]
-compression-snappy = ["memberlist-machine/compression-snappy"]
-compression-zstd = ["memberlist-machine/compression-zstd"]
-compression-brotli = ["memberlist-machine/compression-brotli"]
-encryption-aes-gcm = ["memberlist-machine/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["memberlist-machine/encryption-chacha20-poly1305"]
+tcp = ["memberlist-proto/tcp"]
+tls-rustls-ring = ["memberlist-proto/tls-rustls-ring", "compio/rustls"]
+tls-rustls-aws-lc-rs = ["memberlist-proto/tls-rustls-aws-lc-rs"]
+quic = ["memberlist-proto/quic"]
+quic-rustls-ring = ["quic", "memberlist-proto/quic-rustls-ring"]
+quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs"]
+compression-lz4 = ["memberlist-proto/compression-lz4"]
+compression-snappy = ["memberlist-proto/compression-snappy"]
+compression-zstd = ["memberlist-proto/compression-zstd"]
+compression-brotli = ["memberlist-proto/compression-brotli"]
+encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
 dns = ["dep:hickory-proto", "dep:resolv-conf"]
 
 [dependencies]
 memberlist = { workspace = true }
-memberlist-machine = { workspace = true }
-memberlist-wire = { workspace = true }
+memberlist-proto = { workspace = true }
 hostaddr = { workspace = true }
 smol_str = { workspace = true }
 compio = { workspace = true, features = ["net", "runtime", "macros", "time"] }

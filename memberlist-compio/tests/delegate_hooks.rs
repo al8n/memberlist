@@ -26,8 +26,7 @@ use memberlist_compio::{
   NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpMemberlist, TcpTransport,
   TcpTransportOptions,
 };
-use memberlist_machine::TcpOptions;
-use memberlist_wire::typed::NodeState;
+use memberlist_proto::{TcpOptions, typed::NodeState};
 use smol_str::SmolStr;
 
 /// Shared record of the peer ids a [`RecordingDelegate`] saw join.

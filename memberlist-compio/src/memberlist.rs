@@ -39,8 +39,9 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
-use memberlist_machine::{Instant, event::Event};
-use memberlist_wire::{CheapClone, CompressionOptions, EncryptionOptions, Node};
+use memberlist_proto::{
+  CheapClone, CompressionOptions, EncryptionOptions, Instant, Node, event::Event,
+};
 
 use crate::{
   EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
@@ -150,7 +151,7 @@ where
 impl<T, D> Memberlist<T, D>
 where
   T: Transport,
-  T::Id: CheapClone + memberlist_wire::Data,
+  T::Id: CheapClone + memberlist_proto::Data,
   D: Delegate<Id = T::Id, Address = SocketAddr>,
 {
   /// Construct a memberlist, bind the transport's sockets, build the
@@ -385,7 +386,7 @@ where
   ///
   /// The returned count is the number of dispatched exchanges that
   /// terminated with
-  /// [`ExchangeOutcome::Succeeded`](memberlist_machine::event::ExchangeOutcome::Succeeded)
+  /// [`ExchangeOutcome::Succeeded`](memberlist_proto::event::ExchangeOutcome::Succeeded)
   /// — i.e. the peer's response decoded cleanly, the record layer +
   /// frame + payload all accepted, and the peer's state was merged
   /// into membership. Each exchange counts independently, so passing
@@ -472,7 +473,7 @@ where
   /// Returns the number of resolved seed addresses handed to the driver —
   /// i.e. the number of push/pull exchanges queued, NOT the number of
   /// seeds that successfully responded. The driver emits a
-  /// [`NodeJoined`](memberlist_machine::event::Event) for every newly-Alive
+  /// [`NodeJoined`](memberlist_proto::event::Event) for every newly-Alive
   /// peer; per-seed dial failure surfaces through the membership FSM's
   /// normal suspicion / dead-node path.
   ///
@@ -666,7 +667,7 @@ where
   /// mechanism. The coordinator's machine-side state — the keyring, the
   /// gossip ingress buffer, and every live bridge's outbound buffer — is
   /// updated to the new policy on the spot (see
-  /// [`memberlist_machine::streams::StreamEndpoint::set_encryption_options`]
+  /// [`memberlist_proto::streams::StreamEndpoint::set_encryption_options`]
   /// for the full purge-and-reap protocol).
   ///
   /// On an INSECURE reliable transport (plain TCP) a policy change FAILS

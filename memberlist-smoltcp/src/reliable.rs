@@ -24,7 +24,7 @@
 use bytes::Bytes;
 use core::net::SocketAddr;
 use hashbrown::HashMap;
-use memberlist_machine::{Instant, streams::ExchangeId};
+use memberlist_proto::{Instant, streams::ExchangeId};
 use smoltcp::iface::SocketHandle;
 use std::{collections::VecDeque, vec::Vec};
 

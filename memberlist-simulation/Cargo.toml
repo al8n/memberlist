@@ -9,7 +9,7 @@ readme.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Deterministic single-threaded simulation harness for memberlist-machine."
+description = "Deterministic single-threaded simulation harness for memberlist-proto."
 
 [lib]
 # Internal deterministic test-harness crate: doc comments are
@@ -30,11 +30,11 @@ doctest = false
 #   `--features quic`                   → ring (default)
 #   `--features quic-rustls-aws-lc-rs`  → aws-lc-rs
 quic = ["quic-rustls-ring"]
-quic-rustls-ring = ["__quic-harness", "memberlist-machine/quic-rustls-ring", "quinn-proto/rustls-ring", "dep:ring"]
-quic-rustls-aws-lc-rs = ["__quic-harness", "memberlist-machine/quic-rustls-aws-lc-rs", "quinn-proto/rustls-aws-lc-rs", "dep:aws-lc-rs"]
+quic-rustls-ring = ["__quic-harness", "memberlist-proto/quic-rustls-ring", "quinn-proto/rustls-ring", "dep:ring"]
+quic-rustls-aws-lc-rs = ["__quic-harness", "memberlist-proto/quic-rustls-aws-lc-rs", "quinn-proto/rustls-aws-lc-rs", "dep:aws-lc-rs"]
 # Internal: shared non-crypto harness deps + the cfg gate. Do not enable
 # directly — pick `quic` (ring) or `quic-rustls-aws-lc-rs`.
-__quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/quic", "memberlist-machine/compression-lz4"]
+__quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-proto/quic", "memberlist-proto/compression-lz4"]
 
 # Drives the composed `TlsEndpoint` (memberlist + real rustls over a
 # deterministic virtual TCP) through the same virtual clock / fault model as
@@ -43,22 +43,22 @@ __quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:
 #   `--features tls`                   → ring (default)
 #   `--features tls-rustls-aws-lc-rs`  → aws-lc-rs
 tls = ["tls-rustls-ring"]
-tls-rustls-ring = ["__tls-harness", "memberlist-machine/tls-rustls-ring", "rustls/ring"]
-tls-rustls-aws-lc-rs = ["__tls-harness", "memberlist-machine/tls-rustls-aws-lc-rs", "rustls/aws_lc_rs"]
+tls-rustls-ring = ["__tls-harness", "memberlist-proto/tls-rustls-ring", "rustls/ring"]
+tls-rustls-aws-lc-rs = ["__tls-harness", "memberlist-proto/tls-rustls-aws-lc-rs", "rustls/aws_lc_rs"]
 # Internal: shared non-crypto harness deps + the cfg gate. Do not enable
 # directly — pick `tls` (ring) or `tls-rustls-aws-lc-rs`.
-__tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/tls", "memberlist-machine/compression-lz4"]
+__tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-proto/tls", "memberlist-proto/compression-lz4"]
 
 # Drives the composed `TcpEndpoint` (memberlist + per-exchange plain TCP)
 # through the same virtual clock / fault model as the TLS harness, without any
 # crypto layer. The reliable path is wire-label-gated plain TCP; the
 # unreliable path is the same UDP gossip queue.
-tcp = ["memberlist-machine/tcp", "memberlist-machine/compression-lz4"]
+tcp = ["memberlist-proto/tcp", "memberlist-proto/compression-lz4"]
 
 # Passthrough: expose the machine-level lz4 compression feature at the sim
 # boundary so that `--features __sim-encryption-aes-gcm,compression-lz4` gates
 # the compound compressed+encrypted conformance tests.
-compression-lz4 = ["memberlist-machine/compression-lz4"]
+compression-lz4 = ["memberlist-proto/compression-lz4"]
 
 # Internal: encryption backend for the encrypted conformance tests across every
 # transport. Not part of the public API. The default-feature sim build still
@@ -66,12 +66,11 @@ compression-lz4 = ["memberlist-machine/compression-lz4"]
 # byte-unchanged. Selecting this feature pulls every transport harness in so a
 # single `--features __sim-encryption-aes-gcm` build covers tcp / tls / quic
 # encrypted-conformance runs.
-__sim-encryption-aes-gcm = ["tcp", "tls", "quic", "memberlist-machine/encryption-aes-gcm"]
+__sim-encryption-aes-gcm = ["tcp", "tls", "quic", "memberlist-proto/encryption-aes-gcm"]
 
 [dependencies]
 bytes.workspace = true
-memberlist-machine = { path = "../memberlist-machine" }
-memberlist-wire = { workspace = true, features = ["default"] }
+memberlist-proto = { path = "../memberlist-proto" }
 rand.workspace = true
 smol_str.workspace = true
 # quic-harness-only. The crypto-provider feature on rustls/quinn-proto is
@@ -82,7 +81,7 @@ rustls-pki-types = { version = "1", default-features = false, optional = true }
 ring = { version = "0.17", optional = true }
 aws-lc-rs = { version = "1", optional = true }
 # Self-signed certs for the quic conformance harness (mirrors the
-# memberlist-machine quic crypto tests; sim/test only).
+# memberlist-proto quic crypto tests; sim/test only).
 rcgen = { version = "0.14", optional = true }
 
 [dev-dependencies]

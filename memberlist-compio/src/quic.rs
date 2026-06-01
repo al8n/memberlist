@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 
 use compio::net::UdpSocket;
 use hostaddr::HostAddr;
-use memberlist_machine::{QuicEndpoint, config::EndpointConfig, endpoint::Endpoint};
+use memberlist_proto::{QuicEndpoint, config::EndpointConfig, endpoint::Endpoint};
 use smol_str::SmolStr;
 
 use crate::{
@@ -36,15 +36,15 @@ use crate::{
 /// Phantom type tag identifying the QUIC backend.
 ///
 /// `Quic` does not implement
-/// [`memberlist_machine::streams::StreamTransport`] — QUIC carries no
+/// [`memberlist_proto::streams::StreamTransport`] — QUIC carries no
 /// stream-transport record layer; its security is intrinsic to the QUIC
 /// handshake. Retained as a public backend marker; [`QuicTransport`] is
 /// the type that actually drives the QUIC endpoint.
 pub struct Quic;
 
 /// QUIC config bundle handed to [`QuicTransport`]. Re-exported from
-/// `memberlist-machine` so callers don't need a direct dep.
-pub use memberlist_machine::QuicConfig;
+/// `memberlist-proto` so callers don't need a direct dep.
+pub use memberlist_proto::QuicConfig;
 
 /// QUIC-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
 /// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`.
@@ -142,9 +142,9 @@ pub struct QuicTransport<I = SmolStr, A = HostAddr<SmolStr>> {
 
 impl<I, A> Transport for QuicTransport<I, A>
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send

@@ -2,9 +2,9 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use memberlist_machine::{AliveDelegate, EndpointConfig, Event, Instant, MergeDelegate};
-use memberlist_wire::typed::{
-  Alive, Dead, Message, Node, NodeState, PushNodeState, State, Suspect,
+use memberlist_proto::{
+  AliveDelegate, EndpointConfig, Event, Instant, MergeDelegate,
+  typed::{Alive, Dead, Message, Node, NodeState, PushNodeState, State, Suspect},
 };
 use smol_str::SmolStr;
 
@@ -387,7 +387,7 @@ impl Cluster {
     from_id: SmolStr,
     incarnation: u32,
   ) {
-    use memberlist_wire::typed::Suspect;
+    use memberlist_proto::typed::Suspect;
     let now = self.clock.now();
     let Some(ep) = self.net.endpoints.get_mut(&host) else {
       return;
@@ -409,7 +409,7 @@ impl Cluster {
     &self,
     host: SocketAddr,
     peer: &SmolStr,
-  ) -> Option<memberlist_wire::typed::State> {
+  ) -> Option<memberlist_proto::typed::State> {
     self.net.endpoints.get(&host)?.member_liveness(peer)
   }
 
@@ -422,7 +422,7 @@ impl Cluster {
   ///
   /// Does nothing if `host` is not a known endpoint.
   pub fn trigger_push_pull(&mut self, host: SocketAddr, peer_addr: SocketAddr) {
-    use memberlist_machine::PushPullKind;
+    use memberlist_proto::PushPullKind;
     let now = self.clock.now();
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
       ep.start_push_pull(peer_addr, PushPullKind::Refresh, now);
@@ -677,7 +677,7 @@ impl Cluster {
   ///
   /// Does nothing if `host` is not a known endpoint.
   pub fn join(&mut self, host: SocketAddr, peer_addr: SocketAddr) {
-    use memberlist_machine::PushPullKind;
+    use memberlist_proto::PushPullKind;
     let now = self.clock.now();
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
       ep.start_push_pull(peer_addr, PushPullKind::Join, now);
@@ -695,7 +695,7 @@ impl Cluster {
   /// should still run [`step`](Cluster::step) to let the datagrams propagate.
   ///
   /// Does nothing and returns `Ok(())` if `host` is not a known endpoint.
-  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
+  pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_proto::Error> {
     let now = self.clock.now();
     let Some(ep) = self.net.endpoints.get_mut(&host) else {
       return Ok(());
@@ -732,8 +732,8 @@ impl Cluster {
   pub fn set_meta(
     &mut self,
     host: SocketAddr,
-    meta: memberlist_wire::typed::Meta,
-  ) -> Result<(), memberlist_machine::Error> {
+    meta: memberlist_proto::typed::Meta,
+  ) -> Result<(), memberlist_proto::Error> {
     match self.net.endpoints.get_mut(&host) {
       Some(ep) => ep.update_meta(meta),
       None => Ok(()),
@@ -756,7 +756,7 @@ impl Cluster {
     self.net.enqueue(
       host,
       peer_addr,
-      memberlist_wire::typed::Message::UserData(data),
+      memberlist_proto::typed::Message::UserData(data),
       now,
     );
   }

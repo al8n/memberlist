@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use memberlist_wire::Node;
+use memberlist_proto::Node;
 
 /// An immutable snapshot of the cluster's observable membership at one instant.
 ///
@@ -68,9 +68,9 @@ impl<I, A> MemberlistSnapshot<I, A> {
 /// backend constructor's initial publish and a driver's per-change republish).
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub(crate) fn snapshot_of<I: crate::NodeId>(
-  ep: &memberlist_machine::Endpoint<I, SocketAddr>,
+  ep: &memberlist_proto::Endpoint<I, SocketAddr>,
 ) -> MemberlistSnapshot<I, SocketAddr> {
-  use memberlist_wire::CheapClone;
+  use memberlist_proto::CheapClone;
   let mut members = Vec::new();
   let mut alive_count = 0usize;
   for ns in ep.members() {
@@ -78,7 +78,7 @@ pub(crate) fn snapshot_of<I: crate::NodeId>(
       ns.id_ref().cheap_clone(),
       ns.address_ref().cheap_clone(),
     ));
-    if let Some(memberlist_wire::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
+    if let Some(memberlist_proto::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
       alive_count += 1;
     }
   }

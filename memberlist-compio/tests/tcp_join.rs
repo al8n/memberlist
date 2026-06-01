@@ -15,8 +15,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, Resolver,
   SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_machine::TcpOptions;
-use memberlist_wire::typed::Meta;
+use memberlist_proto::{TcpOptions, typed::Meta};
 use smol_str::SmolStr;
 
 /// Test resolver that always resolves to an empty address list — models

@@ -1,355 +1,407 @@
+//! AckRegistry — bookkeeping for outstanding ack/nack handlers keyed by
+//! sequence number. Pure data structure; the `Endpoint` wires it into the probe FSM.
+
+use crate::Instant;
+
+use crate::FxHashMap;
 use bytes::Bytes;
 
-use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip};
-
-/// Ack response is sent for a ping
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
-pub struct Ack {
-  /// The sequence number of the ack
-  #[viewit(
-    getter(const, attrs(doc = "Returns the sequence number of the ack")),
-    setter(
-      const,
-      attrs(doc = "Sets the sequence number of the ack (Builder pattern)")
-    )
-  )]
-  sequence_number: u32,
-  /// The payload of the ack
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
-    setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
-  )]
-  #[cfg_attr(any(feature = "arbitrary", test), arbitrary(with = crate::arbitrary_impl::bytes))]
-  payload: Bytes,
+/// What category of probe / ping originated this ack-awaiting entry. Used by
+/// `Endpoint` to dispatch the eventual ack/nack/timeout to the right
+/// callback path.
+#[derive(Debug, Clone)]
+pub enum AckKind<A> {
+  /// Direct probe ping issued by the local probe FSM.
+  Probe,
+  /// We're forwarding an indirect ping on behalf of another node; on ack,
+  /// reply with an Ack to the carried `reply_to`. On timeout, the probe
+  /// FSM treats this as a missed ack and may send a Nack.
+  Forward(ForwardAck<A>),
+  /// Application-level ping (via `Memberlist::ping`); on ack, emit a
+  /// `PingCompleted` event with the RTT.
+  Ping,
 }
 
-impl Ack {
-  const SEQUENCE_NUMBER_TAG: u8 = 1;
-  const SEQUENCE_NUMBER_BYTE: u8 = merge(WireType::Varint, Self::SEQUENCE_NUMBER_TAG);
-  const PAYLOAD_TAG: u8 = 2;
-  const PAYLOAD_BYTE: u8 = merge(WireType::LengthDelimited, Self::PAYLOAD_TAG);
+/// Payload of [`AckKind::Forward`]. Extracted as a named struct because
+/// the codebase forbids struct enum variants — newtype variants only.
+#[derive(Debug, Clone)]
+pub struct ForwardAck<A> {
+  reply_to: A,
+}
 
-  /// Decodes the sequence number from the given buffer
-  #[inline]
-  pub fn decode_sequence_number(src: &[u8]) -> Result<(usize, u32), DecodeError> {
-    let mut offset = 0;
-    let mut sequence_number = None;
-    let buf_len = src.len();
-
-    while offset < buf_len {
-      match src[offset] {
-        Self::SEQUENCE_NUMBER_BYTE => {
-          offset += 1;
-          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
-          offset += bytes_read;
-          sequence_number = Some(value);
-        }
-        _ => offset += skip("Ack", &src[offset..])?,
-      }
-    }
-
-    // Ensure the sequence_number was found
-    Ok((offset, sequence_number.unwrap_or(0)))
+impl<A> ForwardAck<A> {
+  /// Construct a new forward-ack payload.
+  #[inline(always)]
+  pub const fn new(reply_to: A) -> Self {
+    Self { reply_to }
   }
 
-  /// Create a new ack response with the given sequence number and empty payload.
-  #[inline]
-  pub const fn new(sequence_number: u32) -> Self {
+  /// Borrow the reply-to address.
+  #[inline(always)]
+  pub const fn reply_to_ref(&self) -> &A {
+    &self.reply_to
+  }
+
+  /// Consume and return the reply-to address.
+  #[inline(always)]
+  pub fn into_reply_to(self) -> A {
+    self.reply_to
+  }
+}
+
+/// One pending ack-awaiting entry.
+#[derive(Debug, Clone)]
+pub struct AckEntry<A> {
+  sent_at: Instant,
+  deadline: Instant,
+  kind: AckKind<A>,
+}
+
+impl<A> AckEntry<A> {
+  /// Construct a new pending entry.
+  #[inline(always)]
+  pub const fn new(sent_at: Instant, deadline: Instant, kind: AckKind<A>) -> Self {
     Self {
-      sequence_number,
-      payload: Bytes::new(),
+      sent_at,
+      deadline,
+      kind,
     }
   }
 
-  /// Sets the sequence number of the ack
-  #[inline]
-  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
-    self.sequence_number = sequence_number;
-    self
+  /// When this entry was registered (used to compute RTT on ack).
+  #[inline(always)]
+  pub const fn sent_at(&self) -> Instant {
+    self.sent_at
   }
 
-  /// Sets the payload of the ack
-  #[inline]
-  pub fn set_payload(&mut self, payload: Bytes) -> &mut Self {
-    self.payload = payload;
-    self
+  /// Wall-clock deadline after which this entry is considered timed-out.
+  #[inline(always)]
+  pub const fn deadline(&self) -> Instant {
+    self.deadline
   }
 
-  /// Consumes the [`Ack`] and returns the sequence number and payload
-  #[inline]
-  pub fn into_components(self) -> (u32, Bytes) {
-    (self.sequence_number, self.payload)
+  /// Discriminator for downstream dispatch.
+  #[inline(always)]
+  pub const fn kind_ref(&self) -> &AckKind<A> {
+    &self.kind
+  }
+
+  /// Consume the entry and return its `kind`.
+  #[inline(always)]
+  pub fn into_kind(self) -> AckKind<A> {
+    self.kind
   }
 }
 
-impl Data for Ack {
-  type Ref<'a> = AckRef<'a>;
+/// Resolution of a pending ack-awaiting entry: either an ack arrival (with
+/// payload + recv timestamp) or a timeout. Returned by
+/// [`AckRegistry::handle_ack`] and [`AckRegistry::poll_expired`].
+#[derive(Debug, Clone)]
+pub struct AckResolution<A> {
+  seq: u32,
+  entry: AckEntry<A>,
+  payload: Option<Bytes>,
+  received_at: Option<Instant>,
+}
 
-  #[inline]
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(Self {
-      sequence_number: val.sequence_number,
-      payload: Bytes::copy_from_slice(val.payload),
+impl<A> AckResolution<A> {
+  /// The sequence number this resolution relates to.
+  #[inline(always)]
+  pub const fn seq(&self) -> u32 {
+    self.seq
+  }
+
+  /// The registered entry.
+  #[inline(always)]
+  pub const fn entry_ref(&self) -> &AckEntry<A> {
+    &self.entry
+  }
+
+  /// Consume the resolution and return its inner [`AckEntry`].
+  #[inline(always)]
+  pub fn into_entry(self) -> AckEntry<A> {
+    self.entry
+  }
+
+  /// `Some(payload)` for acks (may be empty); `None` for timeouts.
+  #[inline(always)]
+  pub fn payload(&self) -> Option<&[u8]> {
+    self.payload.as_deref()
+  }
+
+  /// Return a cheap clone of the payload buffer if present.
+  #[inline(always)]
+  pub fn payload_bytes(&self) -> Option<Bytes> {
+    self.payload.clone()
+  }
+
+  /// Take ownership of the payload, leaving `None` behind.
+  #[inline(always)]
+  pub fn take_payload(&mut self) -> Option<Bytes> {
+    self.payload.take()
+  }
+
+  /// `Some(now)` if this came from an ack with a recv timestamp;
+  /// `None` for timeouts.
+  #[inline(always)]
+  pub const fn received_at(&self) -> Option<Instant> {
+    self.received_at
+  }
+}
+
+/// Registry of outstanding ack-awaiting entries keyed by sequence number.
+///
+/// Sync, single-threaded. The owning `Endpoint` is responsible for
+/// reading `next_deadline()` to inform `Endpoint::poll_timeout()`, and calling
+/// `poll_expired(now)` from `Endpoint::handle_timeout`.
+#[derive(Debug)]
+pub struct AckRegistry<A> {
+  pending: FxHashMap<u32, AckEntry<A>>,
+}
+
+impl<A> Default for AckRegistry<A> {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl<A> AckRegistry<A> {
+  /// Construct an empty registry.
+  #[inline(always)]
+  pub fn new() -> Self {
+    Self {
+      pending: FxHashMap::default(),
+    }
+  }
+
+  /// Number of outstanding entries.
+  #[inline(always)]
+  pub fn len(&self) -> usize {
+    self.pending.len()
+  }
+
+  /// True iff no entries are outstanding.
+  #[inline(always)]
+  pub fn is_empty(&self) -> bool {
+    self.pending.is_empty()
+  }
+
+  /// Register a new pending entry. If `seq` was already present, the old
+  /// entry is replaced and returned.
+  #[inline(always)]
+  pub fn register(&mut self, seq: u32, entry: AckEntry<A>) -> Option<AckEntry<A>> {
+    self.pending.insert(seq, entry)
+  }
+
+  /// Process an incoming Ack. Returns the registered entry (now removed) and
+  /// the payload, or `None` if `seq` was not pending.
+  pub fn handle_ack(
+    &mut self,
+    seq: u32,
+    payload: Bytes,
+    received_at: Instant,
+  ) -> Option<AckResolution<A>> {
+    let entry = self.pending.remove(&seq)?;
+    Some(AckResolution {
+      seq,
+      entry,
+      payload: Some(payload),
+      received_at: Some(received_at),
     })
   }
 
-  fn encoded_len(&self) -> usize {
-    let mut len = 1 + self.sequence_number.encoded_len();
-    let payload_len = self.payload.len();
-    if payload_len != 0 {
-      len += 1 + self.payload.encoded_len_with_length_delimited();
-    }
-    len
+  /// Process an incoming Nack. Returns a *reference* to the entry without
+  /// removing it (the entry stays pending until ack or timeout).
+  /// Returns `None` if `seq` was not pending.
+  pub fn handle_nack(&self, seq: u32) -> Option<&AckEntry<A>> {
+    self.pending.get(&seq)
   }
 
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    macro_rules! bail {
-      ($offset:expr, $remaining:ident) => {
-        if $offset >= $remaining {
-          return Err(EncodeError::insufficient_buffer(
-            self.encoded_len(),
-            $remaining,
-          ));
-        }
-      };
-    }
-
-    let len = buf.len();
-    let mut offset = 0;
-    bail!(offset, len);
-    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
-    offset += 1;
-    offset += self
-      .sequence_number
-      .encode(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
-
-    let payload_len = self.payload.len();
-    if payload_len != 0 {
-      bail!(offset, len);
-      buf[offset] = Self::PAYLOAD_BYTE;
-      offset += 1;
-      offset += self
-        .payload
-        .encode_length_delimited(&mut buf[offset..])
-        .map_err(|e| e.update(self.encoded_len(), len))?;
-    }
-
-    #[cfg(debug_assertions)]
-    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
-    Ok(offset)
-  }
-}
-
-/// The reference to an [`Ack`] message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct AckRef<'a> {
-  sequence_number: u32,
-  payload: &'a [u8],
-}
-
-impl<'a> AckRef<'a> {
-  /// Create a new ack reference with the given sequence number and payload
-  #[inline]
-  pub const fn new(sequence_number: u32, payload: &'a [u8]) -> Self {
-    Self {
-      sequence_number,
-      payload,
-    }
+  /// Peek the pending entry for `seq` WITHOUT removing it. Used by
+  /// `handle_ack` to read the entry kind and validate the Ack's source
+  /// address before consuming the slot — a spoofed Ack for a guessed seq
+  /// must not be able to evict the entry the genuine responder still
+  /// needs. Distinct from [`handle_nack`](Self::handle_nack)
+  /// only in intent/name.
+  pub fn get(&self, seq: u32) -> Option<&AckEntry<A>> {
+    self.pending.get(&seq)
   }
 
-  /// Returns the sequence number of the ack
-  #[inline]
-  pub const fn sequence_number(&self) -> u32 {
-    self.sequence_number
+  /// Remove the entry for exactly `seq`, if present. Targeted cleanup for
+  /// callers that know which outstanding record to drop (an expiring
+  /// indirect-forward, a terminating probe) and must NOT disturb other
+  /// still-registered entries. Unlike [`poll_expired`](Self::poll_expired),
+  /// which pops the globally-oldest expired entry, this only touches `seq`.
+  pub fn remove(&mut self, seq: u32) -> Option<AckEntry<A>> {
+    self.pending.remove(&seq)
   }
 
-  /// Returns the payload of the ack
-  #[inline]
-  pub const fn payload(&self) -> &'a [u8] {
-    self.payload
-  }
-}
+  /// Pop one entry whose deadline has passed (relative to `now`).
+  /// Repeated calls drain all expired entries. Returns `None` once none remain.
+  pub fn poll_expired(&mut self, now: Instant) -> Option<AckResolution<A>> {
+    // Find the smallest-deadline expired entry. O(n) per call; acceptable
+    // since the registry is typically small (bounded by indirect_checks +
+    // a handful of in-flight pings). Switch to a heap if profiling demands.
+    let seq = self
+      .pending
+      .iter()
+      .filter(|(_, e)| e.deadline <= now)
+      .min_by_key(|(_, e)| e.deadline)
+      .map(|(s, _)| *s)?;
 
-impl<'a> DataRef<'a, Ack> for AckRef<'a> {
-  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut sequence_number = None;
-    let mut payload = None;
-
-    while offset < src.len() {
-      // Parse the tag and wire type
-      match src[offset] {
-        Ack::SEQUENCE_NUMBER_BYTE => {
-          if sequence_number.is_some() {
-            return Err(DecodeError::duplicate_field(
-              "Ack",
-              "sequence_number",
-              Ack::SEQUENCE_NUMBER_TAG,
-            ));
-          }
-          offset += 1;
-          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
-          offset += bytes_read;
-          sequence_number = Some(value);
-        }
-        Ack::PAYLOAD_BYTE => {
-          if payload.is_some() {
-            return Err(DecodeError::duplicate_field(
-              "Ack",
-              "payload",
-              Ack::PAYLOAD_TAG,
-            ));
-          }
-          offset += 1;
-          let (readed, data) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
-          offset += readed;
-          payload = Some(data);
-        }
-        _ => offset += skip("Ack", &src[offset..])?,
-      }
-    }
-
-    Ok((
-      offset,
-      AckRef {
-        sequence_number: sequence_number.unwrap_or(0),
-        payload: payload.unwrap_or_default(),
-      },
-    ))
-  }
-}
-
-/// Nack response is sent for an indirect ping when the pinger doesn't hear from
-/// the ping-ee within the configured timeout. This lets the original node know
-/// that the indirect ping attempt happened but didn't succeed.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
-#[repr(transparent)]
-pub struct Nack {
-  #[viewit(
-    getter(const, attrs(doc = "Returns the sequence number of the nack")),
-    setter(
-      const,
-      attrs(doc = "Sets the sequence number of the nack (Builder pattern)")
-    )
-  )]
-  sequence_number: u32,
-}
-
-impl Nack {
-  const SEQUENCE_NUMBER_TAG: u8 = 1;
-  const SEQUENCE_NUMBER_BYTE: u8 = merge(WireType::Varint, Self::SEQUENCE_NUMBER_TAG);
-
-  /// Create a new nack response with the given sequence number.
-  #[inline]
-  pub const fn new(sequence_number: u32) -> Self {
-    Self { sequence_number }
+    let entry = self.pending.remove(&seq).expect("just found");
+    Some(AckResolution {
+      seq,
+      entry,
+      payload: None,
+      received_at: None,
+    })
   }
 
-  /// Sets the sequence number of the nack response
-  #[inline]
-  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
-    self.sequence_number = sequence_number;
-    self
-  }
-}
-
-impl<'a> DataRef<'a, Self> for Nack {
-  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut sequence_number = None;
-    let mut offset = 0;
-    while offset < src.len() {
-      match src[offset] {
-        Self::SEQUENCE_NUMBER_BYTE => {
-          if sequence_number.is_some() {
-            return Err(DecodeError::duplicate_field(
-              "Nack",
-              "sequence_number",
-              Self::SEQUENCE_NUMBER_TAG,
-            ));
-          }
-          offset += 1;
-
-          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
-          offset += bytes_read;
-          sequence_number = Some(value);
-        }
-        _ => offset += skip("Nack", &src[offset..])?,
-      }
-    }
-
-    Ok((
-      offset,
-      Self {
-        sequence_number: sequence_number.unwrap_or(0),
-      },
-    ))
-  }
-}
-
-impl Data for Nack {
-  type Ref<'a> = Self;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(val)
-  }
-
-  fn encoded_len(&self) -> usize {
-    1 + self.sequence_number.encoded_len()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let mut offset = 0;
-    if buf.is_empty() {
-      return Err(EncodeError::insufficient_buffer(self.encoded_len(), 0));
-    }
-    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
-    offset += 1;
-    offset += self.sequence_number.encode(&mut buf[offset..])?;
-    #[cfg(debug_assertions)]
-    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
-    Ok(offset)
+  /// Earliest pending deadline, or `None` if the registry is empty.
+  /// Used to inform `Endpoint::poll_timeout()`.
+  pub fn next_deadline(&self) -> Option<Instant> {
+    self.pending.values().map(|e| e.deadline).min()
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use arbitrary::{Arbitrary, Unstructured};
+  use core::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+  };
+
+  fn addr(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+  }
+
+  fn entry(deadline: Instant, kind: AckKind<SocketAddr>) -> AckEntry<SocketAddr> {
+    AckEntry::new(deadline - Duration::from_millis(50), deadline, kind)
+  }
 
   #[test]
-  fn test_access() {
-    let mut data = vec![0; 1024];
-    rand::fill(&mut data[..]);
-    let mut data = Unstructured::new(&data);
-    let mut ack = Ack::arbitrary(&mut data).unwrap();
-    ack.set_payload(Bytes::from_static(b"hello world"));
-    ack.set_sequence_number(100);
-    assert_eq!(ack.sequence_number(), 100);
-    assert_eq!(ack.payload(), &Bytes::from_static(b"hello world"));
+  fn empty_registry() {
+    let r: AckRegistry<SocketAddr> = AckRegistry::new();
+    assert_eq!(r.len(), 0);
+    assert!(r.is_empty());
+    assert!(r.next_deadline().is_none());
+  }
 
-    let mut nack = Nack::arbitrary(&mut data).unwrap();
-    nack.set_sequence_number(100);
-    assert_eq!(nack.sequence_number(), 100);
+  #[test]
+  fn register_then_handle_ack_returns_and_removes() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(500);
+    r.register(7, entry(deadline, AckKind::Probe));
+    assert_eq!(r.len(), 1);
+
+    let payload = Bytes::from_static(b"pong");
+    let resolution = r.handle_ack(7, payload.clone(), now).expect("ack found");
+    assert_eq!(resolution.seq(), 7);
+    assert_eq!(resolution.payload(), Some(payload.as_ref()));
+    assert!(matches!(resolution.entry_ref().kind_ref(), AckKind::Probe));
+    assert_eq!(r.len(), 0);
+  }
+
+  #[test]
+  fn handle_ack_for_unknown_seq_returns_none() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    assert!(r.handle_ack(7, Bytes::new(), Instant::now()).is_none());
+  }
+
+  #[test]
+  fn handle_nack_does_not_remove() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(500);
+    r.register(7, entry(deadline, AckKind::Probe));
+    let e = r.handle_nack(7);
+    assert!(e.is_some());
+    assert_eq!(r.len(), 1, "nack should not remove the entry");
+  }
+
+  #[test]
+  fn poll_expired_returns_none_before_deadline() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(7, entry(now + Duration::from_secs(1), AckKind::Probe));
+    assert!(r.poll_expired(now).is_none());
+    assert_eq!(r.len(), 1);
+  }
+
+  #[test]
+  fn poll_expired_pops_oldest_first() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(1, entry(now - Duration::from_millis(100), AckKind::Probe));
+    r.register(2, entry(now - Duration::from_millis(200), AckKind::Probe));
+    r.register(3, entry(now + Duration::from_secs(10), AckKind::Probe));
+
+    let first = r.poll_expired(now).expect("entry 2 should expire first");
+    assert_eq!(first.seq(), 2);
+    let second = r.poll_expired(now).expect("entry 1 should expire next");
+    assert_eq!(second.seq(), 1);
+    assert!(r.poll_expired(now).is_none(), "entry 3 not yet expired");
+    assert_eq!(r.len(), 1);
+  }
+
+  /// `remove(seq)` is targeted — it must not disturb other
+  /// entries the way `poll_expired` (global oldest) would. Models the
+  /// `fire_expired_forwards` case: an older, still-registered direct-probe
+  /// entry must survive when a newer indirect-forward entry is cleaned up.
+  #[test]
+  fn remove_is_targeted_not_oldest() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    // Older probe entry (intentionally left registered past its deadline so
+    // a relayed Ack can still match) + a newer forward entry that expired.
+    r.register(1, entry(now - Duration::from_millis(200), AckKind::Probe));
+    r.register(
+      2,
+      entry(
+        now - Duration::from_millis(50),
+        AckKind::Forward(ForwardAck { reply_to: addr(9) }),
+      ),
+    );
+
+    // Targeted removal of the forward must NOT evict the older probe
+    // (poll_expired would have popped seq 1, the global oldest).
+    let removed = r.remove(2).expect("forward entry removed");
+    assert!(matches!(removed.kind_ref(), AckKind::Forward(_)));
+    assert_eq!(r.len(), 1);
+    assert!(r.handle_nack(1).is_some(), "probe entry must survive");
+    assert!(r.remove(999).is_none(), "removing an absent seq is a no-op");
+  }
+
+  #[test]
+  fn next_deadline_returns_minimum() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(1, entry(now + Duration::from_secs(5), AckKind::Probe));
+    r.register(2, entry(now + Duration::from_secs(2), AckKind::Probe));
+    r.register(3, entry(now + Duration::from_secs(10), AckKind::Probe));
+    assert_eq!(r.next_deadline(), Some(now + Duration::from_secs(2)));
+  }
+
+  #[test]
+  fn forward_kind_carries_reply_addr() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    let reply = addr(7000);
+    r.register(
+      7,
+      entry(
+        now + Duration::from_millis(500),
+        AckKind::Forward(ForwardAck { reply_to: reply }),
+      ),
+    );
+
+    let resolution = r.handle_ack(7, Bytes::new(), now).expect("ack");
+    match resolution.into_entry().into_kind() {
+      AckKind::Forward(ForwardAck { reply_to }) => assert_eq!(reply_to, reply),
+      _ => panic!("expected Forward kind"),
+    }
   }
 }

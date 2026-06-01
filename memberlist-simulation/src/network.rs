@@ -10,7 +10,7 @@ use std::{
   time::Duration,
 };
 
-use memberlist_machine::{
+use memberlist_proto::{
   Endpoint, EndpointConfig, Event, Instant, Stream, StreamCommand, StreamError, Transmit,
 };
 use smol_str::SmolStr;
@@ -37,7 +37,7 @@ pub(crate) struct PendingDatagram {
   /// datagram, so a one-shot drop drops the whole compound atomically —
   /// exactly what a real UDP/QUIC compound datagram does (a real driver
   /// `encode_outgoing_compound`s into ONE `send_to`).
-  pub(crate) messages: Vec<memberlist_wire::typed::Message<SmolStr, SocketAddr>>,
+  pub(crate) messages: Vec<memberlist_proto::typed::Message<SmolStr, SocketAddr>>,
 }
 
 /// A virtual in-progress stream exchange between two endpoints.
@@ -91,7 +91,7 @@ impl Network {
     &mut self,
     from: SocketAddr,
     to: SocketAddr,
-    message: memberlist_wire::typed::Message<SmolStr, SocketAddr>,
+    message: memberlist_proto::typed::Message<SmolStr, SocketAddr>,
     deliver_at: Instant,
   ) {
     self.enqueue_datagram(from, to, vec![message], deliver_at);
@@ -111,7 +111,7 @@ impl Network {
     &mut self,
     from: SocketAddr,
     to: SocketAddr,
-    messages: Vec<memberlist_wire::typed::Message<SmolStr, SocketAddr>>,
+    messages: Vec<memberlist_proto::typed::Message<SmolStr, SocketAddr>>,
     deliver_at: Instant,
   ) {
     if messages.is_empty() {
@@ -207,7 +207,7 @@ impl Network {
       // holding a mutable borrow on self.endpoints while mutating self.queue.
       let mut pending: Vec<(
         SocketAddr,
-        Vec<memberlist_wire::typed::Message<SmolStr, SocketAddr>>,
+        Vec<memberlist_proto::typed::Message<SmolStr, SocketAddr>>,
       )> = Vec::new();
       let ep = self.endpoints.get_mut(&addr).unwrap();
       while let Some(tx) = ep.poll_transmit() {
@@ -444,11 +444,10 @@ fn apply_stream_command(
 fn dispatch_message(
   ep: &mut Endpoint<SmolStr, SocketAddr>,
   from: SocketAddr,
-  msg: memberlist_wire::typed::Message<SmolStr, SocketAddr>,
+  msg: memberlist_proto::typed::Message<SmolStr, SocketAddr>,
   now: Instant,
 ) {
-  use memberlist_machine::Reliability;
-  use memberlist_wire::typed::Message;
+  use memberlist_proto::{Reliability, typed::Message};
   match msg {
     Message::Alive(a) => ep.handle_alive(from, a, now),
     Message::Suspect(s) => ep.handle_suspect(from, s, now),
@@ -472,8 +471,10 @@ fn dispatch_message(
 mod tests {
   use super::*;
   use crate::clock::Clock;
-  use memberlist_machine::EndpointConfig;
-  use memberlist_wire::typed::{Message, Node, Ping};
+  use memberlist_proto::{
+    EndpointConfig,
+    typed::{Message, Node, Ping},
+  };
   use smol_str::SmolStr;
   use std::time::Duration;
 

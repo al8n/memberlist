@@ -53,8 +53,8 @@
 //! `tests/suspect_dead.rs`), and the existing non-tls suite is byte-unchanged
 //! and still green under the parity gate `cargo test -p memberlist-simulation`.
 
+use memberlist_proto::typed::State;
 use memberlist_simulation::tls_net::TlsCluster;
-use memberlist_wire::typed::State;
 use smol_str::SmolStr;
 use std::time::Duration;
 
@@ -475,7 +475,7 @@ fn parity_suspect_transitions_to_dead_after_timeout() {
 
 #[test]
 fn compressed_two_node_join_over_tls_reaches_alive_both_sides() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9701".parse().unwrap();
   let b = "127.0.0.1:9702".parse().unwrap();
   let mut c = TlsCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
@@ -497,7 +497,7 @@ fn compressed_two_node_join_over_tls_reaches_alive_both_sides() {
 
 #[test]
 fn compressed_join_over_tls_matches_uncompressed_membership_outcome() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9711".parse().unwrap();
   let b = "127.0.0.1:9712".parse().unwrap();
   let mut plain = TlsCluster::two_node_join(a, b);
@@ -526,7 +526,7 @@ fn compressed_join_over_tls_matches_uncompressed_membership_outcome() {
 
 #[test]
 fn compressed_large_state_push_pull_completes_under_tcp_backpressure() {
-  use memberlist_wire::CompressAlgorithm;
+  use memberlist_proto::CompressAlgorithm;
   let a = "127.0.0.1:9721".parse().unwrap();
   let b = "127.0.0.1:9722".parse().unwrap();
   // a's push snapshot is pre-loaded with 200 extra members and the virtual TCP
@@ -560,10 +560,10 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // sequence does not consume the full decompressed payload is treated the same
   // as a datagram with a corrupt compression wrapper (i.e. dropped with no
   // partial application of the prefix frames that did decode cleanly).
-  use memberlist_simulation::{Alive, Message, Node};
-  use memberlist_wire::{
+  use memberlist_proto::{
     CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
   };
+  use memberlist_simulation::{Alive, Message, Node};
 
   let a: std::net::SocketAddr = "127.0.0.1:9731".parse().unwrap();
   let b: std::net::SocketAddr = "127.0.0.1:9732".parse().unwrap();
@@ -621,7 +621,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_tls_reaches_alive_both_sides() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9921".parse().unwrap();
   let b = "127.0.0.1:9922".parse().unwrap();
   let mut c = TlsCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x55; 32]));
@@ -644,7 +644,7 @@ fn encrypted_two_node_join_over_tls_reaches_alive_both_sides() {
 #[cfg(feature = "__sim-encryption-aes-gcm")]
 #[test]
 fn encrypted_join_over_tls_matches_unencrypted_membership_outcome() {
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9931".parse().unwrap();
   let b = "127.0.0.1:9932".parse().unwrap();
 
@@ -682,7 +682,7 @@ fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
   // encryption off, so the plaintext units the bridge writes never carry an
   // `Encrypted` wrapper. On the wire those units become TLS records (record
   // types `0x14..=0x17`), also never `ENCRYPTED_TAG`.
-  use memberlist_wire::SecretKey;
+  use memberlist_proto::SecretKey;
   let a = "127.0.0.1:9941".parse().unwrap();
   let b = "127.0.0.1:9942".parse().unwrap();
   let mut c = TlsCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x77; 32]));
@@ -699,7 +699,7 @@ fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
   for chunk in observed {
     assert_ne!(
       chunk.first().copied(),
-      Some(memberlist_wire::ENCRYPTED_TAG),
+      Some(memberlist_proto::ENCRYPTED_TAG),
       "TLS reliable wire bytes must NOT carry an Encrypted wrapper"
     );
   }
@@ -710,7 +710,7 @@ fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
 #[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_tls_matches_unencrypted_uncompressed_membership_outcome() {
-  use memberlist_wire::{CompressAlgorithm, SecretKey};
+  use memberlist_proto::{CompressAlgorithm, SecretKey};
   let a = "127.0.0.1:9991".parse().unwrap();
   let b = "127.0.0.1:9992".parse().unwrap();
   let mut plain = TlsCluster::two_node_join(a, b);

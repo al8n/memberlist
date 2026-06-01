@@ -25,7 +25,7 @@ pub use void::VoidDelegate;
 
 // Admission predicates are the machine's Sans-I/O traits — re-exported so
 // compio users name them from one place when supplying them to `Options`.
-pub use memberlist_machine::{AliveDelegate, MergeDelegate};
+pub use memberlist_proto::{AliveDelegate, MergeDelegate};
 
 /// compio's per-driver observation hook surface (NOT admission — that's
 /// the machine's `AliveDelegate`/`MergeDelegate` via `Options`).
@@ -52,7 +52,7 @@ pub trait Delegate:
 pub(crate) struct BoxedAlive<I, A>(pub(crate) Box<dyn AliveDelegate<I, A>>);
 
 impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
-  fn notify_alive(&self, peer: &memberlist_wire::typed::NodeState<I, A>) -> bool {
+  fn notify_alive(&self, peer: &memberlist_proto::typed::NodeState<I, A>) -> bool {
     self.0.notify_alive(peer)
   }
 }
@@ -62,7 +62,7 @@ impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
 pub(crate) struct BoxedMerge<I, A>(pub(crate) Box<dyn MergeDelegate<I, A>>);
 
 impl<I: 'static, A: 'static> MergeDelegate<I, A> for BoxedMerge<I, A> {
-  fn notify_merge(&self, peers: &[memberlist_wire::typed::NodeState<I, A>]) -> bool {
+  fn notify_merge(&self, peers: &[memberlist_proto::typed::NodeState<I, A>]) -> bool {
     self.0.notify_merge(peers)
   }
 }

@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
-use memberlist_machine::{
+use memberlist_proto::{
   TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
@@ -182,9 +182,9 @@ pub struct TlsTransport<I = SmolStr, A = HostAddr<SmolStr>> {
 
 impl<I, A> Transport for TlsTransport<I, A>
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -343,7 +343,7 @@ where
 mod transport_tests {
   use std::{net::SocketAddr, sync::Arc};
 
-  use memberlist_machine::TlsOptions;
+  use memberlist_proto::TlsOptions;
 
   use super::*;
   use crate::{FirstAddrResolver, MaybeResolved, OsResolver};

@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
-use memberlist_machine::{
+use memberlist_proto::{
   RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
@@ -145,9 +145,9 @@ pub struct TcpTransport<I = SmolStr, A = HostAddr<SmolStr>> {
 
 impl<I, A> Transport for TcpTransport<I, A>
 where
-  I: memberlist_wire::Id
-    + memberlist_wire::Data
-    + memberlist_wire::CheapClone
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send

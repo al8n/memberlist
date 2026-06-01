@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use memberlist_wire::typed::{Alive, Node, Suspect};
+use memberlist_proto::typed::{Alive, Node, Suspect};
 use smol_str::SmolStr;
 
 use crate::Cluster;
