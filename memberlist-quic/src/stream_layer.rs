@@ -1,4 +1,4 @@
-use std::{future::Future, io, net::SocketAddr};
+use std::{io, net::SocketAddr};
 
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
@@ -14,9 +14,6 @@ pub trait QuicStream:
 {
   /// The send stream type.
   type SendStream: memberlist_core::proto::ProtoWriter;
-
-  /// Read a packet from the the stream.
-  fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Bytes>> + Send;
 }
 
 /// A trait for QUIC stream layers.

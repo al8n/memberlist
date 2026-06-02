@@ -230,10 +230,6 @@ mod unit_tests {
 
   impl crate::QuicStream for NoopStream {
     type SendStream = futures::io::Cursor<Vec<u8>>;
-
-    async fn read_packet(&mut self) -> io::Result<Bytes> {
-      Ok(Bytes::new())
-    }
   }
 
   impl crate::QuicConnection for NoopConn {
@@ -438,14 +434,12 @@ mod unit_tests {
       assert_eq!(*opts.max_concurrent_stream_limit(), 256);
       assert_eq!(*opts.max_stream_data(), 10_000_000);
       assert_eq!(*opts.max_connection_data(), 15_000_000);
-      assert_eq!(*opts.max_packet_size(), 10_000_000);
 
       let layer = TestLayer::new(
         opts
           .clone()
           .with_max_stream_data(64)
-          .with_max_connection_data(32)
-          .with_max_packet_size(128),
+          .with_max_connection_data(32),
       )
       .await
       .unwrap();
@@ -622,15 +616,17 @@ mod unit_tests {
       );
       writer.close().await.unwrap();
 
-      let (from, mut inbound) = TokioRuntime::timeout(Duration::from_secs(2), t2.stream().recv())
+      let (from, inbound) = TokioRuntime::timeout(Duration::from_secs(2), t2.stream().recv())
         .await
         .unwrap()
         .unwrap();
       assert_eq!(from, *t1.advertise_address());
-      assert_eq!(
-        inbound.read_packet().await.unwrap(),
-        Bytes::from_static(b"stream-data")
-      );
+
+      let (mut reader, _) = inbound.split();
+      use futures::io::AsyncReadExt;
+      let mut buf = Vec::new();
+      reader.read_to_end(&mut buf).await.unwrap();
+      assert_eq!(&buf, b"stream-data");
 
       let mut outbound = t1.open(t2.advertise_address(), deadline).await.unwrap();
       outbound.write_all(b"abcdef").await.unwrap();
@@ -692,7 +688,7 @@ mod unit_tests {
       let t1 = transport("cleaner-1").await;
       let t2 = transport("cleaner-2").await;
       let addr = *t2.advertise_address();
-      let conn = t1.fetch_connection(addr).await.unwrap();
+      let conn = t1.fetch_connection(addr, None).await.unwrap();
       assert_eq!(t1.connection_pool.len(), 1);
 
       conn.close().await.unwrap();
@@ -775,12 +771,14 @@ mod unit_tests {
       client_stream.flush().await.unwrap();
       client_stream.close().await.unwrap();
 
-      let (mut server_stream, stream_addr) = server_conn.accept_bi().await.unwrap();
+      let (server_stream, stream_addr) = server_conn.accept_bi().await.unwrap();
       assert_eq!(stream_addr, addr1);
-      assert_eq!(
-        server_stream.read_packet().await.unwrap(),
-        Bytes::from_static(b"direct-stream")
-      );
+
+      let (mut reader, _) = server_stream.split();
+      use futures::io::AsyncReadExt;
+      let mut buf = Vec::new();
+      reader.read_to_end(&mut buf).await.unwrap();
+      assert_eq!(&buf, b"direct-stream");
 
       client_conn.close().await.unwrap();
       server_conn.close().await.unwrap();
