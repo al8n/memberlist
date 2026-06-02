@@ -1,0 +1,69 @@
+[package]
+name = "memberlist-embassy"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Async no_std memberlist driver over the embassy-net network stack."
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["std"]
+std = ["memberlist-proto/std", "memberlist-embedded/std", "bytes/std"]
+alloc = ["memberlist-proto/alloc", "memberlist-embedded/alloc"]
+
+# Gossip/reliable-plane compression backends. Each pass-through enables the
+# matching machine backend so the driver's `TransformOptions` can carry a
+# `CompressionOptions` for that algorithm; without one the algorithm's
+# `compress_gossip` falls back to plaintext and the reliable-plane bridge
+# cannot pack. Each also pulls a base tier so the feature is self-contained
+# (enabling it alone is a valid build — `cargo hack --each-feature` does so):
+# lz4 is no_std+alloc, so it floors on `alloc`; snappy/zstd/brotli are std-only
+# (mirroring the machine, so the tier is never silently under-selected on a
+# no_std build), so they floor on `std`.
+compression-lz4 = ["alloc", "memberlist-embedded/compression-lz4"]
+compression-snappy = ["std", "memberlist-embedded/compression-snappy"]
+compression-zstd = ["std", "memberlist-embedded/compression-zstd"]
+compression-brotli = ["std", "memberlist-embedded/compression-brotli"]
+
+# Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
+# matching machine backend so a `TransformOptions` carrying a `Keyring` for that
+# cipher can actually encrypt; without the backend `encrypt_gossip` returns
+# `EncryptionError::UnsupportedAlgorithm`. Both AEAD backends are no_std+alloc,
+# so each floors on `alloc` to stay a valid standalone build.
+encryption-aes-gcm = ["alloc", "memberlist-embedded/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["alloc", "memberlist-embedded/encryption-chacha20-poly1305"]
+
+[dependencies]
+memberlist-proto = { workspace = true, default-features = false, features = ["tcp"] }
+memberlist-embedded = { workspace = true, default-features = false }
+embassy-net = { workspace = true, features = [
+  "udp",
+  "tcp",
+  "proto-ipv4",
+  "proto-ipv6",
+  "medium-ethernet",
+] }
+embassy-time = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-futures = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+# A time driver so `embassy_time::Instant::now()` works in the unit tests (the
+# production build leaves the driver to the embedded app). `std` is test-only;
+# `generic-queue-8` is the self-contained timer queue.
+embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }
+# `block_on` to drive any async harness inline in tests.
+futures = { workspace = true, features = ["executor"] }
+# A concrete node-id type for the loopback tests.
+smol_str = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

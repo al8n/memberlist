@@ -1,0 +1,45 @@
+[package]
+name = "memberlist-embedded"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Transport-agnostic no_std driving core shared by the embedded memberlist drivers."
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["std"]
+std = ["memberlist-proto/std"]
+alloc = ["memberlist-proto/alloc"]
+
+# Gossip/reliable-plane compression backends. Each pass-through enables the
+# matching machine backend so a driver's `TransformOptions` can carry a
+# `CompressionOptions` for that algorithm; without one the algorithm's
+# `compress_gossip` falls back to plaintext and the reliable-plane bridge
+# cannot pack. lz4 is no_std+alloc; snappy/zstd/brotli are std-only (mirroring
+# the machine, so the tier is never silently under-selected on a no_std build).
+compression-lz4 = ["memberlist-proto/compression-lz4"]
+compression-snappy = ["memberlist-proto/compression-snappy"]
+compression-zstd = ["memberlist-proto/compression-zstd"]
+compression-brotli = ["memberlist-proto/compression-brotli"]
+
+# Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
+# matching machine backend so a `TransformOptions` carrying a `Keyring` for that
+# cipher can actually encrypt; without the backend `encrypt_gossip` returns
+# `EncryptionError::UnsupportedAlgorithm` (surfaced at construction by the
+# encryption-config probe, so it is never a silent runtime gossip drop). Both
+# AEAD backends are no_std+alloc.
+encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+
+[dependencies]
+memberlist-proto = { workspace = true, default-features = false, features = ["tcp"] }
+getrandom = { workspace = true }
+bytes = { workspace = true }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }

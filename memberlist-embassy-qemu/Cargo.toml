@@ -1,0 +1,79 @@
+[package]
+name = "memberlist-embassy-qemu"
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+description = "Bare-metal QEMU execution proof: two memberlist-embassy nodes joining on an emulated Cortex-M."
+
+[dependencies]
+# memberlist-embassy driver, built no_std (+ alloc) like a real firmware would.
+memberlist-embassy = { path = "../memberlist-embassy", default-features = false, features = [
+  "alloc",
+] }
+# Re-exported through the driver, but named directly here for socket buffers and
+# the in-memory paired device.
+embassy-net = { version = "0.9", default-features = false, features = [
+  "udp",
+  "tcp",
+  "proto-ipv4",
+  "proto-ipv6",
+  "medium-ethernet",
+] }
+embassy-time = { version = "0.5", default-features = false, features = [
+  # 1 MHz timebase: `now()` is reported in microseconds. The SysTick handler
+  # supplies the actual wake granularity (coarser); the queue handles waker
+  # storage.
+  "tick-hz-1_000_000",
+  # 8-slot software timer queue. With this feature embassy-time does NOT provide
+  # the `schedule_wake` symbol itself, so this crate's SysTick driver supplies
+  # the full `embassy_time_driver::Driver` (now + schedule_wake) backed by it.
+  "generic-queue-8",
+] }
+embassy-time-driver = { version = "0.2", default-features = false }
+# The 8-slot software timer queue the SysTick driver stores wakers in. embassy-net
+# pulls it transitively (via embassy-time's `generic-queue-8`), but the driver
+# names `Queue` directly, so it is a direct dependency here with the matching
+# capacity feature.
+embassy-time-queue-utils = { version = "0.3", default-features = false, features = [
+  "generic-queue-8",
+] }
+embassy-executor = { version = "0.9", default-features = false, features = [
+  "arch-cortex-m",
+  "executor-thread",
+] }
+embassy-sync = { version = "0.8", default-features = false }
+embassy-futures = { version = "0.1", default-features = false }
+
+# Cortex-M runtime: reset handler, vector table, the `#[entry]` macro, and the
+# `link.x` linker script that consumes `memory.x`.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+# Critical sections on a single-core M-profile core; the SysTick driver guards
+# its queue with `critical_section::Mutex`.
+critical-section = "1"
+# A global allocator over a static heap, for the driver's `alloc` use.
+embedded-alloc = "0.6"
+# ARM semihosting: stdout writes and `process::exit` (the qemu exit code), plus
+# a `panic_handler` that prints the message over semihosting and exits non-zero.
+semihosting = { version = "0.1", features = ["stdio", "panic-handler"] }
+# `&'static mut` homes for the executor and the per-node buffer bundles without a
+# hand-rolled `static mut` for each.
+static_cell = "2"
+
+# A fixed-seed `getrandom` custom backend so the gossip RNG has entropy on a
+# core with no hardware RNG. Deterministic on purpose (reproducible test).
+getrandom = "0.4"
+
+# Node-id type for the two nodes.
+smol_str = { version = "0.3", default-features = false }
+bytes = { version = "1", default-features = false }
+
+[profile.dev]
+# `opt-level = 1` keeps the debug build small enough and fast enough to converge
+# within the qemu deadline while preserving panic messages.
+opt-level = 1
+
+[profile.release]
+opt-level = "s"
+lto = true
