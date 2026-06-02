@@ -91,7 +91,8 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   /// Maximum packet size in bytes. Used as an upper bound when computing
   /// the effective `max_packet_size` for the transport.
   ///
-  /// Default is `usize::MAX`.
+  /// Default is `1150`, derived from the minimum QUIC path MTU (1200 bytes)
+  /// minus QUIC overhead and the datagram frame size.
   #[viewit(
     getter(const, attrs(doc = "Get the maximum packet size in bytes.")),
     setter(attrs(doc = "Set the maximum packet size in bytes. (Builder pattern)"))
@@ -273,7 +274,16 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       stream_layer: stream_layer_opts,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
-      max_packet_size: usize::MAX,
+      // QUIC datagrams are limited by the path MTU. To avoid Quinn's local
+      // TooLarge rejection, we must account for the worst-case QUIC overhead:
+      //   - Minimum path MTU:                  1200 bytes
+      //   - QUIC header:                          1 byte
+      //   - Max Connection ID:                   20 bytes
+      //   - Max packet number:                    4 bytes
+      //   - Encryption tag (AEAE suffix):        16 bytes
+      //   - Quinn Datagram frame SIZE_BOUND:      9 bytes
+      // Net datagram payload = 1200 - (1+20+4+16) - 9 = 1150 bytes
+      max_packet_size: 1150,
       #[cfg(feature = "metrics")]
       metric_labels: None,
       packet_buffer_size: 1000,
