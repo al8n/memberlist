@@ -287,6 +287,40 @@ impl fmt::Display for InitError {
   }
 }
 
+impl InitError {
+  /// Map an [`Engine`](memberlist_embedded::Engine) construction error into the
+  /// driver's [`InitError`].
+  ///
+  /// The driver pre-validates the port, gossip MTU, close timeout, and advertise
+  /// address before building the engine, so in practice the engine fails only with
+  /// [`Endpoint`](memberlist_embedded::InitError::Endpoint) (machine init) or
+  /// [`Encryption`](memberlist_embedded::InitError::Encryption) (an unusable
+  /// keyring). The remaining variants are mapped to their driver equivalents
+  /// anyway so the conversion is total and stays correct if the driver's
+  /// pre-checks are ever reordered or relaxed.
+  pub(crate) fn from_embedded(e: memberlist_embedded::InitError) -> Self {
+    use memberlist_embedded::InitError as E;
+    match e {
+      E::NonRoutableAdvertiseAddr(addr) => InitError::NonRoutableAdvertiseAddr(addr),
+      E::AdvertisePortMismatch => InitError::AdvertisePortMismatch,
+      E::ZeroPort => InitError::ZeroPort,
+      E::ZeroCloseTimeout => InitError::ZeroCloseTimeout,
+      E::GossipMtuTooLarge(m) => InitError::GossipMtuTooLarge(GossipMtuTooLarge {
+        gossip_mtu: m.gossip_mtu,
+        ceiling: m.ceiling,
+      }),
+      E::Endpoint(inner) => InitError::Endpoint(inner),
+      E::Encryption(inner) => InitError::Encryption(inner),
+      // `memberlist_embedded::InitError` is `#[non_exhaustive]`, so a wildcard is
+      // required even though every variant it defines today is handled above. A
+      // future engine-only failure mode reaching here surfaces as a generic endpoint
+      // init failure (the sole `EndpointInitError` variant) and would warrant its own
+      // driver variant when added.
+      _ => InitError::Endpoint(EndpointInitError::Entropy),
+    }
+  }
+}
+
 impl From<EndpointInitError> for InitError {
   fn from(e: EndpointInitError) -> Self {
     InitError::Endpoint(e)

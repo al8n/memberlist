@@ -1,0 +1,74 @@
+name: embedded
+
+on:
+  push:
+    branches:
+      - refactor/sansio
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+
+jobs:
+  # Bare-metal compile gate: the `no_std` + `alloc` engine and both embedded
+  # drivers must build for a real Cortex-M target. A `no_std` lib also compiles on
+  # a `std` host, so the host jobs don't exercise the no_std path; this does.
+  # `cargo check` doesn't link, so no embedded runtime or cross-linker is needed.
+  # The gossip RNG's default entropy draw needs a backend on a bare-metal target,
+  # so the custom-backend cfg is set (the symbol itself is only required when an
+  # actual binary links — the qemu job below).
+  embedded-check:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings --cfg getrandom_backend="custom"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo check
+          -p memberlist-embedded
+          -p memberlist-smoltcp
+          -p memberlist-embassy
+          --no-default-features --features alloc
+          --target thumbv7em-none-eabihf
+
+  # Execution proof: build the `memberlist-embassy-qemu` firmware and run it under
+  # QEMU. The crate's `.cargo/config.toml` supplies the target, the linker script,
+  # the custom getrandom cfg, and a `qemu-system-arm` runner with semihosting on,
+  # so `cargo run` boots two memberlist nodes on an emulated Cortex-M4 and the
+  # firmware's `semihosting::process::exit` code becomes the job's pass/fail.
+  #
+  # No workflow `RUSTFLAGS` is set here: a `RUSTFLAGS` env var replaces (does not
+  # append to) the crate's `.cargo/config.toml` rustflags, which would drop the
+  # linker script and the getrandom cfg and break the link. The crate is excluded
+  # from the workspace, so it is built only by this `cargo run`.
+  qemu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm
+      - name: Two nodes join under QEMU
+        run: cargo run
+        working-directory: memberlist-embassy-qemu

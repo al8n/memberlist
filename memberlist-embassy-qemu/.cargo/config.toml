@@ -1,0 +1,29 @@
+# Build + run config for the bare-metal qemu execution proof.
+#
+# The default target is `thumbv7em-none-eabihf` (Cortex-M4 with hardware float),
+# matching the `mps2-an386` machine and the target the embassy driver's
+# compile-check already covers. `cargo run` here builds the ELF and launches it
+# under qemu with semihosting on, so the binary's `semihosting::process::exit`
+# code becomes qemu's process exit code — that is the pass/fail signal.
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# `-kernel <elf>` loads the image into the AN386's SSRAM1-as-flash region and
+# boots from its reset vector; `-semihosting-config target=native` routes ARM
+# semihosting calls (stdout writes and `SYS_EXIT`) to the host so the program can
+# print over semihosting and set the qemu process exit code.
+runner = "qemu-system-arm -cpu cortex-m4 -machine mps2-an386 -nographic -semihosting-config enable=on,target=native -kernel"
+rustflags = [
+  # Link against the cortex-m-rt linker script, which pulls in `memory.x`.
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+  # No on-board entropy source on this emulated core, so the gossip RNG seed is
+  # drawn from a fixed-seed custom `getrandom` backend provided in this binary
+  # (deterministic — this is a reproducible test, not a security context).
+  "--cfg", "getrandom_backend=\"custom\"",
+]
+
+[env]
+# `defmt`/`semihosting` need no extra env; declared block kept minimal.

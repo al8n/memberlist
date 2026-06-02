@@ -15,8 +15,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["std"]
-std = ["memberlist-proto/std", "smoltcp/std"]
-alloc = ["memberlist-proto/alloc", "smoltcp/alloc"]
+std = ["memberlist-proto/std", "memberlist-embedded/std", "smoltcp/std"]
+alloc = ["memberlist-proto/alloc", "memberlist-embedded/alloc", "smoltcp/alloc"]
 
 # Gossip/reliable-plane compression backends. Each pass-through enables the
 # matching machine backend so the driver's `TransformOptions` can carry a
@@ -24,10 +24,10 @@ alloc = ["memberlist-proto/alloc", "smoltcp/alloc"]
 # `compress_gossip` falls back to plaintext and the reliable-plane bridge
 # cannot pack. lz4 is no_std+alloc; snappy/zstd/brotli are std-only (mirroring
 # the machine, so the tier is never silently under-selected on a no_std build).
-compression-lz4 = ["memberlist-proto/compression-lz4"]
-compression-snappy = ["memberlist-proto/compression-snappy"]
-compression-zstd = ["memberlist-proto/compression-zstd"]
-compression-brotli = ["memberlist-proto/compression-brotli"]
+compression-lz4 = ["memberlist-proto/compression-lz4", "memberlist-embedded/compression-lz4"]
+compression-snappy = ["memberlist-proto/compression-snappy", "memberlist-embedded/compression-snappy"]
+compression-zstd = ["memberlist-proto/compression-zstd", "memberlist-embedded/compression-zstd"]
+compression-brotli = ["memberlist-proto/compression-brotli", "memberlist-embedded/compression-brotli"]
 
 # Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
 # matching machine backend so a `TransformOptions` carrying a `Keyring` for that
@@ -35,11 +35,12 @@ compression-brotli = ["memberlist-proto/compression-brotli"]
 # `EncryptionError::UnsupportedAlgorithm` (surfaced at construction by the
 # encryption-config probe, so it is never a silent runtime gossip drop). Both
 # AEAD backends are no_std+alloc.
-encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm", "memberlist-embedded/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305", "memberlist-embedded/encryption-chacha20-poly1305"]
 
 [dependencies]
 memberlist-proto = { workspace = true, default-features = false, features = ["tcp"] }
+memberlist-embedded = { workspace = true, default-features = false }
 smoltcp = { version = "0.13", default-features = false, features = ["alloc", "medium-ip", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp"] }
 getrandom = { workspace = true }
 bytes = { workspace = true }

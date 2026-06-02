@@ -51,7 +51,9 @@ pub use memberlist::Memberlist;
 // Re-export types that appear in public `Memberlist` method signatures so
 // callers do not need to depend on `memberlist-proto` directly.
 pub use memberlist_proto::{Node, PingId, StreamId, typed::NodeState};
-pub use transform::{
+// The wire transforms live in the shared `memberlist-embedded` core and are
+// re-exported here so the smoltcp public API is unchanged.
+pub use memberlist_embedded::transform::{
   CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey, TcpOptions,
   TransformOptions,
 };
@@ -59,7 +61,7 @@ pub use transform::{
 mod addr;
 mod config;
 mod error;
+mod gossip_io;
 mod interface;
 mod memberlist;
-mod reliable;
-mod transform;
+mod stream_io;
