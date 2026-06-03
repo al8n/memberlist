@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 
 /// A payload can be sent over the transport.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -69,5 +69,13 @@ impl Payload {
   /// Returns the whole payload as a slice.
   pub fn as_slice(&self) -> &[u8] {
     &self.buf
+  }
+
+  /// Consumes the payload and returns its inner buffer as a [`Bytes`].
+  ///
+  /// This is zero-copy when this is the only reference to the buffer
+  /// (which is the common case for freshly-created payloads).
+  pub fn into_bytes(self) -> Bytes {
+    self.buf.freeze()
   }
 }

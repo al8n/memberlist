@@ -1,4 +1,4 @@
-use std::{future::Future, io, net::SocketAddr};
+use std::{io, net::SocketAddr};
 
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
@@ -14,9 +14,6 @@ pub trait QuicStream:
 {
   /// The send stream type.
   type SendStream: memberlist_core::proto::ProtoWriter;
-
-  /// Read a packet from the the stream.
-  fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Bytes>> + Send;
 }
 
 /// A trait for QUIC stream layers.
@@ -99,7 +96,7 @@ pub trait QuicConnector: Send + Sync + 'static {
 
 /// A connection between local and remote peer.
 #[auto_impl::auto_impl(Box, Arc)]
-pub trait QuicConnection: Send + Sync + 'static {
+pub trait QuicConnection: Clone + Send + Sync + 'static {
   /// The bidirectional stream type.
   type Stream: QuicStream;
 
@@ -108,6 +105,12 @@ pub trait QuicConnection: Send + Sync + 'static {
 
   /// Opens a bidirectional stream to a remote peer.
   fn open_bi(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
+
+  /// Sends a datagram to the remote peer.
+  fn send_datagram(&self, data: Bytes) -> impl Future<Output = io::Result<()>> + Send;
+
+  /// Receives a datagram from the remote peer.
+  fn recv_datagram(&self) -> impl Future<Output = io::Result<Bytes>> + Send;
 
   /// Closes the connection.
   fn close(&self) -> impl Future<Output = io::Result<()>> + Send;
