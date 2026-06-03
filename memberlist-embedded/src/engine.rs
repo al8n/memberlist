@@ -20,7 +20,8 @@ use std::collections::VecDeque;
 use std::{boxed::Box, collections::VecDeque};
 
 use memberlist_proto::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, Node, PushPullKind, RawRecords, StreamId,
+  AliveDelegate, Endpoint, EndpointConfig, Instant, LabelOptions, Node, PushPullKind, RawRecords,
+  StreamId,
   event::{PingId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, NodeState, State},
@@ -128,6 +129,14 @@ where
   /// from `outbound_stream_ids` when it returned an `ExchangeCompleted`, or `None`
   /// otherwise. Valid only until the next `poll_event`.
   last_completed_send: Option<StreamId>,
+  /// Cluster label applied to the gossip codec on both encode and decode.
+  ///
+  /// When `Some`, the gossip codec stamps a label prefix onto every outbound
+  /// datagram and rejects any inbound datagram whose label does not match,
+  /// isolating this cluster's gossip plane from nodes that carry a different
+  /// label (or no label). `None` disables labeling, which is the default
+  /// behaviour for an unlabelled cluster.
+  label: Option<bytes::Bytes>,
 }
 
 impl<I, C> Engine<I, C>
@@ -284,9 +293,20 @@ where
     // re-gossiped — preventing cluster-wide propagation of an address no node
     // could send a useful packet to.
     ep.set_alive_delegate(RoutableAddrFilter);
+    // Build the reliable-plane label options from the single validated source.
+    // The label is already validated at the TransformOptions setter; `new_in`
+    // is infallible here.
+    let label_bytes = transform.label.as_deref().map(|b| b.to_vec());
+    let mut label_opts = LabelOptions::new_in(label_bytes, ());
+    if transform.skip_inbound_label_check {
+      label_opts = label_opts.skip_inbound_label_check();
+    }
+    // Retain the validated label for the gossip codec (same source, both planes
+    // share one label so they cannot diverge).
+    let label = transform.label.clone();
     let endpoint = StreamEndpoint::with_compression(
       ep,
-      transform.tcp,
+      label_opts,
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
       Box::new(|addr: &SocketAddr| *addr),
       transform.compression,
@@ -301,6 +321,7 @@ where
       pending_seeds: VecDeque::new(),
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
+      label,
     })
   }
 
@@ -765,6 +786,42 @@ where
     self.endpoint.leave(now)
   }
 
+  /// Replace the gossip + reliable-plane compression policy in place.
+  ///
+  /// The new policy takes effect for all gossip datagrams emitted after this
+  /// call and is fanned out to every live reliable bridge so long-lived
+  /// push/pull exchanges adopt it on their next outbound encode.
+  pub fn set_compression_options(&mut self, opts: memberlist_proto::CompressionOptions) {
+    self.endpoint.set_compression_options(opts);
+  }
+
+  /// Replace the gossip + reliable-plane encryption policy in place.
+  ///
+  /// Validates every key in the keyring before mutating state — an unusable key
+  /// (whose AEAD backend was not compiled into this binary) is rejected without
+  /// touching the live policy, so a node never starts dropping traffic
+  /// mid-rotation under a bad key. A valid update fans the new policy out to
+  /// every live reliable bridge immediately.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`memberlist_proto::EncryptionError`] when a key in the supplied
+  /// keyring cannot be used by this build (e.g.
+  /// `EncryptionError::UnsupportedAlgorithm`). The existing policy is
+  /// unchanged.
+  pub fn set_encryption_options(
+    &mut self,
+    opts: memberlist_proto::EncryptionOptions,
+  ) -> Result<(), memberlist_proto::EncryptionError> {
+    if let Some(keyring) = opts.keyring() {
+      for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
+        memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")?;
+      }
+    }
+    self.endpoint.set_encryption_options(opts);
+    Ok(())
+  }
+
   /// Whether this node has learned at least one peer.
   ///
   /// `num_members() > 1` means a join push/pull has synced remote state, or a peer
@@ -887,7 +944,7 @@ where
         Ok(p) => bytes::Bytes::from(p),
         Err(_) => continue,
       };
-      let opts = memberlist_proto::codec::DecodeOptions::new(None);
+      let opts = memberlist_proto::codec::DecodeOptions::new(self.label.clone());
       // Drop malformed inbound datagrams silently — bad network input must not
       // panic the node; SWIM is self-healing. (`decode_incoming` Err = label
       // mismatch / framing error; `parse_messages` Err = malformed frame.)
@@ -1981,7 +2038,7 @@ where
   /// errors and a full tx ring both silently drop the datagram — gossip is best-effort
   /// and SWIM recovers on the next round.
   fn drain_gossip_transmits<G: GossipIo>(&mut self, gossip: &mut G) {
-    let enc = memberlist_proto::codec::EncodeOptions::new(None);
+    let enc = memberlist_proto::codec::EncodeOptions::new(self.label.clone());
     while let Some(transmit) = self.endpoint.poll_memberlist_transmit() {
       let (dest, bytes) = match encode_transmit::<I>(transmit, &enc) {
         Some(pair) => pair,
@@ -2052,5 +2109,413 @@ where
       let bytes = memberlist_proto::codec::encode_outgoing_compound(&msgs, enc).ok()?;
       Some((to, bytes))
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  use core::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+  };
+
+  use memberlist_proto::{CompressionOptions, EncryptionOptions, Keyring, SecretKey};
+  use smol_str::SmolStr;
+
+  // ── Stub GossipIo: drops all sends, never delivers anything. ──────────────
+
+  struct NoGossip;
+
+  impl GossipIo for NoGossip {
+    fn recv(&mut self, _buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+      None
+    }
+
+    fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+  }
+
+  // ── Stub StreamIo: a fixed pool of never-connecting `u32` handles. ────────
+
+  struct NoStream {
+    free: std::vec::Vec<u32>,
+  }
+
+  impl NoStream {
+    fn with_pool(size: u32) -> Self {
+      Self {
+        free: (0..size).collect(),
+      }
+    }
+  }
+
+  impl StreamIo for NoStream {
+    type Conn = u32;
+
+    fn take_free(&mut self) -> Option<u32> {
+      self.free.pop()
+    }
+
+    fn give(&mut self, c: u32) {
+      self.free.push(c);
+    }
+
+    fn free_count(&self) -> usize {
+      self.free.len()
+    }
+
+    fn listen(&mut self, _c: u32, _port: u16) -> Result<(), crate::StreamIoError> {
+      Ok(())
+    }
+
+    fn accepted_peer(&self, _c: u32) -> Option<SocketAddr> {
+      None
+    }
+
+    fn connect(
+      &mut self,
+      _c: u32,
+      _remote: SocketAddr,
+      _local_port: u16,
+    ) -> Result<(), crate::StreamIoError> {
+      Err(crate::StreamIoError::Busy)
+    }
+
+    fn may_send(&self, _c: u32) -> bool {
+      false
+    }
+
+    fn may_recv(&self, _c: u32) -> bool {
+      false
+    }
+
+    fn is_open(&self, _c: u32) -> bool {
+      false
+    }
+
+    fn is_established(&self, _c: u32) -> bool {
+      false
+    }
+
+    fn recv(&mut self, _c: u32, _buf: &mut [u8]) -> Option<usize> {
+      None
+    }
+
+    fn recv_finished(&self, _c: u32) -> bool {
+      false
+    }
+
+    fn send(&mut self, _c: u32, _bytes: &[u8]) -> usize {
+      0
+    }
+
+    fn send_queue(&self, _c: u32) -> usize {
+      0
+    }
+
+    fn close(&mut self, _c: u32) {}
+
+    fn abort(&mut self, _c: u32) {}
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  fn node_addr(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port)
+  }
+
+  fn make_engine() -> Engine<SmolStr, u32> {
+    let cfg = Config::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    let ep_cfg = memberlist_proto::EndpointConfig::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now)
+      .expect("valid configuration must construct without error")
+  }
+
+  // ── Tests ─────────────────────────────────────────────────────────────────
+
+  /// `set_compression_options` is accepted and the engine remains operational
+  /// (a subsequent `pump` does not panic or error).
+  #[test]
+  fn set_compression_options_accepted_and_engine_still_pumps() {
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+
+    engine.set_compression_options(CompressionOptions::default());
+    engine.start(now);
+
+    let mut gossip = NoGossip;
+    let mut stream = NoStream::with_pool(2);
+    // `pump` must not panic after a compression-options update.
+    let _deadline = engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "single-node engine has exactly one member"
+    );
+  }
+
+  /// `set_encryption_options` with no keyring (disabled) is always accepted.
+  #[test]
+  fn set_encryption_options_disabled_is_always_ok() {
+    let mut engine = make_engine();
+    let result = engine.set_encryption_options(EncryptionOptions::default());
+    assert!(result.is_ok(), "disabling encryption must always succeed");
+  }
+
+  /// `set_encryption_options` rejects a keyring whose algorithm backend is not
+  /// compiled into this build, leaving the prior policy intact so the engine
+  /// continues to pump without disruption.
+  ///
+  /// This test runs only when `encryption-aes-gcm` is absent; with the backend
+  /// present the AES-256 key is valid and the test is logically inverted (the
+  /// round-trip smoke test below covers that path).
+  #[cfg(not(feature = "encryption-aes-gcm"))]
+  #[test]
+  fn set_encryption_options_rejects_unsupported_keyring_and_engine_still_pumps() {
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+
+    // AES-256 key whose algorithm backend (`encryption-aes-gcm`) is absent in
+    // this build; the probe inside `set_encryption_options` must reject it.
+    let bad_key = SecretKey::Aes256([0x5a; 32]);
+    let bad_opts = EncryptionOptions::new().with_keyring(Keyring::new(bad_key));
+    let err = engine
+      .set_encryption_options(bad_opts)
+      .expect_err("keyring with unsupported algorithm must be rejected");
+    assert!(
+      matches!(
+        err,
+        memberlist_proto::EncryptionError::UnsupportedAlgorithm(_)
+      ),
+      "expected UnsupportedAlgorithm, got {err:?}"
+    );
+
+    // The engine must still function under its original (no-encryption) policy.
+    engine.start(now);
+    let mut gossip = NoGossip;
+    let mut stream = NoStream::with_pool(2);
+    let _deadline = engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "engine remains functional after rejected encryption update"
+    );
+  }
+
+  /// `set_encryption_options` with a valid AES-256 keyring succeeds when the
+  /// `encryption-aes-gcm` backend is compiled in, and the engine pumps normally
+  /// afterward.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() {
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+
+    let key = SecretKey::Aes256([0x42; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    engine
+      .set_encryption_options(opts)
+      .expect("valid AES-256 keyring must be accepted when encryption-aes-gcm is compiled in");
+
+    engine.start(now);
+    let mut gossip = NoGossip;
+    let mut stream = NoStream::with_pool(2);
+    let _deadline = engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "engine remains functional after encryption update"
+    );
+  }
+
+  // ── GossipIo that queues inbound bytes and captures outbound bytes. ─────────
+
+  struct QueueGossip {
+    /// Pending inbound datagrams: each entry is `(src, bytes)`.
+    inbound: std::vec::Vec<(SocketAddr, std::vec::Vec<u8>)>,
+    /// Outbound datagrams captured from `send`.
+    outbound: std::vec::Vec<(std::vec::Vec<u8>, SocketAddr)>,
+  }
+
+  impl QueueGossip {
+    fn new() -> Self {
+      Self {
+        inbound: std::vec::Vec::new(),
+        outbound: std::vec::Vec::new(),
+      }
+    }
+
+    fn push(&mut self, src: SocketAddr, bytes: std::vec::Vec<u8>) {
+      self.inbound.push((src, bytes));
+    }
+  }
+
+  impl GossipIo for QueueGossip {
+    fn recv(&mut self, buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+      if self.inbound.is_empty() {
+        return None;
+      }
+      let (src, bytes) = self.inbound.remove(0);
+      let n = bytes.len().min(buf.len());
+      buf[..n].copy_from_slice(&bytes[..n]);
+      Some((src, n))
+    }
+
+    fn send(&mut self, bytes: &[u8], dest: SocketAddr) {
+      self.outbound.push((bytes.to_vec(), dest));
+    }
+  }
+
+  /// An engine with a cluster label must:
+  ///
+  /// - Reject gossip datagrams that carry no label (or a wrong label) — the
+  ///   `decode_incoming` label check drops them before the machine sees them, so
+  ///   no membership change occurs.
+  /// - Accept gossip datagrams that carry the matching label — the machine
+  ///   processes the Alive and the member count rises.
+  /// - Stamp the cluster label onto every outbound gossip datagram — the on-wire
+  ///   bytes decode successfully with the matching label and fail when no label
+  ///   (or the wrong label) is expected.
+  #[test]
+  fn gossip_carries_and_checks_the_configured_label() {
+    use memberlist_proto::{
+      DecodeOptions, EncodeOptions, Node, encode_outgoing,
+      typed::{Alive, Message},
+    };
+
+    let cfg = Config::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    let ep_cfg = memberlist_proto::EndpointConfig::new(SmolStr::new("alpha"), node_addr(7946))
+      .with_rng_seed(1);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let transform = TransformOptions::new()
+      .with_label(Some(b"alpha".to_vec()))
+      .expect("valid label");
+    let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now).expect("valid config");
+    engine.start(now);
+
+    // ── Ingress: unlabeled datagram must be dropped. ─────────────────────────
+    // Build a plaintext Alive for a fake peer. Incarnation > 0 passes SWIM's
+    // freshness check for a node this engine has never seen.
+    let peer_addr: SocketAddr = SocketAddr::new(
+      core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 2)),
+      7946,
+    );
+    let ghost_node = Node::new(SmolStr::new("ghost"), peer_addr);
+    let alive_msg = Alive::new(1, ghost_node.clone());
+    let unlabeled = encode_outgoing::<SmolStr, SocketAddr>(
+      &Message::Alive(alive_msg),
+      &EncodeOptions::default(), // no label
+    )
+    .expect("encode unlabeled Alive");
+
+    let src: SocketAddr = SocketAddr::new(
+      core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 3)),
+      7946,
+    );
+    let mut gossip = QueueGossip::new();
+    gossip.push(src, unlabeled.to_vec());
+    let mut stream = NoStream::with_pool(2);
+    let _ = engine.pump(now, &mut gossip, &mut stream);
+
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "unlabeled inbound gossip must be rejected — ghost must not appear"
+    );
+
+    // ── Ingress: wrong-label datagram must also be dropped. ──────────────────
+    let alive_msg2 = Alive::new(1, ghost_node.clone());
+    let beta_labeled = encode_outgoing::<SmolStr, SocketAddr>(
+      &Message::Alive(alive_msg2),
+      &EncodeOptions::new(Some(bytes::Bytes::from_static(b"beta"))),
+    )
+    .expect("encode beta-labeled Alive");
+
+    gossip.push(src, beta_labeled.to_vec());
+    let _ = engine.pump(now, &mut gossip, &mut stream);
+
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "wrong-label inbound gossip must be rejected — ghost must not appear"
+    );
+
+    // ── Ingress: correctly-labeled datagram must be accepted. ─────────────────
+    let alive_msg3 = Alive::new(1, ghost_node);
+    let alpha_labeled = encode_outgoing::<SmolStr, SocketAddr>(
+      &Message::Alive(alive_msg3),
+      &EncodeOptions::new(Some(bytes::Bytes::from_static(b"alpha"))),
+    )
+    .expect("encode alpha-labeled Alive");
+
+    gossip.push(src, alpha_labeled.to_vec());
+    let _ = engine.pump(now, &mut gossip, &mut stream);
+
+    assert_eq!(
+      engine.num_members(),
+      2,
+      "alpha-labeled inbound gossip must be accepted — ghost must appear"
+    );
+
+    // ── Egress: outbound gossip must carry the cluster label. ────────────────
+    // Advance time enough that the machine emits at least one gossip transmit.
+    // The gossip timer fires on the first tick; pump once more to drain it.
+    let later = Instant::from_origin(Duration::from_secs(86_400 + 2));
+    let _ = engine.pump(later, &mut gossip, &mut stream);
+
+    // Collect the first outbound datagram (if any).  The machine may or may
+    // not emit one on the first ticked pump; iterate until we see a send or
+    // exhaust a few more ticks.
+    let mut tries = 0u32;
+    while gossip.outbound.is_empty() && tries < 10 {
+      let t = Instant::from_origin(Duration::from_secs(86_400 + 2 + tries as u64));
+      let _ = engine.pump(t, &mut gossip, &mut stream);
+      tries += 1;
+    }
+
+    assert!(
+      !gossip.outbound.is_empty(),
+      "engine must emit at least one gossip transmit after the timer fires"
+    );
+
+    let (wire_bytes, _dest) = &gossip.outbound[0];
+    // Decoding with the matching label must succeed.
+    let ok = memberlist_proto::codec::decode_incoming(
+      bytes::Bytes::copy_from_slice(wire_bytes),
+      &DecodeOptions::new(Some(bytes::Bytes::from_static(b"alpha"))),
+    );
+    assert!(
+      ok.is_ok(),
+      "outbound gossip must be decodable with the cluster label; got {:?}",
+      ok.err()
+    );
+
+    // Decoding with no expected label must fail (labeled frame on an unlabeled
+    // receiver is rejected with DoubleLabel).
+    let no_label = memberlist_proto::codec::decode_incoming(
+      bytes::Bytes::copy_from_slice(wire_bytes),
+      &DecodeOptions::new(None),
+    );
+    assert!(
+      no_label.is_err(),
+      "outbound gossip must NOT be accepted by a no-label decoder"
+    );
+
+    // Decoding with the wrong label must fail (LabelMismatch).
+    let wrong_label = memberlist_proto::codec::decode_incoming(
+      bytes::Bytes::copy_from_slice(wire_bytes),
+      &DecodeOptions::new(Some(bytes::Bytes::from_static(b"beta"))),
+    );
+    assert!(
+      wrong_label.is_err(),
+      "outbound gossip must NOT be accepted by a wrong-label decoder"
+    );
   }
 }

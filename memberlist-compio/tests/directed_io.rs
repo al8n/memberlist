@@ -19,7 +19,7 @@ use memberlist_compio::{
   TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{
-  Node, TcpOptions,
+  Node,
   typed::{Meta, NodeState},
 };
 use smol_str::SmolStr;
@@ -29,12 +29,15 @@ fn loopback_addr(port: u16) -> SocketAddr {
 }
 
 async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
+  let ml_opts = MemberlistOptions::new()
+    .with_label(Some(b"directed-io-test".to_vec()))
+    .expect("valid label");
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(Some(b"directed-io-test".to_vec()))),
-  );
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  )
+  .with_memberlist(ml_opts);
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
     VoidDelegate::default(),
@@ -108,12 +111,15 @@ impl Delegate for RecordingDelegate {
 
 async fn make_recording_tcp(id: &str, addr: SocketAddr) -> (RecordingMemberlist, Messages) {
   let msgs: Messages = Arc::new(Mutex::new(Vec::new()));
+  let ml_opts = MemberlistOptions::new()
+    .with_label(Some(b"directed-io-test".to_vec()))
+    .expect("valid label");
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(Some(b"directed-io-test".to_vec()))),
-  );
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  )
+  .with_memberlist(ml_opts);
   let node = RecordingMemberlist::new(
     opts,
     RecordingDelegate::new(msgs.clone()),
@@ -444,14 +450,17 @@ async fn send_reliable_to_unreachable_returns_err_not_hang() {
 async fn local_state_carries_initial_meta_immediately_after_new() {
   let meta_bytes = Bytes::from_static(b"role=db,zone=eu");
   let meta = Meta::try_from(meta_bytes.clone()).expect("meta within cap");
+  let ml_opts = MemberlistOptions::new()
+    .with_label(Some(b"directed-io-test".to_vec()))
+    .expect("valid label")
+    .with_initial_meta(meta);
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("meta-node"))
       // OS-assigned port via :0.
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
-      .with_tcp_options(TcpOptions::new(Some(b"directed-io-test".to_vec()))),
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
   )
-  .with_memberlist(MemberlistOptions::new().with_initial_meta(meta));
+  .with_memberlist(ml_opts);
   let node = TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
     VoidDelegate::default(),

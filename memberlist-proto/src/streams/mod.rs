@@ -58,6 +58,8 @@
 pub(crate) mod action;
 pub(crate) mod bridge;
 pub(crate) mod conn;
+pub(crate) mod label;
+pub(crate) mod labeled;
 pub(crate) mod phase;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -65,6 +67,7 @@ pub(crate) mod transport;
 
 pub use action::{ConnectInfo, ExchangeRef, StreamAction};
 pub use conn::ExchangeId;
+pub use labeled::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 // `Intake` is part of the `StreamTransport` surface a record-layer impl
 // returns; re-exported alongside the trait though the coordinator itself
 // drives it only through the bridge.
@@ -906,7 +909,7 @@ where
   /// or left). Forwards to [`Endpoint::is_running`]. A driver consults
   /// this before calling [`Self::leave`] to distinguish a leave that
   /// actually initiates the dead-self flush (and will emit
-  /// [`Event::LeftCluster`](crate::event::Event::LeftCluster)) from an
+  /// [`Event::LeftCluster`]) from an
   /// idempotent post-leave no-op (which will not).
   #[inline]
   pub fn is_running(&self) -> bool {

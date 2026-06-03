@@ -7,7 +7,8 @@ use std::{io, net::SocketAddr};
 
 /// OS-based resolver — uses compio's `ToSocketAddrsAsync` (`getaddrinfo`).
 /// UDP-only DNS; large hostname records may be truncated. Use
-/// [`DnsResolver`] for TCP-first DNS guaranteed to fetch the full list.
+/// `DnsResolver` (feature `dns`) for TCP-first DNS guaranteed to fetch
+/// the full list.
 pub struct OsResolver;
 
 impl Resolver for OsResolver {

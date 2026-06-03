@@ -2,7 +2,10 @@
 
 use core::{cell::RefCell, net::SocketAddr};
 
-use memberlist_embedded::Engine;
+use memberlist_embedded::{
+  Engine,
+  transform::{CompressionOptions, EncryptionOptions},
+};
 use memberlist_proto::{EndpointConfig, Instant, Node, StreamId, event::PingId, typed::NodeState};
 use smoltcp::{
   iface::{Config as IfConfig, Interface, SocketHandle, SocketSet},
@@ -826,6 +829,23 @@ where
   #[inline]
   pub fn ping(&mut self, node: Node<I, SocketAddr>, now: Instant) -> PingId {
     self.engine.ping(node, now)
+  }
+
+  /// Replace the gossip+stream compression policy at runtime.
+  #[inline]
+  pub fn set_compression_options(&mut self, opts: CompressionOptions) {
+    self.engine.set_compression_options(opts);
+  }
+
+  /// Replace the gossip+stream encryption policy at runtime (key rotation). The
+  /// keyring is validated before it is applied; an unusable key is rejected
+  /// without changing the live policy.
+  #[inline]
+  pub fn set_encryption_options(
+    &mut self,
+    opts: EncryptionOptions,
+  ) -> Result<(), memberlist_proto::EncryptionError> {
+    self.engine.set_encryption_options(opts)
   }
 
   /// Enqueue a directed unreliable UDP user-data packet to `to`.

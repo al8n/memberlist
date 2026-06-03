@@ -226,6 +226,17 @@ where
     // machine default when unset) that `apply_memberlist_options` installs into
     // every `T::run`.
     crate::options::validate_initial_local_state::<T::Id, SocketAddr>(&memberlist_opts)?;
+    // Fail fast when the configured keyring references an AEAD algorithm whose
+    // backend feature is absent from this build. A keyring is constructible
+    // without the feature (only the `random_*` constructors are gated), but
+    // every subsequent gossip encrypt/decrypt would return `UnsupportedAlgorithm`
+    // — the cluster silently breaks after an apparently successful construction.
+    // Every key in the ring (primary AND secondaries) is probed so a supported
+    // primary paired with an unsupported secondary — a common key-rotation state
+    // — is also caught. Checked before any socket is bound (before
+    // `T::new`), so a misconfigured keyring fails fast with no resources held.
+    crate::options::validate_encryption_options(memberlist_opts.encryption())
+      .map_err(MemberlistError::Encryption)?;
     let transport = T::new(transport_opts, resolver, advertise_resolver)
       .await
       .map_err(|e| {
@@ -786,7 +797,7 @@ where
   /// for the full purge-and-reap protocol).
   ///
   /// On an INSECURE reliable transport (plain TCP) a policy change FAILS
-  /// every live bridge, and the machine emits a [`StreamAction::Abort`] for
+  /// every live bridge, and the machine emits a `StreamAction::Abort` for
   /// each: the driver hard-cancels the bridge through its out-of-band
   /// cancel signal, so any reliable-stream bytes encoded under the prior
   /// policy and still queued in the bridge's FIFO channel are DISCARDED,

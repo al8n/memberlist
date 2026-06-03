@@ -2976,7 +2976,7 @@ where
     }
   }
 
-  /// Route an [`EndpointEvent`](EndpointEvent) produced by a
+  /// Route an [`EndpointEvent`] produced by a
   /// [`Stream`] back into the Endpoint.
   ///
   /// - `PushPullReplyReceived`: applies the inbound merge inline (synchronous

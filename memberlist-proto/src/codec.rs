@@ -13,33 +13,19 @@ use std::{
   vec::Vec,
 };
 
-use crate::{Data, framing, message_from_any, message_to_any, typed::Message};
+use crate::{
+  Data, framing,
+  label::{
+    LABEL_OVERHEAD, LabelError, LabelOutcome, classify_header, effective_label,
+    encode_label_prefix, validate_label,
+  },
+  message_from_any, message_to_any,
+  typed::Message,
+};
+// Re-exported from the codec module so the historical `…::codec::MAX_LABEL_LEN`
+// path resolves for downstream crates; the constant itself lives in `crate::label`.
+pub use crate::label::MAX_LABEL_LEN;
 use bytes::Bytes;
-
-/// Outer label tag byte (byte-compatible with legacy memberlist-proto).
-const LABELED_TAG: u8 = 12;
-
-/// Label frame overhead: tag byte + 1-byte length.
-const LABEL_OVERHEAD: usize = 2;
-
-/// Maximum encodable label length. Faithful to the frozen
-/// `memberlist-proto` `Label::MAX_SIZE` (`u8::MAX - 2`, "label length can
-/// never be larger than 253", `proto/encoder.rs:820`): the label shares a
-/// single datagram with the 2-byte `[tag][len]` header, so 253 is the
-/// real cap, not 255.
-pub const MAX_LABEL_LEN: usize = u8::MAX as usize - 2;
-
-/// Normalize an optional label: an absent label and an empty label are the
-/// same thing — "no label" — exactly as frozen `memberlist-proto` treats
-/// it (the encoder writes a header only when `label_size > 0`; the decoder
-/// accepts unlabeled input when the expected label is empty). Returns the
-/// non-empty label bytes, or `None` for no/empty label.
-fn effective_label(label: Option<&Bytes>) -> Option<&[u8]> {
-  match label {
-    Some(l) if !l.is_empty() => Some(l.as_ref()),
-    _ => None,
-  }
-}
 
 /// Errors from the umbrella codec layer.
 #[derive(Debug, thiserror::Error)]
@@ -165,18 +151,15 @@ impl DecodeOptions {
 /// Frozen `memberlist-proto::Label` is a validated UTF-8 type; never
 /// emit a non-UTF-8 label a faithful decoder would reject.
 fn wrap_label(inner: Vec<u8>, opts: &EncodeOptions) -> Result<Bytes, CodecError> {
-  let out = if let Some(label) = effective_label(opts.label_ref()) {
+  let out = if let Some(label) = effective_label(opts.label_ref().map(|b| b.as_ref())) {
     let label_len = label.len();
-    if label_len > MAX_LABEL_LEN {
-      return Err(CodecError::LabelTooLong(label_len));
-    }
-    if core::str::from_utf8(label).is_err() {
-      return Err(CodecError::InvalidLabel("label is not valid UTF-8"));
-    }
+    validate_label(label).map_err(|e| match e {
+      LabelError::TooLong => CodecError::LabelTooLong(label_len),
+      LabelError::NotUtf8 => CodecError::InvalidLabel("label is not valid UTF-8"),
+      _ => CodecError::InvalidLabel("invalid label"),
+    })?;
     let mut buf = Vec::with_capacity(LABEL_OVERHEAD + label_len + inner.len());
-    buf.push(LABELED_TAG);
-    buf.push(label_len as u8);
-    buf.extend_from_slice(label);
+    encode_label_prefix(label, &mut buf);
     buf.extend_from_slice(&inner);
     buf
   } else {
@@ -236,50 +219,35 @@ where
 ///   expected, or [`CodecError::LabelMismatch`] when a non-empty label is
 ///   expected (missing-label strictness).
 pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecError> {
-  if raw.first() == Some(&LABELED_TAG) {
-    if raw.len() < LABEL_OVERHEAD {
-      return Err(CodecError::Truncated("label header"));
-    }
-    let label_len = raw[1] as usize;
-    if raw.len() < LABEL_OVERHEAD + label_len {
-      return Err(CodecError::Truncated("label body"));
-    }
-    let label = &raw[2..2 + label_len];
-    // Frozen `memberlist-proto::Label` is UTF-8 and <= 253 bytes; a
-    // faithful peer never emits anything else, so reject a malformed
-    // inbound label before it can be matched/accepted. A
-    // `[12][0]` empty label passes here and is handled below.
-    if label_len > MAX_LABEL_LEN {
-      return Err(CodecError::LabelTooLong(label_len));
-    }
-    if core::str::from_utf8(label).is_err() {
-      return Err(CodecError::InvalidLabel("inbound label is not valid UTF-8"));
-    }
-    match effective_label(opts.label_ref()) {
-      Some(expected) => {
-        if expected != label {
-          return Err(CodecError::LabelMismatch);
+  let expected = effective_label(opts.label_ref().map(|b| b.as_ref()));
+  // The datagram path never suppresses the inbound label check; datagrams
+  // are single-shot and carry no per-stream policy.
+  match classify_header(&raw, expected, false) {
+    LabelOutcome::Accepted(consumed) => {
+      let inner = raw.slice(consumed..);
+      if inner.is_empty() {
+        if consumed > 0 {
+          return Err(CodecError::Truncated("empty inner frame after label"));
         }
+        return Err(CodecError::Truncated("empty input"));
       }
-      // Labeled frame, but inbound label checking is disabled (no/empty
-      // local label). Frozen memberlist-proto decoder.rs returns
-      // `double_label()` here; silently stripping would weaken the cluster
-      // boundary. A `[12][0]` header also lands here and is rejected.
-      None => return Err(CodecError::DoubleLabel),
+      Ok(inner)
     }
-    let inner = raw.slice(LABEL_OVERHEAD + label_len..);
-    if inner.is_empty() {
-      return Err(CodecError::Truncated("empty inner frame after label"));
-    }
-    Ok(inner)
-  } else {
-    if effective_label(opts.label_ref()).is_some() {
-      return Err(CodecError::LabelMismatch);
-    }
-    if raw.is_empty() {
-      return Err(CodecError::Truncated("empty input"));
-    }
-    Ok(raw)
+    LabelOutcome::Incomplete => Err(CodecError::Truncated("label header")),
+    LabelOutcome::Rejected(e) => match e {
+      LabelError::TooLong => {
+        // Re-derive the declared length for the error payload.
+        let label_len = if raw.len() >= LABEL_OVERHEAD {
+          raw[1] as usize
+        } else {
+          raw.len()
+        };
+        Err(CodecError::LabelTooLong(label_len))
+      }
+      LabelError::NotUtf8 => Err(CodecError::InvalidLabel("inbound label is not valid UTF-8")),
+      LabelError::Mismatch => Err(CodecError::LabelMismatch),
+      LabelError::DoubleLabel => Err(CodecError::DoubleLabel),
+    },
   }
 }
 
@@ -361,7 +329,10 @@ mod tests {
   use smol_str::SmolStr;
 
   use super::*;
-  use crate::typed::{Ack, Message};
+  use crate::{
+    label::LABELED_TAG,
+    typed::{Ack, Message},
+  };
 
   type I = SmolStr;
   type A = SocketAddr;

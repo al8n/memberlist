@@ -256,8 +256,19 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
-    let endpoint = QuicEndpoint::new(ep, self.quic_config);
+    let endpoint = QuicEndpoint::with_compression(
+      ep,
+      self.quic_config,
+      *runtime.memberlist_options.compression(),
+    )
+    .with_encryption(runtime.memberlist_options.encryption().clone());
 
+    // Retain the cluster label for the gossip codec: outbound gossip is
+    // stamped with this label and inbound gossip is verified against it.
+    let label = runtime
+      .memberlist_options
+      .label()
+      .map(bytes::Bytes::copy_from_slice);
     crate::quic_driver::quic_driver_loop::<Self::Id, D>(
       endpoint,
       self.gossip_socket,
@@ -269,6 +280,7 @@ where
       runtime.shutdown_flag,
       runtime.driver_options,
       runtime.delegate,
+      label,
     )
     .await;
   }

@@ -4,7 +4,10 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_proto::{AliveDelegate, MergeDelegate, typed::Meta};
+use memberlist_proto::{
+  AliveDelegate, CompressionOptions, EncryptionOptions, MergeDelegate, label::validate_label,
+  typed::Meta,
+};
 
 /// SWIM-protocol-level overrides applied to the machine-layer
 /// [`EndpointConfig`](memberlist_proto::EndpointConfig) at construction.
@@ -20,6 +23,19 @@ use memberlist_proto::{AliveDelegate, MergeDelegate, typed::Meta};
 /// - `max_stream_frame_size` — the reliable-stream frame ceiling.
 /// - `initial_meta` — the local node's initial metadata payload.
 /// - `initial_local_state` — the local node's initial push/pull state snapshot.
+/// - `compression` — the initial gossip+stream compression policy (disabled by
+///   default). The machine exposes a runtime setter for the post-start case.
+/// - `encryption` — the initial gossip+stream encryption policy (disabled /
+///   no keyring by default). Callers that supply a keyring should verify it
+///   before construction; the driver returns `Error::Encryption` if the keyring
+///   cannot be activated.
+/// - `label` — cluster label applied to both the gossip and reliable planes
+///   (no label by default). Validated at the setter: must be ≤253 bytes and
+///   valid UTF-8. Feeds the reliable-plane `LabelOptions` (TCP/TLS) and the
+///   gossip codec `EncodeOptions` from a single source. QUIC clusters use the
+///   SNI hostname for isolation and do not consult this field.
+/// - `skip_inbound_label_check` — when `true`, an inbound stream that presents
+///   no label header is accepted rather than rejected. Defaults to `false`.
 #[derive(Debug, Clone, Default)]
 pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
@@ -27,6 +43,10 @@ pub struct MemberlistOptions {
   max_stream_frame_size: Option<usize>,
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
+  compression: CompressionOptions,
+  encryption: EncryptionOptions,
+  label: Option<Bytes>,
+  skip_inbound_label_check: bool,
 }
 
 impl MemberlistOptions {
@@ -71,6 +91,52 @@ impl MemberlistOptions {
     self
   }
 
+  /// Sets the initial gossip+stream compression policy.
+  #[must_use]
+  pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
+    self.compression = compression;
+    self
+  }
+
+  /// Sets the initial gossip+stream encryption policy.
+  #[must_use]
+  pub fn with_encryption(mut self, encryption: EncryptionOptions) -> Self {
+    self.encryption = encryption;
+    self
+  }
+
+  /// Sets the cluster label for the gossip and reliable planes.
+  ///
+  /// The label is validated immediately: it must be ≤253 bytes and valid
+  /// UTF-8. An empty slice normalizes to `None` (no label). Returns
+  /// `Err(Error::InvalidLabel(_))` when either constraint is violated.
+  ///
+  /// The validated label is the single source for both the reliable-plane
+  /// `LabelOptions` (plain TCP or TLS) and the gossip codec `EncodeOptions`,
+  /// so the two planes cannot diverge.
+  pub fn with_label(mut self, label: Option<Vec<u8>>) -> Result<Self, crate::error::Error> {
+    self.label = match label {
+      None => None,
+      Some(v) if v.is_empty() => None,
+      Some(v) => {
+        validate_label(&v).map_err(crate::error::Error::InvalidLabel)?;
+        Some(Bytes::from(v))
+      }
+    };
+    Ok(self)
+  }
+
+  /// Suppresses the inbound reliable-plane label check.
+  ///
+  /// When set, an inbound TCP/TLS stream that presents no label header is
+  /// accepted rather than rejected. Defaults to `false`. Faithful to
+  /// memberlist-core `Options::skip_inbound_label_check`.
+  #[must_use]
+  pub fn with_skip_inbound_label_check(mut self, skip: bool) -> Self {
+    self.skip_inbound_label_check = skip;
+    self
+  }
+
   /// The gossip-MTU override, if set.
   #[must_use]
   pub const fn gossip_mtu(&self) -> Option<usize> {
@@ -99,6 +165,85 @@ impl MemberlistOptions {
   #[must_use]
   pub fn initial_local_state(&self) -> Option<&Bytes> {
     self.initial_local_state.as_ref()
+  }
+
+  /// The initial gossip+stream compression policy.
+  #[must_use]
+  pub fn compression(&self) -> &CompressionOptions {
+    &self.compression
+  }
+
+  /// The initial gossip+stream encryption policy.
+  #[must_use]
+  pub fn encryption(&self) -> &EncryptionOptions {
+    &self.encryption
+  }
+
+  /// The cluster label, if set.
+  #[must_use]
+  pub fn label(&self) -> Option<&[u8]> {
+    self.label.as_deref()
+  }
+
+  /// Whether the inbound reliable-plane label check is suppressed.
+  #[must_use]
+  pub const fn skip_inbound_label_check(&self) -> bool {
+    self.skip_inbound_label_check
+  }
+}
+
+/// Clone-only `Default` for `MemberlistOptions`: all knobs unset, both label
+/// and skip are at their "no label / enforce check" defaults.
+#[cfg(test)]
+mod label_tests {
+  use super::*;
+  use crate::error::Error;
+
+  #[test]
+  fn with_label_validates_too_long() {
+    let long = vec![b'x'; 254]; // one over the 253-byte max
+    let result = MemberlistOptions::new().with_label(Some(long));
+    assert!(
+      matches!(result, Err(Error::InvalidLabel(_))),
+      "a label exceeding 253 bytes must be rejected"
+    );
+  }
+
+  #[test]
+  fn with_label_validates_non_utf8() {
+    let bad = vec![0xff, 0xfe];
+    let result = MemberlistOptions::new().with_label(Some(bad));
+    assert!(
+      matches!(result, Err(Error::InvalidLabel(_))),
+      "a non-UTF-8 label must be rejected"
+    );
+  }
+
+  #[test]
+  fn with_label_accepts_valid() {
+    let opts = MemberlistOptions::new()
+      .with_label(Some(b"cluster-x".to_vec()))
+      .expect("valid ASCII label must be accepted");
+    assert_eq!(opts.label(), Some(b"cluster-x".as_slice()));
+    assert!(!opts.skip_inbound_label_check());
+  }
+
+  #[test]
+  fn with_skip_inbound_label_check_round_trips() {
+    let opts = MemberlistOptions::new()
+      .with_label(Some(b"cluster-x".to_vec()))
+      .expect("valid label")
+      .with_skip_inbound_label_check(true);
+    assert_eq!(opts.label(), Some(b"cluster-x".as_slice()));
+    assert!(opts.skip_inbound_label_check());
+  }
+
+  #[test]
+  fn empty_label_normalizes_to_none() {
+    let opts = MemberlistOptions::new()
+      .with_label(Some(Vec::new()))
+      .expect("empty label is valid");
+    assert_eq!(opts.label(), None);
   }
 }
 
@@ -322,6 +467,7 @@ impl<I> Options<I> {
 
   /// Decomposes the options into their parts for the backend constructor: the
   /// SWIM options, the driver options, and the optional admission delegates.
+  #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
   #[allow(clippy::type_complexity)]
   pub(crate) fn into_parts(
     self,

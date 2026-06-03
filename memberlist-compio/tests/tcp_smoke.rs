@@ -9,10 +9,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
+  SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::TcpOptions;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -29,12 +28,13 @@ async fn make_tcp(
   addr: SocketAddr,
   label: Option<Vec<u8>>,
 ) -> Result<TcpMemberlist<SmolStr, SocketAddr>, MemberlistError> {
+  let ml_opts = MemberlistOptions::new().with_label(label)?;
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(label)),
-  );
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  )
+  .with_memberlist(ml_opts);
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
     VoidDelegate::default(),

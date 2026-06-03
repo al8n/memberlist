@@ -6,7 +6,7 @@
 //! reliable exchanges (join/anti-entropy push-pull, reliable-ping fallback)
 //! ride a per-exchange plain TCP connection with a wire-label prefix, while
 //! unreliable gossip rides a plain UDP socket. The cluster-isolation gate is
-//! the [`TcpOptions`] label (matched at the inbound stream's first read), not a
+//! the [`LabelOptions<()>`](memberlist_proto::streams::LabelOptions) cluster label (matched at the inbound stream's first read), not a
 //! TLS handshake; there is no crypto layer at all. Two queues mirror the TLS
 //! harness:
 //!
@@ -42,9 +42,9 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointConfig, Event, Instant, PushPullKind, RawRecords, TcpOptions, Transmit,
-  framing, message_from_any, message_to_any,
-  streams::{ExchangeId, StreamAction, StreamEndpoint},
+  Endpoint, EndpointConfig, Event, Instant, PushPullKind, RawRecords, Transmit, framing,
+  message_from_any, message_to_any,
+  streams::{ExchangeId, LabelOptions, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
 };
 use smol_str::SmolStr;
@@ -128,7 +128,7 @@ pub struct TcpCluster {
   /// Used by the label-mismatch scenario to install a different label on the
   /// responder so the inbound check rejects the dialer's stream.
   label_overrides: HashMap<SocketAddr, Vec<u8>>,
-  /// Hosts built unlabeled (`TcpOptions::new(None)`): no outbound label
+  /// Hosts built unlabeled (`LabelOptions::new_in(None, ())`): no outbound label
   /// prefix is queued; only required for the dialer-side
   /// response-label-rejection scenario.
   unlabeled_hosts: HashSet<SocketAddr>,
@@ -214,9 +214,9 @@ impl TcpCluster {
           .unwrap_or_else(|| DEFAULT_LABEL.to_vec()),
       )
     };
-    let mut tcp_cfg = TcpOptions::new(configured_label);
+    let mut tcp_cfg = LabelOptions::new_in(configured_label, ());
     if self.skip_inbound_label_check_hosts.contains(&addr) {
-      tcp_cfg = tcp_cfg.with_skip_inbound_label_check();
+      tcp_cfg = tcp_cfg.skip_inbound_label_check();
     }
     self.nodes.insert(
       addr,

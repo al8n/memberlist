@@ -10,6 +10,18 @@
 //! inside QUIC streams: cluster isolation comes from the operator's choice
 //! of TLS authentication policy on the supplied `ServerConfig`.
 //!
+//! This is a deliberate asymmetry with the other two reliable transports.
+//! Plain TCP (`Labeled<Passthrough>`) and TLS (`Labeled<TlsRecords>`) prepend
+//! the cluster wire-label to each reliable stream, because neither layer
+//! authenticates a peer's cluster membership on its own — there, the label is
+//! the separation marker. QUIC authenticates the peer during the
+//! per-connection TLS 1.3 handshake before any stream opens, so a second
+//! in-stream label would add nothing. When several clusters share one CA, the
+//! per-peer SNI server name (see [`SniProvider`]) is the discriminator: a peer
+//! that presents the wrong server name does not complete the handshake the
+//! local endpoint expects. QUIC's unreliable gossip path is plain UDP and
+//! carries the cluster label like every other gossip plane.
+//!
 //! Two deployment models are supported by giving the caller full control
 //! over the `quinn_proto::ServerConfig`:
 //!

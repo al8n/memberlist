@@ -20,7 +20,7 @@ use memberlist_compio::{
   Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, StreamTransportOptions,
   TcpMemberlist, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::{TcpOptions, event::Event, typed::NodeState};
+use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -35,8 +35,7 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAd
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
   );
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
@@ -1020,8 +1019,7 @@ async fn slow_observation_delegate_does_not_delay_join_completion() {
     let opts = Options::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowjoin-j"))
-        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
-        .with_tcp_options(TcpOptions::new(None)),
+        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr)),
     );
     Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
       opts,
@@ -1223,8 +1221,7 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
     let opts = Options::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowuser-b"))
-        .with_advertise_addr(MaybeResolved::Resolved(b_addr))
-        .with_tcp_options(TcpOptions::new(None)),
+        .with_advertise_addr(MaybeResolved::Resolved(b_addr)),
     );
     Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
       opts,
@@ -1557,7 +1554,6 @@ async fn zero_bridge_recv_buf_len_is_rejected() {
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-recv-buf"))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None))
       .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(0)),
   );
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -1590,7 +1586,6 @@ async fn zero_bridge_recv_buf_len_is_rejected() {
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-recv-buf"))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None))
       .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(4096)),
   );
   let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -1619,8 +1614,7 @@ async fn zero_idle_wake_interval_is_rejected() {
   let bad = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-idle-wake"))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::ZERO));
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -1651,8 +1645,7 @@ async fn zero_idle_wake_interval_is_rejected() {
   let good = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-idle-wake"))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::from_secs(30)));
   let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(

@@ -62,3 +62,7 @@ required-features = ["quic-rustls-ring"]
 [[test]]
 name = "tls_smoke"
 required-features = ["tls-rustls-ring"]
+
+[[test]]
+name = "transform"
+required-features = ["tcp"]

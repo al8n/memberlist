@@ -13,7 +13,10 @@ use alloc::{rc::Rc, vec::Vec};
 
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
-use memberlist_embedded::{Config as EngineConfig, Engine, TransformOptions};
+use memberlist_embedded::{
+  Config as EngineConfig, Engine, TransformOptions,
+  transform::{CompressionOptions, EncryptionOptions},
+};
 use memberlist_proto::{
   EndpointConfig, Instant, Node,
   event::{Event, PingId, StreamId},
@@ -597,6 +600,29 @@ where
   #[inline]
   pub fn pending_dial_count(&self) -> usize {
     self.shared.engine.borrow().pending_dial_count()
+  }
+
+  /// Replace the gossip+stream compression policy at runtime.
+  #[inline]
+  pub fn set_compression_options(&self, opts: CompressionOptions) {
+    self
+      .shared
+      .engine
+      .borrow_mut()
+      .set_compression_options(opts);
+    self.shared.wake_pump();
+  }
+
+  /// Replace the gossip+stream encryption policy at runtime (key rotation). The
+  /// keyring is validated before it is applied.
+  #[inline]
+  pub fn set_encryption_options(
+    &self,
+    opts: EncryptionOptions,
+  ) -> Result<(), memberlist_proto::EncryptionError> {
+    let r = self.shared.engine.borrow_mut().set_encryption_options(opts);
+    self.shared.wake_pump();
+    r
   }
 }
 

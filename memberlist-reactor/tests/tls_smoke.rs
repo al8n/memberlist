@@ -18,8 +18,8 @@ use std::{
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
 use memberlist_reactor::{
-  DriverOptions, Error, MaybeResolved, Memberlist, Options, SocketAddrResolver, TlsOptions,
-  VoidDelegate,
+  DriverOptions, Error, MaybeResolved, Memberlist, MemberlistOptions, Options, SocketAddrResolver,
+  TlsOptions, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -39,6 +39,28 @@ async fn make(id: &str, tls: TlsOptions) -> Memberlist<SmolStr> {
   )
   .await
   .expect("bind tls memberlist")
+}
+
+/// Builds a labeled TLS node advertising an OS-picked loopback port. The cluster
+/// label restricts which peers may complete the reliable push/pull exchange;
+/// nodes with a different label are rejected at the stream layer even when the
+/// TLS certificate is mutually trusted.
+async fn make_labeled(id: &str, tls: TlsOptions, label: &[u8]) -> Memberlist<SmolStr> {
+  Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new(id),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(
+      MemberlistOptions::new()
+        .with_label(Some(label.to_vec()))
+        .expect("valid label"),
+    ),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+    tls,
+    |_: &SocketAddr| Some("localhost".to_string()),
+  )
+  .await
+  .expect("bind labeled tls memberlist")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -256,4 +278,72 @@ async fn send_many_reliable_partial_pre_connect_failure_reports_err() {
 
   let _ = sender.shutdown().await;
   let _ = seed.shutdown().await;
+}
+
+/// A different cluster label over shared TLS trust must not merge on the
+/// reliable plane: when two clusters share the same certificate and root CA,
+/// only the label header in the reliable stream distinguishes them.
+///
+/// Three nodes share one self-signed cert and one trust root so every TLS
+/// handshake succeeds. Nodes `a` (label "cluster-a") and `b` (label "cluster-b")
+/// must NOT merge even though the TLS layer accepts both. Node `a2` (label
+/// "cluster-a") MUST converge with `a`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_label_isolates_reliable_plane() {
+  let (cert, key) = support::generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("root");
+  let tls_a = support::build_tls_options(cert.clone(), key.clone_key(), roots.clone());
+  let tls_b = support::build_tls_options(cert.clone(), key.clone_key(), roots.clone());
+  let tls_a2 = support::build_tls_options(cert, key, roots);
+
+  let a = make_labeled("tls-iso-a", tls_a, b"cluster-a").await;
+  let b = make_labeled("tls-iso-b", tls_b, b"cluster-b").await;
+  let a2 = make_labeled("tls-iso-a2", tls_a2, b"cluster-a").await;
+  let a_addr = *a.local().addr_ref();
+
+  // A different label over shared TLS trust must not merge on the reliable plane.
+  // Ignoring Err: join failure on a mismatched label is expected.
+  let _ = b
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await;
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  assert_eq!(
+    a.num_members(),
+    1,
+    "cross-label TLS join must not add B: a has {} members",
+    a.num_members()
+  );
+  assert_eq!(
+    b.num_members(),
+    1,
+    "cross-label TLS join must not add A: b has {} members",
+    b.num_members()
+  );
+
+  // Same label over shared TLS trust must converge.
+  a2.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("same-label TLS join must succeed");
+
+  let converged = tokio::time::timeout(Duration::from_secs(10), async {
+    loop {
+      if a.num_members() == 2 && a2.num_members() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(
+    converged.is_ok(),
+    "same-label TLS cluster did not converge: a={}, a2={}",
+    a.num_members(),
+    a2.num_members()
+  );
+
+  // Ignoring Err: best-effort teardown; assertion already passed.
+  let _ = a.shutdown().await;
+  let _ = a2.shutdown().await;
+  let _ = b.shutdown().await;
 }

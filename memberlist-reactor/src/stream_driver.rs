@@ -40,7 +40,10 @@ use memberlist_proto::{
 
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
+  command::{
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, ShutdownCmd,
+  },
   error::Error,
   observation::observation_payload_bytes,
   shared::Shared,
@@ -200,6 +203,11 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   obs_payload_bytes: Arc<AtomicU64>,
   /// Queued-payload byte budget on a bounded obs channel, `None` if unbounded.
   obs_payload_budget: Option<u64>,
+  /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
+  /// outbound gossip is stamped and inbound gossip is verified against the same
+  /// label. Stored here so `drain_surfaces` can read it each poll without a
+  /// per-call allocation.
+  pub(crate) label: Option<bytes::Bytes>,
   /// Application-data events retained after a full obs channel, retried on a
   /// later poll rather than dropped.
   obs_overflow: VecDeque<Event<I, SocketAddr>>,
@@ -262,6 +270,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     accepted_rx: Receiver<(<R::Net as Net>::TcpStream, SocketAddr)>,
     accept_shutdown_tx: Sender<()>,
     close_timeout: Duration,
+    label: Option<bytes::Bytes>,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
@@ -276,6 +285,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       obs_tx,
       obs_payload_bytes,
       obs_payload_budget,
+      label,
       obs_overflow: VecDeque::new(),
       pending_joins: HashMap::new(),
       next_pending_join_id: 0,
@@ -572,6 +582,40 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           }
         }
       }
+      Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
+        // Gate on a running node: after `leave()` the endpoint emits no
+        // protocol traffic, so a new compression policy could never take
+        // effect on the wire. Reject with `NotRunning` rather than ack a
+        // change that will never be observed.
+        let res = if self.endpoint.is_running() {
+          self.endpoint.set_compression_options(opts);
+          Ok(())
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
+      Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the endpoint emits
+        // no protocol traffic, so a new encryption policy could never take
+        // effect on the wire. When running, validate the policy before
+        // applying it: a keyring naming an unsupported AEAD would silently
+        // break the cluster after a false `Ok`.
+        let res = if self.endpoint.is_running() {
+          match crate::transform::validate_encryption(&opts) {
+            Ok(()) => {
+              self.endpoint.set_encryption_options(opts);
+              Ok(())
+            }
+            Err(e) => Err(e),
+          }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
     }
   }
 
@@ -718,8 +762,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   /// Returns `(worked, more)`: whether any surface produced work (republish the
   /// snapshot) and whether any surface hit its cap with work left (self-wake).
   fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool) {
-    let decode_opts = DecodeOptions::default();
-    let encode_opts = EncodeOptions::default();
+    let decode_opts = DecodeOptions::new(self.label.clone());
+    let encode_opts = EncodeOptions::new(self.label.clone());
     let budget = self.transmit_batch.max(1);
     let now = Instant::now();
     let mut worked = false;
@@ -960,6 +1004,14 @@ where
             let _ = reply.try_send(Err(Error::Shutdown));
           }
           Command::SendReliable(SendReliableCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.try_send(Err(Error::Shutdown));
           }
         }
@@ -1368,7 +1420,7 @@ where
   false
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tcp"))]
 mod tests {
   use agnostic::{
     Runtime,
@@ -1376,8 +1428,10 @@ mod tests {
     tokio::TokioRuntime,
   };
   use memberlist_proto::{
-    Instant, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
-    streams::StreamEndpoint,
+    Instant, RawRecords,
+    config::EndpointConfig,
+    endpoint::Endpoint,
+    streams::{LabelOptions, StreamEndpoint},
   };
   use smol_str::SmolStr;
 
@@ -1400,7 +1454,7 @@ mod tests {
     let ep = Endpoint::new(cfg);
     let mut endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
       ep,
-      TcpOptions::new(None),
+      LabelOptions::new_in(None, ()),
       Box::new(|_| None),
       Box::new(|addr| *addr),
     );
@@ -1437,7 +1491,7 @@ mod tests {
     ));
     StreamEndpoint::new(
       ep,
-      TcpOptions::new(Some(b"capture-test".to_vec())),
+      LabelOptions::new_in(Some(b"capture-test".to_vec()), ()),
       Box::new(|_| None),
       Box::new(|a: &SocketAddr| *a),
     )

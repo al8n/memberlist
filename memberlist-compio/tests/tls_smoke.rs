@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver,
-  StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
+  SocketAddrResolver, StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
 };
 use memberlist_proto::TlsOptions;
 use smol_str::SmolStr;
@@ -53,6 +53,88 @@ async fn make_tls(
     &FirstAddrResolver,
   )
   .await
+}
+
+/// Like [`make_tls`] but carrying a cluster label, so the reliable plane is
+/// label-gated in addition to the TLS record layer.
+async fn make_tls_labeled(
+  id: &str,
+  addr: SocketAddr,
+  label: &[u8],
+) -> Result<TlsMemberlist<SmolStr, SocketAddr>, MemberlistError> {
+  let mopts = MemberlistOptions::new()
+    .with_label(Some(label.to_vec()))
+    .expect("valid label bytes");
+  let opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tls_options(smoke_tls_options()),
+  )
+  .with_memberlist(mopts);
+  TlsMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+}
+
+/// A different cluster label over shared TLS trust must not merge on the
+/// reliable plane. All three nodes use the accept-any TLS config, so every
+/// handshake succeeds and only the reliable-stream label header distinguishes
+/// the clusters: `a` (label "cluster-a") and `b` (label "cluster-b") must not
+/// merge, while `a2` (label "cluster-a") must converge with `a`.
+#[compio::test]
+async fn tls_label_isolates_reliable_plane() {
+  let a_addr = loopback_addr(7330);
+  let b_addr = loopback_addr(7331);
+  let a2_addr = loopback_addr(7332);
+  let a = make_tls_labeled("tls-iso-a", a_addr, b"cluster-a")
+    .await
+    .expect("bind a");
+  let b = make_tls_labeled("tls-iso-b", b_addr, b"cluster-b")
+    .await
+    .expect("bind b");
+  let a2 = make_tls_labeled("tls-iso-a2", a2_addr, b"cluster-a")
+    .await
+    .expect("bind a2");
+
+  // A different label over shared TLS trust must not merge on the reliable plane.
+  // Ignoring Err: join failure on a mismatched label is expected.
+  let _ = b
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await;
+  compio::time::sleep(Duration::from_millis(300)).await;
+  assert_eq!(
+    a.member_count(),
+    1,
+    "cross-label TLS join must not add B: a has {}",
+    a.member_count()
+  );
+  assert_eq!(
+    b.member_count(),
+    1,
+    "cross-label TLS join must not add A: b has {}",
+    b.member_count()
+  );
+
+  // The same label over the same trust must converge.
+  a2.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("same-label TLS join must succeed");
+  let converged = wait_until(
+    || a.member_count() == 2 && a2.member_count() == 2,
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    converged,
+    "same-label TLS cluster did not converge: a={}, a2={}",
+    a.member_count(),
+    a2.member_count()
+  );
 }
 
 /// Accept-any server-cert verifier for smoke tests.

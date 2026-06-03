@@ -136,7 +136,15 @@ pub use tls::{TlsOptions, TlsRecords};
 #[cfg(feature = "tcp")]
 mod tcp;
 #[cfg(feature = "tcp")]
-pub use tcp::{RawRecords, TcpOptions};
+pub use tcp::RawRecords;
+
+// The cluster-label record-layer decorator and its options bundle are shared
+// by every reliable transport (plain TCP via `Labeled<Passthrough>`, TLS via
+// `Labeled<TlsRecords>`), so they are re-exported whenever any stream
+// transport is built. `LabelOptionsError` rides alongside for the fallible
+// label-validating constructors.
+#[cfg(any(feature = "tls", feature = "tcp"))]
+pub use streams::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 
 #[cfg(any(feature = "tls", feature = "tcp"))]
 pub mod streams;
@@ -166,6 +174,7 @@ pub mod data;
 pub mod encryption;
 pub mod framing;
 pub mod id;
+pub mod label;
 pub mod messages;
 pub mod node;
 pub mod typed;
@@ -193,7 +202,7 @@ pub use time::Instant;
 pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use cheap_clone::CheapClone;
 pub use codec::{
-  CodecError, DecodeOptions, EncodeOptions, MAX_LABEL_LEN, decode_incoming, encode_outgoing,
+  CodecError, DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing,
   encode_outgoing_compound, parse_message, parse_messages,
 };
 pub use compression::{
@@ -205,6 +214,10 @@ pub use compression::{
 pub use convert::{
   AddrLengthMismatchInfo, ConvertError, id_from_bytes, id_to_bytes, socket_addr_from_bytes,
   socket_addr_to_bytes,
+};
+pub use label::{
+  LABEL_OVERHEAD, LABELED_TAG, LabelError, LabelOutcome, MAX_LABEL_LEN, classify_header,
+  effective_label, encode_label_prefix, validate_label,
 };
 // `data::DecodeError` is reached via `crate::data::DecodeError`; the crate-root
 // `DecodeError` name is already taken by `event::DecodeError`.

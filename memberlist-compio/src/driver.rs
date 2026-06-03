@@ -21,19 +21,22 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use compio::{
   buf::BufResult,
   net::{TcpListener, TcpStream, UdpSocket},
 };
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
+use memberlist::codec::{
+  DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
+  parse_messages,
+};
 use memberlist_proto::{
   Instant,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
-  framing::{MessageTag, decode_compound, decode_message, encode_message},
-  message_from_any, message_to_any,
   streams::{StreamAction, StreamEndpoint, StreamTransport},
-  typed::{Message, NodeState, State},
+  typed::{NodeState, State},
 };
 
 use crate::{
@@ -455,9 +458,9 @@ where
 /// [`BridgeReady::OutboundOk`] (or `OutboundFail`) back through the
 /// `bridge_ready` channel.
 ///
-/// Both transports (`R = RawRecords` for TCP, `R = TlsRecords` for TLS)
-/// use a raw [`TcpStream`] as the wire — the TLS handshake bytes flow
-/// through the same byte path as application bytes; the record-layer
+/// Both transports (`R = RawRecords` for TCP, `R = Labeled<TlsRecords>`
+/// for TLS) use a raw [`TcpStream`] as the wire — the TLS handshake bytes
+/// flow through the same byte path as application bytes; the record-layer
 /// codec inside [`StreamEndpoint::handle_transport_data`] internally
 /// distinguishes handshake from application data.
 ///
@@ -510,6 +513,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   driver_opts: DriverOptions,
   stream_opts: StreamTransportOptions,
   delegate: D,
+  // Cluster label applied to both gossip encode and decode: outbound gossip
+  // is stamped with this label and inbound gossip must carry a matching label.
+  // `None` disables per-cluster labeling, accepting datagrams from any cluster.
+  label: Option<Bytes>,
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id
@@ -746,7 +753,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         let did_actions =
           drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
-        let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
+        let did_transmits =
+          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -838,7 +846,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           let BufResult(res, buf) = gossip;
           if let Ok((n, src)) = res {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now);
+            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
             dirty = true;
           }
         }
@@ -867,7 +875,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         let did_actions =
           drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
-        let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
+        let did_transmits =
+          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -902,7 +911,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         let did_actions =
           drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
-        let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
+        let did_transmits =
+          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -981,7 +991,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         match res {
           Ok((n, src)) => {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now);
+            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
             dirty = true;
           }
           Err(_) => {
@@ -1138,7 +1148,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       let did_actions =
         drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
       let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
-      let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
+      let did_transmits =
+        drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
       let did_events = drain_events(
         &mut endpoint,
         &obs_tx,
@@ -1825,6 +1836,7 @@ fn dispatch_gossip<I, A, R>(
   src: SocketAddr,
   datagram: &[u8],
   now: Instant,
+  label: Option<Bytes>,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -1848,59 +1860,39 @@ fn dispatch_gossip<I, A, R>(
 {
   endpoint.handle_gossip(src.into(), datagram, now);
 
+  let decode_opts = DecodeOptions::new(label);
   // Drain the raw-buffer queue and decode each datagram. Each iteration
   // pops exactly the datagram we just fed (FIFO), but draining the loop
   // unconditionally handles a stale buffer left over from a prior
   // ingress that some earlier handle_gossip had no chance to drain.
   while let Some((from_addr, raw)) = endpoint.poll_memberlist_ingress() {
     let plain = match endpoint.decrypt_gossip(&raw) {
-      Ok(p) => p,
+      Ok(p) => Bytes::from(p),
       // Drop the datagram on a decrypt / unknown-tag / oversize error.
       // Gossip is lossy and self-healing — the peer retransmits on the
       // next gossip round.
       Err(_) => continue,
     };
-    // Compound vs single-message demux: a compound frame carries N
-    // plain-frame slices; everything else is a single plain frame.
-    if !plain.is_empty() && plain[0] == MessageTag::Compound as u8 {
-      let parts = match decode_compound(&plain) {
-        Ok(parts) => parts,
-        // A malformed compound (truncated, count < 2, trailing bytes)
-        // drops the whole datagram per the codec contract.
-        Err(_) => continue,
-      };
-      for part in parts {
-        if let Some(msg) = decode_plain::<I, A>(part) {
-          endpoint.handle_packet(from_addr.cheap_clone(), msg, now);
-        }
-        // Ignoring decode failures on individual parts: a malformed
-        // inner is dropped silently, matching the gossip drop policy.
-      }
-    } else if let Some(msg) = decode_plain::<I, A>(&plain) {
-      endpoint.handle_packet(from_addr, msg, now);
+    // Strip the optional cluster label and verify it matches. A
+    // mismatched or absent label on a labeled cluster (or a labeled
+    // frame on an unlabeled cluster) is rejected here, isolating gossip
+    // traffic between clusters sharing the same UDP port range.
+    let inner = match decode_incoming(plain, &decode_opts) {
+      Ok(b) => b,
+      // LabelMismatch / DoubleLabel / truncated: drop the datagram per
+      // the lossy-gossip discipline; the peer retransmits.
+      Err(_) => continue,
+    };
+    // Demux plain vs compound and feed each decoded message to the
+    // coordinator. A malformed frame drops the whole datagram.
+    let msgs = match parse_messages::<I, A>(inner) {
+      Ok(m) => m,
+      Err(_) => continue,
+    };
+    for msg in msgs {
+      endpoint.handle_packet(from_addr.cheap_clone(), msg, now);
     }
   }
-}
-
-/// Decode a single plain frame into a typed [`Message<I, A>`]. Returns
-/// `None` on any frame / bridge decoder error (the caller drops the
-/// datagram, matching the lossy-gossip discipline).
-///
-/// Strict consumption: the decoded message MUST cover the entire input
-/// slice. Trailing bytes after a valid message indicate a malformed
-/// frame (truncated compound, codec misuse, hostile peer); dropping
-/// closes the silent-acceptance window the partial-decode pattern
-/// would otherwise open.
-fn decode_plain<I, A>(buf: &[u8]) -> Option<Message<I, A>>
-where
-  I: memberlist_proto::Data,
-  A: memberlist_proto::Data,
-{
-  let (consumed, any) = decode_message(buf).ok()?;
-  if consumed != buf.len() {
-    return None;
-  }
-  message_from_any::<I, A>(&any).ok()
 }
 
 /// Drain every [`StreamAction`] the coordinator has queued, dispatching
@@ -2150,9 +2142,15 @@ where
 /// Drain every queued unreliable (UDP gossip) [`Transmit`] and send the
 /// resulting datagram on the gossip socket. Returns `true` iff any
 /// transmit was processed.
+///
+/// Outbound gossip flows through the shared codec:
+/// `encode_outgoing` / `encode_outgoing_compound` stamp the cluster label
+/// (if any) before `compress_gossip` → `encrypt_gossip` → send, matching the
+/// inbound path in `dispatch_gossip` and the reactor driver's gossip egress.
 async fn drain_transmits<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
   gossip_socket: &UdpSocket,
+  label: Option<Bytes>,
 ) -> bool
 where
   I: memberlist_proto::Id
@@ -2174,19 +2172,29 @@ where
     + 'static,
   R: StreamTransport,
 {
+  let encode_opts = EncodeOptions::new(label);
   let mut progress = false;
   while let Some(transmit) = endpoint.poll_memberlist_transmit() {
     progress = true;
-    let (peer, datagram) = match encode_transmit::<I, A>(transmit) {
-      Some(pair) => pair,
-      // A locally-built message that bridges to AnyMessage and round-
-      // trips through `encode_message` cannot fail in normal operation
-      // (see `wire.rs`'s `.expect` convention); if it does we drop the
-      // transmit so a single bad codec invocation cannot wedge the
-      // driver.
-      None => continue,
+    let (peer, plain) = match transmit {
+      Transmit::Packet(pkt) => {
+        let (to, msg) = pkt.into_parts();
+        match encode_outgoing(&msg, &encode_opts) {
+          Ok(b) => (to, b.to_vec()),
+          // A locally-built message that fails to encode is dropped so a
+          // single bad codec invocation cannot wedge the driver.
+          Err(_) => continue,
+        }
+      }
+      Transmit::Compound(cmp) => {
+        let (to, msgs) = cmp.into_parts();
+        match encode_outgoing_compound(&msgs, &encode_opts) {
+          Ok(b) => (to, b.to_vec()),
+          Err(_) => continue,
+        }
+      }
     };
-    let compressed = endpoint.compress_gossip(&datagram);
+    let compressed = endpoint.compress_gossip(&plain);
     let on_wire = match endpoint.encrypt_gossip(&compressed) {
       Ok(bytes) => bytes,
       // Encryption-configured + backend-rejected (e.g. unknown
@@ -2203,35 +2211,6 @@ where
     let _ = res;
   }
   progress
-}
-
-/// Encode one outbound [`Transmit`] into `(peer_addr, datagram_bytes)`.
-/// A `Compound` carries 2+ messages packed into a single datagram via
-/// [`memberlist_proto::framing::encode_compound`]; a `Packet` is one
-/// plain frame via [`memberlist_proto::framing::encode_message`].
-fn encode_transmit<I, A>(transmit: Transmit<I, A>) -> Option<(A, Vec<u8>)>
-where
-  I: memberlist_proto::Data,
-  A: memberlist_proto::Data,
-{
-  use memberlist_proto::framing::encode_compound;
-  match transmit {
-    Transmit::Packet(pkt) => {
-      let (to, msg) = pkt.into_parts();
-      let any = message_to_any::<I, A>(&msg).ok()?;
-      let bytes = encode_message(&any).ok()?;
-      Some((to, bytes))
-    }
-    Transmit::Compound(cmp) => {
-      let (to, msgs) = cmp.into_parts();
-      let mut anys = Vec::with_capacity(msgs.len());
-      for msg in msgs {
-        anys.push(message_to_any::<I, A>(&msg).ok()?);
-      }
-      let bytes = encode_compound(&anys).ok()?;
-      Some((to, bytes))
-    }
-  }
 }
 
 /// Fire the matching [`Delegate`] hook for one drained [`Event`].
@@ -3012,11 +2991,11 @@ mod tests {
   };
 
   use memberlist_proto::{
-    Instant, RawRecords, TcpOptions,
+    Instant, RawRecords,
     config::EndpointConfig,
     endpoint::Endpoint,
     event::{PushPullKind, StreamId},
-    streams::{ExchangeId, StreamAction, StreamEndpoint},
+    streams::{ExchangeId, LabelOptions, StreamAction, StreamEndpoint},
   };
   use smol_str::SmolStr;
 
@@ -3033,7 +3012,7 @@ mod tests {
     ));
     StreamEndpoint::new(
       ep,
-      TcpOptions::new(Some(b"capture-test".to_vec())),
+      LabelOptions::new_in(Some(b"capture-test".to_vec()), ()),
       Box::new(|_| None),
       Box::new(|a: &SocketAddr| *a),
     )

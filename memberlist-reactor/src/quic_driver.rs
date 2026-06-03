@@ -27,13 +27,15 @@ use memberlist::codec::{
 };
 use memberlist_proto::{
   Instant, PingId, QuicEndpoint,
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
-  streams::ExchangeId,
+  event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
 };
 
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
+  command::{
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, ShutdownCmd,
+  },
   error::Error,
   observation::observation_payload_bytes,
   shared::Shared,
@@ -91,6 +93,10 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   shared: Arc<Shared<I>>,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
+  /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
+  /// outbound gossip is stamped and inbound gossip is verified against the same
+  /// label.
+  pub(crate) label: Option<bytes::Bytes>,
   /// Outstanding synchronous joins, reduced as their exchanges complete.
   pending_joins: HashMap<u64, PendingJoin>,
   /// Monotonic key source for `pending_joins`.
@@ -133,6 +139,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
     obs_tx: Sender<Event<I, SocketAddr>>,
     obs_payload_bytes: Arc<AtomicU64>,
     obs_payload_budget: Option<u64>,
+    label: Option<Bytes>,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
@@ -143,6 +150,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       socket,
       shared,
       obs_tx,
+      label,
       pending_joins: HashMap::new(),
       next_pending_join_id: 0,
       pending_leave: None,
@@ -310,6 +318,40 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           reply,
         });
       }
+      Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
+        // Gate on a running node: after `leave()` the endpoint emits no
+        // protocol traffic, so a new compression policy could never take
+        // effect on the wire. Reject with `NotRunning` rather than ack a
+        // change that will never be observed.
+        let res = if self.endpoint.is_running() {
+          self.endpoint.set_compression_options(opts);
+          Ok(())
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
+      Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the endpoint emits
+        // no protocol traffic, so a new encryption policy could never take
+        // effect on the wire. When running, validate the policy before
+        // applying it: a keyring naming an unsupported AEAD would silently
+        // break the cluster after a false `Ok`.
+        let res = if self.endpoint.is_running() {
+          match crate::transform::validate_encryption(&opts) {
+            Ok(()) => {
+              self.endpoint.set_encryption_options(opts);
+              Ok(())
+            }
+            Err(e) => Err(e),
+          }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
     }
   }
 
@@ -408,8 +450,8 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
   /// Returns `(worked, more)`: whether any surface produced work (republish the
   /// snapshot) and whether any surface hit its cap with work left (self-wake).
   fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool) {
-    let decode_opts = DecodeOptions::default();
-    let encode_opts = EncodeOptions::default();
+    let decode_opts = DecodeOptions::new(self.label.clone());
+    let encode_opts = EncodeOptions::new(self.label.clone());
     let budget = self.transmit_batch.max(1);
     let now = Instant::now();
     let mut worked = false;
@@ -628,6 +670,14 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
             let _ = reply.try_send(Err(Error::Shutdown));
           }
           Command::SendReliable(SendReliableCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.try_send(Err(Error::Shutdown));
           }
         }

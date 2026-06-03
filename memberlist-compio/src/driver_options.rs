@@ -13,7 +13,7 @@ use core::time::Duration;
 
 // ---------- base defaults ----------
 
-/// Default per-call deadline for [`Memberlist::join_with`](crate::Memberlist::join_with).
+/// Default per-call deadline for [`Memberlist::join`](crate::Memberlist::join).
 pub const DEFAULT_JOIN_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Default per-call deadline for [`Memberlist::leave`](crate::Memberlist::leave).
@@ -313,7 +313,7 @@ impl StreamTransportOptions {
   /// path, so a peer that stopped reading would otherwise wedge the drain
   /// `write_all` forever. This caps each such write: a write that makes
   /// progress never trips it; a write stalled for the full duration is
-  /// abandoned and the bridge torn down (RST). See [`DEFAULT_CLOSE_TIMEOUT`].
+  /// abandoned and the bridge torn down (RST). See `DEFAULT_CLOSE_TIMEOUT`.
   #[must_use]
   #[inline]
   pub const fn with_close_timeout(mut self, d: Duration) -> Self {
