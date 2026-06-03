@@ -26,7 +26,7 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_proto::{
-  Instant, PingId, QuicEndpoint,
+  DatagramSendOutcome, Instant, PingId, QuicEndpoint, UnreliableTransport,
   event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
 };
 
@@ -160,7 +160,9 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       obs_payload_budget,
       obs_overflow: VecDeque::new(),
       recv_buf: vec![0u8; buf_len],
-      recv_batch,
+      // Clamp to at least 1: a 0 batch makes the `recv_n < recv_batch` loop never
+      // run (no gossip ever received) and `recv_n == recv_batch` self-wake forever.
+      recv_batch: recv_batch.max(1),
       transmit_batch,
       timer: None,
       timer_deadline: None,
@@ -458,11 +460,13 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
     let mut more = false;
 
     // Inbound gossip: decrypt, strip label, decode, feed each message back.
+    // Drain to EMPTY (not budgeted): the poll loop advances membership time
+    // right after `drain_surfaces`, and a datagram-carried Ack must be decoded
+    // and applied before a probe deadline can fire (a QUIC packet's handle_udp
+    // queues datagram payloads here without advancing membership time). Bounded
+    // by the proto mem_ingress cap, so a flood cannot make this loop unbounded.
     let mut ingress = 0;
-    while ingress < budget {
-      let Some((from, raw)) = self.endpoint.poll_memberlist_ingress() else {
-        break;
-      };
+    while let Some((from, raw)) = self.endpoint.poll_memberlist_ingress() {
       ingress += 1;
       let plain = match self.endpoint.decrypt_gossip(&raw) {
         Ok(p) => Bytes::from(p),
@@ -481,9 +485,18 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       }
     }
     worked |= ingress > 0;
-    more |= ingress == budget;
 
-    // Outbound gossip: encode (plain or compound), compress, encrypt, send.
+    // Outbound gossip: encode (plain or compound), compress, encrypt, and route
+    // onto the unreliable wire the endpoint is configured for: a QUIC datagram
+    // over the peer's pooled connection (`UnreliableTransport::Datagram`, the
+    // default) or the shared UDP socket (`UnreliableTransport::Udp`).
+    // `encode_outgoing*` only fails on a typed↔buffa bridge error that
+    // round-trips a locally-built message; matches the stream driver's
+    // drop-on-codec-fail policy. An empty encryption config makes
+    // `encrypt_gossip` a copy; a transient `send_to` error (ENOBUFS / ICMP
+    // unreachable surfacing as a syscall error) is non-fatal per the gossip
+    // drop discipline.
+    let mut needs_flush = false;
     let mut sent = 0;
     while sent < budget {
       let Some(transmit) = self.endpoint.poll_memberlist_transmit() else {
@@ -507,16 +520,56 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         }
       };
       let compressed = self.endpoint.compress_gossip(&plain);
+      // `Bytes` so the datagram-queue path and the UDP fallback can share the
+      // same encoded payload without a second copy (`clone` is an O(1) refcount
+      // bump).
       let on_wire = match self.endpoint.encrypt_gossip(&compressed) {
-        Ok(b) => b,
+        Ok(b) => Bytes::from(b),
         Err(_) => continue,
       };
-      // Ignoring Poll: gossip is best-effort — a full or errored UDP send drops
-      // the datagram and SWIM recovers on the next round.
-      let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+      match self.endpoint.unreliable_transport() {
+        UnreliableTransport::Udp => {
+          // Ignoring Poll: gossip is best-effort — a full or errored UDP send
+          // drops the datagram and SWIM recovers on the next round.
+          let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+        }
+        UnreliableTransport::Datagram => {
+          match self
+            .endpoint
+            .queue_unreliable_datagram(peer, on_wire.clone(), now)
+          {
+            DatagramSendOutcome::Queued => needs_flush = true,
+            // NotReady may mean queue_unreliable_datagram just initiated a cold
+            // dial; flush this tick so the connection's Initial is emitted now
+            // (else the connection does not warm until the next driver wake). The
+            // gossip itself still goes out immediately over the UDP fallback.
+            DatagramSendOutcome::NotReady => {
+              needs_flush = true;
+              // Ignoring Poll: a transient UDP send error is non-fatal — gossip
+              // is lossy and the next probe/gossip round recovers.
+              let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+            }
+            // TooLarge: the connection is already Established (max_size was Some),
+            // so there is no pending Initial to flush; just fall back to UDP.
+            DatagramSendOutcome::TooLarge => {
+              // Ignoring Poll: a transient UDP send error is non-fatal — gossip
+              // is lossy and the next probe/gossip round recovers.
+              let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+            }
+          }
+        }
+      }
     }
     worked |= sent > 0;
     more |= sent == budget;
+
+    // Flush any datagrams queued above into `out` THIS poll so the raw-QUIC
+    // loop below sends them now — a datagram-borne probe whose timeout is armed
+    // this same tick must not wait for the next driver wake (that wake can be
+    // the timeout).
+    if needs_flush {
+      self.endpoint.flush_outbound_transmits(now);
+    }
 
     // Raw QUIC datagrams: already wire-framed by quinn-proto, no codec wrap.
     let mut raw_sent = 0;
@@ -719,6 +772,8 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
     if recv_n > 0 {
       progress = true;
     }
+    // A saturated batch (recv_n == recv_batch) means more datagrams may still be
+    // queued in the socket; self-wake so the next poll drains the rest.
     if recv_n == this.recv_batch {
       more = true;
     }
@@ -728,8 +783,13 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
     progress |= drained;
     more |= drain_more;
 
-    // Timer: fire an overdue deadline inline, else arm + poll the sleep. A fired
-    // deadline may queue transmits/events this pass did not drain.
+    // Timer: advance membership time on schedule. A past-due deadline fires
+    // `handle_timeout` now; otherwise (re)arm and poll the sleep. This runs every
+    // poll regardless of the receive batch: `drain_surfaces` above decoded the
+    // inbound ingress to empty (a datagram-carried probe Ack is already applied),
+    // and the probe FSM anchors success on an absolute `failure_deadline`, so an
+    // Ack decoded slightly later still rescues the probe regardless of
+    // handle_ack-vs-handle_timeout ordering — no recv-saturation gate is needed.
     let target = match this.endpoint.poll_timeout() {
       Some(d) => d.min(now + this.idle_wake),
       None => now + this.idle_wake,

@@ -350,6 +350,7 @@ mod tests {
       test_client(),
       quinn_proto::TransportConfig::default(),
       "localhost",
+      super::super::UnreliableTransport::Datagram,
     );
     let client = QuinnEndpoint::new(cfg.endpoint_arc(), None, true, Some([0x5a; 32]));
     let server = QuinnEndpoint::new(

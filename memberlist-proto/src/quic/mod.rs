@@ -12,8 +12,10 @@ mod bridge;
 mod conn;
 pub mod crypto;
 mod demux;
+mod transport_mode;
 
 pub use crypto::QuicConfig;
+pub use transport_mode::{DatagramSendOutcome, UnreliableTransport};
 
 use crate::Instant;
 use core::net::SocketAddr;
@@ -32,6 +34,60 @@ use crate::{
 use bridge::Bridge;
 use conn::ConnTable;
 use demux::{Class, classify};
+
+/// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
+/// drain. quinn's `datagram_receive_buffer_size` bounds inbound BYTES but not
+/// entry COUNT (a flood of tiny or zero-length DATAGRAM frames adds ~0 bytes
+/// yet one coordinator-queue entry each), so the drain enforces an explicit
+/// count cap: beyond it datagrams are popped from quinn and dropped (counted),
+/// keeping the coordinator queue and per-tick decode work bounded. Sized far
+/// above any legitimate buffered-ingress burst, so normal traffic never drops.
+const MAX_MEM_INGRESS_DATAGRAMS: usize = 8192;
+
+/// Maximum inbound application datagrams a SINGLE peer may hold as its STANDING
+/// share of the shared `mem_ingress` across the WHOLE undrained queue (counted
+/// via `mem_ingress_per_peer`, maintained on every push and pop), not merely
+/// within one `service_quinn` pass. Bounds one peer's standing share of the
+/// node-global queue so a flooding peer cannot starve other peers' probe Acks
+/// regardless of how many recv passes a driver batches before decoding; excess
+/// is popped from quinn (so its buffer cannot accumulate) and dropped.
+const MAX_INGRESS_DATAGRAMS_PER_PEER: usize = 1024;
+
+/// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
+/// frame) into the shared coordinator ingress queue, enforcing the per-peer
+/// standing-share cap AND the node-global cap so neither source can exceed the
+/// bound. Drops and counts when either cap is reached; returns whether it was
+/// queued. The per-peer counter is maintained here so a flood on EITHER
+/// transport cannot starve another peer's probe Ack and the global cap is a
+/// hard memory bound regardless of source.
+///
+/// The payload is supplied as a thunk and built ONLY on admission: a rejected
+/// frame never materializes its `Bytes`, so a saturated queue cannot force an
+/// allocation/copy per dropped frame on the unauthenticated plain-UDP path
+/// (where the payload would otherwise be a fresh `Bytes::copy_from_slice`).
+///
+/// Borrows only the three disjoint ingress fields (never all of `self`) so the
+/// QUIC datagram drain in `service_quinn` can call it while the
+/// `self.conns.get_mut(..)` connection borrow is still live.
+fn push_mem_ingress_capped(
+  mem_ingress: &mut std::collections::VecDeque<(SocketAddr, Bytes)>,
+  per_peer: &mut HashMap<SocketAddr, usize>,
+  dropped: &mut u64,
+  from: SocketAddr,
+  make_payload: impl FnOnce() -> Bytes,
+) -> bool {
+  let queued = per_peer.get(&from).copied().unwrap_or(0);
+  if queued >= MAX_INGRESS_DATAGRAMS_PER_PEER || mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
+    // Reject WITHOUT constructing the payload: a saturated queue must not let a
+    // flood force an allocation/copy per dropped frame on the unauthenticated
+    // UDP path.
+    *dropped = dropped.saturating_add(1);
+    return false;
+  }
+  mem_ingress.push_back((from, make_payload()));
+  *per_peer.entry(from).or_insert(0) += 1;
+  true
+}
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
@@ -126,6 +182,11 @@ pub struct QuicEndpoint<I> {
   /// — for the codec-owning layer to unwrap and feed back through
   /// [`handle_packet`](Self::handle_packet).
   mem_ingress: std::collections::VecDeque<(SocketAddr, Bytes)>,
+  /// Per-peer count of entries currently in `mem_ingress`, maintained on every
+  /// push and pop, so the inbound datagram drain can bound one peer's standing
+  /// share of the shared queue (fairness against a single-peer flood)
+  /// regardless of how many recv passes a driver batches before decoding.
+  mem_ingress_per_peer: HashMap<SocketAddr, usize>,
   /// Private queue of pending dial intents. `memberlist::Endpoint::poll_event`
   /// emits `Event::DialRequested { id, peer, deadline }` for an external
   /// driver to dial — but in the composed design `QuicEndpoint` IS the
@@ -153,6 +214,23 @@ pub struct QuicEndpoint<I> {
   /// `None` only before the very first `handle_*` / `start_*` call; after
   /// that, every subsequent `poll_timeout` can return it.
   last_now: Option<Instant>,
+  /// Count of unreliable datagrams dropped by
+  /// [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) on a quinn
+  /// datagram-state error. The `max_size` pre-check excludes `TooLarge`, and
+  /// `Blocked` (a full send buffer) is handled separately as a `NotReady`
+  /// UDP fallback rather than a drop, so this counts only a residual edge.
+  /// Best-effort accounting only — never a membership signal.
+  datagram_dropped: u64,
+  /// Count of inbound unreliable datagrams the `service_quinn` receive drain
+  /// popped from quinn but did NOT push into `mem_ingress`, because either the
+  /// per-peer budget ([`MAX_INGRESS_DATAGRAMS_PER_PEER`], one peer's standing
+  /// share of the undrained queue) or the node-global cap
+  /// ([`MAX_MEM_INGRESS_DATAGRAMS`]) was already reached. quinn's
+  /// `datagram_receive_buffer_size` bounds inbound bytes
+  /// but not entry count, so a flood of tiny/zero-length DATAGRAM frames is
+  /// bounded here by popping-and-dropping past either limit. Best-effort
+  /// accounting only — never a membership signal.
+  datagram_ingress_dropped: u64,
   /// Test-only counter incremented once per `EndpointEvent` drained from
   /// every connection's `poll_endpoint_events()` queue inside
   /// [`Self::service_quinn`]. Exists ONLY for the negative-control regression
@@ -162,6 +240,14 @@ pub struct QuicEndpoint<I> {
   /// per-event contract). Never compiled into production builds.
   #[cfg(test)]
   endpoint_events_processed: u64,
+  /// Test-only counter incremented once per [`Endpoint::handle_timeout`] call,
+  /// i.e. once per membership-time advance. Exists ONLY for the regression test
+  /// proving a QUIC packet ingress (`service_quic_inbound`) does NOT advance
+  /// membership time — only the driver's explicit `handle_timeout` does — so a
+  /// probe Ack carried in a datagram cannot be timed out before it is decoded.
+  /// Never compiled into production builds.
+  #[cfg(test)]
+  membership_time_advances: u64,
   /// Test-only counter incremented once per bridge `drain_then_reap`'d
   /// inside [`Self::service_quinn`] on an `Event::ConnectionLost` — the
   /// strict-poll self-sufficiency path that closes the D1 drain within
@@ -271,10 +357,15 @@ where
       pending_outbound_peers: HashMap::new(),
       out: std::collections::VecDeque::new(),
       mem_ingress: std::collections::VecDeque::new(),
+      mem_ingress_per_peer: HashMap::new(),
       dial_pending: std::collections::VecDeque::new(),
       last_now: None,
+      datagram_dropped: 0,
+      datagram_ingress_dropped: 0,
       #[cfg(test)]
       endpoint_events_processed: 0,
+      #[cfg(test)]
+      membership_time_advances: 0,
       #[cfg(test)]
       bridges_reaped_on_connection_lost: 0,
       #[cfg(test)]
@@ -562,7 +653,20 @@ where
   /// this, decodes each `Message`, and feeds it back through
   /// [`handle_packet`](Self::handle_packet).
   pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
-    self.mem_ingress.pop_front()
+    let (from, bytes) = self.mem_ingress.pop_front()?;
+    // Keep the per-peer share counter exact: decrement on pop and remove the
+    // entry at zero so no stale zeros accumulate (one map key per peer with a
+    // live standing share, nothing more).
+    if let std::collections::hash_map::Entry::Occupied(mut slot) =
+      self.mem_ingress_per_peer.entry(from)
+    {
+      let n = slot.get_mut();
+      *n -= 1;
+      if *n == 0 {
+        slot.remove();
+      }
+    }
+    Some((from, bytes))
   }
 
   /// Number of live (non-reaped) QUIC connections to `peer` — `0` or `1`,
@@ -728,6 +832,8 @@ where
     // there is no per-bridge failure path here — the gossip ingress buffer
     // is the only at-risk queue on policy change.
     self.mem_ingress.clear();
+    // Keep the per-peer share counter consistent with the now-empty queue.
+    self.mem_ingress_per_peer.clear();
     self.encryption = encryption;
   }
 
@@ -962,6 +1068,20 @@ where
     self.ep.poll_transmit()
   }
 
+  /// Pump queued quinn outbound — including datagrams just handed to
+  /// [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) — into the
+  /// [`poll_transmit`](Self::poll_transmit) queue at the current instant WITHOUT
+  /// advancing any membership timer. A driver calls this after queuing
+  /// unreliable datagrams so they flush on the SAME tick they were queued: a
+  /// datagram carries a probe Ping whose timeout is armed in the same tick, and
+  /// a one-tick send latency would let that timeout fire before the Ping ever
+  /// left the host (a spurious failure). Idempotent and side-effect-free on
+  /// membership state (no `Endpoint::handle_timeout`); the existing zero-time
+  /// outbound flush the `start_*` paths already use.
+  pub fn flush_outbound_transmits(&mut self, now: Instant) {
+    self.flush_outbound(now);
+  }
+
   /// Feed one decoded unreliable memberlist [`Message`](crate::typed::Message)
   /// (a frame the codec-owning layer unwrapped from a datagram surfaced by
   /// [`poll_memberlist_ingress`](Self::poll_memberlist_ingress)) into the
@@ -1048,9 +1168,19 @@ where
     // ping/ack/alive/suspect on the composed unit's public ingress. The
     // codec-owning layer drains it via `poll_memberlist_ingress`, decodes
     // each `Message`, and feeds it back through `handle_packet`.
-    self
-      .mem_ingress
-      .push_back((from, Bytes::copy_from_slice(datagram)));
+    //
+    // Admission goes through the SAME capped helper as the QUIC datagram drain
+    // so the shared coordinator queue is bounded uniformly: a plain-UDP /
+    // fallback flood cannot bypass the per-peer or node-global cap, drive
+    // `mem_ingress_per_peer` past the bound the QUIC drain checks, or push the
+    // global count over the hard memory limit.
+    push_mem_ingress_capped(
+      &mut self.mem_ingress,
+      &mut self.mem_ingress_per_peer,
+      &mut self.datagram_ingress_dropped,
+      from,
+      || Bytes::copy_from_slice(datagram),
+    );
   }
 
   /// Emit [`Event::ExchangeCompleted`] for an outbound bridge that has
@@ -1343,6 +1473,102 @@ where
       }
     }
   }
+
+  /// Which wire the unreliable path (gossip + probes) rides. Delegates to the
+  /// [`QuicConfig`]; the driver reads it to route each unreliable send onto
+  /// either [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) or
+  /// the plain-UDP fallback.
+  pub fn unreliable_transport(&self) -> UnreliableTransport {
+    self.cfg.unreliable_transport()
+  }
+
+  /// Count of unreliable datagrams dropped on a residual quinn datagram-state
+  /// error (best-effort accounting; never a membership signal).
+  #[cfg(test)]
+  pub(crate) fn datagram_dropped(&self) -> u64 {
+    self.datagram_dropped
+  }
+
+  /// Count of inbound unreliable datagrams dropped by the receive drain because
+  /// `mem_ingress` was at the count cap (best-effort accounting; never a
+  /// membership signal).
+  #[cfg(test)]
+  pub(crate) fn datagram_ingress_dropped(&self) -> u64 {
+    self.datagram_ingress_dropped
+  }
+
+  /// Count of membership-time advances ([`Endpoint::handle_timeout`] calls).
+  /// A QUIC packet ingress must NOT bump this — only the driver's explicit
+  /// `handle_timeout` may. See [`Self::service_quic_inbound`].
+  #[cfg(test)]
+  pub(crate) fn membership_time_advances(&self) -> u64 {
+    self.membership_time_advances
+  }
+
+  /// The datagram `max_size` of the pooled connection to `peer`, or `None` if
+  /// no connection exists or datagrams are not yet negotiated.
+  #[cfg(test)]
+  pub(crate) fn connection_datagram_max_size(&mut self, peer: SocketAddr) -> Option<usize> {
+    let ch = self.conns.handle_for(&peer)?;
+    self.conns.get_mut(ch)?.conn_mut().datagrams().max_size()
+  }
+
+  /// Offer one already-encoded unreliable datagram (gossip or probe) to `peer`
+  /// over its pooled QUIC connection. Routes only the WIRE — the bytes are the
+  /// same the plain-UDP path would send. Connection liveness is never a
+  /// membership signal: a `NotReady`/dropped datagram becomes a probe timeout,
+  /// not a `Suspect`. The driver falls back to plain UDP on a non-`Queued`
+  /// outcome so dissemination is not starved.
+  pub fn queue_unreliable_datagram(
+    &mut self,
+    peer: SocketAddr,
+    bytes: Bytes,
+    now: Instant,
+  ) -> DatagramSendOutcome {
+    let sni_arc = self.cfg.sni_for(&peer);
+    let ch = match self.conns.get_or_dial(
+      &mut self.quinn,
+      now,
+      self.cfg.client().clone(),
+      peer,
+      &sni_arc,
+    ) {
+      Ok(ch) => ch,
+      // A dial that cannot even be initiated (ConnectError) — best effort.
+      Err(_) => return DatagramSendOutcome::NotReady,
+    };
+    let Some(e) = self.conns.get_mut(ch) else {
+      return DatagramSendOutcome::NotReady;
+    };
+    let conn = e.conn_mut();
+    match conn.datagrams().max_size() {
+      // Still handshaking, peer doesn't support datagrams, or disabled locally.
+      // Best-effort: the driver falls back to UDP; a later datagram lands once
+      // the connection is Established.
+      None => return DatagramSendOutcome::NotReady,
+      Some(max) if bytes.len() > max => return DatagramSendOutcome::TooLarge,
+      Some(_) => {}
+    }
+    // drop = false: under send-buffer pressure quinn returns Blocked and leaves
+    // the already-queued datagrams intact, rather than evicting the OLDEST to
+    // make room. The unreliable path carries probe Pings and Acks as well as
+    // gossip, so evicting the oldest could silently drop an in-flight probe and
+    // cause a spurious failure-detector timeout; refusing the NEW datagram (the
+    // driver then falls back to plain UDP) preserves the earlier critical
+    // datagrams and loses nothing.
+    match conn.datagrams().send(bytes, false) {
+      Ok(()) => DatagramSendOutcome::Queued,
+      // Send buffer full: the driver falls back to plain UDP for this payload.
+      // Not a drop (the payload still goes out over UDP) and not counted.
+      Err(quinn_proto::SendDatagramError::Blocked(_)) => DatagramSendOutcome::NotReady,
+      // UnsupportedByPeer / Disabled / TooLarge are excluded by the max_size
+      // pre-check above; any residual error is unexpected — count and fall back.
+      Err(_) => {
+        self.datagram_dropped = self.datagram_dropped.saturating_add(1);
+        DatagramSendOutcome::NotReady
+      }
+    }
+  }
 }
 
 // Methods that drive the coordinator tick (`run_tick` ->
@@ -1387,7 +1613,7 @@ where
         {
           self.route_datagram_event(ev, from, now, &scratch);
         }
-        self.run_tick(now);
+        self.service_quic_inbound(now);
       }
       Class::Memberlist => self.handle_memberlist_udp(from, datagram),
       Class::Reject => { /* drop; DecodeError is emitted by the codec path only */ }
@@ -1555,13 +1781,40 @@ where
   /// removed from `self.bridges` after the first call. The second pump
   /// is therefore a no-op on every bridge that already ran in step (2).
   fn run_tick(&mut self, now: Instant) {
-    // (1) inbound feed already done in `handle_udp` before `run_tick`.
+    self.tick(now, true);
+  }
+
+  /// Service the composed unit after a QUIC packet ingress WITHOUT advancing
+  /// membership timers. A QUIC packet may carry application datagrams (probe
+  /// Acks, Alives) the driver has not yet decoded; firing the membership probe
+  /// or suspicion deadline here — before `service_quinn` even extracts the
+  /// datagram into `mem_ingress` and before the driver decodes it — would mark a
+  /// peer Suspect/failed even though its Ack already arrived. Membership time is
+  /// advanced ONLY by the driver's explicit `handle_timeout`, after it has
+  /// drained and decoded `mem_ingress`. This gives the QUIC datagram ingress
+  /// path the same property the plain-UDP ingress path (`handle_memberlist_udp`)
+  /// already has.
+  fn service_quic_inbound(&mut self, now: Instant) {
+    self.tick(now, false);
+  }
+
+  /// Shared tick body. `advance_membership_time` gates step (3)
+  /// (`Endpoint::handle_timeout`): true for the driver's explicit timer tick,
+  /// false for QUIC packet ingress (see `service_quic_inbound`).
+  fn tick(&mut self, now: Instant, advance_membership_time: bool) {
+    // (1) inbound feed already done in `handle_udp` before this tick.
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
     #[cfg(test)]
     let pre_step2_ids: std::collections::HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     // (3) THEN memberlist timers (probe cumulative-deadline, suspicion).
-    self.ep.handle_timeout(now);
+    if advance_membership_time {
+      #[cfg(test)]
+      {
+        self.membership_time_advances = self.membership_time_advances.saturating_add(1);
+      }
+      self.ep.handle_timeout(now);
+    }
     // (4) quinn connection timers + accept new bidi streams + transmit.
     self.service_quinn(now);
     // (5) Dial requests emitted by (3) or by accept-events.
@@ -1792,6 +2045,36 @@ where
           // reuse race.
           e.queue_pending_event(conn_ev);
         }
+      }
+      // Drain inbound application datagrams into the same mem_ingress the plain-
+      // UDP gossip path fills, tagged with this connection's peer. Mode-
+      // independent: a Udp-mode endpoint does not negotiate datagrams, so this is
+      // a no-op there; a Datagram-mode endpoint extracts them. Pop quinn's buffer
+      // to EMPTY (so a zero-length-frame flood cannot accumulate inside quinn),
+      // but PUSH into the coordinator queue only while this peer's STANDING share
+      // (`mem_ingress_per_peer`, maintained across the whole undrained queue) is
+      // under the per-peer budget AND the global cap is not reached — beyond
+      // either, drop and count. Bounding the standing share (not a per-pass
+      // counter) gives every peer fair access regardless of how many recv passes
+      // a driver batches before decoding, so one flooding peer cannot starve
+      // another peer's probe Ack. recv() returns an owned Bytes, so the
+      // e.conn_mut() borrow releases before the disjoint-field pushes.
+      let peer = e.peer();
+      while let Some(payload) = e.conn_mut().datagrams().recv() {
+        // Pop quinn to empty so a zero-length-frame flood cannot accumulate
+        // inside quinn; admission (per-peer + global caps, dropped+counted past
+        // either bound so one flooding peer cannot fill the shared queue and
+        // starve another peer's probe Ack) is enforced by the shared helper —
+        // the SAME bound `handle_memberlist_udp` applies, so neither source can
+        // exceed it. The three `&mut self.<field>` args are disjoint from the
+        // `self.conns` borrow `e` holds.
+        push_mem_ingress_capped(
+          &mut self.mem_ingress,
+          &mut self.mem_ingress_per_peer,
+          &mut self.datagram_ingress_dropped,
+          peer,
+          move || payload,
+        );
       }
       // Also reap when the connection has reached `is_drained()` even if
       // `poll()` never yielded `Event::ConnectionLost` for it in this
@@ -2088,10 +2371,10 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::QuicEndpoint;
+  use super::{QuicEndpoint, UnreliableTransport};
   use crate::{config::EndpointConfig, endpoint::Endpoint, quic::QuicConfig};
 
-  fn test_config() -> QuicConfig {
+  fn test_config_with_mode(mode: UnreliableTransport) -> QuicConfig {
     let mut transport = quinn_proto::TransportConfig::default();
     transport.max_idle_timeout(Some(
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
@@ -2102,7 +2385,12 @@ mod tests {
       crate::quic::crypto::tests::test_client(),
       transport,
       "localhost",
+      mode,
     )
+  }
+
+  fn test_config() -> QuicConfig {
+    test_config_with_mode(UnreliableTransport::Datagram)
   }
 
   fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
@@ -2110,6 +2398,21 @@ mod tests {
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
+    let mut seed = [0u8; 32];
+    seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+    QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
+  }
+
+  /// Same as [`make_endpoint`] but with the unreliable transport set to
+  /// [`UnreliableTransport::Udp`] at construction. In Udp mode the constructor
+  /// leaves quinn's datagram buffers at their defaults, so the endpoint does NOT
+  /// advertise the datagram extension: its connections report
+  /// `datagrams().max_size() == None` and no peer can deliver datagrams to it.
+  fn make_endpoint_udp(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
+    let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+    ep.start_scheduling(now);
+    let qc = test_config_with_mode(UnreliableTransport::Udp);
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
     QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
@@ -2927,6 +3230,636 @@ mod tests {
        `self.bridges` this same tick. Got {} live bridge(s) — the \
        bridge leaked beyond the ConnectionLost tick.",
       a.live_bridge_count(),
+    );
+  }
+
+  /// The load-bearing firewall: force-closing a pooled QUIC connection mid-
+  /// cluster does NOT change membership. The membership FSM is driven only by
+  /// SWIM probe-ack timing; a transport connection close/loss reaps the bridge
+  /// (a connection-level event) but never marks the peer Suspect/Dead/Alive.
+  ///
+  /// `Endpoint` has no connection-state input by construction, and
+  /// `service_quinn` maps a quinn `Event::ConnectionLost` (or a locally-closed
+  /// `is_drained()`) to a bridge reap, NEVER to a membership transition. This
+  /// test locks that in: it drives a real push/pull JOIN A<->B to membership
+  /// completion (B becomes a tracked, `Alive` member of A — not merely a
+  /// bridge), then force-closes A's pooled connection to B at the SAME instant
+  /// `now` so no probe/suspicion deadline can fire. After servicing the loss,
+  /// A's membership is byte-identical: B is still tracked, still `Alive`, the
+  /// member count is unchanged, and no `NodeJoined`/`NodeLeft`/`NodeUpdated`/
+  /// `NodeConflict` transition for B is produced by the close. The bridge reap
+  /// may surface an `ExchangeCompleted` (a connection/exchange event) — that is
+  /// allowed and is not a membership transition.
+  ///
+  /// If this test ever fails — num_members drops, or B's gossip liveness goes
+  /// Suspect/Dead, or a membership-transition event for B appears — WITHOUT any
+  /// elapsed probe deadline (time was never advanced), a connection->membership
+  /// edge has been introduced and the firewall is broken.
+  #[test]
+  fn closing_a_pooled_connection_does_not_change_membership() {
+    let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7972".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+    let b_id = SmolStr::new("b");
+
+    // Drive a push/pull JOIN A<->B to membership COMPLETION: ferry datagrams
+    // both ways at a FIXED instant `now`, ticking both ends and draining each
+    // side's `poll_event` per iteration so the merge endpoint events are
+    // processed (mirrors the membership-merge ferry the stream-plane tests use,
+    // adapted to the QUIC datagram pump). The localhost handshake + the push/
+    // pull bidi complete within a single instant in this model, so A learns B
+    // as an `Alive` member without advancing the clock — keeping every
+    // probe/suspicion deadline strictly in the future.
+    // Ignoring StreamId return: the test asserts on membership + the connection
+    // handle, not the exchange id.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..256 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      while a.poll_event().is_some() {}
+      while b.poll_event().is_some() {}
+      if a.endpoint_mut().num_members() >= 2 {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    let members_before = a.endpoint_mut().num_members();
+    assert!(
+      members_before >= 2,
+      "precondition: A must know B as a member before the kill (the push/pull \
+       JOIN must merge B's NodeState into A). num_members = {members_before}"
+    );
+    assert_eq!(
+      a.endpoint_mut().member_liveness(&b_id),
+      Some(crate::typed::State::Alive),
+      "precondition: B must be tracked as Alive before the kill"
+    );
+
+    // Force-close A's pooled connection to B (a pure transport fault) at the
+    // SAME instant `now`. Time is NEVER advanced in this test, so no
+    // probe/suspicion deadline can fire — the connection close is the only
+    // stimulus.
+    let ch = a
+      .conns
+      .handle_for(&b_addr)
+      .expect("A must hold a pooled connection to B post-merge");
+    a.conns
+      .get_mut(ch)
+      .expect("A's pooled connection to B is present")
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+
+    // Service A once so `service_quinn` observes the loss and reaps the bridge.
+    a.handle_timeout(now);
+
+    // Membership MUST be byte-identical: B still tracked, still Alive, count
+    // unchanged.
+    assert_eq!(
+      a.endpoint_mut().num_members(),
+      members_before,
+      "closing a QUIC connection MUST NOT change the member count \
+       (before = {members_before}, after = {}). A connection->membership edge \
+       has been introduced.",
+      a.endpoint_mut().num_members(),
+    );
+    assert_eq!(
+      a.endpoint_mut().member_liveness(&b_id),
+      Some(crate::typed::State::Alive),
+      "closing a QUIC connection MUST NOT transition B's gossip liveness \
+       (got {:?}); only a SWIM probe timeout may move B to Suspect/Dead, and \
+       time was never advanced.",
+      a.endpoint_mut().member_liveness(&b_id),
+    );
+
+    // The close + service drain MUST produce no membership-transition event for
+    // B. A bridge-reap `ExchangeCompleted` / `LeftCluster` is a connection/
+    // exchange event and is allowed.
+    while let Some(ev) = a.poll_event() {
+      match &ev {
+        crate::event::Event::NodeJoined(ns)
+        | crate::event::Event::NodeLeft(ns)
+        | crate::event::Event::NodeUpdated(ns) => {
+          assert_ne!(
+            ns.id_ref(),
+            &b_id,
+            "closing a QUIC connection MUST NOT emit a membership transition \
+             ({ev:?}) for B — the connection close reaped the bridge but the \
+             firewall forbids it from touching membership."
+          );
+        }
+        crate::event::Event::NodeConflict(nc) => {
+          assert_ne!(
+            nc.existing_ref().id_ref(),
+            &b_id,
+            "closing a QUIC connection MUST NOT emit a NodeConflict for B"
+          );
+        }
+        _ => {}
+      }
+    }
+  }
+
+  /// Offering an unreliable datagram to a peer that already holds an
+  /// Established pooled connection enqueues it on that connection
+  /// (`DatagramSendOutcome::Queued`). The datagram does not surface on
+  /// `poll_transmit` synchronously — it rides out via the normal
+  /// `service_quinn -> poll_transmit` pump on a later tick — so the contract
+  /// asserted here is the `Queued` outcome, not an immediate transmit.
+  #[test]
+  fn queue_unreliable_datagram_to_established_peer_is_queued() {
+    let a_addr: SocketAddr = "127.0.0.1:7951".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7952".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive the A<->B push/pull handshake until A holds an Established
+    // connection to B (the proven ferry pattern).
+    // Ignoring StreamId return: the test asserts on the connection state and
+    // the datagram outcome, not the handle.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    let ch_a = a
+      .conns
+      .iter_handles()
+      .first()
+      .copied()
+      .expect("A must hold one connection to B post-handshake");
+    assert!(
+      a.conns
+        .get(ch_a)
+        .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
+        .unwrap_or(false),
+      "test precondition: A's connection to B must be Established before \
+       offering an unreliable datagram"
+    );
+
+    let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
+    assert_eq!(outcome, super::DatagramSendOutcome::Queued);
+  }
+
+  /// A received application datagram surfaces through the SAME
+  /// `poll_memberlist_ingress` accessor the plain-UDP gossip path uses, tagged
+  /// with the sender's address — proving the wire is invisible past `mem_ingress`
+  /// (the driver decodes a datagram-sourced packet identically to a UDP one).
+  #[test]
+  fn received_datagram_surfaces_through_the_same_memberlist_ingress_as_udp() {
+    let a_addr: SocketAddr = "127.0.0.1:7961".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7962".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive the A<->B push/pull handshake until A holds an Established
+    // connection to B (the proven ferry pattern).
+    // Ignoring StreamId return: the test asserts on the connection state and
+    // the surfaced datagram, not the handle.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    let ch_a = a
+      .conns
+      .iter_handles()
+      .first()
+      .copied()
+      .expect("A must hold one connection to B post-handshake");
+    assert!(
+      a.conns
+        .get(ch_a)
+        .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
+        .unwrap_or(false),
+      "test precondition: A's connection to B must be Established before \
+       offering an unreliable datagram"
+    );
+
+    // A offers one application datagram to B.
+    let payload = Bytes::from_static(b"\x01hello-datagram");
+    assert_eq!(
+      a.queue_unreliable_datagram(b_addr, payload.clone(), now),
+      super::DatagramSendOutcome::Queued
+    );
+
+    // Pump: A's tick puts the datagram packet onto a.out; ferry it into B;
+    // B's tick drains it into mem_ingress; poll_memberlist_ingress surfaces it.
+    let mut got: Option<(SocketAddr, Bytes)> = None;
+    for _ in 0..50 {
+      a.handle_timeout(now);
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      b.handle_timeout(now);
+      if let Some(item) = b.poll_memberlist_ingress() {
+        got = Some(item);
+        break;
+      }
+      // keep the connection healthy in both directions
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+    }
+
+    let (from, bytes) = got.expect("B must surface the datagram via poll_memberlist_ingress");
+    assert_eq!(
+      from, a_addr,
+      "ingress must be tagged with the sender address"
+    );
+    assert_eq!(
+      bytes, payload,
+      "the datagram payload must round-trip byte-identically"
+    );
+  }
+
+  /// When mem_ingress is already at MAX_MEM_INGRESS_DATAGRAMS, a further inbound
+  /// QUIC datagram is dropped and counted rather than growing the queue
+  /// unbounded. quinn's byte-budget receive buffer cannot bound the entry count
+  /// (a zero/tiny-length datagram flood adds ~0 bytes per entry), so the
+  /// coordinator drain enforces the count cap.
+  #[test]
+  fn inbound_datagram_dropped_when_ingress_backlog_at_cap() {
+    let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7972".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive the A<->B push/pull handshake until A holds an Established
+    // connection to B (the proven ferry pattern).
+    // Ignoring StreamId return: the test asserts on the drop counter, not the
+    // handle.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    // Clear any handshake-era ingress, then saturate A's mem_ingress to the cap
+    // so the next inbound datagram has nowhere to land.
+    a.mem_ingress.clear();
+    for _ in 0..super::MAX_MEM_INGRESS_DATAGRAMS {
+      a.mem_ingress.push_back((b_addr, Bytes::from_static(b"x")));
+    }
+    let dropped_before = a.datagram_ingress_dropped();
+
+    // B sends one datagram to A; pump it onto the wire and service A. A's
+    // service_quinn drain finds mem_ingress at the cap and drops + counts it.
+    assert_eq!(
+      b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01y"), now),
+      super::DatagramSendOutcome::Queued
+    );
+    for _ in 0..50 {
+      b.handle_timeout(now);
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      if a.datagram_ingress_dropped() > dropped_before {
+        break;
+      }
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+    }
+
+    assert!(
+      a.datagram_ingress_dropped() > dropped_before,
+      "a datagram arriving with mem_ingress at cap must be dropped and counted"
+    );
+  }
+
+  /// One peer flooding its full per-peer standing share of `mem_ingress` must
+  /// not starve a DIFFERENT peer's inbound datagram, even while the node-global
+  /// cap is far from full. The share is bounded across the whole undrained
+  /// queue (not per recv pass), so the flooder's overflow is dropped-and-counted
+  /// by the real `service_quinn` drain while the other peer's datagram still
+  /// surfaces — the fairness the per-pass counter could not provide once a
+  /// driver batches several recv passes before draining `mem_ingress`.
+  #[test]
+  fn per_peer_ingress_cap_does_not_starve_other_peers() {
+    let a_addr: SocketAddr = "127.0.0.1:7981".parse().unwrap();
+    let t_addr: SocketAddr = "127.0.0.1:7982".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7983".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut t = make_endpoint("t", t_addr, now);
+    // B is the flooding peer: a real connection so its datagram traverses the
+    // actual receive drain, where its full standing share is dropped-and-counted.
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive both peers' push/pull handshakes until A holds an Established
+    // connection to each (the proven ferry pattern). Ferrying both each
+    // iteration lets A accept two distinct connections.
+    // Ignoring StreamId return: the test asserts on the surfaced datagram and
+    // the drop counter, not the handles.
+    let _ = t
+      .endpoint_mut()
+      .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    let _ = b
+      .endpoint_mut()
+      .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..400 {
+      for (peer, peer_addr) in [(&mut t, t_addr), (&mut b, b_addr)] {
+        while let Some((to, bytes)) = peer.poll_transmit() {
+          if to == a_addr {
+            a.handle_udp(peer_addr, &bytes, now);
+          }
+        }
+      }
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == t_addr {
+          t.handle_udp(a_addr, &bytes, now);
+        } else if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      t.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_connections_to(t_addr) >= 1 && a.live_connections_to(b_addr) >= 1 {
+        break;
+      }
+    }
+    assert!(
+      a.live_connections_to(t_addr) >= 1 && a.live_connections_to(b_addr) >= 1,
+      "test precondition: A must hold a live connection to both T and B"
+    );
+
+    // Clear handshake-era ingress, then fill peer B's standing share to the
+    // per-peer cap while the node-global queue stays far below its cap, so the
+    // GLOBAL bound never fires — only B's per-peer bound can drop, and only B's
+    // datagrams, never T's.
+    a.mem_ingress.clear();
+    a.mem_ingress_per_peer.clear();
+    for _ in 0..super::MAX_INGRESS_DATAGRAMS_PER_PEER {
+      a.mem_ingress.push_back((b_addr, Bytes::from_static(b"x")));
+      *a.mem_ingress_per_peer.entry(b_addr).or_insert(0) += 1;
+    }
+    assert!(
+      a.mem_ingress.len() < super::MAX_MEM_INGRESS_DATAGRAMS,
+      "test precondition: global queue must stay below its cap so only the \
+       per-peer bound is exercised"
+    );
+
+    // Both peers send one application datagram to A. T's must land in the shared
+    // queue; B's (already at its per-peer cap) must be dropped-and-counted by the
+    // real service_quinn drain.
+    let t_payload = Bytes::from_static(b"\x01t-probe-ack");
+    assert_eq!(
+      t.queue_unreliable_datagram(a_addr, t_payload.clone(), now),
+      super::DatagramSendOutcome::Queued
+    );
+    assert_eq!(
+      b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01b-flood"), now),
+      super::DatagramSendOutcome::Queued
+    );
+    let dropped_before = a.datagram_ingress_dropped();
+
+    let mut got_t: Option<(SocketAddr, Bytes)> = None;
+    for _ in 0..50 {
+      t.handle_timeout(now);
+      b.handle_timeout(now);
+      for (peer, peer_addr) in [(&mut t, t_addr), (&mut b, b_addr)] {
+        while let Some((to, bytes)) = peer.poll_transmit() {
+          if to == a_addr {
+            a.handle_udp(peer_addr, &bytes, now);
+          }
+        }
+      }
+      a.handle_timeout(now);
+      // Drain A's queue looking for T's datagram, skipping B's filler entries.
+      while let Some(item) = a.poll_memberlist_ingress() {
+        if item.0 == t_addr {
+          got_t = Some(item);
+          break;
+        }
+      }
+      if got_t.is_some() && a.datagram_ingress_dropped() > dropped_before {
+        break;
+      }
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == t_addr {
+          t.handle_udp(a_addr, &bytes, now);
+        } else if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+    }
+
+    let (from, bytes) =
+      got_t.expect("T's datagram must surface despite B's full standing share — no starvation");
+    assert_eq!(
+      from, t_addr,
+      "surfaced ingress must be tagged with T's address"
+    );
+    assert_eq!(
+      bytes, t_payload,
+      "T's datagram payload must round-trip intact"
+    );
+    assert!(
+      a.datagram_ingress_dropped() > dropped_before,
+      "B's datagram, arriving while B is at its per-peer cap, must be dropped and counted"
+    );
+  }
+
+  /// A plain-UDP flood from one peer cannot bypass the shared ingress caps:
+  /// `handle_memberlist_udp` is admission-checked through the SAME shared helper
+  /// as the QUIC datagram drain, so once a flooding peer reaches its per-peer cap
+  /// its further UDP frames are dropped-and-counted while a DIFFERENT peer's
+  /// inbound frame is still admitted. Before the fix the UDP path pushed
+  /// unconditionally and incremented `mem_ingress_per_peer` past the cap, so a
+  /// fallback flood was an unbounded queue grower that also starved later
+  /// authenticated QUIC datagrams on the per-peer/global cap checks.
+  #[test]
+  fn udp_ingress_flood_is_capped_and_does_not_starve_other_peers() {
+    let now = Instant::now();
+    let mut a = make_endpoint("a", "127.0.0.1:7991".parse().unwrap(), now);
+    let x: SocketAddr = "127.0.0.1:7992".parse().unwrap(); // UDP flooder
+    // Flood X over plain UDP well past its per-peer cap; the global cap stays
+    // clear (per-peer cap << global cap), so only X's per-peer bound can fire.
+    for _ in 0..(super::MAX_INGRESS_DATAGRAMS_PER_PEER + 50) {
+      a.handle_memberlist_udp(x, b"\x01flood");
+    }
+    // X is capped at exactly its per-peer budget; the overflow was dropped+counted.
+    assert!(
+      a.mem_ingress_per_peer.get(&x).copied().unwrap_or(0) <= super::MAX_INGRESS_DATAGRAMS_PER_PEER,
+      "X's standing share must not exceed its per-peer cap"
+    );
+    assert!(
+      a.datagram_ingress_dropped() >= 50,
+      "X's 50 overflow UDP frames must be dropped and counted"
+    );
+    assert!(
+      a.mem_ingress.len() < super::MAX_MEM_INGRESS_DATAGRAMS,
+      "X must not be able to fill the global queue"
+    );
+    // A different peer Y's frame is still admitted (not starved by X's flood).
+    let y: SocketAddr = "127.0.0.1:7993".parse().unwrap();
+    a.handle_memberlist_udp(y, b"\x01y");
+    // Drain and confirm Y's frame is present.
+    let mut saw_y = false;
+    while let Some((from, _)) = a.poll_memberlist_ingress() {
+      if from == y {
+        saw_y = true;
+      }
+    }
+    assert!(saw_y, "a non-flooding peer's frame must still be admitted");
+  }
+
+  /// Offering an unreliable datagram to a peer with no pooled connection is
+  /// best-effort `NotReady` (no datagram max_size yet), but it MUST initiate a
+  /// dial so a subsequent offer can land once the connection establishes.
+  #[test]
+  fn queue_unreliable_datagram_to_unknown_peer_is_not_ready_and_initiates_dial() {
+    let a_addr: SocketAddr = "127.0.0.1:7953".parse().unwrap();
+    let unknown: SocketAddr = "127.0.0.1:7954".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+
+    let outcome = a.queue_unreliable_datagram(unknown, Bytes::from_static(b"x"), now);
+    assert_eq!(outcome, super::DatagramSendOutcome::NotReady);
+    assert!(
+      a.conns.handle_for(&unknown).is_some(),
+      "queue must initiate a dial to an unknown peer"
+    );
+    // A best-effort NotReady on a still-handshaking connection (no datagram
+    // max_size yet) is NOT a drop — only a residual quinn datagram-state error
+    // bumps the drop counter.
+    assert_eq!(a.datagram_dropped(), 0);
+  }
+
+  /// A datagram to a peer with no pooled connection is best-effort NotReady AND
+  /// initiates a dial; a single flush_outbound_transmits then emits that dial's
+  /// QUIC Initial the SAME tick (so the connection warms promptly instead of
+  /// waiting for the next driver wake).
+  #[test]
+  fn cold_peer_datagram_then_flush_emits_quic_initial_same_tick() {
+    let a_addr: SocketAddr = "127.0.0.1:7991".parse().unwrap();
+    let cold: SocketAddr = "127.0.0.1:7992".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+
+    assert_eq!(
+      a.queue_unreliable_datagram(cold, Bytes::from_static(b"\x01g"), now),
+      super::DatagramSendOutcome::NotReady
+    );
+    // What the driver now does on NotReady:
+    a.flush_outbound_transmits(now);
+    // The cold dial's Initial must be queued for transmit to `cold` this tick.
+    let mut saw_initial_to_cold = false;
+    while let Some((to, _bytes)) = a.poll_transmit() {
+      if to == cold {
+        saw_initial_to_cold = true;
+      }
+    }
+    assert!(
+      saw_initial_to_cold,
+      "the cold dial's QUIC Initial must be emitted the same tick as the flush"
     );
   }
 
@@ -3940,6 +4873,216 @@ mod tests {
     assert_eq!(back, datagram);
   }
 
+  /// A datagram larger than the connection's negotiated `max_size` is reported
+  /// `TooLarge` (never silently dropped) — the driver's UDP fallback then
+  /// carries it. This is the spec's "split OR fall back to UDP, never silently
+  /// dropped" guarantee: the machine surface always returns an actionable
+  /// outcome rather than discarding the payload.
+  ///
+  /// Also confirms the boundary: a payload of exactly `max_size` bytes is
+  /// `Queued`, not `TooLarge`.
+  #[test]
+  fn oversize_unreliable_datagram_reports_too_large() {
+    let a_addr: SocketAddr = "127.0.0.1:7983".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7984".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive an A<->B push/pull handshake to Established so the connection
+    // has negotiated a datagram max_size (the proven ferry loop pattern).
+    // Ignoring StreamId return: the test asserts on the datagram outcome.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    let max = a
+      .connection_datagram_max_size(b_addr)
+      .expect("an Established connection exposes a datagram max_size");
+
+    // One byte over the negotiated limit must be TooLarge — never a silent drop.
+    let too_big = Bytes::from(vec![0u8; max + 1]);
+    assert_eq!(
+      a.queue_unreliable_datagram(b_addr, too_big, now),
+      super::DatagramSendOutcome::TooLarge,
+      "a payload of max_size+1 ({} bytes) must be TooLarge, not silently dropped",
+      max + 1,
+    );
+
+    // A payload of exactly max_size bytes sits within the limit and is Queued.
+    let ok = Bytes::from(vec![0u8; max]);
+    assert_eq!(
+      a.queue_unreliable_datagram(b_addr, ok, now),
+      super::DatagramSendOutcome::Queued,
+      "a payload of exactly max_size ({max} bytes) must be Queued",
+    );
+  }
+
+  /// With drop=false, filling the datagram send buffer returns NotReady (the
+  /// driver then falls back to UDP) instead of silently evicting the OLDEST queued
+  /// datagram. This is what prevents a burst from dropping an in-flight probe.
+  #[test]
+  fn full_datagram_send_buffer_reports_not_ready_without_eviction() {
+    let a_addr: SocketAddr = "127.0.0.1:7995".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Drive an A<->B push/pull handshake to Established so the connection has a
+    // negotiated datagram max_size (the proven ferry loop pattern).
+    // Ignoring StreamId return: the test asserts on the datagram outcome.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    // Query the connection's datagram max_size; use payloads near it so the 64 KiB
+    // send buffer fills within a bounded number of un-flushed sends.
+    let max = a.connection_datagram_max_size(b_addr).expect("max_size");
+    let chunk = max.clamp(1, 4096);
+    let payload = Bytes::from(vec![0u8; chunk]);
+    let mut saw_not_ready = false;
+    for _ in 0..10_000 {
+      match a.queue_unreliable_datagram(b_addr, payload.clone(), now) {
+        super::DatagramSendOutcome::Queued => {}
+        super::DatagramSendOutcome::NotReady => {
+          saw_not_ready = true;
+          break;
+        }
+        super::DatagramSendOutcome::TooLarge => {
+          panic!("payload within max_size must not be TooLarge")
+        }
+      }
+    }
+    assert!(
+      saw_not_ready,
+      "drop=false must report NotReady when the send buffer is full, not evict and report Queued"
+    );
+  }
+
+  /// A Udp-mode endpoint does not enable quinn's datagram extension, so it never
+  /// advertises `max_datagram_frame_size`: its established connections report
+  /// `datagrams().max_size() == None`. This is the structural guarantee behind
+  /// the pure-UDP opt-out AND cross-mode interop — a Datagram-mode peer dialing a
+  /// Udp-mode node sees no datagram capability, reports `NotReady`, and falls
+  /// back to plain UDP rather than emitting datagrams the node would swallow.
+  #[test]
+  fn udp_mode_does_not_advertise_datagram_support() {
+    let a_addr: SocketAddr = "127.0.0.1:7993".parse().unwrap(); // Udp-mode receiver
+    let b_addr: SocketAddr = "127.0.0.1:7994".parse().unwrap(); // Datagram-mode dialer
+    let now = Instant::now();
+    let mut a = make_endpoint_udp("a", a_addr, now); // Udp mode: datagrams disabled
+    let mut b = make_endpoint("b", b_addr, now); // Datagram mode (default)
+
+    // Drive an A<->B push/pull handshake to Established (the proven ferry loop
+    // pattern); the handshake itself does not depend on the unreliable mode, so
+    // the connection forms regardless of the datagram capability difference.
+    // Ignoring StreamId return: the test asserts on the negotiated datagram
+    // capability, not the handle.
+    let _ = b
+      .endpoint_mut()
+      .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if b.live_bridge_count() >= 1
+        && a.endpoint_events_processed > 0
+        && b.endpoint_events_processed > 0
+      {
+        break;
+      }
+      if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+        break;
+      }
+    }
+
+    // quinn's `Connection::datagrams().max_size()` is the LOCAL send ceiling,
+    // gated by the PEER's advertised `max_datagram_frame_size`. A (Udp mode)
+    // advertised none, so B's connection to A reports `max_size() == None`: B
+    // CANNOT send a datagram to A. This is the load-bearing cross-mode interop
+    // guarantee — a Datagram-mode peer never emits a datagram a Udp-mode node
+    // would silently swallow.
+    assert_eq!(
+      b.connection_datagram_max_size(a_addr),
+      None,
+      "a Datagram-mode peer must see no datagram capability toward a Udp-mode node \
+       that disabled the extension (max_size == None)"
+    );
+
+    // The direct consequence at the send API: B's offer is `NotReady`, so the
+    // driver falls back to plain UDP rather than dropping the payload.
+    assert_eq!(
+      b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01x"), now),
+      super::DatagramSendOutcome::NotReady,
+      "a Datagram-mode peer must get NotReady for a Udp-mode node that disabled datagrams"
+    );
+  }
+
   /// Strict-mode rejection MUST fire at the coordinator's public ingress
   /// API. A configured keyring + a leading tag that is not `Encrypted` is
   /// an unauthenticated plaintext Ping/Ack/Alive frame; passing it through
@@ -3966,6 +5109,66 @@ mod tests {
       matches!(result, Err(FrameError::Encryption(_))),
       "decrypt_gossip MUST reject a plaintext datagram while encryption \
        is enabled — got {result:?}",
+    );
+  }
+
+  /// A QUIC packet delivered via handle_udp must NOT advance membership timers:
+  /// the packet may carry application datagrams (probe Acks/Alives) the driver has
+  /// not yet decoded, so firing a probe/suspicion deadline here would be a false
+  /// failure. Membership time advances ONLY on the driver's explicit
+  /// handle_timeout, after it decodes mem_ingress. (The plain-UDP ingress path
+  /// already has this property.)
+  #[test]
+  fn quic_packet_ingress_does_not_advance_membership_time() {
+    let a_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:7998".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Establish an A<->B connection (the ferry pattern) so B has a real QUIC
+    // packet to send to A. Ignoring StreamId: the test asserts on the counter.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    let mut b_to_a: Option<Bytes> = None;
+    for _ in 0..200 {
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          // capture one real QUIC packet from B to A WITHOUT feeding it yet
+          if b_to_a.is_none() {
+            b_to_a = Some(bytes.clone());
+          }
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 && b_to_a.is_some() {
+        break;
+      }
+    }
+    let packet = b_to_a.expect("B must have produced a QUIC packet to A");
+
+    // Deliver a QUIC packet via handle_udp and assert membership time did NOT
+    // advance; then an explicit handle_timeout DOES advance it.
+    let before = a.membership_time_advances();
+    a.handle_udp(b_addr, &packet, now);
+    assert_eq!(
+      a.membership_time_advances(),
+      before,
+      "handle_udp(Class::Quic) must not advance membership time (it may carry an undecoded datagram Ack)"
+    );
+    a.handle_timeout(now);
+    assert_eq!(
+      a.membership_time_advances(),
+      before + 1,
+      "handle_timeout must advance membership time exactly once"
     );
   }
 }

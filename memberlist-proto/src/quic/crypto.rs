@@ -68,6 +68,8 @@
 use core::net::SocketAddr;
 use std::sync::Arc;
 
+use super::UnreliableTransport;
+
 /// Per-peer SNI lookup. The coordinator calls this once per outbound dial,
 /// passing the dialed `SocketAddr`; the returned string is forwarded to
 /// `quinn_proto::Endpoint::connect(client, addr, server_name)` and reaches the
@@ -95,6 +97,15 @@ pub struct QuicConfig {
   /// supplied `server_name`, not the dialed `SocketAddr`, so a custom verifier
   /// cannot re-derive per-peer SAN identity from the address alone).
   sni_provider: SniProvider,
+  /// Which wire the unreliable path (gossip + probes) routes over, chosen at
+  /// construction. In [`UnreliableTransport::Datagram`] mode the constructor
+  /// enables quinn's datagram extension (the buffers are sized); in
+  /// [`UnreliableTransport::Udp`] mode it forces `datagram_receive_buffer_size`
+  /// to `None` (quinn enables datagrams by default, so this must be explicit) so
+  /// the endpoint does NOT advertise datagram support and a cross-mode peer
+  /// falls back to plain UDP. The driver reads this via
+  /// [`Self::unreliable_transport`] to route unreliable sends.
+  unreliable_transport: UnreliableTransport,
 }
 
 impl QuicConfig {
@@ -150,16 +161,31 @@ impl QuicConfig {
   /// `ServerCertVerifier::verify_server_cert(_, _, server_name, _, _)` does not
   /// receive the dialed `SocketAddr`, so a verifier cannot re-derive per-peer
   /// SAN identity from the supplied address.
+  ///
+  /// `unreliable_transport` picks the wire for the unreliable path (gossip +
+  /// probes) and is the single source of truth for whether quinn's datagram
+  /// extension is enabled: [`UnreliableTransport::Datagram`] sizes the datagram
+  /// buffers (the extension is advertised), [`UnreliableTransport::Udp`] forces
+  /// `datagram_receive_buffer_size` to `None` so the endpoint does NOT advertise
+  /// datagram support and cross-mode peers fall back to plain UDP.
   pub fn new(
     endpoint: quinn_proto::EndpointConfig,
     server: quinn_proto::ServerConfig,
     client: quinn_proto::ClientConfig,
     transport: quinn_proto::TransportConfig,
     server_name: impl Into<Arc<str>>,
+    unreliable_transport: UnreliableTransport,
   ) -> Self {
     let name: Arc<str> = server_name.into();
     let provider: SniProvider = Arc::new(move |_addr: &SocketAddr| name.clone());
-    Self::new_with_sni_provider(endpoint, server, client, transport, provider)
+    Self::new_with_sni_provider(
+      endpoint,
+      server,
+      client,
+      transport,
+      provider,
+      unreliable_transport,
+    )
   }
 
   /// Like [`Self::new`] but takes a per-peer SNI provider. The closure is
@@ -169,12 +195,17 @@ impl QuicConfig {
   /// the operator's `ServerCertVerifier` at handshake time. Use this for
   /// per-peer SAN deployments where the verifier must see a different
   /// `server_name` for each peer.
+  ///
+  /// `unreliable_transport` governs the datagram extension exactly as for
+  /// [`Self::new`]: enabled in [`UnreliableTransport::Datagram`] mode, left at
+  /// quinn defaults (disabled, unadvertised) in [`UnreliableTransport::Udp`].
   pub fn new_with_sni_provider(
     mut endpoint: quinn_proto::EndpointConfig,
     mut server: quinn_proto::ServerConfig,
     mut client: quinn_proto::ClientConfig,
     mut transport: quinn_proto::TransportConfig,
     sni_provider: SniProvider,
+    unreliable_transport: UnreliableTransport,
   ) -> Self {
     // Disable QUIC-bit greasing (RFC 9287). `EndpointConfig::new`
     // defaults `grease_quic_bit` to `true`, which advertises the
@@ -211,6 +242,42 @@ impl QuicConfig {
     // value (impossible if they `move`d it as the signature requires,
     // but defensive against API misuse) is consumed.
     transport.max_concurrent_uni_streams(quinn_proto::VarInt::from_u32(0));
+
+    // Govern quinn's datagram extension by the chosen mode. The advertised
+    // `max_datagram_frame_size` transport parameter is derived SOLELY from
+    // `datagram_receive_buffer_size`: quinn maps `Some(n) -> advertise`,
+    // `None -> do not advertise` (transport_parameters.rs builds the param as
+    // `config.datagram_receive_buffer_size.map(...)`). It also gates the local
+    // SEND path on the receive buffer being set — `datagrams().send(...)`
+    // returns `SendDatagramError::Disabled` when it is `None`. Crucially,
+    // `TransportConfig::default()` sets `datagram_receive_buffer_size =
+    // Some(STREAM_RWND)`, so datagrams are ON by default; the mode must drive
+    // BOTH directions explicitly rather than relying on the default.
+    //
+    // - `Datagram` mode: size both buffers so the extension is advertised and
+    //   the send path is enabled.
+    // - `Udp` mode: force `datagram_receive_buffer_size(None)` so the endpoint
+    //   does NOT advertise datagram support. A `Datagram`-mode peer then sees
+    //   `datagrams().max_size() == None` for this connection, reports
+    //   `NotReady`, and falls back to plain UDP. This is the true pure-UDP
+    //   opt-out AND the mixed-mode interop guarantee — a `Udp` node never
+    //   silently swallows a datagram a peer believed it could deliver, because
+    //   the peer never negotiated one.
+    //
+    // Both setters run before `Arc::new(transport)` so the values propagate into
+    // the shared `Arc` installed on the server and client configs.
+    // (`grease_quic_bit` and `max_concurrent_uni_streams` above are not
+    // mode-dependent and stay forced unconditionally.)
+    match unreliable_transport {
+      UnreliableTransport::Datagram => {
+        transport.datagram_receive_buffer_size(Some(64 * 1024));
+        transport.datagram_send_buffer_size(64 * 1024);
+      }
+      UnreliableTransport::Udp => {
+        transport.datagram_receive_buffer_size(None);
+      }
+    }
+
     let transport = Arc::new(transport);
     server.transport_config(transport.clone());
     client.transport_config(transport);
@@ -222,6 +289,7 @@ impl QuicConfig {
       server,
       client,
       sni_provider,
+      unreliable_transport,
     }
   }
 
@@ -260,6 +328,15 @@ impl QuicConfig {
   /// Returns the client config used for outbound dials.
   pub fn client(&self) -> &quinn_proto::ClientConfig {
     &self.client
+  }
+
+  /// Which wire the unreliable path (gossip + probes) rides, as chosen at
+  /// construction. [`UnreliableTransport::Datagram`] has quinn's datagram
+  /// extension enabled; [`UnreliableTransport::Udp`] does not advertise it. The
+  /// driver reads this to route unreliable sends.
+  #[inline(always)]
+  pub fn unreliable_transport(&self) -> UnreliableTransport {
+    self.unreliable_transport
   }
 }
 
@@ -365,6 +442,7 @@ pub(crate) mod tests {
       test_client(),
       quinn_proto::TransportConfig::default(),
       "localhost",
+      UnreliableTransport::Datagram,
     );
     // Prove the bundle is usable: quinn_proto::Endpoint::new must not panic.
     // Signature: Endpoint::new(Arc<EndpointConfig>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
@@ -401,6 +479,7 @@ pub(crate) mod tests {
       test_client(),
       tc,
       "localhost",
+      UnreliableTransport::Datagram,
     );
   }
 
@@ -414,11 +493,49 @@ pub(crate) mod tests {
       test_client(),
       quinn_proto::TransportConfig::default(),
       "cluster.example",
+      UnreliableTransport::Datagram,
     );
     let a: SocketAddr = "10.0.0.1:7946".parse().unwrap();
     let b: SocketAddr = "10.0.0.2:7946".parse().unwrap();
     assert_eq!(&*cfg.sni_for(&a), "cluster.example");
     assert_eq!(&*cfg.sni_for(&b), "cluster.example");
+  }
+
+  /// The unreliable transport is chosen at construction: a `Datagram`-built
+  /// config (encrypted, peer-attested delivery over the per-peer QUIC
+  /// connection) reports `Datagram`; a `Udp`-built config (the large-cluster
+  /// opt-out that routes the unreliable path over plain UDP) reports `Udp`.
+  /// `UnreliableTransport::default()` is `Datagram`, so callers that do not care
+  /// pass that.
+  #[test]
+  fn quic_config_unreliable_transport_is_a_constructor_arg() {
+    assert_eq!(
+      UnreliableTransport::default(),
+      UnreliableTransport::Datagram
+    );
+
+    let datagram = QuicConfig::new(
+      test_endpoint_config(&[7u8; 32]),
+      test_server(),
+      test_client(),
+      quinn_proto::TransportConfig::default(),
+      "localhost",
+      UnreliableTransport::Datagram,
+    );
+    assert_eq!(
+      datagram.unreliable_transport(),
+      UnreliableTransport::Datagram
+    );
+
+    let udp = QuicConfig::new(
+      test_endpoint_config(&[7u8; 32]),
+      test_server(),
+      test_client(),
+      quinn_proto::TransportConfig::default(),
+      "localhost",
+      UnreliableTransport::Udp,
+    );
+    assert_eq!(udp.unreliable_transport(), UnreliableTransport::Udp);
   }
 
   /// `new_with_sni_provider` lets the operator return a different identity
@@ -435,6 +552,7 @@ pub(crate) mod tests {
       test_client(),
       quinn_proto::TransportConfig::default(),
       provider,
+      UnreliableTransport::Datagram,
     );
     let a: SocketAddr = "10.0.0.1:7100".parse().unwrap();
     let b: SocketAddr = "10.0.0.2:7200".parse().unwrap();

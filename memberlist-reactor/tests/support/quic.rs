@@ -6,6 +6,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use memberlist_proto::UnreliableTransport;
 use memberlist_reactor::QuicConfig;
 use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
@@ -63,7 +64,14 @@ pub fn build_quic_config(
     ))
     .keep_alive_interval(Some(Duration::from_secs(1)));
 
-  QuicConfig::new(endpoint_cfg, server_cfg, client_cfg, transport, "localhost")
+  QuicConfig::new(
+    endpoint_cfg,
+    server_cfg,
+    client_cfg,
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
 }
 
 /// Generates a self-signed cert and builds a `QuicConfig` that trusts it as its

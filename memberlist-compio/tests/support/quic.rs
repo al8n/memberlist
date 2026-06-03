@@ -7,6 +7,7 @@
 use std::{sync::Arc, time::Duration};
 
 use memberlist_compio::QuicConfig;
+use memberlist_proto::UnreliableTransport;
 use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -39,7 +40,8 @@ pub fn generate_cert_with_sans(
 }
 
 /// Build a `QuicConfig` with the supplied cert + key, accepting any cert
-/// signed by `trusted_roots` on the client side.
+/// signed by `trusted_roots` on the client side, in `Datagram` unreliable mode
+/// (the default).
 ///
 /// Uses no-client-auth on the server (trusted-network deployment model).
 /// ALPN is set to `memberlist-quic` on both sides. Transport is configured
@@ -48,6 +50,18 @@ pub fn build_quic_config(
   cert: CertificateDer<'static>,
   key: PrivateKeyDer<'static>,
   trusted_roots: RootCertStore,
+) -> QuicConfig {
+  build_quic_config_with_mode(cert, key, trusted_roots, UnreliableTransport::Datagram)
+}
+
+/// Like [`build_quic_config`] but with an explicit unreliable-transport mode.
+/// `UnreliableTransport::Udp` builds a config that does NOT advertise the QUIC
+/// datagram extension, exercising the plain-UDP opt-out.
+pub fn build_quic_config_with_mode(
+  cert: CertificateDer<'static>,
+  key: PrivateKeyDer<'static>,
+  trusted_roots: RootCertStore,
+  unreliable_transport: UnreliableTransport,
 ) -> QuicConfig {
   let provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -92,7 +106,14 @@ pub fn build_quic_config(
     ))
     .keep_alive_interval(Some(Duration::from_secs(1)));
 
-  QuicConfig::new(endpoint_cfg, server_cfg, client_cfg, transport, "localhost")
+  QuicConfig::new(
+    endpoint_cfg,
+    server_cfg,
+    client_cfg,
+    transport,
+    "localhost",
+    unreliable_transport,
+  )
 }
 
 /// Convenience: generate a self-signed cert and build a `QuicConfig` that

@@ -2047,7 +2047,8 @@ mod per_peer_server_name {
   };
 
   use memberlist_proto::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, typed::State,
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, UnreliableTransport,
+    typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
@@ -2166,7 +2167,14 @@ mod per_peer_server_name {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    let cfg = QuicConfig::new(endpoint, server, client, transport, expected_peer_name);
+    let cfg = QuicConfig::new(
+      endpoint,
+      server,
+      client,
+      transport,
+      expected_peer_name,
+      UnreliableTransport::Datagram,
+    );
     (cfg, last_seen)
   }
 
@@ -2403,7 +2411,8 @@ mod mtls_cluster_auth {
   use std::{net::SocketAddr, sync::Arc, time::Duration};
 
   use memberlist_proto::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, typed::State,
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, UnreliableTransport,
+    typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;
@@ -2527,7 +2536,14 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    QuicConfig::new(endpoint, server, client, transport, "localhost")
+    QuicConfig::new(
+      endpoint,
+      server,
+      client,
+      transport,
+      "localhost",
+      UnreliableTransport::Datagram,
+    )
   }
 
   /// Build B's config: server accepts any client; client has no cert
@@ -2560,7 +2576,14 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0xa5u8; 32]);
-    QuicConfig::new(endpoint, server, client, transport, "localhost")
+    QuicConfig::new(
+      endpoint,
+      server,
+      client,
+      transport,
+      "localhost",
+      UnreliableTransport::Datagram,
+    )
   }
 
   fn build_endpoint(

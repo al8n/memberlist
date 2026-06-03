@@ -351,7 +351,14 @@ mod transport_tests {
       ))
       .keep_alive_interval(Some(Duration::from_secs(1)));
 
-    QuicConfig::new(endpoint_cfg, server_cfg, client_cfg, transport, "localhost")
+    QuicConfig::new(
+      endpoint_cfg,
+      server_cfg,
+      client_cfg,
+      transport,
+      "localhost",
+      memberlist_proto::UnreliableTransport::Datagram,
+    )
   }
 
   fn test_quic_opts() -> QuicTransportOptions {

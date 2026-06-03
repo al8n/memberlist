@@ -35,7 +35,7 @@ use std::{
 
 use memberlist_proto::{
   Endpoint, EndpointConfig, Event, Instant, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
-  framing, message_from_any, message_to_any,
+  UnreliableTransport, framing, message_from_any, message_to_any,
   typed::{Ack, Alive, Message, Node, Suspect},
 };
 use smol_str::SmolStr;
@@ -198,6 +198,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     client,
     transport,
     "localhost",
+    UnreliableTransport::Datagram,
   )
 }
 
