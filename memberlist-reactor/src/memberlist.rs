@@ -158,7 +158,10 @@ impl<I: NodeId> Memberlist<I> {
       ep.set_merge_delegate(BoxedMerge(md));
     }
 
-    // Retain the cluster label for the gossip codec.
+    // Retain the cluster label. The same label feeds both the gossip codec
+    // (outbound stamping + inbound verification) and the QUIC reliable bridge
+    // (stream label framing), ensuring the two planes share one source and
+    // cannot diverge.
     let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
 
     let mut endpoint = QuicEndpoint::new(ep, quic_config);
@@ -167,6 +170,11 @@ impl<I: NodeId> Memberlist<I> {
     // are applied to the gossip (UDP datagram) path only.
     endpoint.set_compression_options(*ml_opts.compression());
     endpoint.set_encryption_options(ml_opts.encryption().clone());
+    // Thread the cluster label into the reliable bridge constructor so the
+    // reliable plane enforces the same label as the gossip codec.
+    let mut endpoint = endpoint
+      .with_label(label.clone(), ml_opts.skip_inbound_label_check())
+      .expect("cluster label validated at the MemberlistOptions setter");
     endpoint.start_scheduling(Instant::now());
 
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));

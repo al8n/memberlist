@@ -256,19 +256,25 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
+    // Retain the cluster label. The same label feeds both the gossip codec
+    // (outbound stamping + inbound verification) and the QUIC reliable bridge
+    // (stream label framing), ensuring the two planes share one source and
+    // cannot diverge.
+    let label = runtime
+      .memberlist_options
+      .label()
+      .map(bytes::Bytes::copy_from_slice);
     let endpoint = QuicEndpoint::with_compression(
       ep,
       self.quic_config,
       *runtime.memberlist_options.compression(),
     )
-    .with_encryption(runtime.memberlist_options.encryption().clone());
-
-    // Retain the cluster label for the gossip codec: outbound gossip is
-    // stamped with this label and inbound gossip is verified against it.
-    let label = runtime
-      .memberlist_options
-      .label()
-      .map(bytes::Bytes::copy_from_slice);
+    .with_encryption(runtime.memberlist_options.encryption().clone())
+    .with_label(
+      label.clone(),
+      runtime.memberlist_options.skip_inbound_label_check(),
+    )
+    .expect("cluster label validated at the MemberlistOptions setter");
     crate::quic_driver::quic_driver_loop::<Self::Id, D>(
       endpoint,
       self.gossip_socket,

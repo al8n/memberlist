@@ -984,3 +984,90 @@ async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), seed.shutdown()).await;
 }
+
+/// A different cluster label over shared QUIC/TLS trust must not allow a node
+/// to join a foreign cluster via the QUIC reliable plane.
+///
+/// Three nodes share one self-signed cert and trust root so every TLS
+/// handshake succeeds. The cluster label on the reliable bridge is the sole
+/// isolation mechanism:
+///
+/// - `a`  (label "cluster-a") and `b` (label "cluster-b") share the same TLS
+///   trust but carry different labels — B's push/pull stream must be rejected
+///   by A's inbound label check, preventing membership convergence.
+/// - `a2` (label "cluster-a") must converge with `a` after joining.
+///
+/// This test passes only when the label is threaded into every QUIC reliable
+/// bridge and would fail (B merging into A) without that wiring.
+#[compio::test]
+async fn quic_label_isolates_reliable_plane() {
+  let (cert, key) = support::generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("root");
+  // All three nodes trust the same root so TLS never rejects; only the
+  // reliable-stream cluster label distinguishes the clusters.
+  let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
+  let qcfg_b = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
+  let qcfg_a2 = support::build_quic_config(cert, key, roots);
+
+  let a_opts = MemberlistOptions::new()
+    .with_label(Some(b"cluster-a".to_vec()))
+    .expect("valid label");
+  let b_opts = MemberlistOptions::new()
+    .with_label(Some(b"cluster-b".to_vec()))
+    .expect("valid label");
+  let a2_opts = MemberlistOptions::new()
+    .with_label(Some(b"cluster-a".to_vec()))
+    .expect("valid label");
+
+  let a_port: u16 = 7470;
+  let b_port: u16 = 7471;
+  let a2_port: u16 = 7472;
+
+  let a = make_quic_with("ql-a", a_port, qcfg_a, a_opts).await;
+  let b = make_quic_with("ql-b", b_port, qcfg_b, b_opts).await;
+  let a2 = make_quic_with("ql-a2", a2_port, qcfg_a2, a2_opts).await;
+  let a_addr = loopback_addr(a_port);
+
+  // Cross-label join: B's stream label mismatch must cause A to reject it.
+  // Ignoring Err: join failure on a mismatched label is expected here.
+  let _ = b
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await;
+  compio::time::sleep(Duration::from_millis(500)).await;
+  assert_eq!(
+    a.member_count(),
+    1,
+    "cross-label QUIC join must not add B to A: a has {} members",
+    a.member_count()
+  );
+  assert_eq!(
+    b.member_count(),
+    1,
+    "cross-label QUIC join must not add A to B: b has {} members",
+    b.member_count()
+  );
+
+  // Same-label join: A2 must converge with A on the reliable plane.
+  a2.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("same-label QUIC join must succeed");
+  let converged = wait_until(
+    || a.member_count() == 2 && a2.member_count() == 2,
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    converged,
+    "same-label QUIC cluster did not converge: a={}, a2={}",
+    a.member_count(),
+    a2.member_count()
+  );
+
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a2.shutdown()).await;
+}
