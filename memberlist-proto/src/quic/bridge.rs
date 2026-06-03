@@ -26,6 +26,7 @@ use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored, StreamId},
+  label::{LabelOutcome, classify_header, encode_label_prefix},
   stream::Stream,
 };
 
@@ -120,6 +121,37 @@ pub(crate) struct Bridge<I, A> {
   /// the Stream FSM's own configured frame limit rather than a separate
   /// constant.
   reliable_max: usize,
+  /// Cluster label for this bridge, or `None` when no label is configured.
+  ///
+  /// When `Some`, a `[LABELED_TAG=12][len:u8][label_bytes]` frame is prepended
+  /// to the bidi stream as the FIRST outbound bytes, and the peer's inbound
+  /// label header is validated off the head of `recv_accum` before any
+  /// reliable unit reaches `self.stream`. Faithful to
+  /// `memberlist-core/src/network.rs` bidirectional labeling: both sides
+  /// write their label AND validate the peer's.
+  ///
+  /// `None` is byte-identical to today: no label frame is written, and the
+  /// inbound path skips `classify_header` entirely.
+  label: Option<bytes::Bytes>,
+  /// When `true`, suppress the "label expected but missing from inbound peer"
+  /// check — the `classify_header` `skip_inbound_label_check` argument.
+  /// Passed through verbatim; does not suppress `DoubleLabel` (a labeled
+  /// frame arriving at an unlabeled bridge is always rejected).
+  skip_inbound_label_check: bool,
+  /// `true` for the dialer role: write the outbound label frame eagerly
+  /// as the first bytes, without waiting for the peer's inbound label to
+  /// validate. `false` for the acceptor: hold the outbound label until
+  /// `inbound_label_validated` latches (lazy disclosure).
+  eager_outbound_label: bool,
+  /// Latch: `true` once the peer's inbound label header has been validated
+  /// (or confirmed absent for an unlabeled stream). Initialized to
+  /// `label.is_none()` so the unlabeled path is byte-identical to today —
+  /// no `classify_header` call, no early-return.
+  inbound_label_validated: bool,
+  /// Latch: `true` once the outbound label frame has been inserted into
+  /// `pending_out` (or skipped because `label` is `None`). Initialized to
+  /// `label.is_none()`.
+  outbound_label_written: bool,
 }
 
 impl<I, A> Bridge<I, A>
@@ -154,6 +186,15 @@ where
   /// double-encrypting on top costs CPU and bandwidth without adding
   /// security. The field is force-disabled in the body regardless of the
   /// caller's intent (see [`Self::encryption`] field docs).
+  ///
+  /// `label` is the cluster label to frame, or `None` for an unlabeled stream
+  /// (byte-identical to today). `skip_inbound_label_check` suppresses the
+  /// missing-label rejection for an unlabeled peer (forwarded to
+  /// [`classify_header`]). `eager_outbound_label` selects the dialer (eager,
+  /// writes before inbound validation) vs. acceptor (lazy, writes after
+  /// inbound validation) role — faithfully reproduced from
+  /// `memberlist-core/src/network.rs` bidirectional labeling.
+  #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
     stream: Stream<I, A>,
     ch: ConnectionHandle,
@@ -161,6 +202,9 @@ where
     compression: crate::CompressionOptions,
     _encryption: crate::EncryptionOptions,
     reliable_max: usize,
+    label: Option<bytes::Bytes>,
+    skip_inbound_label_check: bool,
+    eager_outbound_label: bool,
   ) -> Self {
     // Snapshot the exchange deadline now, while the stream is still pre-`Done`.
     // Both stream constructors (`Endpoint::dial_succeeded` —
@@ -183,6 +227,19 @@ where
     // variants when handed a disabled `EncryptionOptions`, keeping the
     // on-wire bytes byte-identical to the pre-encryption-port shape.
     let encryption = crate::EncryptionOptions::new();
+    // Defense-in-depth: an empty label normalizes to no-label so an empty
+    // configured label never emits a `[12][0]` header, and an over-long label
+    // (a caller-side bug — `QuicEndpoint::with_label` validates) is caught in
+    // debug before it could truncate the length byte in `encode_label_prefix`.
+    let label = label.filter(|bytes| !bytes.is_empty());
+    debug_assert!(
+      label
+        .as_ref()
+        .is_none_or(|bytes| bytes.len() <= crate::label::MAX_LABEL_LEN),
+      "QUIC bridge label exceeds MAX_LABEL_LEN; validate via QuicEndpoint::with_label"
+    );
+    let inbound_label_validated = label.is_none();
+    let outbound_label_written = label.is_none();
     Self {
       stream,
       ch,
@@ -196,6 +253,11 @@ where
       encryption,
       recv_accum: Vec::new(),
       reliable_max,
+      label,
+      skip_inbound_label_check,
+      eager_outbound_label,
+      inbound_label_validated,
+      outbound_label_written,
     }
   }
 
@@ -620,6 +682,21 @@ where
     };
     let conn = entry.conn_mut();
 
+    // Outbound label frame — emitted exactly once, BEFORE any reliable unit.
+    //
+    // The dialer (eager_outbound_label=true) writes its label immediately; the
+    // acceptor (eager_outbound_label=false) holds until inbound_label_validated
+    // latches, so it never discloses its own label before confirming the peer's.
+    // `pending_out` is guaranteed empty when this fires: outbound_label_written
+    // is initialized to label.is_none(), so the first write-eligible invocation
+    // is the very first pump_out call, at which point no bytes have been sent.
+    if !self.outbound_label_written && (self.eager_outbound_label || self.inbound_label_validated) {
+      if let Some(lbl) = &self.label {
+        encode_label_prefix(lbl, &mut self.pending_out);
+      }
+      self.outbound_label_written = true;
+    }
+
     // Flush any back-pressured remainder first so stream order is preserved.
     if !self.pending_out.is_empty() {
       match conn.send_stream(self.sid).write(&self.pending_out) {
@@ -819,6 +896,45 @@ where
             match chunks.next(usize::MAX) {
               Ok(Some(chunk)) => {
                 self.recv_accum.extend_from_slice(&chunk.bytes);
+
+                // Inbound label validation — runs before any reliable unit
+                // reaches the FSM. While the latch is unset, accumulate chunks
+                // and classify; a split label header is held in recv_accum
+                // until a later chunk completes it.
+                //
+                // CRITICAL INVARIANT: when label is None, inbound_label_validated
+                // starts true, so this block is unreachable — byte-identical to
+                // today's behavior, no classify_header call is ever made.
+                if !self.inbound_label_validated {
+                  let expected = self.label.as_deref();
+                  match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
+                    LabelOutcome::Accepted(consumed) => {
+                      self.recv_accum.drain(..consumed);
+                      self.inbound_label_validated = true;
+                      // Acceptor lazy release: now that the peer's label is
+                      // validated, the acceptor may disclose its own. Prepend
+                      // the label frame to pending_out (guaranteed empty here —
+                      // acceptors hold outbound_label_written=false until now,
+                      // so no bytes have been sent yet).
+                      if !self.eager_outbound_label && !self.outbound_label_written {
+                        if let Some(lbl) = &self.label {
+                          encode_label_prefix(lbl, &mut self.pending_out);
+                        }
+                        self.outbound_label_written = true;
+                      }
+                    }
+                    LabelOutcome::Incomplete => {
+                      // Not enough bytes yet; hold recv_accum and wait for the
+                      // next chunk.
+                      break;
+                    }
+                    LabelOutcome::Rejected(_) => {
+                      decode_failed = true;
+                      break;
+                    }
+                  }
+                }
+
                 // Drain every COMPLETE `[unit_len][payload]` unit; a trailing
                 // partial unit stays buffered for a later chunk. `stream` is a
                 // plain `Stream` here (no Option), so feed it directly.
@@ -1201,6 +1317,59 @@ where
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }
+
+  /// Test-only: feed `bytes` into `recv_accum` and run the inbound label
+  /// classifier once. Returns `Ok(true)` when the latch is now set (either it
+  /// was already set or it just flipped), `Ok(false)` when the header is still
+  /// `Incomplete`, and `Err(reason)` when the header is `Rejected`.
+  ///
+  /// This drives the same classify path that `pump_in`'s chunk loop runs,
+  /// without requiring a real quinn connection. Lets label-unit tests drive
+  /// the validation state machine directly.
+  #[cfg(test)]
+  pub(crate) fn push_recv_and_classify(
+    &mut self,
+    bytes: &[u8],
+  ) -> Result<bool, crate::label::LabelError> {
+    self.recv_accum.extend_from_slice(bytes);
+    if self.inbound_label_validated {
+      return Ok(true);
+    }
+    let expected = self.label.as_deref();
+    match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
+      LabelOutcome::Accepted(consumed) => {
+        self.recv_accum.drain(..consumed);
+        self.inbound_label_validated = true;
+        if !self.eager_outbound_label && !self.outbound_label_written {
+          if let Some(lbl) = &self.label {
+            encode_label_prefix(lbl, &mut self.pending_out);
+          }
+          self.outbound_label_written = true;
+        }
+        Ok(true)
+      }
+      LabelOutcome::Incomplete => Ok(false),
+      LabelOutcome::Rejected(e) => Err(e),
+    }
+  }
+
+  /// Test-only: `true` once the inbound label latch is set.
+  #[cfg(test)]
+  pub(crate) fn inbound_label_validated(&self) -> bool {
+    self.inbound_label_validated
+  }
+
+  /// Test-only: `true` once the outbound label frame has been staged.
+  #[cfg(test)]
+  pub(crate) fn outbound_label_written(&self) -> bool {
+    self.outbound_label_written
+  }
+
+  /// Test-only: the bytes currently staged in `pending_out`.
+  #[cfg(test)]
+  pub(crate) fn pending_out_bytes(&self) -> &[u8] {
+    &self.pending_out
+  }
 }
 
 #[cfg(test)]
@@ -1250,6 +1419,9 @@ mod tests {
       crate::CompressionOptions::new(),
       crate::EncryptionOptions::new(),
       ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
     );
     assert!(matches!(bridge.phase, BridgePhase::Active));
 
@@ -1332,6 +1504,9 @@ mod tests {
       crate::CompressionOptions::new(),
       crate::EncryptionOptions::new(),
       ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
     );
     assert!(matches!(bridge.phase, BridgePhase::Active));
 
@@ -1412,6 +1587,9 @@ mod tests {
         crate::CompressionOptions,
         crate::EncryptionOptions,
         usize,
+        Option<bytes::Bytes>,
+        bool,
+        bool,
       ) -> Bridge<I, A> = Bridge::<I, A>::new;
     }
   }
@@ -1499,11 +1677,14 @@ mod tests {
       crate::CompressionOptions::new(),
       encryption,
       ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
     )
   }
 
   /// A QUIC `Bridge` built with an ENABLED `EncryptionOptions` ends up with
-  /// a DISABLED effective `EncryptionOptions`: the 6-arg `Bridge::new` zeroes
+  /// a DISABLED effective `EncryptionOptions`: the 9-arg `Bridge::new` zeroes
   /// the encryption field unconditionally. The on-wire reliable bytes
   /// therefore carry no `Encrypted` wrapper — quinn already provides
   /// confidentiality, and double-encrypting on the reliable path costs CPU
@@ -1517,6 +1698,319 @@ mod tests {
     assert!(
       !bridge.encryption_for_test().is_enabled(),
       "QUIC bridge zeroes encryption — quinn already encrypts the stream"
+    );
+  }
+
+  // ── Label mechanism helpers ────────────────────────────────────────────────
+
+  fn make_labeled_dialer(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      Some(label),
+      false,
+      true,
+    )
+  }
+
+  fn make_labeled_acceptor(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      Some(label),
+      false,
+      false,
+    )
+  }
+
+  fn make_labeled_acceptor_skip(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      Some(label),
+      true,
+      false,
+    )
+  }
+
+  fn build_label_header(label: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    crate::label::encode_label_prefix(label, &mut buf);
+    buf
+  }
+
+  // ── Label mechanism tests ──────────────────────────────────────────────────
+
+  /// Two bridges with the same label — the dialer validates the acceptor's
+  /// inbound label in one shot, and the acceptor validates the dialer's.
+  /// Both `inbound_label_validated` latches flip to `true` after receiving
+  /// the matching header from the other side.
+  #[test]
+  fn labeled_exchange_same_label_both_validate() {
+    let label = bytes::Bytes::from_static(b"cluster-x");
+
+    // Dialer: inbound_label_validated starts false (label is Some).
+    let mut dialer = make_labeled_dialer(label.clone());
+    assert!(
+      !dialer.inbound_label_validated(),
+      "dialer starts with inbound latch unset"
+    );
+    // Dialer is eager: outbound label is staged on first pump opportunity
+    // (pending_out still empty at construction; the label gets pushed
+    // when pump_out runs — but our test helper drives it directly).
+    // Drive inbound classification with the acceptor's label header.
+    let header = build_label_header(b"cluster-x");
+    assert!(
+      dialer
+        .push_recv_and_classify(&header)
+        .expect("should not fail"),
+      "dialer: matching inbound label is accepted"
+    );
+    assert!(
+      dialer.inbound_label_validated(),
+      "dialer inbound latch set after matching header"
+    );
+
+    // Acceptor: inbound_label_validated starts false (label is Some).
+    let mut acceptor = make_labeled_acceptor(label.clone());
+    assert!(
+      !acceptor.inbound_label_validated(),
+      "acceptor starts with inbound latch unset"
+    );
+    assert!(
+      !acceptor.outbound_label_written(),
+      "acceptor outbound latch unset before inbound validation"
+    );
+    // Drive inbound classification with the dialer's label header.
+    assert!(
+      acceptor
+        .push_recv_and_classify(&header)
+        .expect("should not fail"),
+      "acceptor: matching inbound label is accepted"
+    );
+    assert!(
+      acceptor.inbound_label_validated(),
+      "acceptor inbound latch set after matching header"
+    );
+    // Acceptor lazy release: outbound label must have been staged.
+    assert!(
+      acceptor.outbound_label_written(),
+      "acceptor outbound latch set after inbound validates"
+    );
+    // The staged bytes must be the expected label frame.
+    let expected_frame = build_label_header(b"cluster-x");
+    assert_eq!(
+      acceptor.pending_out_bytes(),
+      expected_frame.as_slice(),
+      "acceptor pending_out must contain the label frame after lazy release"
+    );
+  }
+
+  /// A mismatched inbound label is rejected before any reliable unit reaches
+  /// the FSM — `classify_header` returns `Rejected(Mismatch)`.
+  #[test]
+  fn labeled_bridge_mismatched_inbound_label_rejected() {
+    let label = bytes::Bytes::from_static(b"cluster-x");
+    let mut acceptor = make_labeled_acceptor(label);
+
+    // Send a label frame claiming a DIFFERENT cluster.
+    let wrong_header = build_label_header(b"cluster-y");
+    let result = acceptor.push_recv_and_classify(&wrong_header);
+    assert!(
+      matches!(result, Err(crate::label::LabelError::Mismatch)),
+      "a mismatched inbound label must be Rejected(Mismatch) — got {result:?}"
+    );
+    // The FSM must not have received any data (recv_accum still has the
+    // rejected header bytes, latch is still unset).
+    assert!(
+      !acceptor.inbound_label_validated(),
+      "inbound latch must remain unset after a rejected label"
+    );
+  }
+
+  /// `skip_inbound_label_check=true` on an acceptor allows an unlabeled peer
+  /// (no `[12]` header present). The inbound latch flips to `true` consuming 0
+  /// bytes from recv_accum.
+  #[test]
+  fn labeled_bridge_skip_accepts_unlabeled_inbound() {
+    let label = bytes::Bytes::from_static(b"cluster-x");
+    let mut acceptor = make_labeled_acceptor_skip(label);
+
+    // Inbound peer sends a plain reliable unit byte-sequence (no label header).
+    // The first byte is NOT 12, so classify_header returns Accepted(0) with
+    // skip=true.
+    let payload = b"some plain payload data";
+    let validated = acceptor
+      .push_recv_and_classify(payload)
+      .expect("skip=true must not fail for an unlabeled inbound");
+    assert!(validated, "skip must accept an unlabeled inbound");
+    assert!(
+      acceptor.inbound_label_validated(),
+      "inbound latch must be set after skip-accepted unlabeled inbound"
+    );
+    // recv_accum retains the payload bytes (Accepted(0) consumes 0 bytes).
+    assert_eq!(
+      acceptor.pending_out_bytes().len(),
+      build_label_header(b"cluster-x").len(),
+      "acceptor must have staged its own label frame after lazy release"
+    );
+  }
+
+  /// An unlabeled bridge (label=None) passes a 12-byte first reliable unit
+  /// through unchanged — no false reject, no classify_header call.
+  ///
+  /// Faithful to `memberlist-core/src/network.rs`: an unlabeled coordinator
+  /// treats a 12-byte first unit as a normal reliable frame, not as a label
+  /// header to parse. inbound_label_validated starts true so the classifier
+  /// is never invoked.
+  #[test]
+  fn unlabeled_bridge_twelve_byte_first_unit_passes_through() {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    let bridge = Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
+    );
+    // The latch starts true for an unlabeled bridge — the classifier is
+    // never invoked, so a first unit whose varint-encoded length happens
+    // to be 12 (== LABELED_TAG) is never falsely classified as a label frame.
+    assert!(
+      bridge.inbound_label_validated(),
+      "unlabeled bridge: inbound latch must start true — byte-identical to today"
+    );
+    // Outbound latch is also true: no label frame is ever written.
+    assert!(
+      bridge.outbound_label_written(),
+      "unlabeled bridge: outbound latch must start true — no label frame emitted"
+    );
+  }
+
+  /// A label header split across two `push_recv_and_classify` calls validates
+  /// only once the full header is present. The first partial push returns
+  /// `Ok(false)` (Incomplete); the second push with the remaining bytes
+  /// returns `Ok(true)` (Accepted).
+  #[test]
+  fn labeled_bridge_split_label_header_validates_on_completion() {
+    let label = bytes::Bytes::from_static(b"cluster-x");
+    let header = build_label_header(b"cluster-x");
+    assert!(header.len() > 3, "label header large enough to split");
+
+    let split = header.len() / 2;
+    let mut acceptor = make_labeled_acceptor(label);
+
+    // First half — Incomplete.
+    let result = acceptor
+      .push_recv_and_classify(&header[..split])
+      .expect("partial header must not fail");
+    assert!(
+      !result,
+      "partial label header must return Incomplete (Ok(false))"
+    );
+    assert!(
+      !acceptor.inbound_label_validated(),
+      "inbound latch must remain unset after partial header"
+    );
+
+    // Second half — Accepted.
+    let result = acceptor
+      .push_recv_and_classify(&header[split..])
+      .expect("completing the header must not fail");
+    assert!(
+      result,
+      "completing the label header must return Accepted (Ok(true))"
+    );
+    assert!(
+      acceptor.inbound_label_validated(),
+      "inbound latch must be set after the split header completes"
+    );
+  }
+
+  /// The acceptor MUST NOT write its outbound label before the inbound label
+  /// validates. Before `push_recv_and_classify` is called, `pending_out` must
+  /// be empty and `outbound_label_written` must be false.
+  #[test]
+  fn acceptor_holds_outbound_label_until_inbound_validates() {
+    let label = bytes::Bytes::from_static(b"cluster-x");
+    let acceptor = make_labeled_acceptor(label);
+
+    // At construction: outbound label must NOT be staged.
+    assert!(
+      !acceptor.outbound_label_written(),
+      "acceptor: outbound latch must be false at construction"
+    );
+    assert!(
+      acceptor.pending_out_bytes().is_empty(),
+      "acceptor: pending_out must be empty at construction — no label written yet"
+    );
+
+    // Note: the dialer (eager=true) gets its label staged the first time
+    // pump_out runs (when it calls encode_label_prefix into pending_out).
+    // That path is tested via make_labeled_dialer + pump_out; here we only
+    // assert the construction-time invariant for the acceptor.
+    let dialer = make_labeled_dialer(bytes::Bytes::from_static(b"cluster-x"));
+    // Dialer: outbound_label_written starts FALSE too — the label is written
+    // into pending_out the first time pump_out fires (eager, not at construction).
+    // At construction-time pending_out is empty.
+    assert!(
+      !dialer.outbound_label_written(),
+      "dialer: outbound latch also false at construction — written on first pump_out"
+    );
+    assert!(
+      dialer.pending_out_bytes().is_empty(),
+      "dialer: pending_out must be empty at construction"
     );
   }
 }

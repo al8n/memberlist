@@ -78,6 +78,18 @@ pub struct QuicEndpoint<I> {
   /// reliable path always skips — quinn-encrypted streams already provide
   /// confidentiality.
   encryption: crate::EncryptionOptions,
+  /// Cluster label for all reliable bridges spawned by this coordinator, or
+  /// `None` when no label is configured.
+  ///
+  /// Identical source as the gossip-plane label threaded through the driver —
+  /// a single `MemberlistOptions::label` feeds both paths so they cannot
+  /// diverge. Set via [`Self::with_label`]; defaults to `None` so
+  /// constructors that never call `with_label` are byte-identical to before.
+  label: Option<bytes::Bytes>,
+  /// Forwarded verbatim to each new [`Bridge`]'s `skip_inbound_label_check`
+  /// parameter. Suppresses the "label expected but missing from inbound peer"
+  /// check without suppressing `DoubleLabel`. Defaults to `false`.
+  skip_inbound_label_check: bool,
   conns: ConnTable,
   bridges: HashMap<StreamId, Bridge<I, SocketAddr>>,
   /// Tags each outbound bridge's [`StreamId`] with the originating
@@ -251,6 +263,8 @@ where
       cfg,
       compression: crate::CompressionOptions::new(),
       encryption: crate::EncryptionOptions::new(),
+      label: None,
+      skip_inbound_label_check: false,
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       pending_outbound_kinds: HashMap::new(),
@@ -284,6 +298,45 @@ where
     let mut this = Self::new(ep, cfg);
     this.compression = compression;
     this
+  }
+
+  /// Attach a cluster label to this coordinator. Every reliable bridge opened
+  /// after this call inherits `label` and `skip_inbound_label_check`.
+  ///
+  /// `label = None` — or an empty label, which normalizes to `None` — is
+  /// byte-identical to having never called this builder: no label frame is
+  /// written and the inbound path skips validation entirely. An over-long
+  /// (> 253-byte) or non-UTF-8 label returns
+  /// [`LabelError`](crate::label::LabelError). The intended call site is the
+  /// driver constructor, which threads the same `MemberlistOptions::label`
+  /// value used by the gossip codec so the two planes share one source and
+  /// cannot diverge.
+  pub fn with_label(
+    mut self,
+    label: Option<bytes::Bytes>,
+    skip_inbound_label_check: bool,
+  ) -> Result<Self, crate::label::LabelError> {
+    // Normalize and validate at this public entry: an empty label collapses to
+    // the byte-identical no-label path, and an over-long or non-UTF-8 label is
+    // rejected here so it can never reach `encode_label_prefix`, which would
+    // truncate the single length byte and let the overflow be parsed as
+    // reliable-unit data.
+    self.label = match label {
+      None => None,
+      Some(bytes) if bytes.is_empty() => None,
+      Some(bytes) => {
+        crate::label::validate_label(&bytes)?;
+        Some(bytes)
+      }
+    };
+    self.skip_inbound_label_check = skip_inbound_label_check;
+    Ok(self)
+  }
+
+  /// The configured cluster label, or `None` for an unlabeled coordinator.
+  #[cfg(test)]
+  pub(crate) fn label(&self) -> Option<&[u8]> {
+    self.label.as_deref()
   }
 
   /// The configured cross-transport compression options.
@@ -1630,6 +1683,9 @@ where
                   self.compression,
                   self.encryption.clone(),
                   reliable_max,
+                  self.label.clone(),
+                  self.skip_inbound_label_check,
+                  false,
                 ),
               );
             }
@@ -1880,6 +1936,9 @@ where
                       self.compression,
                       self.encryption.clone(),
                       reliable_max,
+                      self.label.clone(),
+                      self.skip_inbound_label_check,
+                      true,
                     ),
                   );
                 }
@@ -2079,6 +2138,42 @@ mod tests {
         super::QuicConfig,
       ) -> super::QuicEndpoint<I> = super::QuicEndpoint::<I>::new;
     }
+  }
+
+  #[test]
+  fn with_label_empty_normalizes_to_none() {
+    // An empty label collapses to the byte-identical no-label path, never a
+    // `[12][0]` header.
+    let ep = make_endpoint("n", "127.0.0.1:7600".parse().unwrap(), Instant::now())
+      .with_label(Some(Bytes::new()), false)
+      .expect("an empty label normalizes to None, never errors");
+    assert_eq!(ep.label(), None);
+  }
+
+  #[test]
+  fn with_label_accepts_valid() {
+    let ep = make_endpoint("n", "127.0.0.1:7601".parse().unwrap(), Instant::now())
+      .with_label(Some(Bytes::from_static(b"cluster-x")), false)
+      .expect("a valid label");
+    assert_eq!(ep.label(), Some(b"cluster-x".as_slice()));
+  }
+
+  #[test]
+  fn with_label_rejects_overlong() {
+    // A label longer than MAX_LABEL_LEN is rejected here, so it never reaches
+    // `encode_label_prefix` (which would truncate the length byte and let the
+    // overflow be parsed as reliable-unit data).
+    let too_long = Bytes::from(vec![b'x'; crate::label::MAX_LABEL_LEN + 1]);
+    let result = make_endpoint("n", "127.0.0.1:7602".parse().unwrap(), Instant::now())
+      .with_label(Some(too_long), false);
+    assert!(matches!(result, Err(crate::label::LabelError::TooLong)));
+  }
+
+  #[test]
+  fn with_label_rejects_non_utf8() {
+    let result = make_endpoint("n", "127.0.0.1:7603".parse().unwrap(), Instant::now())
+      .with_label(Some(Bytes::from_static(&[0xff, 0xfe])), false);
+    assert!(matches!(result, Err(crate::label::LabelError::NotUtf8)));
   }
 
   /// Regression guard: `service_quinn` MUST drain the per-connection
