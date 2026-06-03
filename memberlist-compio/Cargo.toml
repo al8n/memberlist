@@ -70,3 +70,11 @@ required-features = ["quic-rustls-ring"]
 [[test]]
 name = "quic_lifecycle"
 required-features = ["quic-rustls-ring"]
+
+[[test]]
+name = "initial_transform"
+required-features = ["tcp", "encryption-aes-gcm"]
+
+[[test]]
+name = "transform"
+required-features = ["tcp"]

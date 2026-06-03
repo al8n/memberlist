@@ -58,4 +58,18 @@ pub enum Error {
   /// An I/O error.
   #[error(transparent)]
   Io(#[from] std::io::Error),
+
+  /// An encryption keyring was rejected (a key's algorithm backend is
+  /// missing), so the node refuses to start rather than run plaintext on an
+  /// encrypted-cluster configuration.
+  #[error("encryption: {0}")]
+  Encryption(memberlist_proto::EncryptionError),
+
+  /// The cluster label supplied to
+  /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)
+  /// violates the wire constraints: it exceeds the 253-byte maximum or is not
+  /// valid UTF-8. Rejected at the setter so the error surfaces at configuration
+  /// time rather than at construction.
+  #[error("invalid cluster label: {0}")]
+  InvalidLabel(memberlist_proto::LabelError),
 }

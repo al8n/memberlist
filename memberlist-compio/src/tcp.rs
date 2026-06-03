@@ -6,17 +6,18 @@
 //! the compio runtime. [`TcpMemberlist`] is the pinned-alias convenience
 //! shape (`I = SmolStr`, `A = SocketAddr`, default [`VoidDelegate`]); the
 //! machine endpoint is built inside [`TcpTransport::run`] from the stored
-//! [`TcpOptions`]. The returned handle is cheaply clonable and shares the
+//! [`LabelOptions<()>`](memberlist_proto::streams::LabelOptions). The returned handle is cheaply clonable and shares the
 //! same driver task with every clone.
 
 #![cfg(feature = "tcp")]
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
 use memberlist_proto::{
-  RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
+  LabelOptions, RawRecords, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
 
@@ -37,29 +38,27 @@ pub type TcpMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, S
 /// Per-backend TCP-specific transport options.
 ///
 /// Embedded into `Options<TcpTransport<I, A>>::transport()`. Bundles the
-/// local identifier, the (possibly-unresolved) advertise address, the
-/// stream-transport tuning knobs, and the plain-TCP record-layer
-/// `TcpOptions` (cluster label + inbound-label-check policy).
+/// local identifier, the (possibly-unresolved) advertise address, and the
+/// stream-transport tuning knobs. The cluster label and inbound-label-check
+/// policy are supplied via
+/// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label) and
+/// [`MemberlistOptions::with_skip_inbound_label_check`](crate::MemberlistOptions::with_skip_inbound_label_check),
+/// feeding both planes from a single validated source.
 pub struct TcpTransportOptions<I = SmolStr, A = HostAddr<SmolStr>> {
   local_id: Option<I>,
   advertise_addr: Option<MaybeResolved<A, SocketAddr>>,
   stream: StreamTransportOptions,
-  tcp_options: TcpOptions,
 }
 
 impl<I, A> TcpTransportOptions<I, A> {
   /// Construct with defaults. Caller MUST chain `with_local_id` and
-  /// `with_advertise_addr` before passing to `TcpTransport::new`. The
-  /// default `tcp_options` is the unlabeled plain-TCP record layer
-  /// (`TcpOptions::new(None)`); supply [`Self::with_tcp_options`] to set
-  /// a cluster label.
+  /// `with_advertise_addr` before passing to `TcpTransport::new`.
   #[inline]
   pub fn new() -> Self {
     Self {
       local_id: None,
       advertise_addr: None,
       stream: StreamTransportOptions::new(),
-      tcp_options: TcpOptions::new(None),
     }
   }
 
@@ -87,15 +86,6 @@ impl<I, A> TcpTransportOptions<I, A> {
     self
   }
 
-  /// Builder: plain-TCP record-layer options (cluster label +
-  /// inbound-label-check policy). Defaults to the unlabeled layer.
-  #[must_use]
-  #[inline]
-  pub fn with_tcp_options(mut self, opts: TcpOptions) -> Self {
-    self.tcp_options = opts;
-    self
-  }
-
   /// Local node identifier — must be set before `TcpTransport::new`.
   #[inline]
   pub const fn local_id(&self) -> Option<&I> {
@@ -113,12 +103,6 @@ impl<I, A> TcpTransportOptions<I, A> {
   pub const fn stream(&self) -> &StreamTransportOptions {
     &self.stream
   }
-
-  /// Plain-TCP record-layer options.
-  #[inline]
-  pub const fn tcp_options(&self) -> &TcpOptions {
-    &self.tcp_options
-  }
 }
 
 impl<I, A> Default for TcpTransportOptions<I, A> {
@@ -132,7 +116,8 @@ impl<I, A> Default for TcpTransportOptions<I, A> {
 ///
 /// Owns the bound `UdpSocket` (gossip) and `TcpListener` (reliable). The
 /// machine-layer `StreamEndpoint<I, SocketAddr, RawRecords>` is built inside
-/// [`TcpTransport::run`] from the stored config (`tcp_options`).
+/// [`TcpTransport::run`] from the cluster label and inbound-check policy
+/// sourced from [`MemberlistOptions`](crate::MemberlistOptions).
 pub struct TcpTransport<I = SmolStr, A = HostAddr<SmolStr>> {
   local_id: I,
   local_address: MaybeResolved<A, SocketAddr>,
@@ -140,7 +125,6 @@ pub struct TcpTransport<I = SmolStr, A = HostAddr<SmolStr>> {
   gossip_socket: UdpSocket,
   tcp_listener: TcpListener,
   stream_options: StreamTransportOptions,
-  tcp_options: TcpOptions,
 }
 
 impl<I, A> Transport for TcpTransport<I, A>
@@ -225,7 +209,6 @@ where
       gossip_socket,
       tcp_listener,
       stream_options: options.stream,
-      tcp_options: options.tcp_options,
     })
   }
 
@@ -256,6 +239,22 @@ where
       EndpointConfig::new(self.local_id, self.advertise_socket),
       &runtime.memberlist_options,
     );
+    // The single configured label from MemberlistOptions feeds both the
+    // reliable-plane label exchange and the gossip codec. Validated at the
+    // MemberlistOptions setter; `new_in` is infallible here.
+    let label_bytes = runtime.memberlist_options.label().map(|b| b.to_vec());
+    let mut label_opts = LabelOptions::new_in(label_bytes, ());
+    if runtime.memberlist_options.skip_inbound_label_check() {
+      label_opts = label_opts.skip_inbound_label_check();
+    }
+
+    // Retain the validated label for the gossip codec (same source as the
+    // reliable-plane opts above, so gossip and reliable cannot diverge).
+    let label = runtime
+      .memberlist_options
+      .label()
+      .map(Bytes::copy_from_slice);
+
     // Install the optional machine admission predicates before the driver
     // loop starts; each `None` leaves the `Endpoint` at its admit-all
     // default. `BoxedAlive`/`BoxedMerge` forward the boxed dyn so it
@@ -267,12 +266,14 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
-    let endpoint = StreamEndpoint::new(
+    let endpoint = StreamEndpoint::with_compression(
       ep,
-      self.tcp_options,
+      label_opts,
       Box::new(|_| None),
       Box::new(|addr| *addr),
-    );
+      *runtime.memberlist_options.compression(),
+    )
+    .with_encryption(runtime.memberlist_options.encryption().clone());
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
     crate::driver::stream_driver_loop::<Self::Id, SocketAddr, RawRecords, D>(
@@ -290,6 +291,7 @@ where
       runtime.driver_options,
       self.stream_options,
       runtime.delegate,
+      label,
     )
     .await;
   }
@@ -317,5 +319,26 @@ mod transport_tests {
     assert_eq!(t.local_id().as_str(), "test-node");
     assert!(t.local_address().is_resolved());
     let _: &SocketAddr = t.advertise_address();
+  }
+
+  /// Labels larger than 253 bytes or non-UTF-8 must be rejected at the
+  /// MemberlistOptions setter — not at construction and not via a panic.
+  #[test]
+  fn with_label_rejects_invalid_at_setter() {
+    use crate::{MemberlistError, MemberlistOptions};
+
+    let too_long = vec![b'x'; 254];
+    let result = MemberlistOptions::new().with_label(Some(too_long));
+    assert!(
+      matches!(result, Err(MemberlistError::InvalidLabel(_))),
+      "a label exceeding 253 bytes must be rejected at the setter"
+    );
+
+    let non_utf8 = vec![0xff, 0xfe];
+    let result = MemberlistOptions::new().with_label(Some(non_utf8));
+    assert!(
+      matches!(result, Err(MemberlistError::InvalidLabel(_))),
+      "a non-UTF-8 label must be rejected at the setter"
+    );
   }
 }

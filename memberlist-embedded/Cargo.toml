@@ -43,3 +43,6 @@ memberlist-proto = { workspace = true, default-features = false, features = ["tc
 getrandom = { workspace = true }
 bytes = { workspace = true }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
+
+[dev-dependencies]
+smol_str = { workspace = true }

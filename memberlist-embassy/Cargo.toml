@@ -64,6 +64,11 @@ embassy-time = { workspace = true, features = ["std", "generic-queue-8"] }
 futures = { workspace = true, features = ["executor"] }
 # A concrete node-id type for the loopback tests.
 smol_str = { workspace = true, features = ["std"] }
+# AES-256-GCM backend for the transform end-to-end tests (encryption round-trip
+# and key-rotation). Declared on the dev build only so the library's own build
+# stays backend-free and bare-metal compile checks exercise the disabled path.
+memberlist-proto = { workspace = true, default-features = false, features = ["tcp", "encryption-aes-gcm"] }
+memberlist-embedded = { workspace = true, default-features = false, features = ["std", "encryption-aes-gcm"] }
 
 [lints]
 workspace = true

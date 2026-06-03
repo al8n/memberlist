@@ -13,11 +13,11 @@ mod tests {
     endpoint::Endpoint,
     event::PushPullKind,
     streams::{
-      StreamAction, StreamEndpoint,
+      LabelOptions, StreamAction, StreamEndpoint,
       bridge::StreamBridge,
       test_support::{addr, test_peer_to_socket, test_sni_provider},
     },
-    tcp::{TcpOptions, records::RawRecords},
+    tcp::records::RawRecords,
   };
 
   /// A reliable-unit ceiling distinct from every other constant in play so a
@@ -49,7 +49,7 @@ mod tests {
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
       ep,
-      TcpOptions::new(Some(b"cluster-x".to_vec())),
+      LabelOptions::new_in(Some(b"cluster-x".to_vec()), ()),
       test_sni_provider(),
       test_peer_to_socket(),
     );

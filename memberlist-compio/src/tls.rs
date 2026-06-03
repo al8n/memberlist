@@ -2,7 +2,7 @@
 //!
 //! [`TlsTransport`] owns the bound `UdpSocket` (gossip) and `TcpListener`
 //! (reliable; TLS handshake-on-accept); the machine-layer
-//! `StreamEndpoint<I, SocketAddr, TlsRecords>` is built inside
+//! `StreamEndpoint<I, SocketAddr, Labeled<TlsRecords>>` is built inside
 //! [`TlsTransport::run`] from the stored `TlsTransportOptions` (cert/key
 //! bundle + SNI provider). Construct via
 //! [`Memberlist::new`](crate::Memberlist::new); [`TlsMemberlist`] is the
@@ -23,10 +23,12 @@
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
 use memberlist_proto::{
-  TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
+  LabelOptions, Labeled, TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint,
+  streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
 
@@ -166,7 +168,7 @@ impl<I, A> Default for TlsTransportOptions<I, A> {
 ///
 /// Owns the bound `UdpSocket` (gossip) and `TcpListener` (reliable; TLS
 /// handshake-on-accept). The machine-layer
-/// `StreamEndpoint<I, SocketAddr, TlsRecords>` is built inside
+/// `StreamEndpoint<I, SocketAddr, Labeled<TlsRecords>>` is built inside
 /// [`TlsTransport::run`] from the stored config (`tls_options` +
 /// `sni_provider`).
 pub struct TlsTransport<I = SmolStr, A = HostAddr<SmolStr>> {
@@ -311,15 +313,35 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
-    let endpoint = StreamEndpoint::new(
+    // The reliable transport is the cluster-label decorator over the TLS
+    // record layer: the configured cluster label rides as the first plaintext
+    // inside the TLS session, so two clusters that share a TLS trust anchor and
+    // SNI are still isolated on the reliable plane. The same label feeds the
+    // gossip codec below, so the two planes cannot diverge.
+    let label_bytes = runtime.memberlist_options.label().map(|b| b.to_vec());
+    let mut tls_label_opts = LabelOptions::new_in(label_bytes, self.tls_options);
+    if runtime.memberlist_options.skip_inbound_label_check() {
+      tls_label_opts = tls_label_opts.skip_inbound_label_check();
+    }
+    let endpoint = StreamEndpoint::with_compression(
       ep,
-      self.tls_options,
+      tls_label_opts,
       self.sni_provider,
       Box::new(|addr| *addr),
-    );
+      *runtime.memberlist_options.compression(),
+    )
+    .with_encryption(runtime.memberlist_options.encryption().clone());
+
+    // Retain the cluster label for the gossip codec. TLS isolation comes from
+    // the TLS record layer; the gossip label is still applied via the codec
+    // EncodeOptions, mirroring the reactor driver's behaviour.
+    let label = runtime
+      .memberlist_options
+      .label()
+      .map(Bytes::copy_from_slice);
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
-    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, TlsRecords, D>(
+    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, Labeled<TlsRecords>, D>(
       endpoint,
       self.gossip_socket,
       self.tcp_listener,
@@ -334,6 +356,7 @@ where
       runtime.driver_options,
       self.stream_options,
       runtime.delegate,
+      label,
     )
     .await;
   }

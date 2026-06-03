@@ -5,7 +5,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use flume::Sender;
-use memberlist_proto::Node;
+use memberlist_proto::{CompressionOptions, EncryptionOptions, Node};
 
 use crate::error::Error;
 
@@ -27,6 +27,10 @@ pub(crate) enum Command<I> {
   SendUser(SendUserCmd),
   /// Send one or more reliable directed user messages via the stream plane.
   SendReliable(SendReliableCmd),
+  /// Reconfigure the gossip compression policy in place.
+  SetCompressionOptions(SetCompressionOptionsCmd),
+  /// Reconfigure the gossip encryption policy in place.
+  SetEncryptionOptions(SetEncryptionOptionsCmd),
 }
 
 /// Payload of [`Command::Join`].
@@ -77,5 +81,22 @@ pub(crate) struct SendReliableCmd {
   /// One or more reliable user-message payloads to deliver to `to`.
   pub(crate) payloads: Vec<Bytes>,
   /// Replies with `Ok(())` once all exchanges complete, or an error.
+  pub(crate) reply: Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::SetCompressionOptions`].
+pub(crate) struct SetCompressionOptionsCmd {
+  /// The new compression policy to apply.
+  pub(crate) opts: CompressionOptions,
+  /// Replies with `Ok(())` once applied, or `Err(NotRunning)`.
+  pub(crate) reply: Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::SetEncryptionOptions`].
+pub(crate) struct SetEncryptionOptionsCmd {
+  /// The new encryption policy to apply (validated before applying).
+  pub(crate) opts: EncryptionOptions,
+  /// Replies with `Ok(())` once applied, `Err(NotRunning)`, or a
+  /// keyring-validation error.
   pub(crate) reply: Sender<Result<(), Error>>,
 }

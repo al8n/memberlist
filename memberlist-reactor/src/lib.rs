@@ -33,8 +33,10 @@ mod shared;
 mod snapshot;
 #[cfg(any(feature = "tcp", feature = "tls"))]
 mod stream_driver;
+mod transform;
 
 pub use error::Error;
+pub use memberlist_proto::LabelError;
 pub use options::{Channel, DriverOptions, MemberlistOptions, Options};
 pub use resolver::{AddressResolver, MaybeResolved, SocketAddrResolver};
 pub use snapshot::MemberlistSnapshot;
@@ -51,6 +53,10 @@ pub use memberlist_proto::QuicConfig;
 pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::event::Event;
+#[cfg(feature = "tcp")]
+pub use memberlist_proto::streams::LabelOptions;
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+pub use memberlist_proto::{CompressionOptions, EncryptionOptions, Keyring, SecretKey};
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::{Node, typed::NodeState};
 

@@ -19,7 +19,6 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, Options, SocketAddrResolver, TcpMemberlist,
   TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::TcpOptions;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -31,8 +30,7 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAd
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
   );
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,

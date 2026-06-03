@@ -4,7 +4,7 @@ use std::io;
 
 /// Payload for [`MemberlistError::JoinAllFailed`]: every dispatched
 /// outbound push/pull exchange from a synchronous
-/// [`join_with`](crate::Memberlist::join_with) terminated without
+/// [`join`](crate::Memberlist::join) terminated without
 /// `ExchangeOutcome::Succeeded`, OR the per-call deadline elapsed
 /// before any exchange could succeed.
 #[derive(Debug)]
@@ -265,7 +265,7 @@ pub enum MemberlistError {
   #[error("address resolution: {0}")]
   Resolve(io::Error),
 
-  /// The synchronous [`join_with`](crate::Memberlist::join_with) attempt
+  /// The synchronous [`join`](crate::Memberlist::join) attempt
   /// resolved without any dispatched outbound push/pull exchange
   /// terminating with `ExchangeOutcome::Succeeded` — either every
   /// exchange terminated `Failed` (dial failure, frame/record-layer
@@ -401,6 +401,14 @@ pub enum MemberlistError {
   /// or the stream-level exchange timed out.
   #[error("reliable send failed: one or more outbound exchanges failed")]
   SendFailed,
+
+  /// The cluster label supplied to
+  /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)
+  /// violates the wire constraints: it exceeds the 253-byte maximum or is not
+  /// valid UTF-8. Rejected at the setter so the error surfaces at configuration
+  /// time rather than at construction.
+  #[error("invalid cluster label: {0}")]
+  InvalidLabel(memberlist_proto::LabelError),
 }
 
 /// Convenience [`Result`] for [`MemberlistError`].

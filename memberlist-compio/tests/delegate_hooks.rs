@@ -26,7 +26,7 @@ use memberlist_compio::{
   NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpMemberlist, TcpTransport,
   TcpTransportOptions,
 };
-use memberlist_proto::{TcpOptions, typed::NodeState};
+use memberlist_proto::typed::NodeState;
 use smol_str::SmolStr;
 
 /// Shared record of the peer ids a [`RecordingDelegate`] saw join.
@@ -87,8 +87,7 @@ async fn make_seed(id: &str) -> TcpMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
@@ -106,8 +105,7 @@ async fn make_recording_joiner(id: &str, joins: Joins) -> RecordingMemberlist {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
   RecordingMemberlist::new(
     opts,
@@ -192,8 +190,7 @@ async fn make_rejecting_joiner(id: &str, reject_id: &str) -> TcpMemberlist<SmolS
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_alive_delegate(RejectAlive {
     reject_id: SmolStr::new(reject_id),

@@ -15,7 +15,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, Resolver,
   SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::{TcpOptions, typed::Meta};
+use memberlist_proto::typed::Meta;
 use smol_str::SmolStr;
 
 /// Test resolver that always resolves to an empty address list — models
@@ -51,11 +51,13 @@ async fn make_tcp_with(
   label: &[u8],
   mopts: MemberlistOptions,
 ) -> TcpMemberlist<SmolStr, SocketAddr> {
+  let mopts = mopts
+    .with_label(Some(label.to_vec()))
+    .expect("valid label bytes");
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(addr))
-      .with_tcp_options(TcpOptions::new(Some(label.to_vec()))),
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(mopts);
   TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -205,8 +207,12 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
     Options::new(
       TcpTransportOptions::<SmolStr, String>::new()
         .with_local_id(SmolStr::new("joiner"))
-        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
-        .with_tcp_options(TcpOptions::new(Some(b"cluster-empty-resolve".to_vec()))),
+        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr)),
+    )
+    .with_memberlist(
+      MemberlistOptions::new()
+        .with_label(Some(b"cluster-empty-resolve".to_vec()))
+        .expect("valid label"),
     ),
     VoidDelegate::default(),
     &EmptyResolver,

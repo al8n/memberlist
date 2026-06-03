@@ -67,5 +67,8 @@ pub use runner::Runner;
 pub use stream_io::{EmbassyStream, SlotId};
 pub use time::{EmbassyInstant, now};
 
-pub use memberlist_embedded::TransformOptions;
-pub use memberlist_proto::{EndpointConfig, Instant, Node, event};
+pub use memberlist_embedded::{
+  TransformOptions,
+  transform::{CompressionOptions, EncryptionOptions, Keyring, LabelError, SecretKey},
+};
+pub use memberlist_proto::{EncryptionError, EndpointConfig, Instant, Node, event};

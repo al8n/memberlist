@@ -500,8 +500,10 @@ mod tests {
     net::{TcpListener, TcpStream},
   };
   use memberlist_proto::{
-    Instant, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
-    streams::StreamEndpoint,
+    Instant, RawRecords,
+    config::EndpointConfig,
+    endpoint::Endpoint,
+    streams::{LabelOptions, StreamEndpoint},
   };
   use smol_str::SmolStr;
 
@@ -522,7 +524,7 @@ mod tests {
     let ep = Endpoint::new(cfg);
     let mut endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
       ep,
-      TcpOptions::new(None),
+      LabelOptions::new_in(None, ()),
       Box::new(|_| None),
       Box::new(|addr| *addr),
     );

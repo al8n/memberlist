@@ -13,8 +13,8 @@ use std::{
 ///
 /// Generic over the wire id / address types `<I, A>`; pinned aliases
 /// like [`TcpMemberlist`](crate::TcpMemberlist) instantiate this as
-/// `EventStream<SmolStr, SocketAddr>` through the [`Memberlist::events`]
-/// signature.
+/// `EventStream<SmolStr, SocketAddr>` through the
+/// [`Memberlist::events`](crate::Memberlist::events) signature.
 ///
 /// **Concurrency model:** flume MPMC — multiple `events()` calls each
 /// return an independent `EventStream`, but events ROUND-ROBIN between

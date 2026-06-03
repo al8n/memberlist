@@ -1,15 +1,20 @@
-//! Plain-TCP record layer for the generic Sans-I/O stream transport.
+//! Plain-TCP reliable record layer for the generic Sans-I/O stream transport.
 //!
-//! A label-prefix-then-raw-passthrough record layer: a one-time
+//! The plain-TCP reliable path is the cluster-label decorator over a pure byte
+//! pipe: [`RawRecords`] is [`crate::streams::Labeled`] wrapping
+//! [`crate::streams::Passthrough`] (see [`records`]). A one-time
 //! `[LABELED_TAG=12][len][label]` frame (byte-compatible with the frozen
 //! `memberlist-proto` label frame) is written once at stream start by both
 //! sides, then bytes pass through verbatim — there is no transport-level
-//! encryption. [`RawRecords`] implements [`StreamTransport`], so a
-//! [`crate::streams::StreamEndpoint`] parameterised with `R = RawRecords`
-//! carries reliable membership exchanges over a per-exchange plain TCP
-//! connection (plain UDP carries the unreliable gossip on a separate
-//! socket). TLS's in-band `close_notify` half-close anchor is replaced by
-//! the out-of-band TCP FIN (`shutdown(write)`).
+//! encryption. A [`crate::streams::StreamEndpoint`] parameterised with
+//! `R = RawRecords` carries reliable membership exchanges over a per-exchange
+//! plain TCP connection (plain UDP carries the unreliable gossip on a separate
+//! socket). TLS's in-band `close_notify` half-close anchor is replaced by the
+//! out-of-band TCP FIN (`shutdown(write)`).
+//!
+//! The plain-TCP options bundle is [`crate::streams::LabelOptions`]`<()>`:
+//! construct via [`LabelOptions::new_in`] (panics on invalid label) or
+//! [`LabelOptions::try_new_in`] (checked).
 
 #[cfg(test)]
 mod bridge;
@@ -18,88 +23,7 @@ mod conn;
 mod options;
 mod records;
 
-use crate::Instant;
-#[cfg(not(feature = "std"))]
-use std::vec::Vec;
-
-use crate::streams::transport::{Intake, StreamTransport};
-
-pub use options::TcpOptions;
 pub use records::RawRecords;
-
-/// The raw-passthrough record layer as a transport-agnostic
-/// [`StreamTransport`] plug.
-///
-/// Plain TCP needs no per-dial verification identity, so [`Self::DialContext`]
-/// is `()` and [`Self::dial_context`] returns `Ok(())` without consulting the
-/// bridge's `server_name`. The [`RawRecords`] constructors are infallible (a
-/// label is validated at [`TcpOptions`] build time, not at record-layer
-/// construction), so [`Self::ConstructError`] is [`core::convert::Infallible`].
-/// The inherent `records::Intake::{Done, Pending, Failed}` map straight across
-/// to the unified [`Intake`].
-impl StreamTransport for RawRecords {
-  type Options = TcpOptions;
-  type DialContext = ();
-  type ConstructError = core::convert::Infallible;
-
-  fn dial_context<A>(_addr: &A, _server_name: Option<&str>) -> Result<(), &'static str> {
-    Ok(())
-  }
-
-  fn dialer(opts: &Self::Options, _ctx: Self::DialContext) -> Result<Self, Self::ConstructError> {
-    Ok(RawRecords::dialer(
-      opts.label().map(<[u8]>::to_vec),
-      opts.is_skip_inbound_label_check(),
-    ))
-  }
-
-  fn acceptor(opts: &Self::Options) -> Result<Self, Self::ConstructError> {
-    Ok(RawRecords::acceptor(
-      opts.label().map(<[u8]>::to_vec),
-      opts.is_skip_inbound_label_check(),
-    ))
-  }
-
-  fn handle_transport_data(&mut self, input: &[u8], now: Instant) -> Intake {
-    match RawRecords::handle_transport_data(self, input, now) {
-      records::Intake::Done => Intake::Done,
-      records::Intake::Pending(n) => Intake::Pending(n),
-      records::Intake::Failed => Intake::Failed,
-    }
-  }
-
-  fn poll_transport_transmit(&mut self, out: &mut Vec<u8>) -> usize {
-    RawRecords::poll_transport_transmit(self, out)
-  }
-
-  fn is_handshaking(&self) -> bool {
-    RawRecords::is_handshaking(self)
-  }
-
-  fn read_plaintext(&mut self, out: &mut Vec<u8>) -> usize {
-    RawRecords::read_plaintext(self, out)
-  }
-
-  fn write_plaintext(&mut self, plaintext: &[u8]) {
-    RawRecords::write_plaintext(self, plaintext)
-  }
-
-  fn send_close_notify(&mut self) {
-    RawRecords::send_close_notify(self)
-  }
-
-  fn peer_has_closed(&self) -> bool {
-    RawRecords::peer_has_closed(self)
-  }
-
-  fn clear_outbound(&mut self) {
-    RawRecords::clear_outbound(self)
-  }
-
-  fn is_secure() -> bool {
-    false
-  }
-}
 
 #[cfg(test)]
 mod tests {
@@ -109,7 +33,9 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{TcpOptions, records::RawRecords};
+  use crate::streams::LabelOptions;
+
+  use super::records::RawRecords;
   use crate::{
     config::EndpointConfig,
     endpoint::Endpoint,
@@ -126,7 +52,7 @@ mod tests {
   #[test]
   fn tcp_endpoint_type_is_constructible_signature() {
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(coord.live_bridge_count(), 0);
@@ -164,7 +90,7 @@ mod tests {
   fn start_push_pull_dials_in_band_and_does_not_leak_dial_requested() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -211,7 +137,7 @@ mod tests {
   #[test]
   fn connect_action_carries_originating_stream_id() {
     let now = Instant::now();
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
 
     // start_user_message: the returned StreamId equals the Connect's stream_id().
     {
@@ -273,7 +199,7 @@ mod tests {
   #[test]
   fn same_peer_dials_carry_distinct_stream_ids() {
     let now = Instant::now();
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
       endpoint(7100),
       cfg,
@@ -320,7 +246,7 @@ mod tests {
   fn fin_owed_emits_one_shutdown_per_exchange() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -395,7 +321,7 @@ mod tests {
   fn handle_timeout_drives_pump_before_endpoint_timeout() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -414,7 +340,7 @@ mod tests {
   fn accept_connection_installs_acceptor_bridge_without_emitting_actions() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -459,7 +385,7 @@ mod tests {
   fn timer_emitted_dial_request_bytes_appear_same_tick() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -537,7 +463,7 @@ mod tests {
     // `accept_connection`; the dialer's coalesced bytes arrive via
     // `handle_transport_data` and the same-tick EOF rides the same call.
     let server_ep = endpoint(server_addr.port());
-    let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
@@ -548,7 +474,7 @@ mod tests {
     // dialer's label step settles at construction and `start_user_message`
     // flushes outbound in-band).
     let dialer_ep = endpoint(dialer_addr.port());
-    let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_d = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let payload = Bytes::from_static(b"coalesced-with-eof");
@@ -647,7 +573,7 @@ mod tests {
   fn same_tick_shutdown_old_and_connect_new_emit_connect_first() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -723,7 +649,7 @@ mod tests {
   fn same_tick_close_and_new_connect_emit_connect_first() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -793,7 +719,7 @@ mod tests {
   fn naive_drain_loop_writes_last_bytes_before_shutdown() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -899,7 +825,7 @@ mod tests {
   fn timed_out_exchange_purges_stale_transmit_before_close() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -1015,14 +941,14 @@ mod tests {
   fn failed_acceptor_label_mismatch_no_bytes_before_close() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Driver accepts an inbound TCP connection from a wrong-cluster
-    // peer. The acceptor's `RawRecords::outbound` is populated with the
-    // local label prefix `[12][9]["cluster-x"]` at construction. The
-    // acceptor stays Handshaking until its inbound label is validated.
+    // peer. The acceptor stays Handshaking until its inbound label is
+    // validated; its lazy label gate has queued no outbound prefix yet, so
+    // nothing is owed to the wire.
     let exchange = coord.accept_connection(addr(7000), now);
     assert!(
       coord.poll_transport_transmit().is_none(),
@@ -1030,10 +956,10 @@ mod tests {
     );
 
     // (2) Wrong-cluster peer sends its own labeled header. The acceptor's
-    // `classify_inbound_label` returns Rejected (label mismatch), the
-    // bridge enters `Failed(Transport)` via `intake_handshaking`'s
-    // `self.fail(...)`, and the driver-facing `run_tick` runs through to
-    // the reap.
+    // label gate returns a reject (label mismatch) → the decorator surfaces
+    // `Intake::Failed`, the bridge enters `Failed(Transport)` via
+    // `intake_handshaking`'s `self.fail(...)`, and the driver-facing
+    // `run_tick` runs through to the reap.
     let mut wrong = vec![12u8, 7];
     wrong.extend_from_slice(b"other-x");
     coord.handle_transport_data(exchange, &wrong, false, now);
@@ -1109,12 +1035,12 @@ mod tests {
   fn failed_accept_handshake_timeout_no_bytes_before_close() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
-    // (1) Driver accepts an inbound connection; the acceptor queues
-    // `[12][9]["cluster-x"]` in `RawRecords::outbound` at construction.
+    // (1) Driver accepts an inbound connection; the acceptor's lazy label
+    // gate queues no outbound prefix until its inbound label validates.
     let exchange = coord.accept_connection(addr(7000), now);
     assert!(
       coord.poll_transport_transmit().is_none(),
@@ -1180,21 +1106,20 @@ mod tests {
   /// connection — BEFORE any inbound bytes arrive — must observe NO
   /// outbound bytes for that exchange. The acceptor's outbound label prefix
   /// is queued LAZILY at inbound-label validation, so the bridge's
-  /// `records.outbound` is empty across the pump and `finalize_tick`'s
-  /// `collect_bridge_transmits` drains nothing for this exchange. Faithful
-  /// to `memberlist-core/src/network.rs::handle_conn`'s
+  /// the acceptor's outbound label prefix is empty across the pump and
+  /// `finalize_tick`'s `collect_bridge_transmits` drains nothing for this
+  /// exchange. Faithful to `memberlist-core/src/network.rs::handle_conn`'s
   /// `read_message`-before-`send_message` ordering: an acceptor reveals
   /// cluster identity only after the dialer has proven its own.
   ///
-  /// Mutation gate: restoring the at-construction eager queue in
-  /// `RawRecords::acceptor` (calling `queue_outbound_label_if_needed` from
-  /// the constructor) makes this test fail with the leaked
-  /// `[12][len][cluster-x]` bytes surfacing on the first pump.
+  /// Mutation gate: switching the acceptor's [`crate::streams::label::LabelGate`]
+  /// to an eager (dialer-style) outbound-prefix queue makes this test fail
+  /// with the leaked `[12][len][cluster-x]` bytes surfacing on the first pump.
   #[test]
   fn accept_connection_then_handle_timeout_no_bytes_before_inbound_validation() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -1269,7 +1194,7 @@ mod tests {
   fn accept_connection_then_valid_inbound_then_outbound_label_emitted() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -1278,9 +1203,9 @@ mod tests {
     assert!(coord.poll_transport_transmit().is_none());
 
     // (2) Deliver a matching labeled header from the peer; the acceptor's
-    // `classify_inbound_label` returns `Accepted`, the lazy queue fires
-    // inside `handle_transport_data`, and the bridge's
-    // `records.outbound` now holds the `[12][9][cluster-x]` prefix.
+    // label gate accepts it, the lazy outbound-prefix queue fires inside the
+    // gate's accepted branch, and the acceptor's outbound prefix now holds
+    // the `[12][9][cluster-x]` bytes.
     let mut inbound = vec![12u8, 9];
     inbound.extend_from_slice(b"cluster-x");
     coord.handle_transport_data(exchange, &inbound, false, now);
@@ -1358,7 +1283,7 @@ mod tests {
     // bridge, surfaces `Connect`, and queues `[label||push_pull_request]`
     // into `out_transmit`.
     let dialer_ep = endpoint(dialer_addr.port());
-    let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_d = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let _sid = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
@@ -1388,19 +1313,17 @@ mod tests {
     // (2) Build the acceptor coordinator and accept the connection. The
     // bridge is Handshaking; the lazy outbound label has NOT fired yet.
     let server_ep = endpoint(server_addr.port());
-    let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
 
     // (3) First transport read: ONLY the dialer's label prefix, no FIN.
-    // The acceptor's inbound label validates (`classify_inbound_label`
-    // returns `Accepted`), the lazy outbound label fires inside
-    // `RawRecords::handle_transport_data`, and the bridge's
-    // `records.outbound` now holds `[12][9][cluster-x]`. The Stream is
-    // not minted yet because the bytes-only feed leaves the bridge
-    // Handshaking until the next `run_tick`'s
-    // `service_handshake_completions`.
+    // The acceptor's inbound label validates, the lazy outbound label fires
+    // inside the label gate's accepted branch, and the acceptor's outbound
+    // prefix now holds `[12][9][cluster-x]`. The Stream is not minted yet
+    // because the bytes-only feed leaves the bridge Handshaking until the
+    // next `run_tick`'s `service_handshake_completions`.
     server.handle_transport_data(server_exchange, label_only, false, now);
 
     // (4) One tick to promote and drain the acceptor's lazy label into
@@ -1555,7 +1478,7 @@ mod tests {
   fn failed_dial_no_label_leak_no_connect_emitted() {
     let now = Instant::now();
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -1679,7 +1602,7 @@ mod tests {
   fn stream_endpoint_gossip_compression_roundtrips() {
     use crate::{CompressAlgorithm, CompressionOptions};
     let ep = endpoint(7100);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
@@ -1700,7 +1623,7 @@ mod tests {
   fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
     use crate::{CompressAlgorithm, CompressionOptions};
     let ep = endpoint(7102);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
@@ -1723,7 +1646,7 @@ mod tests {
   fn stream_endpoint_compressed_gossip_never_inflates() {
     use crate::{CompressAlgorithm, CompressionOptions};
     let ep = endpoint(7101);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     // Low threshold so the compressor attempts compression for all sizes in
     // the sweep, exercising the don't-expand else branch for sizes where the
     // wrapper header overhead erases the raw saving.
@@ -1765,7 +1688,7 @@ mod tests {
   fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(
@@ -1795,7 +1718,7 @@ mod tests {
     use crate::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
@@ -1830,7 +1753,7 @@ mod tests {
   fn stream_endpoint_gossip_encryption_roundtrip() {
     use crate::{EncryptionOptions, Keyring, SecretKey};
     let ep = endpoint(7200);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let kr = Keyring::new(SecretKey::Aes256([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
@@ -1851,7 +1774,7 @@ mod tests {
   #[test]
   fn stream_endpoint_gossip_encryption_disabled_is_byte_identical() {
     let ep = endpoint(7201);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     let datagram = b"a gossip body".to_vec();
@@ -1876,7 +1799,7 @@ mod tests {
       EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
     };
     let ep = endpoint(7205);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
@@ -1905,7 +1828,7 @@ mod tests {
     // surface as Err, NOT silently emit plaintext.
     use crate::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
     let ep = endpoint(7202);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
@@ -1949,7 +1872,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7203);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2006,7 +1929,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7204);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2075,7 +1998,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7205);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2180,7 +2103,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7206);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2260,7 +2183,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7207);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2336,7 +2259,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7208);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let key = SecretKey::Aes256([0x42; 32]);
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
@@ -2441,7 +2364,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7209);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2550,7 +2473,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7900);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2654,7 +2577,7 @@ mod tests {
     // (1) Build the dialer coordinator and produce a real `[label||request]`
     // blob with `start_push_pull`.
     let dialer_ep = endpoint(dialer_addr.port());
-    let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_d = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let _sid = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
@@ -2679,7 +2602,7 @@ mod tests {
     // (2) Build the server coordinator under DISABLED encryption (the policy
     // we will later flip to enabled) and accept the connection.
     let server_ep = endpoint(server_addr.port());
-    let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
@@ -2778,7 +2701,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7700);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2867,7 +2790,7 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7800);
-    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
@@ -2925,13 +2848,14 @@ mod tests {
         .expect("aes-gcm primary -> encrypt succeeds for a well-formed PushPull response");
     // The dialer's records layer still validates its INBOUND label before
     // surfacing plaintext (the dialer is non-handshaking from construction,
-    // but `inbound_label_validated` starts false — see the `RawRecords` docs
-    // on the dialer's in-line inbound label check). Prepend the label frame
-    // so the records layer accepts the unit on the first call rather than
-    // rejecting on a wrong-cluster label-mismatch — without the prefix the
-    // records layer would `Intake::Failed` the bytes and the bridge's
-    // `pump_in_established` would short-circuit BEFORE reaching
-    // `Stream::handle_data`, masking the regression this test asserts.
+    // but its label gate's inbound label starts unvalidated — see
+    // [`crate::streams::label::LabelGate`] on the dialer's in-line inbound
+    // label check). Prepend the label frame so the records layer accepts the
+    // unit on the first call rather than rejecting on a wrong-cluster
+    // label-mismatch — without the prefix the records layer would
+    // `Intake::Failed` the bytes and the bridge's `pump_in_established` would
+    // short-circuit BEFORE reaching `Stream::handle_data`, masking the
+    // regression this test asserts.
     let label = b"cluster-x";
     let mut framed = Vec::with_capacity(2 + label.len() + unit.len());
     framed.push(12u8); // LABELED_TAG

@@ -11,17 +11,19 @@ use agnostic::{
   net::{Net, UdpSocket},
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
+use memberlist_proto::LabelOptions;
+#[cfg(feature = "tcp")]
+use memberlist_proto::RawRecords;
+#[cfg(any(feature = "tcp", feature = "tls"))]
 use memberlist_proto::streams::{StreamEndpoint, StreamTransport};
 use memberlist_proto::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, MergeDelegate, Node, event::Event,
-  typed::NodeState,
+  AliveDelegate, CompressionOptions, EncryptionOptions, Endpoint, EndpointConfig, Instant,
+  MergeDelegate, Node, event::Event, typed::NodeState,
 };
+#[cfg(feature = "tls")]
+use memberlist_proto::{Labeled, TlsOptions, TlsRecords};
 #[cfg(feature = "quic")]
 use memberlist_proto::{QuicConfig, QuicEndpoint};
-#[cfg(feature = "tcp")]
-use memberlist_proto::{RawRecords, TcpOptions};
-#[cfg(feature = "tls")]
-use memberlist_proto::{TlsOptions, TlsRecords};
 
 #[cfg(feature = "quic")]
 use crate::quic_driver::QuicDriver;
@@ -29,7 +31,10 @@ use crate::quic_driver::QuicDriver;
 use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
+  command::{
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, ShutdownCmd,
+  },
   delegate::Delegate,
   error::Error,
   events::EventStream,
@@ -38,6 +43,7 @@ use crate::{
   resolver::{AddressResolver, MaybeResolved},
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
+  transform::validate_encryption,
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
@@ -141,6 +147,8 @@ impl<I: NodeId> Memberlist<I> {
     validate_advertise(bound)?;
 
     let (ml_opts, drv_opts, alive, merge) = options.into_parts();
+    validate_encryption(ml_opts.encryption())?;
+
     let cfg = apply_memberlist_options(EndpointConfig::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
     if let Some(ad) = alive {
@@ -150,7 +158,15 @@ impl<I: NodeId> Memberlist<I> {
       ep.set_merge_delegate(BoxedMerge(md));
     }
 
+    // Retain the cluster label for the gossip codec.
+    let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
+
     let mut endpoint = QuicEndpoint::new(ep, quic_config);
+    // Apply the configured compression and encryption policies. QUIC's reliable
+    // path has its own connection-level security layer; compression and encryption
+    // are applied to the gossip (UDP datagram) path only.
+    endpoint.set_compression_options(*ml_opts.compression());
+    endpoint.set_encryption_options(ml_opts.encryption().clone());
     endpoint.start_scheduling(Instant::now());
 
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
@@ -186,6 +202,7 @@ impl<I: NodeId> Memberlist<I> {
       obs_tx,
       obs_payload_bytes,
       obs_payload_budget,
+      label,
     );
     R::spawn_detach(driver);
 
@@ -216,14 +233,25 @@ impl<I: NodeId> Memberlist<I> {
       advertise,
       options,
       delegate,
-      |ep| {
-        let tcp_opts = TcpOptions::try_new(None).expect("an absent TCP label is always valid");
-        StreamEndpoint::new(
+      |ep, ml_opts| {
+        // The single configured label feeds both the reliable-plane label
+        // exchange (so peers verify they belong to the same cluster on every
+        // TCP stream) and the gossip codec (wired below). The label is
+        // validated at the MemberlistOptions setter so `try_new_in` never
+        // fails here; the infallible `new_in` unwrap is safe.
+        let label_bytes = ml_opts.label().map(|b| b.to_vec());
+        let mut label_opts = LabelOptions::new_in(label_bytes, ());
+        if ml_opts.skip_inbound_label_check() {
+          label_opts = label_opts.skip_inbound_label_check();
+        }
+        StreamEndpoint::with_compression(
           ep,
-          tcp_opts,
+          label_opts,
           Box::new(|_: &SocketAddr| -> Option<String> { None }),
           Box::new(|addr: &SocketAddr| *addr),
+          *ml_opts.compression(),
         )
+        .with_encryption(ml_opts.encryption().clone())
       },
     )
     .await
@@ -251,19 +279,31 @@ impl<I: NodeId> Memberlist<I> {
     D: Delegate<Id = I, Address = SocketAddr>,
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
   {
-    Self::build_stream_backend::<R, Res, D, TlsRecords>(
+    Self::build_stream_backend::<R, Res, D, Labeled<TlsRecords>>(
       resolver,
       local_id,
       advertise,
       options,
       delegate,
-      move |ep| {
-        StreamEndpoint::new(
+      move |ep, ml_opts| {
+        // The reliable transport is the cluster-label decorator over the TLS
+        // record layer: the configured cluster label rides as the first
+        // plaintext inside the TLS session, so two clusters that share a TLS
+        // trust anchor and SNI are still isolated on the reliable plane. The
+        // same label feeds the gossip codec, so the two planes cannot diverge.
+        let label_bytes = ml_opts.label().map(|b| b.to_vec());
+        let mut label_opts = LabelOptions::new_in(label_bytes, tls_options);
+        if ml_opts.skip_inbound_label_check() {
+          label_opts = label_opts.skip_inbound_label_check();
+        }
+        StreamEndpoint::with_compression(
           ep,
-          tls_options,
+          label_opts,
           Box::new(sni_provider),
           Box::new(|addr: &SocketAddr| *addr),
+          *ml_opts.compression(),
         )
+        .with_encryption(ml_opts.encryption().clone())
       },
     )
     .await
@@ -273,6 +313,10 @@ impl<I: NodeId> Memberlist<I> {
   /// UDP gossip socket and the TCP listener, builds the membership `Endpoint`,
   /// hands it to `make_endpoint` to wrap in the record-layer-specific
   /// `StreamEndpoint`, then spawns the observation and accept tasks and the driver.
+  ///
+  /// `make_endpoint` receives both the bare `Endpoint` and a reference to the
+  /// decoded `MemberlistOptions` so it can configure the record-layer-specific
+  /// label, compression, and encryption on the `StreamEndpoint` it returns.
   #[cfg(any(feature = "tcp", feature = "tls"))]
   async fn build_stream_backend<R, Res, D, T>(
     resolver: &Res,
@@ -280,7 +324,10 @@ impl<I: NodeId> Memberlist<I> {
     advertise: MaybeResolved<Res::Address>,
     options: Options<I>,
     delegate: D,
-    make_endpoint: impl FnOnce(Endpoint<I, SocketAddr>) -> StreamEndpoint<I, SocketAddr, T>,
+    make_endpoint: impl FnOnce(
+      Endpoint<I, SocketAddr>,
+      &MemberlistOptions,
+    ) -> StreamEndpoint<I, SocketAddr, T>,
   ) -> Result<Self, Error>
   where
     R: Runtime,
@@ -307,6 +354,11 @@ impl<I: NodeId> Memberlist<I> {
     if drv_opts.close_timeout().is_zero() {
       return Err(Error::ZeroCloseTimeout);
     }
+    // Validate the encryption configuration before the endpoint is built, so an
+    // unusable keyring surfaces as a typed construction error rather than silently
+    // discarding every encrypted gossip datagram at runtime.
+    validate_encryption(ml_opts.encryption())?;
+
     let cfg = apply_memberlist_options(EndpointConfig::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
     if let Some(ad) = alive {
@@ -316,7 +368,10 @@ impl<I: NodeId> Memberlist<I> {
       ep.set_merge_delegate(BoxedMerge(md));
     }
 
-    let mut endpoint = make_endpoint(ep);
+    // Retain the cluster label for the gossip codec.
+    let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
+
+    let mut endpoint = make_endpoint(ep, &ml_opts);
     endpoint.start_scheduling(Instant::now());
 
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
@@ -366,6 +421,7 @@ impl<I: NodeId> Memberlist<I> {
       accepted_rx,
       accept_shutdown_tx,
       drv_opts.close_timeout(),
+      label,
     );
     R::spawn_detach(driver);
 
@@ -675,6 +731,50 @@ impl<I: NodeId> Memberlist<I> {
       .push_command(Command::SendReliable(SendReliableCmd {
         to,
         payloads,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Reconfigures the gossip compression policy in place.
+  ///
+  /// The change takes effect on the next outbound datagram. Rejected with
+  /// `Err(NotRunning)` once the node has left the cluster.
+  pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    if !self
+      .shared
+      .push_command(Command::SetCompressionOptions(SetCompressionOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Reconfigures the gossip encryption policy in place.
+  ///
+  /// The keyring is validated before being applied: every key in the ring is
+  /// trial-encrypted to confirm the AEAD backend is compiled in. Rejected with
+  /// `Err(NotRunning)` once the node has left the cluster, or with
+  /// `Err(Encryption(_))` when the keyring contains an unsupported algorithm.
+  pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    if !self
+      .shared
+      .push_command(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
+        opts,
         reply: tx,
       }))
     {

@@ -20,7 +20,6 @@ use memberlist_compio::{
   OsResolver, SocketAddrResolver, StreamTransportOptions, TcpMemberlist, TcpTransportOptions,
   VoidDelegate,
 };
-use memberlist_proto::TcpOptions;
 use smol_str::SmolStr;
 
 /// Spin-wait up to `deadline` for `predicate` to return true; returns the
@@ -45,8 +44,7 @@ async fn make_tcp_socket(id: &str, advertise: SocketAddr) -> TcpMemberlist<SmolS
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(advertise))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved(advertise)),
   );
   TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
@@ -66,8 +64,7 @@ async fn make_tcp_hostaddr(id: &str, advertise: Address) -> TcpMemberlist {
   let opts = Options::new(
     TcpTransportOptions::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Unresolved(advertise))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Unresolved(advertise)),
   );
   TcpMemberlist::new(
     opts,
@@ -209,8 +206,7 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("reject"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1 << 20));
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -235,8 +231,7 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("accept"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(65507 - 30 - 1));
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -263,8 +258,7 @@ async fn transport_new_rejects_too_small_gossip_mtu() {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tiny"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1));
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -290,8 +284,7 @@ async fn transport_new_rejects_too_small_gossip_mtu() {
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("min-ok"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1024));
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -322,8 +315,7 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(huge_id)
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -350,8 +342,7 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("small-id"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -381,8 +372,7 @@ async fn transport_new_rejects_oversized_initial_local_state() {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("big-state"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_initial_local_state(oversized));
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -402,8 +392,7 @@ async fn transport_new_rejects_oversized_initial_local_state() {
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("ok-state"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_initial_local_state(Bytes::from_static(b"hello")));
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -431,7 +420,6 @@ async fn transport_new_rejects_zero_close_timeout() {
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-close"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None))
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::ZERO)),
   );
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -459,7 +447,6 @@ async fn transport_new_rejects_zero_close_timeout() {
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-close"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None))
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::from_secs(10))),
   );
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
@@ -486,8 +473,7 @@ async fn transport_new_rejects_unspecified_advertise() {
   let opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("wildcard"))
-      .with_advertise_addr(MaybeResolved::Resolved("0.0.0.0:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("0.0.0.0:0".parse().unwrap())),
   );
   let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
     opts,
@@ -514,8 +500,7 @@ async fn transport_new_rejects_unspecified_advertise() {
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("concrete"))
-      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
-      .with_tcp_options(TcpOptions::new(None)),
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
     ok_opts,

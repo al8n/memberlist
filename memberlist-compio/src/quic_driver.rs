@@ -182,6 +182,10 @@ struct QuicDriverState<I> {
   endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
+  /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
+  /// outbound gossip is stamped and inbound gossip is verified against the same
+  /// label.
+  label: Option<bytes::Bytes>,
   /// Hand-off channel to the per-driver observation task (delegate
   /// dispatch + EventStream forward), sized per
   /// [`DriverOptions::observation_channel`]. The driver `try_send`s every
@@ -285,6 +289,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   delegate: D,
+  label: Option<bytes::Bytes>,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
   I: memberlist_proto::Id
@@ -351,6 +356,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
     endpoint,
     udp_socket,
     commands,
+    label,
     obs_tx,
     observation_dropped,
     obs_payload_bytes,
@@ -1352,8 +1358,8 @@ where
     + 'static,
 {
   let mut any_progress = false;
-  let decode_opts = DecodeOptions::default();
-  let encode_opts = EncodeOptions::default();
+  let decode_opts = DecodeOptions::new(state.label.clone());
+  let encode_opts = EncodeOptions::new(state.label.clone());
   loop {
     let mut iter_progress = false;
 

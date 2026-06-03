@@ -51,7 +51,7 @@ pub enum Intake {
 pub trait StreamTransport: Sized {
   /// Caller-built immutable options bundle for this record layer.
   /// `tls::TlsRecords::Options = tls::TlsOptions`;
-  /// `tcp::RawRecords::Options = tcp::TcpOptions`.
+  /// `tcp::RawRecords::Options = LabelOptions<()>`.
   type Options;
 
   /// Per-dial extra information the record layer needs at the moment

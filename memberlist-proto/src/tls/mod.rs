@@ -3,10 +3,29 @@
 //! rustls is itself Sans-I/O — the TLS record layer lives in the deterministic
 //! core and the driver moves only raw bytes. [`TlsRecords`] wraps a rustls
 //! `ClientConnection` / `ServerConnection` behind a byte-only interface and
-//! implements [`StreamTransport`], so a [`crate::streams::StreamEndpoint`]
-//! parameterised with `R = TlsRecords` carries reliable membership exchanges
-//! over a per-exchange TLS-over-TCP connection (plain UDP carries the
-//! unreliable gossip on a separate socket).
+//! implements [`StreamTransport`].
+//!
+//! # Cluster label on the TLS reliable path
+//!
+//! Cluster isolation on the reliable path is the same one-time
+//! `[LABELED_TAG=12][len][label]` exchange the plain-TCP and gossip planes use,
+//! carried by the [`crate::streams::Labeled`] decorator — so the coordinator is
+//! parameterised with `R = Labeled<TlsRecords>` and its options are
+//! [`crate::streams::LabelOptions`] over [`TlsOptions`]
+//! ([`LabelOptions<TlsOptions>`](crate::streams::LabelOptions)). The label is
+//! the **decrypted plaintext** consumed before the bridge mints its `Stream`:
+//! the dialer writes its label as the first application bytes inside the TLS
+//! session (eager), and a labeled acceptor withholds BOTH its `Stream` mint and
+//! its own label until the inbound label validates (lazy) — so a wrong-cluster
+//! peer that completes only the TLS handshake learns nothing and merges
+//! nothing. [`TlsOptions`] is unchanged: it never carries the label, which
+//! rides [`LabelOptions`](crate::streams::LabelOptions) exclusively.
+//!
+//! A [`crate::streams::StreamEndpoint`] parameterised with
+//! `R = Labeled<TlsRecords>` therefore carries reliable membership exchanges
+//! over a per-exchange TLS-over-TCP connection — label-gated, then
+//! TLS-encrypted (plain UDP carries the unreliable gossip on a separate
+//! socket).
 
 #[cfg(test)]
 mod bridge;
@@ -143,13 +162,23 @@ mod tests {
         + Sync
         + 'static,
     {
+      // The reliable transport is the label decorator over the TLS record
+      // layer; its options bundle is `LabelOptions<TlsOptions>` (the label
+      // rides `LabelOptions`, never `TlsOptions`).
       let _: fn(
         crate::endpoint::Endpoint<I, A>,
-        super::TlsOptions,
+        crate::streams::LabelOptions<super::TlsOptions>,
         Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
         Box<dyn Fn(&A) -> core::net::SocketAddr + Send + Sync>,
-      ) -> crate::streams::StreamEndpoint<I, A, crate::tls::records::TlsRecords> =
-        crate::streams::StreamEndpoint::<I, A, crate::tls::records::TlsRecords>::new;
+      ) -> crate::streams::StreamEndpoint<
+        I,
+        A,
+        crate::streams::Labeled<crate::tls::records::TlsRecords>,
+      > = crate::streams::StreamEndpoint::<
+        I,
+        A,
+        crate::streams::Labeled<crate::tls::records::TlsRecords>,
+      >::new;
     }
   }
 
@@ -169,16 +198,16 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
 
     let ep = endpoint(7300);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xAB; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
         .with_encryption(opts);
     let datagram = b"tls gossip body".to_vec();
@@ -209,15 +238,15 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
 
     let ep = endpoint(7301);
-    let cfg = TlsOptions::new(test_server(), test_client());
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     let datagram = b"a gossip body".to_vec();
     let on_wire = coord.encrypt_gossip(&datagram).expect("identity");
@@ -244,17 +273,17 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
 
     let ep = endpoint(7302);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
         .with_encryption(opts);
     let datagram = b"this gossip must not go out plaintext".to_vec();
@@ -286,16 +315,16 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
 
     let ep = endpoint(7303);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
         .with_encryption(opts);
     let plain_ping = encode_plain_frame(MessageTag::Ping, b"opaque-body").expect("encode");
@@ -325,7 +354,7 @@ mod tests {
       config::EndpointConfig,
       endpoint::Endpoint,
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{addr, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
@@ -333,9 +362,9 @@ mod tests {
 
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7304)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
         .with_encryption(opts);
     let plaintext = vec![0xab; 1200];
@@ -376,7 +405,7 @@ mod tests {
       config::EndpointConfig,
       endpoint::Endpoint,
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{addr, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
@@ -384,8 +413,8 @@ mod tests {
 
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7305)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
-    let cfg = TlsOptions::new(test_server(), test_client());
-    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(
       coord.gossip_mtu(),
@@ -412,7 +441,7 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
@@ -420,8 +449,8 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7306);
-    let cfg = TlsOptions::new(test_server(), test_client());
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Queue a plaintext gossip datagram under disabled encryption.
@@ -465,7 +494,7 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
@@ -473,10 +502,10 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7308);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let key = SecretKey::Aes256([0x42; 32]);
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
         .with_encryption(opts.clone());
 
@@ -522,7 +551,7 @@ mod tests {
     use crate::{
       event::PushPullKind,
       streams::{
-        StreamEndpoint,
+        LabelOptions, Labeled, StreamEndpoint,
         test_support::{addr, endpoint, test_peer_to_socket},
       },
       tls::options::tests::{test_client, test_server},
@@ -530,12 +559,12 @@ mod tests {
 
     let now = Instant::now();
     let ep = endpoint(7310);
-    let cfg = TlsOptions::new(test_server(), test_client());
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     // SNI provider returns `None`. `TlsRecords::dial_context` rejects with
     // "tls dial_context called without server_name", which routes through the
     // pre-`ExchangeMeta` `dial_failed` path inside `service_dials`.
     let sni: Box<dyn Fn(&SocketAddr) -> Option<String> + Send + Sync> = Box::new(|_| None);
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(ep, cfg, sni, test_peer_to_socket());
 
     let _sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
@@ -599,7 +628,7 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
-        ExchangeId, StreamAction, StreamEndpoint,
+        ExchangeId, LabelOptions, Labeled, StreamAction, StreamEndpoint,
         test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
@@ -616,8 +645,8 @@ mod tests {
 
     let now = Instant::now();
     let acceptor_ep = endpoint(8001);
-    let cfg = TlsOptions::new(test_server(), test_client());
-    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
       StreamEndpoint::new(acceptor_ep, cfg, test_sni_provider(), test_peer_to_socket());
     let dialer_addr = addr(8000);
 
@@ -741,6 +770,501 @@ mod tests {
         .all(|a| a.as_close().is_none_or(|r| r.id() != exchange)),
       "a failed reap emits Abort, never Close, for the exchange; got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+  }
+
+  // ── cluster label on the TLS reliable plane (Labeled<TlsRecords>) ──────────
+
+  /// Two coordinators carrying the SAME cluster label complete a reliable
+  /// push/pull over `Labeled<TlsRecords>`: the in-TLS label validates on both
+  /// sides, the dialer's `Stream` mints, the acceptor's `Stream` mints AFTER
+  /// its inbound label validates, and the membership state merges in BOTH
+  /// directions (the dialer learns the acceptor and the acceptor learns the
+  /// dialer purely through the labeled TLS exchange — no gossip).
+  ///
+  /// This is the TLS analogue of the plain-TCP two-node label join: the label
+  /// rides `LabelOptions` ahead of the first application record inside the TLS
+  /// session, and the generic [`crate::streams::Labeled`] decorator strips +
+  /// validates it before any membership data reaches the FSM.
+  #[test]
+  fn tls_two_same_label_nodes_complete_a_reliable_exchange() {
+    use crate::Instant;
+    use core::{net::SocketAddr, time::Duration};
+
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      event::PushPullKind,
+      streams::{
+        ExchangeId, LabelOptions, Labeled, StreamAction, StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    let mut now = Instant::now();
+    let dialer_addr = addr(8100);
+    let acceptor_addr = addr(8101);
+
+    // Both nodes share the cluster label `cluster-x`. The label lives on
+    // `LabelOptions`; `TlsOptions` is untouched.
+    let label = || Some(b"cluster-x".to_vec());
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> = StreamEndpoint::new(
+      endpoint(dialer_addr.port()),
+      LabelOptions::new_in(label(), TlsOptions::new(test_server(), test_client())),
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(
+        endpoint(acceptor_addr.port()),
+        LabelOptions::new_in(label(), TlsOptions::new(test_server(), test_client())),
+        test_sni_provider(),
+        test_peer_to_socket(),
+      );
+
+    // The dialer initiates a Join push/pull against the acceptor's address.
+    let _sid = dialer.start_push_pull(acceptor_addr, PushPullKind::Join, now);
+
+    // Drive both coordinators until the membership converges. Each iteration:
+    // tick both, translate a dialer `Connect` into the acceptor's
+    // `accept_connection`, shuttle per-exchange ciphertext both ways, and
+    // translate a `Shutdown`/`Close` teardown into the peer's transport EOF.
+    let mut dialer_ex: Option<ExchangeId> = None;
+    let mut acceptor_ex: Option<ExchangeId> = None;
+    for _ in 0..256 {
+      dialer.handle_timeout(now);
+      acceptor.handle_timeout(now);
+
+      // Dialer actions: the first `Connect` opens the acceptor's inbound
+      // exchange. Teardowns become an EOF delivered to the acceptor.
+      while let Some(action) = dialer.poll_action() {
+        match action {
+          StreamAction::Connect(info) => {
+            dialer_ex = Some(info.id());
+            if acceptor_ex.is_none() {
+              acceptor_ex = Some(acceptor.accept_connection(dialer_addr, now));
+            }
+          }
+          StreamAction::Shutdown(r) | StreamAction::Close(r) => {
+            if Some(r.id()) == dialer_ex {
+              if let Some(ax) = acceptor_ex {
+                acceptor.handle_transport_data(ax, &[], true, now);
+              }
+            }
+          }
+          StreamAction::Abort(_) => panic!("the labeled dialer must not abort a same-label peer"),
+        }
+      }
+      // Acceptor actions: it never dials; its teardown becomes an EOF to the
+      // dialer.
+      while let Some(action) = acceptor.poll_action() {
+        match action {
+          StreamAction::Connect(_) => panic!("the acceptor never dials"),
+          StreamAction::Shutdown(r) | StreamAction::Close(r) => {
+            if Some(r.id()) == acceptor_ex {
+              if let Some(dx) = dialer_ex {
+                dialer.handle_transport_data(dx, &[], true, now);
+              }
+            }
+          }
+          StreamAction::Abort(_) => panic!("the labeled acceptor must not abort a same-label peer"),
+        }
+      }
+
+      // Shuttle the dialer's per-exchange ciphertext to the acceptor.
+      if let Some(ax) = acceptor_ex {
+        let mut to_acceptor = Vec::new();
+        while let Some((id, _peer, bytes)) = dialer.poll_transport_transmit() {
+          if Some(id) == dialer_ex {
+            to_acceptor.extend_from_slice(&bytes);
+          }
+        }
+        if !to_acceptor.is_empty() {
+          acceptor.handle_transport_data(ax, &to_acceptor, false, now);
+        }
+      }
+      // Shuttle the acceptor's per-exchange ciphertext to the dialer.
+      if let Some(dx) = dialer_ex {
+        let mut to_dialer = Vec::new();
+        while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+          if Some(id) == acceptor_ex {
+            to_dialer.extend_from_slice(&bytes);
+          }
+        }
+        if !to_dialer.is_empty() {
+          dialer.handle_transport_data(dx, &to_dialer, false, now);
+        }
+      }
+
+      // Drain any application events the coordinators surface (membership
+      // notices) so their queues do not back up.
+      while dialer.poll_event().is_some() {}
+      while acceptor.poll_event().is_some() {}
+
+      if dialer.endpoint_ref().num_members() >= 2 && acceptor.endpoint_ref().num_members() >= 2 {
+        break;
+      }
+      now += Duration::from_millis(5);
+    }
+
+    // Both sides learned the other purely through the labeled TLS push/pull.
+    assert!(
+      dialer.endpoint_ref().num_members() >= 2,
+      "the dialer merged the acceptor's state over the labeled TLS exchange \
+       (num_members={})",
+      dialer.endpoint_ref().num_members(),
+    );
+    assert!(
+      acceptor.endpoint_ref().num_members() >= 2,
+      "the acceptor merged the dialer's push over the labeled TLS exchange \
+       (num_members={})",
+      acceptor.endpoint_ref().num_members(),
+    );
+  }
+
+  /// A labeled acceptor rejects a peer that completes the TLS handshake and
+  /// then presents a MISMATCHED in-TLS cluster label: the bridge fails BEFORE
+  /// any `Stream` is minted, so no membership is merged and the coordinator
+  /// surfaces an `Abort` (RST). The label is decrypted plaintext consumed by
+  /// the [`crate::streams::Labeled`] gate before the mint — the wrong-cluster
+  /// payload that follows the label never reaches the FSM.
+  #[test]
+  fn tls_acceptor_rejects_mismatched_inbound_label_before_mint() {
+    use crate::Instant;
+    use core::net::SocketAddr;
+    use std::sync::Arc;
+
+    use rustls::pki_types::ServerName;
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      streams::{
+        LabelOptions, Labeled, StreamAction, StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    let now = Instant::now();
+    let dialer_addr = addr(8110);
+    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(
+        endpoint(8111),
+        LabelOptions::new_in(
+          Some(b"cluster-x".to_vec()),
+          TlsOptions::new(test_server(), test_client()),
+        ),
+        test_sni_provider(),
+        test_peer_to_socket(),
+      );
+
+    let exchange = acceptor.accept_connection(dialer_addr, now);
+
+    // A bare client TLS half drives the handshake to completion, then sends a
+    // WRONG-cluster label `[12][7][other-x]` followed by a payload — all as TLS
+    // application data inside the established session.
+    let mut client = TlsRecords::client(
+      Arc::new(test_client()),
+      ServerName::try_from("localhost").unwrap(),
+    )
+    .expect("client TlsRecords");
+
+    // First, complete the TLS handshake (no application data yet).
+    let mut handshook = false;
+    for _ in 0..64 {
+      let mut c_out = Vec::new();
+      client.poll_transport_transmit(&mut c_out);
+      if !c_out.is_empty() {
+        acceptor.handle_transport_data(exchange, &c_out, false, now);
+      }
+      let mut s_out = Vec::new();
+      while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+        if id == exchange {
+          s_out.extend_from_slice(&bytes);
+        }
+      }
+      if !s_out.is_empty() {
+        client
+          .handle_transport_data(&s_out)
+          .expect("client consumes the server flight");
+      }
+      while acceptor.poll_action().is_some() {}
+      if !client.is_handshaking() && c_out.is_empty() && s_out.is_empty() {
+        handshook = true;
+        break;
+      }
+    }
+    assert!(handshook, "the client TLS handshake completed");
+
+    // Then the client encrypts a MISMATCHED label header + payload and
+    // delivers it to the acceptor as one TLS record flight.
+    let mut wrong = vec![12u8, 7];
+    wrong.extend_from_slice(b"other-x");
+    wrong.extend_from_slice(b"push-pull-request-bytes");
+    client.write_plaintext(&wrong);
+    let mut c_app = Vec::new();
+    client.poll_transport_transmit(&mut c_app);
+    assert!(!c_app.is_empty(), "the client produced encrypted app data");
+    acceptor.handle_transport_data(exchange, &c_app, false, now);
+
+    // Drive the reap and observe: an `Abort` surfaces, NO `Stream` was minted
+    // (the bridge never reached `Established(Active)`), the bridge is gone, and
+    // no membership was merged (only the local node).
+    acceptor.handle_timeout(now);
+    let mut saw_abort = false;
+    let mut saw_close_or_shutdown = false;
+    while let Some(action) = acceptor.poll_action() {
+      match action {
+        StreamAction::Abort(r) if r.id() == exchange => saw_abort = true,
+        StreamAction::Close(r) | StreamAction::Shutdown(r) if r.id() == exchange => {
+          saw_close_or_shutdown = true;
+        }
+        _ => {}
+      }
+    }
+    assert!(
+      saw_abort,
+      "a mismatched in-TLS label must fail the exchange with an Abort (RST)",
+    );
+    assert!(
+      !saw_close_or_shutdown,
+      "a rejected exchange must not emit a graceful Close/Shutdown",
+    );
+    assert_eq!(
+      acceptor.live_bridge_count(),
+      0,
+      "the rejected bridge was reaped; no Stream was minted",
+    );
+    assert_eq!(
+      acceptor.endpoint_ref().num_members(),
+      1,
+      "no membership merged from a wrong-cluster peer (only the local node)",
+    );
+  }
+
+  /// TLS leak-hygiene: a labeled acceptor sends NO in-TLS application data —
+  /// in particular NOT its own `[12][len][label]` prefix — to a peer that has
+  /// completed the TLS handshake but has NOT yet presented a valid inbound
+  /// label. The acceptor's outbound label is queued LAZILY by the
+  /// [`crate::streams::Labeled`] gate at inbound-label validation, so a
+  /// wrong-cluster / slow-loris peer that only finishes the TLS handshake
+  /// never learns the local cluster identity. The TLS analogue of the
+  /// plain-TCP `failed_acceptor_label_mismatch_no_bytes_before_close` /
+  /// `accept_connection_then_handle_timeout_no_bytes_before_inbound_validation`
+  /// leak invariants.
+  ///
+  /// Distinguishing the in-TLS label from the TLS handshake flights is the
+  /// crux: after the handshake settles the client drains the acceptor's
+  /// outbound and decrypts it; the acceptor must surface ZERO decrypted
+  /// application plaintext (the label) until the client sends its own valid
+  /// label.
+  #[test]
+  fn tls_acceptor_discloses_no_label_before_inbound_validates() {
+    use crate::Instant;
+    use core::net::SocketAddr;
+    use std::sync::Arc;
+
+    use rustls::pki_types::ServerName;
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      streams::{
+        LabelOptions, Labeled, StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    let now = Instant::now();
+    let dialer_addr = addr(8120);
+    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(
+        endpoint(8121),
+        LabelOptions::new_in(
+          Some(b"cluster-x".to_vec()),
+          TlsOptions::new(test_server(), test_client()),
+        ),
+        test_sni_provider(),
+        test_peer_to_socket(),
+      );
+
+    let exchange = acceptor.accept_connection(dialer_addr, now);
+
+    let mut client = TlsRecords::client(
+      Arc::new(test_client()),
+      ServerName::try_from("localhost").unwrap(),
+    )
+    .expect("client TlsRecords");
+
+    // Complete the TLS handshake, draining every decrypted plaintext byte the
+    // client surfaces along the way. The acceptor must NEVER surface decrypted
+    // application plaintext (its label) before the client presents one.
+    let mut leaked_plaintext: Vec<u8> = Vec::new();
+    for _ in 0..64 {
+      acceptor.handle_timeout(now);
+      let mut c_out = Vec::new();
+      client.poll_transport_transmit(&mut c_out);
+      if !c_out.is_empty() {
+        acceptor.handle_transport_data(exchange, &c_out, false, now);
+      }
+      let mut s_out = Vec::new();
+      while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+        if id == exchange {
+          s_out.extend_from_slice(&bytes);
+        }
+      }
+      if !s_out.is_empty() {
+        client
+          .handle_transport_data(&s_out)
+          .expect("client consumes the server flight");
+        // Any decrypted application plaintext here is the acceptor's label
+        // leaking pre-validation — the property under test forbids it.
+        client.read_plaintext(&mut leaked_plaintext);
+      }
+      while acceptor.poll_action().is_some() {}
+      if !client.is_handshaking() && c_out.is_empty() && s_out.is_empty() {
+        break;
+      }
+    }
+    assert!(
+      !client.is_handshaking(),
+      "the client TLS handshake completed"
+    );
+
+    // One more pump round after the handshake to force any buffered acceptor
+    // output to the client; still NO application plaintext may appear.
+    for _ in 0..4 {
+      acceptor.handle_timeout(now);
+      let mut s_out = Vec::new();
+      while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+        if id == exchange {
+          s_out.extend_from_slice(&bytes);
+        }
+      }
+      if !s_out.is_empty() {
+        client
+          .handle_transport_data(&s_out)
+          .expect("client consumes");
+        client.read_plaintext(&mut leaked_plaintext);
+      }
+      while acceptor.poll_action().is_some() {}
+    }
+
+    assert!(
+      leaked_plaintext.is_empty(),
+      "a labeled acceptor must disclose NO in-TLS application bytes (its \
+       cluster label) before the peer's inbound label validates; leaked {:?}",
+      leaked_plaintext,
+    );
+    assert_eq!(
+      acceptor.live_bridge_count(),
+      1,
+      "the acceptor is still waiting for the inbound label (bridge alive, no \
+       Stream minted yet)",
+    );
+  }
+
+  /// Invariant-4 on TLS: an UNLABELED node passes a 12-byte first reliable unit
+  /// (whose `[unit_len]` prefix byte is `0x0C` == `LABELED_TAG`) straight
+  /// through as decrypted plaintext rather than misclassifying the leading byte
+  /// as an in-TLS cluster-label tag. With no local label the
+  /// [`crate::streams::Labeled`] gate is a pure passthrough from byte 0, so the
+  /// 12-byte unit is surfaced verbatim and the exchange is NOT rejected at the
+  /// label gate.
+  ///
+  /// Driven directly on the `Labeled<TlsRecords>` record layer (the acceptor
+  /// side of a real rustls handshake against a bare client peer): once the TLS
+  /// handshake settles, the peer encrypts a `[0x0C][12 payload bytes]` frame
+  /// and the unlabeled decorator must surface it byte-for-byte — never an
+  /// `Intake::Failed` from treating `0x0C` as a `LABELED_TAG`. This is the TLS
+  /// analogue of the plain-TCP `unlabeled_acceptor_passes_through_a_12_byte_first_unit`
+  /// latent-bug regression.
+  #[test]
+  fn tls_unlabeled_node_passes_through_a_12_byte_first_unit() {
+    use crate::Instant;
+    use std::sync::Arc;
+
+    use rustls::pki_types::ServerName;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      streams::{Intake, LabelOptions, Labeled, StreamTransport},
+      tls::options::tests::{test_client, test_server},
+    };
+
+    // Unlabeled acceptor record layer: the label gate is a pure passthrough
+    // from byte 0 (no mint gate, no `[12]` classifier on the stream).
+    let mut records = <Labeled<TlsRecords>>::acceptor(&LabelOptions::new_in(
+      None,
+      TlsOptions::new(test_server(), test_client()),
+    ))
+    .expect("unlabeled acceptor records");
+    assert!(
+      <Labeled<TlsRecords>>::is_secure(),
+      "the TLS reliable transport is secure"
+    );
+
+    // Bare client peer to drive a real TLS handshake against `records`.
+    let mut peer = TlsRecords::client(
+      Arc::new(test_client()),
+      ServerName::try_from("localhost").unwrap(),
+    )
+    .expect("peer client");
+    for _ in 0..64 {
+      let mut p_out = Vec::new();
+      peer.poll_transport_transmit(&mut p_out);
+      if !p_out.is_empty() {
+        assert!(
+          !matches!(
+            records.handle_transport_data(&p_out, Instant::now()),
+            Intake::Failed
+          ),
+          "no label reject may occur while the TLS handshake is in flight",
+        );
+      }
+      let mut r_out = Vec::new();
+      records.poll_transport_transmit(&mut r_out);
+      if !r_out.is_empty() {
+        peer
+          .handle_transport_data(&r_out)
+          .expect("peer consumes server flight");
+      }
+      if p_out.is_empty() && r_out.is_empty() {
+        break;
+      }
+    }
+    assert!(
+      !records.is_handshaking(),
+      "the unlabeled TLS record layer settled (handshake done, no label gate)"
+    );
+
+    // The peer encrypts a 12-byte reliable unit `[0x0C][12 payload bytes]`. The
+    // leading `0x0C` is the unit-length prefix, NOT a label tag.
+    let mut first_unit = vec![12u8];
+    first_unit.extend_from_slice(b"ABCDEFGHIJKL");
+    peer.write_plaintext(&first_unit);
+    let mut enc = Vec::new();
+    peer.poll_transport_transmit(&mut enc);
+    assert!(!enc.is_empty(), "the peer produced encrypted app data");
+
+    assert!(
+      !matches!(
+        records.handle_transport_data(&enc, Instant::now()),
+        Intake::Failed
+      ),
+      "an unlabeled node must NOT classify the 0x0C-led first unit as a label \
+       tag — no Intake::Failed at the gate",
+    );
+    let mut got = Vec::new();
+    records.read_plaintext(&mut got);
+    assert_eq!(
+      got, first_unit,
+      "the 0x0C-led 12-byte unit surfaced verbatim as decrypted plaintext (no \
+       label classification)",
     );
   }
 }

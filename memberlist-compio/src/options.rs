@@ -4,7 +4,10 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use memberlist_proto::{CheapClone, config::EndpointConfig, typed::Meta};
+use memberlist_proto::{
+  CheapClone, CompressionOptions, EncryptionOptions, config::EndpointConfig, label::validate_label,
+  typed::Meta,
+};
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
@@ -32,6 +35,25 @@ use crate::{
 /// - `initial_meta` — the local node's initial metadata payload.
 /// - `initial_local_state` — the local node's initial push/pull
 ///   application-state snapshot.
+/// - `compression` — the initial gossip and reliable-stream compression policy
+///   (disabled by default). Applied at endpoint construction; the runtime
+///   [`set_compression_options`](crate::Memberlist::set_compression_options)
+///   command allows reconfiguration after the node is running.
+/// - `encryption` — the initial gossip and reliable-stream encryption policy
+///   (disabled / no keyring by default). Applied at endpoint construction; a
+///   keyring naming an unsupported AEAD algorithm is caught at
+///   [`Memberlist::new`](crate::Memberlist::new) rather than silently starting
+///   plaintext. The runtime
+///   [`set_encryption_options`](crate::Memberlist::set_encryption_options)
+///   command allows key rotation after the node is running.
+/// - `label` — cluster label applied to both the gossip and reliable planes
+///   (no label by default). Validated at the setter: must be ≤253 bytes and
+///   valid UTF-8. Feeds the reliable-plane `LabelOptions` (TCP/TLS) and the
+///   gossip codec `EncodeOptions` from a single source, so the two planes
+///   cannot diverge. QUIC clusters use the SNI hostname for isolation and do
+///   not consult this field.
+/// - `skip_inbound_label_check` — when `true`, an inbound stream that presents
+///   no label header is accepted rather than rejected. Defaults to `false`.
 #[derive(Debug, Clone, Default)]
 pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
@@ -39,6 +61,10 @@ pub struct MemberlistOptions {
   max_stream_frame_size: Option<usize>,
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
+  compression: CompressionOptions,
+  encryption: EncryptionOptions,
+  label: Option<Bytes>,
+  skip_inbound_label_check: bool,
 }
 
 impl MemberlistOptions {
@@ -119,6 +145,69 @@ impl MemberlistOptions {
     self
   }
 
+  /// Builder: set the initial gossip and reliable-stream compression policy.
+  /// The default (disabled) leaves all datagrams and stream frames
+  /// uncompressed until a runtime
+  /// [`set_compression_options`](crate::Memberlist::set_compression_options)
+  /// call is made.
+  #[must_use]
+  #[inline]
+  pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
+    self.compression = compression;
+    self
+  }
+
+  /// Builder: set the initial gossip and reliable-stream encryption policy.
+  /// The default (no keyring) leaves all traffic unencrypted until a runtime
+  /// [`set_encryption_options`](crate::Memberlist::set_encryption_options)
+  /// call is made. A keyring naming an unsupported AEAD algorithm is rejected
+  /// at [`Memberlist::new`](crate::Memberlist::new) before any socket is
+  /// bound.
+  #[must_use]
+  #[inline]
+  pub fn with_encryption(mut self, encryption: EncryptionOptions) -> Self {
+    self.encryption = encryption;
+    self
+  }
+
+  /// Builder: set the cluster label for both the gossip and reliable planes.
+  ///
+  /// The label is validated immediately: it must be ≤253 bytes and valid
+  /// UTF-8. An empty slice normalizes to `None` (no label). Returns
+  /// `Err(MemberlistError::InvalidLabel(_))` when either constraint is
+  /// violated.
+  ///
+  /// The validated label is the single source for both the reliable-plane
+  /// `LabelOptions` (plain TCP or TLS) and the gossip codec `EncodeOptions`,
+  /// so the two planes cannot diverge.
+  #[inline]
+  pub fn with_label(
+    mut self,
+    label: Option<Vec<u8>>,
+  ) -> Result<Self, crate::error::MemberlistError> {
+    self.label = match label {
+      None => None,
+      Some(v) if v.is_empty() => None,
+      Some(v) => {
+        validate_label(&v).map_err(crate::error::MemberlistError::InvalidLabel)?;
+        Some(Bytes::from(v))
+      }
+    };
+    Ok(self)
+  }
+
+  /// Builder: suppress the inbound reliable-plane label check.
+  ///
+  /// When set, an inbound TCP/TLS stream that presents no label header is
+  /// accepted rather than rejected. Defaults to `false`. Faithful to
+  /// memberlist-core `Options::skip_inbound_label_check`.
+  #[must_use]
+  #[inline]
+  pub fn with_skip_inbound_label_check(mut self, skip: bool) -> Self {
+    self.skip_inbound_label_check = skip;
+    self
+  }
+
   /// The configured gossip-MTU override, if any.
   #[inline]
   pub const fn gossip_mtu(&self) -> Option<usize> {
@@ -147,6 +236,30 @@ impl MemberlistOptions {
   #[inline]
   pub const fn initial_local_state(&self) -> Option<&Bytes> {
     self.initial_local_state.as_ref()
+  }
+
+  /// The initial gossip and reliable-stream compression policy.
+  #[inline]
+  pub const fn compression(&self) -> &CompressionOptions {
+    &self.compression
+  }
+
+  /// The initial gossip and reliable-stream encryption policy.
+  #[inline]
+  pub const fn encryption(&self) -> &EncryptionOptions {
+    &self.encryption
+  }
+
+  /// The cluster label, if set.
+  #[inline]
+  pub fn label(&self) -> Option<&[u8]> {
+    self.label.as_deref()
+  }
+
+  /// Whether the inbound reliable-plane label check is suppressed.
+  #[inline]
+  pub const fn skip_inbound_label_check(&self) -> bool {
+    self.skip_inbound_label_check
   }
 }
 

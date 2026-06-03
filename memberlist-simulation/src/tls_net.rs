@@ -40,8 +40,8 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointConfig, Event, Instant, PushPullKind, TlsOptions, TlsRecords, Transmit,
-  framing, message_from_any, message_to_any,
+  Endpoint, EndpointConfig, Event, Instant, LabelOptions, Labeled, PushPullKind, TlsOptions,
+  TlsRecords, Transmit, framing, message_from_any, message_to_any,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
 };
@@ -50,8 +50,10 @@ use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
 
-/// The concrete coordinator the harness drives.
-type Node1 = StreamEndpoint<SmolStr, SocketAddr, TlsRecords>;
+/// The concrete coordinator the harness drives: the cluster-label decorator
+/// over the rustls-over-TCP record layer. The reliable plane is label-gated
+/// (the label rides `LabelOptions`, never `TlsOptions`) then TLS-encrypted.
+type Node1 = StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>;
 
 /// The rustls crypto provider the harness uses, selected by the active backend
 /// feature. The entire conformance suite runs under whichever is chosen
@@ -316,11 +318,16 @@ impl TlsCluster {
     } else {
       sim_tls_config()
     };
+    // The reliable transport is the label decorator over the TLS record layer.
+    // These scenarios exercise TLS mutual-auth (not the wire label) for cluster
+    // isolation, so the label is `None` (unlabeled): the gate is a pure
+    // passthrough and behaviour matches the pre-decorator TLS coordinator.
+    let cfg = LabelOptions::new_in(None, tls);
     self.nodes.insert(
       addr,
       StreamEndpoint::with_compression(
         ep,
-        tls,
+        cfg,
         Box::new(|_addr: &SocketAddr| Some("localhost".to_string())),
         Box::new(|addr: &SocketAddr| *addr),
         self.compression,
