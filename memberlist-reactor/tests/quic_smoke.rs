@@ -275,6 +275,49 @@ async fn wildcard_advertise_is_rejected() {
   assert!(rejected, "wildcard advertise must be rejected");
 }
 
+/// Two default-configured reactor QUIC nodes must converge: gossip + probes ride
+/// QUIC datagrams over per-peer connections (`UnreliableTransport::Datagram`, the
+/// default). Convergence proves the datagram path is functional end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_datagram_gossip_two_nodes_converge() {
+  let (cert, key) = support::generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("root");
+  let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
+  let qcfg_b = support::build_quic_config(cert, key, roots);
+
+  let a = make("dg-a", qcfg_a).await;
+  let b = make("dg-b", qcfg_b).await;
+  let a_addr = *a.local().addr_ref();
+
+  let n = b
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  assert_eq!(n, 1, "one seed dispatched");
+
+  // Gossip and probes travel over QUIC datagrams (the default unreliable
+  // transport); both nodes must converge before the budget.
+  let converged = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if a.num_members() == 2 && b.num_members() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(
+    converged.is_ok(),
+    "datagram-path convergence timed out: a={}, b={}",
+    a.num_members(),
+    b.num_members()
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
 /// A different cluster label over shared QUIC/TLS trust must not allow a node
 /// to join a foreign cluster via the QUIC reliable plane.
 ///

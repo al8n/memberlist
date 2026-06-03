@@ -36,7 +36,7 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_proto::{
-  Instant, Node, QuicEndpoint,
+  DatagramSendOutcome, Instant, Node, QuicEndpoint, UnreliableTransport,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
   typed::{NodeState, State},
@@ -495,8 +495,8 @@ pub(crate) async fn quic_driver_loop<I, D>(
     // the main `select_biased!`'s `recv` arm always wins over `timer`
     // (recv arm 1, timer arm 2 in source order), so a deadline that
     // is already in the past at loop entry would never fire under
-    // the select — `recv` keeps re-arming. The bounded peek +
-    // re-polled-deadline `handle_timeout` + drain sequence inside
+    // the select — `recv` keeps re-arming. The single one-packet peek
+    // + re-polled-deadline `handle_timeout` sequence inside
     // `fire_timeout_with_drain` runs the past-due deadline protocol
     // BEFORE the select re-arms: a kernel-buffered datagram that
     // would resolve the deadline gets exactly one shot per past-due
@@ -611,7 +611,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
         // `handle_timeout` inline + setting `dirty` defers the four-
         // surface flush to the next iter's iter-top dirty drain.
         //
-        // The bounded-peek `fire_timeout_with_drain` helper is NOT
+        // The peek-based `fire_timeout_with_drain` helper is NOT
         // called here: it would build a SECOND `recv_from` SQE on
         // `state.udp_socket` while the outer `recv_fut` SQE is still
         // live in this iteration, and io_uring would deliver a
@@ -1198,48 +1198,48 @@ async fn dispatch_command<I>(
   }
 }
 
-/// Past-due / timer-arm helper: bounded peek on the UDP socket
-/// (consume one buffered datagram if any arrived during the
-/// deadline), re-poll the coordinator's deadline, fire
-/// `handle_timeout` only if still past, then drain to fixed point.
+/// Past-due / timer-arm helper: a single one-packet peek off the UDP
+/// socket, then re-poll the coordinator's deadline and fire
+/// `handle_timeout` if it is still past, then drain to fixed point.
 ///
 /// Under a continuous UDP-recv flood the main `select_biased!`'s
 /// `recv` arm always wins over `timer` (recv arm 1, timer arm 2 in
 /// source order), so `handle_timeout` would never fire and overdue
 /// suspicion / probe deadlines would never be reaped. Under a clean
 /// past-due event a kernel-buffered probe Ack would resolve the
-/// deadline; firing `handle_timeout` without applying it first would
-/// wrongly suspect the peer.
+/// deadline; applying that one buffered datagram before the deadline
+/// re-poll keeps a just-arrived Ack from being decided as a timeout.
 ///
-/// The bounded peek gives `recv` exactly ONE shot per past-due fire:
-/// a `select_biased!` between the recv future and a `peek_budget`
-/// sleep timer polls recv first (so a buffered datagram wins) and
-/// falls through on the timer otherwise. The peek timer must be a
-/// real sleep (not a zero-duration ready future) so io_uring has
-/// time to complete a freshly-submitted recv SQE — on completion-
-/// based io_uring the recv is ALWAYS Pending on first poll. The
-/// `peek_budget` default (1 ms; see [`crate::DEFAULT_PEEK_BUDGET`])
-/// is comfortably above io_uring's completion latency for a
-/// kernel-buffered recv (~100 µs) while keeping the per-fire cost
-/// negligible.
+/// The bounded peek gives `recv` priority for the fire: a
+/// `select_biased!` between the recv future and a sleep timer polls
+/// recv first (so a buffered datagram wins) and falls through on the
+/// timer otherwise. The peek's timer must be a real sleep (not a
+/// zero-duration ready future) so io_uring has time to complete a
+/// freshly-submitted recv SQE — on completion-based io_uring the recv
+/// is ALWAYS Pending on first poll. The `peek_budget` default (1 ms;
+/// see [`crate::DEFAULT_PEEK_BUDGET`]) is comfortably above io_uring's
+/// completion latency for a kernel-buffered recv (~100 µs) while
+/// keeping the per-fire cost negligible.
 ///
 /// After the peek the deadline is re-polled: a consumed datagram may
-/// have resolved it (a probe Ack landing the same tick the
-/// cumulative deadline expires). `handle_timeout` fires only if the
-/// deadline is STILL past. Then `drain_actions` flushes every
-/// downstream consequence of the consumed datagram and/or fired
-/// timeout (events, ingress, outbound memberlist transmits, raw QUIC
-/// transmits) to fixed point.
+/// have resolved it (a probe Ack landing the same tick the cumulative
+/// deadline expires). `handle_timeout` fires only if the deadline is
+/// STILL past. No socket drain-to-empty is needed: the probe FSM
+/// anchors success on an absolute `failure_deadline`, so an Ack
+/// decoded slightly later — even after `handle_timeout` — still
+/// rescues the probe regardless of ordering (this mirrors the plain
+/// stream driver's past-due protocol, which is correct over UDP).
+/// Then `drain_actions` flushes every downstream consequence of the
+/// consumed datagram and/or fired timeout (events, ingress, outbound
+/// memberlist transmits, raw QUIC transmits) to fixed point.
 ///
 /// Mirrors the stream driver's iter-top peek + `fire_timeout_with_drain`
-/// pair (`memberlist-compio/src/driver.rs:602`); the QUIC version
-/// bundles all three phases into one helper because the iter-top
-/// past-due site is the only call site that can safely build a peek
-/// `recv_from` SQE (the timer-arm site already has the main loop's
-/// `recv_fut` SQE in flight on the same socket — a second SQE there
-/// would race the kernel's datagram delivery between two pending
-/// futures and lose the datagram if the outer `recv_fut` is dropped
-/// without being polled).
+/// pair (`memberlist-compio/src/driver.rs:602`); this is the only call
+/// site that can safely build a peek `recv_from` SQE (the timer-arm
+/// site already has the main loop's `recv_fut` SQE in flight on the
+/// same socket — a second SQE there would race the kernel's datagram
+/// delivery between two pending futures and lose the datagram if the
+/// outer `recv_fut` is dropped without being polled).
 ///
 /// Returns `true` iff any work was applied (the peek consumed a
 /// datagram, `handle_timeout` fired, OR `drain_actions` made
@@ -1257,14 +1257,10 @@ where
 {
   let mut dirty = false;
 
-  // Bounded peek: at most one buffered datagram, at most peek_budget
-  // wait. The peek's select_biased puts recv first so a kernel-
-  // buffered datagram is always consumed if present.
-  //
-  // Scoped in an inner block so `peek_recv` / `peek_timer` (pinned
-  // via `pin_mut!`) drop at the closing brace — their immutable
-  // borrows on `state.udp_socket` / `state.driver_opts` release
-  // before `drain_actions(state)` below takes `&mut state`.
+  // Bounded peek: at most one buffered datagram, at most peek_budget wait.
+  // The peek's select_biased puts recv first so a kernel-buffered datagram
+  // is always consumed if present. Scoped so the borrows release before
+  // drain_actions takes &mut state.
   {
     let peek_buf = vec![0u8; recv_buf_len];
     let peek_recv = state.udp_socket.recv_from(peek_buf).fuse();
@@ -1273,29 +1269,26 @@ where
     select_biased! {
       gossip = peek_recv => {
         let BufResult(res, buf) = gossip;
-        match res {
-          Ok((n, src)) => {
-            let received_at = Instant::now();
-            state.endpoint.handle_udp(src, &buf[..n], received_at);
-            dirty = true;
-          }
-          Err(_) => {
-            // Best-effort: a transient recv error (ICMP unreachable
-            // surfacing as a syscall error on Linux, EAGAIN, etc.) is
-            // non-fatal — the next iter's main recv arm re-arms with
-            // a fresh buffer.
-          }
+        // Best-effort: a transient recv error is non-fatal; the next iter's main
+        // recv arm re-arms with a fresh buffer, so only the Ok case has work.
+        if let Ok((n, src)) = res {
+          let received_at = Instant::now();
+          state.endpoint.handle_udp(src, &buf[..n], received_at);
+          dirty = true;
         }
       }
       _ = peek_timer => {
-        // No buffered datagram surfaced within the peek budget; fall
-        // through to the deadline-firing protocol below.
+        // No buffered datagram surfaced within the peek budget; fall through
+        // to the deadline-firing protocol below.
       }
     }
   }
 
-  // Re-poll the deadline AFTER the peek — a consumed datagram may
-  // have resolved it. Fire `handle_timeout` only if still past.
+  // Re-poll the deadline AFTER the peek — a consumed datagram may have
+  // resolved it. Fire handle_timeout only if still past. The probe FSM's
+  // absolute failure_deadline makes a slightly-later-decoded Ack still rescue
+  // the probe, so no socket drain-to-empty is needed here (mirrors the plain
+  // stream driver's past-due protocol).
   let now = Instant::now();
   let after_peek_deadline = state
     .endpoint
@@ -1392,14 +1385,16 @@ where
     }
 
     // 2. Outbound memberlist transmits — encode (plain or compound),
-    //    then compress + encrypt + send on the shared UDP socket.
-    //    `encode_outgoing*` only fails on a typed↔buffa bridge error
-    //    that round-trips a locally-built message; matches the
-    //    stream driver's drop-on-codec-fail policy. An empty
-    //    encryption config makes `encrypt_gossip` a copy; a
-    //    transient `send_to` error (ENOBUFS / ICMP unreachable
-    //    surfacing as a syscall error) is non-fatal per the gossip
-    //    drop discipline.
+    //    then compress + encrypt and route onto the unreliable wire the
+    //    endpoint is configured for: a QUIC datagram over the peer's pooled
+    //    connection (`UnreliableTransport::Datagram`, the default) or the
+    //    shared UDP socket (`UnreliableTransport::Udp`). `encode_outgoing*`
+    //    only fails on a typed↔buffa bridge error that round-trips a
+    //    locally-built message; matches the stream driver's drop-on-codec-fail
+    //    policy. An empty encryption config makes `encrypt_gossip` a copy; a
+    //    transient `send_to` error (ENOBUFS / ICMP unreachable surfacing as a
+    //    syscall error) is non-fatal per the gossip drop discipline.
+    let mut needs_flush = false;
     while let Some(transmit) = state.endpoint.poll_memberlist_transmit() {
       iter_progress = true;
       let (peer, plain) = match transmit {
@@ -1421,16 +1416,56 @@ where
         }
       };
       let compressed = state.endpoint.compress_gossip(&plain);
+      // `Bytes` so the datagram-queue path and the UDP fallback can share the
+      // same encoded payload without a second copy (`clone` is an O(1) refcount
+      // bump).
       let on_wire = match state.endpoint.encrypt_gossip(&compressed) {
-        Ok(b) => b,
+        Ok(b) => Bytes::from(b),
         Err(_) => continue,
       };
-      let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
-      // Ignoring Err: a transient UDP send error (ENOBUFS, network
-      // down on an interface, ICMP unreachable surfacing as a
-      // syscall error) is non-fatal — gossip is lossy and the next
-      // probe/gossip round recovers.
-      let _ = res;
+      match state.endpoint.unreliable_transport() {
+        UnreliableTransport::Udp => {
+          let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
+          // Ignoring Err: a transient UDP send error (ENOBUFS / ICMP
+          // unreachable surfacing as a syscall error) is non-fatal — gossip
+          // is lossy and the next probe/gossip round recovers.
+          let _ = res;
+        }
+        UnreliableTransport::Datagram => {
+          match state
+            .endpoint
+            .queue_unreliable_datagram(peer, on_wire.clone(), now)
+          {
+            DatagramSendOutcome::Queued => needs_flush = true,
+            // NotReady may mean queue_unreliable_datagram just initiated a cold
+            // dial; flush this tick so the connection's Initial is emitted now
+            // (else the connection does not warm until the next driver wake). The
+            // gossip itself still goes out immediately over the UDP fallback.
+            DatagramSendOutcome::NotReady => {
+              needs_flush = true;
+              let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
+              // Ignoring Err: a transient UDP send error is non-fatal — gossip is
+              // lossy and the next probe/gossip round recovers.
+              let _ = res;
+            }
+            // TooLarge: the connection is already Established (max_size was Some),
+            // so there is no pending Initial to flush; just fall back to UDP.
+            DatagramSendOutcome::TooLarge => {
+              let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
+              // Ignoring Err: a transient UDP send error is non-fatal — gossip is
+              // lossy and the next probe/gossip round recovers.
+              let _ = res;
+            }
+          }
+        }
+      }
+    }
+
+    // Flush any datagrams queued above into `out` THIS tick so Section 3 sends
+    // them now — a datagram-borne probe whose timeout is armed this same tick
+    // must not wait for the next driver wake (that wake can be the timeout).
+    if needs_flush {
+      state.endpoint.flush_outbound_transmits(now);
     }
 
     // 3. Raw QUIC datagrams (handshake, acks, application stream

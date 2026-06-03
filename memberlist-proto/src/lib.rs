@@ -126,7 +126,7 @@ mod bridge_phase;
 #[cfg(feature = "quic")]
 mod quic;
 #[cfg(feature = "quic")]
-pub use quic::{QuicConfig, QuicEndpoint};
+pub use quic::{DatagramSendOutcome, QuicConfig, QuicEndpoint, UnreliableTransport};
 
 #[cfg(feature = "tls")]
 mod tls;

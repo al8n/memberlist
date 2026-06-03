@@ -23,7 +23,10 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, Options,
   QuicConfig, QuicMemberlist, QuicTransportOptions, Resolver, SocketAddrResolver, VoidDelegate,
 };
-use memberlist_proto::typed::{Meta, NodeState};
+use memberlist_proto::{
+  UnreliableTransport,
+  typed::{Meta, NodeState},
+};
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
@@ -69,11 +72,20 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 /// cert, both nodes in the same trust root so they mutually accept each
 /// other's (identical) certificate.
 fn two_node_quic_configs() -> (memberlist_compio::QuicConfig, memberlist_compio::QuicConfig) {
+  two_node_quic_configs_with_mode(UnreliableTransport::Datagram)
+}
+
+/// Like [`two_node_quic_configs`] but pins the unreliable-transport mode on both
+/// nodes — used by the plain-UDP opt-out test.
+fn two_node_quic_configs_with_mode(
+  mode: UnreliableTransport,
+) -> (memberlist_compio::QuicConfig, memberlist_compio::QuicConfig) {
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
-  let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
-  let qcfg_b = support::build_quic_config(cert, key, roots);
+  let qcfg_a =
+    support::build_quic_config_with_mode(cert.clone(), key.clone_key(), roots.clone(), mode);
+  let qcfg_b = support::build_quic_config_with_mode(cert, key, roots, mode);
   (qcfg_a, qcfg_b)
 }
 
@@ -388,6 +400,48 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   let _ = compio::time::timeout(Duration::from_secs(5), seed.shutdown()).await;
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), joiner.shutdown()).await;
+}
+
+/// Two default-configured QUIC nodes (`UnreliableTransport::Datagram`) must
+/// converge — gossip + probes ride QUIC datagrams over the per-peer
+/// connection rather than plain UDP. The default unreliable transport is
+/// `Datagram`, so a default-configured cluster reaching `member_count == 2`
+/// IS the datagram dissemination path proven end-to-end (queue on the quinn
+/// connection, same-tick outbound flush, peer drain into the shared ingress).
+#[compio::test]
+async fn quic_datagram_gossip_two_nodes_converge() {
+  let (qcfg_a, qcfg_b) = two_node_quic_configs();
+
+  let a_port: u16 = 7290;
+  let b_port: u16 = 7291;
+  let a = make_quic("a", a_port, qcfg_a).await;
+  let b = make_quic("b", b_port, qcfg_b).await;
+
+  let b_addr = loopback_addr(b_port);
+
+  let count = a
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
+    .await
+    .expect("join Ok");
+  assert_eq!(count, 1, "one contacted exchange");
+
+  // Wider deadline than TCP: QUIC handshake latency before datagrams can flow.
+  let converged = wait_until(
+    || a.member_count() == 2 && b.member_count() == 2,
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge over QUIC datagrams: a={} b={}",
+    a.member_count(),
+    b.member_count()
+  );
+
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
 }
 
 /// A `gossip_mtu` whose wire datagram cannot fit a single UDP packet is an
@@ -1070,4 +1124,47 @@ async fn quic_label_isolates_reliable_plane() {
   let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), a2.shutdown()).await;
+}
+
+/// The plain-UDP opt-out: two nodes configured `UnreliableTransport::Udp`
+/// gossip over the shared UDP socket (not QUIC datagrams) and still converge
+/// — the unreliable path is byte-identical to the pre-datagram path when the
+/// opt-out is set. This proves the `Udp` mode does not regress the
+/// dissemination liveness that existed before the QUIC datagram extension.
+#[compio::test]
+async fn udp_opt_out_cluster_converges_over_plain_udp() {
+  let (ca, cb) = two_node_quic_configs_with_mode(UnreliableTransport::Udp);
+
+  let seed = make_quic("udp-opt-seed", 7480, ca).await;
+  let joiner = make_quic("udp-opt-joiner", 7481, cb).await;
+
+  let count = joiner
+    .dispatch_join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(loopback_addr(7480))],
+    )
+    .await
+    .expect("dispatch_join");
+  assert_eq!(count, 1, "one seed address dispatched");
+
+  // Wider deadline than TCP: QUIC handshake latency.
+  let converged = wait_until(
+    || joiner.member_count() == 2 && seed.member_count() == 2,
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    converged,
+    "UDP-opt-out cluster did not converge: joiner={} seed={}",
+    joiner.member_count(),
+    seed.member_count()
+  );
+
+  assert_eq!(joiner.alive_count(), 2);
+  assert_eq!(seed.alive_count(), 2);
+
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), seed.shutdown()).await;
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), joiner.shutdown()).await;
 }
