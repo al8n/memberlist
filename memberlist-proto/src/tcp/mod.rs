@@ -1105,9 +1105,8 @@ mod tests {
   /// A driver that runs one `handle_timeout` tick on a freshly-accepted
   /// connection — BEFORE any inbound bytes arrive — must observe NO
   /// outbound bytes for that exchange. The acceptor's outbound label prefix
-  /// is queued LAZILY at inbound-label validation, so the bridge's
-  /// the acceptor's outbound label prefix is empty across the pump and
-  /// `finalize_tick`'s `collect_bridge_transmits` drains nothing for this
+  /// is queued LAZILY at inbound-label validation, so it is empty across the
+  /// pump and `finalize_tick`'s `collect_bridge_transmits` drains nothing for this
   /// exchange. Faithful to `memberlist-core/src/network.rs::handle_conn`'s
   /// `read_message`-before-`send_message` ordering: an acceptor reveals
   /// cluster identity only after the dialer has proven its own.

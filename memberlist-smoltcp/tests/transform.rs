@@ -8,9 +8,9 @@
 //! the keyring cannot inject SWIM state — the trust boundary.
 //!
 //! These tests reuse the deterministic paired-`Device` + virtual-clock harness
-//! from `gossip.rs`. Each node is seeded with the other as Alive (Milestone 1
-//! has no join path); whether the pair STAYS converged then depends entirely on
-//! whether their gossip/probe datagrams survive the transform layer.
+//! from `gossip.rs`. Each node is seeded with the other as Alive (bypassing the
+//! join path, as in `gossip.rs`); whether the pair STAYS converged then depends
+//! entirely on whether their gossip/probe datagrams survive the transform layer.
 
 mod harness;
 
