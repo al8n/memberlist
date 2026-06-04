@@ -184,8 +184,6 @@ pub struct Endpoint<I, A> {
 
   // Probe FSM.
   ack_registry: AckRegistry<A>,
-
-  // Probe FSM.
   probes: FxHashMap<u32, Probe<I, A>>,
   /// Indirect-ping forwarders we're currently routing on behalf of other nodes.
   indirect_forwards: FxHashMap<u32, IndirectForward<A>>,
@@ -550,7 +548,6 @@ where
     self.members.len()
   }
 
-  /// access to the broadcast queue (used by transitions).
   pub(crate) fn broadcast_alive(&mut self, state: &LocalNodeState<I, A>) {
     let alive = Alive::new(
       state.incarnation(),
@@ -568,14 +565,12 @@ where
     ));
   }
 
-  /// access to the broadcast queue (used by transitions).
   pub(crate) fn broadcast_message(&mut self, node: I, msg: Message<I, A>) {
     self
       .broadcast
       .queue_broadcast(MemberlistBroadcast::new(node, msg));
   }
 
-  /// emit an event for the application to drain.
   pub(crate) fn emit_event(&mut self, ev: Event<I, A>) {
     self.pending_events.push_back(ev);
   }
@@ -600,7 +595,6 @@ where
     self.incarnation
   }
 
-  /// borrow the RNG.
   #[allow(dead_code)]
   pub(crate) fn rng_mut(&mut self) -> &mut SmallRng {
     &mut self.rng
@@ -682,7 +676,6 @@ where
 
     let is_local = &alive_id == self.cfg.local_id_ref();
 
-    // existing or new.
     let mut updates_address = false;
     if let Some(existing) = self.members.get(&alive_id) {
       let existing_addr = existing.state_ref().address_ref().cheap_clone();
@@ -726,7 +719,6 @@ where
       self.members.insert_at_random_at(new_member, offset);
     }
 
-    // 5 + 6: compare incarnation, possibly refute, otherwise apply.
     // Re-fetch (insert_at_random_at may have moved indices).
     let member = self
       .members
@@ -736,16 +728,14 @@ where
     let old_state = member.state_ref().state();
     let old_meta = member.state_ref().server_ref().meta_ref().cheap_clone();
 
-    // Bail if older and not about us.
     if !updates_address && !is_local && alive_incarnation <= local_incarnation {
       return;
     }
-    // Strict-less-than for self.
+    // Strict-less-than for self (unlike peers, which use <=).
     if is_local && alive_incarnation < local_incarnation {
       return;
     }
 
-    // Clear any active suspicion timer.
     member.set_suspicion(None);
 
     if !bootstrap && is_local {
@@ -756,12 +746,10 @@ where
       if alive_incarnation == local_incarnation && same_meta && same_pv && same_dv {
         return;
       }
-      // Self-refute path: bump our incarnation past the accuser, broadcast Alive.
       self.refute(alive_incarnation);
       return;
     }
 
-    // 6: apply the new state.
     let new_server = Arc::new(
       NodeState::new(
         alive_id.cheap_clone(),
@@ -784,7 +772,6 @@ where
       }
     }
 
-    // 8: enqueue broadcast (unless this is bootstrap of self).
     if !bootstrap || !is_local {
       self.broadcast_message(
         alive_id.cheap_clone(),
@@ -800,7 +787,6 @@ where
       );
     }
 
-    // 7: emit join/update events.
     if old_state == State::Dead || old_state == State::Left {
       self.emit_event(Event::NodeJoined(new_server));
     } else if old_meta != new_meta {
@@ -865,7 +851,7 @@ where
     let from = suspect.from_ref().cheap_clone();
     let inc = suspect.incarnation();
 
-    // 1. Unknown id → ignore. No pending-decision buffering is needed: an
+    // Unknown id → ignore. No pending-decision buffering is needed: an
     // inbound Alive is now applied or dropped synchronously before the
     // next message, so a Suspect can never race ahead of an in-flight
     // Alive decision.
@@ -876,7 +862,6 @@ where
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let is_self = target == local_id;
 
-    // 2 + 3: existing suspicion + incarnation comparison.
     let (local_inc, current_state, has_suspicion) = {
       let m = self.members.get(&target).unwrap();
       (
@@ -906,18 +891,15 @@ where
       return;
     }
 
-    // 4: non-Alive → ignore.
     if current_state != State::Alive {
       return;
     }
 
-    // 5: self → refute.
     if is_self {
       self.refute(inc);
       return;
     }
 
-    // 6: install suspicion timer + transition + broadcast.
     let (min, max) = self.suspicion_timeouts();
     let suspicion_mult = self.cfg.suspicion_mult();
     let n = self.num_members() as u32;
@@ -953,7 +935,7 @@ where
     let from = dead.from_ref().cheap_clone();
     let inc = dead.incarnation();
 
-    // 1. Unknown id → ignore. No pending-decision buffering: Alive is
+    // Unknown id → ignore. No pending-decision buffering: Alive is
     // applied/dropped synchronously before the next message, so a Dead
     // cannot race an in-flight Alive.
     if !self.members.contains(&target) {
@@ -969,34 +951,28 @@ where
       let m = self.members.get(&target).unwrap();
       (m.state_ref().incarnation(), m.state_ref().state())
     };
-    // 2.
     if inc < local_inc {
       return;
     }
-    // 3.
     if matches!(current_state, State::Dead | State::Left) {
       return;
     }
 
-    // 4 + 5.
     if is_self {
       if self.lifecycle != Lifecycle::Leaving {
         self.refute(inc);
         return;
       }
-      // Leaving: mark Left.
       {
         let m = self.members.get_mut(&target).unwrap();
         m.set_suspicion(None);
         m.state_mut().set_incarnation(inc);
         m.state_mut().set_state(State::Left, now);
       }
-      // Broadcast.
       self.broadcast_message(
         target.cheap_clone(),
         Message::Dead(Dead::new(inc, target.cheap_clone(), from)),
       );
-      // Emit event.
       let server = self.members.get(&target).unwrap().state_ref().server_arc();
       self.emit_event(Event::NodeLeft(server));
       self.lifecycle = Lifecycle::Left;
@@ -1008,7 +984,6 @@ where
       return;
     }
 
-    // 6.
     {
       let m = self.members.get_mut(&target).unwrap();
       m.set_suspicion(None);
@@ -1021,7 +996,6 @@ where
       m.state_mut().set_state(new_state, now);
     }
 
-    // 7.
     self.broadcast_message(
       target.cheap_clone(),
       Message::Dead(Dead::new(inc, target.cheap_clone(), from)),

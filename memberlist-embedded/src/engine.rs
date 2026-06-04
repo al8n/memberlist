@@ -30,7 +30,7 @@ use memberlist_proto::{
 use hashbrown::HashMap;
 
 use crate::{
-  Options, GossipIo, InitError, StreamIo, TransformOptions,
+  GossipIo, InitError, Options, StreamIo, TransformOptions,
   addr::socket_addr_is_routable,
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane},
@@ -2124,8 +2124,6 @@ mod tests {
   use memberlist_proto::{CompressionOptions, EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
 
-  // ── Stub GossipIo: drops all sends, never delivers anything. ──────────────
-
   struct NoGossip;
 
   impl GossipIo for NoGossip {
@@ -2135,8 +2133,6 @@ mod tests {
 
     fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
   }
-
-  // ── Stub StreamIo: a fixed pool of never-connecting `u32` handles. ────────
 
   struct NoStream {
     free: std::vec::Vec<u32>,
@@ -2219,8 +2215,6 @@ mod tests {
     fn abort(&mut self, _c: u32) {}
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
-
   fn node_addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port)
   }
@@ -2235,8 +2229,6 @@ mod tests {
     Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now)
       .expect("valid configuration must construct without error")
   }
-
-  // ── Tests ─────────────────────────────────────────────────────────────────
 
   /// `set_compression_options` is accepted and the engine remains operational
   /// (a subsequent `pump` does not panic or error).
@@ -2332,8 +2324,6 @@ mod tests {
       "engine remains functional after encryption update"
     );
   }
-
-  // ── GossipIo that queues inbound bytes and captures outbound bytes. ─────────
 
   struct QueueGossip {
     /// Pending inbound datagrams: each entry is `(src, bytes)`.

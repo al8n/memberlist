@@ -10,12 +10,9 @@ fn cfg() -> EndpointOptions<SmolStr, SocketAddr> {
   .with_rng_seed(0xdeadbeef)
 }
 
-/// Test helper: process an Alive. Admission is now synchronous (no decision
-/// token); with no [`AliveDelegate`] installed every alive is admitted, so
-/// this is a thin wrapper kept only to avoid churning ~120 call sites and to
-/// document intent at sites that aren't exercising the admission filter.
-/// Any resulting `NodeJoined` / `NodeUpdated` stays queued for `poll_event`,
-/// exactly as before.
+/// Test helper: process an Alive with no [`AliveDelegate`] installed (every
+/// alive is admitted). Resulting `NodeJoined` / `NodeUpdated` events stay
+/// queued for `poll_event`.
 fn process_alive_auto<I, A>(
   e: &mut Endpoint<I, A>,
   alive: Alive<I, A>,
@@ -118,16 +115,12 @@ fn scheduler_deadlines_saturate_at_extreme_now() {
   e.handle_timeout(near_max);
 }
 
+use crate::typed::{DelegateVersion, ProtocolVersion};
 use Alive;
 use Dead;
 use Meta;
 use Node;
 use Suspect;
-// `DelegateVersion` / `ProtocolVersion` are no longer re-exported through
-// `super::*` (endpoint.rs's proto glob became an explicit import that omits
-// the names endpoint.rs itself doesn't reference). Pull them straight from
-// the typed shapes — same types, just an explicit path.
-use crate::typed::{DelegateVersion, ProtocolVersion};
 
 fn alive(node_id: &str, port: u16, inc: u32) -> Alive<SmolStr, SocketAddr> {
   Alive::new(
@@ -712,7 +705,7 @@ fn broadcast_queue_grows_on_alive_and_suspect() {
   assert!(e.broadcast_queue_len() > initial_len);
 }
 
-// ─────────────── New tests: synchronous AliveDelegate admission ───────────
+// ─────────────── Synchronous AliveDelegate admission ─────────────────────
 
 /// An [`AliveDelegate`] that vetoes every inbound alive.
 struct RejectAllAlive;
@@ -952,7 +945,7 @@ fn disable_and_enable_reliable_ping_round_trips() {
   assert!(e.is_reliable_ping_enabled(&bob));
 }
 
-// ─────────────── New tests: suspect confirm / dead-reclaim / idempotence ──
+// ─────────────── Suspect confirm / dead-reclaim / idempotence ────────────
 
 #[test]
 fn suspect_with_existing_timer_confirm_pulls_deadline_in() {
@@ -1122,7 +1115,7 @@ fn drain_user_broadcasts_zero_limit_returns_empty() {
   assert_eq!(e.user_broadcast_queue_len(), 1);
 }
 
-// ─────────────── New tests: handle_ping (responder side) ─────────────────
+// ─────────────── handle_ping (responder side) ────────────────────────────
 
 use Node as PNode;
 use Ping;
@@ -1199,7 +1192,7 @@ fn handle_ping_uses_current_ack_payload() {
   }
 }
 
-// ─────────────── New tests: start_probe ──────────────────────────────────
+// ─────────────── start_probe ─────────────────────────────────────────────
 
 #[test]
 fn start_probe_returns_false_when_only_local() {
@@ -1264,7 +1257,7 @@ fn start_probe_round_robins_across_alive_peers() {
   assert!(targets.contains(&7003));
 }
 
-// ─────────────── New tests: handle_ack ───────────────────────────────────
+// ─────────────── handle_ack ──────────────────────────────────────────────
 
 #[test]
 fn handle_ack_completes_direct_probe_and_ticks_awareness() {
@@ -1487,11 +1480,11 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
 // ─── Nack accounting — deadline-bound, allowlisted, deduped ─────────────
 //
 // A Nack carries only the sequence number; the responder identity is its
-// transport source address. The old code blindly `nacks_seen += 1` on
-// every matching seq, so a duplicate / unsolicited / late Nack inflated
-// the count and `expected_nacks.saturating_sub(seen)` in
-// `probe_terminate_failure` would underflow to 0, silently suppressing the
-// Lifeguard health penalty for a genuinely-unanswered indirect probe.
+// transport source address. A duplicate / unsolicited / late Nack must NOT
+// inflate `nacks_seen`: blindly incrementing on every matching seq lets
+// `expected_nacks.saturating_sub(seen)` underflow to 0, silently
+// suppressing the Lifeguard health penalty for a genuinely-unanswered
+// indirect probe.
 
 fn nacked_by_addrs(
   e: &Endpoint<SmolStr, SocketAddr>,
@@ -1673,7 +1666,7 @@ fn nack_flood_from_one_peer_does_not_suppress_awareness_penalty() {
   );
 }
 
-// ─────────────── New tests: handle_indirect_ping ─────────────────────────
+// ─────────────── handle_indirect_ping ────────────────────────────────────
 
 use IndirectPing;
 
@@ -1802,7 +1795,7 @@ fn forged_indirect_ping_source_is_rejected() {
   );
 }
 
-// ─────────────── New tests: handle_timeout probe FSM + forwards ──────────
+// ─────────────── handle_timeout probe FSM + forwards ─────────────────────
 
 #[test]
 fn probe_direct_timeout_fans_out_to_indirect() {
@@ -2077,16 +2070,16 @@ fn indirect_forward_timeout_emits_nack() {
 }
 
 /// The indirect-forward timeout Nack must reach the requester even when
-/// its id is NOT in our local membership (asymmetric membership). Old code
-/// resolved the requester id via `members.get` and silently dropped the
-/// Nack when absent — corrupting the requester's `expected_nacks - seen`
-/// Lifeguard accounting. The Nack now goes to the VALIDATED transport
-/// source address (same as the relay-Ack path).
+/// its id is NOT in our local membership (asymmetric membership). Resolving
+/// the requester id via `members.get` and silently dropping the Nack when
+/// absent corrupts the requester's `expected_nacks - seen` Lifeguard
+/// accounting. The Nack goes to the validated transport source address
+/// (same as the relay-Ack path).
 #[test]
 fn forward_timeout_nack_reaches_requester_absent_from_membership() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
-  // NOTE: "carol" (the requester) is deliberately NOT added to members.
+  // "carol" (the requester) is deliberately NOT added to members.
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
 
@@ -2250,7 +2243,7 @@ fn forward_ack_before_deadline_still_relays() {
   }
 }
 
-// ─────────────── New tests: application-level ping ───────────────────────
+// ─────────────── Application-level ping ──────────────────────────────────
 
 #[test]
 fn ping_emits_ping_and_records_app_ping_state() {
@@ -2758,7 +2751,7 @@ fn outbound_push_pull_decode_and_merge() {
   let mut stream = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
   // Draining the request via the public API auto-advances the phase to
-  // OutboundAwaitingResponse (no manual phase mutation / removed helper).
+  // OutboundAwaitingResponse.
   stream.poll_transmit(t0, &mut _req_buf);
 
   // Simulate peer's PushPull reply — contains "carol" as a member.
@@ -3053,9 +3046,8 @@ fn inbound_reliable_ping_encodes_ack() {
 }
 
 /// The public driver contract is "drain poll_transmit until None".
-/// Draining must itself advance the write phase — no manual phase mutation,
-/// no removed `output_drained` helper (the driver lives in another crate
-/// and could never call a `pub(crate)` one).
+/// Draining must itself advance the write phase: the driver lives in
+/// another crate and can only use public APIs.
 #[test]
 fn poll_transmit_advances_outbound_and_inbound_phases() {
   use PushNodeState;
@@ -3268,8 +3260,8 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
 /// the u32 wire decoder where it would wrap and desync framing.
 #[test]
 fn over_u32_frame_length_rejected_even_with_huge_cap() {
-  // Cap well above u32::MAX so the old `total > max_frame_size` check
-  // alone would NOT catch a ~2^32 declared length.
+  // Cap well above u32::MAX so a cap-only check would not catch a ~2^32
+  // declared length — the u32 wire limit must be enforced independently.
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new(cfg().with_max_stream_frame_size(usize::MAX));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);

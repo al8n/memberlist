@@ -25,7 +25,7 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  Options, EndpointOptions, InitError, Memberlist, Node, Runner, TransformOptions, now,
+  EndpointOptions, InitError, Memberlist, Node, Options, Runner, TransformOptions, now,
 };
 use memberlist_proto::event::Event;
 use smol_str::SmolStr;

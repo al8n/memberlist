@@ -20,7 +20,7 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
-use memberlist_embassy::{Options, EndpointOptions, Memberlist, Runner, TransformOptions, now};
+use memberlist_embassy::{EndpointOptions, Memberlist, Options, Runner, TransformOptions, now};
 use smol_str::SmolStr;
 
 use support::paired_device::{PairedDevice, pair};

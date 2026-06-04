@@ -11,8 +11,6 @@
 
 use core::time::Duration;
 
-// ---------- base defaults ----------
-
 /// Default per-call deadline for [`Memberlist::join`](crate::Memberlist::join).
 pub const DEFAULT_JOIN_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -41,8 +39,6 @@ pub const DEFAULT_EVENT_QUEUE_CAP: usize = 1024;
 /// Default past-due peek budget.
 pub const DEFAULT_PEEK_BUDGET: Duration = Duration::from_millis(1);
 
-// ---------- stream-transport defaults ----------
-
 /// Default outbound dial budget for the stream-transport driver.
 pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -65,8 +61,6 @@ pub const DEFAULT_BRIDGE_RECV_BUF_LEN: usize = 16 * 1024;
 /// reading) is abandoned and the bridge torn down (RST). Mirrors the smoltcp
 /// driver's `Config::close_timeout` default.
 pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ---------- observation channel ----------
 
 /// How the per-driver delegate **observation channel** is bounded.
 ///
@@ -114,8 +108,6 @@ pub enum Channel {
 /// needs guaranteed never-drop delivery (and controls its own latency) can opt
 /// into [`Channel::Unbounded`].
 pub const DEFAULT_OBSERVATION_CHANNEL: Channel = Channel::Bounded(1024);
-
-// ---------- DriverOptions ----------
 
 /// Per-`Memberlist` driver tuning knobs. Generic-free; per-backend knobs
 /// live on each backend's `*TransportOptions` struct, folded into
@@ -272,8 +264,6 @@ impl Default for DriverOptions {
     Self::new()
   }
 }
-
-// ---------- StreamTransportOptions ----------
 
 /// Stream-transport-specific tuning knobs.
 ///

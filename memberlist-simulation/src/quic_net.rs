@@ -34,7 +34,7 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointOptions, Event, Instant, PushPullKind, QuicOptions, QuicEndpoint, Transmit,
+  Endpoint, EndpointOptions, Event, Instant, PushPullKind, QuicEndpoint, QuicOptions, Transmit,
   UnreliableTransport, framing, message_from_any, message_to_any,
   typed::{Ack, Alive, Message, Node, Suspect},
 };
@@ -143,7 +143,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
 
   let provider = sim_crypto_provider();
 
-  // SIM-ONLY server config: self-signed cert + `with_no_client_auth`.
+  // Sim-only server config: self-signed cert + `with_no_client_auth`.
   // Production caller-built server configs install an operator-chosen
   // `ClientCertVerifier` for cluster-CA mTLS — see the `quic::crypto`
   // module docs. The mTLS-rejects-unauthenticated-peer property is

@@ -1615,9 +1615,9 @@ mod tests {
   #[cfg(feature = "compression-lz4")]
   #[test]
   fn quic_reliable_unit_split_across_two_chunks_buffers_then_completes() {
-    // REGRESSION TEST for the split-wrapper bug on a QUIC stream: a unit may
-    // arrive over two `chunks.next` yields. The accumulator must hold the
-    // first partial chunk (no frame yet) and complete on the second.
+    // A reliable unit may arrive split across two `chunks.next` yields. The
+    // accumulator must hold the first partial chunk (no frame yet) and
+    // complete on the second.
     use crate::{CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit};
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)

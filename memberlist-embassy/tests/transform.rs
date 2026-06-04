@@ -23,7 +23,7 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  Options, EncryptionOptions, EndpointOptions, Keyring, LabelError, Memberlist, Runner, SecretKey,
+  EncryptionOptions, EndpointOptions, Keyring, LabelError, Memberlist, Options, Runner, SecretKey,
   TransformOptions, now,
 };
 use smol_str::SmolStr;

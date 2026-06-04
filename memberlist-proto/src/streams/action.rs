@@ -17,9 +17,6 @@ pub struct ConnectInfo {
 }
 
 impl ConnectInfo {
-  /// The exchange handle the coordinator keys this connection on. Every
-  /// subsequent `handle_transport_data` / `poll_transport_transmit` for the
-  /// connection carries this same handle.
   pub(crate) const fn new(id: ExchangeId, peer: SocketAddr, stream_id: StreamId) -> Self {
     Self {
       id,

@@ -263,7 +263,7 @@ mod tests {
   use super::Shared;
   use crate::{error::OpError, stream_io::SlotId};
   use core::{net::SocketAddr, time::Duration};
-  use memberlist_embedded::{Options as EngineConfig, Engine, TransformOptions};
+  use memberlist_embedded::{Engine, Options as EngineConfig, TransformOptions};
   use memberlist_proto::{EndpointOptions, Instant};
   use smol_str::SmolStr;
 
@@ -273,9 +273,9 @@ mod tests {
 
   /// Two overlapping reliable sends get distinct `StreamId`s; resolving the SECOND
   /// one first (out of issue order) must resolve ONLY the second waiter, and the
-  /// first must still resolve to its OWN independent result. This pins the
-  /// finding-3 fix: completions are matched by `StreamId`, never by arrival order —
-  /// the old FIFO resolution would have handed the second's outcome to the first.
+  /// first must still resolve to its OWN independent result. Completions are
+  /// matched by `StreamId`, never by arrival order — the old FIFO resolution
+  /// would have handed the second's outcome to the first.
   #[test]
   fn out_of_order_reliable_completions_resolve_their_own_waiter() {
     let now = Instant::from_origin(Duration::from_secs(1));

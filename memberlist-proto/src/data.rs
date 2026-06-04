@@ -540,10 +540,7 @@ impl From<varing::DecodeError> for DecodeError {
       varing::DecodeError::Overflow => Self::LengthDelimitedOverflow,
       varing::DecodeError::InsufficientData { .. } => Self::buffer_underflow(),
       varing::DecodeError::Other(cow) => Self::Custom(cow),
-      _ => {
-        // Convert other decode errors to custom error
-        Self::custom("unknown decoding error")
-      }
+      _ => Self::custom("unknown decoding error"),
     }
   }
 }
@@ -555,10 +552,7 @@ impl From<varing::ConstDecodeError> for DecodeError {
       varing::ConstDecodeError::Overflow => Self::LengthDelimitedOverflow,
       varing::ConstDecodeError::InsufficientData { .. } => Self::buffer_underflow(),
       varing::ConstDecodeError::Other(cow) => Self::custom(cow),
-      _ => {
-        // Convert other decode errors to custom error
-        Self::custom("unknown decoding error")
-      }
+      _ => Self::custom("unknown decoding error"),
     }
   }
 }

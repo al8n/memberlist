@@ -1312,7 +1312,7 @@ where
         if br.is_terminal() {
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
           let outcome = Self::outcome_for_terminal(&br);
-          // (5) reap AFTER drain: dropping the bridge frees its slot.
+          // Reap AFTER drain: dropping the bridge frees its slot.
           drop(br);
           self.emit_exchange_completed(*id, outcome);
         } else {

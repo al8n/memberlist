@@ -14,7 +14,7 @@ use alloc::{rc::Rc, vec::Vec};
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
 use memberlist_embedded::{
-  Options as EngineConfig, Engine, TransformOptions,
+  Engine, Options as EngineConfig, TransformOptions,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{

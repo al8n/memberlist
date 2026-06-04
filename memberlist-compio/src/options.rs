@@ -1376,8 +1376,7 @@ mod tests {
     );
     // The SAME snapshot is rejected against a 256-byte configured ceiling —
     // proving the check honors the configured `max_stream_frame_size`, not the
-    // machine default (under which 4 KiB would pass). This is the regression
-    // guard for the validator that previously always checked the default.
+    // machine default (under which 4 KiB would pass).
     assert!(matches!(
       validate_initial_local_state::<smol_str::SmolStr, SocketAddr>(
         &MemberlistOptions::new()

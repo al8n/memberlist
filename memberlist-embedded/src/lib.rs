@@ -55,7 +55,7 @@ pub mod stream_io;
 pub mod transform;
 
 pub use addr::socket_addr_is_routable;
-pub use config::{Options, DEFAULT_CLOSE_TIMEOUT};
+pub use config::{DEFAULT_CLOSE_TIMEOUT, Options};
 pub use engine::Engine;
 pub use error::{GossipMtuTooLarge, InitError};
 pub use gossip_io::GossipIo;
