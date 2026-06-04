@@ -39,6 +39,12 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+      # memberlist-proto's build.rs runs protoc for the wire codegen, so protoc is
+      # needed even for a bare-metal `cargo check` (build scripts run on the host).
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - run: >
           cargo check
           -p memberlist-embedded
@@ -65,10 +71,10 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
-      - name: Install QEMU
+      - name: Install QEMU and protoc
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-arm
+          sudo apt-get install -y qemu-system-arm protobuf-compiler
       - name: Two nodes join under QEMU
         run: cargo run
         working-directory: memberlist-embassy-qemu
