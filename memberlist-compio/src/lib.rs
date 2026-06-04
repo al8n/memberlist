@@ -2,11 +2,10 @@
 //! powered by compio.
 
 mod address;
-mod bridge;
 mod command;
 mod delegate;
-mod driver;
 mod driver_options;
+mod driver_shared;
 mod error;
 mod events;
 mod maybe_resolved;
@@ -15,6 +14,22 @@ mod options;
 mod resolver;
 mod snapshot;
 mod transport;
+
+// The reliable byte-stream plane (`StreamEndpoint` + the per-bridge byte-mover)
+// is compiled only for the stream transports. QUIC has its own reliable plane
+// (`QuicEndpoint`), so a QUIC-only build does not pull these in.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+mod bridge;
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+mod driver;
 
 #[cfg(feature = "tcp")]
 mod tcp;

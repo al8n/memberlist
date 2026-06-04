@@ -115,7 +115,10 @@ use compio::{
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 
-use crate::driver::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOut, ExchangeId};
+use crate::{
+  driver::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOut},
+  driver_shared::ExchangeId,
+};
 
 // Per-bridge recv buffer size is now configured by the driver via
 // [`crate::DriverOptions::with_bridge_recv_buf_len`]; the historical
@@ -491,7 +494,7 @@ where
   WriteOutcome::Wrote(Ok(()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tcp"))]
 mod tests {
   use std::{net::SocketAddr, time::Duration};
 

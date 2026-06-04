@@ -38,7 +38,6 @@ use memberlist::codec::{
 use memberlist_proto::{
   DatagramSendOutcome, Instant, Node, QuicEndpoint, UnreliableTransport,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
-  streams::ExchangeId,
   typed::{NodeState, State},
 };
 
@@ -48,8 +47,8 @@ use crate::{
     ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
-  driver::dispatch_event_delegate,
   driver_options::DriverOptions,
+  driver_shared::{ExchangeId, dispatch_event_delegate},
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
 };
@@ -826,7 +825,7 @@ async fn observation_task<I, D>(
     // byte backstop and free the budget it occupied before the (possibly slow)
     // delegate hook, so the driver's enqueue side sees the reclaimed budget
     // promptly. Membership / control events have no weight.
-    let payload = crate::driver::observation_payload_bytes(&ev);
+    let payload = crate::driver_shared::observation_payload_bytes(&ev);
     if let Some(b) = payload {
       obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
     }
@@ -1640,7 +1639,7 @@ where
       // Payload-bearing events (`UserPacket` / `RemoteStateReceived`) can each
       // own up to `max_stream_frame_size` bytes; size this one for the byte
       // backstop (`None` for small membership / control events).
-      let payload_bytes = crate::driver::observation_payload_bytes(&ev);
+      let payload_bytes = crate::driver_shared::observation_payload_bytes(&ev);
 
       // Byte backstop (bounded channels only): the count cap does not bound
       // memory when events carry large reliable payloads. If enqueueing this
@@ -1657,7 +1656,7 @@ where
           .saturating_add(bytes)
           > budget
         {
-          crate::driver::yield_once().await;
+          crate::driver_shared::yield_once().await;
         }
         if state
           .obs_payload_bytes
@@ -1679,12 +1678,14 @@ where
       // delegate) — bounding memory without an indefinite SWIM stall. On a
       // successful enqueue, add the payload bytes to the backstop counter.
       match state.obs_tx.try_send(ev) {
-        Ok(()) => crate::driver::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
+        Ok(()) => crate::driver_shared::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
         Err(flume::TrySendError::Disconnected(_)) => {}
         Err(flume::TrySendError::Full(ev)) => {
-          crate::driver::yield_once().await;
+          crate::driver_shared::yield_once().await;
           match state.obs_tx.try_send(ev) {
-            Ok(()) => crate::driver::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
+            Ok(()) => {
+              crate::driver_shared::add_obs_payload(&state.obs_payload_bytes, payload_bytes)
+            }
             Err(_) => {
               state.observation_dropped.fetch_add(1, Ordering::Relaxed);
             }
