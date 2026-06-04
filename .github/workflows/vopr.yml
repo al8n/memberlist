@@ -1,0 +1,79 @@
+name: vopr
+
+# Deterministic adversarial SWIM simulation (VOPR). Each run drives a contiguous
+# band of seeds; every seed is a pure function of (seed, ticks) and panics with
+# its seed on any safety or liveness violation, so a failure replays exactly.
+#
+# This is a heavy, release-built campaign kept out of the routine test workflow:
+#  - manual dispatch runs a chosen band (defaults to 0..4096 x 5000 ticks),
+#  - the nightly schedule rotates to a fresh 4096-seed band for continuous
+#    coverage (scheduled runs only fire from the default branch),
+#  - a push touching the simulation or the state machine re-runs the default
+#    band as a regression gate.
+on:
+  workflow_dispatch:
+    inputs:
+      seed_start:
+        description: First seed (inclusive)
+        default: "0"
+      seed_end:
+        description: Last seed (exclusive)
+        default: "4096"
+      ticks:
+        description: Chaos ticks per seed
+        default: "5000"
+  schedule:
+    - cron: "0 4 * * *"
+  push:
+    branches:
+      - refactor/sansio
+      - vopr
+    paths:
+      - "memberlist-simulation/**"
+      - "memberlist-proto/**"
+      - ".github/workflows/vopr.yml"
+
+jobs:
+  campaign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # memberlist-proto's build.rs runs protoc for the wire codegen.
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      # Pick the seed band: the dispatch inputs, a schedule-rotated fresh band,
+      # or the default regression band on push.
+      - name: Compute seed band
+        id: band
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            START="${{ github.event.inputs.seed_start }}"
+            END="${{ github.event.inputs.seed_end }}"
+            TICKS="${{ github.event.inputs.ticks }}"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            START=$(( ${{ github.run_number }} * 4096 ))
+            END=$(( START + 4096 ))
+            TICKS=5000
+          else
+            START=0
+            END=4096
+            TICKS=5000
+          fi
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+          echo "ticks=$TICKS" >> "$GITHUB_OUTPUT"
+          echo "VOPR band: seeds [$START, $END) x $TICKS ticks"
+
+      - name: Run the VOPR campaign (release)
+        env:
+          VOPR_SEED_START: ${{ steps.band.outputs.start }}
+          VOPR_SEED_END: ${{ steps.band.outputs.end }}
+          VOPR_TICKS: ${{ steps.band.outputs.ticks }}
+        run: >
+          cargo test --release -p memberlist-simulation
+          --test vopr full_campaign -- --ignored --nocapture

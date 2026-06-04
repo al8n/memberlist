@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
 
+pub mod checker;
 pub mod clock;
 pub mod cluster;
 pub mod faults;
@@ -28,11 +29,13 @@ pub mod quic_net;
 pub mod scenarios;
 #[cfg(feature = "tcp")]
 pub mod tcp_net;
+pub mod vopr;
 #[cfg(feature = "__tls-harness")]
 pub mod tls_net;
 #[cfg(any(feature = "__tls-harness", feature = "tcp"))]
 mod virtual_tcp;
 
+pub use checker::{BoundednessChecker, CheckResult, ConvergenceChecker, IllegalPairChecker, IncarnationMonotonicChecker, MetaPerIncarnationChecker, NoResurrectionChecker, SelfIncarnationChecker, SelfLivenessChecker, Transition};
 pub use clock::Clock;
 pub use cluster::{Cluster, DecisionPolicy};
 pub use faults::FaultConfig;

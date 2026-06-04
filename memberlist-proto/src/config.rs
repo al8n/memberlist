@@ -117,6 +117,7 @@ pub struct EndpointOptions<I, A> {
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
   rng_seed: Option<u64>,
+  initial_incarnation: u32,
 }
 
 impl<I, A> EndpointOptions<I, A> {
@@ -147,6 +148,7 @@ impl<I, A> EndpointOptions<I, A> {
       protocol_version: ProtocolVersion::V1,
       delegate_version: DelegateVersion::V1,
       rng_seed: None,
+      initial_incarnation: 1,
     }
   }
 
@@ -378,6 +380,41 @@ impl<I, A> EndpointOptions<I, A> {
     self
   }
 
+  /// Builder: set the local node's initial incarnation (default 1). A driver
+  /// that restarts a crashed node uses this to supersede the incarnation peers
+  /// still hold, ensuring the restarted node's Alive wins over any stale Dead
+  /// or lower-incarnation Alive already in circulation.
+  ///
+  /// # Panics
+  ///
+  /// Panics unless `incarnation <= u32::MAX / 2`. Incarnation bumps (self-refute,
+  /// `update_meta`) increment a `u32` that wraps at its boundary; once a node
+  /// wraps past a value peers already observed, its lower wrapped incarnation is
+  /// rejected as stale and it can no longer supersede its own terminal state. A
+  /// starting incarnation is therefore confined to the lower half of the range,
+  /// reserving the upper half — 2^31 increments — as overflow headroom, orders
+  /// of magnitude beyond the bumps any node performs in its lifetime. A real
+  /// cluster seeds small incarnations; the bound only rejects pathological
+  /// near-overflow seeds (rejecting `u32::MAX` alone would still bless values a
+  /// few bumps short of wrapping).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_initial_incarnation(mut self, incarnation: u32) -> Self {
+    assert!(
+      incarnation <= u32::MAX / 2,
+      "initial incarnation must lie in the lower half of the u32 range: incarnation \
+       bumps wrap, so the upper half is reserved as overflow headroom"
+    );
+    self.initial_incarnation = incarnation;
+    self
+  }
+
+  /// The configured initial incarnation.
+  #[inline(always)]
+  pub const fn initial_incarnation(&self) -> u32 {
+    self.initial_incarnation
+  }
+
   /// The local node's id.
   #[inline(always)]
   pub const fn local_id_ref(&self) -> &I {
@@ -531,5 +568,48 @@ impl<I, A> EndpointOptions<I, A> {
   #[inline(always)]
   pub const fn rng_seed(&self) -> Option<u64> {
     self.rng_seed
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::EndpointOptions;
+
+  #[test]
+  fn initial_incarnation_default_is_one() {
+    let opts = EndpointOptions::<(), ()>::new((), ());
+    assert_eq!(opts.initial_incarnation(), 1);
+  }
+
+  #[test]
+  fn with_initial_incarnation_accepts_lower_half() {
+    // A small seed (the realistic case) and the exact upper boundary of the
+    // accepted lower half both round-trip.
+    let small = EndpointOptions::<(), ()>::new((), ()).with_initial_incarnation(7);
+    assert_eq!(small.initial_incarnation(), 7);
+    let boundary = EndpointOptions::<(), ()>::new((), ()).with_initial_incarnation(u32::MAX / 2);
+    assert_eq!(boundary.initial_incarnation(), u32::MAX / 2);
+  }
+
+  #[test]
+  #[should_panic(expected = "lower half")]
+  fn with_initial_incarnation_rejects_upper_half() {
+    // Just past the midpoint is rejected — the smallest value outside the
+    // reserved headroom.
+    let _ = EndpointOptions::<(), ()>::new((), ()).with_initial_incarnation(u32::MAX / 2 + 1);
+  }
+
+  #[test]
+  #[should_panic(expected = "lower half")]
+  fn with_initial_incarnation_rejects_near_max() {
+    // `u32::MAX - 1` is only two bumps from wrapping; the previous MAX-only
+    // guard wrongly accepted it.
+    let _ = EndpointOptions::<(), ()>::new((), ()).with_initial_incarnation(u32::MAX - 1);
+  }
+
+  #[test]
+  #[should_panic(expected = "lower half")]
+  fn with_initial_incarnation_rejects_u32_max() {
+    let _ = EndpointOptions::<(), ()>::new((), ()).with_initial_incarnation(u32::MAX);
   }
 }
