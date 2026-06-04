@@ -415,12 +415,13 @@ where
     .with_delegate_version(cfg.delegate_version());
     // The local node's initial state is stamped at the driver-supplied `now`.
     let mut local_state = LocalNodeState::new(local_node_state, now);
-    local_state.set_incarnation(1);
+    local_state.set_incarnation(cfg.initial_incarnation());
     // Ignoring Err: a fresh `Members` is empty, so the insert returns
     // `None`. Asserting it is the caller-owned invariant we just upheld.
     let _ = members.insert(Member::new(local_state.clone()));
 
     let local_state_snapshot = cfg.initial_local_state_bytes();
+    let initial_incarnation = cfg.initial_incarnation();
 
     let mut endpoint = Self {
       cfg,
@@ -434,7 +435,7 @@ where
       next_seq: 0,
       probe_index: 0,
       probes_since_reset: 0,
-      incarnation: 1,
+      incarnation: initial_incarnation,
       local_state_snapshot,
       lifecycle: Lifecycle::Running,
       pending_events: VecDeque::new(),
