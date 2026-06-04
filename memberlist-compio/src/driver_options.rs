@@ -385,7 +385,13 @@ impl StreamTransportOptions {
   ///
   /// QUIC has no bridges, so this is a stream-only knob; it lives in
   /// `T::Options` and so is not reachable at `Memberlist::new` — both stream
-  /// backends call this at the top of their `Transport::new`.
+  /// backends call this at the top of their `Transport::new`. Compiled only for
+  /// the stream transports (its only callers); a QUIC-only build omits it.
+  #[cfg(any(
+    feature = "tcp",
+    feature = "tls-rustls-ring",
+    feature = "tls-rustls-aws-lc-rs"
+  ))]
   pub(crate) fn validate(&self) -> Result<(), crate::error::MemberlistError> {
     if self.bridge_recv_buf_len == 0 {
       return Err(crate::error::MemberlistError::InvalidOption(
