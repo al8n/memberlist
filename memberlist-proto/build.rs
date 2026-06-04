@@ -13,6 +13,7 @@ fn main() {
     .files(&["proto/memberlist/v1/messages.proto"])
     .includes(&["proto"])
     .use_bytes_type()
+    .string_type(buffa_build::StringRepr::SmolStr)
     .include_file("memberlist_wire_generated.rs")
     .compile()
     .expect("buffa codegen failed");
