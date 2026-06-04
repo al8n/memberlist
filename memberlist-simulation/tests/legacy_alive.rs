@@ -349,7 +349,7 @@ fn alive_node_refute() {
 ///   - addr updates to addr2, meta updates to "foo"
 #[test]
 fn alive_node_conflict() {
-  use memberlist_simulation::EndpointConfig;
+  use memberlist_simulation::EndpointOptions;
 
   let reclaim = Duration::from_millis(10);
 
@@ -358,7 +358,7 @@ fn alive_node_conflict() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(21051),
-    |cfg: EndpointConfig<_, _>| cfg.with_dead_node_reclaim_time(reclaim),
+    |cfg: EndpointOptions<_, _>| cfg.with_dead_node_reclaim_time(reclaim),
   );
 
   let peer_id = SmolStr::new("conflict_peer");

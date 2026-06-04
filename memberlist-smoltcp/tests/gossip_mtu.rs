@@ -1,6 +1,6 @@
 //! Gossip ingress must honour a configured gossip MTU larger than 2 KiB.
 //!
-//! `EndpointConfig::gossip_mtu` is configurable above 2 KiB, so the driver's
+//! `EndpointOptions::gossip_mtu` is configurable above 2 KiB, so the driver's
 //! UDP receive scratch is sized from it. This matters because smoltcp's
 //! `udp::Socket::recv_slice` POPS the datagram before checking the caller's
 //! slice length and returns `RecvError::Truncated` for an oversized one: a
@@ -17,8 +17,8 @@ use core::{
 };
 
 use bytes::Bytes;
-use memberlist_proto::{EndpointConfig, Event};
-use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
+use memberlist_proto::{EndpointOptions, Event};
+use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -59,14 +59,14 @@ fn oversized_gossip_datagram_is_received() {
   // Gossip frequently so the broadcast rides out quickly; the large gossip MTU
   // is the knob under test.
   let mk = |id: &str, ip: u8, seed: u64| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(seed)
       .with_gossip_mtu(GOSSIP_MTU)
       .with_gossip_interval(Duration::from_millis(20))
   };
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1, 1),
@@ -74,7 +74,7 @@ fn oversized_gossip_datagram_is_received() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2, 2),
@@ -164,16 +164,16 @@ fn oversized_gossip_datagram_is_sent() {
   let now = clk.now();
 
   let mk = |id: &str, ip: u8, seed: u64| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(seed)
       .with_gossip_mtu(GOSSIP_MTU)
       .with_gossip_interval(Duration::from_millis(20))
   };
 
-  // Both nodes use the DEFAULT Config (default UDP arenas) so the scaling floor,
+  // Both nodes use the DEFAULT Options (default UDP arenas) so the scaling floor,
   // not an explicitly enlarged arena, is what makes the send fit.
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1, 1),
@@ -181,7 +181,7 @@ fn oversized_gossip_datagram_is_sent() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2, 2),

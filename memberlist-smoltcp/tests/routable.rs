@@ -26,9 +26,9 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  Config, EthernetAddress, HardwareAddress, InitError, InterfaceConfig, IpCidr, Memberlist,
+  Options, EthernetAddress, HardwareAddress, InitError, InterfaceOptions, IpCidr, Memberlist,
   TransformOptions,
 };
 use smol_str::SmolStr;
@@ -43,11 +43,11 @@ fn unroutable() -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7946)
 }
 
-/// An `EndpointConfig` with short timers so a gossip/probe round (which would
+/// An `EndpointOptions` with short timers so a gossip/probe round (which would
 /// select an admitted member as an egress destination) fires within a small tick
 /// budget.
-fn fast_ep(id: &str, ip: u8) -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+fn fast_ep(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
+  EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
     .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(20))
     .with_probe_timeout(Duration::from_millis(10))
@@ -56,8 +56,8 @@ fn fast_ep(id: &str, ip: u8) -> EndpointConfig<SmolStr, SocketAddr> {
 
 /// An Ethernet-medium interface config (the medium whose neighbor cache holds
 /// the egress unicast assertion).
-fn eth_iface(ip: u8, mac_last: u8) -> InterfaceConfig {
-  InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress([
+fn eth_iface(ip: u8, mac_last: u8) -> InterfaceOptions {
+  InterfaceOptions::new(HardwareAddress::Ethernet(EthernetAddress([
     0x02, 0x00, 0x00, 0x00, 0x00, mac_last,
   ])))
   .with_ip_addr(IpCidr::new(
@@ -74,9 +74,9 @@ fn non_routable_advertise_addr_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   // Advertise 0.0.0.0:7946 — unspecified, not a routable destination.
-  let ep_cfg = EndpointConfig::new(SmolStr::new("a"), unroutable()).with_rng_seed(1);
+  let ep_cfg = EndpointOptions::new(SmolStr::new("a"), unroutable()).with_rng_seed(1);
   let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     ep_cfg,
@@ -99,10 +99,10 @@ fn routable_advertise_addr_constructs() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut dev,
     now,
   );
@@ -119,10 +119,10 @@ fn injected_non_routable_peer_is_dropped() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let mut m: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut dev,
     now,
   );
@@ -148,10 +148,10 @@ fn injected_routable_peer_is_admitted() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let mut m: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut dev,
     now,
   );
@@ -178,10 +178,10 @@ fn non_routable_seed_is_not_dialed() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
   let mut m: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut dev,
     now,
   );
@@ -257,7 +257,7 @@ fn unroutable_alive_is_filtered_and_ethernet_poll_stays_clean() {
   let now = clk.now();
 
   let mut m: Memberlist<SmolStr, _> = Memberlist::try_new(
-    Config::new(),
+    Options::new(),
     eth_iface(1, 0x01),
     TransformOptions::default(),
     fast_ep("a", 1),

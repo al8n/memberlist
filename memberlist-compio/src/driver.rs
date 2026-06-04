@@ -95,7 +95,7 @@ struct PendingJoin {
   /// `contacted` it has accumulated even if `pending` is non-empty.
   deadline: Instant,
   /// One-shot reply channel back to the caller.
-  reply: flume::Sender<Result<usize>>,
+  reply: futures_channel::oneshot::Sender<Result<usize>>,
 }
 
 /// Driver-side state for the single in-flight graceful-leave operation.
@@ -123,7 +123,7 @@ struct PendingLeave {
   /// leave — the initiator plus any racing clones. Drained together on
   /// the single terminal outcome (`Ok` on `LeftCluster`, `LeaveTimeout`
   /// on deadline, `Shutdown` on teardown).
-  repliers: Vec<flume::Sender<Result<()>>>,
+  repliers: Vec<futures_channel::oneshot::Sender<Result<()>>>,
   /// Wall-clock instant past which the driver replies
   /// [`MemberlistError::LeaveTimeout`] to every replier even if
   /// `LeftCluster` has not yet fired.
@@ -142,7 +142,7 @@ impl PendingLeave {
     for replier in self.repliers {
       // Ignoring Err: a `leave()` caller dropped its reply receiver
       // (its user-facing future was cancelled); nothing to surface.
-      let _ = replier.send_async(make_result()).await;
+      let _ = replier.send(make_result());
     }
   }
 }
@@ -158,7 +158,7 @@ struct PendingPing {
   /// Correlation token minted by `endpoint.ping(…)`.
   ping_id: memberlist_proto::PingId,
   /// One-shot reply channel back to the `ping()` caller.
-  reply: flume::Sender<Result<core::time::Duration>>,
+  reply: futures_channel::oneshot::Sender<Result<core::time::Duration>>,
 }
 
 /// Driver-side state for one outstanding reliable directed-send call.
@@ -186,7 +186,7 @@ struct PendingUserSend {
   /// caller. `Ok(())` only if every payload was dispatched AND every exchange
   /// succeeded; `Err(SendFailed)` if any payload failed before `Connect` or
   /// any exchange failed.
-  reply: flume::Sender<Result<()>>,
+  reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Driver-loop-local state tracking outstanding commands awaiting completion.
@@ -270,7 +270,7 @@ pub(crate) struct OutboundOkReady {
   /// `StreamAction::Abort` for this exchange while the dial was in flight
   /// signals the matching `cancel_tx`, so the bridge breaks without
   /// draining `out_rx`.
-  pub(crate) cancel_rx: Receiver<()>,
+  pub(crate) cancel_rx: futures_channel::oneshot::Receiver<()>,
 }
 
 /// Payload for [`BridgeReady::OutboundFail`]: an outbound dial task hit a
@@ -384,8 +384,8 @@ struct BridgeHandle {
   out_tx: Sender<BridgeOut>,
   /// Out-of-band hard-abort signal. Sent by the `StreamAction::Abort` arm;
   /// the bridge selects on it with priority and breaks without draining
-  /// `out_tx`. Bounded(1): a single send is enough to cancel.
-  cancel_tx: Sender<()>,
+  /// `out_tx`. A one-shot: a single send is enough to cancel.
+  cancel_tx: futures_channel::oneshot::Sender<()>,
 }
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
@@ -595,7 +595,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // [`dispatch_command`]. Ack lands AFTER the post-loop cleanup drops
   // the listener and the gossip socket so the bound ports are free
   // when the caller resumes from `shutdown.await`.
-  let mut shutdown_reply: Option<flume::Sender<Result<()>>> = None;
+  let mut shutdown_reply: Option<futures_channel::oneshot::Sender<Result<()>>> = None;
   // Outstanding commands awaiting completion. Bundled into one struct
   // and passed by `&mut` to [`dispatch_command`] and [`drain_events`].
   // See [`PendingCommands`] for per-field documentation.
@@ -1036,7 +1036,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             let now = Instant::now();
             let eid = endpoint.accept_connection(peer.into(), now);
             let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-            let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+            let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
             bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
             spawn_bridge(
               stream,
@@ -1200,35 +1200,35 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   shutdown_flag.store(true, std::sync::atomic::Ordering::Release);
   while let Ok(c) = commands.try_recv() {
     let res = Err(MemberlistError::Shutdown);
-    let reply: flume::Sender<Result<()>> = match c {
+    let reply: futures_channel::oneshot::Sender<Result<()>> = match c {
       Command::Shutdown(ShutdownCmd { reply }) => reply,
       Command::Leave(LeaveCmd { reply }) => reply,
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
-      Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
-      Command::SetLocalState(cmd) => cmd.reply().clone(),
-      Command::SetAckPayload(cmd) => cmd.reply().clone(),
-      Command::SendUser(cmd) => cmd.reply().clone(),
-      Command::SendReliable(cmd) => cmd.reply().clone(),
+      Command::QueueUserBroadcast(cmd) => cmd.reply,
+      Command::SetLocalState(cmd) => cmd.reply,
+      Command::SetAckPayload(cmd) => cmd.reply,
+      Command::SendUser(cmd) => cmd.reply,
+      Command::SendReliable(cmd) => cmd.reply,
       Command::Join(JoinCmd { reply, .. }) => {
         // Join's reply type is `Result<usize>`; surface the same
         // Shutdown error through a separate match arm so the type
         // checker sees the right `Sender<Result<usize>>`.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = reply.send_async(Err(MemberlistError::Shutdown)).await;
+        let _ = reply.send(Err(MemberlistError::Shutdown));
         continue;
       }
       Command::Ping(cmd) => {
         // Ping's reply type is `Result<Duration>`; surface Shutdown
         // through a separate arm so the type checker sees the right sender.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd.reply().send_async(Err(MemberlistError::Shutdown)).await;
+        let _ = cmd.reply.send(Err(MemberlistError::Shutdown));
         continue;
       }
     };
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = reply.send_async(res).await;
+    let _ = reply.send(res);
   }
   // Drop the Receiver immediately so any subsequent clone send
   // fails fast (see step 3 above). After this point flume's send
@@ -1241,7 +1241,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // is about to exit).
   for pj in pending.joins.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = pj.reply.send(Err(MemberlistError::Shutdown));
   }
   // Reply Err(Shutdown) to every joined graceful-leave replier whose
   // `LeftCluster` never arrived before the loop exited (e.g. a shutdown
@@ -1254,13 +1254,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // `PingCompleted`/`PingFailed` will never arrive (driver is exiting).
   for pp in pending.pings.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = pp.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = pp.reply.send(Err(MemberlistError::Shutdown));
   }
   // Reply Err(Shutdown) to every parked reliable-send waiter whose
   // `ExchangeCompleted(UserMessage)` will never arrive (driver is exiting).
   for ps in pending.user_sends.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = ps.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = ps.reply.send(Err(MemberlistError::Shutdown));
   }
   for (_eid, handle) in bridges.drain() {
     // Ignoring Err: the bridge may have exited already; the close
@@ -1281,7 +1281,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // immediate rebind on the same address succeeds.
   if let Some(reply) = shutdown_reply {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = reply.send_async(Ok(())).await;
+    let _ = reply.send(Ok(()));
   }
 }
 
@@ -1305,7 +1305,7 @@ async fn dispatch_command<I, A, R>(
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
-  shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
+  shutdown_reply: &mut Option<futures_channel::oneshot::Sender<Result<()>>>,
   pending: &mut PendingCommands,
   leave_timeout: core::time::Duration,
   cmd: Command<I>,
@@ -1343,7 +1343,7 @@ async fn dispatch_command<I, A, R>(
       // driver makes the check + dispatch atomic (no lifecycle race).
       if !endpoint.is_running() {
         // Ignoring Err: the caller may have dropped the reply receiver.
-        let _ = reply.send_async(Err(MemberlistError::NotRunning)).await;
+        let _ = reply.send(Err(MemberlistError::NotRunning));
         return;
       }
       // Both `JoinKind::Dispatch` and `JoinKind::WaitForCompletion`
@@ -1379,7 +1379,7 @@ async fn dispatch_command<I, A, R>(
           // Ignoring Err: the caller may have dropped the reply
           // receiver (e.g. the user-facing `dispatch_join_with`
           // future was cancelled).
-          let _ = reply.send_async(Ok(count)).await;
+          let _ = reply.send(Ok(count));
         }
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           // The resolved seed count (one per address, duplicates included).
@@ -1421,11 +1421,9 @@ async fn dispatch_command<I, A, R>(
             // all-failed outcome carrying the full resolved seed count
             // (the same payload the deadline reaper would produce).
             // Ignoring Err: the caller dropped the reply receiver.
-            let _ = reply
-              .send_async(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-                requested, 0,
-              ))))
-              .await;
+            let _ = reply.send(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
+              requested, 0,
+            ))));
           } else {
             pending.joins.push(PendingJoin {
               pending: exchange_ids,
@@ -1476,7 +1474,7 @@ async fn dispatch_command<I, A, R>(
           // OR the call errored. Reply immediately; parking would hang.
           other => {
             // Ignoring Err: caller dropped the reply receiver.
-            let _ = reply.send_async(other).await;
+            let _ = reply.send(other);
           }
         }
       }
@@ -1498,7 +1496,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
       // Gate on a running node: after `leave()` the endpoint emits no
@@ -1513,7 +1511,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
       // Gate on a running node FIRST: after `leave()` the endpoint emits no
@@ -1539,7 +1537,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::QueueUserBroadcast(cmd) => {
       // Gate on a running node FIRST: after `leave()` the gossip scheduler
@@ -1557,7 +1555,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SetLocalState(cmd) => {
       // Gate on a running node FIRST: after `leave()` no push/pull
@@ -1575,7 +1573,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SetAckPayload(cmd) => {
       // Gate on a running node FIRST: after `leave()` no probe ack will
@@ -1593,7 +1591,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::Shutdown(ShutdownCmd { reply }) => {
       // Drain every live bridge so the per-bridge byte movers observe
@@ -1623,14 +1621,11 @@ async fn dispatch_command<I, A, R>(
         let ping_id = endpoint.ping(node_a, now);
         pending.pings.push(PendingPing {
           ping_id,
-          reply: cmd.reply().clone(),
+          reply: cmd.reply,
         });
       } else {
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd
-          .reply()
-          .send_async(Err(MemberlistError::NotRunning))
-          .await;
+        let _ = cmd.reply.send(Err(MemberlistError::NotRunning));
       }
     }
     Command::SendUser(cmd) => {
@@ -1645,7 +1640,7 @@ async fn dispatch_command<I, A, R>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SendReliable(cmd) => {
       // Gate on a running node: after `leave()` the stream coordinator is
@@ -1653,10 +1648,7 @@ async fn dispatch_command<I, A, R>(
       // `DialRequested` action and the caller would hang.
       if !endpoint.is_running() {
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd
-          .reply()
-          .send_async(Err(MemberlistError::NotRunning))
-          .await;
+        let _ = cmd.reply.send(Err(MemberlistError::NotRunning));
         return;
       }
       // Convert `SocketAddr` to `A` once; reused for each payload's dial.
@@ -1713,7 +1705,7 @@ async fn dispatch_command<I, A, R>(
           Err(MemberlistError::SendFailed)
         };
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd.reply().send_async(res).await;
+        let _ = cmd.reply.send(res);
       } else {
         // Park with `failed` SEEDED to the `n - m` payloads that never
         // produced an exchange. The waiter resolves `Ok(())` only when
@@ -1732,15 +1724,12 @@ async fn dispatch_command<I, A, R>(
             pending.user_sends.push(PendingUserSend {
               pending: exchange_ids,
               failed,
-              reply: cmd.reply().clone(),
+              reply: cmd.reply,
             });
           }
           None => {
             // Ignoring Err: caller dropped the reply receiver.
-            let _ = cmd
-              .reply()
-              .send_async(Err(MemberlistError::SendFailed))
-              .await;
+            let _ = cmd.reply.send(Err(MemberlistError::SendFailed));
           }
         }
       }
@@ -1948,7 +1937,7 @@ fn process_one_action(
         pending_exchanges.insert(eid);
       }
       let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-      let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+      let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       let ready_tx = bridge_ready_tx.clone();
       let dial_timeout = stream_opts.dial_timeout();
@@ -2040,7 +2029,7 @@ fn process_one_action(
       if let Some(handle) = bridges.remove(&eref.id()) {
         // Ignoring Err: the bridge may have already exited (its
         // cancel receiver gone); the abort signal is best-effort.
-        let _ = handle.cancel_tx.try_send(());
+        let _ = handle.cancel_tx.send(());
       }
     }
   }
@@ -2402,7 +2391,7 @@ where
           };
           // Ignoring Err: caller dropped the reply receiver (e.g. the
           // user-facing join_with future was cancelled).
-          let _ = pj.reply.send_async(result).await;
+          let _ = pj.reply.send(result);
         }
       }
     }
@@ -2429,7 +2418,7 @@ where
       if let Some(idx) = pending.pings.iter().position(|pp| pp.ping_id == pid) {
         let pp = pending.pings.swap_remove(idx);
         // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
-        let _ = pp.reply.send_async(Ok(p.rtt())).await;
+        let _ = pp.reply.send(Ok(p.rtt()));
       }
     }
     // Ping failure: resolve the matching `PendingPing` waiter with `PingTimeout`.
@@ -2439,7 +2428,7 @@ where
       if let Some(idx) = pending.pings.iter().position(|pp| pp.ping_id == pid) {
         let pp = pending.pings.swap_remove(idx);
         // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
-        let _ = pp.reply.send_async(Err(MemberlistError::PingTimeout)).await;
+        let _ = pp.reply.send(Err(MemberlistError::PingTimeout));
       }
     }
     // Reliable user-send completion: each `ExchangeCompleted` with kind
@@ -2470,7 +2459,7 @@ where
             Ok(())
           };
           // Ignoring Err: caller dropped the reply receiver.
-          let _ = ps.reply.send_async(result).await;
+          let _ = ps.reply.send(result);
         }
       }
     }
@@ -2660,7 +2649,7 @@ async fn reap_pending_joins(pending_joins: &mut Vec<PendingJoin>, now: Instant) 
       };
       // Ignoring Err: caller dropped the reply receiver (e.g.
       // the user-facing join_with future was cancelled).
-      let _ = pj.reply.send_async(result).await;
+      let _ = pj.reply.send(result);
     } else {
       i += 1;
     }
@@ -2965,7 +2954,7 @@ fn spawn_bridge(
   stream: TcpStream,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
-  cancel_rx: Receiver<()>,
+  cancel_rx: futures_channel::oneshot::Receiver<()>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   recv_buf_len: usize,
   close_timeout: core::time::Duration,
@@ -2992,7 +2981,7 @@ mod tests {
 
   use memberlist_proto::{
     Instant, RawRecords,
-    config::EndpointConfig,
+    config::EndpointOptions,
     endpoint::Endpoint,
     event::{PushPullKind, StreamId},
     streams::{ExchangeId, LabelOptions, StreamAction, StreamEndpoint},
@@ -3006,7 +2995,7 @@ mod tests {
   }
 
   fn test_endpoint() -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
-    let ep = Endpoint::new(EndpointConfig::new(
+    let ep = Endpoint::new(EndpointOptions::new(
       SmolStr::new("capture-test"),
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     ));

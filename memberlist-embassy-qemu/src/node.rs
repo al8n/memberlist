@@ -22,7 +22,7 @@ use embassy_net::{
   udp::{PacketMetadata, UdpSocket},
 };
 use embassy_time::{Duration, Timer};
-use memberlist_embassy::{Config, EndpointConfig, Memberlist, Runner, TransformOptions, now};
+use memberlist_embassy::{EndpointOptions, Memberlist, Options, Runner, TransformOptions, now};
 use semihosting::println;
 use smol_str::SmolStr;
 use static_cell::StaticCell;
@@ -154,18 +154,18 @@ pub async fn main_task(spawner: Spawner) -> ! {
 
   let clock = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, PORT)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)).with_rng_seed(1),
     udp_a,
     tcp_a,
     clock,
   )
   .expect("build node a");
   let (ml_b, run_b) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, PORT)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)).with_rng_seed(2),
     udp_b,
     tcp_b,
     clock,

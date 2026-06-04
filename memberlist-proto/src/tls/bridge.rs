@@ -23,7 +23,7 @@ mod tests {
 
   use super::super::records::TlsRecords;
   use crate::{
-    config::EndpointConfig,
+    config::EndpointOptions,
     error::StreamError,
     event::Event,
     streams::{
@@ -126,7 +126,7 @@ mod tests {
     complete_handshake(&mut client, &mut server, now);
 
     let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let stream = ep.accept_stream(addr(7001), now);
     let want_deadline = stream
       .poll_timeout()
@@ -167,7 +167,7 @@ mod tests {
 
     // Outbound client: a one-way reliable user message.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7100)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
     let payload = Bytes::from_static(b"hello-tls");
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -177,7 +177,7 @@ mod tests {
 
     // Inbound server: accept the exchange.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let s_stream = ep_s.accept_stream(addr(7100), now);
     server.promote(s_stream);
 
@@ -251,7 +251,7 @@ mod tests {
     // far exceeds the 16 KiB received-plaintext limit but is well under the
     // 64 MiB max_stream_frame_size — a VALID large frame.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7400)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7400)));
     let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -261,7 +261,7 @@ mod tests {
 
     // Inbound server: accept the exchange.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let s_stream = ep_s.accept_stream(addr(7400), now);
     server.promote(s_stream);
 
@@ -378,7 +378,7 @@ mod tests {
     // message, then pump it so the client's `Finished` + the >16 KiB app frame
     // are produced together.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7500)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7500)));
     let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -418,7 +418,7 @@ mod tests {
     // SAME tick. The retained pre-promotion ciphertext tail must replay into the
     // freshly-promoted `Stream` so the WHOLE frame reassembles.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let s_stream = ep_s.accept_stream(addr(7500), now);
     server.promote(s_stream);
     // Drive the replay exactly as the coordinator's post-mint `pump_bridges`
@@ -520,7 +520,7 @@ mod tests {
     // the dialer's `close_notify` (a one-way message half-closes once its
     // request is sent) are produced together.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7600)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
     let payload = Bytes::from_static(b"small-coalesced-first-frame");
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -572,7 +572,7 @@ mod tests {
     // plaintext into the just-promoted `Stream` and fire the recv-half close
     // anchor (`peer_has_closed()`), or the small frame never reaches the FSM.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let s_stream = ep_s.accept_stream(addr(7600), now);
     server.promote(s_stream);
     server
@@ -665,7 +665,7 @@ mod tests {
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
     // reaps a failed-handshake bridge without an FSM lifecycle notice).
     let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     server.drain_then_reap(&mut ep, now);
     assert!(
       ep.poll_event().is_none(),
@@ -688,7 +688,7 @@ mod tests {
     // request is pumped, the inner FSM is `OutboundAwaitingResponse` — a
     // premature peer close is `PeerClosed`.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7200)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
     let sid = ep_c.start_reliable_ping(
       SmolStr::new("srv"),
       addr(7000),
@@ -785,7 +785,7 @@ mod tests {
     // `drain_then_reap` on a no-`Stream` bridge is a clean no-op — no FSM
     // lifecycle notice is owed for a handshake that never minted a `Stream`.
     let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7300)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
     client.drain_then_reap(&mut ep, deadline);
     assert!(
       ep.poll_event().is_none(),

@@ -11,7 +11,7 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointConfig, Event, Instant, Stream, StreamCommand, StreamError, Transmit,
+  Endpoint, EndpointOptions, Event, Instant, Stream, StreamCommand, StreamError, Transmit,
 };
 use smol_str::SmolStr;
 
@@ -75,7 +75,7 @@ impl Network {
   /// Add an endpoint with the given config, returning the advertise address.
   pub fn add_endpoint(
     &mut self,
-    cfg: EndpointConfig<SmolStr, SocketAddr>,
+    cfg: EndpointOptions<SmolStr, SocketAddr>,
     now: Instant,
   ) -> SocketAddr {
     let addr = *cfg.advertise_addr_ref();
@@ -472,14 +472,14 @@ mod tests {
   use super::*;
   use crate::clock::Clock;
   use memberlist_proto::{
-    EndpointConfig,
+    EndpointOptions,
     typed::{Message, Node, Ping},
   };
   use smol_str::SmolStr;
   use std::time::Duration;
 
-  fn make_cfg(id: &str, port: u16) -> EndpointConfig<SmolStr, SocketAddr> {
-    EndpointConfig::new(
+  fn make_cfg(id: &str, port: u16) -> EndpointOptions<SmolStr, SocketAddr> {
+    EndpointOptions::new(
       SmolStr::new(id),
       format!("127.0.0.1:{port}").parse().unwrap(),
     )

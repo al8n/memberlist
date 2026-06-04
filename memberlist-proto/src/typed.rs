@@ -47,7 +47,7 @@ impl Meta {
   /// one.
   ///
   /// Coordinators ([`memberlist-proto`]) can apply a TIGHTER
-  /// per-endpoint cap via `EndpointConfig::with_meta_max_size` (the
+  /// per-endpoint cap via `EndpointOptions::with_meta_max_size` (the
   /// historical default mirrors Go memberlist at 512 bytes); this
   /// constant is the absolute hard ceiling above which no
   /// machine-level config can rise.

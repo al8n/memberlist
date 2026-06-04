@@ -14,7 +14,7 @@ pub use memberlist_embedded::DEFAULT_CLOSE_TIMEOUT;
 /// Ports and bridge sizing for [`Memberlist`](crate::Memberlist).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct Options {
   /// Local port the node binds. The gossip UDP socket and the reliable-plane TCP
   /// listener both use it, and it is the port peers reach the node at — the
   /// single-port memberlist model (one advertised `SocketAddr` serves both
@@ -41,7 +41,7 @@ pub struct Config {
   pub socket_timeout: Duration,
 }
 
-impl Default for Config {
+impl Default for Options {
   fn default() -> Self {
     Self {
       port: 7946,
@@ -53,7 +53,7 @@ impl Default for Config {
   }
 }
 
-impl Config {
+impl Options {
   /// Defaults tuned for a small embedded cluster.
   pub fn new() -> Self {
     Self::default()
@@ -78,13 +78,13 @@ impl Config {
     self
   }
 
-  /// Override the graceful-close timeout (see [`Config::close_timeout`]).
+  /// Override the graceful-close timeout (see [`Options::close_timeout`]).
   pub fn with_close_timeout(mut self, d: Duration) -> Self {
     self.close_timeout = d;
     self
   }
 
-  /// Override the per-socket inactivity timeout (see [`Config::socket_timeout`]).
+  /// Override the per-socket inactivity timeout (see [`Options::socket_timeout`]).
   pub fn with_socket_timeout(mut self, d: Duration) -> Self {
     self.socket_timeout = d;
     self
@@ -97,7 +97,7 @@ mod tests {
 
   #[test]
   fn defaults_are_sane_and_overridable() {
-    let c = Config::new();
+    let c = Options::new();
     assert_eq!(c.port, 7946);
     assert!(c.tcp_socket_rx_bytes > 0);
     assert!(c.tcp_socket_tx_bytes > 0);
@@ -107,7 +107,7 @@ mod tests {
       "socket timeout must exceed the close timeout"
     );
 
-    let c = Config::new()
+    let c = Options::new()
       .with_port(1234)
       .with_tcp_socket_rx_bytes(8192)
       .with_tcp_socket_tx_bytes(2048)

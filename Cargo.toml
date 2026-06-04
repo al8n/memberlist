@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "memberlist",
   "memberlist-proto",
   "memberlist-compio",
   "memberlist-embedded",
@@ -62,6 +63,7 @@ embassy-time = { version = "0.5", default-features = false }
 embassy-sync = { version = "0.8", default-features = false }
 embassy-futures = { version = "0.1", default-features = false }
 flume = { version = "0.12", default-features = false }
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 hickory-proto = { version = "0.26", default-features = false }
 hostaddr = { version = "0.2", default-features = false }
@@ -95,12 +97,15 @@ quickcheck = { version = "1", default-features = false }
 
 memberlist-core = { version = "0.8", path = "legacy/memberlist-core", default-features = false }
 memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
+memberlist-reactor = { version = "0.0.1", path = "memberlist-reactor", default-features = false }
+memberlist-compio = { version = "0.0.1", path = "memberlist-compio", default-features = false }
+memberlist-smoltcp = { version = "0.0.1", path = "memberlist-smoltcp", default-features = false }
 memberlist-embedded = { version = "0.0.1", path = "memberlist-embedded", default-features = false }
 memberlist-embassy = { version = "0.0.1", path = "memberlist-embassy", default-features = false }
 memberlist-net = { version = "0.8", path = "legacy/memberlist-net", default-features = false }
 memberlist-wire = { version = "0.3", path = "legacy/memberlist-wire", default-features = false }
 memberlist-quic = { version = "0.8", path = "legacy/memberlist-quic", default-features = false }
-memberlist = { version = "0.8", path = "legacy/memberlist", default-features = false }
+memberlist = { version = "0.8", package = "memberlist-legacy", path = "legacy/memberlist", default-features = false }
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"

@@ -41,24 +41,24 @@
 //!   handshake — and a failed handshake produces no `EndpointEvent` side
 //!   effects (no merge, no `UserDataReceived`, no reliable-ping ack).
 //!
-//! `QuicConfig::new` does NOT make this choice for the operator. It
+//! `QuicOptions::new` does NOT make this choice for the operator. It
 //! accepts a fully caller-built `quinn_proto::EndpointConfig` /
 //! `ServerConfig` / `ClientConfig` and only enforces the two
 //! composition prerequisites the demux invariant demands:
-//! `grease_quic_bit = false` (forced on the supplied `EndpointConfig`)
+//! `grease_quic_bit = false` (forced on the supplied `EndpointOptions`)
 //! and `max_concurrent_uni_streams = 0` (forced on the supplied
 //! `TransportConfig`).
 //!
 //! # Crypto backend
 //!
 //! The coordinator is crypto-backend-agnostic: it names no crypto
-//! crate. The caller builds the `EndpointConfig` (whose stateless-reset
+//! crate. The caller builds the `EndpointOptions` (whose stateless-reset
 //! HMAC key comes from their chosen backend's `HmacKey`), the
 //! `ServerConfig`, and the `ClientConfig` with whatever provider they
 //! want (ring, aws-lc-rs, FIPS, …). Enable the matching `quic-*`
 //! crypto-backend feature so that backend is present in the dependency
-//! graph; the `EndpointConfig` is then typically built as
-//! `EndpointConfig::new(Arc::new(<backend>::hmac::Key::new(HMAC_SHA256,
+//! graph; the `EndpointOptions` is then typically built as
+//! `EndpointOptions::new(Arc::new(<backend>::hmac::Key::new(HMAC_SHA256,
 //! reset_key)))`.
 //!
 //! The sim path uses a self-signed cert + accept-any verifier with the
@@ -78,7 +78,7 @@ use super::UnreliableTransport;
 pub type SniProvider = Arc<dyn Fn(&SocketAddr) -> Arc<str> + Send + Sync>;
 
 /// Immutable QUIC config bundle handed to the coordinator. Accessor-only.
-pub struct QuicConfig {
+pub struct QuicOptions {
   endpoint: Arc<quinn_proto::EndpointConfig>,
   server: Arc<quinn_proto::ServerConfig>,
   client: quinn_proto::ClientConfig,
@@ -108,12 +108,12 @@ pub struct QuicConfig {
   unreliable_transport: UnreliableTransport,
 }
 
-impl QuicConfig {
+impl QuicOptions {
   /// Build from a caller-built endpoint config, server config, client
   /// config, and the single `transport` config the coordinator owns.
   ///
   /// The CALLER builds `endpoint`, `server`, and `client` — including
-  /// the stateless-reset HMAC key (on the `EndpointConfig`), the TLS
+  /// the stateless-reset HMAC key (on the `EndpointOptions`), the TLS
   /// versions, cert chains, and (critically) the **client-cert verifier
   /// on the server side**. The crypto backend is the caller's choice;
   /// the coordinator names no crypto crate. The constructor's job is
@@ -149,7 +149,7 @@ impl QuicConfig {
   /// uni-stream frame, so no remote uni-stream state can accumulate.
   ///
   /// quinn-proto APIs used here:
-  /// - `EndpointConfig::grease_quic_bit(bool) -> &mut Self`.
+  /// - `EndpointOptions::grease_quic_bit(bool) -> &mut Self`.
   /// - `TransportConfig::max_concurrent_uni_streams(VarInt) -> &mut Self`.
   /// - `ServerConfig::transport_config(Arc<TransportConfig>) -> &mut Self`.
   /// - `ClientConfig::transport_config(Arc<TransportConfig>) -> &mut Self`.
@@ -207,7 +207,7 @@ impl QuicConfig {
     sni_provider: SniProvider,
     unreliable_transport: UnreliableTransport,
   ) -> Self {
-    // Disable QUIC-bit greasing (RFC 9287). `EndpointConfig::new`
+    // Disable QUIC-bit greasing (RFC 9287). `EndpointOptions::new`
     // defaults `grease_quic_bit` to `true`, which advertises the
     // `grease_quic_bit` transport parameter so the PEER may clear
     // `FIXED_BIT` (`0x40`) on its outgoing short-header packets — and
@@ -221,10 +221,10 @@ impl QuicConfig {
     // `Class::Reject`, handing valid post-handshake QUIC ciphertext to
     // the memberlist codec and silently dropping ACKs / stream data /
     // close packets. Disabling greasing on the constructed
-    // `EndpointConfig` stops us advertising the transport parameter — a
+    // `EndpointOptions` stops us advertising the transport parameter — a
     // protocol-compliant peer will not clear FIXED_BIT in packets it
     // sends us — and stops our encoder from greasing outbound. A single
-    // setter call covers both directions: the same `Arc<EndpointConfig>`
+    // setter call covers both directions: the same `Arc<EndpointOptions>`
     // is installed on every `quinn_proto::Endpoint` the coordinator
     // builds (`mod.rs::new` calls `Endpoint::new(cfg.endpoint_arc(),
     // ...)`), so server and client share this policy. Tradeoff: a
@@ -356,8 +356,8 @@ pub(crate) mod tests {
 
   /// Test-only endpoint config builder: a fixed stateless-reset HMAC key
   /// via the ring backend. Production callers build their own
-  /// `EndpointConfig` with their chosen crypto backend — see the module
-  /// docs. `QuicConfig::new` forces `grease_quic_bit = false` regardless.
+  /// `EndpointOptions` with their chosen crypto backend — see the module
+  /// docs. `QuicOptions::new` forces `grease_quic_bit = false` regardless.
   pub(crate) fn test_endpoint_config(reset_key: &[u8]) -> quinn_proto::EndpointConfig {
     let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, reset_key);
     quinn_proto::EndpointConfig::new(Arc::new(hmac))
@@ -436,7 +436,7 @@ pub(crate) mod tests {
 
   #[test]
   fn builds_a_usable_config_bundle() {
-    let cfg = QuicConfig::new(
+    let cfg = QuicOptions::new(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),
@@ -445,7 +445,7 @@ pub(crate) mod tests {
       UnreliableTransport::Datagram,
     );
     // Prove the bundle is usable: quinn_proto::Endpoint::new must not panic.
-    // Signature: Endpoint::new(Arc<EndpointConfig>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
+    // Signature: Endpoint::new(Arc<EndpointOptions>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
     let _server_ep =
       quinn_proto::Endpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, None);
     let _client_ep = quinn_proto::Endpoint::new(cfg.endpoint_arc(), None, true, None);
@@ -473,7 +473,7 @@ pub(crate) mod tests {
   fn transport_config_construction_with_caller_set_uni_credit_overridden() {
     let mut tc = quinn_proto::TransportConfig::default();
     tc.max_concurrent_uni_streams(quinn_proto::VarInt::from_u32(100));
-    let _cfg = QuicConfig::new(
+    let _cfg = QuicOptions::new(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),
@@ -487,7 +487,7 @@ pub(crate) mod tests {
   /// string regardless of the dialed `SocketAddr`.
   #[test]
   fn sni_for_default_constructor_is_cluster_uniform() {
-    let cfg = QuicConfig::new(
+    let cfg = QuicOptions::new(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),
@@ -514,7 +514,7 @@ pub(crate) mod tests {
       UnreliableTransport::Datagram
     );
 
-    let datagram = QuicConfig::new(
+    let datagram = QuicOptions::new(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),
@@ -527,7 +527,7 @@ pub(crate) mod tests {
       UnreliableTransport::Datagram
     );
 
-    let udp = QuicConfig::new(
+    let udp = QuicOptions::new(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),
@@ -546,7 +546,7 @@ pub(crate) mod tests {
     let provider: SniProvider = Arc::new(|peer: &SocketAddr| -> Arc<str> {
       Arc::from(format!("peer-{}.example", peer.port()))
     });
-    let cfg = QuicConfig::new_with_sni_provider(
+    let cfg = QuicOptions::new_with_sni_provider(
       test_endpoint_config(&[7u8; 32]),
       test_server(),
       test_client(),

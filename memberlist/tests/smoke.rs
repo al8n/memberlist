@@ -1,0 +1,112 @@
+//! Umbrella facade smoke test: `memberlist::tokio::quic` hides the runtime.
+//!
+//! The `tokio::quic` free function pins `R = TokioRuntime` internally; callers
+//! never name the runtime type parameter. `QuicOptions` and the other protocol
+//! types are reachable as `memberlist::proto::*`.
+
+#![cfg(all(feature = "tokio", feature = "quic"))]
+
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+use memberlist::{
+  proto::UnreliableTransport,
+  tokio::{MaybeResolved, Options, QuicOptions, SocketAddrResolver, VoidDelegate},
+};
+use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
+use rustls::RootCertStore;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use smol_str::SmolStr;
+
+const ALPN: &[u8] = b"memberlist-quic";
+
+fn generate_localhost_cert() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+  let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen self-sign");
+  let cert = CertificateDer::from(ck.cert.der().to_vec());
+  let key = PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
+  (cert, key)
+}
+
+fn build_quic_config(
+  cert: CertificateDer<'static>,
+  key: PrivateKeyDer<'static>,
+  trusted_roots: RootCertStore,
+) -> QuicOptions {
+  let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+  let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider.clone())
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS 1.3")
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key)
+    .expect("server single cert");
+  rustls_server.alpn_protocols = vec![ALPN.to_vec()];
+  let qsc = quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(rustls_server))
+    .expect("QuicServerConfig");
+  let server_cfg = ServerConfig::with_crypto(Arc::new(qsc));
+
+  let mut rustls_client = rustls::ClientConfig::builder_with_provider(provider)
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS 1.3")
+    .with_root_certificates(trusted_roots)
+    .with_no_client_auth();
+  rustls_client.alpn_protocols = vec![ALPN.to_vec()];
+  let qcc = quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(rustls_client))
+    .expect("QuicClientConfig");
+  let client_cfg = ClientConfig::new(Arc::new(qcc));
+
+  let reset_key = [0x5au8; 32];
+  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key);
+  let endpoint_cfg = EndpointConfig::new(Arc::new(hmac));
+
+  let mut transport = TransportConfig::default();
+  transport
+    .max_idle_timeout(Some(
+      quinn_proto::IdleTimeout::try_from(Duration::from_secs(5)).expect("idle timeout"),
+    ))
+    .keep_alive_interval(Some(Duration::from_secs(1)));
+
+  QuicOptions::new(
+    endpoint_cfg,
+    server_cfg,
+    client_cfg,
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
+fn self_trusted_quic_config() -> QuicOptions {
+  let (cert, key) = generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("add root cert");
+  build_quic_config(cert, key, roots)
+}
+
+/// `memberlist::tokio::quic` constructs a single node without naming the
+/// runtime type parameter. `QuicOptions` (a renamed type) is reachable via
+/// both `memberlist::tokio::QuicOptions` (re-export) and
+/// `memberlist::proto::QuicOptions` (proto module path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tokio_quic_hides_runtime_single_node() {
+  // `QuicOptions` is reachable through the proto module path — the facade
+  // exposes it without the caller needing to name a runtime.
+  let _quic_opts_via_proto: memberlist::proto::QuicOptions = self_trusted_quic_config();
+
+  // Construct via `memberlist::tokio::quic` — no `::<TokioRuntime, _, _>`
+  // turbofish needed; the runtime is pinned by the convenience wrapper.
+  let node = memberlist::tokio::quic(
+    &SocketAddrResolver,
+    SmolStr::new("smoke-node"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+    self_trusted_quic_config(),
+  )
+  .await
+  .expect("single node must construct Ok");
+
+  assert_eq!(node.num_members(), 1, "a lone node counts itself");
+
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = node.shutdown().await;
+}

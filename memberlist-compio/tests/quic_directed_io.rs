@@ -19,7 +19,7 @@ use std::{
 use bytes::Bytes;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, MemberlistError,
-  NodeDelegate, Options, PingDelegate, QuicConfig, QuicMemberlist, QuicTransportOptions,
+  NodeDelegate, Options, PingDelegate, QuicMemberlist, QuicOptions, QuicTransportOptions,
   SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{Node, typed::NodeState};
@@ -72,7 +72,7 @@ fn loopback(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-fn two_node_configs() -> (QuicConfig, QuicConfig) {
+fn two_node_configs() -> (QuicOptions, QuicOptions) {
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
@@ -81,7 +81,7 @@ fn two_node_configs() -> (QuicConfig, QuicConfig) {
   (a, b)
 }
 
-async fn make_quic(id: &str, addr: SocketAddr, qcfg: QuicConfig) -> QuicNode {
+async fn make_quic(id: &str, addr: SocketAddr, qcfg: QuicOptions) -> QuicNode {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
@@ -101,7 +101,7 @@ async fn make_quic(id: &str, addr: SocketAddr, qcfg: QuicConfig) -> QuicNode {
 async fn make_recording_quic(
   id: &str,
   addr: SocketAddr,
-  qcfg: QuicConfig,
+  qcfg: QuicOptions,
 ) -> (RecordingQuicNode, Messages) {
   let msgs: Messages = Arc::new(Mutex::new(Vec::new()));
   let opts = Options::new(

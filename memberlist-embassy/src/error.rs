@@ -21,8 +21,8 @@ pub enum InitError {
   /// one dial/accept socket. The supplied count is carried for diagnostics.
   TcpPoolTooSmall(usize),
   /// A configured bridge ring capacity
-  /// ([`Config::tcp_socket_rx_bytes`](crate::Config::tcp_socket_rx_bytes) or
-  /// [`tcp_socket_tx_bytes`](crate::Config::tcp_socket_tx_bytes)) is zero.
+  /// ([`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) or
+  /// [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes)) is zero.
   ///
   /// A zero-byte inbound ring can never buffer a received byte for the engine to
   /// drain, and a zero-byte outbound ring can never accept a byte from the
@@ -30,11 +30,11 @@ pub enum InitError {
   ZeroBridgeRing,
   /// The per-socket inactivity timeout is out of the valid range.
   ///
-  /// [`Config::socket_timeout`](crate::Config::socket_timeout), as embassy-net installs it
+  /// [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs it
   /// into smoltcp (floored to whole microseconds — the embassy tick count handed over via
   /// `as_micros`), must be at least one microsecond and strictly greater than BOTH the
-  /// graceful-close bound ([`close_timeout`](crate::Config::close_timeout)) and the
-  /// machine's reliable-exchange deadline (`EndpointConfig::stream_timeout`) — otherwise
+  /// graceful-close bound ([`close_timeout`](crate::Options::close_timeout)) and the
+  /// machine's reliable-exchange deadline (`EndpointOptions::stream_timeout`) — otherwise
   /// embassy-net could abort a slow-but-valid exchange before the engine's own policy
   /// fires — AND no larger than a sane maximum, so it cannot overflow the
   /// embassy-time-to-smoltcp duration conversion into a wrapped (effectively past)

@@ -17,7 +17,7 @@ use std::{
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
 use memberlist_reactor::{
-  Delegate, Error, MaybeResolved, Memberlist, Node, Options, QuicConfig, SocketAddrResolver,
+  Delegate, Error, MaybeResolved, Memberlist, Node, Options, QuicOptions, SocketAddrResolver,
   VoidDelegate,
 };
 use rustls::RootCertStore;
@@ -25,7 +25,7 @@ use smol_str::SmolStr;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn shared_quic_pair() -> (QuicConfig, QuicConfig) {
+fn shared_quic_pair() -> (QuicOptions, QuicOptions) {
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
@@ -34,7 +34,7 @@ fn shared_quic_pair() -> (QuicConfig, QuicConfig) {
   (a, b)
 }
 
-async fn make(id: &str, qcfg: QuicConfig) -> Memberlist<SmolStr> {
+async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr> {
   Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
@@ -73,7 +73,7 @@ impl Delegate for RecordingDelegate {
   }
 }
 
-async fn make_recording(id: &str, qcfg: QuicConfig) -> (Memberlist<SmolStr>, Messages) {
+async fn make_recording(id: &str, qcfg: QuicOptions) -> (Memberlist<SmolStr>, Messages) {
   let (delegate, msgs) = RecordingDelegate::new();
   let node = Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,

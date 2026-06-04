@@ -34,7 +34,7 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointConfig, Event, Instant, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
+  Endpoint, EndpointOptions, Event, Instant, PushPullKind, QuicOptions, QuicEndpoint, Transmit,
   UnreliableTransport, framing, message_from_any, message_to_any,
   typed::{Ack, Alive, Message, Node, Suspect},
 };
@@ -46,7 +46,7 @@ use crate::{clock::Clock, faults::FaultConfig};
 ///
 /// The QUIC coordinator pins `A = SocketAddr` internally (`quinn_proto`'s
 /// endpoint is structurally `SocketAddr`-typed). The cluster-uniform TLS
-/// verification identity is sourced from `QuicConfig::server_name`
+/// verification identity is sourced from `QuicOptions::server_name`
 /// (`"localhost"`, matching the sim's self-signed certs — see
 /// [`sim_quic_config`]).
 type Node1 = QuicEndpoint<SmolStr>;
@@ -77,7 +77,7 @@ pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 }
 
 /// A `quinn_proto::EndpointConfig` with a fixed stateless-reset HMAC key,
-/// built with the active backend. `QuicConfig::new` forces
+/// built with the active backend. `QuicOptions::new` forces
 /// `grease_quic_bit = false`; the fixed key keeps runs reproducible.
 #[cfg(not(feature = "quic-rustls-aws-lc-rs"))]
 pub fn sim_endpoint_config(reset_key: &[u8]) -> quinn_proto::EndpointConfig {
@@ -94,8 +94,8 @@ pub fn sim_endpoint_config(reset_key: &[u8]) -> quinn_proto::EndpointConfig {
 
 /// Self-signed cert + accept-any verifier, matching the memberlist-proto
 /// quic crypto tests (sim/test only; behavioural determinism is the virtual
-/// clock, not crypto). Returns a fresh [`QuicConfig`] each call.
-fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
+/// clock, not crypto). Returns a fresh [`QuicOptions`] each call.
+fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
   use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
   #[derive(Debug)]
@@ -167,7 +167,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
   let qcc = quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(client_tls)).unwrap();
   let client = quinn_proto::ClientConfig::new(Arc::new(qcc));
 
-  // `QuicConfig::new` installs the supplied `TransportConfig` on BOTH the
+  // `QuicOptions::new` installs the supplied `TransportConfig` on BOTH the
   // server and client (it also forces `max_concurrent_uni_streams = 0` on
   // it — memberlist's reliable exchanges are all bidirectional). Build
   // the transport here so the sim's per-stream backpressure tuning and
@@ -192,7 +192,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     ));
   }
 
-  QuicConfig::new(
+  QuicOptions::new(
     sim_endpoint_config(&[0x5au8; 32]),
     server,
     client,
@@ -345,7 +345,7 @@ impl QuicCluster {
     let (probe_interval, probe_timeout) = self
       .probe_window
       .unwrap_or((Duration::from_millis(1000), Duration::from_millis(500)));
-    let mut cfg = EndpointConfig::new(SmolStr::new(id), addr)
+    let mut cfg = EndpointOptions::new(SmolStr::new(id), addr)
       .with_gossip_interval(Duration::from_millis(200))
       .with_push_pull_interval(Duration::from_secs(30))
       .with_probe_interval(probe_interval)
@@ -1119,7 +1119,7 @@ impl QuicCluster {
   /// streams is exhausted (`state.next[Uni] >= state.max[Uni]`).
   ///
   /// Regression coverage for the refusal of peer-attempted unidirectional
-  /// streams: `QuicConfig::new` forces `max_concurrent_uni_streams = 0`
+  /// streams: `QuicOptions::new` forces `max_concurrent_uni_streams = 0`
   /// on the shared transport config, so the peer's advertised
   /// `initial_max_streams_uni` is zero, `host`'s view of `state.max[Uni]`
   /// is zero, and the open returns `None` without generating any bytes

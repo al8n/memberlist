@@ -19,7 +19,7 @@ use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  MemberlistError, NodeDelegate, Options, PingDelegate, QuicConfig, QuicMemberlist, QuicTransport,
+  MemberlistError, NodeDelegate, Options, PingDelegate, QuicMemberlist, QuicOptions, QuicTransport,
   QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
@@ -31,10 +31,10 @@ fn loopback_addr(port: u16) -> SocketAddr {
 }
 
 /// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicConfig`. The membership-input address type is `SocketAddr`, so the
+/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicConfig) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))

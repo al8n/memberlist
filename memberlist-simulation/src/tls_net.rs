@@ -40,7 +40,7 @@ use std::{
 };
 
 use memberlist_proto::{
-  Endpoint, EndpointConfig, Event, Instant, LabelOptions, Labeled, PushPullKind, TlsOptions,
+  Endpoint, EndpointOptions, Event, Instant, LabelOptions, Labeled, PushPullKind, TlsOptions,
   TlsRecords, Transmit, framing, message_from_any, message_to_any,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
@@ -302,7 +302,7 @@ impl TlsCluster {
     let (probe_interval, probe_timeout) = self
       .probe_window
       .unwrap_or((Duration::from_millis(1000), Duration::from_millis(500)));
-    let cfg = EndpointConfig::new(SmolStr::new(id), addr)
+    let cfg = EndpointOptions::new(SmolStr::new(id), addr)
       .with_gossip_interval(Duration::from_millis(200))
       .with_push_pull_interval(Duration::from_secs(30))
       .with_probe_interval(probe_interval)

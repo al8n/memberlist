@@ -21,7 +21,7 @@ use crate::{
   ack::AckRegistry,
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
-  config::EndpointConfig,
+  config::EndpointOptions,
   error::EndpointInitError,
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
@@ -52,7 +52,7 @@ pub enum Lifecycle {
 /// Maximum size of node-meta payload that can be carried in an `Alive` message.
 pub const META_MAX_SIZE: usize = 512;
 
-/// Headroom reserved below [`EndpointConfig::max_stream_frame_size`] for the
+/// Headroom reserved below [`EndpointOptions::max_stream_frame_size`] for the
 /// membership-state list that rides the SAME PushPull frame as the local-state
 /// snapshot. [`set_local_state_snapshot`](Endpoint::set_local_state_snapshot)
 /// (and the construction-time `initial_local_state` check) bound the snapshot's
@@ -170,7 +170,7 @@ struct IndirectForward<A> {
 /// *quality* (failure-detection latency, transient-suspect window), not a
 /// correctness dependency. The machine never compensates for the driver.
 pub struct Endpoint<I, A> {
-  cfg: EndpointConfig<I, A>,
+  cfg: EndpointOptions<I, A>,
   rng: SmallRng,
 
   // Membership state.
@@ -312,7 +312,7 @@ where
   /// The configured maximum reliable stream frame size. The composed
   /// stream-transport coordinators read this as the reliable-unit /
   /// decompressed-payload ceiling so the limit always tracks
-  /// `EndpointConfig::max_stream_frame_size` rather than a separate constant.
+  /// `EndpointOptions::max_stream_frame_size` rather than a separate constant.
   #[cfg(any(feature = "tls", feature = "tcp", feature = "quic"))]
   pub(crate) const fn max_stream_frame_size(&self) -> usize {
     self.cfg.max_stream_frame_size()
@@ -321,7 +321,7 @@ where
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
   /// The composed stream-transport coordinators read this as the
   /// decompressed / decrypted-payload ceiling so the limit always tracks
-  /// [`EndpointConfig::gossip_mtu`] rather than a separate constant. The
+  /// [`EndpointOptions::gossip_mtu`] rather than a separate constant. The
   /// on-wire datagram may exceed this by
   /// [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
   /// enabled — the ceiling bounds the FSM's plaintext budget, not the
@@ -333,7 +333,7 @@ where
   /// The configured server-side accept handshake deadline. Used by the
   /// streams coordinator when bounding a freshly-accepted bridge's
   /// label / TLS-handshake step. See
-  /// [`EndpointConfig::with_accept_handshake_deadline`]. Gated on a
+  /// [`EndpointOptions::with_accept_handshake_deadline`]. Gated on a
   /// feature config that compiles the `streams` module — under
   /// QUIC-only or default builds the accessor has no callers.
   #[cfg_attr(not(any(feature = "tcp", feature = "tls")), allow(dead_code))]
@@ -366,21 +366,21 @@ where
   ///
   /// This is the entropy-fallible primary constructor. When the config carries
   /// an explicit RNG seed (via
-  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed))
+  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed))
   /// it never touches platform entropy and never fails — the natural choice for
   /// a fully Sans-I/O or deterministic driver. Without a seed it draws the
   /// gossip RNG seed from the platform entropy source and returns
   /// [`EndpointInitError::Entropy`] if that source fails (e.g. an
   /// integrator-provided getrandom backend that is not ready on a no_std
   /// target). See [`Endpoint::new_at`] for the panicking convenience.
-  pub fn try_new_at(cfg: EndpointConfig<I, A>, now: Instant) -> Result<Self, EndpointInitError> {
+  pub fn try_new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Result<Self, EndpointInitError> {
     // Operator-time misconfiguration guard: `initial_meta` was set
     // via the builder, but its size exceeds the per-endpoint cap
     // set via `with_meta_max_size`. The configs disagree — the
     // local Alive broadcast would carry a meta peers will reject.
     debug_assert!(
       cfg.initial_meta_ref().len() <= cfg.meta_max_size(),
-      "EndpointConfig::initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
+      "EndpointOptions::initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
       cfg.initial_meta_ref().len(),
       cfg.meta_max_size(),
     );
@@ -468,9 +468,9 @@ where
   /// # Panics
   /// When the config carries no RNG seed and the platform entropy source
   /// fails. Use [`Endpoint::try_new_at`], or supply a seed via
-  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed),
+  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed),
   /// to handle that case without panicking.
-  pub fn new_at(cfg: EndpointConfig<I, A>, now: Instant) -> Self {
+  pub fn new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Self {
     Self::try_new_at(cfg, now).expect("endpoint construction: system entropy source unavailable")
   }
 
@@ -479,7 +479,7 @@ where
   /// virtual- or embedded-clock drivers use `try_new_at` with their own `now`
   /// so the machine never reads a clock the driver does not own.
   #[cfg(feature = "std")]
-  pub fn try_new(cfg: EndpointConfig<I, A>) -> Result<Self, EndpointInitError> {
+  pub fn try_new(cfg: EndpointOptions<I, A>) -> Result<Self, EndpointInitError> {
     Self::try_new_at(cfg, Instant::now())
   }
 
@@ -492,7 +492,7 @@ where
   /// Panics on a seedless config when the platform entropy source is
   /// unavailable — see [`Endpoint::try_new`].
   #[cfg(feature = "std")]
-  pub fn new(cfg: EndpointConfig<I, A>) -> Self {
+  pub fn new(cfg: EndpointOptions<I, A>) -> Self {
     Self::new_at(cfg, Instant::now())
   }
 
@@ -2149,7 +2149,7 @@ where
   ///
   /// An Ack is emitted as ONE UDP datagram on the gossip socket
   /// ([`handle_ping`](Self::handle_ping)), so its framed size must fit the
-  /// node's gossip packet budget ([`gossip_mtu`](EndpointConfig::gossip_mtu)).
+  /// node's gossip packet budget ([`gossip_mtu`](EndpointOptions::gossip_mtu)).
   /// A payload whose framed Ack would exceed that budget is rejected with
   /// [`Error::AckPayloadExceedsMtu`](crate::error::Error::AckPayloadExceedsMtu)
   /// and NOT stored: an over-budget Ack is deterministically unsendable
@@ -2220,7 +2220,7 @@ where
   ///
   /// The snapshot rides every push/pull exchange as the PushPull `user_data`,
   /// and receivers reject any reliable-stream frame whose declared length
-  /// exceeds [`max_stream_frame_size`](EndpointConfig::max_stream_frame_size).
+  /// exceeds [`max_stream_frame_size`](EndpointOptions::max_stream_frame_size).
   /// A snapshot whose minimal framed PushPull would exceed that cap (after
   /// reserving headroom for the co-resident membership-state list) is rejected
   /// with [`Error::LocalStateExceedsFrame`](crate::error::Error::LocalStateExceedsFrame)
@@ -2261,7 +2261,7 @@ where
   /// API is push-based — the application enqueues bytes ahead of time.
   ///
   /// A payload whose lone framed `UserData` packet would exceed the gossip
-  /// packet budget ([`gossip_mtu`](EndpointConfig::gossip_mtu)) is rejected
+  /// packet budget ([`gossip_mtu`](EndpointOptions::gossip_mtu)) is rejected
   /// with [`Error::UserBroadcastExceedsMtu`](crate::error::Error::UserBroadcastExceedsMtu)
   /// and NOT stored: such a payload is deterministically untransmittable (it
   /// cannot be gossiped even alone), so storing it would falsely report

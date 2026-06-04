@@ -1,5 +1,5 @@
 //! QUIC test fixtures — a self-signed localhost-SAN cert + caller-built
-//! `quinn_proto` configs assembled into a `memberlist_reactor::QuicConfig`.
+//! `quinn_proto` configs assembled into a `memberlist_reactor::QuicOptions`.
 
 #![cfg(feature = "quic-rustls-ring")]
 #![allow(dead_code)] // Each test binary uses a subset of these helpers.
@@ -7,7 +7,7 @@
 use std::{sync::Arc, time::Duration};
 
 use memberlist_proto::UnreliableTransport;
-use memberlist_reactor::QuicConfig;
+use memberlist_reactor::QuicOptions;
 use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -23,13 +23,13 @@ pub fn generate_localhost_cert() -> (CertificateDer<'static>, PrivateKeyDer<'sta
   (cert, key)
 }
 
-/// Builds a `QuicConfig` presenting `cert`/`key` and trusting `trusted_roots`,
+/// Builds a `QuicOptions` presenting `cert`/`key` and trusting `trusted_roots`,
 /// with `memberlist-quic` ALPN and short test-friendly timeouts.
 pub fn build_quic_config(
   cert: CertificateDer<'static>,
   key: PrivateKeyDer<'static>,
   trusted_roots: RootCertStore,
-) -> QuicConfig {
+) -> QuicOptions {
   let provider = Arc::new(rustls::crypto::ring::default_provider());
 
   let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -64,7 +64,7 @@ pub fn build_quic_config(
     ))
     .keep_alive_interval(Some(Duration::from_secs(1)));
 
-  QuicConfig::new(
+  QuicOptions::new(
     endpoint_cfg,
     server_cfg,
     client_cfg,
@@ -74,9 +74,9 @@ pub fn build_quic_config(
   )
 }
 
-/// Generates a self-signed cert and builds a `QuicConfig` that trusts it as its
+/// Generates a self-signed cert and builds a `QuicOptions` that trusts it as its
 /// own root (the common single-node / single-cluster test case).
-pub fn self_trusted_quic_config() -> QuicConfig {
+pub fn self_trusted_quic_config() -> QuicOptions {
   let (cert, key) = generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("add root cert");

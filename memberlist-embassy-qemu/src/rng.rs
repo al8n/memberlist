@@ -8,7 +8,7 @@
 //! The stream is a deterministic SplitMix64 seeded from a fixed constant. That is
 //! intentional: this is a reproducible convergence test, not a security context,
 //! so a fixed seed makes every run identical. (Each node additionally pins its
-//! own gossip RNG seed via `EndpointConfig::with_rng_seed`, so this backend only
+//! own gossip RNG seed via `EndpointOptions::with_rng_seed`, so this backend only
 //! ever services whatever incidental entropy the protocol draws beyond that.)
 //!
 //! The state is a `Cell<u64>` behind a `critical_section::Mutex` rather than an

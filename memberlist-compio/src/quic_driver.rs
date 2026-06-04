@@ -87,7 +87,7 @@ struct PendingJoin {
   /// `contacted` it has accumulated even if `pending` is non-empty.
   deadline: Instant,
   /// One-shot reply channel back to the caller.
-  reply: flume::Sender<Result<usize>>,
+  reply: futures_channel::oneshot::Sender<Result<usize>>,
 }
 
 /// Driver-side state for the single in-flight graceful-leave operation.
@@ -114,7 +114,7 @@ struct PendingLeave {
   /// leave — the initiator plus any racing clones. Drained together on
   /// the single terminal outcome (`Ok` on `LeftCluster`, `LeaveTimeout`
   /// on deadline, `Shutdown` on teardown).
-  repliers: Vec<flume::Sender<Result<()>>>,
+  repliers: Vec<futures_channel::oneshot::Sender<Result<()>>>,
   /// Wall-clock instant past which the driver replies
   /// [`MemberlistError::LeaveTimeout`] to every replier even if
   /// `LeftCluster` has not yet fired.
@@ -133,7 +133,7 @@ impl PendingLeave {
     for replier in self.repliers {
       // Ignoring Err: a `leave()` caller dropped its reply receiver
       // (its user-facing future was cancelled); nothing to surface.
-      let _ = replier.send_async(make_result()).await;
+      let _ = replier.send(make_result());
     }
   }
 }
@@ -149,7 +149,7 @@ struct PendingPing {
   /// Correlation token minted by `endpoint.ping(…)`.
   ping_id: memberlist_proto::PingId,
   /// One-shot reply channel back to the `ping()` caller.
-  reply: flume::Sender<Result<core::time::Duration>>,
+  reply: futures_channel::oneshot::Sender<Result<core::time::Duration>>,
 }
 
 /// Driver-side state for one outstanding reliable directed-send call.
@@ -172,7 +172,7 @@ struct PendingUserSend {
   /// One-shot reply channel back to the `send_reliable` / `send_many_reliable`
   /// caller. `Ok(())` if every exchange succeeded; `Err(SendFailed)` if any
   /// failed.
-  reply: flume::Sender<Result<()>>,
+  reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// All driver-owned state, packed so the loop body can borrow
@@ -226,7 +226,7 @@ struct QuicDriverState<I> {
   /// Stash for the `Command::Shutdown` reply sender — drained in
   /// the post-loop cleanup so the ack lands AFTER the UDP socket
   /// drops and the bound port is free.
-  shutdown_reply: Option<flume::Sender<Result<()>>>,
+  shutdown_reply: Option<futures_channel::oneshot::Sender<Result<()>>>,
   /// Outstanding graceful-leave waiter. Parked by `dispatch_command`
   /// when a `Command::Leave` initiates the machine's `leave()` (the
   /// endpoint was Running); resolved `Ok` in `drain_actions`' events
@@ -689,7 +689,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   state.shutdown_flag.store(true, Ordering::Release);
   while let Ok(c) = state.commands.try_recv() {
     let res = Err(MemberlistError::Shutdown);
-    let reply: flume::Sender<Result<()>> = match c {
+    let reply: futures_channel::oneshot::Sender<Result<()>> = match c {
       Command::Shutdown(ShutdownCmd { reply }) => {
         // A straggler `Shutdown` whose racing clone slipped in
         // behind the first one we already stashed — prefer the
@@ -705,29 +705,29 @@ pub(crate) async fn quic_driver_loop<I, D>(
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
-      Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
-      Command::SetLocalState(cmd) => cmd.reply().clone(),
-      Command::SetAckPayload(cmd) => cmd.reply().clone(),
-      Command::SendUser(cmd) => cmd.reply().clone(),
-      Command::SendReliable(cmd) => cmd.reply().clone(),
+      Command::QueueUserBroadcast(cmd) => cmd.reply,
+      Command::SetLocalState(cmd) => cmd.reply,
+      Command::SetAckPayload(cmd) => cmd.reply,
+      Command::SendUser(cmd) => cmd.reply,
+      Command::SendReliable(cmd) => cmd.reply,
       Command::Join(JoinCmd { reply, .. }) => {
         // `Join`'s reply type is `Result<usize>`; surface the same
         // `Shutdown` error through a separate arm so the type
         // checker sees the right `Sender<Result<usize>>`.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = reply.send_async(Err(MemberlistError::Shutdown)).await;
+        let _ = reply.send(Err(MemberlistError::Shutdown));
         continue;
       }
       Command::Ping(cmd) => {
         // `Ping`'s reply type is `Result<Duration>`; surface Shutdown
         // through a separate arm so the type checker sees the right sender.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd.reply().send_async(Err(MemberlistError::Shutdown)).await;
+        let _ = cmd.reply.send(Err(MemberlistError::Shutdown));
         continue;
       }
     };
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = reply.send_async(res).await;
+    let _ = reply.send(res);
   }
   // Drop the `commands` Receiver immediately so any subsequent
   // clone send fails fast (see step 3 above). Move out of state so
@@ -741,20 +741,20 @@ pub(crate) async fn quic_driver_loop<I, D>(
   for (_, pj) in state.pending_joins.drain() {
     // Ignoring Err: caller's reply receiver may have been dropped;
     // nothing to surface.
-    let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = pj.reply.send(Err(MemberlistError::Shutdown));
   }
 
   // Reply `Err(Shutdown)` to every parked application-ping waiter whose
   // `PingCompleted`/`PingFailed` will never arrive (driver is exiting).
   for pp in state.pending_pings.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = pp.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = pp.reply.send(Err(MemberlistError::Shutdown));
   }
   // Reply `Err(Shutdown)` to every parked reliable directed-send waiter
   // whose `ExchangeCompleted(UserMessage)` will never arrive (driver is exiting).
   for ps in state.pending_user_sends.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = ps.reply.send_async(Err(MemberlistError::Shutdown)).await;
+    let _ = ps.reply.send(Err(MemberlistError::Shutdown));
   }
 
   // Reply `Err(Shutdown)` to every joined graceful-leave replier whose
@@ -777,7 +777,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   if let Some(reply) = state.shutdown_reply.take() {
     // Ignoring Err: the caller dropped its reply receiver; nothing
     // to surface.
-    let _ = reply.send_async(Ok(())).await;
+    let _ = reply.send(Ok(()));
   }
   // `state` (and with it `obs_tx`) drops here, closing the observation
   // channel; the observation task drains any buffered events and exits.
@@ -868,7 +868,7 @@ async fn observation_task<I, D>(
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_command<I>(
   endpoint: &mut QuicEndpoint<I>,
-  shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
+  shutdown_reply: &mut Option<futures_channel::oneshot::Sender<Result<()>>>,
   pending_joins: &mut HashMap<u64, PendingJoin>,
   next_pending_join_id: &mut u64,
   pending_leave: &mut Option<PendingLeave>,
@@ -899,7 +899,7 @@ async fn dispatch_command<I>(
       // driver makes the check + dispatch atomic (no lifecycle race).
       if !endpoint.is_running() {
         // Ignoring Err: the caller may have dropped the reply receiver.
-        let _ = reply.send_async(Err(MemberlistError::NotRunning)).await;
+        let _ = reply.send(Err(MemberlistError::NotRunning));
         return;
       }
       match kind {
@@ -917,7 +917,7 @@ async fn dispatch_command<I>(
           // Ignoring Err: the caller may have dropped the reply
           // receiver (e.g. the user-facing `dispatch_join_with`
           // future was cancelled).
-          let _ = reply.send_async(Ok(count)).await;
+          let _ = reply.send(Ok(count));
         }
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           // Dispatch one outbound push/pull per seed; each
@@ -998,7 +998,7 @@ async fn dispatch_command<I>(
           // OR the call errored. Reply immediately; parking would hang.
           other => {
             // Ignoring Err: caller dropped the reply receiver.
-            let _ = reply.send_async(other).await;
+            let _ = reply.send(other);
           }
         }
       }
@@ -1020,7 +1020,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
       // Gate on a running node: after `leave()` the endpoint emits no
@@ -1035,7 +1035,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
       // Gate on a running node FIRST: after `leave()` the endpoint emits no
@@ -1061,7 +1061,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      let _ = reply.send(res);
     }
     Command::QueueUserBroadcast(cmd) => {
       // Gate on a running node FIRST: after `leave()` the gossip scheduler
@@ -1079,7 +1079,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SetLocalState(cmd) => {
       // Gate on a running node FIRST: after `leave()` no push/pull
@@ -1097,7 +1097,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SetAckPayload(cmd) => {
       // Gate on a running node FIRST: after `leave()` no probe ack will
@@ -1115,7 +1115,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::Shutdown(ShutdownCmd { reply }) => {
       // Stash the reply for the post-loop cleanup. Acking AFTER the
@@ -1135,14 +1135,11 @@ async fn dispatch_command<I>(
         let ping_id = endpoint.ping(node, now);
         pending_pings.push(PendingPing {
           ping_id,
-          reply: cmd.reply().clone(),
+          reply: cmd.reply,
         });
       } else {
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd
-          .reply()
-          .send_async(Err(MemberlistError::NotRunning))
-          .await;
+        let _ = cmd.reply.send(Err(MemberlistError::NotRunning));
       }
     }
     Command::SendUser(cmd) => {
@@ -1156,7 +1153,7 @@ async fn dispatch_command<I>(
         Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = cmd.reply().send_async(res).await;
+      let _ = cmd.reply.send(res);
     }
     Command::SendReliable(cmd) => {
       // Gate on a running node: after `leave()` the QUIC stream coordinator
@@ -1164,10 +1161,7 @@ async fn dispatch_command<I>(
       // and the caller would hang. Reject with `NotRunning`.
       if !endpoint.is_running() {
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd
-          .reply()
-          .send_async(Err(MemberlistError::NotRunning))
-          .await;
+        let _ = cmd.reply.send(Err(MemberlistError::NotRunning));
         return;
       }
       let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(cmd.payloads().len());
@@ -1186,12 +1180,12 @@ async fn dispatch_command<I>(
         // No exchanges dispatched (empty payloads). Reply Ok immediately;
         // parking would hang with no terminal event incoming.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = cmd.reply().send_async(Ok(())).await;
+        let _ = cmd.reply.send(Ok(()));
       } else {
         pending_user_sends.push(PendingUserSend {
           pending,
           failed: 0,
-          reply: cmd.reply().clone(),
+          reply: cmd.reply,
         });
       }
     }
@@ -1572,7 +1566,7 @@ where
           };
           // Ignoring Err: caller dropped the reply receiver (e.g. the
           // user-facing join_with future was cancelled).
-          let _ = pj.reply.send_async(reply_value).await;
+          let _ = pj.reply.send(reply_value);
         }
       }
       // Ping completion: resolve the matching `PendingPing` waiter with the
@@ -1585,7 +1579,7 @@ where
         if let Some(idx) = state.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = state.pending_pings.swap_remove(idx);
           // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
-          let _ = pp.reply.send_async(Ok(p.rtt())).await;
+          let _ = pp.reply.send(Ok(p.rtt()));
         }
       }
       // Ping failure: resolve the matching `PendingPing` waiter with `PingTimeout`.
@@ -1595,7 +1589,7 @@ where
         if let Some(idx) = state.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = state.pending_pings.swap_remove(idx);
           // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
-          let _ = pp.reply.send_async(Err(MemberlistError::PingTimeout)).await;
+          let _ = pp.reply.send(Err(MemberlistError::PingTimeout));
         }
       }
       // Reliable user-send completion: each `ExchangeCompleted` with kind
@@ -1626,7 +1620,7 @@ where
               Ok(())
             };
             // Ignoring Err: caller dropped the reply receiver.
-            let _ = ps.reply.send_async(result).await;
+            let _ = ps.reply.send(result);
           }
         }
       }
@@ -1744,7 +1738,7 @@ async fn reap_pending_joins(pending_joins: &mut HashMap<u64, PendingJoin>, now: 
       };
       // Ignoring Err: caller dropped the reply receiver (e.g.
       // the user-facing join_with future was cancelled).
-      let _ = pj.reply.send_async(reply_value).await;
+      let _ = pj.reply.send(reply_value);
     }
   }
 }

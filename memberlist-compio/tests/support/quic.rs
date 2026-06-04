@@ -1,12 +1,12 @@
 //! QUIC test fixtures — self-signed localhost-SAN cert + caller-built
-//! `quinn_proto` configs assembled into a `memberlist_compio::QuicConfig`.
+//! `quinn_proto` configs assembled into a `memberlist_compio::QuicOptions`.
 
 #![cfg(feature = "quic-rustls-ring")]
 #![allow(dead_code)] // Each test binary uses a subset of these helpers.
 
 use std::{sync::Arc, time::Duration};
 
-use memberlist_compio::QuicConfig;
+use memberlist_compio::QuicOptions;
 use memberlist_proto::UnreliableTransport;
 use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
@@ -27,7 +27,7 @@ pub fn generate_localhost_cert() -> (CertificateDer<'static>, PrivateKeyDer<'sta
 ///
 /// Returns the DER-encoded certificate and its PKCS#8 private key. Used by
 /// negative tests that need a cert whose subject-alt-names do NOT match the
-/// SNI value the [`memberlist_proto::QuicConfig`] SNI closure returns
+/// SNI value the [`memberlist_proto::QuicOptions`] SNI closure returns
 /// (which the compio test setup always wires to `"localhost"`), forcing
 /// rustls to reject the peer's certificate during the TLS handshake.
 pub fn generate_cert_with_sans(
@@ -39,7 +39,7 @@ pub fn generate_cert_with_sans(
   (cert, key)
 }
 
-/// Build a `QuicConfig` with the supplied cert + key, accepting any cert
+/// Build a `QuicOptions` with the supplied cert + key, accepting any cert
 /// signed by `trusted_roots` on the client side, in `Datagram` unreliable mode
 /// (the default).
 ///
@@ -50,7 +50,7 @@ pub fn build_quic_config(
   cert: CertificateDer<'static>,
   key: PrivateKeyDer<'static>,
   trusted_roots: RootCertStore,
-) -> QuicConfig {
+) -> QuicOptions {
   build_quic_config_with_mode(cert, key, trusted_roots, UnreliableTransport::Datagram)
 }
 
@@ -62,7 +62,7 @@ pub fn build_quic_config_with_mode(
   key: PrivateKeyDer<'static>,
   trusted_roots: RootCertStore,
   unreliable_transport: UnreliableTransport,
-) -> QuicConfig {
+) -> QuicOptions {
   let provider = Arc::new(rustls::crypto::ring::default_provider());
 
   let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -97,7 +97,7 @@ pub fn build_quic_config_with_mode(
   let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key);
   let endpoint_cfg = EndpointConfig::new(Arc::new(hmac));
 
-  // Fast timeouts keep test runs short; `QuicConfig::new` forces
+  // Fast timeouts keep test runs short; `QuicOptions::new` forces
   // `max_concurrent_uni_streams = 0` and `grease_quic_bit = false`.
   let mut transport = TransportConfig::default();
   transport
@@ -106,7 +106,7 @@ pub fn build_quic_config_with_mode(
     ))
     .keep_alive_interval(Some(Duration::from_secs(1)));
 
-  QuicConfig::new(
+  QuicOptions::new(
     endpoint_cfg,
     server_cfg,
     client_cfg,
@@ -116,9 +116,9 @@ pub fn build_quic_config_with_mode(
   )
 }
 
-/// Convenience: generate a self-signed cert and build a `QuicConfig` that
+/// Convenience: generate a self-signed cert and build a `QuicOptions` that
 /// trusts that cert as its own root (the common case for single-cluster tests).
-pub fn self_trusted_quic_config() -> QuicConfig {
+pub fn self_trusted_quic_config() -> QuicOptions {
   let (cert, key) = generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("add root cert");

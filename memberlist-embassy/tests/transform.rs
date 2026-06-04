@@ -23,7 +23,7 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  Config, EncryptionOptions, EndpointConfig, Keyring, LabelError, Memberlist, Runner, SecretKey,
+  Options, EncryptionOptions, EndpointOptions, Keyring, LabelError, Memberlist, Runner, SecretKey,
   TransformOptions, now,
 };
 use smol_str::SmolStr;
@@ -150,18 +150,18 @@ fn encrypted_gossip_round_trips() {
   let enc = shared_key();
   let clock = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default().with_encryption(enc.clone()),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp_a,
     tcp_a,
     clock,
   )
   .expect("build node a");
   let (ml_b, run_b) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default().with_encryption(enc),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
     udp_b,
     tcp_b,
     clock,
@@ -233,10 +233,10 @@ fn gossip_label_isolates_clusters() {
       .expect("valid label");
     let clock = now();
     let (ml_alpha, run_alpha) = Memberlist::new::<POOL>(
-      Config::new(),
+      Options::new(),
       transform_alpha,
       // Short probe timers so failure detection completes within 2 000ms.
-      EndpointConfig::new(SmolStr::new("alpha"), addr(1, 7946))
+      EndpointOptions::new(SmolStr::new("alpha"), addr(1, 7946))
         .with_rng_seed(1)
         .with_probe_interval(StdDuration::from_millis(100))
         .with_probe_timeout(StdDuration::from_millis(50))
@@ -249,9 +249,9 @@ fn gossip_label_isolates_clusters() {
     )
     .expect("build alpha node");
     let (ml_plain, run_plain) = Memberlist::new::<POOL>(
-      Config::new(),
+      Options::new(),
       TransformOptions::default(),
-      EndpointConfig::new(SmolStr::new("plain"), addr(2, 7946))
+      EndpointOptions::new(SmolStr::new("plain"), addr(2, 7946))
         .with_rng_seed(2)
         .with_probe_interval(StdDuration::from_millis(100))
         .with_probe_timeout(StdDuration::from_millis(50))
@@ -307,18 +307,18 @@ fn gossip_label_isolates_clusters() {
 
     let clock = now();
     let (ml_a2, run_a2) = Memberlist::new::<POOL>(
-      Config::new(),
+      Options::new(),
       transform_a2,
-      EndpointConfig::new(SmolStr::new("a2"), addr(3, 7946)).with_rng_seed(3),
+      EndpointOptions::new(SmolStr::new("a2"), addr(3, 7946)).with_rng_seed(3),
       udp_a,
       tcp_a,
       clock,
     )
     .expect("build a2 node");
     let (ml_b2, run_b2) = Memberlist::new::<POOL>(
-      Config::new(),
+      Options::new(),
       transform_b2,
-      EndpointConfig::new(SmolStr::new("b2"), addr(4, 7946)).with_rng_seed(4),
+      EndpointOptions::new(SmolStr::new("b2"), addr(4, 7946)).with_rng_seed(4),
       udp_b,
       tcp_b,
       clock,
@@ -397,19 +397,19 @@ fn runtime_set_encryption_rotates_key() {
 
   let clock = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default().with_encryption(enc1),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp_a,
     tcp_a,
     clock,
   )
   .expect("build node a");
   let (ml_c, run_c) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     // C starts with key2 — incompatible with A's key1.
     TransformOptions::default().with_encryption(enc2),
-    EndpointConfig::new(SmolStr::new("c"), addr(3, 7946)).with_rng_seed(3),
+    EndpointOptions::new(SmolStr::new("c"), addr(3, 7946)).with_rng_seed(3),
     udp_c,
     tcp_c,
     clock,

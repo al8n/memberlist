@@ -17,7 +17,7 @@ use bytes::Bytes;
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
 use memberlist_proto::{
-  LabelOptions, RawRecords, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
+  LabelOptions, RawRecords, config::EndpointOptions, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
 
@@ -236,7 +236,7 @@ where
     // stored config. Plain TCP has no SNI (`|_| None`) and a membership
     // address that IS the transport socket (`|addr| *addr`).
     let cfg = crate::options::apply_memberlist_options(
-      EndpointConfig::new(self.local_id, self.advertise_socket),
+      EndpointOptions::new(self.local_id, self.advertise_socket),
       &runtime.memberlist_options,
     );
     // The single configured label from MemberlistOptions feeds both the

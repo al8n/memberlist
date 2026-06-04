@@ -14,7 +14,7 @@ pub mod crypto;
 mod demux;
 mod transport_mode;
 
-pub use crypto::QuicConfig;
+pub use crypto::QuicOptions;
 pub use transport_mode::{DatagramSendOutcome, UnreliableTransport};
 
 use crate::Instant;
@@ -125,7 +125,7 @@ struct PendingDial {
 pub struct QuicEndpoint<I> {
   ep: Endpoint<I, SocketAddr>,
   quinn: QuinnEndpoint,
-  cfg: QuicConfig,
+  cfg: QuicOptions,
   /// Cross-transport compression configuration. A disabled `CompressionOptions`
   /// makes the gossip compress/decompress methods identity.
   compression: crate::CompressionOptions,
@@ -320,9 +320,9 @@ where
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
   /// connection-ID / path-challenge RNG from the OS (production entropy).
   ///
-  /// Signature (quinn-proto 0.11.14): `Endpoint::new(Arc<EndpointConfig>,
+  /// Signature (quinn-proto 0.11.14): `Endpoint::new(Arc<EndpointOptions>,
   /// Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)`.
-  pub fn new(ep: Endpoint<I, SocketAddr>, cfg: QuicConfig) -> Self {
+  pub fn new(ep: Endpoint<I, SocketAddr>, cfg: QuicOptions) -> Self {
     Self::with_quinn_rng_seed(ep, cfg, None)
   }
 
@@ -339,7 +339,7 @@ where
   #[must_use]
   pub fn with_quinn_rng_seed(
     ep: Endpoint<I, SocketAddr>,
-    cfg: QuicConfig,
+    cfg: QuicOptions,
     rng_seed: Option<[u8; 32]>,
   ) -> Self {
     let quinn = QuinnEndpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, rng_seed);
@@ -383,7 +383,7 @@ where
   #[must_use]
   pub fn with_compression(
     ep: Endpoint<I, SocketAddr>,
-    cfg: QuicConfig,
+    cfg: QuicOptions,
     compression: crate::CompressionOptions,
   ) -> Self {
     let mut this = Self::new(ep, cfg);
@@ -601,7 +601,7 @@ where
   }
 
   /// The reliable-stream frame ceiling
-  /// ([`max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)).
+  /// ([`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)).
   /// The driver derives its observation-channel payload byte budget from this.
   #[inline]
   pub fn max_stream_frame_size(&self) -> usize {
@@ -698,7 +698,7 @@ where
   }
 
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
-  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
+  /// Sourced from [`crate::config::EndpointOptions::gossip_mtu`] (default
   /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
   /// exceed this by [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] when
   /// encryption is enabled.
@@ -714,7 +714,7 @@ where
   ///
   /// Diagnostic only: the composed unit disables remotely-initiated
   /// unidirectional streams by construction — the transport config
-  /// installed by [`QuicConfig::new`] advertises
+  /// installed by [`QuicOptions::new`] advertises
   /// `max_concurrent_uni_streams = 0`, so on a peer that observed
   /// our transport parameters this method MUST return `false` once
   /// the handshake completes. A test can use this to assert that
@@ -1475,7 +1475,7 @@ where
   }
 
   /// Which wire the unreliable path (gossip + probes) rides. Delegates to the
-  /// [`QuicConfig`]; the driver reads it to route each unreliable send onto
+  /// [`QuicOptions`]; the driver reads it to route each unreliable send onto
   /// either [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) or
   /// the plain-UDP fallback.
   pub fn unreliable_transport(&self) -> UnreliableTransport {
@@ -2192,7 +2192,7 @@ where
       // The membership address `peer` IS the wire `SocketAddr` (the
       // coordinator pins `A = SocketAddr` internally); the TLS verification
       // identity for this dial is resolved per-peer via the closure on
-      // `QuicConfig` (default mode is cluster-uniform — the same string
+      // `QuicOptions` (default mode is cluster-uniform — the same string
       // for every peer — but operators with per-peer SAN certs supply a
       // closure that maps each `SocketAddr` to its expected identity).
       let addr = peer;
@@ -2372,14 +2372,14 @@ mod tests {
   use smol_str::SmolStr;
 
   use super::{QuicEndpoint, UnreliableTransport};
-  use crate::{config::EndpointConfig, endpoint::Endpoint, quic::QuicConfig};
+  use crate::{config::EndpointOptions, endpoint::Endpoint, quic::QuicOptions};
 
-  fn test_config_with_mode(mode: UnreliableTransport) -> QuicConfig {
+  fn test_config_with_mode(mode: UnreliableTransport) -> QuicOptions {
     let mut transport = quinn_proto::TransportConfig::default();
     transport.max_idle_timeout(Some(
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
-    QuicConfig::new(
+    QuicOptions::new(
       crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
       crate::quic::crypto::tests::test_server(),
       crate::quic::crypto::tests::test_client(),
@@ -2389,12 +2389,12 @@ mod tests {
     )
   }
 
-  fn test_config() -> QuicConfig {
+  fn test_config() -> QuicOptions {
     test_config_with_mode(UnreliableTransport::Datagram)
   }
 
   fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
-    let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
+    let cfg = EndpointOptions::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
@@ -2409,7 +2409,7 @@ mod tests {
   /// advertise the datagram extension: its connections report
   /// `datagrams().max_size() == None` and no peer can deliver datagrams to it.
   fn make_endpoint_udp(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
-    let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
+    let cfg = EndpointOptions::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config_with_mode(UnreliableTransport::Udp);
@@ -2424,7 +2424,7 @@ mod tests {
     // peer). This guards the public constructor signature only: the
     // coordinator is generic over `I` with `A = SocketAddr` pinned
     // internally, and `new` takes the membership `Endpoint` plus the
-    // `QuicConfig` bundle.
+    // `QuicOptions` bundle.
     fn _sig<I>()
     where
       I: crate::Id
@@ -2438,7 +2438,7 @@ mod tests {
     {
       let _: fn(
         crate::endpoint::Endpoint<I, SocketAddr>,
-        super::QuicConfig,
+        super::QuicOptions,
       ) -> super::QuicEndpoint<I> = super::QuicEndpoint::<I>::new;
     }
   }
@@ -2559,11 +2559,11 @@ mod tests {
   /// (first byte ∈ `1..=15`) or `Class::Reject` and silently lose ACKs /
   /// stream data / close packets to the memberlist codec.
   ///
-  /// `EndpointConfig::new` defaults `grease_quic_bit: true`; under that
+  /// `EndpointOptions::new` defaults `grease_quic_bit: true`; under that
   /// default both sides advertise greasing and quinn-proto's packet
   /// encoder is permitted to clear FIXED_BIT on outgoing short-header
   /// packets. The coordinator forces `grease_quic_bit(false)` in
-  /// [`QuicConfig::new`](super::crypto::QuicConfig::new) so the
+  /// [`QuicOptions::new`](super::crypto::QuicOptions::new) so the
   /// transport parameter is not advertised — a compliant peer will not
   /// clear FIXED_BIT in packets it sends us and our encoder will not
   /// clear FIXED_BIT in packets we send.
@@ -2575,7 +2575,7 @@ mod tests {
   /// from either side's `poll_transmit`, `classify(&bytes)` is asserted
   /// to be `Class::Quic` — directly encoding the demux invariant.
   ///
-  /// Negative control: revert `super::crypto::QuicConfig::new` to omit
+  /// Negative control: revert `super::crypto::QuicOptions::new` to omit
   /// the `endpoint.grease_quic_bit(false)` setter (greasing on) and run
   /// this test. With the determinism seed wired through to quinn-proto's
   /// per-packet greasing decision, some emitted short-header packets
@@ -3007,7 +3007,7 @@ mod tests {
     // (1) Build a bare Endpoint. Call start_push_pull on it BEFORE
     // wrapping — this is the legitimate Endpoint usage that produces a
     // DialRequested in the inner queue before `QuicEndpoint` wraps it.
-    let cfg = EndpointConfig::new(SmolStr::new("a"), a_addr).with_rng_seed(a_addr.port() as u64);
+    let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr).with_rng_seed(a_addr.port() as u64);
     let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     bare_ep.start_scheduling(t0);
     // Ignoring StreamId return: tests assert on observable side
@@ -4762,7 +4762,7 @@ mod tests {
   ) -> QuicEndpoint<SmolStr> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
-    let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
+    let cfg = EndpointOptions::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
@@ -4853,7 +4853,7 @@ mod tests {
   ) -> QuicEndpoint<SmolStr> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
-    let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
+    let cfg = EndpointOptions::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();

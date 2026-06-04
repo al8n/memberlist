@@ -263,8 +263,8 @@ mod tests {
   use super::Shared;
   use crate::{error::OpError, stream_io::SlotId};
   use core::{net::SocketAddr, time::Duration};
-  use memberlist_embedded::{Config as EngineConfig, Engine, TransformOptions};
-  use memberlist_proto::{EndpointConfig, Instant};
+  use memberlist_embedded::{Options as EngineConfig, Engine, TransformOptions};
+  use memberlist_proto::{EndpointOptions, Instant};
   use smol_str::SmolStr;
 
   fn sa(last: u8) -> SocketAddr {
@@ -282,7 +282,7 @@ mod tests {
     let engine: Engine<SmolStr, SlotId> = Engine::new_at(
       EngineConfig::new().with_port(7946),
       TransformOptions::default(),
-      EndpointConfig::new(SmolStr::new("t"), sa(1)).with_rng_seed(7),
+      EndpointOptions::new(SmolStr::new("t"), sa(1)).with_rng_seed(7),
       now,
     );
     let shared: Shared<SmolStr> = Shared::new(engine);

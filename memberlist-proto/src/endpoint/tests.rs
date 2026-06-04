@@ -2,8 +2,8 @@ use super::*;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smol_str::SmolStr;
 
-fn cfg() -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(
+fn cfg() -> EndpointOptions<SmolStr, SocketAddr> {
+  EndpointOptions::new(
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   )
@@ -4658,7 +4658,7 @@ fn end_to_end_push_pull_membership_convergence() {
   }
 
   // ── Set up A: knows alice (self) + bob ────────────────────────────────
-  let cfg_a = EndpointConfig::<SmolStr, SocketAddr>::new(SmolStr::new("alice"), make_addr(7000));
+  let cfg_a = EndpointOptions::<SmolStr, SocketAddr>::new(SmolStr::new("alice"), make_addr(7000));
   let mut a: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_a);
   // Drain new() startup events.
   while a.poll_event().is_some() {}
@@ -4670,7 +4670,7 @@ fn end_to_end_push_pull_membership_convergence() {
   while a.poll_transmit().is_some() {}
 
   // ── Set up B: knows charlie (self) ────────────────────────────────────
-  let cfg_b = EndpointConfig::<SmolStr, SocketAddr>::new(SmolStr::new("charlie"), make_addr(7002));
+  let cfg_b = EndpointOptions::<SmolStr, SocketAddr>::new(SmolStr::new("charlie"), make_addr(7002));
   let mut b: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_b);
   while b.poll_event().is_some() {}
   while b.poll_transmit().is_some() {}
@@ -4799,7 +4799,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
 #[test]
 fn start_scheduling_sets_finite_deadlines() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -4823,7 +4823,7 @@ fn start_scheduling_sets_finite_deadlines() {
 
 #[test]
 fn start_scheduling_no_op_when_leaving() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   );
@@ -4840,7 +4840,7 @@ fn start_scheduling_no_op_when_leaving() {
 #[test]
 fn probe_scheduler_fires_when_deadline_elapses() {
   // Two-node cluster so start_probe has a valid target.
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -4891,7 +4891,7 @@ fn probe_scheduler_fires_when_deadline_elapses() {
 
 #[test]
 fn probe_scheduler_does_not_fire_after_leave() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -4915,7 +4915,7 @@ fn probe_scheduler_does_not_fire_after_leave() {
 
 #[test]
 fn zero_interval_disables_scheduler() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -4943,7 +4943,7 @@ fn zero_interval_disables_scheduler() {
 #[test]
 fn gossip_scheduler_emits_transmits_to_peers() {
   // Two live peers, gossip_nodes=2 → both should receive the user broadcast.
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5034,7 +5034,7 @@ fn gossip_scheduler_emits_transmits_to_peers() {
 #[test]
 fn gossip_scheduler_skips_emit_when_no_broadcasts() {
   // No peers, no user broadcasts → no transmits, but deadline still advances.
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5063,7 +5063,7 @@ fn gossip_scheduler_skips_emit_when_no_broadcasts() {
 
 #[test]
 fn pushpull_scheduler_emits_dial_requested() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5113,7 +5113,7 @@ fn pushpull_scheduler_scales_interval_for_large_cluster() {
 
 #[test]
 fn pushpull_scheduler_no_op_with_no_peers() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5139,7 +5139,7 @@ fn pushpull_scheduler_no_op_with_no_peers() {
 
 #[test]
 fn leave_clears_scheduler_fields() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5170,7 +5170,7 @@ fn leave_clears_scheduler_fields() {
 
 #[test]
 fn poll_timeout_returns_none_after_leave_with_no_other_timers() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5193,7 +5193,7 @@ fn poll_timeout_returns_none_after_leave_with_no_other_timers() {
 
 #[test]
 fn handle_timeout_no_op_scheduler_after_leave() {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -5583,7 +5583,7 @@ fn alive_then_dead_marks_dead() {
 /// Build a one-peer, gossip_nodes=1 endpoint armed to fire gossip at `t0`
 /// with the broadcast/user queues drained empty. Returns `(endpoint, t0)`.
 fn gossip_harness_one_target() -> (Endpoint<SmolStr, SocketAddr>, Instant) {
-  let cfg = EndpointConfig::<SmolStr, SocketAddr>::new(
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
@@ -6258,20 +6258,20 @@ fn alive_then_suspect_marks_suspect() {
   );
 }
 
-/// `EndpointConfig::new` seeds `gossip_mtu` to [`DEFAULT_GOSSIP_MTU`] (1400),
+/// `EndpointOptions::new` seeds `gossip_mtu` to [`DEFAULT_GOSSIP_MTU`] (1400),
 /// matching the legacy memberlist sub-MTU ceiling. Operators that bypass the
 /// builder still get the safe LAN default.
 #[test]
 fn endpoint_config_gossip_mtu_defaults_to_1400() {
   use crate::config::DEFAULT_GOSSIP_MTU;
-  let c: EndpointConfig<SmolStr, SocketAddr> = EndpointConfig::new(
+  let c: EndpointOptions<SmolStr, SocketAddr> = EndpointOptions::new(
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   );
   assert_eq!(
     c.gossip_mtu(),
     DEFAULT_GOSSIP_MTU,
-    "EndpointConfig::new must seed gossip_mtu to DEFAULT_GOSSIP_MTU so a \
+    "EndpointOptions::new must seed gossip_mtu to DEFAULT_GOSSIP_MTU so a \
      bypassed builder still gets the safe LAN default",
   );
   assert_eq!(
@@ -6437,7 +6437,7 @@ fn send_user_packets_rejects_compound_oversize() {
 /// constant.
 #[test]
 fn endpoint_config_gossip_mtu_is_propagated_to_endpoint() {
-  let c: EndpointConfig<SmolStr, SocketAddr> = EndpointConfig::new(
+  let c: EndpointOptions<SmolStr, SocketAddr> = EndpointOptions::new(
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   )

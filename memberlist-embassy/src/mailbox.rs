@@ -93,7 +93,7 @@ impl Mailbox {
   /// Build a fresh, idle mailbox with the given ring capacities.
   ///
   /// `inbound_cap` / `outbound_cap` come from the driver's
-  /// [`Config`](crate::Config) (the TCP socket RX/TX byte sizes), so the bridge
+  /// [`Options`](crate::Options) (the TCP socket RX/TX byte sizes), so the bridge
   /// rings never hold more than a socket buffer's worth of un-handed-off bytes.
   pub(crate) fn new(inbound_cap: usize, outbound_cap: usize) -> Self {
     Self {

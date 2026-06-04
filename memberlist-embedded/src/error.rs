@@ -7,8 +7,8 @@ use memberlist_proto::EndpointInitError;
 /// Why constructing an [`Engine`](crate::Engine) failed.
 ///
 /// Every variant is a misconfiguration or environment fault reported in place
-/// of a panic, so a caller assembling a [`Config`](crate::Config) and an
-/// [`EndpointConfig`](memberlist_proto::EndpointConfig) from untrusted or
+/// of a panic, so a caller assembling a [`Options`](crate::Options) and an
+/// [`EndpointOptions`](memberlist_proto::EndpointOptions) from untrusted or
 /// runtime values can recover. A concrete driver layers its own link-layer
 /// construction errors (medium, interface addresses, socket buffers, …) on top
 /// of these.
@@ -16,7 +16,7 @@ use memberlist_proto::EndpointInitError;
 #[non_exhaustive]
 pub enum InitError {
   /// The configured advertise address
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointOptions::advertise_addr_ref`](memberlist_proto::EndpointOptions::advertise_addr_ref))
   /// is not a routable destination.
   ///
   /// A node must advertise an address its peers can route a reply to. An
@@ -28,20 +28,20 @@ pub enum InitError {
   NonRoutableAdvertiseAddr(core::net::SocketAddr),
   /// The advertised port does not match the bound port.
   ///
-  /// The node binds one [`Config::port`](crate::Config::port) for both the
+  /// The node binds one [`Options::port`](crate::Options::port) for both the
   /// gossip plane and the reliable listener (the single-port memberlist model).
   /// A direct embedded interface has no NAT, so a node is reachable only at the
   /// port it binds; its advertised port
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointOptions::advertise_addr_ref`](memberlist_proto::EndpointOptions::advertise_addr_ref))
   /// must equal it. Otherwise every peer routes to a port nothing is listening
   /// on.
   AdvertisePortMismatch,
-  /// [`Config::port`](crate::Config::port) is zero.
+  /// [`Options::port`](crate::Options::port) is zero.
   ///
   /// A link layer such as smoltcp rejects binding/listening on port 0, and no
   /// peer can dial it; the engine rejects it up front.
   ZeroPort,
-  /// [`Config::close_timeout`](crate::Config::close_timeout) is zero.
+  /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
   /// still draining past `now + close_timeout` is force-aborted. A zero timeout

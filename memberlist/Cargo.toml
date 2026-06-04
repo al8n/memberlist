@@ -1,0 +1,71 @@
+[package]
+name = "memberlist"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Sans-I/O memberlist: a Rust implementation of the SWIM gossip membership protocol."
+repository = "https://github.com/al8n/memberlist"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+memberlist-proto    = { workspace = true, default-features = false }
+memberlist-reactor  = { workspace = true, optional = true }
+memberlist-compio   = { workspace = true, optional = true }
+memberlist-smoltcp  = { workspace = true, optional = true }
+memberlist-embassy  = { workspace = true, optional = true }
+memberlist-embedded = { workspace = true, optional = true }
+agnostic            = { workspace = true, optional = true }
+
+[dev-dependencies]
+rcgen = "0.14"
+ring = "0.17"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"
+quinn-proto = { version = "0.11", features = ["rustls-ring"] }
+smol_str = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "smoke"
+required-features = ["tokio", "quic-rustls-ring"]
+
+[features]
+default = ["tokio", "tcp"]
+alloc = ["memberlist-proto/alloc"]
+std = ["alloc", "memberlist-proto/std"]
+
+# driver selection
+reactor  = ["dep:memberlist-reactor", "std"]
+tokio    = ["reactor", "dep:agnostic", "agnostic/tokio", "memberlist-reactor/tokio"]
+smol     = ["reactor", "dep:agnostic", "agnostic/smol",  "memberlist-reactor/smol"]
+compio   = ["dep:memberlist-compio", "std"]
+# bare-metal / no_std drivers: `alloc` tier (they never pull `std` here)
+smoltcp  = ["dep:memberlist-smoltcp",  "alloc", "memberlist-smoltcp/alloc"]
+embassy  = ["dep:memberlist-embassy",  "alloc", "memberlist-embassy/alloc"]
+embedded = ["dep:memberlist-embedded", "alloc", "memberlist-embedded/alloc"]
+
+# transports (kept prefix) — only drivers that DEFINE the feature
+tcp = ["memberlist-proto/tcp", "memberlist-reactor?/tcp", "memberlist-compio?/tcp"]
+tls = ["memberlist-proto/tls", "memberlist-reactor?/tls"]
+tls-rustls-ring      = ["tls", "memberlist-proto/tls-rustls-ring",      "memberlist-reactor?/tls-rustls-ring",      "memberlist-compio?/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["tls", "memberlist-proto/tls-rustls-aws-lc-rs", "memberlist-reactor?/tls-rustls-aws-lc-rs", "memberlist-compio?/tls-rustls-aws-lc-rs"]
+quic = ["memberlist-proto/quic", "memberlist-reactor?/quic", "memberlist-compio?/quic"]
+quic-rustls-ring      = ["quic", "memberlist-proto/quic-rustls-ring",      "memberlist-reactor?/quic-rustls-ring",      "memberlist-compio?/quic-rustls-ring"]
+quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs", "memberlist-reactor?/quic-rustls-aws-lc-rs", "memberlist-compio?/quic-rustls-aws-lc-rs"]
+
+# compression (DE-prefixed) — every driver + proto define these
+lz4    = ["memberlist-proto/compression-lz4",    "memberlist-reactor?/compression-lz4",    "memberlist-compio?/compression-lz4",    "memberlist-smoltcp?/compression-lz4",    "memberlist-embassy?/compression-lz4",    "memberlist-embedded?/compression-lz4"]
+snappy = ["memberlist-proto/compression-snappy", "memberlist-reactor?/compression-snappy", "memberlist-compio?/compression-snappy", "memberlist-smoltcp?/compression-snappy", "memberlist-embassy?/compression-snappy", "memberlist-embedded?/compression-snappy"]
+zstd   = ["memberlist-proto/compression-zstd",   "memberlist-reactor?/compression-zstd",   "memberlist-compio?/compression-zstd",   "memberlist-smoltcp?/compression-zstd",   "memberlist-embassy?/compression-zstd",   "memberlist-embedded?/compression-zstd"]
+brotli = ["memberlist-proto/compression-brotli", "memberlist-reactor?/compression-brotli", "memberlist-compio?/compression-brotli", "memberlist-smoltcp?/compression-brotli", "memberlist-embassy?/compression-brotli", "memberlist-embedded?/compression-brotli"]
+
+# encryption (DE-prefixed) — every driver + proto define these
+aes-gcm           = ["memberlist-proto/encryption-aes-gcm",           "memberlist-reactor?/encryption-aes-gcm",           "memberlist-compio?/encryption-aes-gcm",           "memberlist-smoltcp?/encryption-aes-gcm",           "memberlist-embassy?/encryption-aes-gcm",           "memberlist-embedded?/encryption-aes-gcm"]
+chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305", "memberlist-reactor?/encryption-chacha20-poly1305", "memberlist-compio?/encryption-chacha20-poly1305", "memberlist-smoltcp?/encryption-chacha20-poly1305", "memberlist-embassy?/encryption-chacha20-poly1305", "memberlist-embedded?/encryption-chacha20-poly1305"]
+
+# misc
+dns     = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
+tracing = ["memberlist-proto/tracing"]

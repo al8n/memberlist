@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::{boxed::Box, collections::VecDeque};
 
 use memberlist_proto::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, LabelOptions, Node, PushPullKind, RawRecords,
+  AliveDelegate, Endpoint, EndpointOptions, Instant, LabelOptions, Node, PushPullKind, RawRecords,
   StreamId,
   event::{PingId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint},
@@ -30,7 +30,7 @@ use memberlist_proto::{
 use hashbrown::HashMap;
 
 use crate::{
-  Config, GossipIo, InitError, StreamIo, TransformOptions,
+  Options, GossipIo, InitError, StreamIo, TransformOptions,
   addr::socket_addr_is_routable,
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane},
@@ -43,7 +43,7 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// Size the inbound-gossip receive scratch from the effective gossip MTU.
 ///
 /// The machine caps an outbound gossip datagram's PLAINTEXT at the configured
-/// [`EndpointConfig::gossip_mtu`]; the on-wire datagram can then exceed that by
+/// [`EndpointOptions::gossip_mtu`]; the on-wire datagram can then exceed that by
 /// up to [`memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper
 /// header, nonce, and AEAD tag) when encryption is enabled. The buffer must hold
 /// the largest such on-wire datagram, so it is sized to
@@ -98,7 +98,7 @@ where
 {
   endpoint: StreamEndpoint<I, SocketAddr, RawRecords>,
   /// Sizing / port configuration; retained for the reliable-plane paths.
-  cfg: Config,
+  cfg: Options,
   /// Pooled connection handles and the exchange-to-handle map for the reliable
   /// plane.
   plane: ReliablePlane<C>,
@@ -157,9 +157,9 @@ where
   /// on a zero/over-ceiling gossip MTU, a non-routable or port-mismatched
   /// advertise address, an entropy failure, or a machine-endpoint init failure.
   pub fn new_at(
-    cfg: Config,
+    cfg: Options,
     transform: TransformOptions,
-    ep_cfg: EndpointConfig<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
   ) -> Self {
     Self::try_new_at(cfg, transform, ep_cfg, now)
@@ -200,9 +200,9 @@ where
   /// - [`InitError::Encryption`] — `transform.encryption` carries a keyring with
   ///   a key whose AEAD backend was not compiled into this binary.
   pub fn try_new_at(
-    cfg: Config,
+    cfg: Options,
     transform: TransformOptions,
-    ep_cfg: EndpointConfig<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
   ) -> Result<Self, InitError> {
     // Reject a zero port up front. A link layer's bind/listen rejects port 0 and
@@ -843,7 +843,7 @@ where
   /// pump_result)`, advances the clock, and loops. Because every deadline the
   /// engine enforces on a tick is folded into the returned instant, a caller that
   /// sleeps exactly to it always wakes in time to honor them — including
-  /// reclaiming a closing connection by `Config::close_timeout`.
+  /// reclaiming a closing connection by `Options::close_timeout`.
   ///
   /// # Order
   ///
@@ -1072,7 +1072,7 @@ where
     //   link layer sets no TCP timeout), and a deadline-driven caller could sleep
     //   arbitrarily past `close_timeout`. Folding the soonest of BOTH in guarantees
     //   the caller wakes by `close_timeout` to reap it, so pool / listener recovery
-    //   is bounded by `Config::close_timeout` as documented.
+    //   is bounded by `Options::close_timeout` as documented.
     //
     // `pending_dial` deliberately contributes NO deadline of its own: a buffered
     // dial is serviced when a slot frees, never on a clock of its own, and every
@@ -2226,10 +2226,10 @@ mod tests {
   }
 
   fn make_engine() -> Engine<SmolStr, u32> {
-    let cfg = Config::new()
+    let cfg = Options::new()
       .with_port(7946)
       .with_close_timeout(Duration::from_secs(10));
-    let ep_cfg = memberlist_proto::EndpointConfig::new(SmolStr::new("test"), node_addr(7946))
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
       .with_rng_seed(42);
     let now = Instant::from_origin(Duration::from_secs(86_400));
     Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now)
@@ -2388,10 +2388,10 @@ mod tests {
       typed::{Alive, Message},
     };
 
-    let cfg = Config::new()
+    let cfg = Options::new()
       .with_port(7946)
       .with_close_timeout(Duration::from_secs(10));
-    let ep_cfg = memberlist_proto::EndpointConfig::new(SmolStr::new("alpha"), node_addr(7946))
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("alpha"), node_addr(7946))
       .with_rng_seed(1);
     let now = Instant::from_origin(Duration::from_secs(86_400));
     let transform = TransformOptions::new()

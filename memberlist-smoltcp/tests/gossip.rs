@@ -4,15 +4,15 @@ use core::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
   time::Duration,
 };
-use memberlist_proto::{EndpointConfig, Instant};
-use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
+use memberlist_proto::{EndpointOptions, Instant};
+use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, ip)), port)
 }
 
-/// Build a short-timeout `EndpointConfig` for deterministic virtual-time tests.
+/// Build a short-timeout `EndpointOptions` for deterministic virtual-time tests.
 ///
 /// Timings chosen so the full suspect→dead cycle completes in well under
 /// 2 000 virtual milliseconds:
@@ -29,8 +29,8 @@ fn addr(ip: u8, port: u16) -> SocketAddr {
 ///   The suspicion timer fires at most 400 ms after the node is suspected.
 /// - `gossip_interval = 50 ms`: gossip rounds fire often enough to keep both
 ///   members' Alive broadcasts circulating during the healthy phase.
-fn mk(id: &str, ip: u8) -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
+  EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
     .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(100))
     .with_probe_timeout(Duration::from_millis(50))
@@ -71,7 +71,7 @@ fn two_nodes_gossip_and_detect_failure() {
   let now: Instant = clock.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
@@ -79,7 +79,7 @@ fn two_nodes_gossip_and_detect_failure() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),

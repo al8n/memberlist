@@ -11,7 +11,7 @@
 
 use core::time::Duration;
 
-/// Default [`Config::close_timeout`]: 10 seconds.
+/// Default [`Options::close_timeout`]: 10 seconds.
 ///
 /// A graceful TCP close (FIN/ACK exchange) over a healthy link completes in a
 /// few round-trips; 10 s is a generous bound that rides out WAN latency while
@@ -28,7 +28,7 @@ pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// port (7946) with the [`DEFAULT_CLOSE_TIMEOUT`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct Options {
   /// Local port the node binds. The gossip plane and the reliable-plane
   /// listener both use it, and it is the port peers reach the node at — the
   /// single-port memberlist model (one advertised `SocketAddr` serves both
@@ -48,7 +48,7 @@ pub struct Config {
   pub close_timeout: Duration,
 }
 
-impl Default for Config {
+impl Default for Options {
   fn default() -> Self {
     Self {
       port: 7946,
@@ -57,7 +57,7 @@ impl Default for Config {
   }
 }
 
-impl Config {
+impl Options {
   /// Defaults tuned for a small embedded cluster.
   pub fn new() -> Self {
     Self::default()
@@ -70,7 +70,7 @@ impl Config {
     self
   }
 
-  /// Override the graceful-close timeout (see [`Config::close_timeout`]).
+  /// Override the graceful-close timeout (see [`Options::close_timeout`]).
   pub fn with_close_timeout(mut self, d: Duration) -> Self {
     self.close_timeout = d;
     self
@@ -83,10 +83,10 @@ mod tests {
 
   #[test]
   fn defaults_are_sane_and_overridable() {
-    let c = Config::new();
+    let c = Options::new();
     assert_eq!(c.port, 7946);
     assert!(!c.close_timeout.is_zero());
-    let c = Config::new()
+    let c = Options::new()
       .with_port(1234)
       .with_close_timeout(Duration::from_secs(3));
     assert_eq!(c.port, 1234);

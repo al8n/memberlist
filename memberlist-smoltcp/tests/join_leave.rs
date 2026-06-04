@@ -13,8 +13,8 @@ mod harness;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use memberlist_proto::{EndpointConfig, Event};
-use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
+use memberlist_proto::{EndpointOptions, Event};
+use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -52,18 +52,18 @@ fn join_from_seed_then_clean_leave() {
   // Node A is the seed; node B is the joiner. Distinct rng seeds keep their
   // probe/gossip staggers independent.
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut da,
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
     &mut db,
     now,
   );

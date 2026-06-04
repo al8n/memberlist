@@ -4,7 +4,6 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use flume::Sender;
 use memberlist_proto::{CompressionOptions, EncryptionOptions, Node};
 
 use crate::error::Error;
@@ -41,19 +40,19 @@ pub(crate) struct JoinCmd {
   /// count), or reply immediately with the dispatched count.
   pub(crate) wait: bool,
   /// Replies with the number of seeds contacted, or an error.
-  pub(crate) reply: Sender<Result<usize, Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<usize, Error>>,
 }
 
 /// Payload of [`Command::Leave`].
 pub(crate) struct LeaveCmd {
   /// Replies once the leave has reached the wire (or on timeout/shutdown).
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// Payload of [`Command::Shutdown`].
 pub(crate) struct ShutdownCmd {
   /// Replies once the driver has stopped and released its socket.
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// Payload of [`Command::Ping`].
@@ -61,7 +60,7 @@ pub(crate) struct PingCmd<I> {
   /// The node to probe (id + wire address).
   pub(crate) node: Node<I, SocketAddr>,
   /// Replies with the round-trip time, or an error.
-  pub(crate) reply: Sender<Result<Duration, Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<Duration, Error>>,
 }
 
 /// Payload of [`Command::SendUser`].
@@ -71,7 +70,7 @@ pub(crate) struct SendUserCmd {
   /// One or more unreliable user-message payloads to direct to `to`.
   pub(crate) payloads: Vec<Bytes>,
   /// Replies with `Ok(())` on dispatch, or an error.
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// Payload of [`Command::SendReliable`].
@@ -81,7 +80,7 @@ pub(crate) struct SendReliableCmd {
   /// One or more reliable user-message payloads to deliver to `to`.
   pub(crate) payloads: Vec<Bytes>,
   /// Replies with `Ok(())` once all exchanges complete, or an error.
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// Payload of [`Command::SetCompressionOptions`].
@@ -89,7 +88,7 @@ pub(crate) struct SetCompressionOptionsCmd {
   /// The new compression policy to apply.
   pub(crate) opts: CompressionOptions,
   /// Replies with `Ok(())` once applied, or `Err(NotRunning)`.
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// Payload of [`Command::SetEncryptionOptions`].
@@ -98,5 +97,5 @@ pub(crate) struct SetEncryptionOptionsCmd {
   pub(crate) opts: EncryptionOptions,
   /// Replies with `Ok(())` once applied, `Err(NotRunning)`, or a
   /// keyring-validation error.
-  pub(crate) reply: Sender<Result<(), Error>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }

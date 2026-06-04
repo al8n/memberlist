@@ -10,9 +10,9 @@ use memberlist_proto::{
 };
 
 /// SWIM-protocol-level overrides applied to the machine-layer
-/// [`EndpointConfig`](memberlist_proto::EndpointConfig) at construction.
+/// [`EndpointOptions`](memberlist_proto::EndpointOptions) at construction.
 ///
-/// Every field is an override layered over the `EndpointConfig` default: a
+/// Every field is an override layered over the `EndpointOptions` default: a
 /// `None` leaves that knob at its machine default.
 ///
 /// - `gossip_mtu` — the outbound gossip-datagram cap (and the recv-buffer sizing

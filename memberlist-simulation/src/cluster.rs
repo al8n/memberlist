@@ -3,7 +3,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use memberlist_proto::{
-  AliveDelegate, EndpointConfig, Event, Instant, MergeDelegate,
+  AliveDelegate, EndpointOptions, Event, Instant, MergeDelegate,
   typed::{Alive, Dead, Message, Node, NodeState, PushNodeState, State, Suspect},
 };
 use smol_str::SmolStr;
@@ -219,7 +219,7 @@ impl Cluster {
 
   /// Add a node with a custom configuration modifier.
   ///
-  /// The `config_fn` receives the default [`EndpointConfig`] and may chain
+  /// The `config_fn` receives the default [`EndpointOptions`] and may chain
   /// builder methods (e.g. `.with_dead_node_reclaim_time(...)`) before
   /// returning it. Useful for tests that need non-default knobs such as
   /// `dead_node_reclaim_time`.
@@ -227,9 +227,9 @@ impl Cluster {
     &mut self,
     id: SmolStr,
     addr: SocketAddr,
-    config_fn: impl FnOnce(EndpointConfig<SmolStr, SocketAddr>) -> EndpointConfig<SmolStr, SocketAddr>,
+    config_fn: impl FnOnce(EndpointOptions<SmolStr, SocketAddr>) -> EndpointOptions<SmolStr, SocketAddr>,
   ) -> SocketAddr {
-    let cfg = EndpointConfig::new(id, addr)
+    let cfg = EndpointOptions::new(id, addr)
       .with_gossip_interval(Duration::from_millis(200))
       .with_push_pull_interval(Duration::from_secs(30))
       .with_probe_interval(Duration::from_millis(1000))

@@ -1787,7 +1787,7 @@ fn drained_reap_then_subsequent_dial_redials_and_converges() {
 
 /// A peer that opens a remote-initiated unidirectional stream toward
 /// the composed endpoint must be refused at the QUIC protocol layer:
-/// `QuicConfig::new` forces `TransportConfig::max_concurrent_uni_streams = 0`
+/// `QuicOptions::new` forces `TransportConfig::max_concurrent_uni_streams = 0`
 /// on the shared transport config installed on BOTH client and server,
 /// so the sender's `quinn_proto::Streams::open(Dir::Uni)` returns `None`
 /// once `state.next[Uni] >= state.max[Uni]`. The receiver therefore
@@ -1820,7 +1820,7 @@ fn drained_reap_then_subsequent_dial_redials_and_converges() {
 ///
 /// Negative-control proof: removing the
 /// `transport.max_concurrent_uni_streams(VarInt::from_u32(0))` line in
-/// `QuicConfig::new` (and removing the analogous force on the server
+/// `QuicOptions::new` (and removing the analogous force on the server
 /// side) reverts `state.max[Uni]` to quinn's default 100, so the
 /// `Streams::open(Dir::Uni)` would instead return `Some(_)` and the
 /// receiver would allocate `Recv` state on first frame arrival. The
@@ -2023,14 +2023,14 @@ fn start_push_pull_self_sufficient_under_strict_poll_driving() {
   );
 }
 
-// ── Cluster-uniform rustls `server_name` plumbing via `QuicConfig` ──────────
+// ── Cluster-uniform rustls `server_name` plumbing via `QuicOptions` ──────────
 //
 // `QuicEndpoint` MUST source the rustls/QUIC verification identity for a
-// peer from `QuicConfig::server_name()`, NOT a hardcoded string. The
+// peer from `QuicOptions::server_name()`, NOT a hardcoded string. The
 // test below proves the plumbing end-to-end: each side's client cert
 // verifier is a strict `ServerCertVerifier` that asserts the
 // `ServerName` it receives matches the configured peer name; each side's
-// `QuicConfig` carries that name; each side's server cert SAN matches
+// `QuicOptions` carries that name; each side's server cert SAN matches
 // what the peer's verifier expects. A successful push/pull exchange
 // between A and B is then proof that the configured name reached rustls.
 //
@@ -2047,7 +2047,7 @@ mod per_peer_server_name {
   };
 
   use memberlist_proto::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, UnreliableTransport,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicOptions, QuicEndpoint, UnreliableTransport,
     typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -2062,7 +2062,7 @@ mod per_peer_server_name {
   ///
   /// The certificate bytes themselves are NOT checked — this is a
   /// plumbing test, not a TLS conformance test; the assertion is that
-  /// the rustls verifier saw the name `QuicConfig::server_name()` returned.
+  /// the rustls verifier saw the name `QuicOptions::server_name()` returned.
   #[derive(Debug)]
   struct CapturingVerifier {
     expected: ServerName<'static>,
@@ -2128,13 +2128,13 @@ mod per_peer_server_name {
     (chain, key)
   }
 
-  /// Build a `QuicConfig` for one node: its own server cert (SAN =
+  /// Build a `QuicOptions` for one node: its own server cert (SAN =
   /// `own_san`) plus a strict client verifier that requires the peer's
   /// cert verification name to equal `expected_peer_name`.
   fn config_with_strict_verifier(
     own_san: &str,
     expected_peer_name: &'static str,
-  ) -> (QuicConfig, Arc<Mutex<Option<ServerName<'static>>>>) {
+  ) -> (QuicOptions, Arc<Mutex<Option<ServerName<'static>>>>) {
     let (chain, key) = cert_with_san(own_san);
     let expected: ServerName<'static> =
       ServerName::try_from(expected_peer_name).expect("valid DNS name");
@@ -2167,7 +2167,7 @@ mod per_peer_server_name {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    let cfg = QuicConfig::new(
+    let cfg = QuicOptions::new(
       endpoint,
       server,
       client,
@@ -2181,10 +2181,10 @@ mod per_peer_server_name {
   fn build_endpoint(
     id: &str,
     addr: SocketAddr,
-    cfg: QuicConfig,
+    cfg: QuicOptions,
     now: Instant,
   ) -> QuicEndpoint<SmolStr> {
-    let ep_cfg = EndpointConfig::new(SmolStr::new(id), addr)
+    let ep_cfg = EndpointOptions::new(SmolStr::new(id), addr)
       .with_gossip_interval(Duration::from_millis(200))
       .with_push_pull_interval(Duration::from_secs(30))
       .with_probe_interval(Duration::from_millis(1000))
@@ -2199,13 +2199,13 @@ mod per_peer_server_name {
     QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, cfg, Some(seed))
   }
 
-  /// Cluster-uniform rustls `server_name` plumbing via `QuicConfig`.
+  /// Cluster-uniform rustls `server_name` plumbing via `QuicOptions`.
   ///
   /// Two nodes A and B, each with a server cert whose SAN is its own
   /// per-peer DNS name. Each client side uses a strict
   /// `ServerCertVerifier` that requires the `ServerName` it receives to
   /// match the configured peer name (a non-match returns
-  /// `CertificateError::NotValidForName`). Each side's `QuicConfig`
+  /// `CertificateError::NotValidForName`). Each side's `QuicOptions`
   /// carries the expected peer name via the `server_name` constructor
   /// argument. A successful push/pull join (A and B converge Alive)
   /// proves the configured name travelled from `service_dials` through
@@ -2356,7 +2356,7 @@ mod per_peer_server_name {
     let expected = ServerName::try_from("node-b.example.com").unwrap();
     assert_eq!(
       observed, expected,
-      "QuicConfig::server_name MUST plumb through to rustls — A's \
+      "QuicOptions::server_name MUST plumb through to rustls — A's \
        client verifier observed `{observed:?}`, expected `{expected:?}`. \
        Reverting `get_or_dial` to hardcode `\"localhost\"` would have \
        this asserting `localhost` against `node-b.example.com`."
@@ -2381,25 +2381,25 @@ mod per_peer_server_name {
     assert!(
       a_alive_b,
       "A must see B Alive — the rustls verifier on A's side accepted \
-       the SAN `node-b.example.com` configured on A's QuicConfig, so \
+       the SAN `node-b.example.com` configured on A's QuicOptions, so \
        the handshake completed and the join push/pull converged"
     );
     assert!(
       b_alive_a,
       "B must see A Alive — symmetric: B's verifier accepted the \
-       SAN `node-a.example.com` configured on B's QuicConfig"
+       SAN `node-a.example.com` configured on B's QuicOptions"
     );
   }
 }
 
 /// Cluster-auth on the QUIC reliable path is the operator's choice of
 /// rustls `ClientCertVerifier` on the supplied `quinn_proto::ServerConfig`.
-/// `QuicConfig::new` does NOT pick a policy: the caller builds the entire
+/// `QuicOptions::new` does NOT pick a policy: the caller builds the entire
 /// server config including the cert verifier. This test proves the two
 /// pieces operators need:
 ///
 /// 1. A server config built with `with_client_cert_verifier(...)` instead
-///    of `with_no_client_auth()` makes `QuicConfig::new` happily install
+///    of `with_no_client_auth()` makes `QuicOptions::new` happily install
 ///    it (the constructor no longer hardcodes `with_no_client_auth`).
 /// 2. A client that does NOT present a cert against such a server fails
 ///    the TLS handshake — no `EndpointEvent` side effects survive
@@ -2411,7 +2411,7 @@ mod mtls_cluster_auth {
   use std::{net::SocketAddr, sync::Arc, time::Duration};
 
   use memberlist_proto::{
-    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint, UnreliableTransport,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicOptions, QuicEndpoint, UnreliableTransport,
     typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -2508,7 +2508,7 @@ mod mtls_cluster_auth {
   /// Build A's config: server REQUIRES client cert (rejected by
   /// `RejectAllClients`); client side has no client cert (irrelevant —
   /// A is the strict server).
-  fn strict_server_config() -> QuicConfig {
+  fn strict_server_config() -> QuicOptions {
     let (chain, key) = cert();
     let provider = memberlist_simulation::quic_net::sim_crypto_provider();
     let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -2536,7 +2536,7 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    QuicConfig::new(
+    QuicOptions::new(
       endpoint,
       server,
       client,
@@ -2548,7 +2548,7 @@ mod mtls_cluster_auth {
 
   /// Build B's config: server accepts any client; client has no cert
   /// — the unauthenticated-joiner role.
-  fn unauth_client_config() -> QuicConfig {
+  fn unauth_client_config() -> QuicOptions {
     let (chain, key) = cert();
     let provider = memberlist_simulation::quic_net::sim_crypto_provider();
     let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -2576,7 +2576,7 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0xa5u8; 32]);
-    QuicConfig::new(
+    QuicOptions::new(
       endpoint,
       server,
       client,
@@ -2589,10 +2589,10 @@ mod mtls_cluster_auth {
   fn build_endpoint(
     id: &str,
     addr: SocketAddr,
-    cfg: QuicConfig,
+    cfg: QuicOptions,
     now: Instant,
   ) -> QuicEndpoint<SmolStr> {
-    let ep_cfg = EndpointConfig::new(SmolStr::new(id), addr)
+    let ep_cfg = EndpointOptions::new(SmolStr::new(id), addr)
       .with_probe_interval(Duration::from_millis(1000))
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)

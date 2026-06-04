@@ -17,13 +17,13 @@ use memberlist_proto::RawRecords;
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use memberlist_proto::streams::{StreamEndpoint, StreamTransport};
 use memberlist_proto::{
-  AliveDelegate, CompressionOptions, EncryptionOptions, Endpoint, EndpointConfig, Instant,
+  AliveDelegate, CompressionOptions, EncryptionOptions, Endpoint, EndpointOptions, Instant,
   MergeDelegate, Node, event::Event, typed::NodeState,
 };
 #[cfg(feature = "tls")]
 use memberlist_proto::{Labeled, TlsOptions, TlsRecords};
 #[cfg(feature = "quic")]
-use memberlist_proto::{QuicConfig, QuicEndpoint};
+use memberlist_proto::{QuicEndpoint, QuicOptions};
 
 #[cfg(feature = "quic")]
 use crate::quic_driver::QuicDriver;
@@ -68,11 +68,11 @@ impl<I: 'static, A: 'static> MergeDelegate<I, A> for BoxedMerge<I, A> {
   }
 }
 
-/// Layers the [`MemberlistOptions`] overrides onto a machine [`EndpointConfig`].
+/// Layers the [`MemberlistOptions`] overrides onto a machine [`EndpointOptions`].
 fn apply_memberlist_options<I, A>(
-  mut cfg: EndpointConfig<I, A>,
+  mut cfg: EndpointOptions<I, A>,
   opts: &MemberlistOptions,
-) -> EndpointConfig<I, A> {
+) -> EndpointOptions<I, A> {
   if let Some(mtu) = opts.gossip_mtu() {
     cfg = cfg.with_gossip_mtu(mtu);
   }
@@ -132,7 +132,7 @@ impl<I: NodeId> Memberlist<I> {
     advertise: MaybeResolved<Res::Address>,
     options: Options<I>,
     delegate: D,
-    quic_config: QuicConfig,
+    quic_config: QuicOptions,
   ) -> Result<Self, Error>
   where
     R: Runtime,
@@ -149,7 +149,7 @@ impl<I: NodeId> Memberlist<I> {
     let (ml_opts, drv_opts, alive, merge) = options.into_parts();
     validate_encryption(ml_opts.encryption())?;
 
-    let cfg = apply_memberlist_options(EndpointConfig::new(local_id, bound), &ml_opts);
+    let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
@@ -367,7 +367,7 @@ impl<I: NodeId> Memberlist<I> {
     // discarding every encrypted gossip datagram at runtime.
     validate_encryption(ml_opts.encryption())?;
 
-    let cfg = apply_memberlist_options(EndpointConfig::new(local_id, bound), &ml_opts);
+    let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
@@ -632,7 +632,7 @@ impl<I: NodeId> Memberlist<I> {
     if !seeds.is_empty() && addrs.is_empty() {
       return Err(Error::JoinFailed(seeds.len()));
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self.shared.push_command(Command::Join(JoinCmd {
       addrs,
       wait,
@@ -640,7 +640,7 @@ impl<I: NodeId> Memberlist<I> {
     })) {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Gracefully leaves the cluster (the node stops participating).
@@ -648,19 +648,19 @@ impl<I: NodeId> Memberlist<I> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::Leave(LeaveCmd { reply: tx }))
     {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Stops the driver and releases its socket.
   pub async fn shutdown(&self) -> Result<(), Error> {
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::Shutdown(ShutdownCmd { reply: tx }))
@@ -668,7 +668,7 @@ impl<I: NodeId> Memberlist<I> {
       // The driver already exited; shutdown is idempotent.
       return Ok(());
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Probes `node` and returns the measured round-trip time.
@@ -680,14 +680,14 @@ impl<I: NodeId> Memberlist<I> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::Ping(PingCmd { node, reply: tx }))
     {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Sends a single unreliable directed user message to `to` via gossip.
@@ -705,7 +705,7 @@ impl<I: NodeId> Memberlist<I> {
       return Err(Error::Shutdown);
     }
     let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self.shared.push_command(Command::SendUser(SendUserCmd {
       to,
       payloads,
@@ -713,7 +713,7 @@ impl<I: NodeId> Memberlist<I> {
     })) {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Sends a single reliable directed user message to `to` via the stream
@@ -733,7 +733,7 @@ impl<I: NodeId> Memberlist<I> {
       return Err(Error::Shutdown);
     }
     let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::SendReliable(SendReliableCmd {
@@ -744,7 +744,7 @@ impl<I: NodeId> Memberlist<I> {
     {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Reconfigures the gossip compression policy in place.
@@ -755,7 +755,7 @@ impl<I: NodeId> Memberlist<I> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::SetCompressionOptions(SetCompressionOptionsCmd {
@@ -765,7 +765,7 @@ impl<I: NodeId> Memberlist<I> {
     {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 
   /// Reconfigures the gossip encryption policy in place.
@@ -778,7 +778,7 @@ impl<I: NodeId> Memberlist<I> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
@@ -788,7 +788,7 @@ impl<I: NodeId> Memberlist<I> {
     {
       return Err(Error::Shutdown);
     }
-    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+    rx.await.map_err(|_| Error::Shutdown)?
   }
 }
 
