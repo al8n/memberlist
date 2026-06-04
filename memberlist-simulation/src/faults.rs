@@ -40,11 +40,9 @@ impl FaultConfig {
   /// Side-effect: consumes a pending one-shot drop.
   #[allow(dead_code)]
   pub(crate) fn should_deliver(&mut self, from: SocketAddr, to: SocketAddr) -> bool {
-    // One-shot drop.
     if self.drop_next.remove(&from) {
       return false;
     }
-    // Partition check.
     if self.partitioned(from, to) {
       return false;
     }

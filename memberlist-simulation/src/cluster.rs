@@ -411,7 +411,6 @@ impl Cluster {
       return false;
     }
 
-    // Remove from the crashed set.
     self.net.crashed.remove(&addr);
 
     // Replace with a fresh endpoint at the superseding incarnation. Rebuild
@@ -657,7 +656,6 @@ impl Cluster {
       } else {
         idle += 1;
         if idle >= 3 {
-          // Three consecutive no-op steps: quiescent.
           break;
         }
       }
