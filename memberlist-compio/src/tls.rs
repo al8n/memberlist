@@ -27,7 +27,7 @@ use bytes::Bytes;
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
 use memberlist_proto::{
-  LabelOptions, Labeled, TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint,
+  LabelOptions, Labeled, TlsOptions, TlsRecords, config::EndpointOptions, endpoint::Endpoint,
   streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
@@ -299,7 +299,7 @@ where
     // stored config. TLS supplies the per-peer SNI provider; the
     // membership address IS the transport socket (`|addr| *addr`).
     let cfg = crate::options::apply_memberlist_options(
-      EndpointConfig::new(self.local_id, self.advertise_socket),
+      EndpointOptions::new(self.local_id, self.advertise_socket),
       &runtime.memberlist_options,
     );
     // Install the optional machine admission predicates before the driver

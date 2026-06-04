@@ -37,7 +37,7 @@ mod tests {
 
   use super::records::RawRecords;
   use crate::{
-    config::EndpointConfig,
+    config::EndpointOptions,
     endpoint::Endpoint,
     event::{Event, PushPullKind, StreamId},
     streams::{
@@ -1681,12 +1681,12 @@ mod tests {
     }
   }
 
-  /// `EndpointConfig::with_gossip_mtu` propagates all the way through to the
+  /// `EndpointOptions::with_gossip_mtu` propagates all the way through to the
   /// composed `StreamEndpoint` coordinator: `coord.gossip_mtu()` returns the
   /// configured value, NOT the legacy 1400 constant.
   #[test]
   fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
-    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
+    let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
@@ -1696,7 +1696,7 @@ mod tests {
       1200,
       "StreamEndpoint::gossip_mtu must read the configured value (not the \
        legacy 1400 constant) so the FSM's plaintext-budget bound tracks \
-       EndpointConfig",
+       EndpointOptions",
     );
   }
 
@@ -1716,7 +1716,7 @@ mod tests {
   #[test]
   fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
     use crate::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
-    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
+    let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));

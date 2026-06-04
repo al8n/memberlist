@@ -19,7 +19,7 @@
 //!   --target thumbv7em-none-eabihf
 //! ```
 //!
-//! Configuring an explicit RNG seed via `EndpointConfig` avoids the entropy
+//! Configuring an explicit RNG seed via `EndpointOptions` avoids the entropy
 //! draw entirely.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -41,10 +41,10 @@ extern crate std;
 #[cfg(not(any(feature = "std", feature = "alloc")))]
 compile_error!("memberlist-smoltcp requires the `std` or `alloc` feature");
 
-pub use config::Config;
+pub use config::Options;
 pub use error::{GossipMtuTooLarge, InitError, MediumMismatch};
 pub use interface::{
-  EthernetAddress, HardwareAddress, InterfaceConfig, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
+  EthernetAddress, HardwareAddress, InterfaceOptions, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
   Medium, Route,
 };
 pub use memberlist::Memberlist;

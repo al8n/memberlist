@@ -3,18 +3,18 @@
 //! [`QuicTransport`] owns the bound `UdpSocket`; QUIC carries no separate
 //! TCP listener — quinn-proto multiplexes streams over the single UDP
 //! socket. The machine-layer `QuicEndpoint<I>` is built inside
-//! [`QuicTransport::run`] from the stored [`QuicConfig`]. Construct via
+//! [`QuicTransport::run`] from the stored [`QuicOptions`]. Construct via
 //! [`Memberlist::new`](crate::Memberlist::new); [`QuicMemberlist`] is the
 //! pinned-alias convenience shape.
 //!
 //! ## TLS server name
 //!
 //! QUIC's TLS 1.3 handshake requires a server name to verify the peer's
-//! certificate against. [`QuicConfig::new`] installs a cluster-uniform
+//! certificate against. [`QuicOptions::new`] installs a cluster-uniform
 //! string used for every peer (see the `quic-rustls` test setups in
 //! `memberlist-simulation` for the `"localhost"` SAN convention);
 //! deployments whose certs name each peer's hostname/IP supply a per-peer
-//! SNI closure via [`QuicConfig::new_with_sni_provider`] that maps each
+//! SNI closure via [`QuicOptions::new_with_sni_provider`] that maps each
 //! dialed `SocketAddr` to its expected verification identity.
 
 #![cfg(feature = "quic")]
@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 
 use compio::net::UdpSocket;
 use hostaddr::HostAddr;
-use memberlist_proto::{QuicEndpoint, config::EndpointConfig, endpoint::Endpoint};
+use memberlist_proto::{QuicEndpoint, config::EndpointOptions, endpoint::Endpoint};
 use smol_str::SmolStr;
 
 use crate::{
@@ -44,7 +44,7 @@ pub struct Quic;
 
 /// QUIC config bundle handed to [`QuicTransport`]. Re-exported from
 /// `memberlist-proto` so callers don't need a direct dep.
-pub use memberlist_proto::QuicConfig;
+pub use memberlist_proto::QuicOptions;
 
 /// QUIC-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
 /// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`.
@@ -55,13 +55,13 @@ pub type QuicMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, 
 ///
 /// Embedded into `Options<QuicTransport<I, A>>::transport()`. Bundles the
 /// local identifier, the (possibly-unresolved) advertise address, and the
-/// caller-built [`QuicConfig`] (quinn-proto `EndpointConfig` /
+/// caller-built [`QuicOptions`] (quinn-proto `EndpointConfig` /
 /// `ServerConfig` / `ClientConfig` / `TransportConfig` bundle plus SNI
 /// provider).
 pub struct QuicTransportOptions<I = SmolStr, A = HostAddr<SmolStr>> {
   local_id: Option<I>,
   advertise_addr: Option<MaybeResolved<A, SocketAddr>>,
-  quic_config: Option<QuicConfig>,
+  quic_config: Option<QuicOptions>,
 }
 
 impl<I, A> QuicTransportOptions<I, A> {
@@ -95,7 +95,7 @@ impl<I, A> QuicTransportOptions<I, A> {
   /// Builder: QUIC config bundle (caller-built quinn-proto configs + SNI).
   #[must_use]
   #[inline]
-  pub fn with_quic_config(mut self, cfg: QuicConfig) -> Self {
+  pub fn with_quic_config(mut self, cfg: QuicOptions) -> Self {
     self.quic_config = Some(cfg);
     self
   }
@@ -114,7 +114,7 @@ impl<I, A> QuicTransportOptions<I, A> {
 
   /// QUIC config bundle.
   #[inline]
-  pub const fn quic_config(&self) -> Option<&QuicConfig> {
+  pub const fn quic_config(&self) -> Option<&QuicOptions> {
     self.quic_config.as_ref()
   }
 }
@@ -137,7 +137,7 @@ pub struct QuicTransport<I = SmolStr, A = HostAddr<SmolStr>> {
   local_address: MaybeResolved<A, SocketAddr>,
   advertise_socket: SocketAddr,
   gossip_socket: UdpSocket,
-  quic_config: QuicConfig,
+  quic_config: QuicOptions,
 }
 
 impl<I, A> Transport for QuicTransport<I, A>
@@ -239,10 +239,10 @@ where
   {
     // `Memberlist::new` is generic over `T` and cannot build the
     // QUIC endpoint (it needs the quinn-proto config bundle); build it
-    // here from `self`'s stored config. `QuicConfig` carries the
+    // here from `self`'s stored config. `QuicOptions` carries the
     // per-peer SNI plumbing internally.
     let cfg = crate::options::apply_memberlist_options(
-      EndpointConfig::new(self.local_id, self.advertise_socket),
+      EndpointOptions::new(self.local_id, self.advertise_socket),
       &runtime.memberlist_options,
     );
     // Install the optional machine admission predicates before the driver
@@ -305,10 +305,10 @@ mod transport_tests {
 
   const ALPN: &[u8] = b"memberlist-quic";
 
-  /// Build a minimal valid `QuicConfig` for the construction test. Mirrors
+  /// Build a minimal valid `QuicOptions` for the construction test. Mirrors
   /// the `tests/support/quic.rs` fixture; the test never performs a QUIC
-  /// handshake, the config just has to type-check and pass `QuicConfig::new`.
-  fn default_test_quic_config() -> QuicConfig {
+  /// handshake, the config just has to type-check and pass `QuicOptions::new`.
+  fn default_test_quic_config() -> QuicOptions {
     let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen self-sign");
     let cert = CertificateDer::from(ck.cert.der().to_vec());
     let key = PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
@@ -351,7 +351,7 @@ mod transport_tests {
       ))
       .keep_alive_interval(Some(Duration::from_secs(1)));
 
-    QuicConfig::new(
+    QuicOptions::new(
       endpoint_cfg,
       server_cfg,
       client_cfg,

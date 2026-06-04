@@ -91,8 +91,8 @@ use conn::StreamConns;
 ///
 /// Historical default for the server-side accept handshake deadline,
 /// retained as documentation. The runtime value is read from
-/// [`crate::config::EndpointConfig::accept_handshake_deadline`] —
-/// operators tune via `EndpointConfig::with_accept_handshake_deadline`;
+/// [`crate::config::EndpointOptions::accept_handshake_deadline`] —
+/// operators tune via `EndpointOptions::with_accept_handshake_deadline`;
 /// see [`crate::config::DEFAULT_ACCEPT_HANDSHAKE_DEADLINE`].
 ///
 /// An accepted connection has no `Event::DialRequested` exchange
@@ -355,7 +355,7 @@ where
   }
 
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
-  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
+  /// Sourced from [`crate::config::EndpointOptions::gossip_mtu`] (default
   /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
   /// exceed this by [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] when
   /// encryption is enabled.
@@ -967,7 +967,7 @@ where
   }
 
   /// The reliable-stream frame ceiling
-  /// ([`max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)).
+  /// ([`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)).
   /// The driver derives its observation-channel payload byte budget from this.
   #[inline]
   pub fn max_stream_frame_size(&self) -> usize {
@@ -1183,7 +1183,7 @@ where
   }
 
   /// The reliable-unit ceiling a given exchange's bridge was built with, for a
-  /// test asserting the ceiling tracks `EndpointConfig::max_stream_frame_size`
+  /// test asserting the ceiling tracks `EndpointOptions::max_stream_frame_size`
   /// rather than a hard-coded constant.
   #[cfg(all(test, feature = "tcp"))]
   pub(crate) fn bridge_reliable_max(&mut self, id: ExchangeId) -> Option<usize> {

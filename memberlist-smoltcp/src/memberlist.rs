@@ -6,7 +6,7 @@ use memberlist_embedded::{
   Engine,
   transform::{CompressionOptions, EncryptionOptions},
 };
-use memberlist_proto::{EndpointConfig, Instant, Node, StreamId, event::PingId, typed::NodeState};
+use memberlist_proto::{EndpointOptions, Instant, Node, StreamId, event::PingId, typed::NodeState};
 use smoltcp::{
   iface::{Config as IfConfig, Interface, SocketHandle, SocketSet},
   phy::Device,
@@ -14,7 +14,7 @@ use smoltcp::{
 };
 
 use crate::{
-  Config, InitError, InterfaceConfig, TransformOptions,
+  Options, InitError, InterfaceOptions, TransformOptions,
   addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_instant},
   error::{GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
@@ -31,7 +31,7 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// smoltcp's `tcp::Socket::new` `panic!`s when the receive-buffer capacity
 /// exceeds this (`if rx_capacity > (1 << 30)`, socket/tcp.rs), derived from the
 /// RFC 1323 window-scale ceiling of 2^30. A caller-supplied
-/// [`Config::tcp_socket_rx_bytes`](crate::Config::tcp_socket_rx_bytes) past it
+/// [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) past it
 /// would panic inside the fallible constructor, so `try_new` rejects it first.
 /// The transmit buffer has no such limit and is not capped.
 const TCP_RX_BUFFER_MAX: usize = 1 << 30;
@@ -136,7 +136,7 @@ where
   ///
   /// This is the convenience wrapper over [`try_new`](Self::try_new); it has the
   /// same parameters and behaviour but unwraps the result. Use it only when the
-  /// [`InterfaceConfig`] is a static constant known to be valid and the build
+  /// [`InterfaceOptions`] is a static constant known to be valid and the build
   /// targets a host whose entropy source cannot fail.
   ///
   /// # Panics
@@ -147,10 +147,10 @@ where
   /// machine-endpoint init failure. Call [`try_new`](Self::try_new) to handle
   /// those.
   pub fn new(
-    cfg: Config,
-    iface: InterfaceConfig,
+    cfg: Options,
+    iface: InterfaceOptions,
     transform: TransformOptions,
-    ep_cfg: EndpointConfig<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     device: &mut D,
     now: Instant,
   ) -> Self {
@@ -214,10 +214,10 @@ where
   ///   engine by encrypting an empty frame with each key), so encrypted gossip
   ///   would otherwise be silently dropped at runtime.
   pub fn try_new(
-    cfg: Config,
-    iface: InterfaceConfig,
+    cfg: Options,
+    iface: InterfaceOptions,
     transform: TransformOptions,
-    ep_cfg: EndpointConfig<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     device: &mut D,
     now: Instant,
   ) -> Result<Self, InitError> {
@@ -357,7 +357,7 @@ where
     // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
     // graceful close is force-aborted immediately — the drain never runs and an
     // in-flight push/pull response is truncated. (The engine also rejects it; the
-    // driver screens it here with the rest of its pure-`Config` checks.)
+    // driver screens it here with the rest of its pure-`Options` checks.)
     if cfg.close_timeout.is_zero() {
       return Err(InitError::ZeroCloseTimeout);
     }
@@ -502,16 +502,16 @@ where
       ));
     }
 
-    // Build the engine from the driver's port / timeout config. NOTE the `Config`
-    // name collision — the driver's `crate::Config` carries link-layer sizing
+    // Build the engine from the driver's port / timeout config. NOTE the `Options`
+    // name collision — the driver's `crate::Options` carries link-layer sizing
     // (socket buffers, UDP arenas, `tcp_pool_size`) that stays on the driver,
-    // while `memberlist_embedded::Config` carries only the port and close timeout
+    // while `memberlist_embedded::Options` carries only the port and close timeout
     // the engine reads directly. `try_new_at` (not `new_at`) so a machine entropy
     // failure, an unusable encryption keyring, or a non-routable / port-mismatched
     // advertise address becomes a typed `InitError` rather than a panic. The
     // engine installs the routable-address admission filter and the
     // compression/encryption/label transforms internally.
-    let embedded_cfg = memberlist_embedded::Config::new()
+    let embedded_cfg = memberlist_embedded::Options::new()
       .with_port(cfg.port)
       .with_close_timeout(cfg.close_timeout);
     let mut engine =
@@ -557,7 +557,7 @@ where
   /// A diagnostic for the interface-seed contract: smoltcp seeds its TCP
   /// initial-sequence-number and ephemeral-port RNG from this value but does not
   /// expose it, so a test uses this to witness that an unpinned
-  /// [`InterfaceConfig`] drew a nonzero seed from system entropy and a pinned one
+  /// [`InterfaceOptions`] drew a nonzero seed from system entropy and a pinned one
   /// was applied verbatim.
   #[doc(hidden)]
   #[inline]
@@ -970,7 +970,7 @@ where
   /// the returned deadline, advancing the clock, and calling `poll` again.
   /// Because every deadline enforced on a tick is folded into this instant, a
   /// caller that sleeps exactly to it always wakes in time to honor them —
-  /// including reclaiming a closing socket by `Config::close_timeout`.
+  /// including reclaiming a closing socket by `Options::close_timeout`.
   ///
   /// # Order
   ///
@@ -1038,7 +1038,7 @@ fn min_opt(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{HardwareAddress, InterfaceConfig, IpCidr};
+  use crate::{HardwareAddress, InterfaceOptions, IpCidr};
   use core::net::{IpAddr, Ipv4Addr, SocketAddr};
   use smol_str::SmolStr;
 
@@ -1046,8 +1046,8 @@ mod tests {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), p)
   }
 
-  fn ip_iface() -> InterfaceConfig {
-    InterfaceConfig::new(HardwareAddress::Ip).with_ip_addr(IpCidr::new(
+  fn ip_iface() -> InterfaceOptions {
+    InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(IpCidr::new(
       IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)).into(),
       24,
     ))
@@ -1055,9 +1055,9 @@ mod tests {
 
   #[test]
   fn new_node_is_sole_member() {
-    let cfg = crate::Config::new();
+    let cfg = crate::Options::new();
     let ep_cfg =
-      memberlist_proto::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
+      memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
     let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
     let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
     let m: Memberlist<SmolStr, _> = Memberlist::new(
@@ -1076,9 +1076,9 @@ mod tests {
     let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
     let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
     let ep_cfg =
-      memberlist_proto::EndpointConfig::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
+      memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946)).with_rng_seed(1);
     let mut m: Memberlist<SmolStr, _> = Memberlist::new(
-      crate::Config::new(),
+      crate::Options::new(),
       ip_iface(),
       TransformOptions::default(),
       ep_cfg,

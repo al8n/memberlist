@@ -10,7 +10,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smol_str::SmolStr;
 
 use crate::{
-  config::EndpointConfig,
+  config::EndpointOptions,
   endpoint::Endpoint,
   event::Event,
   streams::{StreamEndpoint, bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport},
@@ -25,7 +25,7 @@ pub(crate) fn test_peer_to_socket() -> Box<dyn Fn(&SocketAddr) -> SocketAddr + S
   Box::new(|addr: &SocketAddr| *addr)
 }
 
-/// Reliable-unit ceiling for bridge test pairs — `EndpointConfig` default
+/// Reliable-unit ceiling for bridge test pairs — `EndpointOptions` default
 /// `max_stream_frame_size`, generous above every frame these tests exchange.
 pub(crate) const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
 
@@ -53,7 +53,7 @@ pub(crate) fn test_sni_provider<A: 'static>() -> Box<dyn Fn(&A) -> Option<String
 /// `n-<port>`.
 #[allow(dead_code)]
 pub(crate) fn endpoint(port: u16) -> Endpoint<SmolStr, SocketAddr> {
-  Endpoint::new(EndpointConfig::new(
+  Endpoint::new(EndpointOptions::new(
     SmolStr::new(format!("n-{port}")),
     addr(port),
   ))

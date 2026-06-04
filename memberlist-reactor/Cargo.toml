@@ -37,6 +37,7 @@ smol_str = { workspace = true }
 arc-swap = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
+futures-channel = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
 thiserror = { workspace = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
@@ -47,7 +48,7 @@ agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
 smol_str = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
 # QUIC smoke-test fixtures (self-signed cert + quinn_proto configs). Dev-only:
-# production callers supply their own QuicConfig.
+# production callers supply their own QuicOptions.
 rcgen = "0.14"
 ring = "0.17"
 rustls = { version = "0.23", features = ["ring"] }

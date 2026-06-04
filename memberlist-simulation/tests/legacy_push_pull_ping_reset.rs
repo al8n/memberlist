@@ -5,7 +5,7 @@
 //! async ceremony, mutex locks, and delegate subscribers are replaced by
 //! the `Cluster` API.
 
-use memberlist_simulation::{Alive, Cluster, Dead, EndpointConfig, Event, Node, State};
+use memberlist_simulation::{Alive, Cluster, Dead, EndpointOptions, Event, Node, State};
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
@@ -31,7 +31,7 @@ fn push_pull_membership_convergence() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(25001),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_push_pull_interval(Duration::from_millis(1))
         .with_gossip_interval(Duration::from_secs(3600))
@@ -40,7 +40,7 @@ fn push_pull_membership_convergence() {
   let m2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(25002),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_push_pull_interval(Duration::from_secs(3600))
         .with_gossip_interval(Duration::from_secs(3600))
@@ -97,7 +97,7 @@ fn ping_emits_ping_completed_with_rtt() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(25101),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
       .with_probe_timeout(Duration::from_secs(5))
       .with_probe_interval(Duration::from_secs(3600)) // disable auto-probing
@@ -108,7 +108,7 @@ fn ping_emits_ping_completed_with_rtt() {
   let m2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(25102),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_probe_timeout(Duration::from_secs(5))
         .with_probe_interval(Duration::from_secs(3600))
@@ -173,7 +173,7 @@ fn reset_nodes_removes_dead_after_reclaim_time() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(25201),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_to_the_dead_time(reclaim)
         .with_gossip_interval(Duration::from_secs(3600))

@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use memberlist_proto::{
-  CheapClone, CompressionOptions, EncryptionOptions, config::EndpointConfig, label::validate_label,
-  typed::Meta,
+  CheapClone, CompressionOptions, EncryptionOptions, config::EndpointOptions,
+  label::validate_label, typed::Meta,
 };
 
 use crate::{
@@ -16,12 +16,12 @@ use crate::{
 };
 
 /// SWIM-protocol-level options applied to the machine-layer
-/// [`EndpointConfig`](memberlist_proto::config::EndpointConfig) inside each
+/// [`EndpointOptions`](memberlist_proto::config::EndpointOptions) inside each
 /// `Transport::run`.
 ///
-/// Each field is an override layered over the `EndpointConfig` default:
+/// Each field is an override layered over the `EndpointOptions` default:
 /// a `None` scalar / an empty [`Meta`] leaves the corresponding
-/// `EndpointConfig` knob at its own default. The size knobs surfaced here
+/// `EndpointOptions` knob at its own default. The size knobs surfaced here
 /// tune the gossip and reliable-stream paths:
 ///
 /// - `gossip_mtu` — the plaintext outbound-datagram cap (and the per-iter
@@ -69,14 +69,14 @@ pub struct MemberlistOptions {
 
 impl MemberlistOptions {
   /// Construct with SWIM-protocol defaults — all fields unset (`None`),
-  /// letting the machine-layer `EndpointConfig` defaults apply.
+  /// letting the machine-layer `EndpointOptions` defaults apply.
   #[inline]
   pub fn new() -> Self {
     Self::default()
   }
 
   /// Builder: override the plaintext gossip-datagram MTU. `None` (the
-  /// default) keeps the `EndpointConfig` default
+  /// default) keeps the `EndpointOptions` default
   /// ([`DEFAULT_GOSSIP_MTU`](memberlist_proto::config::DEFAULT_GOSSIP_MTU),
   /// 1400 bytes).
   ///
@@ -99,7 +99,7 @@ impl MemberlistOptions {
   }
 
   /// Builder: override the LOCAL node's `Meta` byte ceiling. `None` (the
-  /// default) keeps the `EndpointConfig` default
+  /// default) keeps the `EndpointOptions` default
   /// ([`DEFAULT_META_MAX_SIZE`](memberlist_proto::config::DEFAULT_META_MAX_SIZE),
   /// 512 bytes). This is a local-broadcast cap, not a peer-rejection filter.
   #[must_use]
@@ -111,7 +111,7 @@ impl MemberlistOptions {
 
   /// Builder: override the reliable-stream frame ceiling — the largest
   /// push/pull or reliable user-message payload accepted on a reliable stream.
-  /// `None` (the default) keeps the `EndpointConfig` default
+  /// `None` (the default) keeps the `EndpointOptions` default
   /// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE),
   /// 64 MiB). This bounds the per-event size of `RemoteStateReceived` /
   /// reliable `UserPacket` payloads, and so — together with the
@@ -827,7 +827,7 @@ pub(crate) fn validate_initial_meta(
 /// The initial local-state snapshot rides every push/pull exchange (including
 /// the initial join) as the PushPull `user_data`, and receivers reject any
 /// reliable-stream frame whose declared length exceeds
-/// [`max_stream_frame_size`](memberlist_proto::config::EndpointConfig::max_stream_frame_size).
+/// [`max_stream_frame_size`](memberlist_proto::config::EndpointOptions::max_stream_frame_size).
 /// A snapshot whose framed PushPull would exceed that cap is
 /// deterministically untransmittable — every push/pull carrying it would be
 /// rejected and the application state would never reach a peer. Reject it at
@@ -840,7 +840,7 @@ pub(crate) fn validate_initial_meta(
 /// when set, else the machine default
 /// ([`DEFAULT_MAX_STREAM_FRAME_SIZE`](memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE)).
 /// That is exactly the ceiling `apply_memberlist_options` installs into every
-/// `Transport::run`'s `EndpointConfig`, so the up-front check matches the
+/// `Transport::run`'s `EndpointOptions`, so the up-front check matches the
 /// runtime frame-length gate.
 pub(crate) fn validate_initial_local_state<I, A>(
   opts: &MemberlistOptions,
@@ -923,15 +923,15 @@ pub(crate) fn validate_max_stream_frame_size(
 }
 
 /// Layer the [`MemberlistOptions`] overrides onto a freshly-built
-/// machine-layer [`EndpointConfig`]. Each unset knob leaves the
-/// corresponding `EndpointConfig` default untouched. Called from every
-/// `Transport::run` body after it builds its `EndpointConfig::new(id, addr)`.
+/// machine-layer [`EndpointOptions`]. Each unset knob leaves the
+/// corresponding `EndpointOptions` default untouched. Called from every
+/// `Transport::run` body after it builds its `EndpointOptions::new(id, addr)`.
 /// The `gossip_mtu` override is validated up-front in `Memberlist::new` (see
 /// [`validate_gossip_mtu`]); by the time it reaches here it is known sendable.
 pub(crate) fn apply_memberlist_options<I, A>(
-  mut cfg: EndpointConfig<I, A>,
+  mut cfg: EndpointOptions<I, A>,
   opts: &MemberlistOptions,
-) -> EndpointConfig<I, A> {
+) -> EndpointOptions<I, A> {
   if let Some(mtu) = opts.gossip_mtu() {
     cfg = cfg.with_gossip_mtu(mtu);
   }

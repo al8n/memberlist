@@ -23,7 +23,7 @@
 //!   --target thumbv7em-none-eabihf
 //! ```
 //!
-//! Configuring an explicit RNG seed via `EndpointConfig` avoids the entropy
+//! Configuring an explicit RNG seed via `EndpointOptions` avoids the entropy
 //! draw entirely.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -59,7 +59,7 @@ mod stream_io;
 mod time;
 mod worker;
 
-pub use config::Config;
+pub use config::Options;
 pub use error::{InitError, OpError, SocketTimeoutOutOfRange};
 pub use gossip_io::EmbassyGossip;
 pub use memberlist::{Memberlist, NodeStateHandle};
@@ -71,4 +71,4 @@ pub use memberlist_embedded::{
   TransformOptions,
   transform::{CompressionOptions, EncryptionOptions, Keyring, LabelError, SecretKey},
 };
-pub use memberlist_proto::{EncryptionError, EndpointConfig, Instant, Node, event};
+pub use memberlist_proto::{EncryptionError, EndpointOptions, Instant, Node, event};

@@ -6,7 +6,7 @@
 //! the `Cluster` API.
 
 use memberlist_simulation::{
-  Alive, Cluster, Dead, EndpointConfig, Event, Node, PushNodeState, State, Suspect,
+  Alive, Cluster, Dead, EndpointOptions, Event, Node, PushNodeState, State, Suspect,
 };
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
@@ -140,7 +140,7 @@ fn gossip_propagates_membership() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(24101),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_interval(Duration::from_millis(10))
         .with_push_pull_interval(Duration::from_secs(3600)) // disable PP for this test
@@ -149,7 +149,7 @@ fn gossip_propagates_membership() {
   let m2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(24102),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_interval(Duration::from_millis(10))
         .with_push_pull_interval(Duration::from_secs(3600))
@@ -158,7 +158,7 @@ fn gossip_propagates_membership() {
   let m3 = c.add_node_with(
     SmolStr::new("m3"),
     addr(24103),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_interval(Duration::from_millis(10))
         .with_push_pull_interval(Duration::from_secs(3600))
@@ -227,7 +227,7 @@ fn gossip_skips_aged_dead_peers() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(24201),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_interval(Duration::from_millis(10))
         .with_gossip_to_the_dead_time(dead_time)
@@ -237,7 +237,7 @@ fn gossip_skips_aged_dead_peers() {
   let m2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(24202),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_gossip_interval(Duration::from_millis(10))
         .with_gossip_to_the_dead_time(dead_time)

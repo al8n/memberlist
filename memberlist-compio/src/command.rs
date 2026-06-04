@@ -42,13 +42,13 @@ pub(crate) struct JoinCmd {
   /// Dispatch semantic — see [`JoinKind`].
   pub(crate) kind: JoinKind,
   /// One-shot reply channel for the join result.
-  pub(crate) reply: flume::Sender<Result<usize>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<usize>>,
 }
 
 /// Payload for [`Command::Leave`].
 pub(crate) struct LeaveCmd {
   /// One-shot reply channel for the leave result.
-  pub(crate) reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Payload for [`Command::UpdateNodeMetadata`].
@@ -56,7 +56,7 @@ pub(crate) struct UpdateNodeMetadataCmd {
   /// New raw metadata bytes for the local node.
   pub(crate) meta: Vec<u8>,
   /// One-shot reply channel for the update result.
-  pub(crate) reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Payload for [`Command::SetCompressionOptions`].
@@ -64,7 +64,7 @@ pub(crate) struct SetCompressionOptionsCmd {
   /// New compression configuration to apply in place.
   pub(crate) opts: CompressionOptions,
   /// One-shot reply channel for the reconfiguration result.
-  pub(crate) reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Payload for [`Command::SetEncryptionOptions`].
@@ -72,13 +72,13 @@ pub(crate) struct SetEncryptionOptionsCmd {
   /// New encryption configuration to apply in place.
   pub(crate) opts: EncryptionOptions,
   /// One-shot reply channel for the reconfiguration result.
-  pub(crate) reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Payload for [`Command::Shutdown`].
 pub(crate) struct ShutdownCmd {
   /// One-shot reply channel for the shutdown acknowledgement.
-  pub(crate) reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 /// Payload for [`Command::QueueUserBroadcast`].
@@ -86,23 +86,21 @@ pub(crate) struct QueueUserBroadcastCmd {
   /// Application bytes to disseminate cluster-wide via gossip.
   data: Bytes,
   /// One-shot reply channel for the enqueue acknowledgement.
-  reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 impl QueueUserBroadcastCmd {
   /// Construct from the broadcast bytes and a reply channel.
-  pub(crate) const fn new(data: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+  pub(crate) const fn new(
+    data: Bytes,
+    reply: futures_channel::oneshot::Sender<Result<()>>,
+  ) -> Self {
     Self { data, reply }
   }
 
   /// The application bytes to broadcast.
   pub(crate) const fn data(&self) -> &Bytes {
     &self.data
-  }
-
-  /// The reply channel for the enqueue acknowledgement.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
-    &self.reply
   }
 }
 
@@ -111,23 +109,21 @@ pub(crate) struct SetLocalStateCmd {
   /// Application push/pull local-state snapshot bytes.
   state: Bytes,
   /// One-shot reply channel for the set acknowledgement.
-  reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 impl SetLocalStateCmd {
   /// Construct from the snapshot bytes and a reply channel.
-  pub(crate) const fn new(state: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+  pub(crate) const fn new(
+    state: Bytes,
+    reply: futures_channel::oneshot::Sender<Result<()>>,
+  ) -> Self {
     Self { state, reply }
   }
 
   /// The local-state snapshot bytes.
   pub(crate) const fn state(&self) -> &Bytes {
     &self.state
-  }
-
-  /// The reply channel for the set acknowledgement.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
-    &self.reply
   }
 }
 
@@ -136,23 +132,21 @@ pub(crate) struct SetAckPayloadCmd {
   /// Application payload bytes attached to outbound probe acks.
   payload: Bytes,
   /// One-shot reply channel for the set acknowledgement.
-  reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 impl SetAckPayloadCmd {
   /// Construct from the ack-payload bytes and a reply channel.
-  pub(crate) const fn new(payload: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+  pub(crate) const fn new(
+    payload: Bytes,
+    reply: futures_channel::oneshot::Sender<Result<()>>,
+  ) -> Self {
     Self { payload, reply }
   }
 
   /// The ack-payload bytes.
   pub(crate) const fn payload(&self) -> &Bytes {
     &self.payload
-  }
-
-  /// The reply channel for the set acknowledgement.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
-    &self.reply
   }
 }
 
@@ -161,14 +155,14 @@ pub(crate) struct PingCmd<I> {
   /// The node to ping (id + wire address).
   node: Node<I, SocketAddr>,
   /// One-shot reply channel for the round-trip time.
-  reply: flume::Sender<Result<Duration>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<Duration>>,
 }
 
 impl<I> PingCmd<I> {
   /// Construct from a target node and a reply channel.
   pub(crate) const fn new(
     node: Node<I, SocketAddr>,
-    reply: flume::Sender<Result<Duration>>,
+    reply: futures_channel::oneshot::Sender<Result<Duration>>,
   ) -> Self {
     Self { node, reply }
   }
@@ -176,11 +170,6 @@ impl<I> PingCmd<I> {
   /// The node to ping.
   pub(crate) const fn node(&self) -> &Node<I, SocketAddr> {
     &self.node
-  }
-
-  /// The reply channel for the round-trip time.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<Duration>> {
-    &self.reply
   }
 }
 
@@ -191,7 +180,7 @@ pub(crate) struct SendUserCmd {
   /// One or more unreliable user-message payloads to direct to `to`.
   payloads: Vec<Bytes>,
   /// One-shot reply channel for the send result.
-  reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 impl SendUserCmd {
@@ -199,7 +188,7 @@ impl SendUserCmd {
   pub(crate) fn new(
     to: SocketAddr,
     payloads: Vec<Bytes>,
-    reply: flume::Sender<Result<()>>,
+    reply: futures_channel::oneshot::Sender<Result<()>>,
   ) -> Self {
     Self {
       to,
@@ -217,11 +206,6 @@ impl SendUserCmd {
   pub(crate) fn payloads(&self) -> &[Bytes] {
     &self.payloads
   }
-
-  /// The reply channel.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
-    &self.reply
-  }
 }
 
 /// Payload for [`Command::SendReliable`].
@@ -231,7 +215,7 @@ pub(crate) struct SendReliableCmd {
   /// One or more reliable user-message payloads to deliver to `to`.
   payloads: Vec<Bytes>,
   /// One-shot reply channel for the send result.
-  reply: flume::Sender<Result<()>>,
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
 
 impl SendReliableCmd {
@@ -239,7 +223,7 @@ impl SendReliableCmd {
   pub(crate) fn new(
     to: SocketAddr,
     payloads: Vec<Bytes>,
-    reply: flume::Sender<Result<()>>,
+    reply: futures_channel::oneshot::Sender<Result<()>>,
   ) -> Self {
     Self {
       to,
@@ -256,11 +240,6 @@ impl SendReliableCmd {
   /// The payloads to deliver reliably.
   pub(crate) fn payloads(&self) -> &[Bytes] {
     &self.payloads
-  }
-
-  /// The reply channel.
-  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
-    &self.reply
   }
 }
 

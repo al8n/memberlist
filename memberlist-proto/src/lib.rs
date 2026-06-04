@@ -126,7 +126,7 @@ mod bridge_phase;
 #[cfg(feature = "quic")]
 mod quic;
 #[cfg(feature = "quic")]
-pub use quic::{DatagramSendOutcome, QuicConfig, QuicEndpoint, UnreliableTransport};
+pub use quic::{DatagramSendOutcome, QuicEndpoint, QuicOptions, UnreliableTransport};
 
 #[cfg(feature = "tls")]
 mod tls;
@@ -183,7 +183,7 @@ pub mod wire_type;
 pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
 pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
-pub use config::{DEFAULT_GOSSIP_MTU, EndpointConfig};
+pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{EndpointInitError, Error, StreamError};

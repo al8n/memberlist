@@ -21,7 +21,7 @@ mod tests {
 
   use super::super::records::RawRecords;
   use crate::{
-    config::EndpointConfig,
+    config::EndpointOptions,
     error::StreamError,
     event::Event,
     streams::{
@@ -147,7 +147,7 @@ mod tests {
 
     // Outbound client: a one-way reliable user message.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7100)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
     let payload = Bytes::from_static(b"hello-tcp");
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -157,7 +157,7 @@ mod tests {
 
     // Inbound server: accept the exchange.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     let s_stream = ep_s.accept_stream(addr(7100), now);
     server.promote(s_stream);
 
@@ -273,7 +273,7 @@ mod tests {
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
     // reaps a failed-label bridge without an FSM lifecycle notice).
     let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     server.drain_then_reap(&mut ep, now);
     assert!(
       ep.poll_event().is_none(),
@@ -304,7 +304,7 @@ mod tests {
       TEST_RELIABLE_MAX,
     );
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7300)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
     let sid = ep_c.start_reliable_ping(
       SmolStr::new("srv"),
       addr(7000),
@@ -427,7 +427,7 @@ mod tests {
     // `drain_then_reap` on a no-`Stream` bridge is a clean no-op — no FSM
     // lifecycle notice is owed for a label exchange that never minted a `Stream`.
     let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7000)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
     server.drain_then_reap(&mut ep, deadline);
     assert!(
       ep.poll_event().is_none(),
@@ -455,7 +455,7 @@ mod tests {
     // are produced together (a one-way message half-closes once its request is
     // sent, so the client also owes its FIN).
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7600)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
     let payload = Bytes::from_static(b"small-coalesced-first-frame");
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -499,7 +499,7 @@ mod tests {
     // plaintext into the just-promoted `Stream`, or the small frame never
     // reaches the FSM.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7600)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7600)));
     let s_stream = ep_s.accept_stream(addr(7600), now);
     server.promote(s_stream);
     server
@@ -575,7 +575,7 @@ mod tests {
     // client's outbound buffer carries `[label||frame]` and the client owes
     // its FIN.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7700)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7700)));
     let payload = Bytes::from_static(b"coalesced-with-eof");
     let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
     let c_stream = ep_c
@@ -619,7 +619,7 @@ mod tests {
     // bridge converges to `BothClosed` without waiting for any later
     // transport read.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("srv"), addr(7700)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7700)));
     let s_stream = ep_s.accept_stream(addr(7700), now);
     server.promote(s_stream);
     server
@@ -678,7 +678,7 @@ mod tests {
     // request is pumped, the inner FSM is `OutboundAwaitingResponse` — a
     // premature peer close is `PeerClosed`.
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7200)));
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
     let sid = ep_c.start_reliable_ping(
       SmolStr::new("srv"),
       addr(7000),

@@ -8,8 +8,8 @@ mod support;
 use std::{net::SocketAddr, time::Duration};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, QuicConfig,
-  QuicMemberlist, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, QuicMemberlist,
+  QuicOptions, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -19,10 +19,10 @@ fn loopback_addr(port: u16) -> SocketAddr {
 }
 
 /// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicConfig`. The membership-input address type is `SocketAddr`, so the
+/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicConfig) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))

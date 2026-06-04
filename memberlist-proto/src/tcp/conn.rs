@@ -9,7 +9,7 @@ mod tests {
   use smol_str::SmolStr;
 
   use crate::{
-    config::EndpointConfig,
+    config::EndpointOptions,
     endpoint::Endpoint,
     event::PushPullKind,
     streams::{
@@ -45,7 +45,7 @@ mod tests {
     let now = Instant::now();
     let custom_max = 17 * 1024 * 1024;
     let cfg =
-      EndpointConfig::new(SmolStr::new("n"), addr(7300)).with_max_stream_frame_size(custom_max);
+      EndpointOptions::new(SmolStr::new("n"), addr(7300)).with_max_stream_frame_size(custom_max);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
       ep,

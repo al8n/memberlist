@@ -19,9 +19,9 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::{EndpointConfig, Instant};
+use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  CompressAlgorithm, CompressionOptions, Config, EncryptionOptions, Keyring, LabelError,
+  CompressAlgorithm, CompressionOptions, Options, EncryptionOptions, Keyring, LabelError,
   Memberlist, SecretKey, TransformOptions,
 };
 use smol_str::SmolStr;
@@ -30,12 +30,12 @@ fn addr(ip: u8, port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, ip)), port)
 }
 
-/// Short-timeout `EndpointConfig` for deterministic virtual-time convergence
+/// Short-timeout `EndpointOptions` for deterministic virtual-time convergence
 /// (identical timings to `gossip.rs`): probes every 100 ms, 50 ms ack window,
 /// suspicion fires within 400 ms, gossip every 50 ms. A node that can no longer
 /// read its peer's datagrams therefore demotes that peer to Dead within ~550 ms.
-fn mk(id: &str, ip: u8) -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
+  EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
     .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(100))
     .with_probe_timeout(Duration::from_millis(50))
@@ -66,7 +66,7 @@ fn encrypted_gossip_round_trips() {
 
   let enc = shared_encryption();
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(enc.clone()),
     mk("a", 1),
@@ -74,7 +74,7 @@ fn encrypted_gossip_round_trips() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default().with_encryption(enc),
     mk("b", 2),
@@ -124,7 +124,7 @@ fn encrypted_node_rejects_plaintext_gossip() {
   let now: Instant = clock.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(shared_encryption()),
     mk("a", 1),
@@ -133,7 +133,7 @@ fn encrypted_node_rejects_plaintext_gossip() {
   );
   // B is plaintext: no keyring, no compression, no label.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
@@ -197,7 +197,7 @@ fn gossip_label_isolates_clusters() {
     .expect("valid label");
 
   let mut alpha: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     transform_alpha,
     mk("alpha", 1),
@@ -206,7 +206,7 @@ fn gossip_label_isolates_clusters() {
   );
   // Plaintext node: no label, so alpha rejects its gossip and probes.
   let mut plain: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("plain", 2),
@@ -248,7 +248,7 @@ fn gossip_label_isolates_clusters() {
     .expect("valid label");
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     transform_a,
     mk("a", 3),
@@ -256,7 +256,7 @@ fn gossip_label_isolates_clusters() {
     now2,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4))),
     transform_b,
     mk("b", 4),
@@ -318,7 +318,7 @@ fn runtime_set_encryption_rotates_key() {
   let now: Instant = clock.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(key1.clone()),
     mk("a", 1),
@@ -326,7 +326,7 @@ fn runtime_set_encryption_rotates_key() {
     now,
   );
   let mut c: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     TransformOptions::default().with_encryption(key2.clone()),
     mk("c", 3),
@@ -364,7 +364,7 @@ fn runtime_set_encryption_rotates_key() {
   let now2: Instant = clock2.now();
 
   let mut a2: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
     TransformOptions::default().with_encryption(key1.clone()),
     mk("a2", 5),
@@ -372,7 +372,7 @@ fn runtime_set_encryption_rotates_key() {
     now2,
   );
   let mut d: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6))),
     // D starts with key2 …
     TransformOptions::default().with_encryption(key2.clone()),
@@ -422,7 +422,7 @@ fn compressed_gossip_round_trips() {
   // `CompressionOptions` is `Copy`, so both nodes take the same value directly.
   let comp = CompressionOptions::new().with_algorithm(CompressAlgorithm::Lz4);
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_compression(comp),
     mk("a", 1),
@@ -430,7 +430,7 @@ fn compressed_gossip_round_trips() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default().with_compression(comp),
     mk("b", 2),

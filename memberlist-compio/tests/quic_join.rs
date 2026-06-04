@@ -21,7 +21,7 @@ use std::{
 
 use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, Options,
-  QuicConfig, QuicMemberlist, QuicTransportOptions, Resolver, SocketAddrResolver, VoidDelegate,
+  QuicMemberlist, QuicOptions, QuicTransportOptions, Resolver, SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{
   UnreliableTransport,
@@ -71,7 +71,10 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 /// Build the shared-cert QUIC configs for two-node tests: one self-signed
 /// cert, both nodes in the same trust root so they mutually accept each
 /// other's (identical) certificate.
-fn two_node_quic_configs() -> (memberlist_compio::QuicConfig, memberlist_compio::QuicConfig) {
+fn two_node_quic_configs() -> (
+  memberlist_compio::QuicOptions,
+  memberlist_compio::QuicOptions,
+) {
   two_node_quic_configs_with_mode(UnreliableTransport::Datagram)
 }
 
@@ -79,7 +82,10 @@ fn two_node_quic_configs() -> (memberlist_compio::QuicConfig, memberlist_compio:
 /// nodes — used by the plain-UDP opt-out test.
 fn two_node_quic_configs_with_mode(
   mode: UnreliableTransport,
-) -> (memberlist_compio::QuicConfig, memberlist_compio::QuicConfig) {
+) -> (
+  memberlist_compio::QuicOptions,
+  memberlist_compio::QuicOptions,
+) {
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
@@ -94,10 +100,10 @@ fn loopback_addr(port: u16) -> SocketAddr {
 }
 
 /// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicConfig`. The membership-input address type is `SocketAddr`, so the
+/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicConfig) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
   make_quic_with(id, port, qcfg, MemberlistOptions::new()).await
 }
 
@@ -106,7 +112,7 @@ async fn make_quic(id: &str, port: u16, qcfg: QuicConfig) -> QuicMemberlist<Smol
 async fn make_quic_with(
   id: &str,
   port: u16,
-  qcfg: QuicConfig,
+  qcfg: QuicOptions,
   mopts: MemberlistOptions,
 ) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
@@ -802,7 +808,7 @@ async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
 }
 
 /// Mismatched server name: B's cert SANs only `"otherhost"`; A's
-/// `QuicConfig::server_name` is configured to `"localhost"`. The dial
+/// `QuicOptions::server_name` is configured to `"localhost"`. The dial
 /// path threads that name into rustls's `ClientConfig`, which then
 /// performs server-name verification against the presented cert's SANs.
 /// No SAN matches `"localhost"`, so rustls rejects the cert before any

@@ -342,9 +342,9 @@ mod tests {
   fn quinn_pair() -> (
     QuinnEndpoint,
     QuinnEndpoint,
-    super::super::crypto::QuicConfig,
+    super::super::crypto::QuicOptions,
   ) {
-    let cfg = super::super::crypto::QuicConfig::new(
+    let cfg = super::super::crypto::QuicOptions::new(
       test_endpoint_config(&[3u8; 32]),
       test_server(),
       test_client(),

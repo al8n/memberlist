@@ -9,7 +9,7 @@ use crate::interface::{HardwareAddress, IpCidr, Medium, Route};
 /// Why constructing a [`Memberlist`](crate::Memberlist) failed.
 ///
 /// Every variant is a misconfiguration or environment fault reported in place
-/// of a panic, so a caller assembling an [`InterfaceConfig`](crate::InterfaceConfig)
+/// of a panic, so a caller assembling an [`InterfaceOptions`](crate::InterfaceOptions)
 /// from untrusted or runtime values can recover.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -44,7 +44,7 @@ pub enum InitError {
   /// diagnostics.
   NonUnicastIpAddress(IpCidr),
   /// The configured advertise address
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointOptions::advertise_addr_ref`](memberlist_proto::EndpointOptions::advertise_addr_ref))
   /// is not a routable destination.
   ///
   /// A node must advertise an address its peers can route a reply to. An
@@ -54,7 +54,7 @@ pub enum InitError {
   /// port 0 (`Unaddressable`) and the route / neighbor lookup asserts the address
   /// is unicast. The offending address is carried for diagnostics.
   NonRoutableAdvertiseAddr(core::net::SocketAddr),
-  /// [`InterfaceConfig::ip_addrs`](crate::InterfaceConfig::ip_addrs) was empty,
+  /// [`InterfaceOptions::ip_addrs`](crate::InterfaceOptions::ip_addrs) was empty,
   /// so the interface would accept no packets.
   MissingIpAddress,
   /// More IP addresses were configured than smoltcp's interface capacity
@@ -63,7 +63,7 @@ pub enum InitError {
   /// More routes were configured than smoltcp's route-table capacity
   /// (`IFACE_MAX_ROUTE_COUNT`).
   TooManyRoutes,
-  /// [`Config::port`](crate::Config::port) is zero.
+  /// [`Options::port`](crate::Options::port) is zero.
   ///
   /// smoltcp's `udp::Socket::bind` and `tcp::Socket::listen` reject port 0
   /// (`Unaddressable`), which would otherwise panic inside the fallible
@@ -71,11 +71,11 @@ pub enum InitError {
   ZeroPort,
   /// The advertised port does not match the bound port.
   ///
-  /// The node binds one [`Config::port`](crate::Config::port) for both the
+  /// The node binds one [`Options::port`](crate::Options::port) for both the
   /// gossip UDP socket and the reliable TCP listener (the single-port memberlist
   /// model). On a direct smoltcp interface (no NAT) a node is reachable only at
   /// the port it binds, so its advertised port
-  /// ([`EndpointConfig::advertise_addr_ref`](memberlist_proto::EndpointConfig::advertise_addr_ref))
+  /// ([`EndpointOptions::advertise_addr_ref`](memberlist_proto::EndpointOptions::advertise_addr_ref))
   /// must equal it. Otherwise every peer routes to a port nothing is listening on.
   AdvertisePortMismatch,
   /// The advertised IP is not one assigned to the interface.
@@ -83,7 +83,7 @@ pub enum InitError {
   /// smoltcp drops any inbound packet whose destination is not an assigned
   /// interface address (the `has_ip_addr` gate in `process_ipv4`/`process_ipv6`),
   /// so a node advertising an IP absent from
-  /// [`InterfaceConfig::ip_addrs`](crate::InterfaceConfig::ip_addrs) is
+  /// [`InterfaceOptions::ip_addrs`](crate::InterfaceOptions::ip_addrs) is
   /// unreachable on both planes — peers gossip and dial an address its own
   /// interface discards. The advertised IP must exactly match a configured
   /// interface address. The offending advertise address is carried for
@@ -105,7 +105,7 @@ pub enum InitError {
   RouteFamilyMismatch(Route),
   /// Drawing a random seed from the system entropy source failed (only when no
   /// seed was pinned via
-  /// [`InterfaceConfig::with_random_seed`](crate::InterfaceConfig::with_random_seed)).
+  /// [`InterfaceOptions::with_random_seed`](crate::InterfaceOptions::with_random_seed)).
   Entropy,
   /// The SWIM machine endpoint failed to initialize.
   Endpoint(EndpointInitError),
@@ -134,7 +134,7 @@ pub enum InitError {
   /// count: the product would wrap to an undersized arena. Rejected here rather
   /// than allocating a silently-too-small buffer.
   UdpArenaTooLarge,
-  /// [`Config::tcp_pool_size`](crate::Config::tcp_pool_size) is below 2.
+  /// [`Options::tcp_pool_size`](crate::Options::tcp_pool_size) is below 2.
   ///
   /// Construction dedicates one pooled TCP socket to the inbound listener and
   /// uses the rest for dials and accepts. With 0 there is no listener (no
@@ -143,15 +143,15 @@ pub enum InitError {
   /// accept at most one inbound at a time. The functional minimum is 2 (a
   /// listener plus one dial/accept socket).
   TcpPoolTooSmall,
-  /// [`Config::tcp_socket_rx_bytes`](crate::Config::tcp_socket_rx_bytes) or
-  /// [`Config::tcp_socket_tx_bytes`](crate::Config::tcp_socket_tx_bytes) is zero.
+  /// [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) or
+  /// [`Options::tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes) is zero.
   ///
   /// smoltcp's `RingBuffer::new` does not panic on zero-length storage — it
   /// builds a permanently-empty ring — so a 0-byte rx (or tx) buffer is a socket
   /// that can never receive (or send): a silently-dead reliable plane. Both must
   /// be non-zero.
   ZeroTcpSocketBuffer,
-  /// [`Config::tcp_socket_rx_bytes`](crate::Config::tcp_socket_rx_bytes) exceeds
+  /// [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) exceeds
   /// smoltcp's 1 GiB receive-buffer limit.
   ///
   /// smoltcp's `tcp::Socket::new` `panic!`s when the receive-buffer capacity
@@ -159,15 +159,15 @@ pub enum InitError {
   /// that limit would panic inside this fallible constructor. The transmit
   /// buffer has no such limit. Rejected here instead.
   TcpRxBufferTooLarge,
-  /// [`Config::udp_rx_packets`](crate::Config::udp_rx_packets) or
-  /// [`Config::udp_tx_packets`](crate::Config::udp_tx_packets) is zero.
+  /// [`Options::udp_rx_packets`](crate::Options::udp_rx_packets) or
+  /// [`Options::udp_tx_packets`](crate::Options::udp_tx_packets) is zero.
   ///
   /// The gossip `udp::PacketBuffer` is built with that many per-packet metadata
   /// slots. Zero slots is a ring that can never enqueue or dequeue a datagram,
   /// so gossip can never be received (or sent): a silently-dead gossip plane.
   /// Both must be non-zero.
   ZeroUdpPackets,
-  /// [`Config::close_timeout`](crate::Config::close_timeout) is zero.
+  /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
   /// still `Closing` past `now + close_timeout` is force-aborted. A zero timeout

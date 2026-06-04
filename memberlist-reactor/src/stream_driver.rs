@@ -23,6 +23,7 @@ use agnostic::{
 };
 use bytes::Bytes;
 use flume::{Receiver, Sender};
+use futures_channel::oneshot;
 use futures_util::{
   AsyncReadExt, AsyncWriteExt, FutureExt,
   future::{FusedFuture, pending},
@@ -91,7 +92,7 @@ enum BridgeOut {
 /// stalled on a peer that stopped reading — and discards the queued bytes.
 struct BridgeHandle {
   out_tx: Sender<BridgeOut>,
-  cancel_tx: Sender<()>,
+  cancel_tx: oneshot::Sender<()>,
 }
 
 /// Inbound transport bytes (or EOF) from a bridge's TCP read side to the pump.
@@ -132,7 +133,7 @@ struct DialConnected<R: Runtime> {
   eid: ExchangeId,
   stream: <R::Net as Net>::TcpStream,
   out_rx: Receiver<BridgeOut>,
-  cancel_rx: Receiver<()>,
+  cancel_rx: oneshot::Receiver<()>,
 }
 
 /// A `WaitForCompletion` join awaiting its dispatched push/pull exchanges. The
@@ -152,13 +153,13 @@ struct PendingJoin {
   pending_eids: HashSet<ExchangeId>,
   contacted: usize,
   requested: usize,
-  reply: Sender<Result<usize, Error>>,
+  reply: oneshot::Sender<Result<usize, Error>>,
 }
 
 /// An in-flight graceful leave; every joined caller's reply resolves together
 /// when `LeftCluster` fires.
 struct PendingLeave {
-  repliers: Vec<Sender<Result<(), Error>>>,
+  repliers: Vec<oneshot::Sender<Result<(), Error>>>,
 }
 
 /// An outstanding application-ping call; resolved on `PingCompleted` (reply
@@ -166,7 +167,7 @@ struct PendingLeave {
 /// `PingId`. On driver exit, drained with `Err(Shutdown)`.
 struct PendingPing {
   ping_id: PingId,
-  reply: Sender<Result<Duration, Error>>,
+  reply: oneshot::Sender<Result<Duration, Error>>,
 }
 
 /// An outstanding reliable directed-send call; a single `Command::SendReliable`
@@ -186,7 +187,7 @@ struct PendingUserSend {
   /// tracked exchange whose terminal outcome is `Failed`. A non-zero value
   /// makes the final reply `Err(SendFailed)`.
   failed: usize,
-  reply: Sender<Result<(), Error>>,
+  reply: oneshot::Sender<Result<(), Error>>,
 }
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
@@ -316,7 +317,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     eid: ExchangeId,
     stream: <R::Net as Net>::TcpStream,
     out_rx: Receiver<BridgeOut>,
-    cancel_rx: Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
   ) {
     R::spawn_detach(bridge_task::<I, R, <R::Net as Net>::TcpStream>(
       stream,
@@ -335,7 +336,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     eid: ExchangeId,
     peer: SocketAddr,
     out_rx: Receiver<BridgeOut>,
-    cancel_rx: Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
   ) {
     R::spawn_detach(dial_task::<I, R>(
       eid,
@@ -353,7 +354,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         if !wait {
@@ -367,7 +368,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
             count += 1;
           }
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(count));
+          let _ = reply.send(Ok(count));
           return;
         }
         // WaitForCompletion: account_event replies the contacted count once every
@@ -375,7 +376,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // success, not a failure.
         if addrs.is_empty() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(0));
+          let _ = reply.send(Ok(0));
           return;
         }
         // Drain already-queued actions first, so a same-peer Connect from an
@@ -411,7 +412,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           // Every seed's dial failed before producing an exchange: a bounded
           // failure rather than an indefinite wait.
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::JoinFailed(addrs.len())));
+          let _ = reply.send(Err(Error::JoinFailed(addrs.len())));
           return;
         }
         let id = self.next_pending_join_id;
@@ -451,14 +452,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           // A no-op (not running) or an error fires no completion — reply now.
           other => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(other);
+            let _ = reply.send(other);
           }
         }
       }
       Command::Shutdown(ShutdownCmd { reply }) => {
         self.shared.begin_shutdown();
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(Ok(()));
+        let _ = reply.send(Ok(()));
       }
       Command::Ping(PingCmd { node, reply }) => {
         // Gate on a running node: after `leave()` the probe scheduler is
@@ -466,7 +467,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // arrive and the caller would hang forever. Reject with `NotRunning`.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         let ping_id = self.endpoint.ping(node, now);
@@ -481,7 +482,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // effectively closed to protocol traffic; reject immediately.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         let res = self
@@ -489,7 +490,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           .send_user_packets(to, &payloads)
           .map_err(|e| Error::PayloadTooLarge(e.to_string()));
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
       Command::SendReliable(SendReliableCmd {
         to,
@@ -501,13 +502,13 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // and the caller would hang. Reject with `NotRunning`.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         if payloads.is_empty() {
           // No payloads: nothing to track; reply Ok immediately.
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(()));
+          let _ = reply.send(Ok(()));
           return;
         }
         // Drain any already-queued actions before starting new user messages
@@ -552,7 +553,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           // send genuinely FAILED. Reply `Err(SendFailed)` rather than
           // falsely reporting success.
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::SendFailed));
+          let _ = reply.send(Err(Error::SendFailed));
           return;
         }
         // Park with `failed` SEEDED to the `n - m` payloads that never
@@ -578,7 +579,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           }
           None => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(Err(Error::SendFailed));
+            let _ = reply.send(Err(Error::SendFailed));
           }
         }
       }
@@ -594,7 +595,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           Err(Error::NotRunning)
         };
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits
@@ -614,7 +615,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           Err(Error::NotRunning)
         };
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
     }
   }
@@ -650,14 +651,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
             Ok(pj.contacted)
           };
           // Ignoring Err: the join caller dropped its reply receiver.
-          let _ = pj.reply.try_send(res);
+          let _ = pj.reply.send(res);
         }
       }
       Event::LeftCluster => {
         if let Some(pl) = self.pending_leave.take() {
           for replier in pl.repliers {
             // Ignoring Err: a leave caller dropped its reply receiver.
-            let _ = replier.try_send(Ok(()));
+            let _ = replier.send(Ok(()));
           }
         }
       }
@@ -669,7 +670,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = self.pending_pings.swap_remove(idx);
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = pp.reply.try_send(Ok(p.rtt()));
+          let _ = pp.reply.send(Ok(p.rtt()));
         }
       }
       // Ping failure: resolve the matching waiter with `PingTimeout`. Same
@@ -679,7 +680,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = self.pending_pings.swap_remove(idx);
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = pp.reply.try_send(Err(Error::PingTimeout));
+          let _ = pp.reply.send(Err(Error::PingTimeout));
         }
       }
       // Reliable user-send completion: reduce the pending set; reply when empty.
@@ -705,7 +706,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
               Ok(())
             };
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = ps.reply.try_send(res);
+            let _ = ps.reply.send(res);
           }
         }
       }
@@ -722,7 +723,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         let eid = info.id();
         let peer = info.peer();
         let (out_tx, out_rx) = flume::unbounded();
-        let (cancel_tx, cancel_rx) = flume::bounded(1);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
         self.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
         self.spawn_dial(eid, peer, out_rx, cancel_rx);
       }
@@ -747,13 +748,11 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // bridge — even a write stalled on an unresponsive peer — and discarding
         // any queued bytes (possibly encoded under a superseded policy). Abort and
         // Close no longer coincide: Abort preempts and discards, Close drains.
-        if let Some(handle) = self.bridges.get(&eref.id()) {
-          // Ignoring Err: the bridge already exited, or the bounded(1) channel is
-          // full from a prior signal — the handle drop below still disconnects it;
-          // the explicit signal is only the abort fast-path.
-          let _ = handle.cancel_tx.try_send(());
+        if let Some(handle) = self.bridges.remove(&eref.id()) {
+          // Ignoring Err: the bridge already exited (cancel receiver gone);
+          // the abort signal is best-effort.
+          let _ = handle.cancel_tx.send(());
         }
-        self.bridges.remove(&eref.id());
       }
     }
   }
@@ -988,51 +987,51 @@ where
         match cmd {
           // Ignoring Err: the caller dropped its reply receiver.
           Command::Join(JoinCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::Leave(LeaveCmd { reply }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::Shutdown(ShutdownCmd { reply }) => {
-            let _ = reply.try_send(Ok(()));
+            let _ = reply.send(Ok(()));
           }
           // Ignoring Err: the caller dropped its reply receiver.
           Command::Ping(PingCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SendUser(SendUserCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SendReliable(SendReliableCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
         }
       }
       for (_, pj) in this.pending_joins.drain() {
         // Ignoring Err: the join caller dropped its reply receiver.
-        let _ = pj.reply.try_send(Err(Error::Shutdown));
+        let _ = pj.reply.send(Err(Error::Shutdown));
       }
       if let Some(pl) = this.pending_leave.take() {
         for replier in pl.repliers {
           // Ignoring Err: the leave caller dropped its reply receiver.
-          let _ = replier.try_send(Err(Error::Shutdown));
+          let _ = replier.send(Err(Error::Shutdown));
         }
       }
       for pp in this.pending_pings.drain(..) {
         // Ignoring Err: the ping caller dropped its reply receiver.
-        let _ = pp.reply.try_send(Err(Error::Shutdown));
+        let _ = pp.reply.send(Err(Error::Shutdown));
       }
       for ps in this.pending_user_sends.drain(..) {
         // Ignoring Err: the send_reliable caller dropped its reply receiver.
-        let _ = ps.reply.try_send(Err(Error::Shutdown));
+        let _ = ps.reply.send(Err(Error::Shutdown));
       }
       return Poll::Ready(());
     }
@@ -1063,7 +1062,7 @@ where
     while let Ok((stream, peer)) = this.accepted_rx.try_recv() {
       let eid = this.endpoint.accept_connection(peer, now);
       let (out_tx, out_rx) = flume::unbounded();
-      let (cancel_tx, cancel_rx) = flume::bounded(1);
+      let (cancel_tx, cancel_rx) = oneshot::channel();
       this.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       this.spawn_bridge(eid, stream, out_rx, cancel_rx);
       progress = true;
@@ -1203,7 +1202,7 @@ async fn dial_task<I: NodeId, R: Runtime>(
   eid: ExchangeId,
   peer: SocketAddr,
   out_rx: Receiver<BridgeOut>,
-  cancel_rx: Receiver<()>,
+  cancel_rx: oneshot::Receiver<()>,
   dial_tx: Sender<DialOutcome<R>>,
   shared: Arc<Shared<I>>,
 ) {
@@ -1249,7 +1248,7 @@ async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
   stream: S,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
-  cancel_rx: Receiver<()>,
+  cancel_rx: oneshot::Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   shared: Arc<Shared<I>>,
   close_timeout: Duration,
@@ -1259,14 +1258,14 @@ async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
   let mut read_eof = false;
   let mut write_closed = false;
   // Hoist a single cancel future that resolves ONLY on an explicit abort. A
-  // graceful Close drops `cancel_tx` (Err(Disconnected)); that is NOT an abort,
+  // graceful Close drops `cancel_tx` (Err(Canceled)); that is NOT an abort,
   // so map it to a future that never resolves — queued writes then complete and
   // the bridge tears down via the `out_rx` disconnect after draining. Because the
-  // disconnect maps to `pending()`, `cancel_fut` never wins the write race on a
+  // cancellation maps to `pending()`, `cancel_fut` never wins the write race on a
   // graceful close, so a write is never dropped mid-flight (no partial-write /
   // duplication hazard); an explicit abort still resolves and preempts.
   let cancel_fut = async {
-    match cancel_rx.recv_async().await {
+    match cancel_rx.await {
       Ok(()) => (),
       Err(_) => pending::<()>().await,
     }
@@ -1429,7 +1428,7 @@ mod tests {
   };
   use memberlist_proto::{
     Instant, RawRecords,
-    config::EndpointConfig,
+    config::EndpointOptions,
     endpoint::Endpoint,
     streams::{LabelOptions, StreamEndpoint},
   };
@@ -1447,7 +1446,7 @@ mod tests {
   /// `BridgeInbound` events. These tests assert on the bytes the bridge writes to
   /// the wire, not on the stamped id, so any valid id suffices.
   fn fresh_eid() -> ExchangeId {
-    let cfg = EndpointConfig::new(
+    let cfg = EndpointOptions::new(
       SmolStr::new("bridge-test"),
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     );
@@ -1477,7 +1476,7 @@ mod tests {
   /// A `Shared` whose only role here is to absorb the bridge's `wake_driver`
   /// calls — these tests assert on the wire, not on driver wakeups.
   fn test_shared() -> Arc<Shared<SmolStr>> {
-    let ep = Endpoint::new(EndpointConfig::new(
+    let ep = Endpoint::new(EndpointOptions::new(
       SmolStr::new("bridge-test"),
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     ));
@@ -1485,7 +1484,7 @@ mod tests {
   }
 
   fn capture_test_endpoint() -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
-    let ep = Endpoint::new(EndpointConfig::new(
+    let ep = Endpoint::new(EndpointOptions::new(
       SmolStr::new("capture-test"),
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     ));
@@ -1583,7 +1582,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
     let shared = test_shared();
 
@@ -1661,7 +1660,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
     let shared = test_shared();
 
@@ -1673,7 +1672,7 @@ mod tests {
     out_tx
       .send(BridgeOut::Data(Bytes::from(stale)))
       .expect("queue stale bytes");
-    cancel_tx.try_send(()).expect("signal explicit abort");
+    cancel_tx.send(()).expect("signal explicit abort");
     let _out_tx_kept = out_tx;
 
     // A long `close_timeout`: the abort, not the backstop, must drive teardown.
@@ -1719,7 +1718,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
     let shared = test_shared();
 
@@ -1799,7 +1798,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
     let shared = test_shared();
 

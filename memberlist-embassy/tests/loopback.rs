@@ -25,7 +25,7 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  Config, EndpointConfig, InitError, Memberlist, Node, Runner, TransformOptions, now,
+  Options, EndpointOptions, InitError, Memberlist, Node, Runner, TransformOptions, now,
 };
 use memberlist_proto::event::Event;
 use smol_str::SmolStr;
@@ -190,18 +190,18 @@ fn two_node_join_converges() {
 
   let now = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp_a,
     tcp_a,
     now,
   )
   .expect("build node a");
   let (ml_b, run_b) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
     udp_b,
     tcp_b,
     now,
@@ -255,18 +255,18 @@ fn send_reliable_round_trips() {
 
   let now = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp_a,
     tcp_a,
     now,
   )
   .expect("build node a");
   let (ml_b, run_b) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
     udp_b,
     tcp_b,
     now,
@@ -342,18 +342,18 @@ fn ping_succeeds() {
 
   let now = now();
   let (ml_a, run_a) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp_a,
     tcp_a,
     now,
   )
   .expect("build node a");
   let (ml_b, run_b) = Memberlist::new::<POOL>(
-    Config::new(),
+    Options::new(),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
     udp_b,
     tcp_b,
     now,
@@ -395,9 +395,9 @@ fn rejects_socket_timeout_not_exceeding_engine_deadlines() {
     let mut bufs = NodeBufs::new();
     let (udp, tcp) = build_sockets(stack, &mut bufs);
     let r = Memberlist::new::<POOL>(
-      Config::new().with_socket_timeout(core::time::Duration::from_secs(5)),
+      Options::new().with_socket_timeout(core::time::Duration::from_secs(5)),
       TransformOptions::default(),
-      EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+      EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
       udp,
       tcp,
       now(),
@@ -416,9 +416,9 @@ fn rejects_socket_timeout_not_exceeding_engine_deadlines() {
     let mut bufs = NodeBufs::new();
     let (udp, tcp) = build_sockets(stack, &mut bufs);
     let r = Memberlist::new::<POOL>(
-      Config::new().with_socket_timeout(core::time::Duration::from_secs(12)),
+      Options::new().with_socket_timeout(core::time::Duration::from_secs(12)),
       TransformOptions::default(),
-      EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+      EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
         .with_rng_seed(2)
         .with_stream_timeout(core::time::Duration::from_secs(20)),
       udp,
@@ -447,9 +447,9 @@ fn rejects_huge_socket_timeout() {
   let mut bufs = NodeBufs::new();
   let (udp, tcp) = build_sockets(stack, &mut bufs);
   let r = Memberlist::new::<POOL>(
-    Config::new().with_socket_timeout(core::time::Duration::from_secs(u64::MAX)),
+    Options::new().with_socket_timeout(core::time::Duration::from_secs(u64::MAX)),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     udp,
     tcp,
     now(),
@@ -477,11 +477,11 @@ fn rejects_socket_timeout_that_floors_onto_a_deadline() {
   let mut bufs = NodeBufs::new();
   let (udp, tcp) = build_sockets(stack, &mut bufs);
   let r = Memberlist::new::<POOL>(
-    Config::new()
+    Options::new()
       .with_close_timeout(close)
       .with_socket_timeout(socket),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946))
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946))
       .with_rng_seed(1)
       .with_stream_timeout(core::time::Duration::from_secs(1)),
     udp,

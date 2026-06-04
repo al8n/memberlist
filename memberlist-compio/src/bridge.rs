@@ -66,10 +66,10 @@
 //! A graceful `StreamAction::Close` is NOT an abort. It queues
 //! `BridgeOut::Close` behind the response `Bytes` and then drops the
 //! `BridgeHandle` (and `cancel_tx`), so `cancel_rx` resolves with
-//! `Err(Disconnected)`. That disconnect must not preempt the FIFO — a
-//! disconnect winning the bias over already-queued `Bytes`/`Close`, or
+//! `Err(Canceled)`. That cancellation must not preempt the FIFO — it
+//! winning the bias over already-queued `Bytes`/`Close`, or
 //! dropping a write mid-flight, would truncate a clean exchange's final
-//! response. So the cancel future maps the disconnect to a future that
+//! response. So the cancel future maps that `Err` to a future that
 //! NEVER resolves: the cancel arm can no longer fire on a graceful Close
 //! and no write is ever dropped mid-flight (no partial-write / duplication
 //! hazard). The graceful drain+teardown is driven SOLELY by `out_rx`'s
@@ -138,7 +138,7 @@ use crate::driver::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOu
 ///   flight, so the bridge breaks immediately and drops its write half
 ///   WITHOUT draining any `Bytes` still queued in `out_rx` — those stale
 ///   bytes are discarded, not written. A graceful-Close handle-drop
-///   resolves `recv_async()` with `Err(Disconnected)` instead; that is NOT
+///   resolves the cancel receiver with `Err(Canceled)` instead; that is NOT
 ///   an abort and is mapped to a never-resolving future, so it neither
 ///   fires the cancel arm nor drops a write mid-flight — the queued `Bytes`
 ///   then `Close` in `out_rx` flush first.
@@ -157,7 +157,7 @@ pub(crate) async fn bridge_task<S>(
   stream: S,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
-  cancel_rx: Receiver<()>,
+  cancel_rx: futures_channel::oneshot::Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   recv_buf_len: usize,
   close_timeout: Duration,
@@ -172,21 +172,21 @@ pub(crate) async fn bridge_task<S>(
 
   // Hoist a single cancel future ABOVE the loop that resolves ONLY on an
   // explicit abort. An explicit `cancel_tx.send(())` — emitted by
-  // `StreamAction::Abort` for a FAILED exchange — resolves `recv_async()`
-  // with `Ok(())`, which both wins the select bias at the boundary AND
-  // preempts a write already in flight (the write arms race against this
+  // `StreamAction::Abort` for a FAILED exchange — resolves the cancel
+  // receiver with `Ok(())`, which both wins the select bias at the boundary
+  // AND preempts a write already in flight (the write arms race against this
   // same future). A graceful `StreamAction::Close` instead drops the
   // `BridgeHandle` (and thus `cancel_tx`) AFTER queuing `BridgeOut::Close`
-  // behind the response `Bytes`, which resolves `recv_async()` with
-  // `Err(Disconnected)`; that disconnect is NOT an abort, so it is mapped
-  // to a future that NEVER resolves. Mapping the disconnect to `pending()`
+  // behind the response `Bytes`, which resolves the cancel receiver with
+  // `Err(Canceled)`; that cancellation is NOT an abort, so it is mapped
+  // to a future that NEVER resolves. Mapping that `Err` to `pending()`
   // means the cancel future can never win a write race on a graceful close
   // (no write is dropped mid-flight — no partial-write / duplication
   // hazard); the graceful drain+teardown is driven SOLELY by `out_rx`'s
   // FIFO (`Bytes` then `Close`/`Err`). Fusing keeps the future
   // `is_terminated()`-safe across the many `select_biased!` re-polls.
   let cancel_fut = async {
-    match cancel_rx.recv_async().await {
+    match cancel_rx.await {
       Ok(()) => (),
       Err(_) => futures_util::future::pending::<()>().await,
     }
@@ -501,7 +501,7 @@ mod tests {
   };
   use memberlist_proto::{
     Instant, RawRecords,
-    config::EndpointConfig,
+    config::EndpointOptions,
     endpoint::Endpoint,
     streams::{LabelOptions, StreamEndpoint},
   };
@@ -517,7 +517,7 @@ mod tests {
   /// the bridge writes to the wire, not on the stamped id, so any valid id
   /// suffices.
   fn fresh_eid() -> ExchangeId {
-    let cfg = EndpointConfig::new(
+    let cfg = EndpointOptions::new(
       SmolStr::new("bridge-test"),
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     );
@@ -550,21 +550,21 @@ mod tests {
   ///
   /// Reproduces the exact graceful-teardown shape: `Bytes(response)` then
   /// `Close` are queued into `out_tx`, then the whole `BridgeHandle` is
-  /// dropped (so `cancel_rx` disconnects with `Err`). The disconnect must
+  /// dropped (so `cancel_rx` resolves with `Err`). That cancellation must
   /// NOT preempt the FIFO — the peer must receive the full response, then
   /// EOF.
   ///
-  /// If the cancel arm broke on `Err(Disconnected)` (a graceful-close
-  /// disconnect), it would win the bias and the bridge would break immediately,
+  /// If the cancel arm broke on `Err(Canceled)` (a graceful-close
+  /// sender drop), it would win the bias and the bridge would break immediately,
   /// truncating the response — the client's `read_to_end` returning an empty
-  /// slice. Mapping the disconnect to `pending()` is what keeps the FIFO drain
+  /// slice. Mapping that `Err` to `pending()` is what keeps the FIFO drain
   /// intact.
   #[compio::test]
   async fn graceful_close_drains_queued_bytes_before_exit() {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
     let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
 
     let response = b"the-final-response-bytes".to_vec();
@@ -622,7 +622,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
     let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
 
     let stale = b"stale-bytes-that-must-not-reach-the-wire".to_vec();
@@ -632,7 +632,7 @@ mod tests {
     out_tx
       .send(BridgeOut::Bytes(stale))
       .expect("queue stale bytes");
-    cancel_tx.try_send(()).expect("signal explicit abort");
+    cancel_tx.send(()).expect("signal explicit abort");
     // Keep `out_tx` alive so a disconnect cannot be confused for the abort:
     // the ONLY teardown signal here is the explicit `send(())`.
     let _out_tx_kept = out_tx;
@@ -681,7 +681,7 @@ mod tests {
     let (server, client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
     let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
 
     // A response far larger than any kernel socket buffer: with the peer never
@@ -715,9 +715,7 @@ mod tests {
     // kernel buffers full BEFORE firing the abort, so this exercises mid-write
     // preemption — not the select boundary an already-ready cancel would catch.
     compio::time::sleep(Duration::from_millis(500)).await;
-    cancel_tx
-      .try_send(())
-      .expect("signal explicit abort mid-write");
+    cancel_tx.send(()).expect("signal explicit abort mid-write");
 
     // The abort must preempt the in-flight write and the bridge must return
     // PROMPTLY — without the peer ever draining a byte. The bound is generous
@@ -749,7 +747,7 @@ mod tests {
     let (server, mut client) = loopback_pair().await;
     let eid = fresh_eid();
     let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
     let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
 
     let close_timeout = Duration::from_millis(300);

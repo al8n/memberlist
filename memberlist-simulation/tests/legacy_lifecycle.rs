@@ -18,7 +18,7 @@
 //!   (Task E).
 
 use bytes::Bytes;
-use memberlist_simulation::{Cluster, EndpointConfig, Event, Meta, Reliability, State};
+use memberlist_simulation::{Cluster, EndpointOptions, Event, Meta, Reliability, State};
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
@@ -137,12 +137,12 @@ fn memberlist_join_shutdown() {
   let a1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(34020),
-    |cfg: EndpointConfig<_, _>| cfg.with_gossip_interval(Duration::from_millis(10)),
+    |cfg: EndpointOptions<_, _>| cfg.with_gossip_interval(Duration::from_millis(10)),
   );
   let a2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(34021),
-    |cfg: EndpointConfig<_, _>| cfg.with_gossip_interval(Duration::from_millis(10)),
+    |cfg: EndpointOptions<_, _>| cfg.with_gossip_interval(Duration::from_millis(10)),
   );
 
   // Bootstrap membership.
@@ -173,7 +173,7 @@ fn memberlist_join_shutdown() {
 /// Meta byte attached at construction propagates to peer via push/pull.
 ///
 /// Legacy: each node is constructed with a `NodeDelegate` returning static
-/// metadata.  In simulation we use `EndpointConfig::with_initial_meta`.
+/// metadata.  In simulation we use `EndpointOptions::with_initial_meta`.
 ///
 /// Ported from `memberlist-core/src/base/tests.rs:549 memberlist_node_delegate_meta`.
 #[test]
@@ -185,12 +185,12 @@ fn memberlist_node_delegate_meta() {
   let a1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(34030),
-    |cfg: EndpointConfig<_, _>| cfg.with_initial_meta(meta_web.clone()),
+    |cfg: EndpointOptions<_, _>| cfg.with_initial_meta(meta_web.clone()),
   );
   let a2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(34031),
-    |cfg: EndpointConfig<_, _>| cfg.with_initial_meta(meta_lb.clone()),
+    |cfg: EndpointOptions<_, _>| cfg.with_initial_meta(meta_lb.clone()),
   );
 
   // m1 joins m2.
@@ -257,7 +257,7 @@ fn memberlist_node_delegate_meta_update() {
   let a1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(34040),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_initial_meta(meta_web)
         .with_gossip_interval(Duration::from_millis(10))
@@ -266,7 +266,7 @@ fn memberlist_node_delegate_meta_update() {
   let a2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(34041),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_initial_meta(meta_lb)
         .with_gossip_interval(Duration::from_millis(10))
@@ -485,12 +485,12 @@ fn memberlist_leave() {
   let a1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(34080),
-    |cfg: EndpointConfig<_, _>| cfg.with_gossip_interval(Duration::from_millis(5)),
+    |cfg: EndpointOptions<_, _>| cfg.with_gossip_interval(Duration::from_millis(5)),
   );
   let a2 = c.add_node_with(
     SmolStr::new("m2"),
     addr(34081),
-    |cfg: EndpointConfig<_, _>| cfg.with_gossip_interval(Duration::from_millis(5)),
+    |cfg: EndpointOptions<_, _>| cfg.with_gossip_interval(Duration::from_millis(5)),
   );
 
   // Both nodes join.

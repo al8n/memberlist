@@ -312,7 +312,7 @@ where
     // machine endpoint's local member (`Endpoint::new` stamps the same
     // `initial_meta` onto its local `NodeState`). Protocol / delegate
     // versions default to `V1` in both `NodeState::new` and
-    // `EndpointConfig`, and the compio options expose no override, so the
+    // `EndpointOptions`, and the compio options expose no override, so the
     // defaults already agree with the endpoint's local member.
     let initial_meta = memberlist_opts.initial_meta().cloned().unwrap_or_default();
     let local_ns = Arc::new(
@@ -578,7 +578,7 @@ where
       )));
     }
     let deadline = Instant::now() + self.cached_join_deadline;
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::Join(JoinCmd {
@@ -588,9 +588,7 @@ where
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Fire-and-forget join: dispatch a push/pull against each seed and
@@ -622,7 +620,7 @@ where
       return Err(MemberlistError::Shutdown);
     }
     let addrs = resolve_seeds(resolver, seeds).await?;
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::Join(JoinCmd {
@@ -632,9 +630,7 @@ where
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Leave the cluster gracefully.
@@ -655,15 +651,13 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::Leave(LeaveCmd { reply: tx }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Replace the local node's metadata. The new bytes are gossiped
@@ -676,7 +670,7 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::UpdateNodeMetadata(UpdateNodeMetadataCmd {
@@ -685,9 +679,7 @@ where
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Queue an application user-broadcast for cluster-wide gossip
@@ -701,7 +693,7 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::QueueUserBroadcast(QueueUserBroadcastCmd::new(
@@ -709,9 +701,7 @@ where
       )))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Set the application push/pull local-state snapshot. The snapshot is
@@ -725,15 +715,13 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SetLocalState(SetLocalStateCmd::new(state, tx)))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Set the application payload attached to outbound probe acks. The payload
@@ -753,15 +741,13 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SetAckPayload(SetAckPayloadCmd::new(payload, tx)))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Reconfigure the gossip compression policy in place. Takes effect on
@@ -770,7 +756,7 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SetCompressionOptions(SetCompressionOptionsCmd {
@@ -779,9 +765,7 @@ where
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Reconfigure the gossip encryption policy in place. Takes effect on
@@ -817,7 +801,7 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
@@ -826,9 +810,7 @@ where
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Subscribe to the driver's event stream.
@@ -922,15 +904,13 @@ where
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::Ping(PingCmd::new(node, tx)))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Send an unreliable directed user message to `to`. Best-effort
@@ -956,15 +936,13 @@ where
       return Err(MemberlistError::Shutdown);
     }
     let payloads: Vec<Bytes> = msgs.into_iter().collect();
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SendUser(SendUserCmd::new(to, payloads, tx)))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Send a reliable directed user message to `to` over a dedicated reliable
@@ -988,7 +966,7 @@ where
       return Err(MemberlistError::Shutdown);
     }
     let payloads: Vec<Bytes> = msgs.into_iter().collect();
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::SendReliable(SendReliableCmd::new(
@@ -996,9 +974,7 @@ where
       )))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Cleanly shut down the driver task.
@@ -1021,15 +997,13 @@ where
     if self.shutdown_flag.swap(true, Ordering::AcqRel) {
       return Err(MemberlistError::Shutdown);
     }
-    let (tx, rx) = flume::bounded(1);
+    let (tx, rx) = futures_channel::oneshot::channel();
     self
       .commands
       .send_async(Command::Shutdown(ShutdownCmd { reply: tx }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.recv_async()
-      .await
-      .map_err(|_| MemberlistError::ReplyClosed)?
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
   }
 }
 

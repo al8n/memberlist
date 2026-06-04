@@ -162,7 +162,7 @@ pub(crate) struct StreamBridge<I, A, R> {
   /// Hard ceiling on a reliable unit's on-wire size and its decompressed
   /// payload — the decompression-bomb guard bound, and the cap on the inbound
   /// accumulation buffer (a forged `unit_len` over this is rejected before any
-  /// wait). Derived from `EndpointConfig::max_stream_frame_size` so it tracks
+  /// wait). Derived from `EndpointOptions::max_stream_frame_size` so it tracks
   /// the Stream FSM's own configured frame limit rather than a separate
   /// constant.
   reliable_max: usize,
@@ -195,7 +195,7 @@ where
   /// handshake / label step settles.
   ///
   /// `reliable_max` is the reliable-unit / decompressed-payload ceiling — the
-  /// coordinator passes `EndpointConfig::max_stream_frame_size` so the bound
+  /// coordinator passes `EndpointOptions::max_stream_frame_size` so the bound
   /// always matches the Stream FSM's configured frame limit.
   pub(crate) fn new(
     records: R,

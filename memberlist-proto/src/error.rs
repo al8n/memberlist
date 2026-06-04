@@ -23,7 +23,7 @@ pub enum Error {
   UnknownPeerState(Cow<'static, str>),
 
   /// A caller-supplied `Meta` exceeded the per-endpoint
-  /// [`EndpointConfig::meta_max_size`](crate::config::EndpointConfig::meta_max_size)
+  /// [`EndpointOptions::meta_max_size`](crate::config::EndpointOptions::meta_max_size)
   /// cap. Payload: `(supplied_len, cap)`.
   #[error("meta size {0} exceeds per-endpoint cap {1}")]
   MetaExceedsCap(usize, usize),
@@ -42,7 +42,7 @@ pub enum Error {
   /// would not fit the reliable-stream frame cap. The snapshot rides every
   /// push/pull exchange as the PushPull `user_data`, and receivers reject any
   /// stream frame whose declared length exceeds
-  /// [`EndpointConfig::max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)
+  /// [`EndpointOptions::max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)
   /// the moment the length varint is decoded. A snapshot whose minimal framed
   /// PushPull already exceeds that cap (after reserving a framing budget for
   /// the co-resident membership-state list) is deterministically untransmittable:
@@ -84,7 +84,7 @@ pub enum EndpointInitError {
   /// The config carried no RNG seed and the platform entropy source failed
   /// while seeding the gossip RNG. Recoverable: the driver can retry, or
   /// supply a seed via
-  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed)
+  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed)
   /// (e.g. from a hardware RNG) to avoid platform entropy entirely. On no_std
   /// targets this reflects an integrator-provided getrandom backend that
   /// errored or was not yet ready.

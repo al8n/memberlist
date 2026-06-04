@@ -1,4 +1,4 @@
-//! `EndpointConfig` — construction-time settings for the Endpoint state machine.
+//! `EndpointOptions` — construction-time settings for the Endpoint state machine.
 //!
 //! The design uses event-driven decisions (no callbacks): the application
 //! drains [`Event::PendingAlive`](crate::event::Event::PendingAlive) /
@@ -12,30 +12,30 @@ use core::time::Duration;
 use crate::typed::{DelegateVersion, Meta, ProtocolVersion};
 use bytes::Bytes;
 
-/// Default value for [`EndpointConfig::gossip_mtu`]: 1400 bytes — just under
+/// Default value for [`EndpointOptions::gossip_mtu`]: 1400 bytes — just under
 /// a typical 1500-byte Ethernet MTU, matching the legacy memberlist default
 /// and keeping UDP gossip un-fragmented on IPv4/IPv6 + UDP-header headroom.
 /// The compound-frame budget reserves its own framing from this; a lone
 /// `Packet` is bounded directly by it.
 pub const DEFAULT_GOSSIP_MTU: usize = 1400;
 
-/// Default value for [`EndpointConfig::meta_max_size`]: 512 bytes —
+/// Default value for [`EndpointOptions::meta_max_size`]: 512 bytes —
 /// the legacy memberlist limit, retained as the default to ease
 /// migration from Go memberlist clusters. The absolute upper bound
 /// (the wire-construction ceiling on `Meta`) is
 /// [`crate::typed::Meta::MAX_SIZE`] (`u16::MAX`); operators
 /// who want larger node metadata can raise this via
-/// [`EndpointConfig::with_meta_max_size`] up to that wire ceiling.
+/// [`EndpointOptions::with_meta_max_size`] up to that wire ceiling.
 pub const DEFAULT_META_MAX_SIZE: usize = 512;
 
-/// Default value for [`EndpointConfig::max_stream_frame_size`]: 64 MiB.
+/// Default value for [`EndpointOptions::max_stream_frame_size`]: 64 MiB.
 /// The hard cap on a single inbound reliable-stream frame
 /// (`[tag][varint len][body]`); a declared frame larger than this is
 /// rejected the moment the length varint is decoded. Generous enough for a
 /// very large push/pull snapshot; tune up for huge clusters.
 pub const DEFAULT_MAX_STREAM_FRAME_SIZE: usize = 64 * 1024 * 1024;
 
-/// Default value for [`EndpointConfig::accept_handshake_deadline`]:
+/// Default value for [`EndpointOptions::accept_handshake_deadline`]:
 /// 10 seconds. Bounds the time a server-side bridge spends in
 /// `Handshaking` (label or TLS handshake step) before the
 /// coordinator reaps it as failed. Long enough to ride out typical
@@ -46,7 +46,7 @@ pub const DEFAULT_ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Construction-time settings for [`Endpoint`](crate::endpoint::Endpoint).
 #[derive(Debug, Clone)]
-pub struct EndpointConfig<I, A> {
+pub struct EndpointOptions<I, A> {
   local_id: I,
   advertise_addr: A,
   initial_meta: Meta,
@@ -119,7 +119,7 @@ pub struct EndpointConfig<I, A> {
   rng_seed: Option<u64>,
 }
 
-impl<I, A> EndpointConfig<I, A> {
+impl<I, A> EndpointOptions<I, A> {
   /// Construct a new config with sensible LAN defaults.
   pub fn new(local_id: I, advertise_addr: A) -> Self {
     Self {

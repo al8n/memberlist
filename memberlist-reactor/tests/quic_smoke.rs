@@ -19,7 +19,7 @@ use agnostic::tokio::TokioRuntime;
 use futures_util::StreamExt;
 use memberlist_reactor::{
   Delegate, Error, Event, MaybeResolved, Memberlist, MemberlistOptions, NodeState, Options,
-  QuicConfig, SocketAddrResolver, VoidDelegate,
+  QuicOptions, SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -27,14 +27,14 @@ use smol_str::SmolStr;
 /// Builds a QUIC node advertising an OS-picked loopback port. The constructor
 /// reads the bound address back, so the node advertises its real port and a
 /// peer can dial it via `local().addr_ref()`.
-async fn make(id: &str, qcfg: QuicConfig) -> Memberlist<SmolStr> {
+async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr> {
   make_with_opts(id, qcfg, MemberlistOptions::new()).await
 }
 
 /// Like [`make`] but with explicit SWIM-level [`MemberlistOptions`].
 async fn make_with_opts(
   id: &str,
-  qcfg: QuicConfig,
+  qcfg: QuicOptions,
   ml_opts: MemberlistOptions,
 ) -> Memberlist<SmolStr> {
   Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(

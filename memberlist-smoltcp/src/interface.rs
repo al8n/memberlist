@@ -1,7 +1,7 @@
 //! Public configuration for the smoltcp [`Interface`](smoltcp::iface::Interface)
 //! the driver binds to.
 //!
-//! The caller assembles an [`InterfaceConfig`] from smoltcp's own wire and
+//! The caller assembles an [`InterfaceOptions`] from smoltcp's own wire and
 //! routing types — re-exported here so a downstream crate need not depend on
 //! smoltcp directly — and the driver applies it verbatim at construction.
 
@@ -29,14 +29,14 @@ pub use smoltcp::{
 /// Build it with [`new`](Self::new) plus the repeatable `with_*` setters:
 ///
 /// ```
-/// use memberlist_smoltcp::{HardwareAddress, InterfaceConfig, IpAddress, IpCidr};
+/// use memberlist_smoltcp::{HardwareAddress, InterfaceOptions, IpAddress, IpCidr};
 ///
-/// let cfg = InterfaceConfig::new(HardwareAddress::Ip)
+/// let cfg = InterfaceOptions::new(HardwareAddress::Ip)
 ///   .with_ip_addr(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24));
 /// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct InterfaceConfig {
+pub struct InterfaceOptions {
   /// The interface's hardware address. Its variant selects the medium:
   /// [`HardwareAddress::Ip`] is `Medium::Ip`, [`HardwareAddress::Ethernet`] is
   /// `Medium::Ethernet`. An Ethernet address must be unicast (smoltcp rejects a
@@ -56,7 +56,7 @@ pub struct InterfaceConfig {
   pub random_seed: Option<u64>,
 }
 
-impl InterfaceConfig {
+impl InterfaceOptions {
   /// Begin a configuration for the given hardware address, with no IP
   /// addresses, no routes, and an entropy-drawn random seed.
   ///

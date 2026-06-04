@@ -6,17 +6,17 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use core::net::IpAddr;
 
-use memberlist_smoltcp::{HardwareAddress, InterfaceConfig, IpCidr};
+use memberlist_smoltcp::{HardwareAddress, InterfaceOptions, IpCidr};
 use smoltcp::{
   phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken},
   time::Instant,
 };
 
-/// Build an [`InterfaceConfig`] for the harness's `Medium::Ip` devices:
+/// Build an [`InterfaceOptions`] for the harness's `Medium::Ip` devices:
 /// `HardwareAddress::Ip` plus the node's `/24` address. Keeps the construction
 /// call sites tidy now that `Memberlist::new` takes a full interface config.
-pub fn ip_iface(ip: IpAddr) -> InterfaceConfig {
-  InterfaceConfig::new(HardwareAddress::Ip).with_ip_addr(IpCidr::new(ip.into(), 24))
+pub fn ip_iface(ip: IpAddr) -> InterfaceOptions {
+  InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(IpCidr::new(ip.into(), 24))
 }
 
 type Wire = Rc<RefCell<VecDeque<Vec<u8>>>>;

@@ -62,7 +62,7 @@ pub use tcp::{TcpMemberlist, TcpTransport, TcpTransportOptions};
 pub use tls::{SniProvider, TlsMemberlist, TlsTransport, TlsTransportOptions};
 
 #[cfg(feature = "quic")]
-pub use quic::{Quic, QuicConfig, QuicMemberlist, QuicTransport, QuicTransportOptions};
+pub use quic::{Quic, QuicMemberlist, QuicOptions, QuicTransport, QuicTransportOptions};
 
 #[cfg(feature = "dns")]
 pub use resolver::{DEFAULT_DNS_TIMEOUT, DnsResolver};

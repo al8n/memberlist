@@ -1,5 +1,5 @@
 /// Which wire the QUIC unreliable path (gossip + probes) rides. Chosen at
-/// `QuicConfig` construction and the single source of truth for whether quinn's
+/// `QuicOptions` construction and the single source of truth for whether quinn's
 /// datagram extension is enabled.
 ///
 /// `Datagram` is the default: gossip and probe traffic ride QUIC datagrams

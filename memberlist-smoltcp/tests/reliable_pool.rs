@@ -15,8 +15,8 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::EndpointConfig;
-use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
+use memberlist_proto::EndpointOptions;
+use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -56,10 +56,10 @@ fn min_pool_seed_accepts_repeated_inbound() {
   // be replenished/re-established as sockets free. A short push/pull interval is
   // harmless here and keeps A's scheduler from interfering.
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_tcp_pool_size(2),
+    Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946))
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946))
       .with_rng_seed(1)
       .with_push_pull_interval(Duration::from_millis(50)),
     &mut da,
@@ -71,10 +71,10 @@ fn min_pool_seed_accepts_repeated_inbound() {
   // push/pull interval makes it re-dial A repeatedly after the initial join, so
   // A must accept a SECOND (and further) inbound connection.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_rng_seed(2)
       .with_push_pull_interval(Duration::from_millis(50)),
     &mut db,
@@ -155,10 +155,10 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
 
   // Real seed A on the wire (10.0.0.1). It accepts B's eventual push/pull.
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut da,
     now,
   );
@@ -168,10 +168,10 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
   // ONE dial socket. A short `stream_timeout` makes the dead dial elapse quickly
   // so the freed socket cycles to the viable seed within the virtual-time budget.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_tcp_pool_size(2),
+    Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(1000)),
     &mut db,
@@ -264,20 +264,20 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
   let now = clk.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut da,
     now,
   );
   // B uses the default pool plus a LARGE close timeout and a short stream timeout.
   // Record the pristine free count so we can assert it recovers to exactly that.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
+    Options::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
     &mut db,
@@ -428,18 +428,18 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
   let now = clk.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
     &mut da,
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
+    Options::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
     &mut db,
@@ -604,7 +604,7 @@ fn delayed_reply_after_half_close_still_completes() {
   const NEVER: Duration = Duration::from_secs(3600);
 
   let quiet = |id: &str, ip: u8| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
@@ -616,7 +616,7 @@ fn delayed_reply_after_half_close_still_completes() {
   let now = clk.now();
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     quiet("a", 1),
@@ -624,7 +624,7 @@ fn delayed_reply_after_half_close_still_completes() {
     now,
   );
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
@@ -786,10 +786,10 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // periodic schedulers are disabled so the only sockets in play are the listener,
   // the dead dials, and the inbound from `p` — keeping the contended poll exact.
   let mut n: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_tcp_pool_size(2),
+    Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("n"), addr(1, 7946))
+    EndpointOptions::new(SmolStr::new("n"), addr(1, 7946))
       .with_rng_seed(1)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS))
       .with_push_pull_interval(Duration::from_secs(3600))
@@ -804,10 +804,10 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // dials `n` only when explicitly told to (the timed `join`s below), making each
   // inbound on `n` a deliberate, placeable event.
   let mut p: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("p"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("p"), addr(2, 7946))
       .with_rng_seed(2)
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
@@ -953,7 +953,7 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   const A_TX_RING: usize = 512;
 
   let quiet = |id: &str, ip: u8| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
@@ -965,9 +965,9 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   let now = clk.now();
 
   // Seed A with a small tx ring so its oversized reply must drain across ticks.
-  // The field is `pub`; set it on the owned Config (the builder exposes no tx
+  // The field is `pub`; set it on the owned Options (the builder exposes no tx
   // setter). A larger rx ring keeps A able to read B's inbound request in one go.
-  let mut a_cfg = Config::new();
+  let mut a_cfg = Options::new();
   a_cfg.tcp_socket_tx_bytes = A_TX_RING;
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
     a_cfg,
@@ -1000,7 +1000,7 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   // Joiner B: default sockets, schedulers disabled, short stream timeout. It
   // starts as a lone member and must learn A's whole snapshot from the one reply.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
@@ -1066,7 +1066,7 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
   const TICK_MS: u64 = 10;
 
   let quiet = |id: &str, ip: u8| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
@@ -1077,7 +1077,7 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mut a_cfg = Config::new();
+  let mut a_cfg = Options::new();
   a_cfg.tcp_socket_tx_bytes = A_TX_RING;
   a_cfg.close_timeout = Duration::from_millis(CLOSE_TIMEOUT_MS);
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
@@ -1100,7 +1100,7 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
   assert_eq!(a_members_before, 1 + INJECTED_PEERS);
 
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
@@ -1212,10 +1212,10 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // schedulers are disabled so the only channel that can sync a seed into `b` is
   // `b`'s direct join push/pull to that seed.
   let mut b: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new().with_tcp_pool_size(2),
+    Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointConfig::new(SmolStr::new("b"), addr(2, 7946))
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS))
       .with_gossip_interval(Duration::from_secs(3600))
@@ -1230,14 +1230,14 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // only channel into `b` is `b`'s own direct join push/pull to each seed (and the
   // only sync out of `b` likewise), keeping the contended-socket scenario exact.
   let seed_cfg = |id: &str, ip: u8| {
-    EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+    EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
       .with_rng_seed(ip as u64)
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600))
   };
   let mut a1: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     seed_cfg("a1", 1),
@@ -1246,7 +1246,7 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   );
   a1.start(now);
   let mut a2: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     TransformOptions::default(),
     seed_cfg("a2", 3),

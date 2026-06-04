@@ -41,6 +41,6 @@ pub use network::Network;
 // Re-export the protocol types most commonly needed by simulation tests so
 // that test code only needs `memberlist_simulation` as a dependency.
 pub use memberlist_proto::{
-  EndpointConfig, Event, NodeConflict, PingCompleted, Reliability, UserPacket,
+  EndpointOptions, Event, NodeConflict, PingCompleted, Reliability, UserPacket,
   typed::{Alive, Dead, Message, Meta, Node, PushNodeState, State, Suspect},
 };

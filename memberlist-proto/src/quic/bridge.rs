@@ -117,7 +117,7 @@ pub(crate) struct Bridge<I, A> {
   /// Hard ceiling on a reliable unit's on-wire size and its decompressed
   /// payload — the decompression-bomb guard bound, and the cap on the inbound
   /// accumulation buffer (a forged `unit_len` over this is rejected before any
-  /// wait). Derived from `EndpointConfig::max_stream_frame_size` so it tracks
+  /// wait). Derived from `EndpointOptions::max_stream_frame_size` so it tracks
   /// the Stream FSM's own configured frame limit rather than a separate
   /// constant.
   reliable_max: usize,
@@ -177,7 +177,7 @@ where
   /// Build a `Bridge` over a freshly opened/accepted quinn bidi stream.
   ///
   /// `reliable_max` is the reliable-unit / decompressed-payload ceiling — the
-  /// coordinator passes `EndpointConfig::max_stream_frame_size` so the bound
+  /// coordinator passes `EndpointOptions::max_stream_frame_size` so the bound
   /// always matches the Stream FSM's configured frame limit.
   ///
   /// `_encryption` is accepted to keep the per-transport bridge constructors
@@ -1382,7 +1382,7 @@ mod tests {
   use quinn_proto::{Dir, Side};
   use smol_str::SmolStr;
 
-  use crate::{config::EndpointConfig, event::Event};
+  use crate::{config::EndpointOptions, event::Event};
 
   /// `drain_payload_only` must not commit a dispatched frame's side
   /// effects until the recv half has observed peer FIN. Without this
@@ -1397,7 +1397,7 @@ mod tests {
   /// the bridge to `RecvClosed`, the drain runs and the event surfaces.
   #[test]
   fn drain_payload_only_defers_until_recv_fin_observed() {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1487,7 +1487,7 @@ mod tests {
   /// path.
   #[test]
   fn pre_fin_transport_failure_discards_queued_payload_events() {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1661,7 +1661,7 @@ mod tests {
   fn build_test_quic_bridge_with_encryption(
     encryption: crate::EncryptionOptions,
   ) -> Bridge<SmolStr, SocketAddr> {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1704,7 +1704,7 @@ mod tests {
   // ── Label mechanism helpers ────────────────────────────────────────────────
 
   fn make_labeled_dialer(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1727,7 +1727,7 @@ mod tests {
   }
 
   fn make_labeled_acceptor(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1750,7 +1750,7 @@ mod tests {
   }
 
   fn make_labeled_acceptor_skip(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -1904,7 +1904,7 @@ mod tests {
   /// is never invoked.
   #[test]
   fn unlabeled_bridge_twelve_byte_first_unit_passes_through() {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));

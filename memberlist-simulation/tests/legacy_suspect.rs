@@ -11,7 +11,7 @@
 //! `>= 1` rather than `== 1` where the legacy asserts exactly 1.
 
 use memberlist_proto::typed::Message;
-use memberlist_simulation::{Alive, Cluster, EndpointConfig, Node, State, Suspect};
+use memberlist_simulation::{Alive, Cluster, EndpointOptions, Node, State, Suspect};
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
@@ -63,7 +63,7 @@ fn suspect_node_alive_to_suspect_to_dead() {
   let m1 = c.add_node_with(
     SmolStr::new("m1"),
     addr(22011),
-    |cfg: EndpointConfig<_, _>| {
+    |cfg: EndpointOptions<_, _>| {
       cfg
         .with_suspicion_mult(1)
         .with_probe_interval(Duration::from_millis(1))

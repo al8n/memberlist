@@ -14,17 +14,17 @@ use alloc::{rc::Rc, vec::Vec};
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
 use memberlist_embedded::{
-  Config as EngineConfig, Engine, TransformOptions,
+  Options as EngineConfig, Engine, TransformOptions,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{
-  EndpointConfig, Instant, Node,
+  EndpointOptions, Instant, Node,
   event::{Event, PingId, StreamId},
   typed::NodeState,
 };
 
 use crate::{
-  config::Config,
+  config::Options,
   error::{InitError, OpError, SocketTimeoutOutOfRange},
   mailbox::{Command, Mailbox},
   runner::Runner,
@@ -33,7 +33,7 @@ use crate::{
   time,
 };
 
-/// The largest [`Config::socket_timeout`](crate::Config::socket_timeout)
+/// The largest [`Options::socket_timeout`](crate::Options::socket_timeout)
 /// [`Memberlist::new`] accepts. A per-socket inactivity backstop longer than a day is
 /// nonsensical for memberlist (reliable exchanges complete in milliseconds), and
 /// rejecting larger values keeps the timeout safely within EVERY downstream duration
@@ -154,10 +154,10 @@ where
   /// - [`InitError::TcpPoolTooSmall`] — `N < 2` (a listener plus one dial/accept
   ///   socket is the functional minimum).
   /// - [`InitError::ZeroBridgeRing`] — a zero
-  ///   [`Config::tcp_socket_rx_bytes`](crate::Config::tcp_socket_rx_bytes) /
-  ///   [`tcp_socket_tx_bytes`](crate::Config::tcp_socket_tx_bytes).
+  ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
+  ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
   /// - [`InitError::SocketTimeoutOutOfRange`] —
-  ///   [`Config::socket_timeout`](crate::Config::socket_timeout), as embassy-net installs
+  ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
   ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
   ///   at least one microsecond and strictly greater than both `close_timeout` and the
   ///   machine's `stream_timeout`, or it is larger than the sane maximum it can be safely
@@ -174,9 +174,9 @@ where
   /// embassy-net does not do. Bind the socket yourself before calling if you need
   /// to handle a bind error.
   pub fn new<'a, const N: usize>(
-    cfg: Config,
+    cfg: Options,
     transform: TransformOptions,
-    ep_cfg: EndpointConfig<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     mut udp_socket: UdpSocket<'a>,
     tcp_sockets: [TcpSocket<'a>; N],
     now: Instant,

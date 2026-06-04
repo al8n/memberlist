@@ -14,8 +14,8 @@ use core::{
 };
 
 use bytes::Bytes;
-use memberlist_proto::{EndpointConfig, Node, event::Event};
-use memberlist_smoltcp::{Config, Memberlist, TransformOptions};
+use memberlist_proto::{EndpointOptions, Node, event::Event};
+use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -23,8 +23,8 @@ fn addr(ip: u8, port: u16) -> SocketAddr {
 }
 
 /// Short-timeout config for deterministic tests.
-fn mk(id: &str, ip: u8) -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(SmolStr::new(id), addr(ip, 7946))
+fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
+  EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
     .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(100))
     .with_probe_timeout(Duration::from_millis(50))
@@ -51,7 +51,7 @@ fn converge_two_nodes() -> TwoNodes {
 
   // Use a larger TCP pool so concurrent test-issued reliable exchanges do not
   // compete with the ongoing probe/push-pull exchanges for sockets.
-  let cfg = Config::new().with_tcp_pool_size(8);
+  let cfg = Options::new().with_tcp_pool_size(8);
 
   let mut a: Memberlist<SmolStr, _> = Memberlist::new(
     cfg.clone(),
@@ -99,7 +99,7 @@ fn local_id_returns_local_node_id() {
   let clk = harness::Clock::new();
   let now = clk.now();
   let mut node: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
@@ -117,7 +117,7 @@ fn advertise_address_returns_constructed_addr() {
   let clk = harness::Clock::new();
   let now = clk.now();
   let mut node: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
@@ -136,7 +136,7 @@ fn local_state_is_alive() {
   let clk = harness::Clock::new();
   let now = clk.now();
   let mut node: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
@@ -156,7 +156,7 @@ fn health_score_zero_on_fresh_node() {
   let clk = harness::Clock::new();
   let now = clk.now();
   let mut node: Memberlist<SmolStr, _> = Memberlist::new(
-    Config::new(),
+    Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),

@@ -56,13 +56,13 @@ struct PendingJoin {
   pending: HashSet<ExchangeId>,
   contacted: usize,
   requested: usize,
-  reply: Sender<Result<usize, Error>>,
+  reply: futures_channel::oneshot::Sender<Result<usize, Error>>,
 }
 
 /// An in-flight graceful leave; every joined caller's reply resolves together
 /// when `LeftCluster` fires.
 struct PendingLeave {
-  repliers: Vec<Sender<Result<(), Error>>>,
+  repliers: Vec<futures_channel::oneshot::Sender<Result<(), Error>>>,
 }
 
 /// An outstanding application-ping call; resolved on `PingCompleted` (reply
@@ -70,7 +70,7 @@ struct PendingLeave {
 /// `PingId`. On driver exit, drained with `Err(Shutdown)`.
 struct PendingPing {
   ping_id: PingId,
-  reply: Sender<Result<Duration, Error>>,
+  reply: futures_channel::oneshot::Sender<Result<Duration, Error>>,
 }
 
 /// An outstanding reliable directed-send call; resolved on
@@ -82,7 +82,7 @@ struct PendingPing {
 struct PendingUserSend {
   pending: HashSet<ExchangeId>,
   failed: usize,
-  reply: Sender<Result<(), Error>>,
+  reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }
 
 /// The single-owner QUIC driver future. Runs until shutdown (the last handle
@@ -176,7 +176,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         if !wait {
@@ -190,7 +190,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
             count += 1;
           }
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(count));
+          let _ = reply.send(Ok(count));
           return;
         }
         // WaitForCompletion: track each dispatched exchange; account_event
@@ -204,7 +204,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         }
         if pending.is_empty() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(0));
+          let _ = reply.send(Ok(0));
           return;
         }
         let requested = pending.len();
@@ -245,14 +245,14 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           // A no-op (not running) or an error fires no completion — reply now.
           other => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(other);
+            let _ = reply.send(other);
           }
         }
       }
       Command::Shutdown(ShutdownCmd { reply }) => {
         self.shared.begin_shutdown();
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(Ok(()));
+        let _ = reply.send(Ok(()));
       }
       Command::Ping(PingCmd { node, reply }) => {
         // Gate on a running node: after `leave()` the probe scheduler is
@@ -260,7 +260,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // arrive and the caller would hang forever. Reject with `NotRunning`.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         let ping_id = self.endpoint.ping(node, now);
@@ -275,7 +275,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // stopped; reject immediately.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         let res = self
@@ -283,7 +283,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           .send_user_packets(to, &payloads)
           .map_err(|e| Error::PayloadTooLarge(e.to_string()));
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
       Command::SendReliable(SendReliableCmd {
         to,
@@ -295,12 +295,12 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // and the caller would hang. Reject with `NotRunning`.
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Err(Error::NotRunning));
+          let _ = reply.send(Err(Error::NotRunning));
           return;
         }
         if payloads.is_empty() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(()));
+          let _ = reply.send(Ok(()));
           return;
         }
         let mut pending = HashSet::with_capacity(payloads.len());
@@ -332,7 +332,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           Err(Error::NotRunning)
         };
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits
@@ -352,7 +352,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           Err(Error::NotRunning)
         };
         // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.try_send(res);
+        let _ = reply.send(res);
       }
     }
   }
@@ -386,14 +386,14 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
             Ok(pj.contacted)
           };
           // Ignoring Err: the join caller dropped its reply receiver.
-          let _ = pj.reply.try_send(res);
+          let _ = pj.reply.send(res);
         }
       }
       Event::LeftCluster => {
         if let Some(pl) = self.pending_leave.take() {
           for replier in pl.repliers {
             // Ignoring Err: a leave caller dropped its reply receiver.
-            let _ = replier.try_send(Ok(()));
+            let _ = replier.send(Ok(()));
           }
         }
       }
@@ -405,7 +405,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = self.pending_pings.swap_remove(idx);
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = pp.reply.try_send(Ok(p.rtt()));
+          let _ = pp.reply.send(Ok(p.rtt()));
         }
       }
       // Ping failure: resolve the matching waiter with `PingTimeout`. Same
@@ -415,7 +415,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
           let pp = self.pending_pings.swap_remove(idx);
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = pp.reply.try_send(Err(Error::PingTimeout));
+          let _ = pp.reply.send(Err(Error::PingTimeout));
         }
       }
       // Reliable user-send completion: reduce the pending set; reply when empty.
@@ -440,7 +440,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
               Ok(())
             };
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = ps.reply.try_send(res);
+            let _ = ps.reply.send(res);
           }
         }
       }
@@ -707,51 +707,51 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
         match cmd {
           // Ignoring Err: the caller dropped its reply receiver.
           Command::Join(JoinCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::Leave(LeaveCmd { reply }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::Shutdown(ShutdownCmd { reply }) => {
-            let _ = reply.try_send(Ok(()));
+            let _ = reply.send(Ok(()));
           }
           // Ignoring Err: the caller dropped its reply receiver.
           Command::Ping(PingCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SendUser(SendUserCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SendReliable(SendReliableCmd { reply, .. }) => {
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.try_send(Err(Error::Shutdown));
+            let _ = reply.send(Err(Error::Shutdown));
           }
         }
       }
       for (_, pj) in this.pending_joins.drain() {
         // Ignoring Err: the join caller dropped its reply receiver.
-        let _ = pj.reply.try_send(Err(Error::Shutdown));
+        let _ = pj.reply.send(Err(Error::Shutdown));
       }
       if let Some(pl) = this.pending_leave.take() {
         for replier in pl.repliers {
           // Ignoring Err: the leave caller dropped its reply receiver.
-          let _ = replier.try_send(Err(Error::Shutdown));
+          let _ = replier.send(Err(Error::Shutdown));
         }
       }
       for pp in this.pending_pings.drain(..) {
         // Ignoring Err: the ping caller dropped its reply receiver.
-        let _ = pp.reply.try_send(Err(Error::Shutdown));
+        let _ = pp.reply.send(Err(Error::Shutdown));
       }
       for ps in this.pending_user_sends.drain(..) {
         // Ignoring Err: the send_reliable caller dropped its reply receiver.
-        let _ = ps.reply.try_send(Err(Error::Shutdown));
+        let _ = ps.reply.send(Err(Error::Shutdown));
       }
       return Poll::Ready(());
     }

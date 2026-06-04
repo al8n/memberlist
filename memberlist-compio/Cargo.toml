@@ -30,6 +30,7 @@ compio = { workspace = true, features = ["net", "runtime", "macros", "time"] }
 arc-swap = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
+futures-channel = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
 thiserror = { workspace = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }

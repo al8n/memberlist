@@ -351,7 +351,7 @@ mod tests {
 
     use super::{TlsOptions, TlsRecords};
     use crate::{
-      config::EndpointConfig,
+      config::EndpointOptions,
       endpoint::Endpoint,
       streams::{
         LabelOptions, Labeled, StreamEndpoint,
@@ -360,7 +360,7 @@ mod tests {
       tls::options::tests::{test_client, test_server},
     };
 
-    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7304)).with_gossip_mtu(1200);
+    let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7304)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
@@ -391,7 +391,7 @@ mod tests {
     assert_eq!(back, plaintext, "roundtrip preserves the plaintext bytes");
   }
 
-  /// `EndpointConfig::with_gossip_mtu(n)` MUST be readable on the
+  /// `EndpointOptions::with_gossip_mtu(n)` MUST be readable on the
   /// constructed coordinator via `gossip_mtu()`. No encryption is exercised
   /// — pure config plumbing.
   #[test]
@@ -402,7 +402,7 @@ mod tests {
 
     use super::{TlsOptions, TlsRecords};
     use crate::{
-      config::EndpointConfig,
+      config::EndpointOptions,
       endpoint::Endpoint,
       streams::{
         LabelOptions, Labeled, StreamEndpoint,
@@ -411,7 +411,7 @@ mod tests {
       tls::options::tests::{test_client, test_server},
     };
 
-    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7305)).with_gossip_mtu(1200);
+    let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7305)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
     let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
@@ -421,7 +421,7 @@ mod tests {
       1200,
       "StreamEndpoint::gossip_mtu must read the configured value (not the \
        legacy 1400 constant) so the FSM's plaintext-budget bound tracks \
-       EndpointConfig",
+       EndpointOptions",
     );
   }
 

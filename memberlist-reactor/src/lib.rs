@@ -48,7 +48,7 @@ pub use events::EventStream;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist::Memberlist;
 #[cfg(feature = "quic")]
-pub use memberlist_proto::QuicConfig;
+pub use memberlist_proto::QuicOptions;
 #[cfg(feature = "tls")]
 pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
