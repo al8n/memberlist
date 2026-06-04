@@ -1873,9 +1873,6 @@ fn dispatch_gossip<I, A, R>(
   }
 }
 
-/// Drain every [`StreamAction`] the coordinator has queued, dispatching
-/// each on the driver's per-bridge handle table. Returns `true` iff any
-/// action was processed.
 /// Process one [`StreamAction`].
 ///
 /// Connect: pre-allocate the bridge's out-channel and insert the
@@ -2024,6 +2021,9 @@ fn process_one_action(
   }
 }
 
+/// Drain every [`StreamAction`] the coordinator has queued, dispatching each on
+/// the driver's per-bridge handle table. Returns `true` iff any action was
+/// processed.
 fn drain_actions<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,

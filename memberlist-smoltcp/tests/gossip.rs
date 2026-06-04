@@ -90,8 +90,8 @@ fn two_nodes_gossip_and_detect_failure() {
   a.start(now);
   b.start(now);
 
-  // Pre-seed: each node learns the other as Alive without a TCP push-pull.
-  // Milestone 1 has no join path; this is the equivalent of static
+  // Pre-seed each node with the other as Alive instead of joining over TCP, so
+  // this test isolates gossip/probe convergence — the equivalent of static
   // cluster membership configuration.
   a.inject_alive(SmolStr::new("b"), addr(2, 7946), clock.now());
   b.inject_alive(SmolStr::new("a"), addr(1, 7946), clock.now());

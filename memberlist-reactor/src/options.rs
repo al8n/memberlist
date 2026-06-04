@@ -192,8 +192,6 @@ impl MemberlistOptions {
   }
 }
 
-/// Clone-only `Default` for `MemberlistOptions`: all knobs unset, both label
-/// and skip are at their "no label / enforce check" defaults.
 #[cfg(test)]
 mod label_tests {
   use super::*;
