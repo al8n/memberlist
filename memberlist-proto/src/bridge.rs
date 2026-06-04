@@ -470,7 +470,7 @@ pub fn user_data_from_buffa(b: &pb::UserData) -> Bytes {
 /// Convert `typed::ErrorResponse` → `pb::ErrorResponse`.
 pub fn error_response_to_buffa(t: &typed::ErrorResponse) -> pb::ErrorResponse {
   pb::ErrorResponse {
-    error: t.message().into(),
+    error: t.message().to_string(),
     ..Default::default()
   }
 }
