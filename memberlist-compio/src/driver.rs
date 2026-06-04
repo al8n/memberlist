@@ -428,13 +428,6 @@ where
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
-// The tuning knobs the driver loop reads (fallback idle sleep, dial
-// timeout, bridge-inbound cap, iter-top drain cap, cmd fairness
-// budget, past-due peek budget) all live on [`DriverOptions`] —
-// constructed once per `Memberlist` and threaded into `stream_driver_loop`
-// below. The historical const values are preserved as the
-// `DEFAULT_*` constants in [`crate::driver_options`].
-
 /// Single-owner driver task.
 ///
 /// Drives the `StreamEndpoint` until the command channel closes (all

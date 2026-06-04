@@ -21,8 +21,8 @@ use core::{
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  CompressAlgorithm, CompressionOptions, Options, EncryptionOptions, Keyring, LabelError,
-  Memberlist, SecretKey, TransformOptions,
+  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, LabelError, Memberlist,
+  Options, SecretKey, TransformOptions,
 };
 use smol_str::SmolStr;
 

@@ -217,8 +217,7 @@ impl Network {
             let (to, message) = p.into_parts();
             pending.push((to, vec![message]));
           }
-          // INTERIM (compound workstream): the sim has no wire codec, but a
-          // compound is still ONE datagram — its inner messages are
+          // A compound is still ONE datagram — its inner messages are
           // delivered (or dropped) together, in order, as a real driver's
           // single encode_outgoing_compound `send_to` would. Per-message
           // enqueue would mis-model the datagram boundary for fault

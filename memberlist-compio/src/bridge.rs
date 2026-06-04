@@ -120,11 +120,6 @@ use crate::{
   driver_shared::ExchangeId,
 };
 
-// Per-bridge recv buffer size is now configured by the driver via
-// [`crate::DriverOptions::with_bridge_recv_buf_len`]; the historical
-// default value lives at
-// [`crate::DEFAULT_BRIDGE_RECV_BUF_LEN`].
-
 /// Run the per-bridge byte-mover loop until a [`BridgeOut::Close`] arrives,
 /// the driver signals `cancel_rx` (hard abort), the driver drops the
 /// out-channel sender, or the stream returns an I/O error.

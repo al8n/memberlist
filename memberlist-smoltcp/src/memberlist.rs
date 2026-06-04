@@ -14,7 +14,7 @@ use smoltcp::{
 };
 
 use crate::{
-  Options, InitError, InterfaceOptions, TransformOptions,
+  InitError, InterfaceOptions, Options, TransformOptions,
   addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_instant},
   error::{GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
@@ -502,8 +502,8 @@ where
       ));
     }
 
-    // Build the engine from the driver's port / timeout config. NOTE the `Options`
-    // name collision — the driver's `crate::Options` carries link-layer sizing
+    // Build the engine from the driver's port / timeout config. The `Options`
+    // name collision: the driver's `crate::Options` carries link-layer sizing
     // (socket buffers, UDP arenas, `tcp_pool_size`) that stays on the driver,
     // while `memberlist_embedded::Options` carries only the port and close timeout
     // the engine reads directly. `try_new_at` (not `new_at`) so a machine entropy
@@ -711,8 +711,6 @@ where
     self.engine.is_dead(id)
   }
 
-  // ── Query accessors ────────────────────────────────────────────────────────
-  //
   // Thin forwards to the engine's `&self` reads over the live machine endpoint.
   // Unlike the async drivers (compio, reactor) there is no `ArcSwap` snapshot:
   // reads go directly to the machine state, so they always reflect the result of
@@ -808,8 +806,6 @@ where
     self.engine.local_state()
   }
 
-  // ── Directed I/O ──────────────────────────────────────────────────────────
-  //
   // Thin forwards to the engine. The poll loop drives all actual I/O; the caller
   // correlates completion by draining `poll_event()` after subsequent `poll`
   // ticks.
@@ -908,8 +904,6 @@ where
   pub fn send_reliable(&mut self, to: SocketAddr, payload: bytes::Bytes, now: Instant) -> StreamId {
     self.engine.send_reliable(to, payload, now)
   }
-
-  // ── Join ──────────────────────────────────────────────────────────────────
 
   /// Record intent to join the cluster via these seed addresses.
   ///

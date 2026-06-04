@@ -378,8 +378,6 @@ impl<I, A> EndpointOptions<I, A> {
     self
   }
 
-  // Getters.
-
   /// The local node's id.
   #[inline(always)]
   pub const fn local_id_ref(&self) -> &I {

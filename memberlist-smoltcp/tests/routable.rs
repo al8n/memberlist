@@ -28,7 +28,7 @@ use core::{
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  Options, EthernetAddress, HardwareAddress, InitError, InterfaceOptions, IpCidr, Memberlist,
+  EthernetAddress, HardwareAddress, InitError, InterfaceOptions, IpCidr, Memberlist, Options,
   TransformOptions,
 };
 use smol_str::SmolStr;

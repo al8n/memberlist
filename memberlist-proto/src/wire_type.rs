@@ -67,8 +67,8 @@ pub const fn merge(ty: WireType, tag: u8) -> u8 {
 /// Split a byte into wire type and tag.
 #[inline]
 pub const fn split(val: u8) -> (u8, u8) {
-  let wire_type = val >> 3; // Shift right to get the wire type
-  let tag = val & 0b111; // Mask with 0b111 to get last 3 bits
+  let wire_type = val >> 3;
+  let tag = val & 0b111;
   (wire_type, tag)
 }
 

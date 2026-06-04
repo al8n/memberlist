@@ -2047,8 +2047,8 @@ mod per_peer_server_name {
   };
 
   use memberlist_proto::{
-    Endpoint, EndpointOptions, Instant, PushPullKind, QuicOptions, QuicEndpoint, UnreliableTransport,
-    typed::State,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions,
+    UnreliableTransport, typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
@@ -2411,8 +2411,8 @@ mod mtls_cluster_auth {
   use std::{net::SocketAddr, sync::Arc, time::Duration};
 
   use memberlist_proto::{
-    Endpoint, EndpointOptions, Instant, PushPullKind, QuicOptions, QuicEndpoint, UnreliableTransport,
-    typed::State,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions,
+    UnreliableTransport, typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;

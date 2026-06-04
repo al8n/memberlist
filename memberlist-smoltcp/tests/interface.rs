@@ -12,8 +12,8 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  Options, EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceOptions, IpCidr,
-  Medium, Memberlist, Route, TransformOptions,
+  EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceOptions, IpCidr, Medium,
+  Memberlist, Options, Route, TransformOptions,
 };
 use smol_str::SmolStr;
 

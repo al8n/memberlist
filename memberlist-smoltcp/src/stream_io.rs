@@ -56,8 +56,6 @@ impl<'a, 'b> SmoltcpStream<'a, 'b> {
 impl StreamIo for SmoltcpStream<'_, '_> {
   type Conn = SocketHandle;
 
-  // ── Pool (inert for this driver — see the module-level "Pool ownership" note) ──
-  //
   // The engine owns the `SocketHandle` free-list inside its `ReliablePlane` and
   // reaches it directly, so it never calls these three on the view. They are
   // implemented as no-ops that report an empty pool: there is no driver-side
@@ -74,8 +72,6 @@ impl StreamIo for SmoltcpStream<'_, '_> {
   fn free_count(&self) -> usize {
     0
   }
-
-  // ── Listener / accept ───────────────────────────────────────────────────────
 
   fn listen(&mut self, c: Self::Conn, port: u16) -> Result<(), StreamIoError> {
     // `listen()` fails on port 0 (`Unaddressable`) or an already-open socket
@@ -113,8 +109,6 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     sock.remote_endpoint().map(from_endpoint)
   }
 
-  // ── Dial ────────────────────────────────────────────────────────────────────
-
   fn connect(
     &mut self,
     c: Self::Conn,
@@ -134,8 +128,6 @@ impl StreamIo for SmoltcpStream<'_, '_> {
       .connect(cx, remote_ep, local_port)
       .map_err(|_| StreamIoError::Unaddressable)
   }
-
-  // ── Lifecycle predicates ──────────────────────────────────────────────────────
 
   fn may_send(&self, c: Self::Conn) -> bool {
     self.sockets.borrow().get::<tcp::Socket>(c).may_send()
@@ -190,8 +182,6 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     ) && !sock.may_recv()
   }
 
-  // ── Byte I/O ──────────────────────────────────────────────────────────────────
-
   fn recv(&mut self, c: Self::Conn, buf: &mut [u8]) -> Option<usize> {
     match self
       .sockets
@@ -231,8 +221,6 @@ impl StreamIo for SmoltcpStream<'_, '_> {
   fn send_queue(&self, c: Self::Conn) -> usize {
     self.sockets.borrow().get::<tcp::Socket>(c).send_queue()
   }
-
-  // ── Close ─────────────────────────────────────────────────────────────────────
 
   fn close(&mut self, c: Self::Conn) {
     self.sockets.borrow_mut().get_mut::<tcp::Socket>(c).close();

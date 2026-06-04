@@ -16,7 +16,7 @@ use core::{
 };
 
 use memberlist_proto::EndpointOptions;
-use memberlist_smoltcp::{Options, Memberlist, TransformOptions};
+use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {

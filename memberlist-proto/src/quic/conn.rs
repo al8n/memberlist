@@ -193,10 +193,6 @@ impl ConnTable {
       }
       self.peers.remove(&peer);
     }
-    // Signature:
-    // Endpoint::connect(&mut self, now: Instant, config: ClientConfig,
-    //                   remote: SocketAddr, server_name: &str)
-    //                   -> Result<(ConnectionHandle, Connection), ConnectError>
     // `server_name` is the rustls verification identity for the peer's
     // cert — supplied by the driver's SNI provider so the verification
     // name is keyed on the membership address (not a hardcoded constant).
@@ -308,10 +304,6 @@ impl ConnTable {
       return false;
     }
     // Notify quinn's endpoint so it can retire the connection's CID entries.
-    // Signature:
-    // Endpoint::handle_event(&mut self, ch: ConnectionHandle, event: EndpointEvent)
-    //                        -> Option<ConnectionEvent>
-    //
     // Ignoring the returned `Option<ConnectionEvent>`: a `drained()` event is
     // a terminal endpoint-level retire — quinn returns `None` here in
     // practice and no further connection-level work is owed.

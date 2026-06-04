@@ -2910,8 +2910,6 @@ mod tests {
     }
   }
 
-  // ---- helpers ----------------------------------------------------------
-
   fn action_kind(a: &StreamAction) -> &'static str {
     match a {
       StreamAction::Connect(_) => "Connect",
