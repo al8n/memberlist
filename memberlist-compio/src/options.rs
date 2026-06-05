@@ -1603,4 +1603,93 @@ mod tests {
     assert!(alive.is_none(), "no alive predicate by default");
     assert!(merge.is_none(), "no merge predicate by default");
   }
+
+  // The identity-free `validate_gossip_mtu` enforces both ends of the
+  // single-datagram budget: the UDP ceiling (above which a near-MTU wire
+  // datagram cannot fit one packet) and the mandatory-control-packet floor.
+  #[test]
+  fn validate_gossip_mtu_enforces_floor_and_ceiling() {
+    // Unset leaves the machine default ⇒ Ok.
+    assert!(validate_gossip_mtu(&MemberlistOptions::new()).is_ok());
+
+    // Values comfortably between the floor and ceiling are accepted, INCLUDING
+    // the exact floor and the exact ceiling (the bounds are inclusive).
+    for ok in [GOSSIP_MTU_MIN, 1400, 32 * 1024, GOSSIP_MTU_MAX] {
+      assert!(
+        validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(ok)).is_ok(),
+        "mtu {ok} within [{GOSSIP_MTU_MIN}, {GOSSIP_MTU_MAX}] must be accepted"
+      );
+    }
+
+    // Just above the UDP ceiling is rejected as InvalidGossipMtu, carrying the
+    // offending value and the ceiling.
+    match validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(GOSSIP_MTU_MAX + 1)) {
+      Err(crate::error::MemberlistError::InvalidGossipMtu(e)) => {
+        assert_eq!(
+          e.configured(),
+          GOSSIP_MTU_MAX + 1,
+          "carries the offending mtu"
+        );
+        assert_eq!(e.ceiling(), GOSSIP_MTU_MAX, "carries the UDP ceiling");
+      }
+      other => panic!("mtu above the UDP ceiling must be InvalidGossipMtu, got {other:?}"),
+    }
+
+    // Just below the control-packet floor is rejected as GossipMtuTooSmall.
+    match validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(GOSSIP_MTU_MIN - 1)) {
+      Err(crate::error::MemberlistError::GossipMtuTooSmall(e)) => {
+        assert_eq!(
+          e.configured(),
+          GOSSIP_MTU_MIN - 1,
+          "carries the offending mtu"
+        );
+        assert_eq!(e.minimum(), GOSSIP_MTU_MIN, "carries the required floor");
+      }
+      other => panic!("mtu below the floor must be GossipMtuTooSmall, got {other:?}"),
+    }
+    // A tiny but nonzero value (1 byte) is below the floor ⇒ GossipMtuTooSmall.
+    assert!(matches!(
+      validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(1)),
+      Err(crate::error::MemberlistError::GossipMtuTooSmall(_))
+    ));
+  }
+
+  // `validate_encryption_options` is a usability probe: a disabled (no keyring)
+  // policy is always usable, and a keyring whose every key names an AEAD whose
+  // backend is compiled into THIS build trial-encrypts cleanly. The
+  // unsupported-algorithm REJECTION arm is unreachable in this feature set
+  // (both `encryption-aes-gcm` and `encryption-chacha20-poly1305` are on, so
+  // every `SecretKey` variant has a present backend) — it would require a build
+  // missing one AEAD feature, i.e. fault injection at the feature level.
+  #[test]
+  fn validate_encryption_options_accepts_usable_policies() {
+    use memberlist_proto::{Keyring, SecretKey};
+
+    // No keyring ⇒ encryption disabled ⇒ always usable.
+    assert!(validate_encryption_options(&EncryptionOptions::new()).is_ok());
+
+    // A single supported AES-256-GCM primary trial-encrypts cleanly.
+    let aes = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x11; 32])));
+    assert!(validate_encryption_options(&aes).is_ok());
+
+    // A ChaCha20-Poly1305 primary likewise.
+    let chacha =
+      EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::ChaCha20Poly1305([0x22; 32])));
+    assert!(validate_encryption_options(&chacha).is_ok());
+
+    // A mixed-cipher ring (a common key-rotation state) probes EVERY key — the
+    // primary AND all secondaries — so a supported-primary + supported-secondary
+    // ring is accepted only because each variant's backend is present.
+    let mixed = EncryptionOptions::new().with_keyring(Keyring::with_secondaries(
+      SecretKey::Aes256([0x33; 32]),
+      [
+        SecretKey::Aes128([0x44; 16]),
+        SecretKey::ChaCha20Poly1305([0x55; 32]),
+      ],
+    ));
+    assert!(
+      validate_encryption_options(&mixed).is_ok(),
+      "a mixed ring whose every key's backend is compiled in must validate"
+    );
+  }
 }

@@ -333,6 +333,80 @@ async fn wait_join_after_detached_same_seed_completes() {
   let _ = b.shutdown().await;
 }
 
+/// The bootstrap constructor resolves an `Unresolved` advertise address through
+/// the supplied resolver (the `resolve_one` boundary path the all-`Resolved`
+/// tests skip). A resolver mapping a host label to a concrete loopback address
+/// constructs a node advertising that resolved address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_advertise_is_resolved_at_bootstrap() {
+  use memberlist_reactor::AddressResolver;
+
+  struct FixedResolver;
+  impl AddressResolver for FixedResolver {
+    type Address = &'static str;
+    type Error = std::convert::Infallible;
+    fn resolve(
+      &self,
+      _addr: &&'static str,
+    ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_ {
+      // A `let` before the async block keeps this the explicit `+ Send`
+      // form the `AddressResolver` contract requires (not bare `async fn`).
+      let out = vec!["127.0.0.1:0".parse().unwrap()];
+      async move { Ok(out) }
+    }
+  }
+
+  let m = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &FixedResolver,
+    SmolStr::new("unres-adv"),
+    MaybeResolved::Unresolved("my-host"),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("an Unresolved advertise resolving to loopback must construct");
+  assert_eq!(m.local().id_ref().as_str(), "unres-adv");
+  // The advertised address is a concrete loopback port (the resolver's result,
+  // read back post-bind).
+  assert!(m.advertise_address().ip().is_loopback());
+  let _ = m.shutdown().await;
+}
+
+/// A bootstrap `Unresolved` advertise whose resolver yields ZERO addresses
+/// fails construction with `Error::Resolve` rather than binding an unusable
+/// node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_advertise_empty_resolution_fails() {
+  use memberlist_reactor::AddressResolver;
+
+  struct EmptyResolver;
+  impl AddressResolver for EmptyResolver {
+    type Address = &'static str;
+    type Error = std::convert::Infallible;
+    fn resolve(
+      &self,
+      _addr: &&'static str,
+    ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_ {
+      // Explicit `+ Send` form per the resolver contract.
+      let out: Vec<SocketAddr> = Vec::new();
+      async move { Ok(out) }
+    }
+  }
+
+  let res = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &EmptyResolver,
+    SmolStr::new("no-adv"),
+    MaybeResolved::Unresolved("nowhere"),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await;
+  assert!(
+    matches!(res, Err(Error::Resolve(_))),
+    "an advertise resolving to nothing must fail with Resolve, got a non-Resolve result"
+  );
+}
+
 /// Panics in `notify_join` but records `notify_leave`, to prove a delegate panic
 /// does not kill the observation task.
 struct PanicJoinDelegate {
@@ -362,6 +436,70 @@ impl Delegate for PanicJoinDelegate {
       left.store(true, Ordering::Relaxed);
     }
   }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_leave_is_observed_via_event_stream_and_membership() {
+  // A converges with B; when B leaves, A must observe NodeLeft on its event
+  // stream (the driver's NodeLeft dispatch + LeftCluster accounting) and B must
+  // drop out of A's alive set.
+  let a = make("leave-obs-a").await;
+  let b = make("leave-obs-b").await;
+  let a_addr = *a.local().addr_ref();
+  let mut a_events = a.events();
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if a.num_online_members() == 2 && b.num_online_members() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(converged.is_ok(), "cluster did not converge");
+
+  // B leaves gracefully; .await returns once the Dead-self is on the wire.
+  tokio::time::timeout(Duration::from_secs(8), b.leave())
+    .await
+    .expect("leave must not hang")
+    .expect("leave");
+
+  // A observes NodeLeft for B on the event stream.
+  let saw_left = tokio::time::timeout(Duration::from_secs(8), async {
+    while let Some(ev) = a_events.next().await {
+      if let Event::NodeLeft(node) = ev
+        && node.id_ref() == &SmolStr::new("leave-obs-b")
+      {
+        return true;
+      }
+    }
+    false
+  })
+  .await
+  .unwrap_or(false);
+  assert!(saw_left, "A never observed NodeLeft(B) on its event stream");
+
+  // B is no longer in A's alive set.
+  let dropped = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if a.num_online_members() == 1 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(
+    dropped.is_ok(),
+    "B did not drop out of A's alive set after leaving"
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

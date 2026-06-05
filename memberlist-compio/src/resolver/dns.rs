@@ -513,4 +513,153 @@ mod tests {
     );
     assert!(matches!(err, DnsError::Decode(_)));
   }
+
+  /// A loopback TCP server that speaks just enough of the TCP-DNS wire protocol
+  /// (RFC 1035 §4.2.2) to answer ONE query: read the 2-byte length prefix +
+  /// query body, then write back a framed DNS response carrying the supplied
+  /// A and AAAA answers. Returns the bound address so the resolver can target
+  /// it. Stays entirely on loopback — no external DNS is contacted.
+  ///
+  /// The response echoes no relationship to the query name; the resolver's
+  /// `tcp_query_inner` decodes the message and harvests A/AAAA answers without
+  /// validating the question, so a fixed answer set exercises the full
+  /// frame → connect → write → read-length → read-body → decode → collect path.
+  async fn spawn_tcp_dns_server(
+    answers: Vec<RData>,
+  ) -> (SocketAddr, compio::runtime::JoinHandle<()>) {
+    use compio::{
+      buf::BufResult,
+      io::{AsyncReadExt, AsyncWriteExt},
+      net::TcpListener,
+    };
+    use hickory_proto::{
+      op::{Message, OpCode},
+      rr::{Name, Record},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind loopback DNS server");
+    let addr = listener.local_addr().expect("server local_addr");
+
+    let handle = compio::runtime::spawn(async move {
+      let Ok((mut stream, _)) = listener.accept().await else {
+        return;
+      };
+
+      // Read the 2-byte big-endian query length, then the query body.
+      let len_buf = vec![0u8; 2];
+      let BufResult(r, len_buf) = stream.read_exact(len_buf).await;
+      if r.is_err() {
+        return;
+      }
+      let qlen = u16::from_be_bytes([len_buf[0], len_buf[1]]) as usize;
+      let qbuf = vec![0u8; qlen];
+      let BufResult(r, _qbuf) = stream.read_exact(qbuf).await;
+      if r.is_err() {
+        return;
+      }
+
+      // Build a response message carrying the fixed answers. The id is
+      // irrelevant to the resolver (it does not match the query id).
+      let mut resp = Message::response(0, OpCode::Query);
+      let name = Name::from_ascii("seed.cluster.test.").expect("answer name");
+      for rdata in answers {
+        resp.add_answer(Record::from_rdata(name.clone(), 60, rdata));
+      }
+      let body = resp.to_vec().expect("encode response");
+      let mut framed = Vec::with_capacity(2 + body.len());
+      framed.extend_from_slice(&(body.len() as u16).to_be_bytes());
+      framed.extend_from_slice(&body);
+
+      // Ignoring Err: best-effort single write into a test fixture; if the
+      // client hung up the resolver test will surface the failure itself.
+      let BufResult(_w, _b) = stream.write_all(framed).await;
+    });
+
+    (addr, handle)
+  }
+
+  // The TCP-first success path: a FQDN (contains a `.`) with a configured
+  // nameserver drives `tcp_query` → `tcp_query_inner` end to end against a
+  // loopback DNS server, and the harvested A + AAAA answers (carrying the
+  // query port) are returned without consulting the OS fallback.
+  #[compio::test]
+  async fn tcp_query_collects_a_and_aaaa_from_loopback_server() {
+    use hickory_proto::rr::{
+      RData,
+      rdata::{A, AAAA},
+    };
+
+    let answers = vec![
+      RData::A(A(Ipv4Addr::new(203, 0, 113, 7))),
+      RData::AAAA(AAAA(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1))),
+      // A CNAME-like non-address record is ignored by the collector; model it
+      // with a TXT to prove the `_ => {}` arm is taken.
+      RData::TXT(hickory_proto::rr::rdata::TXT::new(vec![
+        "ignored".to_string(),
+      ])),
+    ];
+    let (server_addr, handle) = spawn_tcp_dns_server(answers).await;
+
+    let r = DnsResolver::from_servers(vec![server_addr]).with_timeout(Duration::from_secs(5));
+    // A fully-qualified name (has a `.`) so the TCP-first branch is taken.
+    let addr: Address = "seed.cluster.test:8300".parse().expect("parse FQDN:port");
+    assert!(matches!(addr.host(), Host::Domain(_)));
+
+    let resolved = r.resolve(&addr).await.expect("TCP-DNS resolve");
+    // Both address answers surface, each carrying the requested port; the TXT
+    // is dropped.
+    assert_eq!(
+      resolved.len(),
+      2,
+      "only A + AAAA are collected: {resolved:?}"
+    );
+    assert!(resolved.contains(&SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
+      8300
+    )));
+    assert!(resolved.contains(&SocketAddr::new(
+      IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1)),
+      8300
+    )));
+
+    handle.await.expect("DNS server task");
+  }
+
+  // When the TCP-DNS server returns an EMPTY answer set, the resolver treats
+  // the TCP attempt as unproductive and falls through to the OS fallback. With
+  // a short loopback name target the fallback resolves loopback, proving the
+  // empty-TCP-answer → fallback path (the `!addrs.is_empty()` guard going
+  // false) rather than surfacing the empty TCP result.
+  #[compio::test]
+  async fn tcp_query_empty_answers_falls_through_to_os_fallback() {
+    // Server answers with zero address records.
+    let (server_addr, handle) = spawn_tcp_dns_server(Vec::new()).await;
+
+    let r = DnsResolver::from_servers(vec![server_addr]).with_timeout(Duration::from_secs(5));
+    // `localhost.` is fully-qualified (trailing dot ⇒ contains `.`), so the TCP
+    // branch is attempted; the empty answer makes it fall through to the OS
+    // resolver, which maps localhost to loopback.
+    let addr: Address = "localhost.:9100".parse().expect("parse localhost.:9100");
+    assert!(matches!(addr.host(), Host::Domain(_)));
+
+    let resolved = r
+      .resolve(&addr)
+      .await
+      .expect("empty TCP answer falls back to OS resolver");
+    assert!(
+      !resolved.is_empty(),
+      "OS fallback must resolve localhost to loopback"
+    );
+    for sa in &resolved {
+      assert_eq!(sa.port(), 9100);
+      assert!(
+        sa.ip().is_loopback(),
+        "localhost maps to loopback, got {sa}"
+      );
+    }
+
+    handle.await.expect("DNS server task");
+  }
 }
