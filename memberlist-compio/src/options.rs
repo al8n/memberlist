@@ -1467,4 +1467,140 @@ mod tests {
       Err(crate::error::MemberlistError::InvalidOption(_))
     ));
   }
+
+  #[test]
+  fn memberlist_options_default_is_all_unset() {
+    let opts = MemberlistOptions::new();
+    assert_eq!(opts.gossip_mtu(), None);
+    assert_eq!(opts.meta_max_size(), None);
+    assert_eq!(opts.max_stream_frame_size(), None);
+    assert!(opts.initial_meta().is_none());
+    assert!(opts.initial_local_state().is_none());
+    assert_eq!(opts.label(), None);
+    assert!(!opts.skip_inbound_label_check());
+    // `new()` and `default()` agree on every scalar.
+    let d = MemberlistOptions::default();
+    assert_eq!(d.gossip_mtu(), None);
+    assert_eq!(
+      d.skip_inbound_label_check(),
+      opts.skip_inbound_label_check()
+    );
+  }
+
+  // Every scalar / payload `with_*` builder round-trips through its accessor.
+  #[test]
+  fn memberlist_options_builders_round_trip() {
+    let meta = Meta::try_from(Bytes::from_static(b"meta")).unwrap();
+    let state = Bytes::from_static(b"local-state");
+    let opts = MemberlistOptions::new()
+      .with_gossip_mtu(1500)
+      .with_meta_max_size(256)
+      .with_max_stream_frame_size(4096)
+      .with_initial_meta(meta.clone())
+      .with_initial_local_state(state.clone())
+      .with_skip_inbound_label_check(true);
+
+    assert_eq!(opts.gossip_mtu(), Some(1500));
+    assert_eq!(opts.meta_max_size(), Some(256));
+    assert_eq!(opts.max_stream_frame_size(), Some(4096));
+    assert_eq!(opts.initial_meta(), Some(&meta));
+    assert_eq!(opts.initial_local_state(), Some(&state));
+    assert!(opts.skip_inbound_label_check());
+    // Clone + Debug are derived and usable.
+    assert_eq!(opts.clone().gossip_mtu(), Some(1500));
+    assert!(!format!("{opts:?}").is_empty());
+  }
+
+  // The compression / encryption policy builders replace the stored policy;
+  // the accessors hand back a borrow of it.
+  #[test]
+  fn memberlist_options_compression_and_encryption_round_trip() {
+    let opts = MemberlistOptions::new()
+      .with_compression(CompressionOptions::new())
+      .with_encryption(EncryptionOptions::new());
+    // No keyring by default ⇒ encryption disabled (a usable identity policy).
+    assert!(opts.encryption().keyring().is_none());
+    // Accessor returns a borrow without panicking.
+    let _ = opts.compression();
+  }
+
+  // `with_label` validates immediately, normalizes empty to `None`, and the
+  // accepted bytes round-trip; an over-long or non-UTF-8 label is rejected.
+  #[test]
+  fn memberlist_options_label_validation_and_round_trip() {
+    let ok = MemberlistOptions::new()
+      .with_label(Some(b"cluster-z".to_vec()))
+      .expect("a short ASCII label is valid");
+    assert_eq!(ok.label(), Some(b"cluster-z".as_slice()));
+
+    // Empty normalizes to no label.
+    let empty = MemberlistOptions::new()
+      .with_label(Some(Vec::new()))
+      .expect("empty label normalizes to None");
+    assert_eq!(empty.label(), None);
+
+    // Explicit `None` is no label.
+    let none = MemberlistOptions::new()
+      .with_label(None)
+      .expect("None label is valid");
+    assert_eq!(none.label(), None);
+
+    // Over the 253-byte max is rejected.
+    assert!(matches!(
+      MemberlistOptions::new().with_label(Some(vec![b'x'; 254])),
+      Err(crate::error::MemberlistError::InvalidLabel(_))
+    ));
+    // Non-UTF-8 is rejected.
+    assert!(matches!(
+      MemberlistOptions::new().with_label(Some(vec![0xff, 0xfe])),
+      Err(crate::error::MemberlistError::InvalidLabel(_))
+    ));
+  }
+
+  #[test]
+  fn options_admission_delegates_and_into_parts() {
+    use memberlist_proto::typed::NodeState;
+
+    // A trivial admit-all predicate, exercising the `with_alive_delegate` /
+    // `with_merge_delegate` install paths.
+    struct AdmitAll;
+    impl AliveDelegate<smol_str::SmolStr, SocketAddr> for AdmitAll {
+      fn notify_alive(&self, _peer: &NodeState<smol_str::SmolStr, SocketAddr>) -> bool {
+        true
+      }
+    }
+    impl MergeDelegate<smol_str::SmolStr, SocketAddr> for AdmitAll {
+      fn notify_merge(&self, _peers: &[NodeState<smol_str::SmolStr, SocketAddr>]) -> bool {
+        true
+      }
+    }
+
+    let custom_ml = MemberlistOptions::new().with_gossip_mtu(1234);
+    let custom_driver = DriverOptions::new().with_iter_drain_cap(7);
+    let opts: Options<MockTransport> = Options::new(())
+      .with_memberlist(custom_ml)
+      .with_driver(custom_driver)
+      .with_alive_delegate(AdmitAll)
+      .with_merge_delegate(AdmitAll);
+
+    // Accessors reflect the installed sub-options.
+    assert_eq!(opts.memberlist().gossip_mtu(), Some(1234));
+    assert_eq!(opts.driver().iter_drain_cap(), 7);
+
+    // `into_parts` hands back the transport opts, both sub-options, and the
+    // two installed predicates.
+    let (_transport, ml, driver, alive, merge) = opts.into_parts();
+    assert_eq!(ml.gossip_mtu(), Some(1234));
+    assert_eq!(driver.iter_drain_cap(), 7);
+    assert!(alive.is_some(), "alive predicate was installed");
+    assert!(merge.is_some(), "merge predicate was installed");
+  }
+
+  #[test]
+  fn options_into_parts_defaults_have_no_delegates() {
+    let opts: Options<MockTransport> = Options::new(());
+    let (_transport, _ml, _driver, alive, merge) = opts.into_parts();
+    assert!(alive.is_none(), "no alive predicate by default");
+    assert!(merge.is_none(), "no merge predicate by default");
+  }
 }

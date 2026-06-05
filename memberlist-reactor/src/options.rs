@@ -483,3 +483,85 @@ impl<I> Options<I> {
     )
   }
 }
+
+#[cfg(test)]
+mod builder_tests {
+  use super::*;
+
+  #[test]
+  fn memberlist_options_overrides_round_trip() {
+    let meta = Meta::try_from(Bytes::from_static(b"meta")).expect("valid meta");
+    let state = Bytes::from_static(b"local-state");
+    let opts = MemberlistOptions::new()
+      .with_gossip_mtu(1400)
+      .with_meta_max_size(512)
+      .with_max_stream_frame_size(65_536)
+      .with_initial_meta(meta.clone())
+      .with_initial_local_state(state.clone());
+
+    assert_eq!(opts.gossip_mtu(), Some(1400));
+    assert_eq!(opts.meta_max_size(), Some(512));
+    assert_eq!(opts.max_stream_frame_size(), Some(65_536));
+    assert_eq!(opts.initial_meta(), Some(&meta));
+    assert_eq!(opts.initial_local_state(), Some(&state));
+  }
+
+  #[test]
+  fn memberlist_options_default_leaves_every_override_unset() {
+    let opts = MemberlistOptions::default();
+    assert_eq!(opts.gossip_mtu(), None);
+    assert_eq!(opts.meta_max_size(), None);
+    assert_eq!(opts.max_stream_frame_size(), None);
+    assert_eq!(opts.initial_meta(), None);
+    assert_eq!(opts.initial_local_state(), None);
+    assert_eq!(opts.label(), None);
+    assert!(!opts.skip_inbound_label_check());
+    // Exercise the compression/encryption accessors (they return machine defaults).
+    let _compression = opts.compression();
+    let _encryption = opts.encryption();
+  }
+
+  #[test]
+  fn memberlist_options_compression_encryption_builders() {
+    let opts = MemberlistOptions::new()
+      .with_compression(CompressionOptions::default())
+      .with_encryption(EncryptionOptions::default());
+    let _compression = opts.compression();
+    let _encryption = opts.encryption();
+  }
+
+  #[test]
+  fn channel_default_is_bounded_1024() {
+    assert_eq!(Channel::default(), Channel::Bounded(1024));
+    assert_ne!(Channel::Bounded(1024), Channel::Unbounded);
+  }
+
+  #[test]
+  fn driver_options_overrides_round_trip() {
+    let opts = DriverOptions::new()
+      .with_observation_channel(Channel::Unbounded)
+      .with_event_stream_capacity(2048)
+      .with_recv_batch(32)
+      .with_transmit_batch(16)
+      .with_join_deadline(Duration::from_secs(5))
+      .with_close_timeout(Duration::from_secs(3));
+
+    assert_eq!(opts.observation_channel(), Channel::Unbounded);
+    assert_eq!(opts.event_stream_capacity(), 2048);
+    assert_eq!(opts.recv_batch(), 32);
+    assert_eq!(opts.transmit_batch(), 16);
+    assert_eq!(opts.join_deadline(), Duration::from_secs(5));
+    assert_eq!(opts.close_timeout(), Duration::from_secs(3));
+  }
+
+  #[test]
+  fn driver_options_default_tuning() {
+    let opts = DriverOptions::default();
+    assert_eq!(opts.observation_channel(), Channel::Bounded(1024));
+    assert_eq!(opts.event_stream_capacity(), 1024);
+    assert_eq!(opts.recv_batch(), 64);
+    assert_eq!(opts.transmit_batch(), 64);
+    assert_eq!(opts.join_deadline(), Duration::from_secs(10));
+    assert_eq!(opts.close_timeout(), Duration::from_secs(10));
+  }
+}

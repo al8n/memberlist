@@ -1595,3 +1595,7 @@ impl<I, A> Message<I, A> {
     Self::ErrorResponse(val)
   }
 }
+
+#[cfg(all(test, feature = "std"))]
+#[path = "typed_tests.rs"]
+mod typed_tests;

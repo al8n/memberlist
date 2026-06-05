@@ -996,3 +996,111 @@ pub enum StreamEvent {
   /// Stream errored; the wrapped string is a driver-reported reason.
   Failed(String),
 }
+
+#[cfg(test)]
+mod event_tests {
+  use std::{net::SocketAddr, sync::Arc};
+
+  use bytes::Bytes;
+  use smol_str::SmolStr;
+
+  use super::{
+    CompoundTransmit, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeOutcome, NodeConflict,
+    PacketTransmit, PingId, PushPullKind, Reliability, Transmit, UserPacket,
+  };
+  use crate::typed::{Ack, Message, NodeState, State};
+
+  fn addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+  }
+
+  fn ack_msg(seq: u32) -> Message<SmolStr, SocketAddr> {
+    Message::ack(Ack::new(seq))
+  }
+
+  #[test]
+  fn hint_enums_expose_their_predicates() {
+    assert!(Reliability::Reliable.is_reliable());
+    assert!(!Reliability::Unreliable.is_reliable());
+    assert!(PushPullKind::Join.is_join());
+    assert!(!PushPullKind::Refresh.is_join());
+    assert!(ExchangeKind::PushPull.is_push_pull());
+    assert!(!ExchangeKind::ReliablePing.is_push_pull());
+    assert!(!ExchangeKind::UserMessage.is_push_pull());
+    assert!(ExchangeOutcome::Succeeded.is_succeeded());
+    assert!(!ExchangeOutcome::Failed.is_succeeded());
+  }
+
+  #[test]
+  fn id_newtypes_round_trip_their_raw_value() {
+    assert_eq!(ExchangeId::new(99).get(), 99);
+    assert_eq!(PingId::new(7).get(), 7);
+  }
+
+  #[test]
+  fn exchange_completed_carries_its_fields() {
+    let ec = ExchangeCompleted::new(
+      ExchangeId::new(3),
+      addr(7000),
+      ExchangeOutcome::Failed,
+      ExchangeKind::PushPull,
+    );
+    assert_eq!(ec.eid(), ExchangeId::new(3));
+    assert_eq!(ec.peer(), &addr(7000));
+    assert_eq!(ec.outcome(), ExchangeOutcome::Failed);
+    assert_eq!(ec.kind(), ExchangeKind::PushPull);
+  }
+
+  #[test]
+  fn packet_and_compound_transmit_round_trip() {
+    let pt = PacketTransmit::new(addr(1), ack_msg(5));
+    assert_eq!(pt.to_ref(), &addr(1));
+    assert!(matches!(pt.message_ref(), Message::Ack(_)));
+    let (to, m) = pt.into_parts();
+    assert_eq!(to, addr(1));
+    assert!(matches!(m, Message::Ack(_)));
+
+    let ct = CompoundTransmit::new(addr(2), std::vec![ack_msg(1), ack_msg(2)]);
+    assert_eq!(ct.to_ref(), &addr(2));
+    assert_eq!(ct.messages_slice().len(), 2);
+    let (to, msgs) = ct.into_parts();
+    assert_eq!(to, addr(2));
+    assert_eq!(msgs.len(), 2);
+  }
+
+  #[test]
+  fn transmit_enum_wraps_packet_and_compound() {
+    let packet = Transmit::Packet(PacketTransmit::new(addr(1), ack_msg(1)));
+    let compound = Transmit::Compound(CompoundTransmit::new(
+      addr(2),
+      std::vec![ack_msg(1), ack_msg(2)],
+    ));
+    assert!(matches!(packet, Transmit::Packet(_)));
+    assert!(matches!(compound, Transmit::Compound(_)));
+  }
+
+  #[test]
+  fn node_conflict_holds_both_peers() {
+    let existing = Arc::new(NodeState::new(SmolStr::new("n"), addr(10), State::Alive));
+    let other = Arc::new(NodeState::new(SmolStr::new("n"), addr(20), State::Alive));
+    let nc = NodeConflict::new(existing.clone(), other.clone());
+    assert!(Arc::ptr_eq(nc.existing_ref(), &existing));
+    assert!(Arc::ptr_eq(nc.other_ref(), &other));
+  }
+
+  #[test]
+  fn user_packet_exposes_payload_and_parts() {
+    let up = UserPacket::new(
+      addr(30),
+      Bytes::from_static(b"hello"),
+      Reliability::Unreliable,
+    );
+    assert_eq!(up.from_ref(), &addr(30));
+    assert_eq!(up.data_ref().as_ref(), b"hello");
+    assert!(!up.reliability().is_reliable());
+    let (from, data, rel) = up.into_parts();
+    assert_eq!(from, addr(30));
+    assert_eq!(data.as_ref(), b"hello");
+    assert!(!rel.is_reliable());
+  }
+}
