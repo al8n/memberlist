@@ -22,7 +22,10 @@ use core::{
 };
 use smol_str::SmolStr;
 
-use crate::typed::{DelegateVersion, ProtocolVersion};
+use crate::{
+  event::PushPullRequestReceived,
+  typed::{DelegateVersion, ProtocolVersion},
+};
 use Alive;
 use Dead;
 use Message;
@@ -1344,4 +1347,386 @@ fn probe_node_awareness_missed_nack() {
     1,
     "missing all indirect nacks decrements health to 1"
   );
+}
+
+// ──────────────── Gossip / state-exchange / reaping family ───────────────────
+//
+// These mirror the dissemination scenarios from the behavioral oracle:
+//
+//   * `gossip` — the periodic gossip scheduler picks random non-local
+//     Alive/Suspect peers and ships them ONE datagram carrying the queued
+//     membership broadcasts, disseminating every known node's Alive.
+//   * `gossip_to_dead` — a recently-Dead peer (within `gossip_to_the_dead_time`)
+//     is still a gossip target so it can hear an accusation and refute; once
+//     aged past that window it is dropped from the candidate set.
+//   * `merge_state` — a batch of remote `PushNodeState`s is folded in: a
+//     higher-incarnation Alive resurrects, remote Suspect/Dead both downgrade
+//     the local entry to Suspect (a remote cannot directly mark us Dead), and a
+//     brand-new peer is admitted Alive with a `NodeJoined`.
+//   * `push_pull` — an inbound push/pull request merges the peer's membership
+//     view (same `merge_state` semantics) and replies with our own view.
+//   * `reset_nodes` — Dead/Left members are reaped only after they have sat in
+//     that state longer than `gossip_to_the_dead_time`.
+//
+// The schedulers are driven deterministically: arm `next_gossip` directly and
+// fire it with `handle_timeout(deadline)`, exactly as the mechanical gossip
+// tests in `endpoint::tests` do, rather than sleeping on a real clock.
+
+/// A remote `PushNodeState` for `node` at incarnation `inc` in `state`.
+fn pns_of(
+  n: &Node<SmolStr, SocketAddr>,
+  inc: u32,
+  state: State,
+) -> PushNodeState<SmolStr, SocketAddr> {
+  PushNodeState::new(inc, n.id_ref().cheap_clone(), *n.addr_ref(), state)
+    .with_meta(Meta::empty())
+    .with_protocol_version(ProtocolVersion::V1)
+    .with_delegate_version(DelegateVersion::V1)
+}
+
+/// Fire the armed gossip scheduler at `now` and collect, per emitted datagram,
+/// the set of node ids carried in `Alive` broadcasts. A datagram may be a lone
+/// `Packet` or a `Compound`; both are flattened.
+///
+/// The scheduler picks its random targets internally, so the caller asserts on
+/// the disseminated content rather than assuming a particular target identity.
+fn gossiped_alive_ids(e: &mut Endpoint<SmolStr, SocketAddr>, now: Instant) -> Vec<SmolStr> {
+  e.next_gossip = Some(now);
+  e.handle_timeout(now);
+  let mut ids = Vec::new();
+  while let Some(tx) = e.poll_transmit() {
+    let msgs: Vec<Message<SmolStr, SocketAddr>> = match tx {
+      Transmit::Packet(p) => {
+        let (_, m) = p.into_parts();
+        vec![m]
+      }
+      Transmit::Compound(c) => {
+        let (_, m) = c.into_parts();
+        m
+      }
+    };
+    for m in msgs {
+      if let Message::Alive(a) = m {
+        ids.push(a.node_ref().id_ref().cheap_clone());
+      }
+    }
+  }
+  ids
+}
+
+/// `gossip`: the periodic gossip scheduler disseminates the membership it knows.
+/// The oracle stands up three nodes, marks them all Alive on the gossiper, then
+/// gossips and watches a delegate-bearing peer learn every node. Here the lone
+/// synchronous `Endpoint` IS the gossiper: with two Alive peers and
+/// `gossip_nodes = 2`, one gossip tick ships every queued membership `Alive`
+/// (local + both peers) to the selected targets.
+#[test]
+fn gossip_disseminates_membership() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(2),
+  );
+  let p2 = node("p2", 8002);
+  let p3 = node("p3", 8003);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.process_alive(alive_of(&p3, 1), false, t0);
+  assert_eq!(e.num_members(), 3, "local plus the two peers");
+  // Leave the construction-/admission-queued membership broadcasts in place —
+  // they are exactly what a gossip tick should disseminate.
+  while e.poll_event().is_some() {}
+
+  let ids = gossiped_alive_ids(&mut e, t0);
+
+  // With gossip_nodes = 2 and two eligible targets, both peers are addressed,
+  // and the single queued membership Alive set (local + p2 + p3) rides each
+  // datagram — so every known node is disseminated at least once.
+  for want in [e.local_id_ref(), p2.id_ref(), p3.id_ref()] {
+    assert!(
+      ids.iter().any(|id| id == want),
+      "gossip must disseminate an Alive for {want}, got {ids:?}"
+    );
+  }
+  // The scheduler always reschedules a tick past `now`.
+  assert_eq!(
+    e.poll_timeout(),
+    Some(t0 + Duration::from_millis(10)),
+    "the gossip deadline must advance by gossip_interval"
+  );
+}
+
+/// `gossip_to_dead`: a node that died within `gossip_to_the_dead_time` is still
+/// gossiped (so a falsely-dead node can hear the accusation and refute), but a
+/// node that has been Dead longer than that window is no longer a gossip target.
+/// The oracle drives the same boundary by back-dating the dead node's
+/// `state_change` across `gossip_to_the_dead_time`; here `age_member` moves the
+/// stamp deterministically.
+#[test]
+fn gossip_to_dead_within_window_then_stops() {
+  let window = Duration::from_millis(100);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(1))
+      .with_gossip_nodes(3)
+      .with_gossip_to_the_dead_time(window),
+  );
+  let dead = node("dead", 8002);
+  let dead_addr = *dead.addr_ref();
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&dead, 1), false, t0);
+  // Mark it Dead at t0 (state_change = t0), the only non-local member.
+  e.process_dead(dead_of(dead.id_ref(), e.local_id_ref(), 1), t0);
+  assert_eq!(e.member_liveness(dead.id_ref()), Some(State::Dead));
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Queue a fresh membership broadcast so a datagram has content to carry.
+  e.broadcast_message(
+    SmolStr::new("zz"),
+    Message::Alive(alive_of(&node("zz", 8099), 1)),
+  );
+
+  // Within the window (now == state_change): the dead node is still a target.
+  e.next_gossip = Some(t0);
+  e.handle_timeout(t0);
+  let reached_dead_within = {
+    let mut hit = false;
+    while let Some(tx) = e.poll_transmit() {
+      let to = match &tx {
+        Transmit::Packet(p) => *p.to_ref(),
+        Transmit::Compound(c) => *c.to_ref(),
+      };
+      hit |= to == dead_addr;
+    }
+    hit
+  };
+  assert!(
+    reached_dead_within,
+    "a recently-dead peer must still receive gossip so it can refute"
+  );
+
+  // Age the dead node's state_change past the window, re-queue a broadcast,
+  // and gossip again: the aged-dead node is no longer an eligible target.
+  e.age_member(dead.id_ref(), window + Duration::from_millis(1));
+  e.broadcast_message(
+    SmolStr::new("zz"),
+    Message::Alive(alive_of(&node("zz", 8099), 2)),
+  );
+  e.next_gossip = Some(t0);
+  e.handle_timeout(t0);
+  while let Some(tx) = e.poll_transmit() {
+    let to = match &tx {
+      Transmit::Packet(p) => *p.to_ref(),
+      Transmit::Compound(c) => *c.to_ref(),
+    };
+    assert_ne!(
+      to, dead_addr,
+      "an aged-dead peer (past gossip_to_the_dead_time) must not be gossiped"
+    );
+  }
+}
+
+/// `merge_state`: folding a remote `PushNodeState` batch into local membership.
+/// Mirrors the oracle exactly — three peers are learned Alive and the first is
+/// locally suspected, then a remote batch arrives:
+///   n1 Alive@2  ⇒ resurrects n1 to Alive at the higher incarnation,
+///   n2 Suspect  ⇒ keeps n2 Suspect,
+///   n3 Dead     ⇒ a remote cannot mark us Dead directly, so n3 → Suspect,
+///   n4 Alive@2  ⇒ a brand-new peer is admitted Alive and emits `NodeJoined`.
+#[test]
+fn merge_state_folds_remote_batch() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let n1 = Node::new(SmolStr::new("n1"), "127.0.0.1:8000".parse().unwrap());
+  let n2 = Node::new(SmolStr::new("n2"), "127.0.0.2:8000".parse().unwrap());
+  let n3 = Node::new(SmolStr::new("n3"), "127.0.0.3:8000".parse().unwrap());
+  let n4 = Node::new(SmolStr::new("n4"), "127.0.0.4:8000".parse().unwrap());
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&n1, 1), false, t0);
+  e.process_alive(alive_of(&n2, 1), false, t0);
+  e.process_alive(alive_of(&n3, 1), false, t0);
+  // Locally suspect n1 at its current incarnation.
+  e.process_suspect(suspect_of(n1.id_ref(), e.local_id_ref(), 1), t0);
+  assert_eq!(e.member_liveness(n1.id_ref()), Some(State::Suspect));
+  while e.poll_event().is_some() {}
+
+  let remote = [
+    pns_of(&n1, 2, State::Alive),
+    pns_of(&n2, 1, State::Suspect),
+    pns_of(&n3, 1, State::Dead),
+    pns_of(&n4, 2, State::Alive),
+  ];
+  e.merge_state(&remote, t0);
+
+  // n1: a higher-incarnation Alive clears the local suspicion.
+  assert_eq!(
+    e.member_liveness(n1.id_ref()),
+    Some(State::Alive),
+    "a higher-incarnation remote Alive resurrects the suspected node"
+  );
+  assert_eq!(e.node_incarnation(n1.id_ref()), Some(2), "n1 takes inc 2");
+
+  // n2: remote Suspect keeps it Suspect.
+  assert_eq!(e.member_liveness(n2.id_ref()), Some(State::Suspect));
+
+  // n3: a remote Dead downgrades us to Suspect, never directly to Dead.
+  assert_eq!(
+    e.member_liveness(n3.id_ref()),
+    Some(State::Suspect),
+    "a remote Dead is admitted only as a local Suspect"
+  );
+
+  // n4: the new peer joins.
+  assert_eq!(e.member_liveness(n4.id_ref()), Some(State::Alive));
+  assert_eq!(e.node_incarnation(n4.id_ref()), Some(2), "n4 takes inc 2");
+
+  // Exactly one membership event: the join of the previously-unknown n4.
+  let ev = e.poll_event().expect("expected NodeJoined for n4");
+  match ev {
+    Event::NodeJoined(n) => assert_eq!(n.id_ref(), n4.id_ref()),
+    other => panic!("expected NodeJoined for n4, got {other:?}"),
+  }
+  assert!(
+    e.poll_event().is_none(),
+    "only the new node should produce a membership event"
+  );
+}
+
+/// `push_pull`: an inbound push/pull exchange merges the peer's membership view
+/// and replies with the local view. The oracle has the initiator ship its state
+/// and watches the receiver learn every node; here we feed the receiver an
+/// inbound `PushPullRequestReceived` and route it through `handle_stream_event`
+/// (the proto's "apply an incoming push/pull" path), which merges the batch and
+/// hands back the local-view response the driver would encode.
+#[test]
+fn push_pull_merges_request_and_replies_with_local_view() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  // The receiver already knows one peer of its own.
+  let mine = node("mine", 8010);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&mine, 1), false, t0);
+  while e.poll_event().is_some() {}
+
+  // The peer pushes a membership view containing itself plus another node the
+  // receiver has never seen.
+  let peer = node("peer", 8020);
+  let other = node("other", 8030);
+  let states = vec![
+    pns_of(&peer, 1, State::Alive),
+    pns_of(&other, 1, State::Alive),
+  ];
+  let req = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
+    *peer.addr_ref(),
+    states,
+    Bytes::new(),
+    PushPullKind::Join,
+  ));
+
+  let cmd = e
+    .handle_stream_event(req, t0)
+    .expect("an admitted push/pull request must yield a response command");
+
+  // The inbound membership is merged: both pushed nodes are now known Alive.
+  assert_eq!(e.member_liveness(peer.id_ref()), Some(State::Alive));
+  assert_eq!(e.member_liveness(other.id_ref()), Some(State::Alive));
+  assert_eq!(
+    e.num_members(),
+    4,
+    "local + the prior peer + the two merged nodes"
+  );
+
+  // Each merged node fires a NodeJoined (order is membership-map dependent, so
+  // collect the joined ids as a set).
+  let mut joined = Vec::new();
+  while let Some(ev) = e.poll_event() {
+    if let Event::NodeJoined(n) = ev {
+      joined.push(n.id_ref().cheap_clone());
+    }
+  }
+  for want in [peer.id_ref(), other.id_ref()] {
+    assert!(
+      joined.iter().any(|id| id == want),
+      "merging the push/pull request must join {want}, joined {joined:?}"
+    );
+  }
+
+  // The receiver replies with its OWN view, which now includes every node it
+  // knows (local + mine + peer + other).
+  match cmd {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let (local_states, _user_data) = resp.into_parts();
+      for want in [
+        e.local_id_ref(),
+        mine.id_ref(),
+        peer.id_ref(),
+        other.id_ref(),
+      ] {
+        assert!(
+          local_states.iter().any(|s| s.id_ref() == want),
+          "the push/pull reply must carry the local view of {want}, got {local_states:?}"
+        );
+      }
+    }
+    StreamCommand::Close => panic!("an admitted join merge must not close the stream"),
+  }
+}
+
+/// `reset_nodes`: Dead/Left members are reaped only after sitting in that state
+/// longer than `gossip_to_the_dead_time`. The oracle stands up three nodes,
+/// kills one, then resets — first within the window (the dead node is retained),
+/// then after sleeping past the window (the dead node is pruned). Here
+/// `age_member` advances the dead node's state-clock deterministically.
+#[test]
+fn reset_nodes_reaps_only_past_the_window() {
+  let window = Duration::from_millis(100);
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new(cfg().with_gossip_to_the_dead_time(window));
+  let n1 = node("n1", 8001);
+  let n2 = node("n2", 8002);
+  let n3 = node("n3", 8003);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&n1, 1), false, t0);
+  e.process_alive(alive_of(&n2, 1), false, t0);
+  e.process_alive(alive_of(&n3, 1), false, t0);
+  // Kill n2 at t0 (state_change = t0).
+  e.process_dead(dead_of(n2.id_ref(), e.local_id_ref(), 1), t0);
+  assert_eq!(e.member_liveness(n2.id_ref()), Some(State::Dead));
+  while e.poll_event().is_some() {}
+
+  // Reset within the window: n2 has been Dead for zero elapsed ⇒ retained.
+  // (local + n1 + n2 + n3 = 4 members.)
+  e.reset_nodes(t0);
+  assert_eq!(e.num_members(), 4, "reset within the window reaps nothing");
+  assert!(
+    e.member(n2.id_ref()).is_some(),
+    "n2 must still be mapped before the window elapses"
+  );
+
+  // Age n2 past the window and reset again: now it is reaped.
+  e.age_member(n2.id_ref(), window + Duration::from_millis(1));
+  e.reset_nodes(t0);
+  assert_eq!(
+    e.num_members(),
+    3,
+    "reset past the window reaps the long-dead node"
+  );
+  assert!(
+    e.member(n2.id_ref()).is_none(),
+    "n2 must be unmapped once it has been Dead longer than the window"
+  );
+  // The live nodes are untouched.
+  for n in [&n1, &n3] {
+    assert_eq!(
+      e.member_liveness(n.id_ref()),
+      Some(State::Alive),
+      "{} must survive the reap",
+      n.id_ref()
+    );
+  }
 }
