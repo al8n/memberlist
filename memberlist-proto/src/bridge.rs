@@ -74,6 +74,51 @@ fn require_bytes<'a>(f: &'a Option<Bytes>, field: &'static str) -> Result<&'a By
   f.as_ref().ok_or(BridgeError::MissingField(field))
 }
 
+/// Copy a decoded wire `bytes` field into an owned buffer, detaching it from the
+/// inbound frame.
+///
+/// The codec decodes zero-copy, so a wire `bytes` field aliases the whole inbound
+/// datagram allocation. A field that crosses into long-lived or machine-retained
+/// state — membership `meta`, or an ack payload routed through the ack registry,
+/// a `PingCompleted` event, or a forwarded ack — must be detached: otherwise a
+/// tiny retained field pins the entire datagram, and protobuf unknown-field
+/// padding lets a remote inflate that datagram into a network-reachable memory
+/// amplification. Copying a small field is cheap and defeats the attack by
+/// construction (a padded frame carries a small real field). Application-delivered
+/// fields use [`app_field`] instead, which keeps large payloads zero-copy.
+fn detach_field(field: &Bytes) -> Bytes {
+  Bytes::copy_from_slice(field)
+}
+
+/// Build the typed [`Meta`](typed::Meta) from a wire `bytes` field, detaching it
+/// from the inbound frame (see [`detach_field`]).
+fn meta_from_wire(meta: &Bytes) -> Result<typed::Meta, DecodeError> {
+  typed::Meta::try_from(detach_field(meta)).map_err(|e| DecodeError::custom(e.to_string()))
+}
+
+/// Size threshold for [`app_field`]: an application-delivered byte field below
+/// this is copied, at or above it is kept zero-copy. Small enough that copying
+/// is cheap.
+const ZEROCOPY_MIN_LEN: usize = 1024;
+
+/// Handle an application-delivered byte field (`UserData`, PushPull `user_data`):
+/// keep a large one zero-copy — it aliases the inbound frame and is handed to
+/// the app via a bounded event — but detach a small one.
+///
+/// The app is expected to copy a delivered payload it retains, but it does so
+/// only AFTER receiving the event; while the event sits in the (capacity-)
+/// bounded queue, a small logical payload aliasing a remote-padded frame pins the
+/// whole frame allocation. Copying small payloads is cheap and bounds that
+/// retention to `ZEROCOPY_MIN_LEN`, while large payloads — where the copy is
+/// worth avoiding and the frame is large because of real data — stay zero-copy.
+fn app_field(field: &Bytes) -> Bytes {
+  if field.len() < ZEROCOPY_MIN_LEN {
+    detach_field(field)
+  } else {
+    field.clone()
+  }
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 /// Convert [`typed::State`] → `buffa::EnumValue<pb::State>`.
@@ -182,8 +227,7 @@ pub fn node_state_from_buffa<I: Data, A: Data>(
       .as_ref()
       .ok_or(BridgeError::MissingField("PushNodeState.state"))?,
   )?;
-  let meta =
-    typed::Meta::try_from(b.meta.clone()).map_err(|e| DecodeError::custom(e.to_string()))?;
+  let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
   let delegate_version: typed::DelegateVersion = versioned(b.delegate_version, "delegate_version")?;
   let ns = typed::NodeState::new(id, addr, state)
@@ -225,8 +269,7 @@ pub fn push_node_state_from_buffa<I: Data, A: Data>(
       .as_ref()
       .ok_or(BridgeError::MissingField("PushNodeState.state"))?,
   )?;
-  let meta =
-    typed::Meta::try_from(b.meta.clone()).map_err(|e| DecodeError::custom(e.to_string()))?;
+  let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
   let delegate_version: typed::DelegateVersion = versioned(b.delegate_version, "delegate_version")?;
   let pns = typed::PushNodeState::new(incarnation, id, addr, state)
@@ -260,8 +303,7 @@ pub fn alive_from_buffa<I: Data, A: Data>(
     .as_option()
     .ok_or(BridgeError::MissingField("Alive.node"))?;
   let node = node_from_buffa(pb_node)?;
-  let meta =
-    typed::Meta::try_from(b.meta.clone()).map_err(|e| DecodeError::custom(e.to_string()))?;
+  let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
   let delegate_version: typed::DelegateVersion = versioned(b.delegate_version, "delegate_version")?;
   let incarnation = b
@@ -399,7 +441,10 @@ pub fn ack_to_buffa(t: &typed::Ack) -> pb::Ack {
 
 /// Convert `pb::Ack` → `typed::Ack`.
 pub fn ack_from_buffa(b: &pb::Ack) -> typed::Ack {
-  typed::Ack::new(b.sequence_number).with_payload(b.payload.clone())
+  // Detach the payload: handle_ack routes it through the ack registry into a
+  // PingCompleted event or a forwarded ack, so the machine retains it past the
+  // decode. See [`detach_field`].
+  typed::Ack::new(b.sequence_number).with_payload(detach_field(&b.payload))
 }
 
 // ─── Nack ────────────────────────────────────────────────────────────────────
@@ -446,7 +491,7 @@ pub fn push_pull_from_buffa<I: Data, A: Data>(
     .map(push_node_state_from_buffa::<I, A>)
     .collect::<Result<Vec<_>, _>>()?;
   let pp =
-    typed::PushPull::new(b.join, states_iter.into_iter()).with_user_data(b.user_data.clone());
+    typed::PushPull::new(b.join, states_iter.into_iter()).with_user_data(app_field(&b.user_data));
   Ok(pp)
 }
 
@@ -462,7 +507,7 @@ pub fn user_data_to_buffa(data: &Bytes) -> pb::UserData {
 
 /// Convert `pb::UserData` → raw `Bytes` payload (typed side stores `Bytes`).
 pub fn user_data_from_buffa(b: &pb::UserData) -> Bytes {
-  b.data.clone()
+  app_field(&b.data)
 }
 
 // ─── ErrorResponse ───────────────────────────────────────────────────────────
@@ -564,6 +609,80 @@ mod tests {
     assert_eq!(back.node_ref().addr_ref(), alive.node_ref().addr_ref());
     assert_eq!(back.protocol_version(), alive.protocol_version());
     assert_eq!(back.delegate_version(), alive.delegate_version());
+  }
+
+  #[test]
+  fn meta_from_wire_detaches_from_the_inbound_datagram() {
+    // Model the zero-copy decode: a small `meta` aliasing a large inbound
+    // datagram (a remote can pad the datagram with protobuf unknown fields).
+    let datagram = Bytes::from(vec![7u8; 4096]);
+    let aliased_meta = datagram.slice(16..32); // 16-byte meta sharing the 4 KiB buffer
+
+    let detached = meta_from_wire(&aliased_meta).unwrap();
+
+    // Value preserved, but the typed meta is a fresh small allocation outside the
+    // datagram, so retaining it in membership cannot pin the whole buffer.
+    assert_eq!(detached.as_bytes(), &datagram[16..32]);
+    let meta_addr = detached.as_bytes().as_ptr() as usize;
+    let dg_start = datagram.as_ptr() as usize;
+    let dg_end = dg_start + datagram.len();
+    assert!(
+      meta_addr < dg_start || meta_addr >= dg_end,
+      "decoded meta must be copied, not aliasing the inbound datagram",
+    );
+  }
+
+  #[test]
+  fn ack_payload_is_detached_from_the_inbound_datagram() {
+    use crate::messages::memberlist::v1 as pb;
+    // A small ack payload aliasing a large inbound datagram (a remote can pad the
+    // datagram with unknown fields). handle_ack retains the payload past decode.
+    let datagram = Bytes::from(vec![9u8; 4096]);
+    let aliased_payload = datagram.slice(8..24);
+    let b = pb::Ack {
+      sequence_number: 7,
+      payload: aliased_payload,
+      ..Default::default()
+    };
+
+    let ack = ack_from_buffa(&b);
+
+    assert_eq!(ack.payload(), &datagram[8..24]); // value preserved
+    let payload_addr = ack.payload().as_ptr() as usize;
+    let dg_start = datagram.as_ptr() as usize;
+    let dg_end = dg_start + datagram.len();
+    assert!(
+      payload_addr < dg_start || payload_addr >= dg_end,
+      "ack payload must be copied, not aliasing the inbound datagram",
+    );
+  }
+
+  #[test]
+  fn app_field_copies_small_payloads_and_aliases_large_ones() {
+    // UserData / PushPull user_data go through `app_field`.
+    let datagram = Bytes::from(vec![3u8; 8192]);
+    let dg_start = datagram.as_ptr() as usize;
+    let dg_end = dg_start + datagram.len();
+
+    // Small (< ZEROCOPY_MIN_LEN): copied, so unknown-field padding cannot pin the
+    // whole frame behind a tiny app payload queued in a bounded event.
+    let small = datagram.slice(0..16);
+    let small_out = app_field(&small);
+    assert_eq!(small_out.as_ref(), &datagram[0..16]);
+    let p = small_out.as_ptr() as usize;
+    assert!(
+      p < dg_start || p >= dg_end,
+      "a small app payload must be copied, not aliasing the datagram",
+    );
+
+    // Large (>= ZEROCOPY_MIN_LEN): kept zero-copy — still aliases the frame.
+    let large = datagram.slice(0..ZEROCOPY_MIN_LEN);
+    let large_out = app_field(&large);
+    let q = large_out.as_ptr() as usize;
+    assert!(
+      q >= dg_start && q < dg_end,
+      "a large app payload stays zero-copy (aliases the datagram)",
+    );
   }
 
   // ── Suspect ────────────────────────────────────────────────────────────────

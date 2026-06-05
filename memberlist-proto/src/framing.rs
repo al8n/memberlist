@@ -19,6 +19,8 @@ use std::vec::Vec;
 use std::borrow::Cow;
 
 use buffa::Message as _;
+use bytes::Bytes;
+use varing::encoded_u32_varint_len;
 
 use crate::{
   compression::CompressionError,
@@ -227,25 +229,64 @@ pub enum FrameError {
   Encryption(#[from] EncryptionError),
 }
 
+/// Body length of a message's buffa encoding (no plain-frame tag/varint).
+fn body_encoded_len(msg: &AnyMessage) -> usize {
+  (match msg {
+    AnyMessage::Alive(m) => m.encoded_len(),
+    AnyMessage::Suspect(m) => m.encoded_len(),
+    AnyMessage::Dead(m) => m.encoded_len(),
+    AnyMessage::Ping(m) => m.encoded_len(),
+    AnyMessage::IndirectPing(m) => m.encoded_len(),
+    AnyMessage::Ack(m) => m.encoded_len(),
+    AnyMessage::Nack(m) => m.encoded_len(),
+    AnyMessage::PushPull(m) => m.encoded_len(),
+    AnyMessage::UserData(m) => m.encoded_len(),
+    AnyMessage::ErrorResponse(m) => m.encoded_len(),
+  }) as usize
+}
+
+/// Append a message's buffa body encoding to `out` (the plain-frame body, no
+/// tag/varint). Encodes in place — no intermediate buffer.
+fn encode_body_into(msg: &AnyMessage, out: &mut Vec<u8>) {
+  match msg {
+    AnyMessage::Alive(m) => m.encode(out),
+    AnyMessage::Suspect(m) => m.encode(out),
+    AnyMessage::Dead(m) => m.encode(out),
+    AnyMessage::Ping(m) => m.encode(out),
+    AnyMessage::IndirectPing(m) => m.encode(out),
+    AnyMessage::Ack(m) => m.encode(out),
+    AnyMessage::Nack(m) => m.encode(out),
+    AnyMessage::PushPull(m) => m.encode(out),
+    AnyMessage::UserData(m) => m.encode(out),
+    AnyMessage::ErrorResponse(m) => m.encode(out),
+  }
+}
+
 /// Convenience: encode any [`AnyMessage`] variant into a plain frame.
 ///
-/// Picks the right [`MessageTag`] automatically and delegates body encoding
-/// to the buffa-generated `encode_to_vec` implementation.
+/// Picks the right [`MessageTag`] automatically and encodes the body in place —
+/// one allocation, no intermediate buffer.
 pub fn encode_message(msg: &AnyMessage) -> Result<Vec<u8>, FrameError> {
   let tag = MessageTag::for_message(msg);
-  let body = match msg {
-    AnyMessage::Alive(m) => m.encode_to_vec(),
-    AnyMessage::Suspect(m) => m.encode_to_vec(),
-    AnyMessage::Dead(m) => m.encode_to_vec(),
-    AnyMessage::Ping(m) => m.encode_to_vec(),
-    AnyMessage::IndirectPing(m) => m.encode_to_vec(),
-    AnyMessage::Ack(m) => m.encode_to_vec(),
-    AnyMessage::Nack(m) => m.encode_to_vec(),
-    AnyMessage::PushPull(m) => m.encode_to_vec(),
-    AnyMessage::UserData(m) => m.encode_to_vec(),
-    AnyMessage::ErrorResponse(m) => m.encode_to_vec(),
-  };
-  encode_plain_frame(tag, &body)
+  let body_len = body_encoded_len(msg);
+  // One allocation, body encoded in place: tag + varint + buffa body (a u32
+  // varint is at most 5 bytes). Replaces the previous encode_to_vec() body
+  // buffer + encode_plain_frame copy.
+  let mut out = Vec::with_capacity(1 + 5 + body_len);
+  out.push(tag as u8);
+  encode_varint_u32(body_len as u32, &mut out);
+  let body_start = out.len();
+  encode_body_into(msg, &mut out);
+  // `encoded_len()` is a `u32`, so a body whose true size exceeds that domain
+  // wraps: the precomputed `body_len` (and the length prefix written above) then
+  // disagrees with the bytes actually appended, yielding a frame the receiver
+  // desyncs on. Validate the real write and reject rather than emit it. (The old
+  // path validated `body.len()` in `encode_plain_frame` after encoding.)
+  let written = out.len() - body_start;
+  if written != body_len {
+    return Err(FrameError::FrameTooLarge(written));
+  }
+  Ok(out)
 }
 
 /// Convenience: decode a plain frame into the appropriate [`AnyMessage`] variant.
@@ -304,12 +345,55 @@ pub fn decode_message(buf: &[u8]) -> Result<(usize, AnyMessage), FrameError> {
   Ok((consumed, msg))
 }
 
+/// Zero-copy [`decode_message`]: the decoded message's `bytes` fields (meta,
+/// user data, ids, addresses) alias `frame` instead of owning fresh copies.
+///
+/// buffa reads each `bytes` field via [`bytes::Buf::copy_to_bytes`], which on a
+/// `Bytes`-backed buffer is an O(1) refcount share rather than an allocate +
+/// memcpy. `frame` must be one whole plain frame (`[tag][varint][body]`); the
+/// returned `usize` is the bytes consumed, identical to [`decode_message`].
+pub fn decode_message_zerocopy(frame: &Bytes) -> Result<(usize, AnyMessage), FrameError> {
+  let (tag, body, consumed) = decode_plain_frame(frame.as_ref())?;
+  // `body` is a sub-slice of `frame`, so `slice_ref` shares the allocation O(1)
+  // rather than copying; the buffa decoder then carves each `bytes` field out
+  // of this shared buffer with `Buf::copy_to_bytes` (also O(1)).
+  let mut body = frame.slice_ref(body);
+  let msg = match tag {
+    MessageTag::Alive => {
+      AnyMessage::Alive(Alive::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::Suspect => {
+      AnyMessage::Suspect(Suspect::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::Dead => AnyMessage::Dead(Dead::decode(&mut body).map_err(|_| FrameError::Decode)?),
+    MessageTag::Ping => AnyMessage::Ping(Ping::decode(&mut body).map_err(|_| FrameError::Decode)?),
+    MessageTag::IndirectPing => {
+      AnyMessage::IndirectPing(IndirectPing::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::Ack => AnyMessage::Ack(Ack::decode(&mut body).map_err(|_| FrameError::Decode)?),
+    MessageTag::Nack => AnyMessage::Nack(Nack::decode(&mut body).map_err(|_| FrameError::Decode)?),
+    MessageTag::PushPull => {
+      AnyMessage::PushPull(PushPull::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::UserData => {
+      AnyMessage::UserData(UserData::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::ErrorResponse => {
+      AnyMessage::ErrorResponse(ErrorResponse::decode(&mut body).map_err(|_| FrameError::Decode)?)
+    }
+    MessageTag::Compound => return Err(FrameError::UnknownTag(MessageTag::Compound as u8)),
+    MessageTag::Encrypted => return Err(FrameError::UnknownTag(MessageTag::Encrypted as u8)),
+    MessageTag::Compressed => return Err(FrameError::UnknownTag(MessageTag::Compressed as u8)),
+  };
+  Ok((consumed, msg))
+}
+
 /// Encode two or more messages into one compound frame:
 /// `[Compound][varint count][ (varint inner_len, inner plain-frame) … ]`.
 ///
-/// Each part is a complete plain frame (`encode_message`), so the inbound
-/// split feeds each straight back through `decode_message` with no
-/// per-message decoding change. New-wire-idiom only — intentionally NOT
+/// Each part is a complete plain frame, so the inbound split feeds each
+/// straight back through `decode_message` with no per-message decoding change.
+/// New-wire-idiom only — intentionally NOT
 /// byte-compatible with the frozen `memberlist-proto` batch format
 /// `count >= 2` (a single message must stay a plain frame so its bytes
 /// are byte-identical); fewer ⇒ `FrameError::Decode`.
@@ -319,16 +403,44 @@ pub fn encode_compound(msgs: &[AnyMessage]) -> Result<Vec<u8>, FrameError> {
     return Err(FrameError::Decode);
   }
   let count = u32::try_from(msgs.len()).map_err(|_| FrameError::FrameTooLarge(msgs.len()))?;
-  // Lower-bound preallocation (Compound tag + count varint + per-part
-  // inner_len varint), mirroring `encode_plain_frame`'s capacity hint.
-  let mut out = Vec::with_capacity(1 + 5 + msgs.len() * (1 + 5));
+  // Size each part once: a part is a plain frame `[tag][varint body_len][body]`,
+  // and its `inner_len` is that frame's total length. Caching (body_len,
+  // frame_len) lets the output be pre-sized exactly and every part be encoded
+  // straight into `out` — no per-part Vec or copy.
+  let mut parts: Vec<(usize, usize)> = Vec::with_capacity(msgs.len());
+  let mut total = 1 + encoded_u32_varint_len(count).get();
+  for m in msgs {
+    let body_len = body_encoded_len(m);
+    let body_len_u32 = u32::try_from(body_len).map_err(|_| FrameError::FrameTooLarge(body_len))?;
+    let frame_len = 1 + encoded_u32_varint_len(body_len_u32).get() + body_len;
+    let frame_len_u32 =
+      u32::try_from(frame_len).map_err(|_| FrameError::FrameTooLarge(frame_len))?;
+    // Checked: a long list of large parts could otherwise overflow the `usize`
+    // capacity accumulator.
+    total = total
+      .checked_add(encoded_u32_varint_len(frame_len_u32).get())
+      .and_then(|t| t.checked_add(frame_len))
+      .ok_or(FrameError::FrameTooLarge(frame_len))?;
+    parts.push((body_len, frame_len));
+  }
+  let mut out = Vec::with_capacity(total);
   out.push(MessageTag::Compound as u8);
   encode_varint_u32(count, &mut out);
-  for m in msgs {
-    let part = encode_message(m)?;
-    let inner_len = u32::try_from(part.len()).map_err(|_| FrameError::FrameTooLarge(part.len()))?;
-    encode_varint_u32(inner_len, &mut out);
-    out.extend_from_slice(&part);
+  for (m, &(body_len, frame_len)) in msgs.iter().zip(&parts) {
+    // inner_len (the part-frame length already validated to fit a u32), then
+    // the part's plain frame encoded in place.
+    encode_varint_u32(frame_len as u32, &mut out);
+    out.push(MessageTag::for_message(m) as u8);
+    encode_varint_u32(body_len as u32, &mut out);
+    let body_start = out.len();
+    encode_body_into(m, &mut out);
+    // Same wrap guard as `encode_message`: if buffa wrote a body whose real
+    // length disagrees with the precomputed `body_len`/`frame_len` (a wrapped
+    // `encoded_len`), the inner_len prefix is wrong — reject the whole compound.
+    let written = out.len() - body_start;
+    if written != body_len {
+      return Err(FrameError::FrameTooLarge(written));
+    }
   }
   Ok(out)
 }

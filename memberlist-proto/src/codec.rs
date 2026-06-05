@@ -265,7 +265,7 @@ where
   I: Data,
   A: Data,
 {
-  let (consumed, any) = framing::decode_message(&plain).map_err(|e| match e {
+  let (consumed, any) = framing::decode_message_zerocopy(&plain).map_err(|e| match e {
     framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
     other => CodecError::Frame(other.to_string()),
   })?;
@@ -304,7 +304,11 @@ where
     })?;
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
-      let (consumed, any) = framing::decode_message(part).map_err(|e| match e {
+      // `part` is a sub-slice of `plain`; `slice_ref` shares the datagram
+      // allocation O(1), so the per-part frame decodes its byte fields zero-copy
+      // (they alias `plain`) instead of copying out of the buffer.
+      let part = plain.slice_ref(part);
+      let (consumed, any) = framing::decode_message_zerocopy(&part).map_err(|e| match e {
         framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
         other => CodecError::Frame(other.to_string()),
       })?;
