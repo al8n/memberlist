@@ -2871,6 +2871,7 @@ mod tests {
     net::{IpAddr, Ipv4Addr, SocketAddr},
   };
 
+  use bytes::Bytes;
   use memberlist_proto::{
     Instant, RawRecords,
     config::EndpointOptions,
@@ -2880,7 +2881,12 @@ mod tests {
   };
   use smol_str::SmolStr;
 
-  use super::{BridgeHandle, BridgeReady, StreamTransportOptions, process_one_action};
+  use super::{
+    BridgeHandle, BridgeReady, GOSSIP_RECV_BUF_MAX, MemberlistError, PendingJoin, PendingLeave,
+    StreamTransportOptions, dispatch_gossip, drain_actions, drain_transport_transmits,
+    gossip_recv_buf_len, min_pending_join_deadline, min_pending_leave_deadline, process_one_action,
+    reap_pending_joins, reap_pending_leave,
+  };
 
   fn addr(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
@@ -2980,5 +2986,212 @@ mod tests {
       captured2.is_empty(),
       "a Connect whose StreamId is not in `started` is never captured",
     );
+  }
+
+  /// `dispatch_gossip` drops a datagram that fails the codec gate (garbage that
+  /// is neither a valid encrypted wrapper nor a decodable labeled frame) without
+  /// panicking and without admitting any membership — exercising the lossy-gossip
+  /// `continue` arms (decrypt / decode / parse failures) per the drop discipline.
+  #[compio::test]
+  async fn dispatch_gossip_drops_malformed_datagram() {
+    let mut endpoint = test_endpoint();
+    // Only the local node is a member before any gossip.
+    assert_eq!(endpoint.endpoint_ref().num_members(), 1);
+
+    let now = Instant::now();
+    let src = addr(9100);
+    let label = Some(Bytes::from_static(b"capture-test"));
+
+    // A few distinct garbage payloads: empty, random-looking bytes, and a buffer
+    // that superficially resembles a labeled frame but is truncated. Each must be
+    // dropped silently, leaving membership untouched.
+    for datagram in [
+      &b""[..],
+      &b"\xff\xfe\xfd\xfc not a frame"[..],
+      &[0x01u8; 64][..],
+    ] {
+      dispatch_gossip::<SmolStr, SocketAddr, RawRecords>(
+        &mut endpoint,
+        src,
+        datagram,
+        now,
+        label.clone(),
+      );
+    }
+
+    assert_eq!(
+      endpoint.endpoint_ref().num_members(),
+      1,
+      "malformed gossip must never admit a member",
+    );
+  }
+
+  /// `gossip_recv_buf_len` sizes the recv buffer to `gossip_mtu +
+  /// ENCRYPTED_WRAPPER_OVERHEAD`, clamped at the 65507-byte UDP-payload ceiling:
+  /// a default-MTU endpoint sits below the ceiling, a near-max MTU clamps to it.
+  #[compio::test]
+  async fn gossip_recv_buf_len_tracks_mtu_and_clamps_at_ceiling() {
+    // Default MTU endpoint: buffer is mtu + overhead, strictly below the ceiling.
+    let small = test_endpoint();
+    let small_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords>(&small);
+    assert_eq!(
+      small_len,
+      small.gossip_mtu() + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
+      "buffer is gossip_mtu plus the encrypted-wrapper overhead",
+    );
+    assert!(
+      small_len < GOSSIP_RECV_BUF_MAX,
+      "a default-MTU endpoint sits below the UDP-payload ceiling",
+    );
+
+    // A gossip_mtu at the UDP ceiling: mtu + overhead would exceed 65507, so the
+    // result clamps to exactly GOSSIP_RECV_BUF_MAX.
+    let ep = Endpoint::new(
+      EndpointOptions::new(
+        SmolStr::new("big-mtu"),
+        "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+      )
+      .with_gossip_mtu(GOSSIP_RECV_BUF_MAX),
+    );
+    let big: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      ep,
+      LabelOptions::new_in(None, ()),
+      Box::new(|_| None),
+      Box::new(|a: &SocketAddr| *a),
+    );
+    let big_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords>(&big);
+    assert_eq!(
+      big_len, GOSSIP_RECV_BUF_MAX,
+      "a near-ceiling gossip_mtu clamps the recv buffer at GOSSIP_RECV_BUF_MAX",
+    );
+  }
+
+  /// On a quiescent endpoint with no queued actions or transport-transmits, the
+  /// per-surface drain helpers report no progress (`false`) — the loop's
+  /// fixed-point exit condition.
+  #[compio::test]
+  async fn drain_helpers_report_no_progress_when_idle() {
+    let mut endpoint = test_endpoint();
+    let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
+    let (ready_tx, _ready_rx) = flume::unbounded::<BridgeReady>();
+
+    assert!(
+      !drain_actions::<SmolStr, SocketAddr, RawRecords>(
+        &mut endpoint,
+        &mut bridges,
+        &ready_tx,
+        StreamTransportOptions::default(),
+      ),
+      "an idle endpoint queues no actions",
+    );
+    assert!(
+      !drain_transport_transmits::<SmolStr, SocketAddr, RawRecords>(&mut endpoint, &bridges),
+      "an idle endpoint queues no transport transmits",
+    );
+  }
+
+  /// `min_pending_join_deadline` returns the earliest deadline across the
+  /// waiter vec, and `None` when empty. `min_pending_leave_deadline` surfaces a
+  /// parked leave's deadline. Both fold into the driver's select timer.
+  #[compio::test]
+  async fn pending_deadline_helpers_pick_the_earliest() {
+    assert_eq!(min_pending_join_deadline(&[]), None);
+    assert_eq!(min_pending_leave_deadline(&None), None);
+
+    let base = Instant::now();
+    let earliest = base + core::time::Duration::from_secs(1);
+    let latest = base + core::time::Duration::from_secs(5);
+    let mk = |deadline| {
+      let (tx, _rx) = futures_channel::oneshot::channel();
+      PendingJoin {
+        pending: HashSet::new(),
+        contacted: 0,
+        requested: 1,
+        deadline,
+        reply: tx,
+      }
+    };
+    let joins = vec![mk(latest), mk(earliest)];
+    assert_eq!(min_pending_join_deadline(&joins), Some(earliest));
+
+    let leave_deadline = base + core::time::Duration::from_secs(3);
+    let pl = PendingLeave {
+      repliers: Vec::new(),
+      deadline: leave_deadline,
+    };
+    assert_eq!(min_pending_leave_deadline(&Some(pl)), Some(leave_deadline));
+  }
+
+  /// `reap_pending_joins` resolves every empty-`pending` waiter: zero contacts ⇒
+  /// `JoinAllFailed(requested, 0)`, any contacts ⇒ `Ok(contacted)`. This is the
+  /// degenerate zero-exchange `WaitForCompletion` / post-completion reap path.
+  #[compio::test]
+  async fn reap_pending_joins_resolves_empty_pending_waiters() {
+    let now = Instant::now();
+    let (tx_fail, rx_fail) = futures_channel::oneshot::channel();
+    let (tx_ok, rx_ok) = futures_channel::oneshot::channel();
+    let mut joins = vec![
+      PendingJoin {
+        pending: HashSet::new(),
+        contacted: 0,
+        requested: 4,
+        deadline: now + core::time::Duration::from_secs(60),
+        reply: tx_fail,
+      },
+      PendingJoin {
+        pending: HashSet::new(),
+        contacted: 3,
+        requested: 3,
+        deadline: now + core::time::Duration::from_secs(60),
+        reply: tx_ok,
+      },
+    ];
+
+    reap_pending_joins(&mut joins, now).await;
+    assert!(joins.is_empty(), "both empty-pending waiters are reaped");
+
+    match rx_fail.await {
+      Ok(Err(MemberlistError::JoinAllFailed(e))) => {
+        assert_eq!(e.requested(), 4, "carries the requested seed count");
+        assert_eq!(e.contacted(), 0);
+      }
+      other => panic!("expected JoinAllFailed, got {other:?}"),
+    }
+    assert!(matches!(rx_ok.await, Ok(Ok(3))), "contacts ⇒ Ok(contacted)");
+  }
+
+  /// `reap_pending_leave` replies `LeaveTimeout` to every joined replier once
+  /// the deadline elapses and clears the slot; a not-yet-expired leave stays
+  /// parked with no reply.
+  #[compio::test]
+  async fn reap_pending_leave_fires_only_after_the_deadline() {
+    let now = Instant::now();
+
+    let (tx_live, mut rx_live) = futures_channel::oneshot::channel::<super::Result<()>>();
+    let mut not_expired = Some(PendingLeave {
+      repliers: vec![tx_live],
+      deadline: now + core::time::Duration::from_secs(10),
+    });
+    reap_pending_leave(&mut not_expired, now).await;
+    assert!(
+      not_expired.is_some(),
+      "a future-deadline leave is left parked"
+    );
+    assert!(
+      matches!(rx_live.try_recv(), Ok(None)),
+      "no reply before the deadline",
+    );
+
+    // Two repliers (initiator + racing clone) both get LeaveTimeout.
+    let (tx_a, rx_a) = futures_channel::oneshot::channel::<super::Result<()>>();
+    let (tx_b, rx_b) = futures_channel::oneshot::channel::<super::Result<()>>();
+    let mut expired = Some(PendingLeave {
+      repliers: vec![tx_a, tx_b],
+      deadline: now - core::time::Duration::from_secs(1),
+    });
+    reap_pending_leave(&mut expired, now).await;
+    assert!(expired.is_none(), "an expired leave clears its slot");
+    assert!(matches!(rx_a.await, Ok(Err(MemberlistError::LeaveTimeout))));
+    assert!(matches!(rx_b.await, Ok(Err(MemberlistError::LeaveTimeout))));
   }
 }

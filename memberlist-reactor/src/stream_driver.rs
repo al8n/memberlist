@@ -1496,6 +1496,485 @@ mod tests {
     )
   }
 
+  use std::{
+    sync::atomic::AtomicU64,
+    task::{Context, Wake, Waker},
+  };
+
+  use memberlist_proto::{
+    event::{Reliability, UserPacket},
+    typed::{NodeState, State},
+  };
+
+  /// A waker that records, via a shared flag, whether it was woken. Built on the
+  /// safe `std::task::Wake` trait (the crate forbids `unsafe`). The driver-poll
+  /// tests pass one through a `Context` and only need it to be a valid, harmless
+  /// waker — its wake is a no-op flag flip.
+  struct FlagWaker(Arc<std::sync::atomic::AtomicBool>);
+
+  impl Wake for FlagWaker {
+    fn wake(self: Arc<Self>) {
+      self.0.store(true, Ordering::SeqCst);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+      self.0.store(true, Ordering::SeqCst);
+    }
+  }
+
+  fn flag_waker() -> Waker {
+    Waker::from(Arc::new(FlagWaker(Arc::new(
+      std::sync::atomic::AtomicBool::new(false),
+    ))))
+  }
+
+  /// An application-data `Event::UserPacket` of exactly `len` payload bytes —
+  /// `observation_payload_bytes` reports `Some(len)`, so it drives the obs-channel
+  /// byte backstop. `account_event` treats it as a no-op (no pending state), so it
+  /// can be fed to `send_observation` without any join/leave/ping bookkeeping.
+  fn user_packet(len: usize) -> Event<SmolStr, SocketAddr> {
+    Event::UserPacket(UserPacket::new(
+      "127.0.0.1:2".parse::<SocketAddr>().unwrap(),
+      Bytes::from(vec![0xABu8; len]),
+      Reliability::Reliable,
+    ))
+  }
+
+  /// A control event carrying no app-data (`observation_payload_bytes` is `None`)
+  /// and, with no parked leave/join/ping, a no-op for `account_event`. Used to
+  /// drive the obs-channel `Full`-and-recoverable drop arm.
+  fn control_event() -> Event<SmolStr, SocketAddr> {
+    Event::NodeJoined(Arc::new(NodeState::new(
+      SmolStr::new("ctl"),
+      "127.0.0.1:3".parse::<SocketAddr>().unwrap(),
+      State::Alive,
+    )))
+  }
+
+  /// Builds a real `StreamDriver` with a bound gossip socket and a caller-supplied
+  /// observation channel, so the obs-backstop and shutdown branches can be driven
+  /// directly. The accept channel is wired but never fed.
+  ///
+  /// `obs_cap` sizes the bounded obs channel (fill it to hit the `Full` arms);
+  /// `obs_budget` is the payload byte budget (small to hit the byte backstop).
+  /// Returns the driver, the obs receiver (drop it to hit the `Disconnected`
+  /// arms), and the shared payload-byte counter.
+  async fn build_driver(
+    obs_cap: usize,
+    obs_budget: Option<u64>,
+  ) -> (
+    StreamDriver<SmolStr, TokioRuntime, RawRecords>,
+    Receiver<Event<SmolStr, SocketAddr>>,
+    Arc<Shared<SmolStr>>,
+    Arc<AtomicU64>,
+  ) {
+    let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+      .await
+      .expect("bind gossip socket");
+    let ep = Endpoint::new(EndpointOptions::new(
+      SmolStr::new("drv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ));
+    let mut endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      ep,
+      LabelOptions::new_in(None, ()),
+      Box::new(|_| None),
+      Box::new(|a: &SocketAddr| *a),
+    );
+    endpoint.start_scheduling(Instant::now());
+    let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
+    let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+    let (obs_tx, obs_rx) = flume::bounded(obs_cap);
+    let (_accepted_tx, accepted_rx) = flume::bounded(ACCEPT_CAP);
+    let (accept_shutdown_tx, _accept_shutdown_rx) = flume::bounded(1);
+    let driver = StreamDriver::<SmolStr, TokioRuntime, RawRecords>::new(
+      endpoint,
+      socket,
+      shared.clone(),
+      8,
+      8,
+      obs_tx,
+      obs_payload_bytes.clone(),
+      obs_budget,
+      accepted_rx,
+      accept_shutdown_tx,
+      Duration::from_secs(60),
+      None,
+    );
+    (driver, obs_rx, shared, obs_payload_bytes)
+  }
+
+  /// `send_observation`'s byte backstop: when enqueuing a payload event would push
+  /// the queued payload bytes over budget, the event is DROPPED and counted —
+  /// never retained — because the count cap alone does not bound memory.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn obs_byte_backstop_drops_oversized_payload() {
+    // Budget of 4 bytes; an 8-byte payload alone exceeds it on the first event.
+    let (mut driver, _obs_rx, shared, bytes) = build_driver(16, Some(4)).await;
+
+    driver.send_observation(user_packet(8));
+
+    assert_eq!(
+      shared.observation_dropped(),
+      1,
+      "an over-budget payload event is dropped and counted"
+    );
+    assert_eq!(
+      bytes.load(Ordering::Relaxed),
+      0,
+      "a dropped payload reserves no bytes"
+    );
+    assert!(
+      driver.obs_overflow.is_empty(),
+      "a byte-backstop drop never retains the event for retry"
+    );
+  }
+
+  /// `send_observation` on a FULL obs channel RETAINS application data (still
+  /// byte-reserved) for a later retry, rather than dropping it.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn obs_full_channel_retains_app_data() {
+    // Capacity-1 channel, ample byte budget. Fill the channel, then a second
+    // payload event finds it full and is retained in the overflow.
+    let (mut driver, _obs_rx, shared, bytes) = build_driver(1, Some(1 << 20)).await;
+
+    driver.send_observation(user_packet(4)); // fills the capacity-1 channel
+    assert!(
+      driver.obs_overflow.is_empty(),
+      "first event went to the channel"
+    );
+    driver.send_observation(user_packet(7)); // channel full → retained
+
+    assert_eq!(
+      driver.obs_overflow.len(),
+      1,
+      "app-data is retained for retry on a full channel, not dropped"
+    );
+    assert_eq!(
+      shared.observation_dropped(),
+      0,
+      "a retained event is not counted as dropped"
+    );
+    assert_eq!(
+      bytes.load(Ordering::Relaxed),
+      4 + 7,
+      "both the queued and the retained payload stay byte-reserved"
+    );
+  }
+
+  /// `send_observation` on a FULL obs channel DROPS a recoverable control event
+  /// (no app-data) and counts it — only application data is worth retaining.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn obs_full_channel_drops_recoverable_control() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+
+    driver.send_observation(control_event()); // fills the capacity-1 channel
+    driver.send_observation(control_event()); // channel full → dropped + counted
+
+    assert!(
+      driver.obs_overflow.is_empty(),
+      "a recoverable control event is never retained"
+    );
+    assert_eq!(
+      shared.observation_dropped(),
+      1,
+      "the second control event found the channel full and was counted"
+    );
+  }
+
+  /// `send_observation` with the obs task GONE (receiver dropped) rolls back the
+  /// reservation it made before the `try_send`, so the byte counter never leaks.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn obs_disconnected_rolls_back_reservation() {
+    let (mut driver, obs_rx, shared, bytes) = build_driver(16, Some(1 << 20)).await;
+    drop(obs_rx); // the obs task is gone → try_send returns Disconnected
+
+    driver.send_observation(user_packet(9));
+
+    assert_eq!(
+      bytes.load(Ordering::Relaxed),
+      0,
+      "a Disconnected send rolls back the payload reservation"
+    );
+    assert!(
+      driver.obs_overflow.is_empty(),
+      "a Disconnected send retains nothing"
+    );
+    assert_eq!(
+      shared.observation_dropped(),
+      0,
+      "a Disconnected (obs task gone) send is not a recoverable drop"
+    );
+  }
+
+  /// `flush_obs_overflow` stops at the first `Full`, pushing the un-sendable event
+  /// back to the FRONT so retry order is preserved.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn flush_overflow_stops_and_repushes_on_full() {
+    // `_obs_rx` is held (never drained) so the channel stays connected-but-full.
+    let (mut driver, _obs_rx, _shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+    // Fill the capacity-1 channel so the flush below cannot make progress.
+    driver
+      .obs_tx
+      .try_send(control_event())
+      .expect("seed the channel full");
+    // Two events queued for retry; neither can be sent while the channel is full.
+    driver.obs_overflow.push_back(control_event());
+    driver.obs_overflow.push_back(control_event());
+
+    driver.flush_obs_overflow();
+
+    assert_eq!(
+      driver.obs_overflow.len(),
+      2,
+      "flush stops at the first Full and re-pushes the event to the front"
+    );
+  }
+
+  /// `flush_obs_overflow` with the obs task GONE reclaims each retained event's
+  /// reserved payload bytes (the obs task can no longer release them).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn flush_overflow_disconnected_reclaims_bytes() {
+    let (mut driver, obs_rx, _shared, bytes) = build_driver(16, Some(1 << 20)).await;
+    // Stage a retained payload event AS IF previously reserved, then drop the
+    // receiver so the flush sees Disconnected and reclaims the reservation.
+    bytes.store(6, Ordering::Relaxed);
+    driver.obs_overflow.push_back(user_packet(6));
+    drop(obs_rx);
+
+    driver.flush_obs_overflow();
+
+    assert!(
+      driver.obs_overflow.is_empty(),
+      "a Disconnected flush drains the overflow"
+    );
+    assert_eq!(
+      bytes.load(Ordering::Relaxed),
+      0,
+      "a Disconnected flush reclaims the retained payload's reserved bytes"
+    );
+  }
+
+  /// Drives the driver through exactly one `Future::poll` with a harmless waker.
+  fn poll_once(driver: &mut StreamDriver<SmolStr, TokioRuntime, RawRecords>) -> Poll<()> {
+    let waker = flag_waker();
+    let mut cx = Context::from_waker(&waker);
+    Pin::new(driver).poll(&mut cx)
+  }
+
+  /// On shutdown, a parked synchronous `WaitForCompletion` join is failed with
+  /// `Err(Shutdown)` (the `pending_joins.drain()` arm). Dispatching the wait-join
+  /// while still running parks it (its dial produces a `Connect`); the same poll's
+  /// shutdown branch then drains it.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_fails_parked_join() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+    let (tx, rx) = oneshot::channel::<Result<usize, Error>>();
+    shared.push_command(Command::Join(JoinCmd {
+      addrs: vec!["127.0.0.1:9".parse::<SocketAddr>().unwrap()],
+      wait: true,
+      reply: tx,
+    }));
+    shared.begin_shutdown();
+    assert!(
+      poll_once(&mut driver).is_ready(),
+      "shutdown poll returns Ready"
+    );
+    assert!(
+      matches!(rx.await, Ok(Err(Error::Shutdown))),
+      "a parked wait-join is failed with Shutdown on driver exit"
+    );
+  }
+
+  /// On shutdown, a parked application-ping is failed with `Err(Shutdown)` (the
+  /// `pending_pings.drain()` arm).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_fails_parked_ping() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+    let (tx, rx) = oneshot::channel::<Result<Duration, Error>>();
+    let node = memberlist_proto::Node::new(
+      SmolStr::new("peer"),
+      "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+    );
+    shared.push_command(Command::Ping(PingCmd { node, reply: tx }));
+    shared.begin_shutdown();
+    assert!(poll_once(&mut driver).is_ready());
+    assert!(
+      matches!(rx.await, Ok(Err(Error::Shutdown))),
+      "a parked ping is failed with Shutdown on driver exit"
+    );
+  }
+
+  /// On shutdown, a parked reliable directed send is failed with `Err(Shutdown)`
+  /// (the `pending_user_sends.drain()` arm).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_fails_parked_reliable_send() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+    let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+    shared.push_command(Command::SendReliable(SendReliableCmd {
+      to: "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+      payloads: vec![Bytes::from_static(b"reliable")],
+      reply: tx,
+    }));
+    shared.begin_shutdown();
+    assert!(poll_once(&mut driver).is_ready());
+    assert!(
+      matches!(rx.await, Ok(Err(Error::Shutdown))),
+      "a parked reliable send is failed with Shutdown on driver exit"
+    );
+  }
+
+  /// The shutdown branch's `close_and_drain` loop fails EVERY queued command
+  /// variant: a handle that pushed a command in the race window between the
+  /// poll's top-of-poll command drain and the shutdown `close_and_drain` gets a
+  /// reply (`Err(Shutdown)`, or `Ok(())` for `Shutdown`) instead of hanging.
+  ///
+  /// That window — `endpoint.leave()` + `drain_surfaces` — only exists mid-poll,
+  /// so the commands must be enqueued concurrently. A pusher thread bursts all
+  /// eight variants the instant a barrier releases, while the main task polls the
+  /// already-`begin_shutdown()` driver. When the burst lands wholly after the top
+  /// drain (detected by the four variants whose `close_and_drain` reply differs
+  /// from their dispatch reply all returning `Shutdown`), all eight commands flow
+  /// through `close_and_drain` together, covering every arm. Re-attempted until a
+  /// clean window hit; the bound fails loudly rather than hanging if the window is
+  /// never hit (it is, well within a few attempts).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn shutdown_close_and_drain_fails_every_queued_command() {
+    use std::{sync::Barrier, thread};
+
+    // The four distinguishable variants: dispatched-while-running they reply
+    // Ok / a non-Shutdown error, so a Shutdown reply on these proves the command
+    // reached `close_and_drain` rather than the top-of-poll dispatch.
+    const MAX_ATTEMPTS: usize = 2000;
+    let mut hit = false;
+    for _ in 0..MAX_ATTEMPTS {
+      let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
+      shared.begin_shutdown();
+
+      // Distinguishable replies.
+      let (join_tx, join_rx) = oneshot::channel::<Result<usize, Error>>();
+      let (user_tx, user_rx) = oneshot::channel::<Result<(), Error>>();
+      let (comp_tx, comp_rx) = oneshot::channel::<Result<(), Error>>();
+      let (enc_tx, enc_rx) = oneshot::channel::<Result<(), Error>>();
+      // The remaining four arms (covered when the window is hit, but their
+      // Shutdown / Ok reply is not uniquely attributable to this arm).
+      let (leave_tx, _leave_rx) = oneshot::channel::<Result<(), Error>>();
+      let (shutdown_tx, _shutdown_rx) = oneshot::channel::<Result<(), Error>>();
+      let (ping_tx, _ping_rx) = oneshot::channel::<Result<Duration, Error>>();
+      let (rel_tx, _rel_rx) = oneshot::channel::<Result<(), Error>>();
+
+      let to = "127.0.0.1:9".parse::<SocketAddr>().unwrap();
+      let node = memberlist_proto::Node::new(SmolStr::new("peer"), to);
+      let cmds: Vec<Command<SmolStr>> = vec![
+        Command::Join(JoinCmd {
+          addrs: vec![to],
+          wait: false,
+          reply: join_tx,
+        }),
+        Command::SendUser(SendUserCmd {
+          to,
+          payloads: vec![Bytes::from_static(b"u")],
+          reply: user_tx,
+        }),
+        Command::SetCompressionOptions(SetCompressionOptionsCmd {
+          opts: memberlist_proto::CompressionOptions::new(),
+          reply: comp_tx,
+        }),
+        Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
+          opts: memberlist_proto::EncryptionOptions::new(),
+          reply: enc_tx,
+        }),
+        Command::Leave(LeaveCmd { reply: leave_tx }),
+        Command::Shutdown(ShutdownCmd { reply: shutdown_tx }),
+        Command::Ping(PingCmd {
+          node,
+          reply: ping_tx,
+        }),
+        Command::SendReliable(SendReliableCmd {
+          to,
+          payloads: vec![Bytes::from_static(b"r")],
+          reply: rel_tx,
+        }),
+      ];
+
+      let barrier = Arc::new(Barrier::new(2));
+      let pusher_barrier = barrier.clone();
+      let pusher_shared = shared.clone();
+      let pusher = thread::spawn(move || {
+        pusher_barrier.wait();
+        for cmd in cmds {
+          // Ignoring bool: a push rejected after the driver closed the queue just
+          // means this attempt missed the window; the outer loop retries.
+          let _ = pusher_shared.push_command(cmd);
+        }
+      });
+
+      barrier.wait();
+      assert!(
+        poll_once(&mut driver).is_ready(),
+        "a shutdown poll returns Ready"
+      );
+      pusher.join().expect("pusher thread joins");
+
+      // A clean window hit: all four distinguishable variants were failed by
+      // `close_and_drain` (Shutdown), so the burst landed wholly after the top
+      // drain and all eight arms ran.
+      let clean = matches!(join_rx.await, Ok(Err(Error::Shutdown)))
+        && matches!(user_rx.await, Ok(Err(Error::Shutdown)))
+        && matches!(comp_rx.await, Ok(Err(Error::Shutdown)))
+        && matches!(enc_rx.await, Ok(Err(Error::Shutdown)));
+      if clean {
+        hit = true;
+        break;
+      }
+    }
+    assert!(
+      hit,
+      "the close_and_drain window was never hit cleanly in {MAX_ATTEMPTS} attempts"
+    );
+  }
+
+  /// On shutdown, an in-flight graceful leave's waiter(s) resolve with
+  /// `Err(Shutdown)` (the `pending_leave.take()` arm).
+  ///
+  /// The shutdown branch itself calls `endpoint.leave()` then `drain_surfaces`,
+  /// and a no-peer leave emits `LeftCluster` within that same drain — which would
+  /// resolve a parked leave with `Ok(())` before the shutdown arm runs. To isolate
+  /// the shutdown arm, the endpoint is first driven to fully `Left` (a prior poll
+  /// consumes its `LeftCluster`), so the shutdown's own `leave()` is an idempotent
+  /// no-op emitting nothing; the freshly seeded `pending_leave` then survives the
+  /// drain and is failed with `Shutdown`.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_fails_parked_leave() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+    // Drive the endpoint to Left first: a real leave whose LeftCluster is consumed
+    // by this poll (resolving the dispatched waiter with Ok, then removed).
+    let (warm_tx, _warm_rx) = oneshot::channel::<Result<(), Error>>();
+    shared.push_command(Command::Leave(LeaveCmd { reply: warm_tx }));
+    assert!(
+      poll_once(&mut driver).is_pending(),
+      "warm-up poll keeps running"
+    );
+    assert!(
+      driver.pending_leave.is_none(),
+      "the no-peer leave completed within the warm-up poll"
+    );
+    assert!(
+      !driver.endpoint.is_running(),
+      "the endpoint is now Left, so the shutdown leave() is a no-op"
+    );
+
+    // Now seed a fresh parked leave and shut down: the no-op leave() emits no
+    // LeftCluster, so this waiter survives the drain and hits the shutdown arm.
+    let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+    driver.pending_leave = Some(PendingLeave { repliers: vec![tx] });
+    shared.begin_shutdown();
+    assert!(poll_once(&mut driver).is_ready());
+    assert!(
+      matches!(rx.await, Ok(Err(Error::Shutdown))),
+      "a parked leave waiter is failed with Shutdown on driver exit"
+    );
+  }
+
   /// The reliable-send / join capture keys on the originating `StreamId`, NOT
   /// the peer. Regression guard for the cross-subsystem misattribution: a
   /// same-peer dial flushed by the shared `service_dials` for another subsystem
@@ -1888,5 +2367,92 @@ mod tests {
     assert_eq!(tail, 0, "no bytes after the reply, only EOF");
 
     bridge.await.expect("bridge task exits cleanly");
+  }
+
+  /// `BridgeOut::ShutdownWrite` (the machine's `StreamAction::Shutdown`,
+  /// half-closing the write side after the send half retires) closes the bridge's
+  /// write half — the peer reads EOF on its read side — while the bridge stays
+  /// alive for the still-open read direction.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn bridge_shutdown_write_half_closes_write_side() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      Duration::from_secs(60),
+    ));
+
+    // Half-close the bridge's write side (FIN). The peer's read side sees EOF.
+    out_tx
+      .send(BridgeOut::ShutdownWrite)
+      .expect("queue write half-close");
+    let tail = client
+      .read_to_end(&mut Vec::new())
+      .await
+      .expect("peer reads its read side to EOF after the bridge FIN");
+    assert_eq!(tail, 0, "the write half-close delivers EOF with no bytes");
+
+    // The bridge is still alive (read side open); dropping the handle tears it
+    // down cleanly.
+    drop((out_tx, cancel_tx));
+    bridge.await.expect("bridge task exits cleanly");
+  }
+
+  /// A bridge write that fails (the peer dropped its whole socket, so the write
+  /// gets a broken pipe / connection reset) tears the bridge down rather than
+  /// spinning — `write_cancellable` returns the tear-down signal on a write error.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn bridge_write_error_tears_down() {
+    let (server, client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    // Drop the peer entirely: its socket is gone (RST on subsequent writes).
+    drop(client);
+
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      Duration::from_secs(60),
+    ));
+
+    // Keep the handle alive and keep queuing writes: the bridge's read side first
+    // sees EOF (peer gone) and enters read-EOF mode, then a queued write to the
+    // dead peer eventually errors, returning the tear-down signal. The bridge must
+    // exit on its own (broken socket), NOT hang, even though the handle is held.
+    let _out_tx_kept = out_tx.clone();
+    let _cancel_kept = cancel_tx;
+    for _ in 0..64 {
+      // Ignoring Err: once the bridge tears down, out_rx disconnects; the test's
+      // assertion is that the bridge EXITS, which the timeout below enforces.
+      if out_tx
+        .send(BridgeOut::Data(Bytes::from(vec![0u8; 64 * 1024])))
+        .is_err()
+      {
+        break;
+      }
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), bridge)
+      .await
+      .expect("bridge tears down on a write error to a dropped peer, not hang")
+      .expect("bridge task exits cleanly");
   }
 }

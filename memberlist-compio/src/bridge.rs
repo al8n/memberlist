@@ -892,6 +892,174 @@ mod tests {
     );
   }
 
+  /// The both-halves-live recv arm forwards peer bytes to the driver as
+  /// `BridgeInbound::Bytes` carrying the same `eid`. This exercises the recv
+  /// `Ok(n)` data path that the abort / graceful-close tests never reach (they
+  /// only drive `out_rx`). Teardown is via an explicit abort (the proven
+  /// deterministic signal), so the assertion is solely the forwarded bytes.
+  #[compio::test]
+  async fn recv_forwards_peer_bytes_to_driver() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+    let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+    // Keep the out-channel alive so the ONLY teardown is the explicit abort.
+    let _out_tx_kept = out_tx;
+
+    let bridge = compio::runtime::spawn(bridge_task(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      64,
+      Duration::from_secs(60),
+    ));
+
+    // The peer writes a request; the bridge's recv `Ok(n)` arm forwards it.
+    let request = b"hello-from-peer".to_vec();
+    client
+      .write_all(request.clone())
+      .await
+      .0
+      .expect("peer writes request");
+
+    // The forwarded bytes carry this bridge's eid and match what was sent.
+    let first = inbound_rx
+      .recv_async()
+      .await
+      .expect("bridge forwards the request bytes");
+    match first {
+      BridgeInbound::Bytes(BridgeBytes {
+        eid: got_eid,
+        bytes,
+        ..
+      }) => {
+        assert_eq!(got_eid, eid, "forwarded bytes carry the bridge's eid");
+        assert_eq!(bytes, request, "forwarded bytes match what the peer sent");
+      }
+      BridgeInbound::Eof(_) => panic!("expected Bytes, got Eof"),
+      BridgeInbound::Error(_) => panic!("expected Bytes, got Error"),
+    }
+
+    // Tear down deterministically via the explicit abort (proven signal).
+    cancel_tx.send(()).expect("signal explicit abort");
+    bridge.await.expect("bridge exits on abort");
+  }
+
+  /// A peer FIN surfaces a single `BridgeInbound::Eof` and flips the bridge into
+  /// read-closed mode, after which a LATE response queued on `out_rx` (the
+  /// inbound-server side writes its push/pull response AFTER the request EOF) is
+  /// still written to the peer, then a trailing `Close` tears the bridge down.
+  /// This exercises the recv `Ok(0)` EOF transition, the read-closed-mode `Bytes`
+  /// write arm, and the read-closed `Close` exit arm — none reached by the
+  /// both-halves-live abort / graceful-close tests.
+  #[compio::test]
+  async fn read_closed_mode_writes_late_response_then_closes() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+    let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+
+    let bridge = compio::runtime::spawn(bridge_task(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      64,
+      Duration::from_secs(60),
+    ));
+
+    // Peer sends its request and half-closes: the bridge forwards the bytes,
+    // then observes the FIN (recv `Ok(0)`) and enters read-closed mode.
+    client
+      .write_all(b"req")
+      .await
+      .0
+      .expect("peer writes request");
+    client.shutdown().await.expect("peer half-closes");
+
+    // Drain the request bytes, then assert the EOF marker (the `Ok(0)` arm).
+    let _bytes = inbound_rx.recv_async().await.expect("request bytes");
+    let eof = inbound_rx
+      .recv_async()
+      .await
+      .expect("eof after the peer FIN");
+    match eof {
+      BridgeInbound::Eof(BridgeEof { eid: got_eid, .. }) => {
+        assert_eq!(got_eid, eid, "EOF carries the bridge's eid");
+      }
+      BridgeInbound::Bytes(_) => panic!("expected Eof after the request, got more Bytes"),
+      BridgeInbound::Error(_) => panic!("expected Eof after the request, got Error"),
+    }
+
+    // The server-side response arrives AFTER the request EOF — exactly the
+    // ordering that requires the bridge to stay alive in read-closed mode.
+    let response = b"server-response-after-eof".to_vec();
+    out_tx
+      .send(BridgeOut::Bytes(response.clone()))
+      .expect("queue late response");
+    out_tx.send(BridgeOut::Close).expect("queue close");
+
+    // The peer reads the full late response, then EOF.
+    let buf = vec![0u8; response.len()];
+    let BufResult(res, got) = client.read_exact(buf).await;
+    res.expect("peer reads the late response in read-closed mode");
+    assert_eq!(got, response, "the late response reaches the peer");
+
+    bridge
+      .await
+      .expect("bridge exits after the read-closed Close");
+  }
+
+  /// A `ShutdownWrite` half-closes the bridge's write side so the peer's read
+  /// side observes FIN while the bridge keeps reading. This is the push/pull
+  /// requester's half-close anchor; the abort / graceful-close tests never
+  /// drive the `ShutdownWrite` arm. Teardown is via an explicit abort.
+  #[compio::test]
+  async fn shutdown_write_half_closes_peer_read_side() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+    let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+
+    let bridge = compio::runtime::spawn(bridge_task(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      64,
+      Duration::from_secs(60),
+    ));
+
+    // Write the push, then half-close the write side (the requester's anchor).
+    let push = b"push-request".to_vec();
+    out_tx
+      .send(BridgeOut::Bytes(push.clone()))
+      .expect("queue push bytes");
+    out_tx
+      .send(BridgeOut::ShutdownWrite)
+      .expect("queue shutdown-write");
+
+    // The peer reads the push, then sees FIN on its read side: `read_to_end`
+    // returns exactly the push bytes (the bridge half-closed only its write
+    // side, so the FIN follows the push).
+    let BufResult(res, got) = client.read_to_end(Vec::new()).await;
+    let n = res.expect("peer reads the push then sees FIN");
+    assert_eq!(n, push.len(), "peer received the full push before FIN");
+    assert_eq!(got, push, "peer received exactly the push bytes");
+
+    // The bridge's read half is still open (only the write side half-closed);
+    // tear down deterministically via the explicit abort.
+    cancel_tx.send(()).expect("signal explicit abort");
+    bridge.await.expect("bridge exits on abort");
+  }
+
   /// The idle bound still reclaims a GENUINELY stalled peer: a single partial
   /// write that makes no progress for the full `close_timeout` returns
   /// `TimedOut`, so the bridge tears down (drop write half → RST). This is the
