@@ -5693,4 +5693,256 @@ mod tests {
       "the retired intent must not be requeued onto dial_pending"
     );
   }
+
+  /// `service_quinn`'s `StreamEvent::Stopped` arm: when the PEER sends
+  /// STOP_SENDING for our send half, quinn-proto yields
+  /// `Event::Stream(StreamEvent::Stopped{id, error_code})`. The arm retires both
+  /// halves inline (RESET our send + STOP our recv) and routes the
+  /// `(ch, sid)`-matched bridge through `fail_stopped_already_retired`, which
+  /// transitions it to `Failed(Transport)`.
+  ///
+  /// To keep B's responder bridge deterministically alive when the STOP_SENDING
+  /// arrives, the test establishes only the CONNECTION (a datagram offer warms
+  /// the dial), then opens a RAW bidi from A at the quinn level and writes a
+  /// single byte — B's `service_quinn` accepts it (a bridge appears, parked
+  /// Active waiting for the rest of the never-completed reliable unit). A then
+  /// STOP_SENDINGs B's send half by stopping A's recv half; after ferrying the
+  /// frame, B's `service_quinn` runs the `Stopped` arm and terminalizes B's
+  /// bridge as `Failed(Transport)`.
+  #[test]
+  fn peer_stop_sending_terminalizes_responder_bridge_via_stopped_arm() {
+    let a_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Warm a pooled connection A→B WITHOUT a reliable exchange: a datagram offer
+    // initiates the dial; ferrying drives the handshake to Established on both
+    // sides (no bridge is created on either end — datagrams are the unreliable
+    // plane).
+    assert_eq!(
+      a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now),
+      super::DatagramSendOutcome::NotReady,
+      "the first datagram to a cold peer is best-effort NotReady and warms a dial"
+    );
+    a.flush_outbound_transmits(now);
+    let mut a_ch: Option<quinn_proto::ConnectionHandle> = None;
+    for _ in 0..200 {
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if let Some(ch) = a.conns.handle_for(&b_addr)
+        && a
+          .conns
+          .get(ch)
+          .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
+          .unwrap_or(false)
+      {
+        a_ch = Some(ch);
+        break;
+      }
+    }
+    let a_ch = a_ch.expect("A's pooled connection to B must reach Established");
+    assert_eq!(
+      a.live_bridge_count(),
+      0,
+      "no reliable bridge is created by a datagram warm"
+    );
+
+    // Open a RAW bidi on A's pooled connection (bypassing the FSM) and write one
+    // byte so B becomes aware of the stream and accepts it.
+    let a_sid = a
+      .conns
+      .get_mut(a_ch)
+      .expect("A's connection present")
+      .conn_mut()
+      .streams()
+      .open(quinn_proto::Dir::Bi)
+      .expect("A opens a raw bidi");
+    // Ignoring the written-byte count: one byte fits a fresh stream's flow
+    // window, and the test asserts on B accepting the bidi, not the write size.
+    let _ = a
+      .conns
+      .get_mut(a_ch)
+      .expect("A's connection present")
+      .conn_mut()
+      .send_stream(a_sid)
+      .write(b"\x05");
+
+    // Ferry until B's `service_quinn` accepts the bidi and a bridge appears.
+    let mut b_id: Option<crate::event::StreamId> = None;
+    for _ in 0..100 {
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      if let Some(id) = b.bridges.keys().next().copied() {
+        b_id = Some(id);
+        break;
+      }
+    }
+    let b_id = b_id.expect("B must accept the raw bidi and create a responder bridge");
+    assert!(
+      b.bridges
+        .get(&b_id)
+        .map(|br| !br.is_phase_failed())
+        .unwrap_or(false),
+      "B's freshly-accepted bridge is parked Active before the STOP_SENDING"
+    );
+
+    // A STOP_SENDINGs B's send half by stopping A's recv half (the half that
+    // would receive B's reply). quinn-proto queues a STOP_SENDING frame.
+    let stop_res = a
+      .conns
+      .get_mut(a_ch)
+      .expect("A's connection present")
+      .conn_mut()
+      .recv_stream(a_sid)
+      .stop(quinn_proto::VarInt::from_u32(42));
+    assert!(
+      stop_res.is_ok(),
+      "A must be able to STOP_SENDING B's send half (its recv half is still open)"
+    );
+
+    // Ferry A→B so the STOP_SENDING reaches B, then tick B so its
+    // `service_quinn` polls the connection and runs the `Stopped` arm. B's
+    // bridge MUST terminalize as Failed (the Stopped arm), then reap.
+    let mut saw_failed = false;
+    for _ in 0..100 {
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      b.handle_timeout(now);
+      match b.bridges.get(&b_id) {
+        Some(br) if br.is_phase_failed() => {
+          saw_failed = true;
+          break;
+        }
+        Some(_) => {}
+        // Reaped: the Stopped arm terminalized it and `pump_bridges` removed it.
+        // A reap is reachable here ONLY via the failure path — B never received
+        // a complete reliable unit, so a clean BothClosed completion is
+        // impossible.
+        None => {
+          saw_failed = true;
+          break;
+        }
+      }
+      a.handle_timeout(now);
+    }
+    assert!(
+      saw_failed,
+      "B's responder bridge MUST terminalize via the `StreamEvent::Stopped` arm \
+       once A STOP_SENDINGs B's send half — the arm routes the (ch, sid)-matched \
+       bridge through `fail_stopped_already_retired` → `Failed(Transport)`. \
+       Without the arm the bridge would linger until its exchange deadline."
+    );
+  }
+
+  /// `service_quinn`'s `StreamEvent::Finished` arm + its inner `(ch, sid)` match
+  /// (and the `break` after `observe_send_fin`): when the peer ACKs our FIN,
+  /// quinn-proto yields `Event::Stream(StreamEvent::Finished{id})`. The arm
+  /// finds the owning bridge by `(ch, sid)` and calls `observe_send_fin`,
+  /// advancing its send-half phase.
+  ///
+  /// The test drives a real A→B push/pull and, on B (the responder), captures
+  /// B's bridge id. After B sends its reply and FINishes its send half, A ACKs
+  /// the FIN; B's `service_quinn` then observes `StreamEvent::Finished` for B's
+  /// send stream and routes it to B's bridge via the inner match + break. The
+  /// observable is that B's bridge reaches a send-finished phase
+  /// (`SendClosed`/`BothClosed`/terminal) — the `Finished` arm is the only
+  /// producer of `observe_send_fin` for a peer-ACKed FIN.
+  #[test]
+  fn peer_acked_fin_routes_to_bridge_via_finished_arm() {
+    let a_addr: SocketAddr = "127.0.0.1:8011".parse().unwrap();
+    let b_addr: SocketAddr = "127.0.0.1:8012".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+    let mut b = make_endpoint("b", b_addr, now);
+
+    // Ignoring StreamId return: the test inspects bridge phase, not the handle.
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+
+    // Capture B's bridge id the moment B accepts the inbound exchange, then keep
+    // driving. B's responder bridge sits at `RecvClosed` (recv FIN observed)
+    // with its send half FINned, waiting for A to ACK that FIN. When A's ACK
+    // arrives, B's `service_quinn` observes `StreamEvent::Finished` for B's send
+    // stream; the inner `(ch, sid)` match finds B's still-present bridge, runs
+    // `observe_send_fin` (`RecvClosed → BothClosed`), and breaks. `BothClosed`
+    // is terminal, so the next `pump_bridges` reaps the bridge CLEANLY (never
+    // `is_phase_failed()`). A clean reap is reachable ONLY through the Finished
+    // arm's `observe_send_fin` — every failure path sets `Failed(_)`.
+    let mut b_id: Option<crate::event::StreamId> = None;
+    let mut ever_failed = false;
+    let mut clean_reaped = false;
+    for _ in 0..300 {
+      while let Some((to, bytes)) = a.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(a_addr, &bytes, now);
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == a_addr {
+          a.handle_udp(b_addr, &bytes, now);
+        }
+      }
+      a.handle_timeout(now);
+      b.handle_timeout(now);
+      match b_id {
+        None => {
+          if let Some(id) = b.bridges.keys().next().copied() {
+            b_id = Some(id);
+          }
+        }
+        Some(id) => match b.bridges.get(&id) {
+          Some(br) => {
+            if br.is_phase_failed() {
+              ever_failed = true;
+            }
+          }
+          None => {
+            // The captured bridge has been reaped. If it never went through a
+            // failure phase, this is the clean `BothClosed` reap that only the
+            // Finished arm's `observe_send_fin` can produce for a responder.
+            clean_reaped = true;
+            break;
+          }
+        },
+      }
+    }
+    assert!(
+      b_id.is_some(),
+      "B must have accepted an inbound responder bridge within the ferry budget"
+    );
+    assert!(
+      clean_reaped && !ever_failed,
+      "B's responder bridge MUST reap CLEANLY (BothClosed) via the \
+       `StreamEvent::Finished` arm's inner `(ch, sid)` match + `observe_send_fin` \
+       once A ACKs B's reply FIN — clean_reaped = {clean_reaped}, \
+       ever_failed = {ever_failed}. A clean reap is reachable only through that \
+       arm; every other terminus is a `Failed(_)` phase."
+    );
+  }
 }

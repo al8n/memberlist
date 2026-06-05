@@ -742,4 +742,115 @@ mod tests {
       Err(CodecError::TrailingData(_, _))
     ));
   }
+
+  #[test]
+  fn parse_message_maps_corrupt_frame_to_frame_error() {
+    // A valid Ping tag + length but a garbage body decodes to a non-Incomplete
+    // framing error, which parse_message maps to the opaque `Frame` variant
+    // (the `other =>` arm of the decode map, distinct from `Incomplete`).
+    let frame = Bytes::from(
+      framing::encode_plain_frame(framing::MessageTag::Ping, &[0xFF, 0xFF, 0xFF, 0xFF])
+        .expect("encode corrupt frame"),
+    );
+    assert!(matches!(
+      parse_message::<I, A>(frame),
+      Err(CodecError::Frame(_))
+    ));
+  }
+
+  #[test]
+  fn parse_messages_maps_truncated_compound_to_incomplete() {
+    // A compound datagram truncated mid-part surfaces `decode_compound`'s
+    // `Incomplete` framing error, which the compound branch of parse_messages
+    // maps to `CodecError::Incomplete` (the leading map arm, not `other`).
+    let batch = vec![ping_msg(), ack_msg()];
+    let encoded = encode_outgoing_compound(&batch, &EncodeOptions::default()).unwrap();
+    // Drop the last byte so the final part's body is short of its declared len.
+    let truncated = encoded.slice(0..encoded.len() - 1);
+    assert!(matches!(
+      parse_messages::<I, A>(truncated),
+      Err(CodecError::Incomplete(_, _))
+    ));
+  }
+
+  /// Build a compound datagram `[Compound][count=2][len0][part0][len1][part1]`
+  /// from two raw part-byte payloads (each is a whole inner frame).
+  fn compound_of(part0: &[u8], part1: &[u8]) -> Bytes {
+    use framing::{MessageTag, encode_varint_u32};
+    let mut buf = std::vec![MessageTag::Compound as u8];
+    encode_varint_u32(2, &mut buf);
+    encode_varint_u32(part0.len() as u32, &mut buf);
+    buf.extend_from_slice(part0);
+    encode_varint_u32(part1.len() as u32, &mut buf);
+    buf.extend_from_slice(part1);
+    Bytes::from(buf)
+  }
+
+  #[test]
+  fn parse_messages_maps_corrupt_compound_part_to_frame_error() {
+    // A structurally valid compound (honest count + part lengths) whose SECOND
+    // part is a frame with an unknown message tag: `decode_compound` yields the
+    // part slices, then the per-part `decode_message_zerocopy` rejects the bad
+    // tag — a non-Incomplete framing error the loop maps to `Frame` (the
+    // `other =>` arm inside the per-part decode).
+    let good = framing::encode_message(&framing::AnyMessage::Ack(
+      crate::messages::memberlist::v1::Ack {
+        sequence_number: 5,
+        ..Default::default()
+      },
+    ))
+    .expect("encode good part");
+    // Tag 0 is not a valid MessageTag.
+    let bad_tag_part = [0u8, 0u8];
+    let raw = compound_of(&good, &bad_tag_part);
+    assert!(matches!(
+      parse_messages::<I, A>(raw),
+      Err(CodecError::Frame(_))
+    ));
+  }
+
+  #[test]
+  fn parse_messages_maps_incomplete_compound_part_to_incomplete() {
+    // A compound whose second part's inner frame declares more body than the
+    // part slice carries surfaces the per-part `Incomplete` arm (distinct from
+    // a whole-datagram truncation): the part length is honest, but the frame
+    // inside it is short.
+    let good = framing::encode_message(&framing::AnyMessage::Ack(
+      crate::messages::memberlist::v1::Ack {
+        sequence_number: 5,
+        ..Default::default()
+      },
+    ))
+    .expect("encode good part");
+    // [Ping tag=2][body_len=10][only 2 body bytes] — a 4-byte part whose frame
+    // promises 10 body bytes.
+    let short_frame_part = [framing::MessageTag::Ping as u8, 10u8, 0xAA, 0xBB];
+    let raw = compound_of(&good, &short_frame_part);
+    assert!(matches!(
+      parse_messages::<I, A>(raw),
+      Err(CodecError::Incomplete(_, _))
+    ));
+  }
+
+  #[test]
+  fn parse_messages_maps_compound_part_with_trailing_bytes_to_trailing_data() {
+    // A compound part whose declared inner_len exceeds the frame it contains
+    // (valid frame + trailing bytes inside the same part) trips the per-part
+    // `consumed != part.len()` guard ⇒ TrailingData.
+    let good = framing::encode_message(&framing::AnyMessage::Ack(
+      crate::messages::memberlist::v1::Ack {
+        sequence_number: 5,
+        ..Default::default()
+      },
+    ))
+    .expect("encode good part");
+    // A complete Ack frame followed by an extra byte, all inside one part.
+    let mut part_with_trailing = good.clone();
+    part_with_trailing.push(0xFF);
+    let raw = compound_of(&good, &part_with_trailing);
+    assert!(matches!(
+      parse_messages::<I, A>(raw),
+      Err(CodecError::TrailingData(_, _))
+    ));
+  }
 }

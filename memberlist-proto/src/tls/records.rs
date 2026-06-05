@@ -475,4 +475,48 @@ mod tests {
       "server saw the client's close_notify"
     );
   }
+
+  /// An empty-ciphertext `handle_transport_data(&[])` is the EOF-poll case the
+  /// bridge issues on a transport `read == 0`: the feed loop never runs (no
+  /// bytes to consume), so the `!fed` branch calls `process_new_packets` once to
+  /// advance any already-buffered records and refresh the close latch. Post
+  /// handshake-and-close, an empty feed reports `Done` and latches the peer
+  /// close exactly once.
+  #[test]
+  fn empty_feed_processes_buffered_records_and_refreshes_close_latch() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking() && !server.is_handshaking());
+
+    // An empty feed on a live (un-closed) connection is a clean no-op `Done`
+    // with no close observed.
+    assert!(matches!(
+      server
+        .handle_transport_data(&[])
+        .expect("empty feed is Done"),
+      Intake::Done
+    ));
+    assert!(!server.peer_has_closed(), "no close yet");
+
+    // Deliver the client's close_notify ciphertext, THEN an empty feed: the
+    // empty-feed `!fed` branch re-runs `process_new_packets`, which keeps the
+    // latched close sticky.
+    client.send_close_notify();
+    let mut alert = Vec::new();
+    client.poll_transport_transmit(&mut alert);
+    assert!(!alert.is_empty(), "close_notify produced ciphertext");
+    server
+      .handle_transport_data(&alert)
+      .expect("server consumes the close_notify");
+    assert!(server.peer_has_closed(), "close latched");
+    // A subsequent empty feed (the bridge's repeated EOF poll) is still `Done`
+    // and the latch stays set.
+    assert!(matches!(
+      server
+        .handle_transport_data(&[])
+        .expect("empty feed is Done"),
+      Intake::Done
+    ));
+    assert!(server.peer_has_closed(), "close latch stays sticky");
+  }
 }

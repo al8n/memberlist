@@ -6530,3 +6530,529 @@ fn age_member_rolls_state_change_back_and_is_noop_for_unknown() {
   e.age_member(&SmolStr::new("ghost"), core::time::Duration::from_secs(1));
   assert!(e.node_incarnation(&SmolStr::new("ghost")).is_none());
 }
+
+// ─── lifecycle / accessor edges ──────────────────────────────────────────────
+
+#[test]
+fn lifecycle_accessor_reports_running_then_left() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  assert_eq!(e.lifecycle(), Lifecycle::Running);
+  // No live peers ⇒ leave completes immediately to Left.
+  e.leave(Instant::now()).expect("leave ok");
+  assert_eq!(e.lifecycle(), Lifecycle::Left);
+}
+
+#[test]
+fn members_iterator_yields_every_known_member() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  let ids: std::collections::BTreeSet<SmolStr> =
+    e.members().map(|m| m.id_ref().cheap_clone()).collect();
+  assert!(ids.contains(&SmolStr::new("local")));
+  assert!(ids.contains(&SmolStr::new("bob")));
+  assert_eq!(ids.len(), 2);
+}
+
+#[test]
+fn try_new_seedless_on_std_succeeds() {
+  // A config WITHOUT an explicit rng seed exercises the platform-entropy
+  // construction branch (`getrandom::fill`) — which always succeeds on std —
+  // and the std `try_new` convenience that stamps the local node at the wall
+  // clock.
+  let seedless = EndpointOptions::new(
+    SmolStr::new("local"),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+  );
+  let e = Endpoint::<SmolStr, SocketAddr>::try_new(seedless).expect("seedless std construction");
+  assert_eq!(e.num_members(), 1);
+}
+
+#[test]
+fn drain_broadcasts_returns_queued_messages() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  // `new()` enqueues the local Alive; queue another via an inbound alive.
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  let drained = e.drain_broadcasts();
+  assert!(
+    !drained.is_empty(),
+    "queued Alive broadcasts must be drainable"
+  );
+}
+
+#[test]
+fn handle_packet_dispatches_each_message_variant() {
+  // `handle_packet` is the datagram demux; route one of each membership /
+  // probe message through it so every match arm is exercised. The exact
+  // side effects are covered by the per-handler tests; here we only assert
+  // the dispatch does not panic and membership reacts where expected.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  e.handle_packet(from, Message::Alive(alive("bob", 7001, 1)), now);
+  assert!(e.member(&SmolStr::new("bob")).is_some(), "Alive dispatched");
+  e.handle_packet(from, Message::Suspect(suspect("bob", "carol", 1)), now);
+  e.handle_packet(from, Message::Dead(dead("bob", "carol", 2)), now);
+  // Probe-family messages: untracked seq / unknown target are safe no-ops.
+  e.handle_packet(from, Message::Ack(Ack::new(999)), now);
+  e.handle_packet(from, Message::Nack(Nack::new(999)), now);
+  e.handle_packet(
+    from,
+    Message::IndirectPing(crate::typed::IndirectPing::new(
+      1,
+      Node::new(
+        SmolStr::new("alice"),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002),
+      ),
+      Node::new(
+        SmolStr::new("bob"),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
+      ),
+    )),
+    now,
+  );
+}
+
+// ─── alive: self lower incarnation + revival ─────────────────────────────────
+
+#[test]
+fn self_alive_with_strictly_lower_incarnation_is_ignored() {
+  // An inbound Alive for the local id whose incarnation is strictly below
+  // our own is dropped (the self-specific strict-less-than guard), with no
+  // refute and no broadcast.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let before = e.local_incarnation();
+  assert!(before >= 1);
+  // local started at incarnation 1; send a self-Alive at incarnation 0.
+  process_alive_auto(&mut e, alive("local", 7000, 0), false, Instant::now());
+  assert_eq!(
+    e.local_incarnation(),
+    before,
+    "a lower-incarnation self-Alive must not bump our incarnation"
+  );
+}
+
+#[test]
+fn dead_then_higher_alive_revives_with_node_joined_event() {
+  // A peer marked Dead, then a higher-incarnation Alive, transitions back to
+  // Alive and emits NodeJoined (the `old_state == Dead` revival arm), and the
+  // member's liveness reflects Alive again.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  e.process_dead(dead("bob", "carol", 2), now);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+  while e.poll_event().is_some() {}
+  // Higher incarnation Alive revives bob.
+  process_alive_auto(&mut e, alive("bob", 7001, 3), false, now);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Alive));
+  let joined = core::iter::from_fn(|| e.poll_event())
+    .any(|ev| matches!(ev, Event::NodeJoined(n) if n.id_ref() == &SmolStr::new("bob")));
+  assert!(joined, "reviving a Dead node must emit NodeJoined");
+}
+
+#[test]
+fn alive_with_changed_meta_emits_node_updated() {
+  // A higher-incarnation Alive for a still-Alive peer that changes its meta
+  // emits NodeUpdated (the `old_meta != new_meta` arm).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  let updated_alive = alive("bob", 7001, 2).with_meta(Meta::try_from(&b"meta-v2"[..]).unwrap());
+  process_alive_auto(&mut e, updated_alive, false, now);
+  let updated = core::iter::from_fn(|| e.poll_event())
+    .any(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")));
+  assert!(updated, "a meta change must emit NodeUpdated");
+}
+
+// ─── refute while leaving + skip-past ─────────────────────────────────────────
+
+#[test]
+fn refute_is_suppressed_once_leaving() {
+  // After leave() the lifecycle is no longer Running; a higher-incarnation
+  // self-Alive would normally refute (bumping our incarnation and broadcasting
+  // a higher-incarnation Alive), but refute must short-circuit once leaving so
+  // it cannot resurrect the leaving node.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  // A live peer so leave() goes Leaving (not immediately Left).
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  e.leave(now).expect("leave ok");
+  assert!(e.is_leaving() || e.is_left());
+  let inc_before = e.local_incarnation();
+  // A higher-incarnation self-Alive reaches the refute path, which is then
+  // suppressed because the lifecycle is no longer Running.
+  process_alive_auto(&mut e, alive("local", 7000, inc_before + 5), false, now);
+  assert_eq!(
+    e.local_incarnation(),
+    inc_before,
+    "refute must be suppressed once leaving/left"
+  );
+}
+
+#[test]
+fn self_suspect_with_high_incarnation_refutes_past_accusation() {
+  // A self-Suspect whose accused incarnation is at/above ours forces refute to
+  // skip its incarnation PAST the accusation (the `skip_incarnation_past`
+  // branch), so the refuting Alive out-ranks the accusation.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  let accused = e.local_incarnation() + 10;
+  e.process_suspect(suspect("local", "bob", accused), now);
+  assert!(
+    e.local_incarnation() > accused,
+    "refute must skip our incarnation past the accusation, got {} <= {accused}",
+    e.local_incarnation()
+  );
+}
+
+// ─── suspect / dead unknown + re-confirmation ────────────────────────────────
+
+#[test]
+fn suspect_for_unknown_node_is_ignored() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let n = e.num_members();
+  e.process_suspect(suspect("ghost", "bob", 1), Instant::now());
+  assert_eq!(e.num_members(), n, "an unknown-node Suspect is a no-op");
+}
+
+#[test]
+fn dead_for_unknown_node_is_ignored() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let n = e.num_members();
+  e.process_dead(dead("ghost", "bob", 1), Instant::now());
+  assert_eq!(e.num_members(), n, "an unknown-node Dead is a no-op");
+}
+
+#[test]
+fn dead_with_older_incarnation_is_ignored() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 5), false, now);
+  // Dead at incarnation 3 < bob's 5 ⇒ ignored; bob stays Alive.
+  e.process_dead(dead("bob", "carol", 3), now);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Alive));
+}
+
+#[test]
+fn second_suspect_from_distinct_source_rebroadcasts_on_confirmation() {
+  // A peer already Suspect, then a Suspect from a DIFFERENT source confirms the
+  // suspicion (incrementing its confirmation count), which re-broadcasts the
+  // Suspect (the `Confirmation::Accepted` arm).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    cfg().with_suspicion_mult(4), // k > 0 so confirmations are tracked
+  );
+  let now = Instant::now();
+  // Add several peers so the cluster is large enough for k > 0.
+  for (i, name) in ["bob", "carol", "dave", "erin"].iter().enumerate() {
+    process_alive_auto(&mut e, alive(name, 7001 + i as u16, 1), false, now);
+  }
+  // First Suspect starts the timer.
+  e.process_suspect(suspect("bob", "carol", 1), now);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect)
+  );
+  e.drain_broadcasts();
+  // Second Suspect from a distinct source confirms ⇒ rebroadcast.
+  e.process_suspect(suspect("bob", "dave", 1), now);
+  let rebroadcast = e
+    .drain_broadcasts()
+    .into_iter()
+    .any(|m| matches!(m, Message::Suspect(s) if s.node_ref() == &SmolStr::new("bob")));
+  assert!(
+    rebroadcast,
+    "a confirming Suspect from a new source must rebroadcast"
+  );
+}
+
+// ─── merge: unknown remote state ──────────────────────────────────────────────
+
+#[test]
+fn merge_skips_unknown_remote_state() {
+  // A PushNodeState carrying an Unknown wire state is silently skipped by
+  // merge_state (the `State::Unknown(_)` arm), leaving membership unchanged.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let n = e.num_members();
+  let remote = vec![pns("weird", 7009, 1, State::Unknown(99))];
+  e.merge_state(&remote, Instant::now());
+  assert_eq!(e.num_members(), n, "an Unknown-state entry must be skipped");
+}
+
+// ─── handle_ack / handle_nack edges ──────────────────────────────────────────
+
+#[test]
+fn handle_nack_for_untracked_seq_is_noop() {
+  // A Nack for a sequence with no pending probe is dropped silently.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  // Must not panic / must be a clean no-op.
+  e.handle_nack(from, Nack::new(424242), Instant::now());
+}
+
+// ─── probe fan-out: reliable disabled + zero indirect → terminate ────────────
+
+#[test]
+fn probe_fan_out_with_reliable_disabled_and_no_indirect_suspects_immediately() {
+  // A two-node cluster (no indirect peers) with reliable ping DISABLED for the
+  // target: when the direct ping times out, fan-out has nothing to try and
+  // suspects the target immediately (the `expected_nacks == 0 &&
+  // reliable_stream_id.is_none()` terminate arm).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    cfg()
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(80)),
+  );
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  e.disable_reliable_ping(SmolStr::new("bob"));
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let t0 = Instant::now();
+  e.start_probe(t0);
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+  // Past the direct deadline but before the cumulative failure deadline.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "no indirect + no reliable fallback must suspect the target on direct timeout"
+  );
+}
+
+// ─── reset_nodes / user packets / meta cap ───────────────────────────────────
+
+#[test]
+fn reset_nodes_keeps_live_members_and_reaps_only_expired_dead() {
+  // reset_nodes scans all members; a live (Alive) remote member is retained
+  // (the `state != Dead && state != Left` filter arm), while a long-expired
+  // Dead member is reaped.
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new(cfg().with_gossip_to_the_dead_time(Duration::from_millis(10)));
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("live", 7001, 1), false, now);
+  process_alive_auto(&mut e, alive("gone", 7002, 1), false, now);
+  e.process_dead(dead("gone", "x", 2), now);
+  // Far in the future so "gone" is past the dead window; "live" is retained.
+  e.reset_nodes(now + Duration::from_secs(60));
+  assert!(
+    e.member(&SmolStr::new("live")).is_some(),
+    "live member retained"
+  );
+  assert!(
+    e.member(&SmolStr::new("gone")).is_none(),
+    "expired dead reaped"
+  );
+}
+
+#[test]
+fn send_user_packets_empty_slice_is_ok_noop() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  e.send_user_packets(to, &[]).expect("empty slice is Ok");
+  assert!(
+    e.poll_transmit().is_none(),
+    "an empty payload slice queues nothing"
+  );
+}
+
+#[test]
+fn update_meta_rejects_oversized_meta() {
+  // A meta larger than the configured cap is rejected with MetaExceedsCap and
+  // not applied.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_meta_max_size(4));
+  let big = Meta::try_from(&b"way-too-long"[..]).unwrap();
+  let err = e
+    .update_meta(big)
+    .expect_err("oversized meta must be rejected");
+  assert!(
+    matches!(err, crate::error::Error::MetaExceedsCap(_, _)),
+    "got {err:?}"
+  );
+}
+
+// ─── stream events: RemoteStateReceived + reliable-ping failure ──────────────
+
+#[test]
+fn push_pull_reply_with_user_data_emits_remote_state_received() {
+  use crate::event::PushPullKind;
+  use bytes::Bytes;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let states = vec![pns("carol", 7003, 1, State::Alive)];
+  // A non-empty user_data payload must surface as RemoteStateReceived after
+  // the merge is admitted.
+  let ev = EndpointEvent::PushPullReplyReceived(crate::event::PushPullReplyReceived::new(
+    peer,
+    states,
+    Bytes::from_static(b"peer-app-state"),
+    PushPullKind::Refresh,
+  ));
+  let cmd = e.handle_stream_event(ev, now);
+  assert!(cmd.is_none(), "an outbound reply returns no command");
+  let got = core::iter::from_fn(|| e.poll_event()).any(|ev| {
+    matches!(ev, Event::RemoteStateReceived(r) if r.user_data_ref().as_ref() == b"peer-app-state")
+  });
+  assert!(
+    got,
+    "non-empty reply user_data must emit RemoteStateReceived"
+  );
+}
+
+#[test]
+fn push_pull_request_with_user_data_emits_remote_state_received_and_response() {
+  use crate::event::PushPullKind;
+  use bytes::Bytes;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let states = vec![pns("carol", 7003, 1, State::Alive)];
+  let ev = EndpointEvent::PushPullRequestReceived(crate::event::PushPullRequestReceived::new(
+    peer,
+    states,
+    Bytes::from_static(b"inbound-app-state"),
+    PushPullKind::Refresh,
+  ));
+  let cmd = e.handle_stream_event(ev, now);
+  assert!(
+    matches!(cmd, Some(StreamCommand::SendPushPullResponse(_))),
+    "an inbound request returns a SendPushPullResponse command"
+  );
+  let got = core::iter::from_fn(|| e.poll_event()).any(|ev| {
+    matches!(ev, Event::RemoteStateReceived(r) if r.user_data_ref().as_ref() == b"inbound-app-state")
+  });
+  assert!(
+    got,
+    "non-empty request user_data must emit RemoteStateReceived"
+  );
+}
+
+#[test]
+fn reliable_ping_failed_event_retires_fallback_without_failing_probe() {
+  // Drive a probe to AwaitingIndirect with the reliable fallback armed, then
+  // route a ReliablePingFailed back through handle_stream_event: the fallback
+  // is retired but the probe keeps running (failure is decided only by the
+  // cumulative deadline).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    cfg()
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(200)),
+  );
+  let now = Instant::now();
+  // Three peers so an indirect peer exists ⇒ AwaitingIndirect (not immediate
+  // terminate), and the reliable fallback is armed concurrently.
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, now);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let t0 = Instant::now();
+  e.start_probe(t0);
+  let seq = match e.poll_transmit().expect("direct Ping") {
+    Transmit::Packet(p) => match p.into_parts().1 {
+      Message::Ping(ping) => ping.sequence_number(),
+      _ => panic!("Ping expected"),
+    },
+    _ => panic!("Ping expected"),
+  };
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+  // Direct timeout (before the 200ms cumulative deadline) ⇒ fan out to indirect
+  // + arm the reliable fallback.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+  assert!(e.probes.contains_key(&seq), "probe is in AwaitingIndirect");
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The reliable fallback fails: routed through the stream-event path.
+  let cmd = e.handle_stream_event(
+    EndpointEvent::ReliablePingFailed(crate::event::ReliablePingFailed::new(seq)),
+    t0 + Duration::from_millis(70),
+  );
+  assert!(
+    cmd.is_none(),
+    "ReliablePingFailed returns no stream command"
+  );
+  assert!(
+    e.probes.contains_key(&seq),
+    "a fallback failure must NOT fail the probe — the indirect path keeps racing"
+  );
+}
+
+#[test]
+fn dial_failed_for_unknown_stream_is_noop() {
+  // dial_failed for a StreamId with no pending intent is a clean no-op.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  e.dial_failed(
+    StreamId::from_raw(999),
+    crate::error::StreamError::PeerClosed,
+    Instant::now(),
+  );
+}
+
+#[test]
+fn ping_untracked_node_synthesizes_target_state() {
+  // Pinging a node not in membership synthesizes a minimal Alive NodeState so a
+  // later PingCompleted can still carry the target (the `None` arm of the
+  // member lookup). A direct Ack then completes it.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let now = Instant::now();
+  let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7099);
+  let node = Node::new(SmolStr::new("stranger"), target_addr);
+  let ping_id = e.ping(node, now);
+  // The probe was registered; drain the outbound direct Ping and its seq.
+  let seq = core::iter::from_fn(|| e.poll_transmit())
+    .find_map(|tx| match tx {
+      Transmit::Packet(p) => match p.into_parts().1 {
+        Message::Ping(ping) => Some(ping.sequence_number()),
+        _ => None,
+      },
+      _ => None,
+    })
+    .expect("a direct Ping must be emitted");
+  // The stranger Acks: PingCompleted carries the synthesized target.
+  e.handle_ack(target_addr, Ack::new(seq), now);
+  let completed = core::iter::from_fn(|| e.poll_event())
+    .any(|ev| matches!(ev, Event::PingCompleted(c) if c.ping_id() == ping_id));
+  assert!(
+    completed,
+    "an Ack from the untracked target must complete the ping"
+  );
+}
+
+#[test]
+fn gossip_scheduler_skips_left_members_as_candidates() {
+  // A Left member is not a gossip candidate (the `_ => false` filter arm). With
+  // only a Left peer present, gossip selects no target and emits nothing, yet
+  // does not panic and reschedules.
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
+    SmolStr::new("local"),
+    "127.0.0.1:7946".parse().unwrap(),
+  )
+  .with_probe_interval(Duration::ZERO)
+  .with_gossip_interval(Duration::from_millis(50))
+  .with_gossip_nodes(2)
+  .with_push_pull_interval(Duration::ZERO)
+  .with_rng_seed(1);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("gone", 7947, 1), false, t0);
+  // Mark "gone" as Left (self-marked dead sentinel: node == from).
+  e.process_dead(dead("gone", "gone", 2), t0);
+  assert_eq!(e.member_liveness(&SmolStr::new("gone")), Some(State::Left));
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  e.queue_user_broadcast(bytes::Bytes::from_static(b"x"))
+    .unwrap();
+  e.next_gossip = Some(t0);
+  e.handle_timeout(t0);
+  // The only peer is Left ⇒ no gossip target ⇒ nothing transmitted.
+  assert!(
+    e.poll_transmit().is_none(),
+    "a Left-only membership must yield no gossip target"
+  );
+}

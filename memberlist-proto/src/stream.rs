@@ -1806,4 +1806,33 @@ mod fsm_tests {
     assert!(s.poll_event().is_none());
     assert!(s.is_done(), "phase preserved");
   }
+
+  /// A well-FRAMED frame (`probe_frame` accepts the `[tag][len][body]` shape and
+  /// confirms the full body is buffered) whose body is undecodable for its tag
+  /// fails the `wire::decode_message` step → `StreamError::Decode`. This is the
+  /// `try_decode_frame` decode-error arm: the pre-scan and the real decoder
+  /// agree on framing, but the bytes inside the frame are garbage for a
+  /// PushPull, so `PushPull::decode_from_slice` rejects them.
+  #[test]
+  fn well_framed_but_undecodable_body_fails_decode() {
+    let t0 = Instant::now();
+    let mut s = stream_in(
+      StreamPhase::InboundAwaitingFirstMessage,
+      Some(t0 + Duration::from_secs(5)),
+    );
+    // [tag=8 PushPull][varint len = 4][4 garbage body bytes]. probe_frame sees a
+    // complete frame (tag is not validated there, the declared body is fully
+    // buffered, total <= max_frame_size); the decoder then fails on the body.
+    let mut bytes = std::vec![8u8];
+    crate::framing::encode_varint_u32(4, &mut bytes);
+    bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    let err = s
+      .handle_data(&bytes, t0)
+      .expect_err("a well-framed but undecodable body fails decode");
+    assert!(
+      matches!(err, StreamError::Decode(_)),
+      "an undecodable body surfaces as Decode, got {err:?}"
+    );
+    assert!(matches!(s.is_failed(), Some(StreamError::Decode(_))));
+  }
 }

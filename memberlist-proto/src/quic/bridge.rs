@@ -2350,4 +2350,1135 @@ mod tests {
       "neither pump changes phase when the connection is absent"
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Real quinn-proto connection pair, for the bridge fault paths that only fire
+  // when `pump_in` / `pump_out` operate over a LIVE quinn stream (the
+  // `conns.get_mut(self.ch)` guard short-circuits over an empty `ConnTable`, so
+  // the `make_plain_bridge` tests above cannot reach them). The harness drives a
+  // real client↔server handshake by ferrying datagrams, parks the SERVER
+  // connection in a `ConnTable` (where a `Bridge` finds it via its `ch`), and
+  // keeps the CLIENT connection raw so a test can open/write/reset/finish a
+  // single bidi stream and observe the server bridge's reaction.
+  // ---------------------------------------------------------------------------
+
+  use quinn_proto::{ConnectionHandle as QpCh, Endpoint as QuinnEndpoint, Transmit as QpTransmit};
+
+  use crate::quic::crypto::tests::{test_client, test_endpoint_config, test_server};
+
+  const CLIENT_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6500);
+  const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6501);
+
+  /// One real quinn client connection + one real quinn server connection, each
+  /// driven directly (no `QuicEndpoint` coordinator). The server connection is
+  /// parked in `server_conns` under `server_ch` so a `Bridge` can pump it.
+  struct RawQuicPair {
+    client_ep: QuinnEndpoint,
+    server_ep: QuinnEndpoint,
+    client_conn: quinn_proto::Connection,
+    client_ch: QpCh,
+    server_conns: ConnTable,
+    server_ch: QpCh,
+    now: std::time::Instant,
+  }
+
+  impl RawQuicPair {
+    /// Mint a client+server endpoint pair and drive the handshake to
+    /// Established on both sides by ferrying datagrams.
+    fn handshaked() -> Self {
+      let cfg = super::super::crypto::QuicOptions::new(
+        test_endpoint_config(&[9u8; 32]),
+        test_server(),
+        test_client(),
+        quinn_proto::TransportConfig::default(),
+        "localhost",
+        super::super::UnreliableTransport::Datagram,
+      );
+      let mut client_ep = QuinnEndpoint::new(cfg.endpoint_arc(), None, true, Some([0x42; 32]));
+      let mut server_ep = QuinnEndpoint::new(
+        cfg.endpoint_arc(),
+        Some(cfg.server_arc()),
+        true,
+        Some([0x24; 32]),
+      );
+      let now = Instant::now().into_std();
+      let (client_ch, client_conn) = client_ep
+        .connect(now, cfg.client().clone(), SERVER_ADDR, "localhost")
+        .expect("client dial");
+
+      let mut server_conns = ConnTable::new();
+      let mut client_conn = client_conn;
+      let mut server_ch: Option<QpCh> = None;
+
+      // Ferry datagrams both ways until both connections are Established.
+      for _ in 0..200 {
+        // Client → server.
+        let mut buf = Vec::new();
+        while let Some(t) = client_conn.poll_transmit(now, 1, &mut buf) {
+          Self::deliver(
+            &mut server_ep,
+            &mut server_conns,
+            &mut server_ch,
+            CLIENT_ADDR,
+            &t,
+            &buf,
+            now,
+          );
+          buf.clear();
+        }
+        // Server → client.
+        if let Some(sch) = server_ch {
+          let mut sbuf = Vec::new();
+          if let Some(e) = server_conns.get_mut(sch) {
+            while let Some(t) = e.conn_mut().poll_transmit(now, 1, &mut sbuf) {
+              let data = bytes::BytesMut::from(&sbuf[..t.size]);
+              let mut scratch = Vec::new();
+              if let Some(ev) = client_ep.handle(now, SERVER_ADDR, None, None, data, &mut scratch) {
+                Self::apply_client_event(&mut client_conn, client_ch, ev);
+              }
+              sbuf.clear();
+            }
+          }
+        }
+        // Drain endpoint events on both sides so CID issuance completes.
+        Self::pump_endpoint_events(&mut client_ep, &mut client_conn, client_ch);
+        if let Some(sch) = server_ch
+          && let Some(e) = server_conns.get_mut(sch)
+        {
+          while let Some(ev) = e.conn_mut().poll_endpoint_events() {
+            if ev.is_drained() {
+              continue;
+            }
+            if let Some(cev) = server_ep.handle_event(sch, ev) {
+              e.conn_mut().handle_event(cev);
+            }
+          }
+        }
+        client_conn.handle_timeout(now);
+        if let Some(sch) = server_ch
+          && let Some(e) = server_conns.get_mut(sch)
+        {
+          e.conn_mut().handle_timeout(now);
+        }
+        let client_up = !client_conn.is_handshaking() && !client_conn.is_closed();
+        let server_up = server_ch
+          .and_then(|sch| server_conns.get(sch))
+          .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
+          .unwrap_or(false);
+        if client_up && server_up {
+          break;
+        }
+      }
+
+      let server_ch = server_ch.expect("server must have accepted the connection");
+      assert!(
+        !client_conn.is_handshaking(),
+        "client connection must reach Established"
+      );
+      assert!(
+        server_conns
+          .get(server_ch)
+          .map(|e| !e.conn_ref().is_handshaking())
+          .unwrap_or(false),
+        "server connection must reach Established"
+      );
+      Self {
+        client_ep,
+        server_ep,
+        client_conn,
+        client_ch,
+        server_conns,
+        server_ch,
+        now,
+      }
+    }
+
+    /// Route a client-originated datagram into the server endpoint, accepting a
+    /// brand-new connection on first contact.
+    fn deliver(
+      server_ep: &mut QuinnEndpoint,
+      server_conns: &mut ConnTable,
+      server_ch: &mut Option<QpCh>,
+      from: SocketAddr,
+      t: &QpTransmit,
+      buf: &[u8],
+      now: std::time::Instant,
+    ) {
+      let data = bytes::BytesMut::from(&buf[..t.size]);
+      let mut scratch = Vec::new();
+      let Some(ev) = server_ep.handle(now, from, None, None, data, &mut scratch) else {
+        return;
+      };
+      match ev {
+        quinn_proto::DatagramEvent::ConnectionEvent(ch, cev) => {
+          if let Some(e) = server_conns.get_mut(ch) {
+            e.conn_mut().handle_event(cev);
+          }
+        }
+        quinn_proto::DatagramEvent::NewConnection(incoming) => {
+          let mut abuf = Vec::new();
+          if let Ok((ch, conn)) = server_ep.accept(incoming, now, &mut abuf, None) {
+            server_conns.insert_accepted(ch, conn, from);
+            *server_ch = Some(ch);
+          }
+        }
+        quinn_proto::DatagramEvent::Response(_) => {}
+      }
+    }
+
+    fn apply_client_event(
+      client_conn: &mut quinn_proto::Connection,
+      client_ch: QpCh,
+      ev: quinn_proto::DatagramEvent,
+    ) {
+      if let quinn_proto::DatagramEvent::ConnectionEvent(ch, cev) = ev {
+        debug_assert_eq!(ch, client_ch);
+        client_conn.handle_event(cev);
+      }
+    }
+
+    fn pump_endpoint_events(
+      client_ep: &mut QuinnEndpoint,
+      client_conn: &mut quinn_proto::Connection,
+      client_ch: QpCh,
+    ) {
+      while let Some(ev) = client_conn.poll_endpoint_events() {
+        if ev.is_drained() {
+          continue;
+        }
+        if let Some(cev) = client_ep.handle_event(client_ch, ev) {
+          client_conn.handle_event(cev);
+        }
+      }
+    }
+
+    /// Open a bidi stream on the CLIENT and return its `StreamId`.
+    fn client_open_bi(&mut self) -> QuicSid {
+      self
+        .client_conn
+        .streams()
+        .open(Dir::Bi)
+        .expect("client opens a bidi stream")
+    }
+
+    /// Write `bytes` on the client's send half of `sid`.
+    fn client_write(&mut self, sid: QuicSid, bytes: &[u8]) {
+      let mut off = 0;
+      while off < bytes.len() {
+        match self.client_conn.send_stream(sid).write(&bytes[off..]) {
+          Ok(n) => off += n,
+          Err(quinn_proto::WriteError::Blocked) => {
+            self.ferry();
+            // After a ferry the peer may have credited us; retry.
+          }
+          Err(e) => panic!("client write failed: {e:?}"),
+        }
+      }
+    }
+
+    /// Reset the client's send half of `sid` (peer's recv half sees
+    /// RESET_STREAM and `pump_in` reads `ReadError::Reset`).
+    fn client_reset(&mut self, sid: QuicSid) {
+      // Ignoring Err: `reset` returns `Err(ClosedStream)` only if the half is
+      // already gone; the test asserts on the peer-side effect, not this call.
+      let _ = self.client_conn.send_stream(sid).reset(VarInt::from_u32(0));
+    }
+
+    /// Finish the client's send half of `sid` (peer's recv half sees FIN).
+    fn client_finish(&mut self, sid: QuicSid) {
+      // Ignoring Err: `finish` returns `Err` only if already finished/reset; the
+      // test asserts on the peer observing FIN, not this call's result.
+      let _ = self.client_conn.send_stream(sid).finish();
+    }
+
+    /// Ferry every queued datagram both ways once and advance both connections
+    /// one timer tick. Drives client-written stream bytes to the server and the
+    /// server's responses (ACKs, RESET_STREAM, …) back to the client.
+    fn ferry(&mut self) {
+      let now = self.now;
+      let mut buf = Vec::new();
+      while let Some(t) = self.client_conn.poll_transmit(now, 1, &mut buf) {
+        Self::deliver(
+          &mut self.server_ep,
+          &mut self.server_conns,
+          &mut Some(self.server_ch),
+          CLIENT_ADDR,
+          &t,
+          &buf,
+          now,
+        );
+        buf.clear();
+      }
+      let sch = self.server_ch;
+      let mut sbuf = Vec::new();
+      if let Some(e) = self.server_conns.get_mut(sch) {
+        while let Some(t) = e.conn_mut().poll_transmit(now, 1, &mut sbuf) {
+          let data = bytes::BytesMut::from(&sbuf[..t.size]);
+          let mut scratch = Vec::new();
+          if let Some(ev) = self
+            .client_ep
+            .handle(now, SERVER_ADDR, None, None, data, &mut scratch)
+          {
+            Self::apply_client_event(&mut self.client_conn, self.client_ch, ev);
+          }
+          sbuf.clear();
+        }
+      }
+      Self::pump_endpoint_events(&mut self.client_ep, &mut self.client_conn, self.client_ch);
+      if let Some(e) = self.server_conns.get_mut(sch) {
+        while let Some(ev) = e.conn_mut().poll_endpoint_events() {
+          if ev.is_drained() {
+            continue;
+          }
+          if let Some(cev) = self.server_ep.handle_event(sch, ev) {
+            e.conn_mut().handle_event(cev);
+          }
+        }
+      }
+      self.client_conn.handle_timeout(now);
+      if let Some(e) = self.server_conns.get_mut(sch) {
+        e.conn_mut().handle_timeout(now);
+      }
+    }
+
+    /// Accept the server's next inbound bidi stream id (ferrying until it
+    /// appears).
+    fn server_accept_bi(&mut self) -> QuicSid {
+      for _ in 0..200 {
+        let sch = self.server_ch;
+        if let Some(e) = self.server_conns.get_mut(sch)
+          && let Some(sid) = e.conn_mut().streams().accept(Dir::Bi)
+        {
+          return sid;
+        }
+        self.ferry();
+      }
+      panic!("server never accepted an inbound bidi stream");
+    }
+
+    /// Build a `Bridge` over the server's accepted bidi `sid` (inbound role,
+    /// no label). The bridge's inner FSM is a fresh `accept_stream`.
+    fn server_bridge(
+      &mut self,
+      ep: &mut Endpoint<SmolStr, SocketAddr>,
+      sid: QuicSid,
+    ) -> Bridge<SmolStr, SocketAddr> {
+      let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(self.now));
+      Bridge::new(
+        stream,
+        self.server_ch,
+        sid,
+        crate::CompressionOptions::new(),
+        crate::EncryptionOptions::new(),
+        ep.max_stream_frame_size(),
+        None,
+        false,
+        false,
+      )
+    }
+  }
+
+  fn make_server_endpoint() -> Endpoint<SmolStr, SocketAddr> {
+    Endpoint::new(EndpointOptions::new(SmolStr::new("server"), SERVER_ADDR))
+  }
+
+  /// `pump_in` over a live quinn stream: an over-ceiling `unit_len` (a forged
+  /// varint above `reliable_max`) makes `take_reliable_unit_with_encryption`
+  /// return `Err` inside the unit loop, driving the `unit_err` → `decode_failed`
+  /// path that retires both halves and transitions the bridge to
+  /// `Failed(Decode)`. Reaches the `take_reliable_unit` `Err(_)` arm and the
+  /// post-borrow `decode_failed` retire block.
+  #[test]
+  fn pump_in_over_ceiling_unit_len_fails_decode() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // Forge a `[unit_len: varint]` far above any plausible `reliable_max`, with
+    // no payload — `take_reliable_unit` rejects the unit before reading bytes.
+    let mut forged = Vec::new();
+    crate::framing::encode_varint_u32(u32::MAX, &mut forged);
+    pair.client_write(sid, &forged);
+    pair.client_finish(sid);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    // Pump the forged unit through the live server stream.
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "an over-ceiling unit_len must fail pump_in via the decode-fail retire path"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+      "a forged over-ceiling unit_len terminalizes the bridge as Failed(Decode) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream: a well-FRAMED reliable unit whose
+  /// payload is not a decodable memberlist `Message` makes `Stream::handle_data`
+  /// return `Err` inside the unit loop (the `decode_failed = true; break` arm),
+  /// then the post-borrow `decode_failed` block retires both halves and sets
+  /// `Failed(Decode)`.
+  #[test]
+  fn pump_in_undecodable_unit_payload_fails_decode() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // A structurally valid `[unit_len][payload]` (so `take_reliable_unit`
+    // succeeds) whose 64-byte payload is not a valid `Message` (so the FSM's
+    // `handle_data` rejects it).
+    let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &[0xffu8; 64]);
+    pair.client_write(sid, &unit);
+    pair.client_finish(sid);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "an undecodable unit payload must fail pump_in via handle_data → decode_failed"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+      "an undecodable unit payload terminalizes the bridge as Failed(Decode) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream: the peer FINs in the middle of a
+  /// reliable unit (writes a partial `[unit_len][..]` then finishes). At EOF the
+  /// trailing partial unit in `recv_accum` is a truncated transmission — the
+  /// `fin_seen && !recv_accum.is_empty()` arm flips `decode_failed`, and the
+  /// retire block terminalizes the bridge `Failed(Decode)`.
+  #[test]
+  fn pump_in_truncated_unit_at_fin_fails_decode() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // A full unit's prefix: declare a 64-byte payload but deliver only 8 bytes,
+    // then FIN. The recv side decodes the varint length, waits for 64 bytes,
+    // and at FIN finds a partial unit → truncated.
+    let full = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &[7u8; 64]);
+    // A 64-byte payload yields a unit well over 10 bytes; send only the first 10
+    // (a partial `[unit_len][..]`) so the recv side waits for the rest, then
+    // FINs.
+    assert!(full.len() > 10);
+    let partial = &full[..10];
+    pair.client_write(sid, partial);
+    pair.client_finish(sid);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "a FIN mid-unit must be treated as a truncated transmission (decode fail)"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+      "a truncated unit at FIN terminalizes the bridge as Failed(Decode) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream: the peer FINs while the bridge's FSM
+  /// still expects inbound bytes (the request stream is opened and FINned with
+  /// NO data). The `fin_seen && handle_data(&[]).is_err()` premature-FIN arm
+  /// (the FSM's `PeerClosed` entry) flips `decode_failed` and the bridge
+  /// terminalizes `Failed(Decode)`.
+  #[test]
+  fn pump_in_premature_fin_with_no_data_fails_decode() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // Open + immediately FIN with no bytes. The server FSM (an inbound stream
+    // awaiting its first message) sees an empty-buffer EOF → PeerClosed.
+    pair.client_finish(sid);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "a premature FIN with no data must route through the FSM PeerClosed failure"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+      "a premature empty FIN terminalizes the bridge as Failed(Decode) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream: the peer RESETs its send half, so the
+  /// bridge's ordered read returns `ReadError::Reset`, driving the `reset`
+  /// retire block (RESET + STOP + `Failed(Transport)`).
+  #[test]
+  fn pump_in_peer_reset_recv_fails_transport() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // Write a partial unit then RESET — the recv side sees the bytes followed by
+    // a RESET_STREAM rather than a clean FIN.
+    let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &[2u8; 24]);
+    // Send only the first few bytes (a partial unit) before resetting, so the
+    // recv side sees bytes followed by a RESET_STREAM rather than a clean FIN.
+    assert!(unit.len() > 6);
+    pair.client_write(sid, &unit[..6]);
+    pair.ferry();
+    pair.client_reset(sid);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "a peer RESET_STREAM on the recv half must fail pump_in via the reset path"
+    );
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "a peer reset terminalizes the bridge as Failed(Transport) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream: a prior UNORDERED read on the recv
+  /// half makes the bridge's ordered `RecvStream::read(true)` return
+  /// `ReadableError::IllegalOrderedRead`, driving the `illegal_ordered` retire
+  /// block (RESET + STOP + `Failed(Transport)`).
+  #[test]
+  fn pump_in_illegal_ordered_read_fails_transport() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &[1u8; 16]);
+    pair.client_write(sid, &unit);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+    // Ferry so the client bytes are buffered on the server recv stream, then do
+    // a poisoning UNORDERED read on the SAME recv half. The bridge's subsequent
+    // ordered `read(true)` then trips `IllegalOrderedRead`.
+    for _ in 0..50 {
+      pair.ferry();
+      let mut buffered = false;
+      if let Some(e) = pair.server_conns.get_mut(pair.server_ch) {
+        let mut rs = e.conn_mut().recv_stream(server_sid);
+        if let Ok(mut chunks) = rs.read(false) {
+          if matches!(chunks.next(usize::MAX), Ok(Some(_))) {
+            buffered = true;
+          }
+          // Ignoring Err: the unordered-read finalize wakeup is unused here.
+          let _ = chunks.finalize();
+        }
+      }
+      if buffered {
+        break;
+      }
+    }
+
+    let result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+    assert_eq!(
+      result,
+      Err(()),
+      "an ordered read after an unordered read must fail via IllegalOrderedRead"
+    );
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "an illegal ordered read terminalizes the bridge as Failed(Transport) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// Build a LABELED inbound bridge (acceptor role, lazy outbound disclosure)
+  /// over the server's accepted bidi `sid`.
+  fn server_labeled_bridge(
+    pair: &mut RawQuicPair,
+    ep: &mut Endpoint<SmolStr, SocketAddr>,
+    sid: QuicSid,
+    label: bytes::Bytes,
+  ) -> Bridge<SmolStr, SocketAddr> {
+    let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(pair.now));
+    Bridge::new(
+      stream,
+      pair.server_ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      Some(label),
+      false,
+      false,
+    )
+  }
+
+  /// Build a LABELED outbound DIALER bridge (eager outbound disclosure) over the
+  /// server's open bidi `sid`.
+  fn server_labeled_dialer_bridge(
+    pair: &mut RawQuicPair,
+    ep: &mut Endpoint<SmolStr, SocketAddr>,
+    sid: QuicSid,
+    label: bytes::Bytes,
+  ) -> Bridge<SmolStr, SocketAddr> {
+    let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(pair.now));
+    Bridge::new(
+      stream,
+      pair.server_ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      Some(label),
+      false,
+      true,
+    )
+  }
+
+  /// `pump_out` over a live quinn stream for a LABELED dialer: the first
+  /// `pump_out` writes the eager outbound label frame into `pending_out` (the
+  /// `!outbound_label_written && eager_outbound_label` arm) and the
+  /// `pending_out` flush writes it onto the quinn send stream. After this the
+  /// `outbound_label_written` latch is set and `pending_out` has drained.
+  #[test]
+  fn pump_out_labeled_dialer_writes_eager_label_over_live_stream() {
+    let label = bytes::Bytes::from_static(b"cluster-out");
+    let mut pair = RawQuicPair::handshaked();
+    // The server opens a bidi (live send half) for the dialer bridge to write on.
+    let server_open_sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let mut ep = make_server_endpoint();
+    let mut bridge =
+      server_labeled_dialer_bridge(&mut pair, &mut ep, server_open_sid, label.clone());
+    assert!(
+      !bridge.outbound_label_written(),
+      "a labeled dialer starts with the outbound-label latch unset"
+    );
+
+    let result = bridge.pump_out(&mut pair.server_conns, Instant::from_std(pair.now));
+    assert_eq!(
+      result,
+      Ok(()),
+      "the eager-label write + flush must succeed on a healthy send half"
+    );
+    assert!(
+      bridge.outbound_label_written(),
+      "the first pump_out must write the eager outbound label frame and set the latch"
+    );
+    assert!(
+      bridge.pending_out_bytes().is_empty(),
+      "the label frame must flush onto the send stream (no back-pressure on a fresh stream)"
+    );
+
+    // Confirm the label bytes actually reached the peer: ferry, accept the bidi
+    // on the client, and read the label header off the front.
+    let mut client_recv = Vec::new();
+    for _ in 0..50 {
+      pair.ferry();
+      if let Some(csid) = pair.client_conn.streams().accept(Dir::Bi) {
+        if let Ok(mut chunks) = pair.client_conn.recv_stream(csid).read(true) {
+          while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+            client_recv.extend_from_slice(&chunk.bytes);
+          }
+          // Ignoring Err: the read finalize wakeup is unused here.
+          let _ = chunks.finalize();
+        }
+        break;
+      }
+    }
+    let expected_header = build_label_header(&label);
+    assert!(
+      client_recv.starts_with(&expected_header),
+      "the eager label frame must be the FIRST bytes on the wire — got {client_recv:?}"
+    );
+  }
+
+  /// `pump_in` over a live quinn stream for a LABELED bridge: the peer writes
+  /// the matching label header followed by a reliable unit. The inline label
+  /// classifier (the `if !self.inbound_label_validated` block inside the chunk
+  /// loop) drains the header, latches `inbound_label_validated`, and the
+  /// acceptor's lazy outbound-label disclosure prepends its own label to
+  /// `pending_out`. The trailing reliable unit then dispatches into the FSM.
+  #[test]
+  fn pump_in_labeled_validates_inbound_label_over_live_stream() {
+    let label = bytes::Bytes::from_static(b"cluster-quic");
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // The dialer writes its label header first, then one reliable unit carrying
+    // a valid Ping message (so the FSM accepts it cleanly after the header).
+    let mut wire = Vec::new();
+    crate::label::encode_label_prefix(&label, &mut wire);
+    let ping = crate::typed::Message::<SmolStr, SocketAddr>::Ping(crate::typed::Ping::new(
+      1,
+      crate::typed::Node::new(SmolStr::new("client"), CLIENT_ADDR),
+      crate::typed::Node::new(SmolStr::new("server"), SERVER_ADDR),
+    ));
+    let framed = crate::wire::encode_message::<SmolStr, SocketAddr>(&ping).expect("encode ping");
+    let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &framed);
+    wire.extend_from_slice(&unit);
+    pair.client_write(sid, &wire);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = server_labeled_bridge(&mut pair, &mut ep, server_sid, label);
+    assert!(
+      !bridge.inbound_label_validated(),
+      "a labeled bridge starts with the inbound latch unset"
+    );
+
+    // Pump until the label header validates (the inline classifier consumes it
+    // and latches).
+    for _ in 0..50 {
+      // Ignoring Err: this loop drives the pump and inspects the bridge's
+      // latch/phase below; a terminal Err is itself the asserted outcome.
+      let _ = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if bridge.inbound_label_validated() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert!(
+      bridge.inbound_label_validated(),
+      "the inline label classifier must validate the matching inbound header \
+       and latch over a live stream"
+    );
+    assert!(
+      bridge.outbound_label_written(),
+      "an acceptor's lazy outbound-label disclosure must arm once the peer's \
+       label validates"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Active),
+      "a matching label + valid reliable unit keeps the bridge non-failed — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream for a LABELED bridge whose peer sends a
+  /// MISMATCHED label header: the inline classifier returns
+  /// `LabelOutcome::Rejected`, flipping `decode_failed` and routing the bridge
+  /// through the decode-fail retire block (`Failed(Decode)`).
+  #[test]
+  fn pump_in_labeled_mismatched_inbound_label_rejected_over_live_stream() {
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    // The peer writes a DIFFERENT label than the bridge expects.
+    let mut wire = Vec::new();
+    crate::label::encode_label_prefix(b"wrong-cluster", &mut wire);
+    pair.client_write(sid, &wire);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = server_labeled_bridge(
+      &mut pair,
+      &mut ep,
+      server_sid,
+      bytes::Bytes::from_static(b"expected-cluster"),
+    );
+
+    let mut result = Ok(());
+    for _ in 0..50 {
+      result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if result.is_err() {
+        break;
+      }
+      pair.ferry();
+    }
+    assert_eq!(
+      result,
+      Err(()),
+      "a mismatched inbound label must fail pump_in via LabelOutcome::Rejected"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+      "a mismatched inbound label terminalizes the bridge as Failed(Decode) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_in` over a live quinn stream for a LABELED bridge whose peer delivers
+  /// the label header SPLIT across two writes: the first `pump_in` sees only a
+  /// partial header → `LabelOutcome::Incomplete` (the `break` that holds
+  /// `recv_accum` for the next chunk), and a later `pump_in` completes it and
+  /// latches `inbound_label_validated`.
+  #[test]
+  fn pump_in_labeled_split_label_header_incompletes_then_validates() {
+    let label = bytes::Bytes::from_static(b"split-cluster");
+    let mut pair = RawQuicPair::handshaked();
+    let sid = pair.client_open_bi();
+    let header = build_label_header(&label);
+    assert!(header.len() >= 2, "a label header is at least [tag][len]");
+    // Write ONLY the first byte (the tag); the classifier needs more → Incomplete.
+    pair.client_write(sid, &header[..1]);
+
+    let server_sid = pair.server_accept_bi();
+    let mut ep = make_server_endpoint();
+    let mut bridge = server_labeled_bridge(&mut pair, &mut ep, server_sid, label);
+
+    // Drive until the partial header has arrived and been pumped (Incomplete
+    // break holds it). The latch must still be UNSET.
+    let mut pumped_partial = false;
+    for _ in 0..50 {
+      pair.ferry();
+      // Ignoring Err: this loop drives the pump and inspects the bridge's
+      // latch/phase below; a terminal Err is itself the asserted outcome.
+      let _ = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      // The test module is a child of this module, so it reads the private
+      // `recv_accum` directly: the Incomplete break holds the partial header
+      // here rather than draining it.
+      if !bridge.recv_accum.is_empty() {
+        pumped_partial = true;
+        break;
+      }
+    }
+    assert!(
+      pumped_partial,
+      "the partial label header (1 byte) must reach recv_accum and be held by \
+       the Incomplete break"
+    );
+    assert!(
+      !bridge.inbound_label_validated(),
+      "a partial label header must NOT latch — it Incompletes and waits for more"
+    );
+
+    // Now write the REST of the header; a later pump_in completes it and latches.
+    pair.client_write(sid, &header[1..]);
+    for _ in 0..50 {
+      pair.ferry();
+      // Ignoring Err: this loop drives the pump and inspects the bridge's
+      // latch/phase below; a terminal Err is itself the asserted outcome.
+      let _ = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+      if bridge.inbound_label_validated() {
+        break;
+      }
+    }
+    assert!(
+      bridge.inbound_label_validated(),
+      "the completing chunk must latch the inbound label after the Incomplete hold"
+    );
+  }
+
+  /// `pump_out` deadline enforcement over a live quinn stream: a non-terminal
+  /// bridge with a back-pressured `pending_out` tail whose inner-stream deadline
+  /// has elapsed routes through the pre-write deadline check
+  /// (`stream.poll_timeout() <= now`), which drives `handle_timeout`, retires
+  /// both halves, and transitions the bridge to `Failed(Timeout)`.
+  #[test]
+  fn pump_out_deadline_with_pending_out_tail_fails_timeout() {
+    let mut pair = RawQuicPair::handshaked();
+    // The server opens a bidi (so it is the outbound dialer with a live send
+    // half) and accepts a fresh outbound FSM stream whose deadline we can read.
+    let server_open_sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
+
+    // Stage a back-pressured tail and pin the inner stream's deadline in the
+    // past so the pre-write deadline check fires on the next pump_out.
+    bridge.pending_out.extend_from_slice(b"back-pressured tail");
+    let past = Instant::from_std(pair.now);
+    // The inner FSM's deadline must be `Some` and `<= now`. A fresh inbound
+    // accept_stream carries an exchange deadline at `now + stream_timeout`; we
+    // pump at a `now` far in the future so `poll_timeout() <= now`.
+    let future = past + core::time::Duration::from_secs(3600);
+    assert!(
+      bridge.stream.poll_timeout().is_some(),
+      "a pre-Done stream must expose its exchange deadline"
+    );
+
+    let result = bridge.pump_out(&mut pair.server_conns, future);
+    assert_eq!(
+      result,
+      Err(()),
+      "a back-pressured tail past the exchange deadline must fail pump_out"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Timeout)),
+      "the pre-write deadline check must terminalize the bridge as \
+       Failed(Timeout) — got {:?}",
+      bridge.phase
+    );
+    assert!(
+      bridge.pending_out.is_empty(),
+      "the back-pressured tail must be cleared so no post-deadline bytes are written"
+    );
+  }
+
+  /// `pump_out`'s post-`poll_transmit` FSM-failure retire (the
+  /// `if let Some(e) = self.stream.is_failed()` block AFTER the gather loop):
+  /// an outbound stream with an EMPTY `pending_out` (so the pre-write deadline
+  /// check is skipped) whose exchange deadline has elapsed self-fails INSIDE
+  /// `poll_transmit`; the post-loop check then retires both halves and sets
+  /// `Failed(Transport)`.
+  #[test]
+  fn pump_out_post_transmit_fsm_timeout_retires() {
+    let mut pair = RawQuicPair::handshaked();
+    let server_open_sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
+    // `pending_out` is empty (a fresh bridge), so the pre-write deadline check
+    // (`!pending_out.is_empty()`) is skipped and the FSM must self-fail inside
+    // `poll_transmit` at the future `now`.
+    assert!(bridge.pending_out.is_empty());
+    let future = Instant::from_std(pair.now) + core::time::Duration::from_secs(3600);
+
+    let result = bridge.pump_out(&mut pair.server_conns, future);
+    assert_eq!(
+      result,
+      Err(()),
+      "an empty-pending_out outbound stream past its deadline must fail via the \
+       post-poll_transmit FSM-failure retire"
+    );
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "the post-poll_transmit `stream.is_failed()` retire must terminalize the \
+       bridge as Failed(Transport) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `pump_out`'s leading terminal-bridge guard, `Some(e)` arm: when the inner
+  /// FSM has already failed (here via an elapsed exchange deadline) but the
+  /// BRIDGE phase is still non-`Failed`, the first thing `pump_out` does is map
+  /// `self.stream.is_failed()` Some → `BridgeFailure::Transport(e.to_string())`,
+  /// retire both halves, and return `Err(())`.
+  #[test]
+  fn pump_out_leading_guard_fsm_failed_retires() {
+    let mut bridge = make_plain_bridge();
+    let mut conns = ConnTable::new();
+    // Fail the inner FSM via its own exchange deadline WITHOUT routing through
+    // the bridge's `fail*` helpers, so `stream.is_failed()` is Some while
+    // `bridge.phase` is still `Active`.
+    let inner_deadline = bridge
+      .stream
+      .poll_timeout()
+      .expect("a fresh stream exposes its exchange deadline");
+    bridge.stream.handle_timeout(inner_deadline);
+    assert!(bridge.stream.is_failed().is_some());
+    assert!(
+      matches!(bridge.phase, BridgePhase::Active),
+      "the bridge phase has not yet cascaded the FSM failure"
+    );
+
+    // The leading guard's `Some(e)` arm fires (the empty ConnTable makes the
+    // retire a no-op, but the phase transition still runs).
+    let result = bridge.pump_out(&mut conns, inner_deadline);
+    assert_eq!(
+      result,
+      Err(()),
+      "pump_out's leading guard must fail an FSM-failed bridge before any write"
+    );
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "the leading guard's `Some(e)` arm maps the FSM error to \
+       Failed(Transport) — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// Build an inbound bridge over a default-ACCEPTING endpoint that has already
+  /// decoded a PushPull join request (FSM in `InboundSendingResponse`,
+  /// `PushPullRequestReceived{Join}` queued). The bridge rides a live server
+  /// stream so its `pump_out` can actually write the response.
+  fn inbound_join_bridge_accepting(
+    pair: &mut RawQuicPair,
+    server_sid: QuicSid,
+  ) -> (Endpoint<SmolStr, SocketAddr>, Bridge<SmolStr, SocketAddr>) {
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_sid);
+    // Dispatch a join PushPull request directly into the FSM (no rejecting
+    // delegate is set, so `handle_stream_event` will return
+    // `SendPushPullResponse`).
+    let dave = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
+    let dave_state =
+      crate::typed::PushNodeState::new(1, SmolStr::new("dave"), dave, crate::typed::State::Alive);
+    let pp =
+      crate::typed::PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
+    let bytes =
+      crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::PushPull(pp)).expect("encode");
+    bridge
+      .stream
+      .handle_data(&bytes, Instant::from_std(pair.now))
+      .expect("dispatch the join push/pull request");
+    (ep, bridge)
+  }
+
+  /// `drain_then_reap`'s `StreamCommand::SendPushPullResponse` arm: a TERMINAL
+  /// inbound bridge that still holds an undrained `PushPullRequestReceived`
+  /// (queued by the FSM, never drained by `drain_payload_only`) drains it
+  /// through the accepting endpoint, which returns `SendPushPullResponse`. The
+  /// arm encodes + `stream_load_response`s the reply, refreshes the bridge
+  /// deadline, and `pump_out`s the response onto the live quinn stream.
+  #[test]
+  fn drain_then_reap_sends_push_pull_response_over_live_stream() {
+    let mut pair = RawQuicPair::handshaked();
+    let client_sid = pair.client_open_bi();
+    // Nudge the client stream into existence on the server so it accepts a bidi.
+    pair.client_write(client_sid, b"\x00");
+    let server_sid = pair.server_accept_bi();
+    let (mut ep, mut bridge) = inbound_join_bridge_accepting(&mut pair, server_sid);
+
+    // Drive the bridge terminal (BothClosed) WITHOUT draining payload events, so
+    // the queued `PushPullRequestReceived` is still pending when the terminal D1
+    // path runs.
+    bridge.observe_send_fin();
+    bridge.observe_recv_fin();
+    assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+    assert!(bridge.is_terminal());
+
+    let deadline_before = bridge.deadline;
+    bridge.drain_then_reap(&mut ep, &mut pair.server_conns, Instant::from_std(pair.now));
+
+    // The SendPushPullResponse arm refreshes the bridge deadline to exactly
+    // `now + 5s` (the response write window, measured from response start, not
+    // from accept). The accept deadline was `now + stream_timeout` (10s by
+    // default), so the refresh moves it to a DIFFERENT, earlier value — the
+    // observable that the arm ran (a no-op drain would leave the accept
+    // deadline untouched).
+    let expected = Instant::from_std(pair.now) + core::time::Duration::from_secs(5);
+    assert_eq!(
+      bridge.deadline, expected,
+      "the SendPushPullResponse arm must refresh the bridge deadline to \
+       `now + 5s`; deadline_before = {deadline_before:?}"
+    );
+    // The encoded response was loaded + flushed by the arm's `pump_out`: the
+    // inner FSM advanced past `InboundSendingResponse` to `Done` and the send
+    // half was finished.
+    assert!(
+      bridge.stream.is_done(),
+      "the inner stream must be Done after the response is encoded, loaded, and \
+       pumped out"
+    );
+    assert!(
+      bridge.finish_called,
+      "pump_out must have finished the send half after writing the response"
+    );
+  }
+
+  /// `drain_then_reap`'s notice selection `(_, Some(e))` arm: a bridge whose
+  /// inner FSM has failed (here via an elapsed exchange deadline →
+  /// `Failed(Timeout)` at the FSM level) while the BRIDGE phase is still
+  /// non-`Failed` emits a `StreamErrored` notice carrying the FSM error string.
+  /// This is the transient-inconsistency window the phase-authoritative
+  /// terminality contract tolerates for one drain.
+  #[test]
+  fn drain_then_reap_fsm_failed_notice_arm() {
+    let mut ep = make_server_endpoint();
+    let mut conns = ConnTable::new();
+    let mut bridge = make_plain_bridge();
+    let t0 = Instant::now();
+    // Fail the inner FSM via its own exchange deadline WITHOUT routing through
+    // the bridge's `fail*` helpers, so `stream.is_failed()` is Some while
+    // `bridge.phase` is still `Active`.
+    let inner_deadline = bridge
+      .stream
+      .poll_timeout()
+      .expect("a fresh stream exposes its exchange deadline");
+    bridge.stream.handle_timeout(inner_deadline);
+    assert!(
+      bridge.stream.is_failed().is_some(),
+      "the inner FSM must be failed after its exchange deadline elapses"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Active),
+      "the bridge phase is still Active — the FSM failure has not yet cascaded"
+    );
+    assert!(
+      !bridge.is_terminal(),
+      "a non-Failed phase is not terminal even with a failed inner FSM"
+    );
+
+    // `drain_then_reap` selects the lifecycle notice from `(phase, fsm_failed)`;
+    // the `(_, Some(e))` arm emits `StreamErrored(e.to_string())`. No panic ==
+    // the arm executed; no UserPacket may surface (no payload was queued).
+    bridge.drain_then_reap(&mut ep, &mut conns, t0);
+    assert!(
+      !ep
+        .poll_event()
+        .is_some_and(|ev| matches!(ev, Event::UserPacket(..))),
+      "the FSM-failed notice arm must not surface application user data"
+    );
+  }
 }

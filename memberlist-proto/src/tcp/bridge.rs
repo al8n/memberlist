@@ -1064,4 +1064,456 @@ mod tests {
       "the reap encoded + loaded the push/pull response into out_transmit",
     );
   }
+
+  /// Build a promoted inbound acceptor bridge over a settled label exchange,
+  /// returning the bridge plus its Endpoint. The inner stream is freshly minted
+  /// in `InboundAwaitingFirstMessage` so a crafted reliable unit can be fed
+  /// straight through the established intake.
+  fn promoted_inbound(
+    now: Instant,
+    port: u16,
+  ) -> (
+    StreamBridge<SmolStr, SocketAddr, RawRecords>,
+    Endpoint<SmolStr, SocketAddr>,
+  ) {
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(port)));
+    let s_stream = ep_s.accept_stream(addr(port + 1), now);
+    server.promote(s_stream);
+    (server, ep_s)
+  }
+
+  /// A forged reliable unit whose declared `unit_len` exceeds the bridge's
+  /// reliable-unit ceiling is a corrupt unit: the established intake's
+  /// `take_reliable_unit_with_encryption` returns `Err`, so the bridge
+  /// `fail_with_retire(BridgeFailure::Decode)` and is terminal — the
+  /// `Err(_)` corrupt-unit arm of `pump_in_established`.
+  #[test]
+  fn established_intake_corrupt_unit_len_over_ceiling_fails_decode() {
+    let now = Instant::now();
+    let (mut server, _ep_s) = promoted_inbound(now, 7700);
+
+    // `[unit_len = TEST_RELIABLE_MAX + 1 : varint][1 payload byte]`. The
+    // ceiling check fires before the payload is even fully required.
+    let mut forged = Vec::new();
+    crate::framing::encode_varint_u32((TEST_RELIABLE_MAX + 1) as u32, &mut forged);
+    forged.push(0u8);
+
+    let res = server.handle_transport_data(&forged, now);
+    assert!(
+      res.is_err(),
+      "an over-ceiling unit_len tears the bridge down"
+    );
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      ),
+      "a corrupt unit maps to Failed(Decode), got {:?}",
+      phase_label(server.phase_ref())
+    );
+    assert!(server.is_terminal());
+  }
+
+  /// A complete reliable unit whose INNER frame is well-framed but undecodable
+  /// drives the established intake's inner-`Stream::handle_data` failure arm:
+  /// the unit decodes off the accumulator, the FSM rejects the frame
+  /// (`StreamError::Decode`), and the bridge `fail_with_retire(Decode)`.
+  #[test]
+  fn established_intake_inner_frame_decode_failure_fails_bridge() {
+    let now = Instant::now();
+    let (mut server, _ep_s) = promoted_inbound(now, 7710);
+
+    // Inner frame `[tag=8 PushPull][len=4][4 garbage bytes]` — accepted by
+    // `probe_frame`, rejected by the real decoder. Wrap it as one reliable unit
+    // (disabled compression/encryption → the payload is the frame verbatim).
+    let mut frame = std::vec![8u8];
+    crate::framing::encode_varint_u32(4, &mut frame);
+    frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &frame);
+
+    let res = server.handle_transport_data(&unit, now);
+    assert!(res.is_err(), "an undecodable inner frame fails the bridge");
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      ),
+      "an inner-frame decode failure maps to Failed(Decode), got {:?}",
+      phase_label(server.phase_ref())
+    );
+    assert!(
+      matches!(server.stream_is_failed(), Some(StreamError::Decode(_))),
+      "the inner FSM recorded the decode failure"
+    );
+  }
+
+  /// A partial reliable unit (the `unit_len` declares more payload than has
+  /// arrived) followed by a transport `read == 0` (EOF) is a truncated
+  /// transmission: the peer closed mid-unit. The established intake's
+  /// `fin_seen && !recv_accum.is_empty()` arm fails the bridge `Decode`.
+  #[test]
+  fn established_intake_partial_unit_then_eof_fails_decode() {
+    let now = Instant::now();
+    let (mut server, _ep_s) = promoted_inbound(now, 7720);
+
+    // Declare a 32-byte unit but deliver only 4 payload bytes — a partial unit
+    // that `take_reliable_unit` buffers (Ok(None)), leaving `recv_accum`
+    // non-empty.
+    let mut partial = Vec::new();
+    crate::framing::encode_varint_u32(32, &mut partial);
+    partial.extend_from_slice(&[1u8, 2, 3, 4]);
+    server
+      .handle_transport_data(&partial, now)
+      .expect("a partial unit buffers without failing");
+    assert!(
+      !server.is_terminal(),
+      "a partial unit alone is not yet a failure"
+    );
+
+    // Now the peer FINs (read == 0) mid-unit: truncation.
+    let res = server.handle_transport_data(&[], now);
+    assert!(
+      res.is_err(),
+      "a partial unit at EOF is a truncation failure"
+    );
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      ),
+      "a truncated partial unit maps to Failed(Decode), got {:?}",
+      phase_label(server.phase_ref())
+    );
+  }
+
+  /// `poll_timeout` on an Established bridge folds in the inner stream's tighter
+  /// deadline via `min`: a freshly-accepted inbound stream snapshots its own
+  /// exchange deadline, which can be earlier than the bridge's handshake/accept
+  /// deadline. The exposed timeout is the minimum of the two.
+  #[test]
+  fn poll_timeout_folds_in_tighter_inner_stream_deadline() {
+    let now = Instant::now();
+    // Bridge handshake/accept deadline far out (+30s).
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(30));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Accept a stream whose own exchange deadline is tighter (+5s, the inbound
+    // first-message default in `accept_stream`). After promote the bridge
+    // snapshots +30s as its bridge deadline, but the inner stream still carries
+    // its tighter timer.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7730)));
+    let s_stream = ep_s.accept_stream(addr(7731), now);
+    let inner_deadline = s_stream
+      .poll_timeout()
+      .expect("a freshly accepted stream carries a deadline");
+    server.promote(s_stream);
+
+    assert_eq!(
+      server.poll_timeout(),
+      Some(inner_deadline),
+      "poll_timeout returns the tighter inner-stream deadline via min, not the \
+       later bridge deadline"
+    );
+  }
+
+  /// A second SEND-half close and a second RECV-half close are idempotent: once
+  /// a bridge reaches `BothClosed`, replaying `pump_out` (send) and a redundant
+  /// EOF feed (recv) leave it terminal without re-transitioning — the
+  /// `observe_send_fin` / `observe_recv_fin` already-closed return arms.
+  #[test]
+  fn second_half_close_observations_are_idempotent_at_both_closed() {
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // One-way user message both promoted, driven to BothClosed.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7740)));
+    let sid = ep_c.start_user_message(addr(7000), Bytes::from_static(b"x"), now);
+    let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+    client.promote(c_stream);
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    let s_stream = ep_s.accept_stream(addr(7740), now);
+    server.promote(s_stream);
+
+    let mut c_fin = false;
+    let mut s_fin = false;
+    for _ in 0..64 {
+      client.pump_out(now).ok();
+      server.pump_out(now).ok();
+      let moved = shuttle(&mut client, &mut server, &mut c_fin, &mut s_fin, now);
+      if !server.is_terminal() {
+        server.drain_payload_only(&mut ep_s, now);
+      }
+      if client.is_terminal() && server.is_terminal() {
+        break;
+      }
+      if !moved {
+        break;
+      }
+    }
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::BothClosed)
+      ),
+      "client reached BothClosed, got {:?}",
+      phase_label(client.phase_ref())
+    );
+
+    // A redundant send-close (pump_out) and a redundant recv EOF on a
+    // BothClosed bridge are no-ops: the phase stays BothClosed (sticky
+    // terminal), and the SECOND observation arms (`SendClosed|BothClosed|Failed
+    // => return`) run without panicking.
+    client.pump_out(now).ok();
+    // Ignoring Err: the redundant EOF on a terminal bridge is a no-op; the
+    // post-condition is asserted via `phase_ref()` below, not the return value.
+    let _ = client.handle_transport_data(&[], now);
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::BothClosed)
+      ),
+      "a redundant double-close leaves BothClosed intact, got {:?}",
+      phase_label(client.phase_ref())
+    );
+  }
+
+  /// `pump_out` on an already phase-failed (NON-FSM-failed) bridge re-enters the
+  /// terminal guard: `is_phase_failed()` is true while the inner FSM is not
+  /// failed, so the `None => "bridge fatal"` reason arm runs and
+  /// `fail_with_retire` is idempotent (the original `Timeout` reason is kept).
+  #[test]
+  fn pump_out_on_phase_failed_non_fsm_failed_bridge_is_idempotent() {
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Promote an inbound stream, then drive it to a bridge flush-deadline
+    // Timeout: the FSM itself is NOT failed (it is `Done`/awaiting), only the
+    // bridge phase is `Failed(Timeout)`.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7750)));
+    let sid = ep_c.start_user_message(addr(7000), Bytes::from_static(b"hi"), now);
+    let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+    client.promote(c_stream);
+    // Pump the one-way message so the FSM reaches `Done` (the user message is
+    // sent and the FSM closes), then push the bridge past its deadline so the
+    // `Done`-but-awaiting-close flush-deadline fails it to `Failed(Timeout)`.
+    client.pump_out(now).expect("first pump sends the request");
+    let past = now + Duration::from_secs(11);
+    let res = client.pump_out(past);
+    assert!(res.is_err(), "the bridge flush deadline fails the bridge");
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      ),
+      "the bridge is Failed(Timeout) with no FSM failure, got {:?}",
+      phase_label(client.phase_ref())
+    );
+    assert!(
+      client.stream_is_failed().is_none(),
+      "the inner FSM is not itself failed — only the bridge phase is"
+    );
+
+    // A subsequent pump_out re-enters the terminal guard (is_phase_failed true,
+    // fsm_failed None → "bridge fatal") and stays Failed(Timeout) — the first
+    // failure's reason wins (sticky).
+    let res2 = client.pump_out(past);
+    assert!(res2.is_err());
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      ),
+      "the sticky reason is preserved across a redundant pump_out, got {:?}",
+      phase_label(client.phase_ref())
+    );
+  }
+
+  /// `drain_then_reap` on a `Failed(Timeout)` bridge that still holds a `Stream`
+  /// builds the `StreamErrored` notice through the `BridgeFailure::Timeout`
+  /// error-string arm of the lifecycle-notice match. The notice is consumed
+  /// internally (`StreamErrored` maps to no public `Event`), so the observable
+  /// contract is a clean reap that leaves the bridge terminal and emits no
+  /// spurious public event.
+  #[test]
+  fn drain_then_reap_timeout_failed_bridge_routes_errored_notice() {
+    let now = Instant::now();
+    let (mut client, _server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    // The dialer is never handshaking; promote an outbound user message.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7760)));
+    let sid = ep_c.start_user_message(addr(7000), Bytes::from_static(b"hi"), now);
+    let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+    client.promote(c_stream);
+    client.pump_out(now).expect("first pump sends the request");
+    // Drain the `DialRequested` the outbound `start_user_message` emitted so the
+    // post-reap assertion observes only events the reap itself produces.
+    while ep_c.poll_event().is_some() {}
+
+    // Fail the bridge to Failed(Timeout) via the flush deadline.
+    let past = now + Duration::from_secs(11);
+    // Ignoring Err: the flush-deadline failure is the intent here; the resulting
+    // Failed(Timeout) phase is asserted directly below.
+    let _ = client.pump_out(past);
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      ),
+      "bridge is Failed(Timeout), got {:?}",
+      phase_label(client.phase_ref())
+    );
+
+    // The terminal reap drains the (no-op) event queue and builds the lifecycle
+    // notice through the Timeout error-string arm. The notice itself maps to no
+    // public Event.
+    client.drain_then_reap(&mut ep_c, past);
+    assert!(
+      client.is_terminal(),
+      "the bridge is terminal after the reap"
+    );
+    assert!(
+      ep_c.poll_event().is_none(),
+      "a StreamErrored notice maps to no public Event"
+    );
+  }
+
+  /// `drain_then_reap` on a `Failed(Decode)` bridge holding a `Stream` builds
+  /// the `StreamErrored` notice through the `BridgeFailure::Decode` error-string
+  /// arm. As above, the notice is consumed internally.
+  #[test]
+  fn drain_then_reap_decode_failed_bridge_routes_errored_notice() {
+    let now = Instant::now();
+    let (mut server, mut ep_s) = promoted_inbound(now, 7770);
+
+    // Truncation: a mid-frame read == 0 fails the inbound stream Decode.
+    let res = server.handle_transport_data(&[], now);
+    assert!(res.is_err());
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      ),
+      "bridge is Failed(Decode), got {:?}",
+      phase_label(server.phase_ref())
+    );
+
+    server.drain_then_reap(&mut ep_s, now);
+    assert!(
+      server.is_terminal(),
+      "the bridge is terminal after the reap"
+    );
+    assert!(
+      ep_s.poll_event().is_none(),
+      "a StreamErrored notice maps to no public Event"
+    );
+  }
+
+  /// `drain_then_reap` itself can carry the admission rejection: when the
+  /// terminal reap drains a still-queued inbound push/pull request whose
+  /// `MergeDelegate` vetoes the merge, `handle_stream_event` returns
+  /// `StreamCommand::Close` and the reap's `Close` arm
+  /// `fail_with_retire(BridgeFailure::AdmissionClosed)`. This is the reap-path
+  /// sibling of the `drain_payload_only` Close arm — the request event was
+  /// queued but `drain_payload_only` never ran before the bridge went terminal.
+  #[test]
+  fn drain_then_reap_close_arm_rejects_inbound_merge() {
+    use crate::event::PushPullKind;
+
+    /// Vetoes every merge.
+    struct RejectAll;
+    impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAll {
+      fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+        false
+      }
+    }
+
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Dialer produces a JOIN push/pull request.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7780)));
+    let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+    client.promote(c_stream);
+    client.pump_out(now).expect("client pumps its request");
+
+    // Acceptor with a rejecting merge delegate. Promote, feed the request
+    // ciphertext (the FSM dispatches `PushPullRequestReceived`, queued), then
+    // reap directly — bypassing `drain_payload_only` — so the reap's Close arm
+    // performs the rejection.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    ep_s.set_merge_delegate(RejectAll);
+    let s_stream = ep_s.accept_stream(addr(7780), now);
+    server.promote(s_stream);
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    assert!(!c_out.is_empty(), "the dialer queued its request bytes");
+    server
+      .handle_transport_data(&c_out, now)
+      .expect("the acceptor consumes the request");
+
+    server.drain_then_reap(&mut ep_s, now);
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::AdmissionClosed))
+      ),
+      "the reap's Close arm failed the bridge AdmissionClosed, got {:?}",
+      phase_label(server.phase_ref())
+    );
+    // The merge was vetoed: the acceptor did NOT learn `cli`.
+    assert!(
+      ep_s.member(&SmolStr::new("cli")).is_none(),
+      "a vetoed merge does not add the dialer to membership"
+    );
+  }
+
+  /// `pump_out` on a bridge whose INNER FSM has failed (a truncation
+  /// `PeerClosed`) re-enters the terminal guard via the `fsm_failed.is_some()`
+  /// disjunct: the `is_failed()` reason is stringified (the `.map` closure) and
+  /// the `Some(e) => Transport(e)` reason arm runs. `fail_with_retire` is
+  /// idempotent so the original failure stands.
+  #[test]
+  fn pump_out_on_fsm_failed_bridge_uses_fsm_reason() {
+    let now = Instant::now();
+    let (mut server, _ep_s) = promoted_inbound(now, 7790);
+
+    // Truncation: a mid-frame read == 0 fails the inbound FSM with PeerClosed,
+    // cascading the bridge to Failed(Decode).
+    let res = server.handle_transport_data(&[], now);
+    assert!(res.is_err());
+    assert!(
+      matches!(server.stream_is_failed(), Some(StreamError::PeerClosed)),
+      "the inner FSM failed with PeerClosed"
+    );
+
+    // A subsequent pump_out sees the failed FSM at its top guard: the
+    // `fsm_failed.is_some()` disjunct fires and the FSM reason string is used.
+    let res2 = server.pump_out(now);
+    assert!(res2.is_err(), "a pump_out on an FSM-failed bridge errors");
+    assert!(
+      server.is_terminal(),
+      "the bridge stays terminal after the redundant pump_out"
+    );
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(_))
+      ),
+      "the bridge is still in a Failed phase, got {:?}",
+      phase_label(server.phase_ref())
+    );
+  }
 }
