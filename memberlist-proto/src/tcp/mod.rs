@@ -2052,12 +2052,12 @@ mod tests {
     );
 
     // (4) Natural drain loop. With the bridge failed, `out_transmit` purged,
-    // and a `Close` synchronously enqueued by `set_encryption_options`, no
-    // bytes for the exchange surface and the `Close` is reachable from
+    // and an `Abort` synchronously enqueued by `set_encryption_options`, no
+    // bytes for the exchange surface and the `Abort` is reachable from
     // `poll_action` WITHOUT an external `handle_timeout` kick. A terminal
     // bridge returns no per-bridge timeout, and an idle endpoint may have
     // no scheduler timeout at all — relying on the natural `pump_bridges`
-    // reap to surface the `Close` would leave it unreachable through the
+    // reap to surface the `Abort` would leave it unreachable through the
     // documented driver interface.
     let mut bytes_observed: Vec<(ExchangeId, Bytes)> = Vec::new();
     let mut actions_observed: Vec<StreamAction> = Vec::new();
@@ -2078,14 +2078,15 @@ mod tests {
       exchange,
       stale,
     );
-    let close_for_exchange = actions_observed
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "the failed bridge MUST surface a Close action so the driver tears down \
-       the affected transport connection; got {:?}",
+      abort_for_exchange,
+      "the failed bridge MUST surface an Abort action so the driver tears down \
+       the affected transport connection and discards the stale plaintext; \
+       got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
   }
@@ -2136,21 +2137,21 @@ mod tests {
     );
 
     // The builder must also share `set_encryption_options`' synchronous
-    // `Close` enqueue: the teardown surfaces from `poll_action` WITHOUT an
+    // `Abort` enqueue: the teardown surfaces from `poll_action` WITHOUT an
     // external `handle_timeout` kick. A terminal bridge returns no
-    // per-bridge timeout, so a `Close` that only fires on the next reap is
+    // per-bridge timeout, so an `Abort` that only fires on the next reap is
     // unreachable from the documented driver interface.
     let mut actions_observed: Vec<StreamAction> = Vec::new();
     while let Some(action) = coord.poll_action() {
       actions_observed.push(action);
     }
-    let close_for_exchange = actions_observed
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "with_encryption (builder) must surface a Close action for the failed \
+      abort_for_exchange,
+      "with_encryption (builder) must surface an Abort action for the failed \
        bridge directly from poll_action; got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
@@ -2162,7 +2163,7 @@ mod tests {
   /// `Connect` MUST be purged — otherwise a driver doing the natural
   /// "drain actions, drain transmits, repeat" loop would open a transport
   /// socket for a bridge the coordinator has already failed, then drain
-  /// the same exchange's `Close` and tear it back down (wasted work, and
+  /// the same exchange's `Abort` and tear it back down (wasted work, and
   /// the eager-queued local label sitting in the bridge's record-layer
   /// outbound buffer was already cleared by the failure transition — but a
   /// driver should not even attempt the dial).
@@ -2174,7 +2175,7 @@ mod tests {
   ///
   /// Mutation gate: removing `purge_pending_connect_for(id)` from
   /// `set_encryption_options` makes the natural drain loop observe the
-  /// stale `Connect` before the `Close`.
+  /// stale `Connect` before the `Abort`.
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn set_encryption_options_purges_pending_connect_for_failed_bridge() {
@@ -2236,7 +2237,7 @@ mod tests {
 
   /// A reapply of the SAME effective `EncryptionOptions` must be a no-op:
   /// no live bridge should be failed, no queued bytes should be purged, no
-  /// `Close` should be enqueued. A config reconciler that republishes the
+  /// `Abort` should be enqueued. A config reconciler that republishes the
   /// current configuration on a timer is a normal operational pattern; the
   /// pre-guard implementation would tear down every reliable exchange on
   /// every reapply for no security gain (the bridge clone already runs
@@ -2249,7 +2250,7 @@ mod tests {
   /// Mutation gate: removing the entry-equality short-circuit from
   /// `set_encryption_options` makes the insecure-transport fail-cascade run
   /// on the reapply — the bridge transitions to `Failed`, the queued
-  /// plaintext is purged, and a `Close` is enqueued (the same outputs the
+  /// plaintext is purged, and an `Abort` is enqueued (the same outputs the
   /// real policy-change tests assert when transitioning DISABLED → ENABLED).
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
@@ -2288,7 +2289,7 @@ mod tests {
     );
 
     // Reapply the IDENTICAL options. The no-op guard MUST skip the
-    // fail-cascade: bridge stays alive, queued bytes stay queued, no `Close`
+    // fail-cascade: bridge stays alive, queued bytes stay queued, no `Abort`
     // is enqueued.
     coord.set_encryption_options(opts.clone());
 
@@ -2305,21 +2306,21 @@ mod tests {
        purge runs only after a real policy-change failure)",
     );
 
-    // Drain the action queue and assert NO `Close` for the exchange surfaced —
+    // Drain the action queue and assert NO `Abort` for the exchange surfaced —
     // the only action that survives is the original `Connect` (already
-    // drained above) and possibly its companions; specifically no `Close`
+    // drained above) and possibly its companions; specifically no `Abort`
     // for this exchange should be present.
     let mut actions_observed: Vec<StreamAction> = Vec::new();
     while let Some(action) = coord.poll_action() {
       actions_observed.push(action);
     }
-    let close_for_exchange = actions_observed
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      !close_for_exchange,
-      "a no-op reapply MUST NOT enqueue a Close — the bridge is still alive; \
+      !abort_for_exchange,
+      "a no-op reapply MUST NOT enqueue an Abort — the bridge is still alive; \
        got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
@@ -2386,23 +2387,23 @@ mod tests {
 
     // (2) Publish an enabling policy. The insecure-transport bridge fails;
     // `set_encryption_options` purges its transmit + connect queues and
-    // enqueues a `Close`. It also sets the `policy_reap_pending` latch so
+    // enqueues an `Abort`. It also sets the `policy_reap_pending` latch so
     // `poll_timeout` returns an immediate-due wake.
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
     coord.set_encryption_options(opts);
 
-    // Drain the synchronous `Close` (already reachable from `poll_action`).
+    // Drain the synchronous `Abort` (already reachable from `poll_action`).
     let mut actions: Vec<StreamAction> = Vec::new();
     while let Some(a) = coord.poll_action() {
       actions.push(a);
     }
-    let close_observed = actions
+    let abort_observed = actions
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_observed,
-      "the failed bridge surfaces a Close directly from poll_action \
+      abort_observed,
+      "the failed bridge surfaces an Abort directly from poll_action \
        (synchronous enqueue); got {:?}",
       actions.iter().map(action_kind).collect::<Vec<_>>(),
     );
@@ -2489,7 +2490,7 @@ mod tests {
 
     // (2) Publish an enabling policy. The insecure-transport bridge fails;
     // `set_encryption_options` purges its transmit + connect queues and
-    // enqueues a `Close`. It also sets the `policy_reap_pending` latch so
+    // enqueues an `Abort`. It also sets the `policy_reap_pending` latch so
     // `poll_timeout` returns an immediate-due wake.
     coord.set_encryption_options(
       EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32]))),
@@ -2767,7 +2768,7 @@ mod tests {
   /// and [`Endpoint::num_members`] would grow to 2. With the guard, the
   /// bridge's `handle_transport_data` no-ops on its terminal phase, the
   /// reliable unit is never decoded, no stream events are queued, and the
-  /// only effect is the queued [`crate::StreamAction::Close`] the
+  /// only effect is the queued [`crate::StreamAction::Abort`] the
   /// policy-change path already enqueued synchronously.
   ///
   /// Mutation gate: removing the terminal-phase guard from
@@ -2887,7 +2888,7 @@ mod tests {
 
     // (5) The post-failure ingress was rejected: `num_members` is unchanged
     // and no `Event::NodeJoined` for carol surfaces from `poll_event`. The
-    // bridge was reaped by the same-call `run_tick`, so the `Close` action
+    // bridge was reaped by the same-call `run_tick`, so the `Abort` action
     // is reachable from `poll_action`.
     let post_members = coord.endpoint_mut().num_members();
     assert_eq!(
