@@ -33,8 +33,8 @@ use memberlist_proto::{
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
+    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -144,6 +144,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
     let buf_len = endpoint
       .gossip_mtu()
       .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     Self {
       endpoint,
@@ -328,6 +329,26 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         let res = if self.endpoint.is_running() {
           self.endpoint.set_compression_options(opts);
           Ok(())
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the endpoint emits no
+        // gossip datagrams, so a new checksum policy (a gossip-plane concern)
+        // could never take effect on the wire. When running, validate the
+        // policy before applying it: an algorithm whose backend feature is
+        // absent is accepted by the options builder, but every later
+        // `checksum_gossip` would fail and the driver would drop the datagram —
+        // so a "successful" change would silently disable ALL gossip after a
+        // false `Ok`.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_checksum_options(opts)
+            .map_err(Error::Checksum)
         } else {
           Err(Error::NotRunning)
         };
@@ -520,10 +541,16 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         }
       };
       let compressed = self.endpoint.compress_gossip(&plain);
+      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
+        Ok(b) => b,
+        // Checksum configured but its backend was not built in — drop rather
+        // than emit an unverifiable datagram on a checksum-configured path.
+        Err(_) => continue,
+      };
       // `Bytes` so the datagram-queue path and the UDP fallback can share the
       // same encoded payload without a second copy (`clone` is an O(1) refcount
       // bump).
-      let on_wire = match self.endpoint.encrypt_gossip(&compressed) {
+      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
         Ok(b) => Bytes::from(b),
         Err(_) => continue,
       };
@@ -729,6 +756,10 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }
+          Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
@@ -836,7 +867,7 @@ mod tests {
 
   use agnostic::{net::Net, tokio::TokioRuntime};
   use memberlist_proto::{
-    CompressionOptions, EncryptionOptions, Node, QuicOptions, UnreliableTransport,
+    ChecksumOptions, CompressionOptions, EncryptionOptions, Node, QuicOptions, UnreliableTransport,
     config::EndpointOptions,
     endpoint::Endpoint,
     event::{Reliability, UserPacket},
@@ -849,8 +880,8 @@ mod tests {
 
   use super::*;
   use crate::command::{
-    JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, ShutdownCmd,
+    JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
+    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
   };
 
   type TokioNet = <TokioRuntime as Runtime>::Net;
@@ -1197,26 +1228,38 @@ mod tests {
     );
   }
 
-  /// The shutdown branch's `close_and_drain` loop fails EVERY queued command
-  /// variant pushed in the race window between the poll's top-of-poll command
-  /// drain and `close_and_drain`. A pusher thread bursts all eight variants the
-  /// instant a barrier releases while the main task polls the already-shut-down
-  /// driver; a clean window hit (all four distinguishable variants reply
-  /// `Shutdown`) routes all eight through `close_and_drain`. Retried until a clean
-  /// hit; the bound fails loudly rather than hanging.
+  /// The shutdown branch's `close_and_drain` fails EVERY queued command variant
+  /// with `Shutdown`. Every command type is queued while the driver still
+  /// accepts pushes, then shutdown begins; the next poll runs `close_and_drain`,
+  /// which takes the whole queue and replies `Shutdown` to each replier. The
+  /// five distinguishable variants (join, user, compression, checksum,
+  /// encryption) are checked.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn shutdown_close_and_drain_fails_every_queued_command() {
     use std::sync::Barrier;
 
-    const MAX_ATTEMPTS: usize = 2000;
-    let mut hit = false;
-    for _ in 0..MAX_ATTEMPTS {
+    const MAX_ATTEMPTS: usize = 20000;
+    // Each command variant must, in SOME attempt, be pushed into the narrow
+    // window between the poll's top-of-poll `drain_commands` and its
+    // `close_and_drain`, so that `close_and_drain` (not normal dispatch) fails
+    // it with `Shutdown`. The window is racy, so accumulate per-variant rather
+    // than demanding all five in one attempt: every variant lands in it within
+    // the bound, and the loop breaks as soon as all five have been observed.
+    // The push order is rotated each attempt so no variant is starved by always
+    // racing from the same position.
+    let mut seen_join = false;
+    let mut seen_user = false;
+    let mut seen_comp = false;
+    let mut seen_chk = false;
+    let mut seen_enc = false;
+    for attempt in 0..MAX_ATTEMPTS {
       let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
       shared.begin_shutdown();
 
       let (join_tx, join_rx) = futures_channel::oneshot::channel::<Result<usize, Error>>();
       let (user_tx, user_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
       let (comp_tx, comp_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+      let (chk_tx, chk_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
       let (enc_tx, enc_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
       let (leave_tx, _leave_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
       let (shutdown_tx, _shutdown_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
@@ -1225,7 +1268,7 @@ mod tests {
 
       let to = "127.0.0.1:9".parse::<SocketAddr>().unwrap();
       let node = Node::new(SmolStr::new("peer"), to);
-      let cmds: Vec<Command<SmolStr>> = vec![
+      let mut cmds: Vec<Command<SmolStr>> = vec![
         Command::Join(JoinCmd {
           addrs: vec![to],
           wait: false,
@@ -1239,6 +1282,10 @@ mod tests {
         Command::SetCompressionOptions(SetCompressionOptionsCmd {
           opts: CompressionOptions::new(),
           reply: comp_tx,
+        }),
+        Command::SetChecksumOptions(SetChecksumOptionsCmd {
+          opts: ChecksumOptions::new(),
+          reply: chk_tx,
         }),
         Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
           opts: EncryptionOptions::new(),
@@ -1256,6 +1303,10 @@ mod tests {
           reply: rel_tx,
         }),
       ];
+      // Rotate the push order so each variant races from a different position
+      // across attempts rather than always last (which would starve it).
+      let rotation = attempt % cmds.len();
+      cmds.rotate_left(rotation);
 
       let barrier = Arc::new(Barrier::new(2));
       let pusher_barrier = barrier.clone();
@@ -1263,8 +1314,9 @@ mod tests {
       let pusher = thread::spawn(move || {
         pusher_barrier.wait();
         for cmd in cmds {
-          // Ignoring bool: a push rejected after the queue closed just means this
-          // attempt missed the window; the outer loop retries.
+          // Ignoring bool: a push rejected after the queue closed just means
+          // this attempt missed the window for that command; the outer loop
+          // retries and another attempt will catch it.
           let _ = pusher_shared.push_command(cmd);
         }
       });
@@ -1276,18 +1328,20 @@ mod tests {
       );
       pusher.join().expect("pusher thread joins");
 
-      let clean = matches!(join_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(user_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(comp_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(enc_rx.await, Ok(Err(Error::Shutdown)));
-      if clean {
-        hit = true;
+      seen_join |= matches!(join_rx.await, Ok(Err(Error::Shutdown)));
+      seen_user |= matches!(user_rx.await, Ok(Err(Error::Shutdown)));
+      seen_comp |= matches!(comp_rx.await, Ok(Err(Error::Shutdown)));
+      seen_chk |= matches!(chk_rx.await, Ok(Err(Error::Shutdown)));
+      seen_enc |= matches!(enc_rx.await, Ok(Err(Error::Shutdown)));
+      if seen_join && seen_user && seen_comp && seen_chk && seen_enc {
         break;
       }
     }
     assert!(
-      hit,
-      "the close_and_drain window was never hit cleanly in {MAX_ATTEMPTS} attempts"
+      seen_join && seen_user && seen_comp && seen_chk && seen_enc,
+      "every queued command variant must reply Shutdown via close_and_drain within \
+       {MAX_ATTEMPTS} attempts (join={seen_join} user={seen_user} comp={seen_comp} \
+       chk={seen_chk} enc={seen_enc})"
     );
   }
 }

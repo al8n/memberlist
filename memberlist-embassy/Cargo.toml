@@ -32,6 +32,16 @@ compression-snappy = ["std", "memberlist-embedded/compression-snappy"]
 compression-zstd = ["std", "memberlist-embedded/compression-zstd"]
 compression-brotli = ["std", "memberlist-embedded/compression-brotli"]
 
+# Gossip-plane (unreliable) checksum backends. Applied only to outbound gossip
+# datagrams; the reliable-plane bridge carries no checksum (it relies on the
+# stream transport's integrity). All backends are no_std+alloc, so each floors
+# on `alloc` (like compression-lz4) — enabling one alone is a valid build.
+checksum-crc32 = ["alloc", "memberlist-embedded/checksum-crc32"]
+checksum-xxhash32 = ["alloc", "memberlist-embedded/checksum-xxhash32"]
+checksum-xxhash64 = ["alloc", "memberlist-embedded/checksum-xxhash64"]
+checksum-xxhash3 = ["alloc", "memberlist-embedded/checksum-xxhash3"]
+checksum-murmur3 = ["alloc", "memberlist-embedded/checksum-murmur3"]
+
 # Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
 # matching machine backend so a `TransformOptions` carrying a `Keyring` for that
 # cipher can actually encrypt; without the backend `encrypt_gossip` returns

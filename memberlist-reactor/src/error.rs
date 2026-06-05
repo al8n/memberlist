@@ -2,6 +2,59 @@
 
 use std::net::SocketAddr;
 
+/// Payload for [`Error::InvalidGossipMtu`]: the configured `gossip_mtu` exceeds
+/// the largest plaintext gossip payload whose on-wire datagram still fits a
+/// single UDP packet once the checksum and encryption wrappers are added.
+/// Carries the configured value and the effective ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidGossipMtu {
+  configured: usize,
+  ceiling: usize,
+}
+
+impl InvalidGossipMtu {
+  /// Build a new payload from the configured `gossip_mtu` and the ceiling.
+  #[inline]
+  pub(crate) fn new(configured: usize, ceiling: usize) -> Self {
+    Self {
+      configured,
+      ceiling,
+    }
+  }
+
+  /// The configured `gossip_mtu` that was rejected.
+  #[inline]
+  pub fn configured(&self) -> usize {
+    self.configured
+  }
+
+  /// The effective ceiling — the largest plaintext `gossip_mtu` whose wire
+  /// datagram (after the checksum and encryption wrappers) still fits a single
+  /// UDP packet.
+  #[inline]
+  pub fn ceiling(&self) -> usize {
+    self.ceiling
+  }
+}
+
+impl std::fmt::Display for InvalidGossipMtu {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "gossip_mtu {} exceeds the maximum sendable plaintext gossip payload of {} bytes \
+       (a gossip packet is one UDP datagram, capped at {} bytes on the wire after the \
+       {}-byte checksum and encryption wrappers); a larger gossip_mtu would make \
+       near-MTU gossip packets deterministically unsendable",
+      self.configured,
+      self.ceiling,
+      self.ceiling
+        + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+        + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
+      memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
+    )
+  }
+}
+
 /// An error from a `memberlist-reactor` operation.
 ///
 /// Grows as the driver is built out (transport / machine variants are added
@@ -64,6 +117,25 @@ pub enum Error {
   /// encrypted-cluster configuration.
   #[error("encryption: {0}")]
   Encryption(memberlist_proto::EncryptionError),
+
+  /// A gossip checksum algorithm was rejected because its backend feature is
+  /// not compiled into this build. The options builder accepts the algorithm,
+  /// but every later `checksum_gossip` would fail and the driver would drop the
+  /// datagram — so a "successful" checksum config silently disables ALL gossip.
+  /// Caught at construction and at the runtime
+  /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) setter so
+  /// the misconfiguration is rejected rather than disabling gossip after a false
+  /// `Ok`.
+  #[error("checksum: {0}")]
+  Checksum(memberlist_proto::ChecksumError),
+
+  /// The configured `gossip_mtu` exceeds the largest plaintext gossip payload
+  /// whose on-wire datagram still fits one UDP packet (after the checksum and
+  /// encryption wrappers). A gossip packet is one UDP datagram, so a near-MTU
+  /// packet built above that ceiling would be deterministically unsendable.
+  /// Rejected at construction, mirroring the compio / embedded / smoltcp drivers.
+  #[error("{0}")]
+  InvalidGossipMtu(InvalidGossipMtu),
 
   /// The cluster label supplied to
   /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)

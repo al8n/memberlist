@@ -118,6 +118,16 @@ pub enum InitError {
   /// turning what would otherwise be a silent runtime drop of every encrypted
   /// gossip datagram into a typed construction error.
   Encryption(memberlist_proto::EncryptionError),
+  /// The configured gossip checksum algorithm cannot be used by this build.
+  ///
+  /// A checksum algorithm whose backend feature was not compiled into this
+  /// binary is accepted by the options builder, but every later
+  /// `checksum_gossip` would return a
+  /// [`ChecksumError`](memberlist_proto::ChecksumError) and the driver would drop
+  /// the datagram — so a "successfully" configured checksum would silently
+  /// disable ALL gossip. Construction probes the configured algorithm and
+  /// surfaces this typed error instead.
+  Checksum(memberlist_proto::ChecksumError),
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
   /// The driver sizes its UDP arenas from `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`
@@ -266,6 +276,7 @@ impl fmt::Display for InitError {
       InitError::Entropy => f.write_str("system entropy source failed while drawing a random seed"),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
+      InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::UdpArenaTooLarge => {
         f.write_str("UDP arena byte count (packets × max datagram) overflows usize")
@@ -311,6 +322,7 @@ impl InitError {
       }),
       E::Endpoint(inner) => InitError::Endpoint(inner),
       E::Encryption(inner) => InitError::Encryption(inner),
+      E::Checksum(inner) => InitError::Checksum(inner),
       // `memberlist_embedded::InitError` is `#[non_exhaustive]`, so a wildcard is
       // required even though every variant it defines today is handled above. A
       // future engine-only failure mode reaching here surfaces as a generic endpoint
@@ -333,12 +345,19 @@ impl From<memberlist_proto::EncryptionError> for InitError {
   }
 }
 
+impl From<memberlist_proto::ChecksumError> for InitError {
+  fn from(e: memberlist_proto::ChecksumError) -> Self {
+    InitError::Checksum(e)
+  }
+}
+
 #[cfg(feature = "std")]
 impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       InitError::Endpoint(e) => Some(e),
       InitError::Encryption(e) => Some(e),
+      InitError::Checksum(e) => Some(e),
       _ => None,
     }
   }
@@ -392,9 +411,10 @@ mod tests {
       InitError::Entropy,
       InitError::Endpoint(EndpointInitError::Entropy),
       InitError::Encryption(memberlist_proto::EncryptionError::AuthFailed),
+      InitError::Checksum(memberlist_proto::ChecksumError::Mismatch),
       InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: 70_000,
-        ceiling: 65_477,
+        ceiling: 65_467,
       }),
       InitError::UdpArenaTooLarge,
       InitError::TcpPoolTooSmall,
@@ -420,11 +440,11 @@ mod tests {
   fn gossip_mtu_too_large_payload_display() {
     let payload = GossipMtuTooLarge {
       gossip_mtu: 70_000,
-      ceiling: 65_477,
+      ceiling: 65_467,
     };
     let shown = format!("{payload}");
     assert!(shown.contains("70000"), "{shown}");
-    assert!(shown.contains("65477"), "{shown}");
+    assert!(shown.contains("65467"), "{shown}");
     // Copy + PartialEq are derived.
     assert_eq!(payload, payload);
     assert!(!format!("{payload:?}").is_empty());
@@ -454,6 +474,12 @@ mod tests {
   fn from_encryption_error() {
     let err: InitError = memberlist_proto::EncryptionError::NoMatchingKey.into();
     assert!(matches!(err, InitError::Encryption(_)));
+  }
+
+  #[test]
+  fn from_checksum_error() {
+    let err: InitError = memberlist_proto::ChecksumError::Mismatch.into();
+    assert!(matches!(err, InitError::Checksum(_)));
   }
 
   // `from_embedded` maps each embedded failure mode to its driver equivalent,
@@ -486,24 +512,28 @@ mod tests {
       InitError::from_embedded(E::Encryption(memberlist_proto::EncryptionError::AuthFailed)),
       InitError::Encryption(_)
     ));
+    assert!(matches!(
+      InitError::from_embedded(E::Checksum(memberlist_proto::ChecksumError::Mismatch)),
+      InitError::Checksum(_)
+    ));
 
     // The carried ceiling/value survive the GossipMtuTooLarge remap.
     let mapped = InitError::from_embedded(E::GossipMtuTooLarge(
       memberlist_embedded::GossipMtuTooLarge {
         gossip_mtu: 99_999,
-        ceiling: 65_477,
+        ceiling: 65_467,
       },
     ));
     match mapped {
       InitError::GossipMtuTooLarge(g) => {
         assert_eq!(g.gossip_mtu, 99_999);
-        assert_eq!(g.ceiling, 65_477);
+        assert_eq!(g.ceiling, 65_467);
       }
       other => panic!("expected GossipMtuTooLarge, got {other:?}"),
     }
   }
 
-  // Under `std` the `Error::source` chains only for the two wrapping variants.
+  // Under `std` the `Error::source` chains only for the wrapping variants.
   #[cfg(feature = "std")]
   #[test]
   fn source_chains_only_for_wrapping_variants() {
@@ -519,13 +549,18 @@ mod tests {
         .source()
         .is_some()
     );
+    assert!(
+      InitError::Checksum(memberlist_proto::ChecksumError::Mismatch)
+        .source()
+        .is_some()
+    );
     // A leaf variant carries no source.
     assert!(InitError::ZeroPort.source().is_none());
     assert!(InitError::Entropy.source().is_none());
     assert!(
       InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: 70_000,
-        ceiling: 65_477,
+        ceiling: 65_467,
       })
       .source()
       .is_none()

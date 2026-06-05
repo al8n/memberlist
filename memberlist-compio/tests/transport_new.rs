@@ -194,13 +194,13 @@ async fn tcp_join_with_unresolved_seed() {
 
 /// A `gossip_mtu` whose wire datagram cannot fit a single UDP packet is an
 /// impossible configuration (gossip is sent as one UDP datagram, hard-capped
-/// at 65507 bytes after the 30-byte encryption wrapper, i.e. a 65477-byte
-/// plaintext ceiling). `Memberlist::new` must reject it fail-fast with
-/// `InvalidGossipMtu` BEFORE binding any socket, while a value just under the
-/// ceiling constructs successfully.
+/// at 65507 bytes after the 30-byte encryption and 10-byte checksum wrappers,
+/// i.e. a 65467-byte plaintext ceiling). `Memberlist::new` must reject it
+/// fail-fast with `InvalidGossipMtu` BEFORE binding any socket, while a value
+/// just under the ceiling constructs successfully.
 #[compio::test]
 async fn transport_new_rejects_impossible_gossip_mtu() {
-  // 1 MiB plaintext gossip_mtu — far above the 65477-byte ceiling. A
+  // 1 MiB plaintext gossip_mtu — far above the 65467-byte ceiling. A
   // near-MTU gossip packet built at this size would always exceed the
   // 65507-byte UDP datagram limit and be silently dropped.
   let opts = Options::new(
@@ -221,19 +221,23 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   match res {
     Err(MemberlistError::InvalidGossipMtu(e)) => {
       assert_eq!(e.configured(), 1 << 20, "carries the configured value");
-      assert_eq!(e.ceiling(), 65507 - 30, "carries the 65477-byte ceiling");
+      assert_eq!(
+        e.ceiling(),
+        65507 - 30 - 10,
+        "carries the 65467-byte ceiling"
+      );
     }
     Err(other) => panic!("expected InvalidGossipMtu, got {other:?}"),
     Ok(_) => panic!("1 MiB gossip_mtu must be rejected, but construction succeeded"),
   }
 
-  // Just under the ceiling (65476 < 65477) must construct successfully.
+  // Just under the ceiling (65466 < 65467) must construct successfully.
   let ok_opts = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("accept"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
-  .with_memberlist(MemberlistOptions::new().with_gossip_mtu(65507 - 30 - 1));
+  .with_memberlist(MemberlistOptions::new().with_gossip_mtu(65507 - 30 - 10 - 1));
   let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
     ok_opts,
     VoidDelegate::default(),

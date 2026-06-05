@@ -29,6 +29,17 @@ compression-snappy = ["memberlist-proto/compression-snappy", "memberlist-embedde
 compression-zstd = ["memberlist-proto/compression-zstd", "memberlist-embedded/compression-zstd"]
 compression-brotli = ["memberlist-proto/compression-brotli", "memberlist-embedded/compression-brotli"]
 
+# Gossip-plane (unreliable) checksum backends. Each pass-through enables the
+# matching machine backend so the driver's `TransformOptions` can carry a
+# `ChecksumOptions` for that algorithm. Checksum is applied only to outbound
+# gossip datagrams; the reliable-plane bridge carries no checksum (it relies on
+# the stream transport's integrity). All backends are no_std+alloc.
+checksum-crc32 = ["memberlist-proto/checksum-crc32", "memberlist-embedded/checksum-crc32"]
+checksum-xxhash32 = ["memberlist-proto/checksum-xxhash32", "memberlist-embedded/checksum-xxhash32"]
+checksum-xxhash64 = ["memberlist-proto/checksum-xxhash64", "memberlist-embedded/checksum-xxhash64"]
+checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3", "memberlist-embedded/checksum-xxhash3"]
+checksum-murmur3 = ["memberlist-proto/checksum-murmur3", "memberlist-embedded/checksum-murmur3"]
+
 # Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
 # matching machine backend so a `TransformOptions` carrying a `Keyring` for that
 # cipher can actually encrypt; without the backend `encrypt_gossip` returns

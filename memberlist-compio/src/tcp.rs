@@ -266,7 +266,7 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
-    let endpoint = StreamEndpoint::with_compression(
+    let mut endpoint = StreamEndpoint::with_compression(
       ep,
       label_opts,
       Box::new(|_| None),
@@ -274,6 +274,14 @@ where
       *runtime.memberlist_options.compression(),
     )
     .with_encryption(runtime.memberlist_options.encryption().clone());
+    // Checksum is gossip-plane (unreliable) only — reliable bridges carry no
+    // checksum — so it is threaded via the gossip-plane setter rather than a
+    // reliable-bridge-fanning builder.
+    //
+    // Ignoring Err: the checksum policy was validated in `Memberlist::new`
+    // (`validate_checksum_options`) before this driver task spawned, so its
+    // backend is built in and this store cannot fail.
+    let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
     crate::driver::stream_driver_loop::<Self::Id, SocketAddr, RawRecords, D>(

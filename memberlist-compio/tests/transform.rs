@@ -177,6 +177,69 @@ mod compression {
   }
 }
 
+#[cfg(feature = "checksum-crc32")]
+mod checksum {
+  use super::*;
+  use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+
+  /// Two nodes both configured with a CRC32 gossip checksum converge via the
+  /// checksummed gossip path. Each side wraps its outbound datagrams in a
+  /// checksum frame and verifies the peer's inbound ones, so convergence proves
+  /// `ChecksumOptions` is threaded through construction on both the encode
+  /// (checksum_gossip) and verify (inbound) sides.
+  ///
+  /// Checksum is a GOSSIP (unreliable) plane concern only — the reliable-stream
+  /// path carries no checksum (the transport provides integrity there) — so
+  /// this exercises the UDP gossip path that the checksum policy actually
+  /// covers.
+  #[compio::test]
+  async fn checksummed_gossip_round_trips() {
+    let cksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
+    let ml_opts = MemberlistOptions::new().with_checksum(cksum);
+
+    let a = make_with_opts("crc32-a", ml_opts.clone()).await;
+    let b = make_with_opts("crc32-b", ml_opts).await;
+    let a_addr = a.advertise_address();
+
+    let n = b
+      .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+      .await
+      .expect("join with crc32 checksum");
+    assert_eq!(n, 1, "one seed contacted");
+
+    let converged = wait_converged(&a, &b, 2, Duration::from_secs(10)).await;
+    assert!(
+      converged,
+      "crc32-checksummed cluster did not converge: a={}, b={}",
+      a.member_count(),
+      b.member_count()
+    );
+
+    // Ignoring Err: best-effort teardown; convergence assertion already passed.
+    let _ = a.shutdown().await;
+    let _ = b.shutdown().await;
+  }
+
+  /// `MemberlistOptions::with_checksum` records the policy on the option
+  /// surface — the field round-trips through the accessor, mirroring the
+  /// compression option surface.
+  #[test]
+  fn with_checksum_sets_the_field() {
+    let cksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
+    let ml_opts = MemberlistOptions::new().with_checksum(cksum);
+    assert_eq!(
+      ml_opts.checksum().algorithm(),
+      Some(ChecksumAlgorithm::Crc32),
+      "with_checksum must record the configured gossip checksum algorithm"
+    );
+    // The default leaves checksumming disabled (gossip datagrams unchecksummed).
+    assert!(
+      !MemberlistOptions::new().checksum().is_enabled(),
+      "the default checksum policy must be disabled"
+    );
+  }
+}
+
 /// Two nodes built with `MemberlistOptions::default()` (no compression, no
 /// encryption, no label) converge to 2 members. This is the regression guard
 /// that the transform wiring did not alter the default plaintext/unlabeled path.

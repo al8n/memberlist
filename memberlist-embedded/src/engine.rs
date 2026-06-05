@@ -44,12 +44,14 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 ///
 /// The machine caps an outbound gossip datagram's PLAINTEXT at the configured
 /// [`EndpointOptions::gossip_mtu`]; the on-wire datagram can then exceed that by
-/// up to [`memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper
-/// header, nonce, and AEAD tag) when encryption is enabled. The buffer must hold
+/// up to [`memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD`] (the checksum wrapper)
+/// plus [`memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper header,
+/// nonce, and AEAD tag) when both transforms are enabled. The buffer must hold
 /// the largest such on-wire datagram, so it is sized to
-/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`, floored at 1500 (the common
-/// Ethernet payload) so the default ([`memberlist_proto::DEFAULT_GOSSIP_MTU`],
-/// 1400) keeps a little headroom and any sub-1500 MTU never under-sizes it.
+/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`,
+/// floored at 1500 (the common Ethernet payload) so the default
+/// ([`memberlist_proto::DEFAULT_GOSSIP_MTU`], 1400) keeps a little headroom and
+/// any sub-1500 MTU never under-sizes it.
 ///
 /// A driver's datagram receive (e.g. smoltcp's `udp::Socket::recv_slice`) may
 /// POP the datagram before checking the caller's slice length, so a datagram
@@ -57,7 +59,10 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// knob the machine uses to bound outbound gossip means a correctly-configured
 /// cluster never truncates an in-budget datagram.
 fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
-  (gossip_mtu + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD).max(1500)
+  (gossip_mtu
+    + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+    + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
+    .max(1500)
 }
 
 /// An [`AliveDelegate`] that admits a peer only when its advertised address is a
@@ -214,13 +219,16 @@ where
 
     // Reject a gossip MTU whose on-wire datagram cannot fit a UDP packet. A
     // driver sizes its gossip arenas and the receive scratch from
-    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` (the largest on-wire datagram the
-    // machine can emit); an over-ceiling `gossip_mtu` would overflow that
-    // addition — a panic in a checked build, a wrap to an undersized arena in
-    // release that then silently truncates in-budget gossip. Bounding it here
-    // makes every downstream `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` safe and
-    // mirrors the async drivers' reject-not-clamp doctrine.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` (the
+    // largest on-wire datagram the machine can emit); an over-ceiling
+    // `gossip_mtu` would overflow that addition — a panic in a checked build, a
+    // wrap to an undersized arena in release that then silently truncates
+    // in-budget gossip. Bounding it here makes every downstream
+    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
+    // and mirrors the async drivers' reject-not-clamp doctrine.
+    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
+      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
     if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
       return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: ep_cfg.gossip_mtu(),
@@ -257,6 +265,15 @@ where
       }
     }
 
+    // Validate the gossip checksum configuration before any endpoint exists, so
+    // an algorithm whose backend feature is absent is a typed construction error
+    // rather than a silent runtime drop of every gossip datagram. The probe is a
+    // trial `apply` of an empty payload: a configured-but-unbuilt algorithm fails
+    // here with a `ChecksumError`, while a disabled (no-algorithm) policy is
+    // always usable. Checksum is a gossip-plane concern only; reliable streams
+    // carry no checksum.
+    transform.checksum.apply(&[]).map_err(InitError::Checksum)?;
+
     // Reject a non-routable advertise address before the endpoint exists. A node
     // must advertise an address its peers can route a reply to; an
     // unspecified/multicast/broadcast IP or port 0 would be gossiped cluster-wide
@@ -281,10 +298,10 @@ where
     // Wire up the machine's stream endpoint. `peer_to_socket` is identity because
     // `A = SocketAddr`; `sni_provider` returns `None` (no TLS / no SNI).
     // `try_new_at` (not `new_at`) so a machine entropy failure becomes
-    // `InitError::Endpoint` rather than a panic. The reliable-plane label and the
-    // cross-transport compression/encryption come from `transform`; with a
-    // default `TransformOptions` all three are disabled, reproducing the plain
-    // no-label endpoint.
+    // `InitError::Endpoint` rather than a panic. The reliable-plane label, the
+    // cross-transport compression/encryption, and the gossip-plane checksum all
+    // come from `transform`; with a default `TransformOptions` they are disabled,
+    // reproducing the plain no-label endpoint.
     let mut ep = Endpoint::try_new_at(ep_cfg, now).map_err(InitError::Endpoint)?;
     // Install the routable-address admission filter on the raw `Endpoint` BEFORE
     // it is moved into the `StreamEndpoint`. The machine consults it inline for
@@ -304,7 +321,7 @@ where
     // Retain the validated label for the gossip codec (same source, both planes
     // share one label so they cannot diverge).
     let label = transform.label.clone();
-    let endpoint = StreamEndpoint::with_compression(
+    let mut endpoint = StreamEndpoint::with_compression(
       ep,
       label_opts,
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
@@ -312,6 +329,14 @@ where
       transform.compression,
     )
     .with_encryption(transform.encryption);
+    // Gossip-plane (unreliable) checksum. Unlike compression/encryption it is
+    // not chainable on the builder because reliable streams carry no checksum
+    // (no per-bridge fan-out); the in-place setter updates only the gossip
+    // field. With a default `TransformOptions` no algorithm is selected and the
+    // gossip codec stays identity.
+    endpoint
+      .set_checksum_options(transform.checksum)
+      .map_err(InitError::Checksum)?;
 
     Ok(Self {
       endpoint,
@@ -2045,13 +2070,20 @@ where
         None => continue,
       };
       // Apply the cross-transport transforms to the encoded frame before it hits the
-      // wire: compress, then encrypt, so the on-wire byte order is
-      // `[Encrypted[Compressed[frame]]]`. Both are identity when disabled, so a default
-      // `TransformOptions` sends the same plaintext frame as before. Staged into owned
-      // `Vec`s here so the `&self.endpoint` transform borrows end before the gossip send
-      // below.
+      // wire: compress, then checksum, then encrypt, so the on-wire byte order is
+      // `[Encrypted[Checksumed[Compressed[frame]]]]`. All are identity when disabled, so a
+      // default `TransformOptions` sends the same plaintext frame as before. Staged into
+      // owned `Vec`s here so the `&self.endpoint` transform borrows end before the gossip
+      // send below.
       let compressed = self.endpoint.compress_gossip(&bytes);
-      let on_wire = match self.endpoint.encrypt_gossip(&compressed) {
+      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
+        Ok(b) => b,
+        // Checksum is configured but its backend was not built into this binary. Drop
+        // rather than emit an unverifiable datagram on a checksum-configured path.
+        // Gossip is lossy and self-healing.
+        Err(_) => continue,
+      };
+      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
         Ok(b) => b,
         // Encryption is configured but the backend rejected the request (e.g. a primary
         // key whose AEAD algorithm was not built into this binary). Drop: emitting the
@@ -2132,6 +2164,58 @@ mod tests {
     }
 
     fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+  }
+
+  /// A [`GossipIo`] that records every outbound datagram so a test can inspect
+  /// the actual on-wire bytes (e.g. the transform wrapper tag).
+  struct CaptureGossip {
+    sent: std::vec::Vec<std::vec::Vec<u8>>,
+  }
+
+  impl CaptureGossip {
+    fn new() -> Self {
+      Self {
+        sent: std::vec::Vec::new(),
+      }
+    }
+  }
+
+  impl GossipIo for CaptureGossip {
+    fn recv(&mut self, _buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+      None
+    }
+
+    fn send(&mut self, bytes: &[u8], _dest: SocketAddr) {
+      self.sent.push(bytes.to_vec());
+    }
+  }
+
+  /// Drive `engine` until it emits at least one outbound gossip datagram (or the
+  /// budget of pumps elapses), returning the captured datagrams. A peer is
+  /// injected first so gossip has a destination.
+  fn capture_gossip(transform: TransformOptions) -> std::vec::Vec<std::vec::Vec<u8>> {
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now).expect("valid configuration");
+    engine.start(now);
+    // A peer to gossip TO, so `pump` emits at least one outbound gossip datagram.
+    engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
+
+    let mut gossip = CaptureGossip::new();
+    let mut stream = NoStream::with_pool(2);
+    let mut t = now;
+    for _ in 0..40 {
+      engine.pump(t, &mut gossip, &mut stream);
+      if !gossip.sent.is_empty() {
+        break;
+      }
+      t += Duration::from_millis(50);
+    }
+    gossip.sent
   }
 
   struct NoStream {
@@ -2251,6 +2335,63 @@ mod tests {
     );
   }
 
+  /// The `Checksumed` wrapper tag on the wire. With neither encryption nor a
+  /// label configured, the checksum wrapper is the OUTERMOST frame, so an
+  /// outbound gossip datagram begins with this tag exactly when checksum is
+  /// applied on the send path.
+  #[cfg(feature = "checksum-crc32")]
+  const CHECKSUMED_TAG: u8 = 15;
+
+  /// With checksum enabled, every outbound gossip datagram carries the
+  /// `Checksumed` wrapper tag — proving the engine's send path actually applies
+  /// `checksum_gossip` (a wire-shape assertion, not mere convergence: an
+  /// unwrapped datagram would still be accepted by a peer, so convergence alone
+  /// cannot detect a send path that skips the checksum wrap).
+  #[cfg(feature = "checksum-crc32")]
+  #[test]
+  fn enabled_checksum_stamps_the_checksumed_tag_on_outbound_gossip() {
+    use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+
+    let transform = TransformOptions::default()
+      .with_checksum(ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32));
+    let sent = capture_gossip(transform);
+
+    assert!(
+      !sent.is_empty(),
+      "engine must emit at least one gossip datagram"
+    );
+    for dg in &sent {
+      assert_eq!(
+        dg.first().copied(),
+        Some(CHECKSUMED_TAG),
+        "every outbound gossip datagram must begin with the Checksumed tag when \
+         checksum is enabled; got first byte {:?}",
+        dg.first()
+      );
+    }
+  }
+
+  /// With checksum disabled (the default), no outbound gossip datagram carries
+  /// the `Checksumed` wrapper tag — confirming the wrap is opt-in and the
+  /// positive test above is discriminating rather than vacuous.
+  #[cfg(feature = "checksum-crc32")]
+  #[test]
+  fn disabled_checksum_leaves_no_checksumed_tag_on_outbound_gossip() {
+    let sent = capture_gossip(TransformOptions::default());
+
+    assert!(
+      !sent.is_empty(),
+      "engine must emit at least one gossip datagram"
+    );
+    for dg in &sent {
+      assert_ne!(
+        dg.first().copied(),
+        Some(CHECKSUMED_TAG),
+        "a default (checksum-disabled) node must not stamp the Checksumed tag"
+      );
+    }
+  }
+
   /// `set_encryption_options` with no keyring (disabled) is always accepted.
   #[test]
   fn set_encryption_options_disabled_is_always_ok() {
@@ -2322,6 +2463,63 @@ mod tests {
       engine.num_members(),
       1,
       "engine remains functional after encryption update"
+    );
+  }
+
+  /// `try_new_at` rejects a gossip checksum algorithm whose backend feature is
+  /// not compiled into this build, with a typed `InitError::Checksum`. The
+  /// options builder accepts the algorithm, but every later `checksum_gossip`
+  /// would fail and the driver would drop the datagram — silently disabling ALL
+  /// gossip. This is the construction-time analogue of the encryption keyring
+  /// rejection (the embedded engine has no runtime checksum setter); it runs only
+  /// when `checksum-murmur3` is absent so the Murmur3 backend is genuinely
+  /// missing.
+  #[cfg(not(feature = "checksum-murmur3"))]
+  #[test]
+  fn try_new_at_rejects_unsupported_checksum_algorithm() {
+    use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    let ep_cfg =
+      memberlist_proto::EndpointOptions::new(SmolStr::new("bad-checksum"), node_addr(7946))
+        .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+
+    // Murmur3 is absent in this build. The selection is accepted by
+    // `with_checksum`, but the trial `apply` probe inside `try_new_at` returns
+    // `ChecksumError::Disabled`.
+    let transform = TransformOptions::default()
+      .with_checksum(ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3));
+
+    let err = Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now)
+      .map(|_| ())
+      .expect_err("unsupported checksum algorithm must be rejected at construction");
+    assert!(
+      matches!(err, InitError::Checksum(_)),
+      "expected InitError::Checksum, got {err:?}"
+    );
+  }
+
+  /// A disabled (no-algorithm) checksum policy always constructs cleanly — there
+  /// is no backend to probe, so `try_new_at` succeeds regardless of feature set.
+  #[test]
+  fn try_new_at_accepts_disabled_checksum() {
+    use memberlist_proto::ChecksumOptions;
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    let ep_cfg =
+      memberlist_proto::EndpointOptions::new(SmolStr::new("no-checksum"), node_addr(7946))
+        .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let transform = TransformOptions::default().with_checksum(ChecksumOptions::new());
+
+    assert!(
+      Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now).is_ok(),
+      "a disabled checksum policy must always construct"
     );
   }
 

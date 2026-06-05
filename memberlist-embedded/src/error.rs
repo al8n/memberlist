@@ -51,7 +51,8 @@ pub enum InitError {
   ZeroCloseTimeout,
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
-  /// A driver sizes its gossip arenas from `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`
+  /// A driver sizes its gossip arenas from
+  /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`
   /// (the largest on-wire datagram the machine can emit). A `gossip_mtu` whose
   /// on-wire size exceeds the 65507-byte UDP payload limit could never be sent,
   /// and the unchecked arena arithmetic would overflow. The configured value
@@ -68,6 +69,16 @@ pub enum InitError {
   /// turning what would otherwise be a silent runtime drop of every encrypted
   /// gossip datagram into a typed construction error.
   Encryption(memberlist_proto::EncryptionError),
+  /// The configured gossip checksum algorithm cannot be used by this build.
+  ///
+  /// A checksum algorithm whose backend feature was not compiled into this
+  /// binary is accepted by the options builder, but every later
+  /// `checksum_gossip` would return a
+  /// [`ChecksumError`](memberlist_proto::ChecksumError) and the driver would drop
+  /// the datagram — so a "successfully" configured checksum would silently
+  /// disable ALL gossip. Construction probes the configured algorithm and
+  /// surfaces this typed error instead.
+  Checksum(memberlist_proto::ChecksumError),
 }
 
 /// The configured gossip MTU exceeds the largest plaintext payload whose on-wire
@@ -76,7 +87,8 @@ pub enum InitError {
 pub struct GossipMtuTooLarge {
   /// The configured `gossip_mtu` that was rejected.
   pub gossip_mtu: usize,
-  /// The largest acceptable `gossip_mtu`: `65507 - ENCRYPTED_WRAPPER_OVERHEAD`.
+  /// The largest acceptable `gossip_mtu`:
+  /// `65507 - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD`.
   pub ceiling: usize,
 }
 
@@ -105,6 +117,7 @@ impl fmt::Display for InitError {
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
+      InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
     }
   }
 }
@@ -121,12 +134,19 @@ impl From<memberlist_proto::EncryptionError> for InitError {
   }
 }
 
+impl From<memberlist_proto::ChecksumError> for InitError {
+  fn from(e: memberlist_proto::ChecksumError) -> Self {
+    InitError::Checksum(e)
+  }
+}
+
 #[cfg(feature = "std")]
 impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       InitError::Endpoint(e) => Some(e),
       InitError::Encryption(e) => Some(e),
+      InitError::Checksum(e) => Some(e),
       _ => None,
     }
   }
@@ -143,7 +163,7 @@ mod tests {
   fn every_init_error_variant_displays_and_reports_its_source() {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     // (variant, whether `source()` should be `Some`).
-    let cases: [(InitError, bool); 7] = [
+    let cases: [(InitError, bool); 8] = [
       (InitError::NonRoutableAdvertiseAddr(addr), false),
       (InitError::AdvertisePortMismatch, false),
       (InitError::ZeroPort, false),
@@ -157,6 +177,7 @@ mod tests {
       ),
       (memberlist_proto::EndpointInitError::Entropy.into(), true),
       (memberlist_proto::EncryptionError::AuthFailed.into(), true),
+      (memberlist_proto::ChecksumError::Mismatch.into(), true),
     ];
     for (err, has_source) in cases {
       assert!(!err.to_string().is_empty(), "Display non-empty for {err:?}");

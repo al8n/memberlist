@@ -190,6 +190,79 @@ fn encrypted_gossip_round_trips() {
   );
 }
 
+/// Both nodes apply the same gossip-plane CRC32 checksum; their checksummed
+/// gossip and push/pull exchanges round-trip, so the pair converges via join
+/// and STAYS converged on a 2-member view.
+///
+/// The embassy driver wraps every outbound gossip datagram with the engine's
+/// checksum transform and verifies the digest on receipt. A broken wrap/verify
+/// (or a digest mismatch) would drop the join push/pull exchange, so a
+/// successful join + 2-member view is a real end-to-end checksummed-gossip
+/// assertion. Checksum is a gossip-plane transform only; the reliable stream
+/// path carries no checksum.
+///
+/// Gated on `checksum-crc32`: constructing with `Crc32` while its backend is
+/// absent now fails fast at `Engine::try_new_at`, so the test must enable the
+/// backend it exercises.
+#[cfg(feature = "checksum-crc32")]
+#[test]
+fn checksummed_gossip_round_trips() {
+  use memberlist_embassy::{ChecksumAlgorithm, ChecksumOptions};
+
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  let mut bufs_b = NodeBufs::new();
+  let (udp_a, tcp_a) = build_sockets(stack_a, &mut bufs_a);
+  let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
+
+  let checksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
+  let clock = now();
+  let (ml_a, run_a) = Memberlist::new::<POOL>(
+    Options::new(),
+    TransformOptions::default().with_checksum(checksum),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    udp_a,
+    tcp_a,
+    clock,
+  )
+  .expect("build node a");
+  let (ml_b, run_b) = Memberlist::new::<POOL>(
+    Options::new(),
+    TransformOptions::default().with_checksum(checksum),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    udp_b,
+    tcp_b,
+    clock,
+  )
+  .expect("build node b");
+
+  let start = StdInstant::now();
+  block_on(async {
+    let op = async {
+      ml_b.join(&[addr(1, 7946)]).await;
+      loop {
+        if ml_a.num_members() == 2 && ml_b.num_members() == 2 {
+          break;
+        }
+        Timer::after(Duration::from_millis(10)).await;
+      }
+    };
+    drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+  });
+
+  assert_eq!(ml_a.num_members(), 2, "A did not converge to 2 members");
+  assert_eq!(ml_b.num_members(), 2, "B did not converge to 2 members");
+  println!(
+    "checksummed_gossip_round_trips: converged in {:?}",
+    start.elapsed()
+  );
+}
+
 /// A cluster label isolates gossip traffic across differently-labelled
 /// embassy nodes.
 ///

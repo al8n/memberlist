@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use memberlist_proto::{
-  CheapClone, CompressionOptions, EncryptionOptions, config::EndpointOptions,
+  CheapClone, ChecksumOptions, CompressionOptions, EncryptionOptions, config::EndpointOptions,
   label::validate_label, typed::Meta,
 };
 
@@ -39,6 +39,13 @@ use crate::{
 ///   (disabled by default). Applied at endpoint construction; the runtime
 ///   [`set_compression_options`](crate::Memberlist::set_compression_options)
 ///   command allows reconfiguration after the node is running.
+/// - `checksum` — the initial gossip (unreliable) checksum policy (disabled by
+///   default). Checksum is a GOSSIP-PLANE-ONLY concern: it is applied to
+///   outbound gossip datagrams and verified on inbound ones, and is NOT applied
+///   on the reliable-stream path (the stream transport provides its own
+///   integrity there). Applied at endpoint construction; the runtime
+///   [`set_checksum_options`](crate::Memberlist::set_checksum_options) command
+///   allows reconfiguration after the node is running.
 /// - `encryption` — the initial gossip and reliable-stream encryption policy
 ///   (disabled / no keyring by default). Applied at endpoint construction; a
 ///   keyring naming an unsupported AEAD algorithm is caught at
@@ -62,6 +69,7 @@ pub struct MemberlistOptions {
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
   compression: CompressionOptions,
+  checksum: ChecksumOptions,
   encryption: EncryptionOptions,
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
@@ -81,9 +89,10 @@ impl MemberlistOptions {
   /// 1400 bytes).
   ///
   /// A gossip packet is emitted as a single UDP datagram, so `mtu` must leave
-  /// room for the encryption wrapper within the 65507-byte UDP payload limit:
-  /// `Memberlist::new` rejects an `mtu` above `65507 - ENCRYPTED_WRAPPER_OVERHEAD`
-  /// (65477 bytes) with [`MemberlistError::InvalidGossipMtu`](crate::MemberlistError::InvalidGossipMtu),
+  /// room for the checksum and encryption wrappers within the 65507-byte UDP
+  /// payload limit: `Memberlist::new` rejects an `mtu` above
+  /// `65507 - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD`
+  /// (65467 bytes) with [`MemberlistError::InvalidGossipMtu`](crate::MemberlistError::InvalidGossipMtu),
   /// since a near-MTU packet built above that would be deterministically
   /// unsendable. It also rejects an `mtu` below the floor needed to carry the
   /// mandatory single-datagram control packets (probe Ping / Ack / minimal
@@ -154,6 +163,22 @@ impl MemberlistOptions {
   #[inline]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
     self.compression = compression;
+    self
+  }
+
+  /// Builder: set the initial gossip (unreliable) checksum policy. The default
+  /// (disabled) leaves gossip datagrams unchecksummed until a runtime
+  /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) call is
+  /// made.
+  ///
+  /// Checksum is applied on the GOSSIP (unreliable) plane only — outbound
+  /// datagrams are wrapped in a checksum frame and inbound ones are verified.
+  /// The reliable-stream path carries NO checksum: the stream transport
+  /// (TCP/TLS/QUIC) provides its own integrity guarantee there.
+  #[must_use]
+  #[inline]
+  pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
+    self.checksum = checksum;
     self
   }
 
@@ -244,6 +269,13 @@ impl MemberlistOptions {
     &self.compression
   }
 
+  /// The initial gossip (unreliable) checksum policy. Checksum is not applied
+  /// on the reliable-stream path.
+  #[inline]
+  pub const fn checksum(&self) -> &ChecksumOptions {
+    &self.checksum
+  }
+
   /// The initial gossip and reliable-stream encryption policy.
   #[inline]
   pub const fn encryption(&self) -> &EncryptionOptions {
@@ -272,14 +304,16 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 
 /// The largest plaintext `gossip_mtu` whose wire datagram still fits a single
 /// UDP packet. A gossip packet's plaintext budget is `gossip_mtu`; the wire
-/// datagram after the encryption wrapper is at most
-/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` (the same model the drivers' recv
-/// buffers are sized to — compression only shrinks, the binding inflation is
-/// the encryption wrapper), and that must be `<= UDP_PAYLOAD_MAX`. So the
-/// valid maximum plaintext `gossip_mtu` is
-/// `UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD`.
-pub(crate) const GOSSIP_MTU_MAX: usize =
-  UDP_PAYLOAD_MAX - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+/// datagram after the checksum and encryption wrappers is at most
+/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` (the
+/// same model the drivers' recv buffers are sized to — compression only
+/// shrinks, the binding inflations are the checksum and encryption wrappers),
+/// and that must be `<= UDP_PAYLOAD_MAX`. So the valid maximum plaintext
+/// `gossip_mtu` is
+/// `UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD`.
+pub(crate) const GOSSIP_MTU_MAX: usize = UDP_PAYLOAD_MAX
+  - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+  - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
 
 /// The lower bound on the plaintext `gossip_mtu`. A gossip packet is the
 /// transport for the SWIM protocol's mandatory single-datagram control
@@ -782,6 +816,34 @@ pub(crate) fn validate_encryption_options(
     memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")?;
   }
   Ok(())
+}
+
+/// Trial-validate a [`ChecksumOptions`](memberlist_proto::ChecksumOptions) for
+/// usability in THIS build BEFORE it is applied as the live gossip policy.
+///
+/// A checksum algorithm whose backend feature is not compiled in (e.g. a
+/// [`ChecksumAlgorithm::Murmur3`](memberlist_proto::ChecksumAlgorithm) selection
+/// in a build without the `checksum-murmur3` feature) is accepted by the options
+/// builder, but every later `checksum_gossip` would return
+/// [`ChecksumError`](memberlist_proto::ChecksumError)
+/// ([`Disabled`](memberlist_proto::ChecksumError::Disabled) for a recognized-but-
+/// unbuilt algorithm, [`UnknownAlgorithm`](memberlist_proto::ChecksumError::UnknownAlgorithm)
+/// for an unknown tag) and the driver would drop the datagram — so a
+/// "successfully" configured checksum silently disables ALL gossip. This mirrors
+/// the encryption guard in [`validate_encryption_options`].
+///
+/// The probe is [`ChecksumOptions::apply`](memberlist_proto::ChecksumOptions::apply)
+/// over an empty payload: it returns `Err` exactly when an algorithm is
+/// configured but its backend is absent, and `Ok` otherwise — INCLUDING when
+/// checksum is disabled (no algorithm), which is always usable (identity codec).
+/// The result bytes are discarded; this is a usability probe, not a real send.
+/// Returns the wire [`ChecksumError`](memberlist_proto::ChecksumError) when the
+/// policy is unusable so the caller can reject the reconfiguration instead of
+/// acking a false `Ok`.
+pub(crate) fn validate_checksum_options(
+  opts: &ChecksumOptions,
+) -> Result<(), memberlist_proto::ChecksumError> {
+  opts.apply(&[]).map(|_| ())
 }
 
 /// Reject an `initial_meta` larger than the effective meta cap

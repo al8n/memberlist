@@ -4,7 +4,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_proto::{CompressionOptions, EncryptionOptions, Node};
+use memberlist_proto::{ChecksumOptions, CompressionOptions, EncryptionOptions, Node};
 
 use crate::error::Error;
 
@@ -28,6 +28,8 @@ pub(crate) enum Command<I> {
   SendReliable(SendReliableCmd),
   /// Reconfigure the gossip compression policy in place.
   SetCompressionOptions(SetCompressionOptionsCmd),
+  /// Reconfigure the gossip (unreliable) checksum policy in place.
+  SetChecksumOptions(SetChecksumOptionsCmd),
   /// Reconfigure the gossip encryption policy in place.
   SetEncryptionOptions(SetEncryptionOptionsCmd),
 }
@@ -87,6 +89,14 @@ pub(crate) struct SendReliableCmd {
 pub(crate) struct SetCompressionOptionsCmd {
   /// The new compression policy to apply.
   pub(crate) opts: CompressionOptions,
+  /// Replies with `Ok(())` once applied, or `Err(NotRunning)`.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::SetChecksumOptions`].
+pub(crate) struct SetChecksumOptionsCmd {
+  /// The new gossip (unreliable) checksum policy to apply.
+  pub(crate) opts: ChecksumOptions,
   /// Replies with `Ok(())` once applied, or `Err(NotRunning)`.
   pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }

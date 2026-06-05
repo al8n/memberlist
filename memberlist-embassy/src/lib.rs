@@ -69,6 +69,9 @@ pub use time::{EmbassyInstant, now};
 
 pub use memberlist_embedded::{
   TransformOptions,
-  transform::{CompressionOptions, EncryptionOptions, Keyring, LabelError, SecretKey},
+  transform::{
+    ChecksumAlgorithm, ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring, LabelError,
+    SecretKey,
+  },
 };
 pub use memberlist_proto::{EncryptionError, EndpointOptions, Instant, Node, event};

@@ -231,6 +231,14 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   /// gossip is still encrypted (gossip is always plain UDP). A disabled
   /// configuration reduces all codec paths to identity.
   encryption: crate::EncryptionOptions,
+  /// Checksum configuration for the gossip (unreliable) plane. A checksum
+  /// guards the connectionless UDP datagram path — the only path without
+  /// transport-level integrity — so it is applied in [`Self::checksum_gossip`]
+  /// and not on the reliable stream bridge, which relies on the stream
+  /// transport's own end-to-end integrity (matching the original Go memberlist
+  /// and the legacy port, where the CRC rides the UDP packet path only). A
+  /// disabled `ChecksumOptions` makes the gossip path identity.
+  checksum: crate::ChecksumOptions,
   /// In-flight reliable exchanges (one bridge each), keyed by [`ExchangeId`].
   /// Connection-per-exchange — no pool, slab, or drained-reap.
   conns: StreamConns<I, A, R>,
@@ -403,19 +411,41 @@ where
     }
   }
 
+  /// The configured cross-transport checksum options.
+  pub fn checksum(&self) -> crate::ChecksumOptions {
+    self.checksum
+  }
+
+  /// Wrap one outbound gossip datagram in a checksum frame for the wire. The
+  /// codec-owning driver calls this on the already-compressed gossip bytes
+  /// (from [`Self::compress_gossip`]) BEFORE [`Self::encrypt_gossip`], so the
+  /// on-wire order is `[Encrypted[Checksumed[Compressed[frame]]]]`. When
+  /// checksumming is disabled the bytes are returned unchanged.
+  ///
+  /// Returns `Err` when a checksum algorithm is configured but its backend was
+  /// not built into this binary; the driver MUST drop the gossip rather than
+  /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
+  pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
+    match self.checksum.apply(datagram)? {
+      crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
+      crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+    }
+  }
+
   /// The configured cross-transport encryption options.
   pub fn encryption_options(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }
 
   /// Encrypt one outbound gossip datagram for the wire. The codec-owning
-  /// driver calls this on the already-compressed gossip bytes (from
-  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
-  /// encryption is disabled the bytes are returned unchanged.
+  /// driver calls this on the already-compressed-and-checksummed gossip bytes
+  /// (from [`Self::compress_gossip`] → [`Self::checksum_gossip`]) before
+  /// handing them to the UDP socket. When encryption is disabled the bytes are
+  /// returned unchanged.
   ///
-  /// The on-wire byte order is therefore `[Encrypted[Compressed[frame]]]`
-  /// when both transforms are enabled and compression won, or
-  /// `[Encrypted[frame]]` when compression is disabled or did not shrink.
+  /// The on-wire byte order with the full stack is
+  /// `[Encrypted[Checksumed[Compressed[frame]]]]`; each disabled layer
+  /// collapses to identity.
   ///
   /// Returns `Err` when encryption is configured but the backend rejects the
   /// request — typically [`crate::EncryptionError::UnsupportedAlgorithm`]
@@ -433,27 +463,30 @@ where
 
   /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
   /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
-  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
-  /// pass (each layer identity when its wrapper is absent). A datagram with
-  /// no Encrypted wrapper is returned unchanged when no keyring is
-  /// configured; when a keyring IS configured the strict-mode entry check
-  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
-  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
-  /// driver drops the datagram (gossip is lossy and self-healing).
+  /// frames — it strips the Encrypted-then-Checksumed-then-Compressed wrapper
+  /// stack in one pass (each layer identity when its wrapper is absent, the
+  /// checksum layer verifying the digest as it strips). A datagram with no
+  /// Encrypted wrapper is returned unchanged when no keyring is configured;
+  /// when a keyring IS configured the strict-mode entry check rejects any
+  /// non-Encrypted leading tag. A corrupt or unknown-algorithm wrapper, a
+  /// checksum mismatch, or a frame the keyring cannot decrypt, is an `Err` —
+  /// the driver drops the datagram (gossip is lossy and self-healing).
   ///
   /// This is the SINGLE canonical ingress unwrap on the coordinator. The
-  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
-  /// (compress, then encrypt) so the on-wire order is
-  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
-  /// authentication never depends on integration discipline.
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::checksum_gossip`]
+  /// → [`Self::encrypt_gossip`] so the on-wire order is
+  /// `[Encrypted[Checksumed[Compressed[frame]]]]`; this helper reverses all
+  /// layers, so authentication and integrity never depend on integration
+  /// discipline.
   pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
     // datagram and is rejected. The encryption-aware unwrap consumes an
-    // Encrypted wrapper through the keyring, then strips a Compressed
-    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
-    // when no keyring is configured (the strict-mode entry check is gated
-    // on `encryption.is_enabled()`).
+    // Encrypted wrapper through the keyring, then verifies and strips a
+    // Checksumed wrapper, then strips a Compressed wrapper if present; a
+    // non-Encrypted-led datagram is returned unchanged when no keyring is
+    // configured (the strict-mode entry check is gated on
+    // `encryption.is_enabled()`).
     crate::unwrap_transforms_with_encryption(datagram, self.ep.gossip_mtu(), &self.encryption)
       .map(|cow| cow.into_owned())
   }
@@ -620,6 +653,7 @@ where
       peer_to_socket,
       compression: crate::CompressionOptions::new(),
       encryption: crate::EncryptionOptions::new(),
+      checksum: crate::ChecksumOptions::new(),
       conns: StreamConns::new(),
       exchanges: FxHashMap::default(),
       out_transmit: std::collections::VecDeque::new(),
@@ -896,6 +930,31 @@ where
       };
       bridge.set_compression(compression);
     }
+  }
+
+  /// Replace the gossip-plane checksum options in place. The driver calls this
+  /// when the operator updates the checksum policy at runtime. Single-threaded
+  /// `&mut self` — no lock.
+  ///
+  /// Checksum is a gossip-plane (unreliable) concern, so this updates only the
+  /// coordinator's own field — read by [`Self::checksum_gossip`] on the next
+  /// outbound datagram. Reliable stream bridges carry no checksum (they rely on
+  /// the stream transport's own integrity), so there is no per-bridge fan-out.
+  /// The new policy takes effect on the next datagram; checksum is non-security
+  /// and the wire frame self-describes its algorithm via the checksum-tag
+  /// prefix, so a peer always verifies under whatever policy produced the bytes.
+  pub fn set_checksum_options(
+    &mut self,
+    checksum: crate::ChecksumOptions,
+  ) -> Result<(), crate::ChecksumError> {
+    // Validate the algorithm's backend is built into this binary BEFORE storing
+    // it: an unusable policy is accepted by the options builder, but every
+    // subsequent `checksum_gossip` would then fail and the codec-owning driver
+    // would drop the datagram — silently disabling all gossip behind a false
+    // success. The empty-payload probe surfaces `Disabled` / `UnknownAlgorithm`.
+    checksum.apply(&[])?;
+    self.checksum = checksum;
+    Ok(())
   }
 
   /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to

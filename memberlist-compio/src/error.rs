@@ -89,12 +89,14 @@ impl core::fmt::Display for InvalidGossipMtu {
       f,
       "gossip_mtu {} exceeds the maximum sendable plaintext gossip payload of {} bytes \
        (a gossip packet is one UDP datagram, capped at {} bytes on the wire after the \
-       {}-byte encryption wrapper); a larger gossip_mtu would make near-MTU gossip \
-       packets deterministically unsendable",
+       {}-byte checksum and encryption wrappers); a larger gossip_mtu would make \
+       near-MTU gossip packets deterministically unsendable",
       self.configured,
       self.ceiling,
-      self.ceiling + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
-      memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
+      self.ceiling
+        + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+        + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
+      memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
     )
   }
 }
@@ -256,6 +258,17 @@ pub enum MemberlistError {
   /// Encryption codec error from memberlist-wire.
   #[error("encryption: {0}")]
   Encryption(#[from] memberlist_proto::EncryptionError),
+
+  /// Checksum codec error from memberlist-wire. Surfaced when a configured
+  /// gossip checksum algorithm's backend feature is not compiled into this
+  /// build: the algorithm is accepted by the options builder but every later
+  /// `checksum_gossip` would fail, silently dropping all gossip. Caught at
+  /// construction and at the runtime
+  /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) setter so
+  /// the misconfiguration is rejected rather than disabling gossip after a false
+  /// `Ok`.
+  #[error("checksum: {0}")]
+  Checksum(#[from] memberlist_proto::ChecksumError),
 
   /// Frame decode error from memberlist-wire.
   #[error("frame: {0}")]
@@ -436,9 +449,9 @@ mod tests {
 
   #[test]
   fn invalid_gossip_mtu_accessors_and_display() {
-    let payload = InvalidGossipMtu::new(70_000, 65_477);
+    let payload = InvalidGossipMtu::new(70_000, 65_467);
     assert_eq!(payload.configured(), 70_000);
-    assert_eq!(payload.ceiling(), 65_477);
+    assert_eq!(payload.ceiling(), 65_467);
     let shown = format!("{payload}");
     assert!(!shown.is_empty());
     assert!(shown.contains("70000"));
@@ -490,6 +503,7 @@ mod tests {
     let variants = [
       MemberlistError::Io(io::Error::other("disk")),
       MemberlistError::Encryption(memberlist_proto::EncryptionError::AuthFailed),
+      MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch),
       MemberlistError::Frame(memberlist_proto::FrameError::Empty),
       MemberlistError::Resolve(io::Error::other("dns")),
       MemberlistError::JoinAllFailed(JoinAllFailed::new(3, 0)),
@@ -497,7 +511,7 @@ mod tests {
       MemberlistError::Shutdown,
       MemberlistError::NotRunning,
       MemberlistError::PayloadTooLarge("1500 > 1400".to_string()),
-      MemberlistError::InvalidGossipMtu(InvalidGossipMtu::new(70_000, 65_477)),
+      MemberlistError::InvalidGossipMtu(InvalidGossipMtu::new(70_000, 65_467)),
       MemberlistError::GossipMtuTooSmall(GossipMtuTooSmall::new(64, 512)),
       MemberlistError::InvalidAdvertiseAddr(InvalidAdvertiseAddr::new(
         "0.0.0.0:7946".parse().unwrap(),
@@ -535,6 +549,11 @@ mod tests {
         .is_some()
     );
     assert!(
+      MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch)
+        .source()
+        .is_some()
+    );
+    assert!(
       MemberlistError::Frame(memberlist_proto::FrameError::Empty)
         .source()
         .is_some()
@@ -559,6 +578,9 @@ mod tests {
 
     let from_enc: MemberlistError = memberlist_proto::EncryptionError::AuthFailed.into();
     assert!(matches!(from_enc, MemberlistError::Encryption(_)));
+
+    let from_checksum: MemberlistError = memberlist_proto::ChecksumError::Mismatch.into();
+    assert!(matches!(from_checksum, MemberlistError::Checksum(_)));
 
     let from_frame: MemberlistError = memberlist_proto::FrameError::Empty.into();
     assert!(matches!(from_frame, MemberlistError::Frame(_)));

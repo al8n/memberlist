@@ -3,7 +3,7 @@
 
 use crate::error::Result;
 use bytes::Bytes;
-use memberlist_proto::{CompressionOptions, EncryptionOptions, Instant, Node};
+use memberlist_proto::{ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, Node};
 use std::{net::SocketAddr, time::Duration};
 
 /// Payload for [`JoinKind::WaitForCompletion`].
@@ -63,6 +63,14 @@ pub(crate) struct UpdateNodeMetadataCmd {
 pub(crate) struct SetCompressionOptionsCmd {
   /// New compression configuration to apply in place.
   pub(crate) opts: CompressionOptions,
+  /// One-shot reply channel for the reconfiguration result.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+}
+
+/// Payload for [`Command::SetChecksumOptions`].
+pub(crate) struct SetChecksumOptionsCmd {
+  /// New gossip-plane checksum configuration to apply in place.
+  pub(crate) opts: ChecksumOptions,
   /// One-shot reply channel for the reconfiguration result.
   pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
 }
@@ -258,6 +266,8 @@ pub(crate) enum Command<I> {
   UpdateNodeMetadata(UpdateNodeMetadataCmd),
   /// Update the compression options (in-place reconfiguration).
   SetCompressionOptions(SetCompressionOptionsCmd),
+  /// Update the gossip-plane checksum options (in-place reconfiguration).
+  SetChecksumOptions(SetChecksumOptionsCmd),
   /// Update the encryption options (in-place reconfiguration).
   SetEncryptionOptions(SetEncryptionOptionsCmd),
   /// Queue an application user-broadcast for cluster-wide gossip.
@@ -386,6 +396,12 @@ mod tests {
       reply: mk_unit(),
     });
     assert!(matches!(set_comp, Command::SetCompressionOptions(_)));
+
+    let set_checksum = Command::<SmolStr>::SetChecksumOptions(SetChecksumOptionsCmd {
+      opts: ChecksumOptions::new(),
+      reply: mk_unit(),
+    });
+    assert!(matches!(set_checksum, Command::SetChecksumOptions(_)));
 
     let set_enc = Command::<SmolStr>::SetEncryptionOptions(SetEncryptionOptionsCmd {
       opts: EncryptionOptions::new(),

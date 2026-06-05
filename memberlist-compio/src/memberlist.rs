@@ -7,7 +7,8 @@
 //!   the driver republishes after every state-affecting tick.
 //! - **Writes** (`join`, `leave`, `update_node_metadata`,
 //!   `queue_user_broadcast`, `set_local_state`, `set_ack_payload`,
-//!   `set_compression_options`, `set_encryption_options`, `shutdown`)
+//!   `set_compression_options`, `set_checksum_options`,
+//!   `set_encryption_options`, `shutdown`)
 //!   round-trip through the command channel: the handle sends a
 //!   [`Command`] carrying a one-shot reply sender; the driver dispatches
 //!   the command on the owned machine endpoint and replies.
@@ -40,7 +41,7 @@ use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
 use memberlist_proto::{
-  CheapClone, CompressionOptions, EncryptionOptions, Instant, Node,
+  CheapClone, ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, Node,
   event::Event,
   typed::{NodeState, State},
 };
@@ -49,8 +50,9 @@ use crate::{
   EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
-    SendUserCmd, SetAckPayloadCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd, WaitForCompletionArgs,
+    SendUserCmd, SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    WaitForCompletionArgs,
   },
   delegate::Delegate,
   maybe_resolved::MaybeResolved,
@@ -237,6 +239,15 @@ where
     // `T::new`), so a misconfigured keyring fails fast with no resources held.
     crate::options::validate_encryption_options(memberlist_opts.encryption())
       .map_err(MemberlistError::Encryption)?;
+    // Fail fast when the configured gossip checksum algorithm's backend feature
+    // is absent from this build. The options builder accepts the algorithm, but
+    // every subsequent `checksum_gossip` would return a `ChecksumError` and the
+    // driver would drop the datagram — so a "successful" checksum config would
+    // silently disable ALL gossip. Caught before any socket is bound (before
+    // `T::new`), mirroring the encryption probe above. Checksum is a gossip-plane
+    // concern only; the reliable stream path carries no checksum.
+    crate::options::validate_checksum_options(memberlist_opts.checksum())
+      .map_err(MemberlistError::Checksum)?;
     let transport = T::new(transport_opts, resolver, advertise_resolver)
       .await
       .map_err(|e| {
@@ -760,6 +771,30 @@ where
     self
       .commands
       .send_async(Command::SetCompressionOptions(SetCompressionOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Reconfigure the gossip (unreliable) checksum policy in place. Takes effect
+  /// on the next outbound gossip datagram.
+  ///
+  /// Checksum is a GOSSIP-PLANE-ONLY concern: it wraps outbound gossip
+  /// datagrams and verifies inbound ones. It is NOT applied on the
+  /// reliable-stream path — the stream transport (TCP/TLS/QUIC) provides its
+  /// own integrity guarantee there, so reliable bridges carry no checksum and
+  /// this reconfiguration has no per-bridge fan-out.
+  pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    self
+      .commands
+      .send_async(Command::SetChecksumOptions(SetChecksumOptionsCmd {
         opts,
         reply: tx,
       }))

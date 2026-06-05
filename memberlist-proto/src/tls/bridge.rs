@@ -959,11 +959,10 @@ mod tests {
 
   /// A `StreamBridge<TlsRecords>` built with an ENABLED `EncryptionOptions`
   /// ends up with a DISABLED effective `EncryptionOptions`: `TlsRecords
-  /// ::is_secure() == true`, so the 5-arg `StreamBridge::new` zeroes the
-  /// encryption field. The on-wire reliable bytes therefore carry no
-  /// `Encrypted` wrapper — TLS already provides confidentiality, and
-  /// double-encrypting on the reliable path costs CPU and bandwidth without
-  /// adding security.
+  /// ::is_secure() == true`, so `StreamBridge::new` zeroes the encryption
+  /// field. The on-wire reliable bytes therefore carry no `Encrypted` wrapper
+  /// — TLS already provides confidentiality, and double-encrypting on the
+  /// reliable path costs CPU and bandwidth without adding security.
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_bridge_reliable_skips_encryption_when_is_secure() {

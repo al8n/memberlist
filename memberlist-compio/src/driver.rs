@@ -41,8 +41,8 @@ use memberlist_proto::{
 
 use crate::{
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinKind, LeaveCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
   driver_options::{DriverOptions, StreamTransportOptions},
@@ -425,6 +425,7 @@ where
   endpoint
     .gossip_mtu()
     .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
@@ -1194,6 +1195,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       Command::Leave(LeaveCmd { reply }) => reply,
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
+      Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
       Command::QueueUserBroadcast(cmd) => cmd.reply,
       Command::SetLocalState(cmd) => cmd.reply,
@@ -1496,6 +1498,26 @@ async fn dispatch_command<I, A, R>(
       let res: Result<()> = if endpoint.is_running() {
         endpoint.set_compression_options(opts);
         Ok(())
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = reply.send(res);
+    }
+    Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
+      // Gate on a running node FIRST: after `leave()` the endpoint emits no
+      // gossip datagrams, so a new checksum policy could never take effect on
+      // the wire. Reject with `NotRunning` without validating — there is no
+      // point probing a policy that can never apply. When running,
+      // `set_checksum_options` validates the algorithm's backend is built in
+      // BEFORE storing it (an unusable policy would make every later
+      // `checksum_gossip` fail and the driver drop the datagram, silently
+      // disabling ALL gossip behind a false `Ok`). Checksum is a gossip-plane
+      // concern only — reliable bridges carry none.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_checksum_options(opts)
+          .map_err(MemberlistError::Checksum)
       } else {
         Err(MemberlistError::NotRunning)
       };
@@ -2173,7 +2195,13 @@ where
       }
     };
     let compressed = endpoint.compress_gossip(&plain);
-    let on_wire = match endpoint.encrypt_gossip(&compressed) {
+    let checksummed = match endpoint.checksum_gossip(&compressed) {
+      Ok(bytes) => bytes,
+      // Checksum configured but its backend was not built in — drop rather
+      // than emit an unverifiable datagram on a checksum-configured path.
+      Err(_) => continue,
+    };
+    let on_wire = match endpoint.encrypt_gossip(&checksummed) {
       Ok(bytes) => bytes,
       // Encryption-configured + backend-rejected (e.g. unknown
       // algorithm baked in) — drop the datagram. Emitting plaintext on
@@ -3036,8 +3064,10 @@ mod tests {
     let small_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords>(&small);
     assert_eq!(
       small_len,
-      small.gossip_mtu() + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD,
-      "buffer is gossip_mtu plus the encrypted-wrapper overhead",
+      small.gossip_mtu()
+        + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+        + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
+      "buffer is gossip_mtu plus the checksum and encrypted wrapper overhead",
     );
     assert!(
       small_len < GOSSIP_RECV_BUF_MAX,

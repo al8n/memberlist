@@ -264,7 +264,7 @@ where
       .memberlist_options
       .label()
       .map(bytes::Bytes::copy_from_slice);
-    let endpoint = QuicEndpoint::with_compression(
+    let mut endpoint = QuicEndpoint::with_compression(
       ep,
       self.quic_config,
       *runtime.memberlist_options.compression(),
@@ -275,6 +275,13 @@ where
       runtime.memberlist_options.skip_inbound_label_check(),
     )
     .expect("cluster label validated at the MemberlistOptions setter");
+    // Checksum is gossip-plane (unreliable) only — the reliable QUIC bridge
+    // carries no checksum (quinn provides its own integrity) — so it is
+    // threaded via the gossip-plane setter rather than a builder.
+    // Ignoring Err: the checksum policy was validated in `Memberlist::new`
+    // (`validate_checksum_options`) before this driver task spawned, so its
+    // backend is built in and this store cannot fail.
+    let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
     crate::quic_driver::quic_driver_loop::<Self::Id, D>(
       endpoint,
       self.gossip_socket,

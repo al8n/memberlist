@@ -56,7 +56,10 @@ pub use memberlist_proto::event::Event;
 #[cfg(feature = "tcp")]
 pub use memberlist_proto::streams::LabelOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-pub use memberlist_proto::{CompressionOptions, EncryptionOptions, Keyring, SecretKey};
+pub use memberlist_proto::{
+  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
+  Keyring, SecretKey,
+};
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::{Node, typed::NodeState};
 

@@ -3,9 +3,11 @@
 //!
 //! The inner frame `[TAG][VARINT len][BODY]` is produced/consumed by
 //! `crate::framing` (body bytes are buffa-encoded protobuf). This module
-//! adds the optional outer **label** frame. Checksum / compression /
-//! encryption / compound outer layers are deferred (optional features) and
-//! intentionally unimplemented.
+//! adds the optional outer **label** frame only. The compression / checksum /
+//! encryption / compound transform layers live in their own modules
+//! (`crate::compression`, `crate::checksum`, `crate::encryption`,
+//! `crate::framing`) and are composed by the per-transport coordinators, not
+//! here.
 
 #[cfg(not(feature = "std"))]
 use std::{
