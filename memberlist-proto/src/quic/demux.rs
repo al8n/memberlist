@@ -2,7 +2,7 @@
 //!
 //! Collision-free by construction: every memberlist datagram's first byte is
 //! a frame tag in `1..=15` (Compound=1 … ErrorResponse=11, Labeled=12,
-//! Checksumed=13, Compressed=14, Encrypted=15), so bits 0x40/0x80 are clear;
+//! Encrypted=13, Compressed=14, Checksumed=15), so bits 0x40/0x80 are clear;
 //! every QUIC packet's first byte sets LONG_HEADER_FORM (0x80) or the
 //! short-header FIXED_BIT (0x40), so it is >= 0x40.
 
@@ -48,7 +48,7 @@ mod tests {
     }
     // Spot-check the semantic boundaries.
     assert_eq!(classify(&[1]), Class::Memberlist); // Compound
-    assert_eq!(classify(&[15]), Class::Memberlist); // Encrypted
+    assert_eq!(classify(&[15]), Class::Memberlist); // Checksumed
     assert_eq!(classify(&[0x10]), Class::Reject); // gap floor
     assert_eq!(classify(&[0x3F]), Class::Reject); // gap ceiling
     assert_eq!(classify(&[0x40]), Class::Quic); // short-header FIXED_BIT

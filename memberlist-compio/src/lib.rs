@@ -61,7 +61,9 @@ pub use error::{
 pub use events::EventStream;
 pub use maybe_resolved::MaybeResolved;
 pub use memberlist::Memberlist;
-pub use memberlist_proto::{Node, typed::NodeState as MemberlistNodeState};
+pub use memberlist_proto::{
+  ChecksumAlgorithm, ChecksumOptions, Node, typed::NodeState as MemberlistNodeState,
+};
 pub use options::{MemberlistOptions, Options, OptionsParts};
 pub use resolver::{
   AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,

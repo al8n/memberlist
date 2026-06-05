@@ -20,6 +20,14 @@ compression-lz4 = ["memberlist-proto/compression-lz4"]
 compression-snappy = ["memberlist-proto/compression-snappy"]
 compression-zstd = ["memberlist-proto/compression-zstd"]
 compression-brotli = ["memberlist-proto/compression-brotli"]
+# Gossip-plane (unreliable) checksum backends. Each forwards to the matching
+# memberlist-proto backend; checksumming applies to the gossip datagram path
+# only, not the reliable stream path (the transport provides integrity there).
+checksum-crc32 = ["memberlist-proto/checksum-crc32"]
+checksum-xxhash32 = ["memberlist-proto/checksum-xxhash32"]
+checksum-xxhash64 = ["memberlist-proto/checksum-xxhash64"]
+checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3"]
+checksum-murmur3 = ["memberlist-proto/checksum-murmur3"]
 encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
 encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
 # Runtime conveniences: pull in the concrete agnostic runtime impls.

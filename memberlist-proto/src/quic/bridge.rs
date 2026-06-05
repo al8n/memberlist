@@ -740,9 +740,10 @@ where
     }
     if !gathered.is_empty() {
       // The QUIC bridge force-disables encryption in its constructor (quinn
-      // already encrypts the stream), so this call cannot fail in normal
-      // operation. The error branch is wired uniformly with the StreamBridge
-      // path so a future change to that policy stays sound.
+      // already encrypts the stream), so the encryption layer never fails
+      // here. The fallible `Result` is still matched — the codec helper's
+      // signature is shared with the StreamBridge path — but on this path the
+      // error branch is unreachable in practice.
       let unit = match crate::encode_reliable_unit_with_encryption(
         &self.compression,
         &self.encryption,

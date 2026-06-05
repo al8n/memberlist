@@ -1654,7 +1654,10 @@ mod tests {
       .with_threshold(1);
     let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::with_compression(ep, cfg, test_sni_provider(), test_peer_to_socket(), opts);
-    for len in 1..=1500 {
+    // Sweep up to the gossip MTU: inbound decode rejects a datagram whose
+    // recovered plaintext exceeds the ceiling, so a round-trip is only defined
+    // for in-budget sizes (the over-MTU rejection is covered separately above).
+    for len in 1..=coord.gossip_mtu() {
       // Mostly-varying pattern with a short repeated motif: the backend's
       // saving is small and varies with `len`, ensuring the don't-expand
       // else branch is exercised for some sizes while still round-tripping
@@ -1678,6 +1681,31 @@ mod tests {
         "compress_gossip round-trip failed at len={len}",
       );
     }
+  }
+
+  /// `set_checksum_options` rejects an algorithm whose backend is not built into
+  /// this binary, rather than storing an unusable policy that would make every
+  /// `checksum_gossip` fail and the codec-owning driver silently drop all
+  /// gossip. (`with_checksum` builders that bypassed this were removed; the
+  /// validated setter is the only way to install a checksum policy.) Runs only
+  /// when `checksum-murmur3` is absent, so `Murmur3`'s backend is genuinely
+  /// missing.
+  #[cfg(not(feature = "checksum-murmur3"))]
+  #[test]
+  fn set_checksum_options_rejects_unbuilt_algorithm() {
+    use crate::{ChecksumAlgorithm, ChecksumError, ChecksumOptions};
+    let ep = endpoint(7180);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+    let opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
+    assert!(
+      matches!(
+        coord.set_checksum_options(opts),
+        Err(ChecksumError::Disabled(ChecksumAlgorithm::Murmur3))
+      ),
+      "an unbuilt checksum algorithm must be rejected, not stored"
+    );
   }
 
   /// `EndpointOptions::with_gossip_mtu` propagates all the way through to the

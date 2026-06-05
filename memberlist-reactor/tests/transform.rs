@@ -169,6 +169,88 @@ mod compression {
   }
 }
 
+#[cfg(feature = "checksum-crc32")]
+mod checksum {
+  use super::*;
+  use memberlist_reactor::{ChecksumAlgorithm, ChecksumOptions};
+
+  /// Two nodes both configured with a CRC32 gossip checksum converge via the
+  /// checksummed gossip path. Both sides must verify each other's datagram
+  /// digests, which proves `ChecksumOptions` is threaded through construction
+  /// on both the encode (checksum_gossip) and decode (verify) sides.
+  ///
+  /// Checksum is a gossip-plane transform only; the reliable stream path
+  /// carries no checksum (it relies on the transport's own integrity), so this
+  /// convergence rides the checksummed UDP gossip and the unchecksummed TCP
+  /// push/pull together.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn checksummed_gossip_round_trips() {
+    let checksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
+    let ml_opts = MemberlistOptions::new().with_checksum(checksum);
+
+    let a = make_with_opts("crc32-a", ml_opts.clone()).await;
+    let b = make_with_opts("crc32-b", ml_opts).await;
+    let a_addr = *a.local().addr_ref();
+
+    let n = b
+      .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+      .await
+      .expect("join with crc32 checksum");
+    assert_eq!(n, 1, "one seed contacted");
+
+    let converged = tokio::time::timeout(Duration::from_secs(10), async {
+      loop {
+        if a.num_members() == 2 && b.num_members() == 2 {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+      }
+    })
+    .await;
+    assert!(
+      converged.is_ok(),
+      "crc32-checksummed cluster did not converge: a={}, b={}",
+      a.num_members(),
+      b.num_members()
+    );
+
+    // Ignoring Err: best-effort teardown; convergence assertion already passed.
+    let _ = a.shutdown().await;
+    let _ = b.shutdown().await;
+  }
+
+  /// Construction must reject a gossip checksum algorithm whose backend feature
+  /// is not compiled into this build, before the node starts. The options
+  /// builder accepts the algorithm, but every later `checksum_gossip` would fail
+  /// and the driver would drop the datagram — silently disabling ALL gossip.
+  /// Mirrors the encryption `valid_keyring_constructs` guard; runs only when
+  /// `checksum-murmur3` is absent so the Murmur3 backend is genuinely missing.
+  #[cfg(not(feature = "checksum-murmur3"))]
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn construction_rejects_unsupported_checksum_algorithm() {
+    use memberlist_reactor::Error;
+
+    // Murmur3 is absent in this build (the harness enables only checksum-crc32).
+    // The selection is accepted by `with_checksum`, but the trial `apply` probe
+    // inside validate_checksum returns `ChecksumError::Disabled`.
+    let bad = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
+    let ml_opts = MemberlistOptions::new().with_checksum(bad);
+
+    let result = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+      &SocketAddrResolver,
+      SmolStr::new("bad-checksum"),
+      MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+      Options::new().with_memberlist(ml_opts),
+      VoidDelegate::<SmolStr, SocketAddr>::new(),
+    )
+    .await;
+    assert!(
+      matches!(result, Err(Error::Checksum(_))),
+      "unsupported checksum algorithm must be rejected at construction"
+    );
+  }
+}
+
 #[cfg(feature = "encryption-aes-gcm")]
 mod encryption {
   use super::*;
@@ -354,6 +436,62 @@ async fn default_options_are_unchanged() {
   // Ignoring Err: best-effort teardown; convergence assertion already passed.
   let _ = a.shutdown().await;
   let _ = b.shutdown().await;
+}
+
+/// The largest plaintext `gossip_mtu` whose on-wire datagram (after the
+/// checksum and encryption wrappers) still fits one 65507-byte UDP packet — the
+/// reactor construction ceiling. Computed from the same proto constants the
+/// driver uses, so the test tracks any wrapper-overhead change automatically.
+fn gossip_mtu_ceiling() -> usize {
+  65507
+    - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+    - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD
+}
+
+/// A `gossip_mtu` at exactly the checksum-and-encryption-aware ceiling
+/// constructs cleanly: its near-MTU wire datagram is the largest that still fits
+/// one UDP packet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_mtu_at_ceiling_constructs() {
+  let ml_opts = MemberlistOptions::new().with_gossip_mtu(gossip_mtu_ceiling());
+  let m = make_with_opts("mtu-ceiling", ml_opts).await;
+  assert_eq!(
+    m.num_members(),
+    1,
+    "node at the gossip_mtu ceiling constructs"
+  );
+  // Ignoring Err: best-effort teardown; the construction assertion already passed.
+  let _ = m.shutdown().await;
+}
+
+/// A `gossip_mtu` one byte above the ceiling is rejected at construction with
+/// the typed `Error::InvalidGossipMtu`, carrying the configured value and the
+/// ceiling — the reactor parity with compio / embedded / smoltcp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_mtu_above_ceiling_is_rejected() {
+  use memberlist_reactor::Error;
+
+  let over = gossip_mtu_ceiling() + 1;
+  let ml_opts = MemberlistOptions::new().with_gossip_mtu(over);
+
+  let result = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("mtu-over"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  // Discard a wrongly-constructed handle so the match does not require `Debug`
+  // on `Memberlist`; the error path is what this test asserts.
+  .map(|_| ());
+  match result {
+    Err(Error::InvalidGossipMtu(e)) => {
+      assert_eq!(e.configured(), over, "carries the configured gossip_mtu");
+      assert_eq!(e.ceiling(), gossip_mtu_ceiling(), "carries the ceiling");
+    }
+    other => panic!("expected Err(InvalidGossipMtu), got {other:?}"),
+  }
 }
 
 /// Over-long (>253 byte) and non-UTF-8 labels must be rejected at the setter

@@ -167,6 +167,7 @@ pub(crate) mod wire;
 
 // ── Wire types, codec, and framing ──────────────────────────────────────────
 pub mod bridge;
+pub mod checksum;
 pub mod codec;
 pub mod compression;
 pub mod convert;
@@ -201,6 +202,10 @@ pub use time::Instant;
 
 pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use cheap_clone::CheapClone;
+pub use checksum::{
+  CHECKSUMED_WRAPPER_OVERHEAD, ChecksumAlgorithm, ChecksumDigest, ChecksumError, ChecksumOptions,
+  ChecksumOutcome, decode_checksummed_frame, digest, encode_checksummed_frame, verify,
+};
 pub use codec::{
   CodecError, DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing,
   encode_outgoing_compound, parse_message, parse_messages,

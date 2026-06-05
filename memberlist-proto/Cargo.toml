@@ -37,6 +37,7 @@ std = [
   "chacha20poly1305?/std",
   "lz4_flex?/std",
   "brotli?/std",
+  "crc32fast?/std",
 ]
 alloc = ["cheap-clone/alloc", "varing/alloc"]
 tracing = ["dep:tracing"]
@@ -80,6 +81,17 @@ tls = ["std", "dep:rustls", "dep:rustls-pki-types"]
 # layer replaced by the raw-passthrough RawRecords codec. Needs the heap
 # tier (the stream codec buffers into `Vec`).
 tcp = ["alloc"]
+
+# Checksum backends — opt-in; the default build pulls none. Every backend is
+# no_std+alloc (a software digest, no std I/O or C binding), so each pulls only
+# the `alloc` tier. crc32fast defaults its own `std` feature on, so it is
+# declared `default-features = false` below and its `std` is threaded into this
+# crate's `std` feature; xxhash-rust and hash32 are no_std by default.
+checksum-crc32 = ["alloc", "dep:crc32fast"]
+checksum-xxhash32 = ["alloc", "xxhash-rust/xxh32"]
+checksum-xxhash64 = ["alloc", "xxhash-rust/xxh64"]
+checksum-xxhash3 = ["alloc", "xxhash-rust/xxh3"]
+checksum-murmur3 = ["alloc", "dep:hash32"]
 
 # Compression backends — opt-in; the default build pulls none. Each pulls the
 # capability tier its backend requires: lz4 is no_std+alloc; snappy/zstd/brotli
@@ -130,6 +142,14 @@ derive_more = { workspace = true, features = ["display", "from", "is_variant", "
 paste = { workspace = true }
 triomphe = { workspace = true }
 varing = { workspace = true }
+
+# Checksum backends — opt-in (see the checksum-* features). All no_std-capable:
+# crc32fast defaults `std` on so it is pinned `default-features = false` (its
+# `std` is re-enabled via this crate's `std` feature); xxhash-rust and hash32
+# are no_std by default.
+crc32fast = { version = "1", optional = true, default-features = false }
+xxhash-rust = { version = "0.8", optional = true, default-features = false }
+hash32 = { version = "1", optional = true, default-features = false }
 
 # Compression backends — opt-in (see the compression-* features).
 brotli = { version = "8", optional = true, default-features = false }

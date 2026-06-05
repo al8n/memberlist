@@ -599,6 +599,11 @@ pub fn take_reliable_unit(
 /// compression is enabled, and `[unit_len][frame]` when both are disabled
 /// (byte-identical to the encryption-unaware [`encode_reliable_unit`]).
 ///
+/// The reliable plane carries no checksum transform: stream transports
+/// provide their own end-to-end integrity, so corruption detection is an
+/// unreliable-plane (connectionless datagram) concern and lives on the gossip
+/// path only.
+///
 /// An encryption backend error (typically
 /// [`crate::encryption::EncryptionError::UnsupportedAlgorithm`] for a key
 /// whose backend was not built into this binary) is surfaced as `Err` so
@@ -659,6 +664,11 @@ pub fn encode_reliable_unit_with_encryption(
 /// which strips `Encrypted` first (if present), then `Compressed` (if
 /// present), then returns the inner bytes. Bomb-guarded by `max_orig_len`
 /// on every wrapper.
+///
+/// The reliable encoder emits no `Checksumed` wrapper — checksums are an
+/// unreliable-plane concern — so that layer is never present on this path.
+/// The shared [`unwrap_transforms_with_encryption`] still recognizes it
+/// defensively, but a well-formed reliable unit will not exercise that arm.
 pub fn take_reliable_unit_with_encryption(
   buf: &[u8],
   encryption: &crate::encryption::EncryptionOptions,

@@ -62,6 +62,6 @@ pub use gossip_io::GossipIo;
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
 pub use stream_io::{StreamIo, StreamIoError};
 pub use transform::{
-  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, LabelError, SecretKey,
-  TransformOptions,
+  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
+  Keyring, LabelError, SecretKey, TransformOptions,
 };

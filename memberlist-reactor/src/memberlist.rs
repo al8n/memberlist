@@ -17,8 +17,8 @@ use memberlist_proto::RawRecords;
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use memberlist_proto::streams::{StreamEndpoint, StreamTransport};
 use memberlist_proto::{
-  AliveDelegate, CompressionOptions, EncryptionOptions, Endpoint, EndpointOptions, Instant,
-  MergeDelegate, Node, event::Event, typed::NodeState,
+  AliveDelegate, ChecksumOptions, CompressionOptions, EncryptionOptions, Endpoint, EndpointOptions,
+  Instant, MergeDelegate, Node, event::Event, typed::NodeState,
 };
 #[cfg(feature = "tls")]
 use memberlist_proto::{Labeled, TlsOptions, TlsRecords};
@@ -32,8 +32,8 @@ use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
+    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
   },
   delegate::Delegate,
   error::Error,
@@ -43,7 +43,7 @@ use crate::{
   resolver::{AddressResolver, MaybeResolved},
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
-  transform::validate_encryption,
+  transform::{validate_checksum, validate_encryption},
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
@@ -147,7 +147,17 @@ impl<I: NodeId> Memberlist<I> {
     validate_advertise(bound)?;
 
     let (ml_opts, drv_opts, alive, merge) = options.into_parts();
+    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet
+    // before the endpoint is built: a near-MTU gossip packet above the ceiling
+    // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
+    validate_gossip_mtu(&ml_opts)?;
     validate_encryption(ml_opts.encryption())?;
+    // Reject a gossip checksum algorithm whose backend feature is absent: the
+    // options builder accepts it, but every later `checksum_gossip` would fail
+    // and the driver would drop the datagram — so a "successful" checksum config
+    // would silently disable ALL gossip. Checksum is a gossip-plane concern only;
+    // the reliable QUIC bridge carries no checksum.
+    validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
@@ -165,10 +175,14 @@ impl<I: NodeId> Memberlist<I> {
     let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
 
     let mut endpoint = QuicEndpoint::new(ep, quic_config);
-    // Apply the configured compression and encryption policies. QUIC's reliable
-    // path has its own connection-level security layer; compression and encryption
-    // are applied to the gossip (UDP datagram) path only.
+    // Apply the configured compression, checksum, and encryption policies. QUIC's
+    // reliable path has its own connection-level security and integrity layer;
+    // compression, checksum, and encryption are applied to the gossip (UDP
+    // datagram) path only.
     endpoint.set_compression_options(*ml_opts.compression());
+    endpoint
+      .set_checksum_options(*ml_opts.checksum())
+      .map_err(Error::Checksum)?;
     endpoint.set_encryption_options(ml_opts.encryption().clone());
     // Thread the cluster label into the reliable bridge constructor so the
     // reliable plane enforces the same label as the gossip codec.
@@ -362,10 +376,20 @@ impl<I: NodeId> Memberlist<I> {
     if drv_opts.close_timeout().is_zero() {
       return Err(Error::ZeroCloseTimeout);
     }
+    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet
+    // before the endpoint is built: a near-MTU gossip packet above the ceiling
+    // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
+    validate_gossip_mtu(&ml_opts)?;
     // Validate the encryption configuration before the endpoint is built, so an
     // unusable keyring surfaces as a typed construction error rather than silently
     // discarding every encrypted gossip datagram at runtime.
     validate_encryption(ml_opts.encryption())?;
+    // Reject a gossip checksum algorithm whose backend feature is absent: the
+    // options builder accepts it, but every later `checksum_gossip` would fail
+    // and the driver would drop the datagram — so a "successful" checksum config
+    // would silently disable ALL gossip. Checksum is a gossip-plane concern only;
+    // the reliable stream path carries no checksum.
+    validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
@@ -380,6 +404,14 @@ impl<I: NodeId> Memberlist<I> {
     let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
 
     let mut endpoint = make_endpoint(ep, &ml_opts);
+    // Apply the configured gossip (unreliable) checksum policy. Checksumming is a
+    // gossip-datagram concern only — the reliable stream path carries no checksum
+    // because the stream transport already provides integrity — so it is set on
+    // the built endpoint rather than threaded through the per-backend closure
+    // (which configures the reliable-plane label/compression/encryption).
+    endpoint
+      .set_checksum_options(*ml_opts.checksum())
+      .map_err(Error::Checksum)?;
     endpoint.start_scheduling(Instant::now());
 
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
@@ -768,6 +800,29 @@ impl<I: NodeId> Memberlist<I> {
     rx.await.map_err(|_| Error::Shutdown)?
   }
 
+  /// Reconfigures the gossip (unreliable) checksum policy in place.
+  ///
+  /// Checksumming applies to the gossip datagram path only — the reliable
+  /// stream path carries no checksum, as its transport already provides
+  /// integrity. The change takes effect on the next outbound datagram. Rejected
+  /// with `Err(NotRunning)` once the node has left the cluster.
+  pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetChecksumOptions(SetChecksumOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
   /// Reconfigures the gossip encryption policy in place.
   ///
   /// The keyring is validated before being applied: every key in the ring is
@@ -807,6 +862,46 @@ async fn resolve_one<Res: AddressResolver>(
       .next()
       .ok_or_else(|| Error::Resolve("no addresses resolved".into())),
   }
+}
+
+/// The IP-layer maximum UDP payload: 65535 (the 16-bit UDP length field) minus
+/// the 8-byte UDP header minus the 20-byte IPv4 header. A gossip packet is one
+/// UDP datagram, so its on-wire size can never exceed this. Mirrors the stream
+/// and QUIC drivers' `GOSSIP_RECV_BUF_MAX` recv-buffer clamp (both `65507`).
+const UDP_PAYLOAD_MAX: usize = 65507;
+
+/// The largest plaintext `gossip_mtu` whose on-wire datagram still fits a single
+/// UDP packet. A gossip packet's plaintext budget is `gossip_mtu`; the wire
+/// datagram after the checksum and encryption wrappers is at most
+/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` (the
+/// same model the drivers' recv buffers are sized to — compression only shrinks,
+/// the binding inflations are the checksum and encryption wrappers), and that
+/// must be `<= UDP_PAYLOAD_MAX`.
+const GOSSIP_MTU_MAX: usize = UDP_PAYLOAD_MAX
+  - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+  - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+
+/// Reject a configured `gossip_mtu` whose on-wire datagram cannot fit one UDP
+/// packet.
+///
+/// A gossip packet (probe ack, gossip-disseminated Alive / user broadcast) is
+/// sent as ONE UDP datagram, so a `gossip_mtu` whose near-MTU wire datagram —
+/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` —
+/// exceeds [`UDP_PAYLOAD_MAX`] is an impossible configuration: such packets would
+/// be deterministically unsendable and peers would falsely suspect this node.
+/// Reject it (rather than silently clamping) so the operator learns and fixes it,
+/// mirroring the compio / embedded / smoltcp drivers' reject-not-clamp doctrine.
+/// An unset `gossip_mtu` keeps the machine default, which sits well under the
+/// ceiling.
+fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), Error> {
+  if let Some(mtu) = opts.gossip_mtu()
+    && mtu > GOSSIP_MTU_MAX
+  {
+    return Err(Error::InvalidGossipMtu(
+      crate::error::InvalidGossipMtu::new(mtu, GOSSIP_MTU_MAX),
+    ));
+  }
+  Ok(())
 }
 
 /// Rejects an advertise address peers could not dial: unspecified, multicast,

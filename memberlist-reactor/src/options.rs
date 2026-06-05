@@ -5,8 +5,8 @@ use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use memberlist_proto::{
-  AliveDelegate, CompressionOptions, EncryptionOptions, MergeDelegate, label::validate_label,
-  typed::Meta,
+  AliveDelegate, ChecksumOptions, CompressionOptions, EncryptionOptions, MergeDelegate,
+  label::validate_label, typed::Meta,
 };
 
 /// SWIM-protocol-level overrides applied to the machine-layer
@@ -25,6 +25,10 @@ use memberlist_proto::{
 /// - `initial_local_state` — the local node's initial push/pull state snapshot.
 /// - `compression` — the initial gossip+stream compression policy (disabled by
 ///   default). The machine exposes a runtime setter for the post-start case.
+/// - `checksum` — the initial gossip (unreliable) checksum policy (disabled by
+///   default). Applied to the gossip datagram path only — NOT the reliable
+///   stream path, whose transport already provides integrity. The machine
+///   exposes a runtime setter for the post-start case.
 /// - `encryption` — the initial gossip+stream encryption policy (disabled /
 ///   no keyring by default). Callers that supply a keyring should verify it
 ///   before construction; the driver returns `Error::Encryption` if the keyring
@@ -44,6 +48,7 @@ pub struct MemberlistOptions {
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
   compression: CompressionOptions,
+  checksum: ChecksumOptions,
   encryption: EncryptionOptions,
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
@@ -95,6 +100,16 @@ impl MemberlistOptions {
   #[must_use]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
     self.compression = compression;
+    self
+  }
+
+  /// Sets the initial gossip (unreliable) checksum policy.
+  ///
+  /// Checksumming is applied to the gossip datagram path only — NOT the
+  /// reliable stream path, whose transport already provides integrity.
+  #[must_use]
+  pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
+    self.checksum = checksum;
     self
   }
 
@@ -171,6 +186,14 @@ impl MemberlistOptions {
   #[must_use]
   pub fn compression(&self) -> &CompressionOptions {
     &self.compression
+  }
+
+  /// The initial gossip (unreliable) checksum policy.
+  ///
+  /// Applied to the gossip datagram path only — NOT the reliable stream path.
+  #[must_use]
+  pub fn checksum(&self) -> &ChecksumOptions {
+    &self.checksum
   }
 
   /// The initial gossip+stream encryption policy.
@@ -518,8 +541,9 @@ mod builder_tests {
     assert_eq!(opts.initial_local_state(), None);
     assert_eq!(opts.label(), None);
     assert!(!opts.skip_inbound_label_check());
-    // Exercise the compression/encryption accessors (they return machine defaults).
+    // Exercise the compression/checksum/encryption accessors (machine defaults).
     let _compression = opts.compression();
+    let _checksum = opts.checksum();
     let _encryption = opts.encryption();
   }
 
@@ -530,6 +554,20 @@ mod builder_tests {
       .with_encryption(EncryptionOptions::default());
     let _compression = opts.compression();
     let _encryption = opts.encryption();
+  }
+
+  /// `with_checksum` sets the gossip (unreliable) checksum field; the accessor
+  /// reflects the override. Checksumming is gossip-plane only — the reliable
+  /// stream path carries no checksum — so this configures just the one field.
+  #[test]
+  fn memberlist_options_with_checksum_sets_field() {
+    use memberlist_proto::ChecksumAlgorithm;
+    let configured = ChecksumOptions::default().with_algorithm(ChecksumAlgorithm::Crc32);
+    let opts = MemberlistOptions::new().with_checksum(configured);
+    assert_eq!(opts.checksum().algorithm(), Some(ChecksumAlgorithm::Crc32));
+
+    // The default leaves checksumming disabled (no algorithm selected).
+    assert_eq!(MemberlistOptions::new().checksum().algorithm(), None);
   }
 
   #[test]

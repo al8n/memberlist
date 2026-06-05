@@ -2,7 +2,8 @@
 //! cluster label.
 
 pub use memberlist_proto::{
-  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
+  Keyring, SecretKey,
 };
 
 #[cfg(not(feature = "std"))]
@@ -28,6 +29,13 @@ pub use memberlist_proto::LabelError;
 pub struct TransformOptions {
   /// Cross-transport gossip + reliable-plane compression.
   pub compression: CompressionOptions,
+  /// Gossip (unreliable) plane checksum.
+  ///
+  /// Applied only to outbound gossip datagrams on the UDP path; reliable
+  /// streams carry no checksum (they rely on the stream transport's own
+  /// integrity), matching memberlist-core and the legacy driver. [`Default`]
+  /// selects no algorithm, leaving the gossip codec identity.
+  pub checksum: ChecksumOptions,
   /// Cross-transport gossip + reliable-plane AEAD encryption.
   pub encryption: EncryptionOptions,
   /// Validated cluster label, or `None` for an unlabeled node.
@@ -48,6 +56,16 @@ impl TransformOptions {
   #[must_use]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
     self.compression = compression;
+    self
+  }
+
+  /// Set the gossip (unreliable) plane checksum.
+  ///
+  /// Applies to outbound gossip datagrams only; reliable streams carry no
+  /// checksum.
+  #[must_use]
+  pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
+    self.checksum = checksum;
     self
   }
 
@@ -105,7 +123,10 @@ impl TransformOptions {
 
 #[cfg(test)]
 mod tests {
-  use super::{CompressAlgorithm, CompressionOptions, EncryptionOptions, TransformOptions};
+  use super::{
+    ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
+    TransformOptions,
+  };
 
   #[test]
   fn default_is_disabled_and_unlabelled() {
@@ -113,6 +134,7 @@ mod tests {
       assert!(opts.label().is_none());
       assert!(!opts.skip_inbound_label_check());
       assert!(opts.compression.algorithm().is_none());
+      assert!(opts.checksum.algorithm().is_none());
     }
   }
 
@@ -155,10 +177,12 @@ mod tests {
   }
 
   #[test]
-  fn compression_and_encryption_builders_set_their_fields() {
+  fn compression_checksum_and_encryption_builders_set_their_fields() {
     let opts = TransformOptions::new()
       .with_compression(CompressionOptions::new().with_algorithm(CompressAlgorithm::Lz4))
+      .with_checksum(ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32))
       .with_encryption(EncryptionOptions::default());
     assert_eq!(opts.compression.algorithm(), Some(CompressAlgorithm::Lz4));
+    assert_eq!(opts.checksum.algorithm(), Some(ChecksumAlgorithm::Crc32));
   }
 }

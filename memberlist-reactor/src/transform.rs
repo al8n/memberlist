@@ -2,7 +2,7 @@
 //! constructors and the runtime transform setters.
 
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-use memberlist_proto::{EncryptionError, EncryptionOptions};
+use memberlist_proto::{ChecksumOptions, EncryptionError, EncryptionOptions};
 
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 use crate::error::Error;
@@ -23,6 +23,22 @@ pub(crate) fn validate_encryption(opts: &EncryptionOptions) -> Result<(), Error>
     }
   }
   Ok(())
+}
+
+/// Probe a [`ChecksumOptions`] for usability in THIS build by trial-applying it
+/// to an empty payload. A configured algorithm whose backend feature was not
+/// compiled into this binary fails here with a
+/// [`ChecksumError`](memberlist_proto::ChecksumError) (the options builder
+/// accepts it, but every later `checksum_gossip` would fail and the driver would
+/// drop the datagram — a "successful" checksum config would silently disable ALL
+/// gossip), so the node refuses to start rather than running gossipless after a
+/// false `Ok`.
+///
+/// Returns `Ok(())` when checksumming is disabled (no algorithm) — always usable
+/// (identity codec) — or the configured algorithm's backend is present.
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+pub(crate) fn validate_checksum(opts: &ChecksumOptions) -> Result<(), Error> {
+  opts.apply(&[]).map(|_| ()).map_err(Error::Checksum)
 }
 
 /// Convert an [`EncryptionError`] from `encode_encrypted_frame` into the

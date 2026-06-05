@@ -43,8 +43,8 @@ use memberlist_proto::{
 
 use crate::{
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinKind, LeaveCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd,
+    SetEncryptionOptionsCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
   driver_options::DriverOptions,
@@ -247,9 +247,10 @@ struct QuicDriverState<I> {
 
 /// Compute the per-recv UDP buffer size from the coordinator's
 /// configured `gossip_mtu`. A datagram on the wire is at most
-/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` bytes when encryption is
-/// enabled (the wrapper carries the algorithm tag + nonce + AEAD auth
-/// tag); the driver sizes the recv buffer to that value so a
+/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`
+/// bytes when checksum and encryption are enabled (the encryption wrapper
+/// carries the algorithm tag + nonce + AEAD auth tag, and the checksum
+/// wrapper its tag + digest); the driver sizes the recv buffer to that value so a
 /// configured `with_gossip_mtu` above the historical 16 KiB default is
 /// not silently truncated by the kernel. Mirrors the stream driver's
 /// `gossip_recv_buf_len`.
@@ -267,6 +268,7 @@ where
   endpoint
     .gossip_mtu()
     .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
@@ -703,6 +705,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
       Command::Leave(LeaveCmd { reply }) => reply,
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
+      Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
       Command::QueueUserBroadcast(cmd) => cmd.reply,
       Command::SetLocalState(cmd) => cmd.reply,
@@ -1030,6 +1033,30 @@ async fn dispatch_command<I>(
       let res: Result<()> = if endpoint.is_running() {
         endpoint.set_compression_options(opts);
         Ok(())
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = reply.send(res);
+    }
+    Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
+      // Gate on a running node FIRST: after `leave()` the endpoint emits no
+      // gossip datagrams, so a new checksum policy could never take effect on
+      // the wire. Reject with `NotRunning` without validating — there is no
+      // point probing a policy that can never apply. When running, validate the
+      // policy BEFORE applying it: a checksum algorithm whose backend feature is
+      // not compiled into this build is accepted by the options builder, but
+      // every later `checksum_gossip` would fail and the driver would drop the
+      // datagram — so a "successful" change would silently disable ALL gossip
+      // after a false `Ok`. Probe usability via a trial `apply`; only swap the
+      // live policy when it is usable. Checksum is a gossip-plane concern only —
+      // the reliable QUIC bridge carries no checksum (quinn provides its own
+      // integrity) — so this updates just the coordinator's gossip policy. The
+      // single-task driver makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_checksum_options(opts)
+          .map_err(MemberlistError::Checksum)
       } else {
         Err(MemberlistError::NotRunning)
       };
@@ -1409,10 +1436,16 @@ where
         }
       };
       let compressed = state.endpoint.compress_gossip(&plain);
+      let checksummed = match state.endpoint.checksum_gossip(&compressed) {
+        Ok(b) => b,
+        // Checksum configured but its backend was not built in — drop rather
+        // than emit an unverifiable datagram on a checksum-configured path.
+        Err(_) => continue,
+      };
       // `Bytes` so the datagram-queue path and the UDP fallback can share the
       // same encoded payload without a second copy (`clone` is an O(1) refcount
       // bump).
-      let on_wire = match state.endpoint.encrypt_gossip(&compressed) {
+      let on_wire = match state.endpoint.encrypt_gossip(&checksummed) {
         Ok(b) => Bytes::from(b),
         Err(_) => continue,
       };

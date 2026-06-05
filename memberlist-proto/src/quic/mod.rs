@@ -134,6 +134,15 @@ pub struct QuicEndpoint<I> {
   /// reliable path always skips — quinn-encrypted streams already provide
   /// confidentiality.
   encryption: crate::EncryptionOptions,
+  /// Checksum configuration for the gossip (unreliable) plane — the QUIC
+  /// datagram path. A checksum guards the connectionless datagram path, which
+  /// carries no transport-level integrity of its own, so it is applied in
+  /// [`Self::checksum_gossip`]. The QUIC reliable bidi bridge carries no
+  /// checksum: quinn streams are already integrity-protected end to end, so
+  /// corruption detection is an unreliable-plane concern (matching the original
+  /// Go memberlist and the legacy port). A disabled `ChecksumOptions` makes the
+  /// gossip path identity.
+  checksum: crate::ChecksumOptions,
   /// Cluster label for all reliable bridges spawned by this coordinator, or
   /// `None` when no label is configured.
   ///
@@ -349,6 +358,7 @@ where
       cfg,
       compression: crate::CompressionOptions::new(),
       encryption: crate::EncryptionOptions::new(),
+      checksum: crate::ChecksumOptions::new(),
       label: None,
       skip_inbound_label_check: false,
       conns: ConnTable::new(),
@@ -476,6 +486,47 @@ where
     }
   }
 
+  /// The configured gossip-plane checksum options. Applies to the QUIC
+  /// datagram (unreliable) path only; the reliable bidi path carries no
+  /// checksum.
+  pub fn checksum(&self) -> crate::ChecksumOptions {
+    self.checksum
+  }
+
+  /// Reconfigure the gossip-plane checksum policy in place. Applies to the next
+  /// outbound gossip datagram via [`Self::checksum_gossip`]. The reliable bidi
+  /// bridge carries no checksum (quinn provides its own integrity), so there is
+  /// no per-bridge fan-out.
+  pub fn set_checksum_options(
+    &mut self,
+    checksum: crate::ChecksumOptions,
+  ) -> Result<(), crate::ChecksumError> {
+    // Validate the algorithm's backend is built into this binary BEFORE storing
+    // it: an unusable policy would make every subsequent `checksum_gossip` fail
+    // and the driver drop the datagram — silently disabling all gossip behind a
+    // false success. The empty-payload probe surfaces `Disabled` /
+    // `UnknownAlgorithm`.
+    checksum.apply(&[])?;
+    self.checksum = checksum;
+    Ok(())
+  }
+
+  /// Wrap one outbound gossip datagram in a checksum frame for the wire. The
+  /// codec-owning driver calls this on the already-compressed gossip bytes
+  /// (from [`Self::compress_gossip`]) BEFORE [`Self::encrypt_gossip`], so the
+  /// on-wire order is `[Encrypted[Checksumed[Compressed[frame]]]]`. When
+  /// checksumming is disabled the bytes are returned unchanged.
+  ///
+  /// Returns `Err` when a checksum algorithm is configured but its backend was
+  /// not built into this binary; the driver MUST drop the gossip rather than
+  /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
+  pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
+    match self.checksum.apply(datagram)? {
+      crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
+      crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+    }
+  }
+
   /// The configured cross-transport encryption options. Applies to the
   /// gossip path only; the QUIC reliable path always skips.
   pub fn encryption_options(&self) -> &crate::EncryptionOptions {
@@ -483,13 +534,15 @@ where
   }
 
   /// Encrypt one outbound gossip datagram for the wire. The codec-owning
-  /// driver calls this on the already-compressed gossip bytes (from
-  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
-  /// encryption is disabled the bytes are returned unchanged.
+  /// driver calls this on the already-compressed-and-checksummed gossip bytes
+  /// (from [`Self::compress_gossip`] → [`Self::checksum_gossip`]) before
+  /// handing them to the UDP socket. When encryption is disabled the bytes
+  /// are returned unchanged.
   ///
-  /// The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
-  /// transforms are enabled and compression won, or `[Encrypted[frame]]`
-  /// when compression is disabled or did not shrink.
+  /// The on-wire byte order with the full stack is
+  /// `[Encrypted[Checksumed[Compressed[frame]]]]`; each disabled layer
+  /// collapses to identity (e.g. `[Encrypted[frame]]` with compression and
+  /// checksum off).
   ///
   /// Returns `Err` when encryption is configured but the backend rejects the
   /// request — typically [`crate::EncryptionError::UnsupportedAlgorithm`]
@@ -507,27 +560,30 @@ where
 
   /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
   /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
-  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
-  /// pass (each layer identity when its wrapper is absent). A datagram with
-  /// no Encrypted wrapper is returned unchanged when no keyring is
-  /// configured; when a keyring IS configured the strict-mode entry check
-  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
-  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
-  /// driver drops the datagram (gossip is lossy and self-healing).
+  /// frames — it strips the Encrypted-then-Checksumed-then-Compressed wrapper
+  /// stack in one pass (each layer identity when its wrapper is absent, the
+  /// checksum layer verifying the digest as it strips). A datagram with no
+  /// Encrypted wrapper is returned unchanged when no keyring is configured;
+  /// when a keyring IS configured the strict-mode entry check rejects any
+  /// non-Encrypted leading tag. A corrupt or unknown-algorithm wrapper, a
+  /// checksum mismatch, or a frame the keyring cannot decrypt, is an `Err` —
+  /// the driver drops the datagram (gossip is lossy and self-healing).
   ///
   /// This is the SINGLE canonical ingress unwrap on the coordinator. The
-  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
-  /// (compress, then encrypt) so the on-wire order is
-  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
-  /// authentication never depends on integration discipline.
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::checksum_gossip`]
+  /// → [`Self::encrypt_gossip`] so the on-wire order is
+  /// `[Encrypted[Checksumed[Compressed[frame]]]]`; this helper reverses all
+  /// layers, so authentication and integrity never depend on integration
+  /// discipline.
   pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
     // datagram and is rejected. The encryption-aware unwrap consumes an
-    // Encrypted wrapper through the keyring, then strips a Compressed
-    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
-    // when no keyring is configured (the strict-mode entry check is gated
-    // on `encryption.is_enabled()`).
+    // Encrypted wrapper through the keyring, then verifies and strips a
+    // Checksumed wrapper, then strips a Compressed wrapper if present; a
+    // non-Encrypted-led datagram is returned unchanged when no keyring is
+    // configured (the strict-mode entry check is gated on
+    // `encryption.is_enabled()`).
     crate::unwrap_transforms_with_encryption(datagram, self.ep.gossip_mtu(), &self.encryption)
       .map(|cow| cow.into_owned())
   }
@@ -4821,7 +4877,10 @@ mod tests {
         .with_algorithm(CompressAlgorithm::Lz4)
         .with_threshold(1),
     );
-    for len in 1..=1500 {
+    // Sweep up to the gossip MTU: inbound decode rejects a datagram whose
+    // recovered plaintext exceeds the ceiling, so a round-trip is only defined
+    // for in-budget sizes (the over-MTU rejection is covered separately above).
+    for len in 1..=coord.gossip_mtu() {
       // Mostly-varying pattern with a short repeated motif: the backend's
       // saving is small and varies with `len`, ensuring the don't-expand
       // else branch is exercised for some sizes while still round-tripping

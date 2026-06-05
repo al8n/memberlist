@@ -303,11 +303,14 @@ where
     // largest on-wire datagram the machine can emit); an over-ceiling `gossip_mtu`
     // would overflow that addition — a panic in a checked build, a wrap to an
     // undersized arena in release that then silently truncates in-budget gossip.
-    // Bounding it here makes every downstream `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`
-    // safe and mirrors the async drivers' reject-not-clamp doctrine. (The engine
+    // Bounding it here makes every downstream
+    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
+    // and mirrors the async drivers' reject-not-clamp doctrine. (The engine
     // re-validates it too; the driver needs it before sizing the UDP arenas.) Done
     // before any UDP allocation.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
+      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
     if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
       return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: ep_cfg.gossip_mtu(),
@@ -439,7 +442,9 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram = ep_cfg.gossip_mtu() + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+    let max_datagram = ep_cfg.gossip_mtu()
+      + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+      + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets

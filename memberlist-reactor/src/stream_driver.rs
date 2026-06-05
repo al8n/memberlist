@@ -42,8 +42,8 @@ use memberlist_proto::{
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
+    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -276,6 +276,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     let buf_len = endpoint
       .gossip_mtu()
       .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     let (inbound_tx, inbound_rx) = flume::bounded(BRIDGE_INBOUND_CAP);
     let (dial_tx, dial_rx) = flume::unbounded();
@@ -597,6 +598,26 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
+      Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the endpoint emits no
+        // gossip datagrams, so a new checksum policy (a gossip-plane concern)
+        // could never take effect on the wire. When running, validate the
+        // policy before applying it: an algorithm whose backend feature is
+        // absent is accepted by the options builder, but every later
+        // `checksum_gossip` would fail and the driver would drop the datagram —
+        // so a "successful" change would silently disable ALL gossip after a
+        // false `Ok`.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_checksum_options(opts)
+            .map_err(Error::Checksum)
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits
         // no protocol traffic, so a new encryption policy could never take
@@ -847,7 +868,13 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         }
       };
       let compressed = self.endpoint.compress_gossip(&plain);
-      let on_wire = match self.endpoint.encrypt_gossip(&compressed) {
+      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
+        Ok(b) => b,
+        // Checksum configured but its backend was not built in — drop rather
+        // than emit an unverifiable datagram on a checksum-configured path.
+        Err(_) => continue,
+      };
+      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
         Ok(b) => b,
         Err(_) => continue,
       };
@@ -1006,6 +1033,10 @@ where
             let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }
@@ -1828,25 +1859,32 @@ mod tests {
   /// poll's top-of-poll command drain and the shutdown `close_and_drain` gets a
   /// reply (`Err(Shutdown)`, or `Ok(())` for `Shutdown`) instead of hanging.
   ///
-  /// That window — `endpoint.leave()` + `drain_surfaces` — only exists mid-poll,
-  /// so the commands must be enqueued concurrently. A pusher thread bursts all
-  /// eight variants the instant a barrier releases, while the main task polls the
-  /// already-`begin_shutdown()` driver. When the burst lands wholly after the top
-  /// drain (detected by the four variants whose `close_and_drain` reply differs
-  /// from their dispatch reply all returning `Shutdown`), all eight commands flow
-  /// through `close_and_drain` together, covering every arm. Re-attempted until a
-  /// clean window hit; the bound fails loudly rather than hanging if the window is
-  /// never hit (it is, well within a few attempts).
+  /// That window — between the poll's top-of-poll dispatch and `close_and_drain`
+  /// — only exists mid-poll, so the commands must be enqueued concurrently. A
+  /// pusher thread bursts all variants the instant a barrier releases, while the
+  /// main task polls the already-`begin_shutdown()` driver. A variant whose
+  /// `close_and_drain` reply (`Shutdown`) differs from its dispatch reply proves
+  /// it reached `close_and_drain`. The window is racy, so each variant is
+  /// accumulated across attempts (rotating the push order so none is starved);
+  /// the bound fails loudly if any variant is never observed.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn shutdown_close_and_drain_fails_every_queued_command() {
     use std::{sync::Barrier, thread};
 
-    // The four distinguishable variants: dispatched-while-running they reply
+    // The five distinguishable variants: dispatched-while-running they reply
     // Ok / a non-Shutdown error, so a Shutdown reply on these proves the command
     // reached `close_and_drain` rather than the top-of-poll dispatch.
-    const MAX_ATTEMPTS: usize = 2000;
-    let mut hit = false;
-    for _ in 0..MAX_ATTEMPTS {
+    const MAX_ATTEMPTS: usize = 20000;
+    // The window is racy, so accumulate per-variant rather than demanding all
+    // five in one attempt; the push order is rotated each attempt so no variant
+    // is starved by always racing from the same position. The loop breaks as
+    // soon as every variant has been observed replying Shutdown.
+    let mut seen_join = false;
+    let mut seen_user = false;
+    let mut seen_comp = false;
+    let mut seen_chk = false;
+    let mut seen_enc = false;
+    for attempt in 0..MAX_ATTEMPTS {
       let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
       shared.begin_shutdown();
 
@@ -1854,6 +1892,7 @@ mod tests {
       let (join_tx, join_rx) = oneshot::channel::<Result<usize, Error>>();
       let (user_tx, user_rx) = oneshot::channel::<Result<(), Error>>();
       let (comp_tx, comp_rx) = oneshot::channel::<Result<(), Error>>();
+      let (chk_tx, chk_rx) = oneshot::channel::<Result<(), Error>>();
       let (enc_tx, enc_rx) = oneshot::channel::<Result<(), Error>>();
       // The remaining four arms (covered when the window is hit, but their
       // Shutdown / Ok reply is not uniquely attributable to this arm).
@@ -1864,7 +1903,7 @@ mod tests {
 
       let to = "127.0.0.1:9".parse::<SocketAddr>().unwrap();
       let node = memberlist_proto::Node::new(SmolStr::new("peer"), to);
-      let cmds: Vec<Command<SmolStr>> = vec![
+      let mut cmds: Vec<Command<SmolStr>> = vec![
         Command::Join(JoinCmd {
           addrs: vec![to],
           wait: false,
@@ -1878,6 +1917,10 @@ mod tests {
         Command::SetCompressionOptions(SetCompressionOptionsCmd {
           opts: memberlist_proto::CompressionOptions::new(),
           reply: comp_tx,
+        }),
+        Command::SetChecksumOptions(SetChecksumOptionsCmd {
+          opts: memberlist_proto::ChecksumOptions::new(),
+          reply: chk_tx,
         }),
         Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
           opts: memberlist_proto::EncryptionOptions::new(),
@@ -1895,6 +1938,10 @@ mod tests {
           reply: rel_tx,
         }),
       ];
+      // Rotate the push order so each variant races from a different position
+      // across attempts rather than always last (which would starve it).
+      let rotation = attempt % cmds.len();
+      cmds.rotate_left(rotation);
 
       let barrier = Arc::new(Barrier::new(2));
       let pusher_barrier = barrier.clone();
@@ -1915,21 +1962,23 @@ mod tests {
       );
       pusher.join().expect("pusher thread joins");
 
-      // A clean window hit: all four distinguishable variants were failed by
-      // `close_and_drain` (Shutdown), so the burst landed wholly after the top
-      // drain and all eight arms ran.
-      let clean = matches!(join_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(user_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(comp_rx.await, Ok(Err(Error::Shutdown)))
-        && matches!(enc_rx.await, Ok(Err(Error::Shutdown)));
-      if clean {
-        hit = true;
+      // Record any variant that `close_and_drain` failed with Shutdown this
+      // attempt (a Shutdown reply on these proves the command reached
+      // `close_and_drain` rather than the top-of-poll dispatch).
+      seen_join |= matches!(join_rx.await, Ok(Err(Error::Shutdown)));
+      seen_user |= matches!(user_rx.await, Ok(Err(Error::Shutdown)));
+      seen_comp |= matches!(comp_rx.await, Ok(Err(Error::Shutdown)));
+      seen_chk |= matches!(chk_rx.await, Ok(Err(Error::Shutdown)));
+      seen_enc |= matches!(enc_rx.await, Ok(Err(Error::Shutdown)));
+      if seen_join && seen_user && seen_comp && seen_chk && seen_enc {
         break;
       }
     }
     assert!(
-      hit,
-      "the close_and_drain window was never hit cleanly in {MAX_ATTEMPTS} attempts"
+      seen_join && seen_user && seen_comp && seen_chk && seen_enc,
+      "every queued command variant must reply Shutdown via close_and_drain within \
+       {MAX_ATTEMPTS} attempts (join={seen_join} user={seen_user} comp={seen_comp} \
+       chk={seen_chk} enc={seen_enc})"
     );
   }
 

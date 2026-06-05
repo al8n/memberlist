@@ -66,6 +66,13 @@ brotli = ["memberlist-proto/compression-brotli", "memberlist-reactor?/compressio
 aes-gcm           = ["memberlist-proto/encryption-aes-gcm",           "memberlist-reactor?/encryption-aes-gcm",           "memberlist-compio?/encryption-aes-gcm",           "memberlist-smoltcp?/encryption-aes-gcm",           "memberlist-embassy?/encryption-aes-gcm",           "memberlist-embedded?/encryption-aes-gcm"]
 chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305", "memberlist-reactor?/encryption-chacha20-poly1305", "memberlist-compio?/encryption-chacha20-poly1305", "memberlist-smoltcp?/encryption-chacha20-poly1305", "memberlist-embassy?/encryption-chacha20-poly1305", "memberlist-embedded?/encryption-chacha20-poly1305"]
 
+# checksum (gossip-plane only; DE-prefixed) — every driver + proto define these
+crc32    = ["memberlist-proto/checksum-crc32",    "memberlist-reactor?/checksum-crc32",    "memberlist-compio?/checksum-crc32",    "memberlist-smoltcp?/checksum-crc32",    "memberlist-embassy?/checksum-crc32",    "memberlist-embedded?/checksum-crc32"]
+xxhash32 = ["memberlist-proto/checksum-xxhash32", "memberlist-reactor?/checksum-xxhash32", "memberlist-compio?/checksum-xxhash32", "memberlist-smoltcp?/checksum-xxhash32", "memberlist-embassy?/checksum-xxhash32", "memberlist-embedded?/checksum-xxhash32"]
+xxhash64 = ["memberlist-proto/checksum-xxhash64", "memberlist-reactor?/checksum-xxhash64", "memberlist-compio?/checksum-xxhash64", "memberlist-smoltcp?/checksum-xxhash64", "memberlist-embassy?/checksum-xxhash64", "memberlist-embedded?/checksum-xxhash64"]
+xxhash3  = ["memberlist-proto/checksum-xxhash3",  "memberlist-reactor?/checksum-xxhash3",  "memberlist-compio?/checksum-xxhash3",  "memberlist-smoltcp?/checksum-xxhash3",  "memberlist-embassy?/checksum-xxhash3",  "memberlist-embedded?/checksum-xxhash3"]
+murmur3  = ["memberlist-proto/checksum-murmur3",  "memberlist-reactor?/checksum-murmur3",  "memberlist-compio?/checksum-murmur3",  "memberlist-smoltcp?/checksum-murmur3",  "memberlist-embassy?/checksum-murmur3",  "memberlist-embedded?/checksum-murmur3"]
+
 # misc
 dns     = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
 tracing = ["memberlist-proto/tracing"]

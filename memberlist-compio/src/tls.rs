@@ -323,7 +323,7 @@ where
     if runtime.memberlist_options.skip_inbound_label_check() {
       tls_label_opts = tls_label_opts.skip_inbound_label_check();
     }
-    let endpoint = StreamEndpoint::with_compression(
+    let mut endpoint = StreamEndpoint::with_compression(
       ep,
       tls_label_opts,
       self.sni_provider,
@@ -331,6 +331,13 @@ where
       *runtime.memberlist_options.compression(),
     )
     .with_encryption(runtime.memberlist_options.encryption().clone());
+    // Checksum is gossip-plane (unreliable) only — reliable bridges carry no
+    // checksum — so it is threaded via the gossip-plane setter rather than a
+    // reliable-bridge-fanning builder.
+    // Ignoring Err: the checksum policy was validated in `Memberlist::new`
+    // (`validate_checksum_options`) before this driver task spawned, so its
+    // backend is built in and this store cannot fail.
+    let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
 
     // Retain the cluster label for the gossip codec. TLS isolation comes from
     // the TLS record layer; the gossip label is still applied via the codec

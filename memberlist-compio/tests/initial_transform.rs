@@ -16,7 +16,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
   SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
+use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions, EncryptionOptions, Keyring, SecretKey};
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -197,5 +197,34 @@ async fn construction_rejects_unsupported_keyring_algorithm() {
   assert!(
     matches!(err, MemberlistError::Encryption(_)),
     "expected Encryption(_), got {err:?}"
+  );
+}
+
+/// `Memberlist::new` must reject a gossip checksum algorithm whose backend
+/// feature is unsupported in this build before any socket is bound. The options
+/// builder accepts the algorithm, but every later `checksum_gossip` would fail
+/// and the driver would drop the datagram — silently disabling ALL gossip. A
+/// disabled (no-algorithm) policy is always accepted.
+#[cfg(not(feature = "checksum-murmur3"))]
+#[compio::test]
+async fn construction_rejects_unsupported_checksum_algorithm() {
+  // Murmur3 is absent in this build (the test harness enables only
+  // checksum-crc32). A Murmur3 selection is accepted by `with_checksum` but the
+  // trial `apply` probe inside validate_checksum_options returns
+  // `ChecksumError::Disabled`.
+  let bad_opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
+
+  let err = make_tcp(
+    "bad-checksum",
+    loopback_addr(8421),
+    MemberlistOptions::new().with_checksum(bad_opts),
+  )
+  .await
+  .map(|_| ())
+  .expect_err("unsupported checksum algorithm must be rejected at construction");
+
+  assert!(
+    matches!(err, MemberlistError::Checksum(_)),
+    "expected Checksum(_), got {err:?}"
   );
 }

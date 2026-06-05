@@ -54,8 +54,8 @@ pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeS
 // The wire transforms live in the shared `memberlist-embedded` core and are
 // re-exported here so the smoltcp public API is self-contained.
 pub use memberlist_embedded::transform::{
-  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, LabelError, SecretKey,
-  TransformOptions,
+  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
+  Keyring, LabelError, SecretKey, TransformOptions,
 };
 
 mod addr;
