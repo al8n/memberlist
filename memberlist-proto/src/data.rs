@@ -24,6 +24,9 @@ mod string;
 
 mod tuple;
 
+#[cfg(all(test, feature = "std"))]
+mod codec_tests;
+
 // ─── helpers (inlined from memberlist-proto::lib) ────────────────────────────
 
 #[cfg(debug_assertions)]
