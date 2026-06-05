@@ -1215,4 +1215,122 @@ mod tests {
       .expect_err("over-envelope unit_len must err");
     assert!(matches!(err, FrameError::Compression(_)));
   }
+
+  #[test]
+  fn oversize_original_payload_accessors() {
+    let pair = OversizeOriginal(4096, 1024);
+    assert_eq!(pair.claimed(), 4096);
+    assert_eq!(pair.max(), 1024);
+  }
+
+  #[test]
+  fn unit_len_exceeds_max_info_accessors_and_display() {
+    let info = UnitLenExceedsMaxInfo::new(2000, 1024);
+    assert_eq!(info.unit_len(), 2000);
+    assert_eq!(info.max(), 1024);
+    let s = info.to_string();
+    assert!(s.contains("2000") && s.contains("1024"), "got {s}");
+  }
+
+  #[test]
+  fn compression_error_display_strings_are_nonempty() {
+    let cases = [
+      CompressionError::UnsupportedAlgorithm(9),
+      CompressionError::Backend("boom".into()),
+      CompressionError::OversizeOriginal(OversizeOriginal(4096, 1024)),
+      CompressionError::MalformedFrame,
+      CompressionError::UnitLenExceedsMax(UnitLenExceedsMaxInfo::new(2000, 1024)),
+    ];
+    for e in &cases {
+      assert!(!e.to_string().is_empty(), "empty display for {e:?}");
+    }
+    // The structured variants surface their numbers.
+    assert!(
+      CompressionError::OversizeOriginal(OversizeOriginal(4096, 1024))
+        .to_string()
+        .contains("4096")
+    );
+  }
+
+  #[test]
+  fn decode_compressed_frame_rejects_malformed_headers() {
+    // Shorter than the 2-byte header.
+    assert!(matches!(
+      decode_compressed_frame(&[COMPRESSED_TAG], 1 << 20),
+      Err(CompressionError::MalformedFrame)
+    ));
+    assert!(matches!(
+      decode_compressed_frame(&[], 1 << 20),
+      Err(CompressionError::MalformedFrame)
+    ));
+    // Right length but wrong leading tag.
+    assert!(matches!(
+      decode_compressed_frame(&[0xAB, CompressAlgorithm::Lz4.tag()], 1 << 20),
+      Err(CompressionError::MalformedFrame)
+    ));
+  }
+
+  #[test]
+  fn decode_compressed_frame_rejects_truncated_orig_len_varint() {
+    // Valid tag + algo, then a lone varint continuation byte — the orig_len
+    // varint cannot complete, surfacing as a Backend error.
+    let frame = [COMPRESSED_TAG, CompressAlgorithm::Lz4.tag(), 0x80];
+    assert!(matches!(
+      decode_compressed_frame(&frame, 1 << 20),
+      Err(CompressionError::Backend(_))
+    ));
+  }
+
+  #[test]
+  fn compression_options_default_matches_new() {
+    assert_eq!(CompressionOptions::default(), CompressionOptions::new());
+  }
+
+  #[test]
+  fn compression_options_in_place_setters() {
+    let mut opts = CompressionOptions::new();
+    // set_algorithm enables; set_threshold replaces in place.
+    opts.set_algorithm(CompressAlgorithm::Lz4).set_threshold(99);
+    assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Lz4));
+    assert_eq!(opts.threshold(), 99);
+    // clear_algorithm disables.
+    opts.clear_algorithm();
+    assert!(opts.algorithm().is_none());
+    // update_algorithm assigns the raw Option in place.
+    opts.update_algorithm(Some(CompressAlgorithm::Zstd));
+    assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Zstd));
+    opts.update_algorithm(None);
+    assert!(opts.algorithm().is_none());
+  }
+
+  #[test]
+  fn compression_options_maybe_algorithm_builder() {
+    let some = CompressionOptions::new().maybe_algorithm(Some(CompressAlgorithm::Snappy));
+    assert_eq!(some.algorithm(), Some(CompressAlgorithm::Snappy));
+    let none = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .maybe_algorithm(None);
+    assert!(none.algorithm().is_none());
+  }
+
+  #[test]
+  fn compression_outcome_equality() {
+    assert_eq!(CompressionOutcome::Plain, CompressionOutcome::Plain);
+    assert_eq!(
+      CompressionOutcome::Compressed(vec![1, 2, 3]),
+      CompressionOutcome::Compressed(vec![1, 2, 3])
+    );
+    assert_ne!(
+      CompressionOutcome::Plain,
+      CompressionOutcome::Compressed(vec![1])
+    );
+  }
+
+  #[test]
+  fn take_reliable_unit_rejects_corrupt_leading_varint() {
+    // A 5-byte varint that overflows u32 is a hard corruption (not Incomplete),
+    // so take_reliable_unit propagates the FrameError rather than returning None.
+    let buf = [0x80, 0x80, 0x80, 0x80, 0x10, 0x00];
+    assert!(take_reliable_unit(&buf, 1 << 20).is_err());
+  }
 }

@@ -2910,6 +2910,324 @@ mod tests {
     }
   }
 
+  /// The `StreamEndpoint` membership/lifecycle forwarders delegate to the
+  /// inner [`Endpoint`]. Drive each once on a real coordinator so the
+  /// pass-through surface is covered and the `last_now` anchoring side effect
+  /// is exercised. Behavioural depth lives in the endpoint's own tests + the
+  /// sim harness; this guards the thin forwarding layer.
+  #[test]
+  fn stream_endpoint_membership_forwarders_delegate_to_endpoint() {
+    use crate::{
+      node::Node,
+      typed::{Alive, Meta, Suspect},
+    };
+
+    let now = Instant::now();
+    let ep = endpoint(7100);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // Pure read-only accessors.
+    assert_eq!(coord.resolve_peer_socket(&addr(7000)), addr(7000));
+    // No compression configured by default → the algorithm is None.
+    assert!(coord.compression().algorithm().is_none());
+    assert!(coord.max_stream_frame_size() > 0);
+
+    // Lifecycle: before scheduling and before any leave, the endpoint is
+    // running.
+    coord.start_scheduling(now);
+    assert!(coord.is_running());
+
+    // Seed an alive peer via the bootstrap forwarder, then assert membership
+    // grew — `handle_alive` reached the inner endpoint.
+    let alive = Alive::new(1, Node::new(SmolStr::new("peer-a"), addr(7001)));
+    coord.handle_alive(addr(7001), alive, now);
+    assert!(
+      coord
+        .endpoint_ref()
+        .member(&SmolStr::new("peer-a"))
+        .is_some(),
+      "handle_alive forwarded the alive into the inner endpoint",
+    );
+
+    // Suspect forwarder: inject a suspicion on the seeded peer (does not panic
+    // and reaches the inner endpoint).
+    let suspect = Suspect::new(1, SmolStr::new("peer-a"), SmolStr::new("n-7100"));
+    coord.handle_suspect(addr(7001), suspect, now);
+
+    // Metadata + broadcast + probe forwarders.
+    coord
+      .update_meta(Meta::empty())
+      .expect("update_meta forwards to the running endpoint");
+    coord
+      .queue_user_broadcast(Bytes::from_static(b"bcast"))
+      .expect("queue_user_broadcast forwards");
+    coord
+      .set_local_state_snapshot(Bytes::from_static(b"snap"))
+      .expect("set_local_state_snapshot forwards");
+    coord
+      .set_ack_payload(Bytes::from_static(b"ack-extra"))
+      .expect("set_ack_payload forwards");
+    // `start_probe` returns whether a probe target was selected; either bool
+    // is a valid outcome — the point is the forwarder runs.
+    let _ = coord.start_probe(now);
+
+    // Directed unreliable user packets.
+    coord
+      .send_user_packet(addr(7001), Bytes::from_static(b"u1"))
+      .expect("send_user_packet forwards");
+    coord
+      .send_user_packets(
+        addr(7001),
+        &[Bytes::from_static(b"u2"), Bytes::from_static(b"u3")],
+      )
+      .expect("send_user_packets forwards");
+
+    // An application ping returns a correlation token.
+    let _ping_id = coord.ping(Node::new(SmolStr::new("peer-a"), addr(7001)), now);
+
+    // `poll_memberlist_transmit` drains the inner endpoint's outbound gossip;
+    // at least the seeded alive / broadcasts produced some transmit traffic.
+    let mut transmits = 0usize;
+    while coord.poll_memberlist_transmit().is_some() {
+      transmits += 1;
+    }
+    assert!(
+      transmits > 0,
+      "the seeded membership produced gossip transmits"
+    );
+
+    // `poll_event`'s DialRequested-sieve arm: a DialRequested emitted by the
+    // inner endpoint must be sieved into the private dial deque, never returned
+    // to the caller. Inject one through the inner endpoint, then drain events.
+    let _intent =
+      coord
+        .endpoint_mut()
+        .start_push_pull(addr(7009), crate::event::PushPullKind::Refresh, now);
+    while let Some(ev) = coord.poll_event() {
+      assert!(
+        !matches!(ev, Event::DialRequested(_)),
+        "poll_event sieves DialRequested into the private deque",
+      );
+    }
+
+    // `leave` forwards to the inner endpoint and transitions the lifecycle out
+    // of running.
+    coord
+      .leave(now)
+      .expect("leave forwards to the running endpoint");
+    assert!(
+      !coord.is_running(),
+      "after leave the endpoint is no longer running",
+    );
+  }
+
+  /// `requeue_event` routes a `DialRequested` into the private dial queue
+  /// (surfacing a `Connect` via the normal poll path) and delegates every
+  /// other variant to the inner endpoint's queue (re-observed via
+  /// `poll_event`). Covers both arms of the match.
+  #[test]
+  fn requeue_event_routes_dial_requested_privately_and_others_to_endpoint() {
+    use crate::event::DialRequested;
+
+    let now = Instant::now();
+    let ep = endpoint(7100);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // (1) A requeued DialRequested is routed DIRECTLY into the private dial
+    // deque (the `Event::DialRequested` arm of `requeue_event`): it must NOT
+    // resurface through poll_event, AND it anchors an immediate-due
+    // `poll_timeout` wake (the freshly-sieved, never-attempted entry) so a
+    // caller advancing solely by `poll_timeout` cannot orphan it.
+    let dial = DialRequested::new(
+      StreamId::from_raw(0),
+      addr(7000),
+      now + Duration::from_secs(10),
+    );
+    coord.requeue_event(Event::DialRequested(dial), now);
+    while let Some(ev) = coord.poll_event() {
+      assert!(
+        !matches!(ev, Event::DialRequested(_)),
+        "a requeued DialRequested is serviced privately, never re-surfaced",
+      );
+    }
+    // The never-attempted private dial entry forces an immediate-due wake
+    // (`<= now`), proving the DialRequested arm landed it in `dial_pending`.
+    let wake = coord
+      .poll_timeout()
+      .expect("the requeued dial intent contributes a poll_timeout wake");
+    assert!(
+      wake <= now,
+      "a freshly-requeued, never-attempted dial intent forces an immediate-due \
+       wake so a poll_timeout-only driver services it",
+    );
+
+    // (2) A non-DialRequested event delegates to the inner endpoint's queue and
+    // is observable via poll_event. Build a `NodeJoined` directly, requeue it,
+    // and confirm the delegation arm round-trips it back through poll_event.
+    use crate::typed::{NodeState, State};
+    use std::sync::Arc;
+    let ns = Arc::new(NodeState::new(
+      SmolStr::new("peer-j"),
+      addr(7003),
+      State::Alive,
+    ));
+    coord.requeue_event(Event::NodeJoined(ns), now);
+    let mut re_observed = false;
+    while let Some(ev) = coord.poll_event() {
+      if matches!(ev, Event::NodeJoined(_)) {
+        re_observed = true;
+      }
+    }
+    assert!(
+      re_observed,
+      "a requeued non-DialRequested event delegates to the inner endpoint and \
+       resurfaces through poll_event",
+    );
+  }
+
+  /// `start_reliable_ping` (the public reliable-fallback dial entry point)
+  /// surfaces a `Connect` in-band and threads the originating `StreamId`,
+  /// exactly like the push/pull / user-message wrappers.
+  #[test]
+  fn start_reliable_ping_dials_in_band() {
+    let now = Instant::now();
+    let ep = endpoint(7100);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    let sid = coord.start_reliable_ping(
+      SmolStr::new("peer-b"),
+      addr(7000),
+      9,
+      now + Duration::from_secs(5),
+      now,
+    );
+    let connect = coord
+      .poll_action()
+      .expect("the reliable-ping dial surfaces a Connect in-band");
+    match connect {
+      StreamAction::Connect(info) => {
+        assert_eq!(info.peer(), addr(7000));
+        assert_eq!(
+          info.stream_id(),
+          sid,
+          "Connect.stream_id() equals the StreamId start_reliable_ping returned",
+        );
+      }
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    }
+    // The dialer's label + ping request bytes emerge on the same tick.
+    let (_id, _peer, bytes) = coord
+      .poll_transport_transmit()
+      .expect("the reliable-ping dialer queued its label + request");
+    assert!(bytes.starts_with(&[12u8]), "leads with LABELED_TAG");
+  }
+
+  /// `handle_dial_failed` for a live outbound exchange fails the bridge via
+  /// `fail_dial_retired` and the resulting reap surfaces an `Abort` (the
+  /// failed-terminal teardown). A one-way user-message whose dial the driver
+  /// reports failed must terminalize as a genuine failure, never a benign EOF.
+  #[test]
+  fn handle_dial_failed_fails_bridge_and_aborts() {
+    let now = Instant::now();
+    let ep = endpoint(7100);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // Dial a one-way user message so a live bridge + Connect exist.
+    let _sid = coord.start_user_message(addr(7000), Bytes::from_static(b"x"), now);
+    let exchange = match coord.poll_action() {
+      Some(StreamAction::Connect(c)) => c.id(),
+      other => panic!(
+        "expected Connect, got {:?}",
+        other.as_ref().map(action_kind)
+      ),
+    };
+    // Drain the in-band request bytes so the teardown gate is not withheld
+    // behind them after the failure.
+    while coord.poll_transport_transmit().is_some() {}
+    assert!(coord.live_bridge_count() >= 1);
+
+    // The driver reports the dial failed. The bridge fails (dial retired) and
+    // the reap emits an Abort for the exchange.
+    coord.handle_dial_failed(exchange, now);
+
+    let mut actions: Vec<StreamAction> = Vec::new();
+    loop {
+      let mut progressed = false;
+      while let Some(a) = coord.poll_action() {
+        actions.push(a);
+        progressed = true;
+      }
+      while coord.poll_transport_transmit().is_some() {
+        progressed = true;
+      }
+      if !progressed {
+        break;
+      }
+    }
+    assert!(
+      actions
+        .iter()
+        .filter_map(StreamAction::as_abort)
+        .any(|r| r.id() == exchange),
+      "a dial-failed exchange is reaped with Abort; got {:?}",
+      actions.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the dial-failed bridge was reaped",
+    );
+  }
+
+  /// `set_compression_options` fans the new policy out to every live bridge's
+  /// `set_compression` (non-security: no failure cascade, no purge). Dial an
+  /// exchange first so there is a live bridge to receive the update.
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn set_compression_options_fans_out_to_live_bridges() {
+    use crate::{CompressAlgorithm, CompressionOptions};
+
+    let now = Instant::now();
+    let ep = endpoint(7100);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // A live outbound bridge.
+    let _sid = coord.start_user_message(addr(7000), Bytes::from_static(b"x"), now);
+    while coord.poll_action().is_some() {}
+    while coord.poll_transport_transmit().is_some() {}
+    assert!(coord.live_bridge_count() >= 1);
+
+    // Apply a non-default compression policy — fans out to the live bridge
+    // (and updates the coordinator's own `compression`).
+    let comp = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(8);
+    coord.set_compression_options(comp);
+    assert_eq!(
+      coord.compression().algorithm(),
+      Some(CompressAlgorithm::Lz4),
+      "the coordinator's compression policy updated",
+    );
+    // A second call with default (disabled) compression also fans out without
+    // failing the live bridge (the non-security no-cascade path).
+    coord.set_compression_options(CompressionOptions::new());
+    assert!(coord.compression().algorithm().is_none());
+    assert!(
+      coord.live_bridge_count() >= 1,
+      "a compression-policy change never fails a live bridge",
+    );
+  }
+
   fn action_kind(a: &StreamAction) -> &'static str {
     match a {
       StreamAction::Connect(_) => "Connect",

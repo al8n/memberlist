@@ -6444,3 +6444,89 @@ fn endpoint_config_gossip_mtu_is_propagated_to_endpoint() {
      budget",
   );
 }
+
+#[test]
+fn advertise_ref_returns_configured_address() {
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  assert_eq!(
+    e.advertise_ref(),
+    &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000)
+  );
+}
+
+#[test]
+fn node_incarnation_tracks_known_member_and_is_none_for_unknown() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  assert!(
+    e.node_incarnation(&SmolStr::new("peer")).is_none(),
+    "unknown peer has no incarnation"
+  );
+  process_alive_auto(&mut e, alive("peer", 7100, 5), false, Instant::now());
+  assert_eq!(e.node_incarnation(&SmolStr::new("peer")), Some(5));
+  // The local node's incarnation is also reachable through the same accessor.
+  assert_eq!(
+    e.node_incarnation(&SmolStr::new("local")),
+    Some(e.local_incarnation())
+  );
+}
+
+#[test]
+fn requeue_event_pushes_to_the_back_of_the_pending_buffer() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  // Generate one real event (a join), drain it, then re-enqueue it: it must
+  // come back out of poll_event unchanged (FIFO push_back).
+  process_alive_auto(&mut e, alive("peer", 7100, 1), false, Instant::now());
+  let ev = e.poll_event().expect("a NodeJoined event is queued");
+  assert!(matches!(ev, Event::NodeJoined(_)));
+  e.requeue_event(ev);
+  assert!(
+    matches!(e.poll_event(), Some(Event::NodeJoined(_))),
+    "requeued event must be observable again"
+  );
+  assert!(e.poll_event().is_none(), "only the one requeued event");
+}
+
+#[test]
+fn ack_payload_bytes_mirrors_ack_payload_slice() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  // Default is empty.
+  assert!(e.ack_payload().is_empty());
+  assert!(e.ack_payload_bytes().is_empty());
+  e.set_ack_payload(Bytes::from_static(b"pong-data"))
+    .expect("small payload fits the gossip MTU");
+  assert_eq!(e.ack_payload(), b"pong-data");
+  assert_eq!(e.ack_payload_bytes().as_ref(), b"pong-data");
+}
+
+#[test]
+fn local_state_snapshot_bytes_mirrors_slice() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  assert!(e.local_state_snapshot().is_empty());
+  assert!(e.local_state_snapshot_bytes().is_empty());
+  e.set_local_state_snapshot(Bytes::from_static(b"snap"))
+    .expect("small snapshot fits the stream frame size");
+  assert_eq!(e.local_state_snapshot(), b"snap");
+  assert_eq!(e.local_state_snapshot_bytes().as_ref(), b"snap");
+}
+
+#[test]
+fn age_member_rolls_state_change_back_and_is_noop_for_unknown() {
+  let now = Instant::now();
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), now);
+  process_alive_auto(&mut e, alive("peer", 7100, 1), false, now);
+  let before = e
+    .node_state_change(&SmolStr::new("peer"))
+    .expect("peer present");
+  e.age_member(&SmolStr::new("peer"), core::time::Duration::from_secs(5));
+  let after = e
+    .node_state_change(&SmolStr::new("peer"))
+    .expect("peer present");
+  assert_eq!(
+    before - core::time::Duration::from_secs(5),
+    after,
+    "state_change must roll back by exactly the delta"
+  );
+  // Aging an unknown member is a silent no-op (no panic, no state created).
+  e.age_member(&SmolStr::new("ghost"), core::time::Duration::from_secs(1));
+  assert!(e.node_incarnation(&SmolStr::new("ghost")).is_none());
+}

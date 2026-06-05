@@ -5171,4 +5171,526 @@ mod tests {
       "handle_timeout must advance membership time exactly once"
     );
   }
+
+  /// The thin membership pass-throughs each forward to the inner `Endpoint`
+  /// and anchor `last_now` where documented. Exercised on a single
+  /// freshly-constructed coordinator without a peer: `start_probe` (no peer ⇒
+  /// `false`), `handle_alive` seeds a member, `handle_suspect` is accepted,
+  /// `ping` returns a correlation id and queues an unreliable transmit,
+  /// `send_user_packets` enqueues directed gossip, and the simple accessors
+  /// (`is_running`, `gossip_mtu`, `max_stream_frame_size`, `live_bridge_count`,
+  /// `live_connections_to`, `unreliable_transport`, `compression`,
+  /// `endpoint_ref`) report the constructed defaults.
+  #[test]
+  fn membership_pass_throughs_forward_to_inner_endpoint() {
+    use crate::{
+      Node,
+      typed::{Alive, Meta, Suspect},
+    };
+
+    let addr: SocketAddr = "127.0.0.1:7710".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7711".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+
+    // Construction-time accessors.
+    assert!(
+      ep.is_running(),
+      "a fresh coordinator is in normal operation"
+    );
+    assert!(ep.gossip_mtu() > 0);
+    assert!(ep.max_stream_frame_size() > 0);
+    assert_eq!(ep.live_bridge_count(), 0);
+    assert_eq!(ep.live_connections_to(peer), 0, "no connection dialed yet");
+    assert_eq!(ep.unreliable_transport(), UnreliableTransport::Datagram);
+    let _ = ep.compression();
+    let _ = ep.endpoint_ref();
+
+    // start_probe on a single-node cluster: no eligible target ⇒ false.
+    assert!(
+      !ep.start_probe(now),
+      "no peer to probe ⇒ start_probe returns false"
+    );
+
+    // handle_alive seeds a member for `peer`.
+    let alive = Alive::new(1, Node::new(SmolStr::new("peer"), peer)).with_meta(Meta::empty());
+    ep.handle_alive(peer, alive, now);
+
+    // handle_suspect against the seeded member is accepted (no panic, time
+    // anchored).
+    let suspect = Suspect::new(1, SmolStr::new("peer"), SmolStr::new("self"));
+    ep.handle_suspect(peer, suspect, now);
+
+    // ping returns a correlation token and queues an unreliable transmit.
+    let _ping_id = ep.ping(Node::new(SmolStr::new("peer"), peer), now);
+    assert!(
+      ep.poll_memberlist_transmit().is_some(),
+      "ping must enqueue an unreliable gossip transmit"
+    );
+
+    // send_user_packets enqueues directed gossip within the MTU budget.
+    ep.send_user_packets(peer, &[Bytes::from_static(b"hi")])
+      .expect("a small directed user packet fits the gossip MTU");
+    assert!(
+      ep.poll_memberlist_transmit().is_some(),
+      "send_user_packets must enqueue an unreliable transmit"
+    );
+  }
+
+  /// `requeue_event` for a NON-`DialRequested` event delegates to the inner
+  /// endpoint's requeue (the `other => self.ep.requeue_event(other)` arm) and
+  /// is observable via the sieving public `poll_event`. (The `DialRequested`
+  /// direct-routing arm is covered by `requeued_dial_request_under_strict_poll_anchors_last_now`.)
+  #[test]
+  fn requeue_non_dial_event_round_trips_through_poll_event() {
+    use crate::event::Event;
+
+    let addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+
+    // A `LeftCluster` event (application-visible unit variant, not
+    // DialRequested) must round-trip back out through poll_event after a
+    // requeue — proving the `other` delegation arm.
+    ep.requeue_event(Event::LeftCluster, now);
+    let got = ep.poll_event();
+    assert!(
+      matches!(got, Some(Event::LeftCluster)),
+      "a requeued non-dial event surfaces through poll_event — got {got:?}"
+    );
+  }
+
+  /// `update_meta` / `queue_user_broadcast` / `set_local_state_snapshot` /
+  /// `set_ack_payload` are the inner-endpoint state setters; each forwards and
+  /// returns `Ok` for in-budget inputs on a running coordinator.
+  #[test]
+  fn state_setter_pass_throughs_return_ok_for_in_budget_inputs() {
+    use crate::typed::Meta;
+
+    let addr: SocketAddr = "127.0.0.1:7730".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+
+    ep.update_meta(Meta::try_from(Bytes::from_static(b"v2")).expect("small meta"))
+      .expect("update_meta forwards and succeeds while running");
+    ep.queue_user_broadcast(Bytes::from_static(b"broadcast"))
+      .expect("queue_user_broadcast forwards");
+    ep.set_local_state_snapshot(Bytes::from_static(b"snap"))
+      .expect("a tiny push-pull snapshot fits the reliable frame budget");
+    ep.set_ack_payload(Bytes::from_static(b"ack"))
+      .expect("a tiny ack payload fits the gossip budget");
+  }
+
+  /// `leave` initiates the graceful dead-self flush on a running coordinator
+  /// (returns `Ok`), and a second `leave` is the idempotent post-leave no-op.
+  /// `is_running` flips to `false` after the first leave.
+  #[test]
+  fn leave_initiates_then_is_idempotent() {
+    let addr: SocketAddr = "127.0.0.1:7740".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+    assert!(ep.is_running());
+    ep.leave(now).expect("the first leave initiates the flush");
+    assert!(
+      !ep.is_running(),
+      "after leave the lifecycle is no longer Running"
+    );
+    // Idempotent: a second leave on an already-left endpoint is a no-op Ok.
+    ep.leave(now)
+      .expect("a second leave is an idempotent no-op");
+  }
+
+  /// `set_compression_options` replaces the policy in place and is reflected by
+  /// the `compression()` accessor; `compress_gossip` then applies the new
+  /// policy on the next datagram.
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn set_compression_options_updates_policy_in_place() {
+    use crate::{CompressAlgorithm, CompressionOptions};
+
+    let addr: SocketAddr = "127.0.0.1:7750".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+    // Default is disabled — a large datagram passes through unchanged.
+    let payload = vec![0xABu8; 4096];
+    assert_eq!(
+      ep.compress_gossip(&payload),
+      payload,
+      "disabled compression is identity"
+    );
+    // Enable lz4; the accessor reflects it and a compressible datagram shrinks.
+    ep.set_compression_options(
+      CompressionOptions::new()
+        .with_algorithm(CompressAlgorithm::Lz4)
+        .with_threshold(8),
+    );
+    assert!(ep.compression().algorithm().is_some());
+    let compressible = b"the quick brown fox jumps over the lazy dog".repeat(64);
+    let out = ep.compress_gossip(&compressible);
+    assert!(
+      out.len() < compressible.len(),
+      "a highly-compressible datagram must shrink once lz4 is enabled"
+    );
+  }
+
+  /// With encryption DISABLED (the `make_endpoint` default), `encrypt_gossip`
+  /// returns the datagram unchanged (the `None` keyring early-return), the
+  /// `encryption_options` accessor reports a disabled policy, and
+  /// `decrypt_gossip` on a plaintext datagram is an identity passthrough (the
+  /// strict-mode entry check is gated on `encryption.is_enabled()`).
+  #[test]
+  fn gossip_transforms_are_identity_when_encryption_disabled() {
+    let addr: SocketAddr = "127.0.0.1:7760".parse().unwrap();
+    let now = Instant::now();
+    let ep = make_endpoint("self", addr, now);
+    assert!(
+      !ep.encryption_options().is_enabled(),
+      "the default coordinator has encryption disabled"
+    );
+    let datagram = b"plain gossip body".to_vec();
+    assert_eq!(
+      ep.encrypt_gossip(&datagram)
+        .expect("disabled encrypt is identity"),
+      datagram,
+      "encrypt_gossip with no keyring returns the bytes unchanged"
+    );
+    assert_eq!(
+      ep.decrypt_gossip(&datagram)
+        .expect("disabled decrypt is identity"),
+      datagram,
+      "decrypt_gossip with no keyring passes a plaintext datagram through"
+    );
+  }
+
+  /// `set_encryption_options` no-op-reapply short-circuit: republishing the
+  /// SAME effective policy takes the equality early-return (it does NOT clear
+  /// the buffered gossip ingress). A DIFFERENT policy takes the clear path —
+  /// the buffered raw gossip datagram is dropped so it cannot be decrypted
+  /// under the new policy.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_noop_reapply_vs_policy_change_clears_ingress() {
+    use crate::{EncryptionOptions, Keyring, SecretKey};
+
+    let self_addr: SocketAddr = "127.0.0.1:7770".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7771".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    // Buffer a raw inbound gossip datagram by feeding a Memberlist-classified
+    // UDP packet (first byte in 1..=15 ⇒ Class::Memberlist ⇒ buffered).
+    ep.handle_udp(peer, &[3u8, 0u8, 0u8], now);
+    assert!(
+      ep.poll_memberlist_ingress().is_some(),
+      "precondition: a memberlist datagram is buffered"
+    );
+
+    // Re-buffer, then a NO-OP reapply of the same (disabled) policy: the
+    // equality early-return must NOT clear the buffered datagram.
+    ep.handle_udp(peer, &[3u8, 0u8, 0u8], now);
+    ep.set_encryption_options(EncryptionOptions::new());
+    assert!(
+      ep.poll_memberlist_ingress().is_some(),
+      "a no-op reapply of the identical policy must preserve buffered gossip"
+    );
+
+    // Re-buffer, then a REAL policy change (disabled → enabled keyring): the
+    // clear path drops the datagram queued under the old policy.
+    ep.handle_udp(peer, &[3u8, 0u8, 0u8], now);
+    ep.set_encryption_options(
+      EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x11; 32]))),
+    );
+    assert!(
+      ep.poll_memberlist_ingress().is_none(),
+      "a policy change must clear the buffered gossip queued under the old policy"
+    );
+    assert!(
+      ep.encryption_options().is_enabled(),
+      "the new policy is now in effect"
+    );
+  }
+
+  /// `try_open_uni_stream_to` returns `false` when no connection to the peer
+  /// exists — the `handle_for(&peer)` early-`None` guard — and anchors
+  /// `last_now` so a subsequent `poll_timeout` is not stuck at `None`.
+  #[test]
+  fn try_open_uni_stream_to_unknown_peer_is_false() {
+    let addr: SocketAddr = "127.0.0.1:7780".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7781".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+    assert!(
+      !ep.try_open_uni_stream_to(peer, now),
+      "no connection to the peer ⇒ false (no uni-stream credit to probe)"
+    );
+  }
+
+  /// `start_reliable_ping` is the reliable-fallback dial wrapper: it records the
+  /// exchange kind/peer, sieves the inner `DialRequested` into `dial_pending`,
+  /// and attempts the dial in-band. Against a cold peer the handshake is not yet
+  /// complete, so no bridge opens this tick but a quinn Initial is emitted on
+  /// the outbound path (the dial was attempted). Covers the wrapper body and
+  /// the `service_dials` cold-dial requeue arm.
+  #[test]
+  fn start_reliable_ping_attempts_dial_in_band() {
+    let self_addr: SocketAddr = "127.0.0.1:7790".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7791".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    let deadline = now + core::time::Duration::from_secs(5);
+    // Ignoring StreamId return: the test asserts on the emitted transmit.
+    let _ = ep.start_reliable_ping(SmolStr::new("peer"), peer, 7, deadline, now);
+
+    // The dial was attempted in-band: a quinn Initial (Class::Quic) is queued
+    // toward the peer.
+    let mut saw_quic_to_peer = false;
+    while let Some((to, bytes)) = ep.poll_transmit() {
+      if to == peer && matches!(super::classify(&bytes), super::Class::Quic) {
+        saw_quic_to_peer = true;
+      }
+    }
+    assert!(
+      saw_quic_to_peer,
+      "start_reliable_ping must attempt the dial in-band (emit a quinn Initial)"
+    );
+    // A connection entry now exists for the peer (still handshaking).
+    assert_eq!(
+      ep.live_connections_to(peer),
+      1,
+      "the in-band dial created a pooled connection for the peer"
+    );
+  }
+
+  /// `handle_packet` forwards a decoded unreliable message into the inner
+  /// membership endpoint. A `UserData` packet surfaces as `Event::UserPacket`
+  /// through the sieving `poll_event`.
+  #[test]
+  fn handle_packet_forwards_user_data_to_inner_endpoint() {
+    use crate::{event::Event, typed::Message};
+
+    let self_addr: SocketAddr = "127.0.0.1:7800".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7801".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    ep.handle_packet(
+      peer,
+      Message::UserData(Bytes::from_static(b"directed-user-bytes")),
+      now,
+    );
+    let mut saw = false;
+    while let Some(ev) = ep.poll_event() {
+      if matches!(&ev, Event::UserPacket(p) if p.data_ref().as_ref() == b"directed-user-bytes") {
+        saw = true;
+      }
+    }
+    assert!(
+      saw,
+      "handle_packet(UserData) must surface as an Event::UserPacket"
+    );
+  }
+
+  /// `handle_udp` with a `Class::Reject` datagram (first byte in the
+  /// `0x10..=0x3F` gap) is silently dropped — neither buffered as memberlist
+  /// ingress nor fed to quinn — while still anchoring `last_now`.
+  #[test]
+  fn handle_udp_reject_class_datagram_is_dropped() {
+    let self_addr: SocketAddr = "127.0.0.1:7810".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7811".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+    // 0x20 is in the reject gap (bits 0x40/0x80 clear, value > 15).
+    assert_eq!(super::classify(&[0x20u8]), super::Class::Reject);
+    ep.handle_udp(peer, &[0x20u8, 0x00], now);
+    assert!(
+      ep.poll_memberlist_ingress().is_none(),
+      "a Reject-class datagram must not be buffered as memberlist ingress"
+    );
+    assert!(
+      ep.poll_transmit().is_none(),
+      "a Reject-class datagram must not produce any quinn output"
+    );
+  }
+
+  /// The sieving `poll_event` drains a `DialRequested` left in the INNER
+  /// endpoint queue into the private `dial_pending` deque and never returns it
+  /// to external callers (the `DialRequested(dial) => … continue` arm). A
+  /// bare-endpoint `start_reliable_ping` (no in-band service) leaves the
+  /// `DialRequested` in the inner queue for `poll_event` to sieve.
+  #[test]
+  fn poll_event_sieves_inner_dial_requested_out() {
+    use crate::event::Event;
+
+    let self_addr: SocketAddr = "127.0.0.1:7820".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7821".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    // Drive the inner endpoint directly so the DialRequested lands in the inner
+    // queue WITHOUT the wrapper's in-band `service_dials` sieving it first.
+    let deadline = now + core::time::Duration::from_secs(5);
+    // Ignoring StreamId return: the test asserts on poll_event sieving.
+    let _ = ep
+      .endpoint_mut()
+      .start_reliable_ping(SmolStr::new("peer"), peer, 3, deadline);
+
+    // poll_event must sieve the DialRequested out — it never surfaces to the
+    // external caller. (The bare endpoint queued only the DialRequested, so
+    // poll_event returns None after sieving it.)
+    let mut leaked_dial = false;
+    while let Some(ev) = ep.poll_event() {
+      if matches!(ev, Event::DialRequested(_)) {
+        leaked_dial = true;
+      }
+    }
+    assert!(
+      !leaked_dial,
+      "poll_event must sieve DialRequested into dial_pending, never leak it"
+    );
+  }
+
+  /// The `QuicEndpoint::start_scheduling` wrapper forwards to the inner
+  /// endpoint's periodic-scheduler arm. Calling it (re)arms scheduling without
+  /// panicking; a subsequent `poll_timeout` then offers a bounded next-deadline.
+  #[test]
+  fn start_scheduling_wrapper_arms_inner_scheduler() {
+    let addr: SocketAddr = "127.0.0.1:7830".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", addr, now);
+    ep.start_scheduling(now);
+    // The inner scheduler is armed: a finite next-deadline is offered.
+    assert!(
+      ep.poll_timeout().is_some(),
+      "an armed scheduler offers a finite next-deadline via poll_timeout"
+    );
+  }
+
+  /// `try_open_uni_stream_to` on a peer with a pooled-but-still-handshaking
+  /// connection takes the `get_mut(ch) == Some` + `open(Dir::Uni) == None`
+  /// path (the handshake has not granted uni-stream credit, and the composed
+  /// config advertises `max_concurrent_uni_streams = 0` regardless), returning
+  /// `false` without closing the connection.
+  #[test]
+  fn try_open_uni_stream_to_handshaking_peer_is_false_without_close() {
+    let self_addr: SocketAddr = "127.0.0.1:7840".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7841".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    // Create a pooled (handshaking) connection by offering an unreliable
+    // datagram to the cold peer — `queue_unreliable_datagram` dials in.
+    let _ = ep.queue_unreliable_datagram(peer, Bytes::from_static(b"probe"), now);
+    assert_eq!(
+      ep.live_connections_to(peer),
+      1,
+      "precondition: a pooled connection exists for the peer"
+    );
+
+    assert!(
+      !ep.try_open_uni_stream_to(peer, now),
+      "a handshaking connection grants no uni-stream credit ⇒ false"
+    );
+    // The connection was NOT closed (the false path skips the close-on-success
+    // branch), so it is still live.
+    assert_eq!(
+      ep.live_connections_to(peer),
+      1,
+      "the false path must not close the pooled connection"
+    );
+  }
+
+  /// `poll_memberlist_ingress` keeps the per-peer share counter exact: with two
+  /// datagrams buffered from the SAME peer, the first pop decrements (entry
+  /// retained, `*n != 0`) and the second pop removes the entry at zero. Covers
+  /// the `Occupied` decrement arm that the single-datagram path skips.
+  #[test]
+  fn poll_memberlist_ingress_decrements_then_removes_per_peer_counter() {
+    let self_addr: SocketAddr = "127.0.0.1:7850".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7851".parse().unwrap();
+    let now = Instant::now();
+    let mut ep = make_endpoint("self", self_addr, now);
+
+    // Buffer two memberlist-classified datagrams from the same peer.
+    ep.handle_udp(peer, &[3u8, 0xAA], now);
+    ep.handle_udp(peer, &[3u8, 0xBB], now);
+
+    // First pop: the per-peer counter decrements to 1 (entry retained).
+    assert!(
+      ep.poll_memberlist_ingress().is_some(),
+      "first datagram pops"
+    );
+    // Second pop: the counter hits 0 and the entry is removed.
+    assert!(
+      ep.poll_memberlist_ingress().is_some(),
+      "second datagram pops"
+    );
+    // Queue is now empty.
+    assert!(
+      ep.poll_memberlist_ingress().is_none(),
+      "both buffered datagrams have been drained"
+    );
+  }
+
+  /// `service_dials` `open(Dir::Bi) == None` with a CLOSED cached connection
+  /// (the `is_closed_now == true` arm): the intent is retired via
+  /// `dial_failed` rather than redialed, so a never-Established unreachable peer
+  /// does not generate a fresh handshake per service tick. The pooled
+  /// connection is driven to closed-never-Established directly, then
+  /// `service_dials` runs against the standing `dial_pending` entry.
+  #[test]
+  fn service_dials_retires_intent_when_cached_connection_is_closed() {
+    use crate::event::{Event, ExchangeId, ExchangeOutcome};
+
+    let self_addr: SocketAddr = "127.0.0.1:7860".parse().unwrap();
+    let peer: SocketAddr = "127.0.0.1:7861".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("self", self_addr, now);
+
+    // Register a push/pull intent + dial in-band; the still-handshaking
+    // connection requeues the intent onto `dial_pending`.
+    let id = a.start_push_pull(peer, crate::event::PushPullKind::Refresh, now);
+    let expected_eid = ExchangeId::from(id);
+    assert_eq!(a.dial_pending.len(), 1, "precondition: intent requeued");
+
+    // Drive the pooled connection to Closed WITHOUT it ever reaching
+    // Established (the never-Established closed-cache signature that
+    // `get_or_dial` returns as-is so `service_dials` fires `dial_failed`).
+    let ch = a
+      .conns
+      .handle_for(&peer)
+      .expect("a pooled connection was dialed");
+    a.conns
+      .get_mut(ch)
+      .unwrap()
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), Bytes::new());
+
+    // Keep the standing entry's deadline in the future so the closed-arm (not
+    // the deadline-elapsed arm) is the one that fires.
+    a.dial_pending.front_mut().unwrap().deadline = now + Duration::from_secs(30);
+
+    a.service_dials(now);
+
+    // The intent is retired as Failed (the closed-cached-connection arm routed
+    // through `retire_failed_dial`).
+    let mut found = None;
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(payload) = ev {
+        if payload.eid() == expected_eid {
+          found = Some(payload);
+          break;
+        }
+      }
+    }
+    let payload = found.expect(
+      "a dial against a closed never-Established cached connection MUST retire \
+       the intent via ExchangeCompleted(Failed), not redial",
+    );
+    assert_eq!(payload.outcome(), ExchangeOutcome::Failed);
+    assert!(
+      a.dial_pending.is_empty(),
+      "the retired intent must not be requeued onto dial_pending"
+    );
+  }
 }

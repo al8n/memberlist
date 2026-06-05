@@ -534,6 +534,60 @@ mod tests {
     );
   }
 
+  /// A runtime `set_encryption_options` change with a LIVE TLS bridge reaches
+  /// that bridge's `set_encryption`, which — because `TlsRecords::is_secure()`
+  /// is `true` — resets the bridge's reliable-plane encryption to disabled
+  /// rather than failing it: TLS already provides confidentiality, so the
+  /// reliable path never double-wraps. The bridge therefore survives the policy
+  /// change (no `EncryptionPolicyChanged` cascade, unlike plain TCP).
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn tls_endpoint_set_encryption_options_keeps_live_bridge_via_is_secure() {
+    use crate::Instant;
+    use core::net::SocketAddr;
+
+    use crate::{EncryptionOptions, Keyring, SecretKey};
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      streams::{
+        LabelOptions, Labeled, StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    let now = Instant::now();
+    let ep = endpoint(7310);
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // A live inbound TLS bridge (still Handshaking — the TLS handshake has not
+    // run, but the bridge exists in `conns`).
+    let _exchange = coord.accept_connection(addr(7311), now);
+    assert_eq!(coord.live_bridge_count(), 1);
+
+    // Publish an enabling encryption policy. For the TLS bridge, `set_encryption`
+    // hits the `is_secure()` branch: it disables the reliable-plane encryption
+    // and does NOT fail the bridge.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x55; 32])));
+    coord.set_encryption_options(opts.clone());
+
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "a TLS bridge survives the encryption-policy change (is_secure resets, \
+       never fails)",
+    );
+    assert_eq!(
+      coord.encryption_options(),
+      &opts,
+      "the coordinator still publishes the new gossip-path policy",
+    );
+  }
+
   /// Regression: an outbound dial whose `R::dial_context` rejects the per-peer
   /// SNI must drop its `pending_outbound_kinds` entry on the failure path.
   /// `TlsRecords::dial_context` requires a non-`None` `server_name` and

@@ -1082,4 +1082,161 @@ mod tests {
     let (_consumed, msg) = decode_message(unwrapped.as_ref()).expect("decode inner");
     assert_eq!(msg, sample_ping());
   }
+
+  #[test]
+  fn message_tag_try_from_roundtrips_all_valid_bytes() {
+    let valid = [
+      (1u8, MessageTag::Compound),
+      (2, MessageTag::Ping),
+      (3, MessageTag::IndirectPing),
+      (4, MessageTag::Ack),
+      (5, MessageTag::Suspect),
+      (6, MessageTag::Alive),
+      (7, MessageTag::Dead),
+      (8, MessageTag::PushPull),
+      (9, MessageTag::UserData),
+      (10, MessageTag::Nack),
+      (11, MessageTag::ErrorResponse),
+      (13, MessageTag::Encrypted),
+      (14, MessageTag::Compressed),
+    ];
+    for (byte, tag) in valid {
+      assert_eq!(MessageTag::try_from(byte).unwrap(), tag);
+      assert_eq!(tag as u8, byte);
+    }
+    // Reserved / unassigned tags are rejected.
+    for byte in [0u8, 12, 15, 200, 255] {
+      assert!(matches!(
+        MessageTag::try_from(byte),
+        Err(FrameError::UnknownTag(b)) if b == byte
+      ));
+    }
+  }
+
+  #[test]
+  fn message_tag_for_message_maps_each_variant() {
+    use crate::messages::memberlist::v1::{
+      Alive, Dead, ErrorResponse, IndirectPing, Nack, PushPull, Suspect, UserData,
+    };
+    let cases: [(AnyMessage, MessageTag); 10] = [
+      (AnyMessage::Alive(Alive::default()), MessageTag::Alive),
+      (AnyMessage::Suspect(Suspect::default()), MessageTag::Suspect),
+      (AnyMessage::Dead(Dead::default()), MessageTag::Dead),
+      (sample_ping(), MessageTag::Ping),
+      (
+        AnyMessage::IndirectPing(IndirectPing::default()),
+        MessageTag::IndirectPing,
+      ),
+      (sample_ack(), MessageTag::Ack),
+      (AnyMessage::Nack(Nack::default()), MessageTag::Nack),
+      (
+        AnyMessage::PushPull(PushPull::default()),
+        MessageTag::PushPull,
+      ),
+      (
+        AnyMessage::UserData(UserData::default()),
+        MessageTag::UserData,
+      ),
+      (
+        AnyMessage::ErrorResponse(ErrorResponse::default()),
+        MessageTag::ErrorResponse,
+      ),
+    ];
+    for (msg, tag) in cases {
+      assert_eq!(MessageTag::for_message(&msg), tag);
+    }
+  }
+
+  #[test]
+  fn incomplete_frame_accessors_and_display() {
+    let f = IncompleteFrame::new(3, 10);
+    assert_eq!(f.available(), 3);
+    assert_eq!(f.required(), 10);
+    let s = f.to_string();
+    assert!(s.contains('3') && s.contains("10"), "got {s}");
+  }
+
+  #[test]
+  fn frame_error_display_strings_are_nonempty() {
+    let cases: [FrameError; 6] = [
+      FrameError::Empty,
+      FrameError::Incomplete(IncompleteFrame::new(1, 2)),
+      FrameError::UnknownTag(99),
+      FrameError::VarintOverflow,
+      FrameError::Decode,
+      FrameError::FrameTooLarge(1 << 33),
+    ];
+    for e in cases {
+      assert!(!e.to_string().is_empty(), "empty display for {e:?}");
+    }
+  }
+
+  #[test]
+  fn decode_plain_frame_rejects_empty_and_unknown_tag() {
+    assert!(matches!(decode_plain_frame(&[]), Err(FrameError::Empty)));
+    // Tag 0 is not a valid MessageTag.
+    assert!(matches!(
+      decode_plain_frame(&[0u8, 0]),
+      Err(FrameError::UnknownTag(0))
+    ));
+  }
+
+  #[test]
+  fn decode_message_zerocopy_roundtrips_and_rejects_wrappers() {
+    // A clean plain frame decodes through the zero-copy path.
+    let frame = Bytes::from(encode_message(&sample_ack()).expect("encode"));
+    let (consumed, msg) = decode_message_zerocopy(&frame).expect("zerocopy decode");
+    assert_eq!(consumed, frame.len());
+    assert_eq!(msg, sample_ack());
+
+    // The three outer-wrapper tags are rejected as UnknownTag (they are not
+    // decoded at the plain-frame layer), matching `decode_message`.
+    for tag in [
+      MessageTag::Compound,
+      MessageTag::Encrypted,
+      MessageTag::Compressed,
+    ] {
+      let raw = Bytes::from(encode_plain_frame(tag, b"body").expect("encode wrapper frame"));
+      assert!(
+        matches!(
+          decode_message_zerocopy(&raw),
+          Err(FrameError::UnknownTag(b)) if b == tag as u8
+        ),
+        "tag {tag:?} must be rejected by the zerocopy path"
+      );
+    }
+  }
+
+  #[test]
+  fn decode_message_rejects_encrypted_and_compressed_tags() {
+    for tag in [MessageTag::Encrypted, MessageTag::Compressed] {
+      let raw = encode_plain_frame(tag, b"body").expect("encode wrapper frame");
+      assert!(
+        matches!(
+          decode_message(&raw),
+          Err(FrameError::UnknownTag(b)) if b == tag as u8
+        ),
+        "decode_message must reject {tag:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn decode_message_rejects_corrupt_body() {
+    // A valid Ping tag + length but garbage body bytes ⇒ buffa decode fails ⇒
+    // FrameError::Decode (not a panic).
+    let frame = encode_plain_frame(MessageTag::Ping, &[0xFF, 0xFF, 0xFF, 0xFF]).expect("encode");
+    assert!(matches!(decode_message(&frame), Err(FrameError::Decode)));
+  }
+
+  #[test]
+  fn decode_compound_rejects_empty_and_non_compound_lead() {
+    assert!(matches!(decode_compound(&[]), Err(FrameError::Empty)));
+    // A plain (non-compound) frame fed to decode_compound is UnknownTag.
+    let plain = encode_message(&sample_ping()).expect("encode");
+    assert!(matches!(
+      decode_compound(&plain),
+      Err(FrameError::UnknownTag(_))
+    ));
+  }
 }

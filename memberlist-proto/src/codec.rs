@@ -665,4 +665,81 @@ mod tests {
       other => panic!("expected CodecError::Incomplete, got {other:?}"),
     }
   }
+
+  #[test]
+  fn encode_options_builders_and_accessors() {
+    // Default: no label, default (0 = 65507) max payload size.
+    let def = EncodeOptions::default();
+    assert!(def.label_ref().is_none());
+    assert_eq!(def.max_payload_size(), 0);
+
+    // `new` then the two `with_*` builders thread through to the accessors.
+    let label = Bytes::from_static(b"cluster-x");
+    let opts = EncodeOptions::new(None)
+      .with_label(Some(label.clone()))
+      .with_max_payload_size(1500);
+    assert_eq!(opts.label_ref(), Some(&label));
+    assert_eq!(opts.max_payload_size(), 1500);
+
+    // with_label(None) clears it again.
+    let cleared = opts.clone().with_label(None);
+    assert!(cleared.label_ref().is_none());
+    // The original is unaffected (builders consume-and-return a fresh value).
+    assert_eq!(opts.max_payload_size(), 1500);
+  }
+
+  #[test]
+  fn decode_options_accessor() {
+    assert!(DecodeOptions::default().label_ref().is_none());
+    let label = Bytes::from_static(b"y");
+    let opts = DecodeOptions::new(Some(label.clone()));
+    assert_eq!(opts.label_ref(), Some(&label));
+  }
+
+  #[test]
+  fn decode_incoming_rejects_empty_input() {
+    // No label expected, empty buffer: classify_header accepts 0 leading
+    // bytes, then the inner-empty guard reports the "empty input" truncation
+    // (consumed == 0 branch, distinct from the post-label empty-frame branch).
+    let result = decode_incoming(Bytes::new(), &DecodeOptions::default());
+    assert!(
+      matches!(result, Err(CodecError::Truncated(_))),
+      "got {result:?}"
+    );
+  }
+
+  #[test]
+  fn codec_error_display_strings_are_nonempty() {
+    let cases = [
+      CodecError::Bridge("b".to_string()),
+      CodecError::Frame("f".to_string()),
+      CodecError::Incomplete(3, 10),
+      CodecError::LabelTooLong(300),
+      CodecError::InvalidLabel("x"),
+      CodecError::LabelMismatch,
+      CodecError::DoubleLabel,
+      CodecError::Truncated("t"),
+      CodecError::TrailingData(4, 9),
+    ];
+    for e in &cases {
+      assert!(!e.to_string().is_empty(), "empty display for {e:?}");
+    }
+    // The Incomplete display surfaces both byte counts.
+    let s = CodecError::Incomplete(3, 10).to_string();
+    assert!(s.contains('3') && s.contains("10"), "got {s}");
+  }
+
+  #[test]
+  fn parse_messages_plain_frame_rejects_trailing_bytes() {
+    // The plain-frame branch of parse_messages routes through parse_message,
+    // so a trailing byte after a single framed message is TrailingData.
+    let encoded = encode_outgoing(&ack_msg(), &EncodeOptions::default()).unwrap();
+    let mut smuggled = encoded.to_vec();
+    smuggled.push(0xAB);
+    let inner = decode_incoming(Bytes::from(smuggled), &DecodeOptions::default()).unwrap();
+    assert!(matches!(
+      parse_messages::<I, A>(inner),
+      Err(CodecError::TrailingData(_, _))
+    ));
+  }
 }

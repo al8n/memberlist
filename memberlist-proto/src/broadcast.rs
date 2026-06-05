@@ -829,4 +829,230 @@ mod tests {
     assert!(!m1.is_unique());
     assert_eq!(m1.id(), Some(&smol_str::SmolStr::new("alice")));
   }
+
+  /// A broadcast with no id that is intrinsically unique — `is_unique()` is
+  /// `true`, so `queue_broadcast` skips the invalidation scan and every
+  /// instance coexists. Does NOT override `finished()` (default no-op).
+  #[derive(Debug)]
+  struct UniqueBroadcast {
+    msg: String,
+  }
+
+  impl Broadcast for UniqueBroadcast {
+    type Id = &'static str;
+    type Message = String;
+
+    fn id(&self) -> Option<&Self::Id> {
+      None
+    }
+    fn invalidates(&self, _other: &Self) -> bool {
+      true // would invalidate everything IF consulted — proves is_unique short-circuits it
+    }
+    fn message(&self) -> &Self::Message {
+      &self.msg
+    }
+    fn encoded_len(msg: &Self::Message) -> usize {
+      msg.len()
+    }
+    fn is_unique(&self) -> bool {
+      true
+    }
+  }
+
+  #[test]
+  fn unique_broadcasts_skip_invalidation_and_coexist() {
+    let mut q: BroadcastQueue<&'static str, UniqueBroadcast> = BroadcastQueue::new(3);
+    for i in 0..4 {
+      q.queue_broadcast(UniqueBroadcast {
+        msg: format!("u{i}"),
+      });
+    }
+    // Despite `invalidates() == true`, is_unique() short-circuits the scan,
+    // so all four remain. (m stays empty because id() is None.)
+    assert_eq!(q.num_queued(), 4);
+    assert!(
+      q.m.is_empty(),
+      "id-less broadcasts never populate the id map"
+    );
+  }
+
+  #[test]
+  fn default_finished_is_a_noop() {
+    // UniqueBroadcast does not override finished(); pruning it must not panic
+    // and must still drop the entries.
+    let mut q: BroadcastQueue<&'static str, UniqueBroadcast> = BroadcastQueue::new(3);
+    q.queue_broadcast(UniqueBroadcast {
+      msg: "u".to_string(),
+    });
+    q.reset();
+    assert!(q.is_empty());
+  }
+
+  /// An id-less, non-unique broadcast: exercises the slow invalidation path in
+  /// `queue_broadcast` (the `else if !is_unique()` branch). `invalidates` keys
+  /// on the message string so we can target specific entries.
+  #[derive(Debug)]
+  struct IdlessBroadcast {
+    msg: String,
+    finished: Arc<AtomicUsize>,
+  }
+
+  impl Broadcast for IdlessBroadcast {
+    type Id = &'static str;
+    type Message = String;
+
+    fn id(&self) -> Option<&Self::Id> {
+      None
+    }
+    fn invalidates(&self, other: &Self) -> bool {
+      self.msg == other.msg
+    }
+    fn message(&self) -> &Self::Message {
+      &self.msg
+    }
+    fn encoded_len(msg: &Self::Message) -> usize {
+      msg.len()
+    }
+    fn finished(&self) {
+      self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  #[test]
+  fn idless_non_unique_invalidation_slow_path() {
+    let mut q: BroadcastQueue<&'static str, IdlessBroadcast> = BroadcastQueue::new(3);
+    let f = Arc::new(AtomicUsize::new(0));
+    q.queue_broadcast(IdlessBroadcast {
+      msg: "dup".to_string(),
+      finished: f.clone(),
+    });
+    q.queue_broadcast(IdlessBroadcast {
+      msg: "other".to_string(),
+      finished: f.clone(),
+    });
+    assert_eq!(q.num_queued(), 2);
+
+    // Re-queueing "dup" invalidates the first "dup" via the slow scan (no id),
+    // finishing it; "other" is untouched.
+    q.queue_broadcast(IdlessBroadcast {
+      msg: "dup".to_string(),
+      finished: f.clone(),
+    });
+    assert_eq!(q.num_queued(), 2, "old dup replaced, other survives");
+    assert_eq!(f.load(Ordering::SeqCst), 1, "exactly one finished()");
+  }
+
+  #[test]
+  fn take_broadcasts_increments_transmits_across_calls() {
+    // With a positive retransmit ceiling the broadcast is reinserted with a
+    // bumped transmit count, then finished once the ceiling is reached.
+    let mut q = BroadcastQueue::new(1); // retransmit_mult=1
+    let f = Arc::new(AtomicUsize::new(0));
+    // num_nodes=9 ⇒ retransmit_limit = 1 * ceil(log10(10)) = 1.
+    q.queue_broadcast(bcast("a", "hi", f.clone()));
+    // First take: transmits 0→1 reaches the limit (1) ⇒ finished + removed.
+    assert_eq!(q.take_broadcasts(9, 0, 64), vec!["hi".to_string()]);
+    assert_eq!(q.num_queued(), 0);
+    assert_eq!(f.load(Ordering::SeqCst), 1);
+  }
+
+  #[test]
+  fn take_broadcasts_reinserts_below_ceiling() {
+    // retransmit_limit large enough that the item survives multiple drains,
+    // its transmit counter climbing each time (lowest-transmits-first order).
+    let mut q = BroadcastQueue::new(3);
+    let f = Arc::new(AtomicUsize::new(0));
+    q.queue_broadcast(bcast("a", "hi", f.clone())); // ceiling for 99 nodes = 6
+    for _ in 0..3 {
+      assert_eq!(q.take_broadcasts(99, 0, 64), vec!["hi".to_string()]);
+      assert_eq!(q.num_queued(), 1, "still below the retransmit ceiling");
+    }
+    assert_eq!(f.load(Ordering::SeqCst), 0, "not yet finished");
+    assert_eq!(
+      q.q.iter().next().unwrap().transmits,
+      3,
+      "transmit count climbed once per drain"
+    );
+  }
+
+  #[test]
+  fn take_broadcasts_selects_multiple_until_budget() {
+    let mut q = BroadcastQueue::new(3);
+    q.queue_broadcast(bcast("a", "aaaa", Arc::new(AtomicUsize::new(0)))); // 4 B
+    q.queue_broadcast(bcast("b", "bbbb", Arc::new(AtomicUsize::new(0)))); // 4 B
+    q.queue_broadcast(bcast("c", "cccc", Arc::new(AtomicUsize::new(0)))); // 4 B
+    // Budget fits two 4-byte messages (8) but not the third.
+    let got = q.take_broadcasts(99, 0, 8);
+    assert_eq!(got.len(), 2, "exactly two messages fit the 8-byte budget");
+    assert_eq!(q.num_queued(), 3, "all reinserted (ceiling not reached)");
+  }
+
+  #[test]
+  fn take_one_broadcast_on_empty_queue_returns_none() {
+    let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
+    assert!(q.take_one_broadcast(10, 64).is_none());
+  }
+
+  #[test]
+  fn prune_with_max_retain_above_len_is_noop() {
+    let mut q = BroadcastQueue::new(3);
+    let f = Arc::new(AtomicUsize::new(0));
+    q.queue_broadcast(bcast("a", "x", f.clone()));
+    q.queue_broadcast(bcast("b", "y", f.clone()));
+    q.prune(10);
+    assert_eq!(q.num_queued(), 2, "retain above len leaves everything");
+    assert_eq!(f.load(Ordering::SeqCst), 0);
+  }
+
+  #[test]
+  fn id_gen_wraps_at_u64_max() {
+    // Drive the private id_gen to u64::MAX and confirm next_id wraps to 1
+    // (rather than overflowing) on the subsequent allocation.
+    let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
+    q.id_gen = u64::MAX;
+    // A fresh (distinct id) broadcast forces a next_id() call.
+    q.queue_broadcast(bcast("wrap", "x", Arc::new(AtomicUsize::new(0))));
+    assert_eq!(q.q.iter().next().unwrap().id, 1, "id_gen wrapped to 1");
+    assert_eq!(q.id_gen, 1);
+  }
+
+  #[test]
+  fn memberlist_broadcast_accessors_and_wire_encoded_len() {
+    use crate::typed::{Ack, Message};
+    let b: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
+      MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(7)));
+    assert_eq!(b.node_ref(), &smol_str::SmolStr::new("alice"));
+    assert!(matches!(b.message_ref(), Message::Ack(_)));
+    // The trait `message()` returns the same wire message.
+    assert!(matches!(Broadcast::message(&b), Message::Ack(_)));
+    // The real wire encoded_len path (bridges to memberlist-wire) is positive.
+    let len =
+      <MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> as Broadcast>::encoded_len(
+        b.message_ref(),
+      );
+    assert!(len > 0, "an Ack message must encode to a nonzero length");
+    // finished() is the default no-op and must not panic.
+    Broadcast::finished(&b);
+  }
+
+  #[test]
+  fn memberlist_broadcast_queue_dedups_by_node_id() {
+    use crate::typed::{Ack, Message};
+    let mut q: BroadcastQueue<
+      smol_str::SmolStr,
+      MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr>,
+    > = BroadcastQueue::new(3);
+    q.queue_broadcast(MemberlistBroadcast::new(
+      smol_str::SmolStr::new("alice"),
+      Message::Ack(Ack::new(1)),
+    ));
+    q.queue_broadcast(MemberlistBroadcast::new(
+      smol_str::SmolStr::new("alice"),
+      Message::Ack(Ack::new(2)),
+    ));
+    // Same node id ⇒ the second replaces the first via the id map.
+    assert_eq!(q.num_queued(), 1);
+    let drained = q.take_broadcasts(99, 0, 1_000_000);
+    assert_eq!(drained.len(), 1);
+  }
 }

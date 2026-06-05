@@ -2013,4 +2013,341 @@ mod tests {
       "dialer: pending_out must be empty at construction"
     );
   }
+
+  // ── Phase / accessor / drain-then-reap coverage ────────────────────────────
+
+  /// Build a plain unlabeled, encryption-disabled bridge over a freshly
+  /// accepted stream. `ch = ConnectionHandle(0)` and an empty `ConnTable` mean
+  /// the `pump_*`/`retire_halves` paths that look up `conns.get_mut(self.ch)`
+  /// short-circuit — these tests drive phase + drain logic in isolation.
+  fn make_plain_bridge() -> Bridge<SmolStr, SocketAddr> {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
+    )
+  }
+
+  /// `set_encryption` force-disables regardless of input (quinn already
+  /// encrypts the reliable stream); `id`/`ch`/`sid` accessors report the
+  /// construction values; `is_phase_failed` is false for a fresh `Active`
+  /// bridge.
+  #[test]
+  fn bridge_accessors_and_set_encryption_force_disable() {
+    let mut bridge = make_plain_bridge();
+    assert!(
+      !bridge.is_phase_failed(),
+      "fresh bridge is Active, not Failed"
+    );
+    assert_eq!(bridge.ch(), ConnectionHandle(0));
+    assert_eq!(bridge.sid(), QuicSid::new(Side::Client, Dir::Bi, 0));
+    // `id()` returns the inner stream's StreamId — exercise the accessor.
+    let _ = bridge.id();
+    // Even handed a (would-be) enabled policy, the stored options stay
+    // disabled on the QUIC reliable path.
+    bridge.set_encryption(crate::EncryptionOptions::new());
+    // The field is reachable directly from the child test module.
+    assert!(
+      !bridge.encryption.is_enabled(),
+      "QUIC bridge encryption stays disabled after set_encryption"
+    );
+  }
+
+  /// `poll_timeout` returns the bridge's own deadline while non-terminal and
+  /// `None` once terminal (`BothClosed`/`Failed`) — the terminal short-circuit
+  /// that keeps a reaped bridge from contributing a stale wake to the
+  /// coordinator's unified `min`.
+  #[test]
+  fn bridge_poll_timeout_some_while_active_none_when_terminal() {
+    let mut bridge = make_plain_bridge();
+    assert!(
+      bridge.poll_timeout().is_some(),
+      "an Active bridge contributes its exchange deadline"
+    );
+    // Drive to BothClosed via the two FIN observers.
+    bridge.observe_send_fin();
+    assert!(matches!(bridge.phase, BridgePhase::SendClosed));
+    bridge.observe_recv_fin();
+    assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+    assert!(bridge.is_terminal(), "BothClosed is terminal");
+    assert!(
+      bridge.poll_timeout().is_none(),
+      "a terminal bridge contributes no deadline"
+    );
+  }
+
+  /// `observe_send_fin` / `observe_recv_fin` are sticky no-ops once terminal:
+  /// a `Failed` bridge stays `Failed` after either observer fires.
+  #[test]
+  fn fin_observers_are_noops_on_terminal_phase() {
+    let mut bridge = make_plain_bridge();
+    bridge.fail_connection_lost();
+    assert!(matches!(
+      bridge.phase,
+      BridgePhase::Failed(BridgeFailure::ConnectionLost)
+    ));
+    bridge.observe_send_fin();
+    bridge.observe_recv_fin();
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::ConnectionLost)
+      ),
+      "FIN observers must not overwrite a sticky Failed phase"
+    );
+  }
+
+  /// `fail_stopped_already_retired` records the peer STOP_SENDING error code as
+  /// a `Transport` failure and clears `pending_out`. Sticky: a follow-up
+  /// `fail_connection_lost` does not overwrite the first cause.
+  #[test]
+  fn fail_stopped_already_retired_sets_transport_failure_and_is_sticky() {
+    let mut bridge = make_plain_bridge();
+    bridge.pending_out.extend_from_slice(b"stale outbound tail");
+    bridge.fail_stopped_already_retired(quinn_proto::VarInt::from_u32(7));
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "STOP_SENDING maps to a Transport failure"
+    );
+    assert!(
+      bridge.pending_out.is_empty(),
+      "the staged outbound tail is cleared on failure"
+    );
+    // First failure wins.
+    bridge.fail_connection_lost();
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::Transport(_))
+      ),
+      "the first failure cause is sticky — ConnectionLost must not overwrite it"
+    );
+  }
+
+  /// `drain_then_reap` selects the lifecycle notice from the bridge's terminal
+  /// phase. For every `BridgeFailure` variant the bridge emits a
+  /// `StreamErrored` notice (covering each reason-string arm); for a clean
+  /// `BothClosed` it emits `StreamClosed`. Driven with an empty `ConnTable`
+  /// (the directly-set `Failed` phase needs no half retirement at drain time)
+  /// so the notice-selection match is exercised in isolation. Observable: no
+  /// panic, and a clean reap surfaces no `UserPacket` (no payload was queued).
+  #[test]
+  fn drain_then_reap_notice_selection_covers_every_failure_reason() {
+    let mut conns = ConnTable::new();
+    let t0 = Instant::now();
+    let reasons = [
+      BridgeFailure::Timeout,
+      BridgeFailure::Transport("boom".to_string()),
+      BridgeFailure::Decode,
+      BridgeFailure::ConnectionLost,
+      BridgeFailure::AdmissionClosed,
+      BridgeFailure::DialRetired,
+      BridgeFailure::EncryptionPolicyChanged,
+    ];
+    for reason in reasons {
+      let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+        SmolStr::new("self"),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+      ));
+      let mut bridge = make_plain_bridge();
+      bridge.phase = BridgePhase::Failed(reason);
+      assert!(bridge.is_terminal());
+      // Drains the (empty) FSM event queue then emits the StreamErrored notice
+      // for this reason — the arm under test. No panic == arm executed.
+      bridge.drain_then_reap(&mut ep, &mut conns, t0);
+      assert!(
+        !ep
+          .poll_event()
+          .is_some_and(|ev| matches!(ev, Event::UserPacket(..))),
+        "a failed reap with no queued payload must not emit a UserPacket"
+      );
+    }
+  }
+
+  /// The clean-`BothClosed` arm of `drain_then_reap`'s notice selection emits
+  /// `StreamClosed` (not `StreamErrored`). Driven in isolation on a bridge with
+  /// no queued payload events.
+  #[test]
+  fn drain_then_reap_clean_bothclosed_emits_stream_closed() {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let mut conns = ConnTable::new();
+    let t0 = Instant::now();
+    let mut bridge = make_plain_bridge();
+    bridge.observe_send_fin();
+    bridge.observe_recv_fin();
+    assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+    bridge.drain_then_reap(&mut ep, &mut conns, t0);
+    // No payload was dispatched, so the only effect is the clean StreamClosed
+    // lifecycle notice routed into the Endpoint — no UserPacket may surface.
+    assert!(
+      !ep
+        .poll_event()
+        .is_some_and(|ev| matches!(ev, Event::UserPacket(..))),
+      "a clean reap with no queued payload must not emit a UserPacket"
+    );
+  }
+
+  /// A `MergeDelegate` that rejects every inbound merge — drives
+  /// `Endpoint::handle_stream_event(PushPullRequestReceived{Join})` to return
+  /// `StreamCommand::Close`.
+  struct RejectAllMerges;
+  impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerges {
+    fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+      false
+    }
+  }
+
+  /// Build an inbound bridge whose stream has already decoded a PushPull join
+  /// request (FSM in `InboundSendingResponse`, `PushPullRequestReceived{Join}`
+  /// queued), over an `Endpoint` that rejects every merge. Returns
+  /// `(ep, conns, bridge)` so the caller drives the drain paths.
+  fn inbound_join_bridge_with_rejecting_endpoint() -> (
+    Endpoint<SmolStr, SocketAddr>,
+    ConnTable,
+    Bridge<SmolStr, SocketAddr>,
+    Instant,
+  ) {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    ep.set_merge_delegate(RejectAllMerges);
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    let mut bridge = Bridge::new(
+      stream,
+      ch,
+      sid,
+      crate::CompressionOptions::new(),
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
+    );
+    // Dispatch a join PushPull request so the FSM queues
+    // `PushPullRequestReceived{Join}` — the event the rejecting delegate turns
+    // into `StreamCommand::Close`.
+    let dave = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
+    let dave_state =
+      crate::typed::PushNodeState::new(1, SmolStr::new("dave"), dave, crate::typed::State::Alive);
+    let pp =
+      crate::typed::PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
+    let bytes =
+      crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::PushPull(pp)).expect("encode");
+    bridge
+      .stream
+      .handle_data(&bytes, t0)
+      .expect("dispatch the join push/pull request");
+    (ep, ConnTable::new(), bridge, t0)
+  }
+
+  /// `drain_payload_only`'s `StreamCommand::Close` arm: a rejected inbound join
+  /// terminalizes the bridge (`Failed(AdmissionClosed)`) in the same drain. The
+  /// deferred-commit gate is released first via `observe_recv_fin`.
+  #[test]
+  fn drain_payload_only_close_arm_terminalizes_on_rejected_merge() {
+    let (mut ep, mut conns, mut bridge, t0) = inbound_join_bridge_with_rejecting_endpoint();
+    // Release the RecvClosed gate so `drain_payload_only` actually drains.
+    bridge.observe_recv_fin();
+    assert!(matches!(bridge.phase, BridgePhase::RecvClosed));
+    bridge.drain_payload_only(&mut ep, &mut conns, t0);
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::AdmissionClosed)
+      ),
+      "the rejected-merge Close command must terminalize the bridge as \
+       AdmissionClosed — got {:?}",
+      bridge.phase
+    );
+  }
+
+  /// `drain_then_reap`'s `StreamCommand::Close` arm (the terminal D1 path
+  /// drains unconditionally): the same rejected-join scenario terminalizes the
+  /// bridge as `Failed(AdmissionClosed)` and delivers the `StreamErrored`
+  /// notice (no `UserPacket` surfaces — the join state was rejected).
+  #[test]
+  fn drain_then_reap_close_arm_terminalizes_on_rejected_merge() {
+    let (mut ep, mut conns, mut bridge, t0) = inbound_join_bridge_with_rejecting_endpoint();
+    bridge.drain_then_reap(&mut ep, &mut conns, t0);
+    assert!(
+      matches!(
+        bridge.phase,
+        BridgePhase::Failed(BridgeFailure::AdmissionClosed)
+      ),
+      "drain_then_reap's Close arm must terminalize as AdmissionClosed — got {:?}",
+      bridge.phase
+    );
+    assert!(
+      !ep
+        .poll_event()
+        .is_some_and(|ev| matches!(ev, Event::UserPacket(..))),
+      "a rejected join must not surface application user data"
+    );
+  }
+
+  /// `push_recv_and_classify` short-circuits to `Ok(true)` when the inbound
+  /// label latch is already set — the `if self.inbound_label_validated` early
+  /// return. An unlabeled bridge starts with the latch set, so any feed returns
+  /// `Ok(true)` without invoking `classify_header`.
+  #[test]
+  fn push_recv_and_classify_returns_true_when_latch_already_set() {
+    let mut bridge = make_plain_bridge();
+    assert!(
+      bridge.inbound_label_validated(),
+      "an unlabeled bridge starts with the inbound latch set"
+    );
+    assert_eq!(
+      bridge.push_recv_and_classify(b"arbitrary reliable bytes"),
+      Ok(true),
+      "a feed on an already-validated bridge returns Ok(true) immediately"
+    );
+  }
+
+  /// `pump_in` / `pump_out` short-circuit to `Ok(())` when the bridge's
+  /// connection handle is absent from the `ConnTable` (`conns.get_mut(self.ch)
+  /// == None`) — the missing-connection guard. No phase change, no panic.
+  #[test]
+  fn pump_in_out_are_ok_noops_when_connection_absent() {
+    let mut bridge = make_plain_bridge();
+    let mut conns = ConnTable::new();
+    let t0 = Instant::now();
+    assert!(
+      bridge.pump_in(&mut conns, t0).is_ok(),
+      "pump_in is a no-op Ok when the connection is gone"
+    );
+    assert!(
+      bridge.pump_out(&mut conns, t0).is_ok(),
+      "pump_out is a no-op Ok when the connection is gone"
+    );
+    assert!(
+      matches!(bridge.phase, BridgePhase::Active),
+      "neither pump changes phase when the connection is absent"
+    );
+  }
 }

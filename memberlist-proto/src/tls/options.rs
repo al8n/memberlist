@@ -159,4 +159,22 @@ pub(crate) mod tests {
     )
     .unwrap();
   }
+
+  /// The borrowing accessors (`server_ref` / `client_ref`) hand back the same
+  /// configs the Arc accessors do — they alias the one stored `Arc`, so a
+  /// borrow and an arc-clone point at the same allocation.
+  #[test]
+  fn borrowing_accessors_alias_the_stored_configs() {
+    let cfg = TlsOptions::new(test_server(), test_client());
+    assert!(
+      core::ptr::eq(cfg.server_ref(), Arc::as_ptr(&cfg.server_arc())),
+      "server_ref borrows the same ServerConfig the server_arc clone wraps",
+    );
+    assert!(
+      core::ptr::eq(cfg.client_ref(), Arc::as_ptr(&cfg.client_arc())),
+      "client_ref borrows the same ClientConfig the client_arc clone wraps",
+    );
+    // A server connection constructs from the borrowed-then-cloned arc.
+    let _server = rustls::ServerConnection::new(cfg.server_arc()).unwrap();
+  }
 }

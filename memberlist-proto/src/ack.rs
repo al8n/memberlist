@@ -404,4 +404,98 @@ mod tests {
       _ => panic!("expected Forward kind"),
     }
   }
+
+  #[test]
+  fn forward_ack_constructor_and_accessors() {
+    let fa = ForwardAck::new(addr(8000));
+    assert_eq!(fa.reply_to_ref(), &addr(8000));
+    assert_eq!(fa.into_reply_to(), addr(8000));
+  }
+
+  #[test]
+  fn default_registry_is_empty() {
+    let r: AckRegistry<SocketAddr> = AckRegistry::default();
+    assert!(r.is_empty());
+    assert_eq!(r.len(), 0);
+  }
+
+  #[test]
+  fn register_replaces_and_returns_old_entry() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    let first = entry(now + Duration::from_secs(1), AckKind::Probe);
+    assert!(r.register(7, first).is_none(), "fresh seq returns None");
+    let second = entry(now + Duration::from_secs(2), AckKind::Ping);
+    let old = r.register(7, second).expect("replaced entry returned");
+    assert!(matches!(old.into_kind(), AckKind::Probe));
+    assert_eq!(r.len(), 1, "replacement keeps a single entry");
+    assert!(matches!(r.get(7).unwrap().kind_ref(), AckKind::Ping));
+  }
+
+  #[test]
+  fn ack_entry_exposes_sent_at_and_deadline() {
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(500);
+    let e = entry(deadline, AckKind::Ping);
+    assert_eq!(e.sent_at(), deadline - Duration::from_millis(50));
+    assert_eq!(e.deadline(), deadline);
+    assert!(matches!(e.kind_ref(), AckKind::Ping));
+  }
+
+  #[test]
+  fn get_peeks_without_removing() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(7, entry(now + Duration::from_secs(1), AckKind::Probe));
+    assert!(r.get(7).is_some());
+    assert_eq!(r.len(), 1, "get must not remove");
+    assert!(r.get(999).is_none(), "absent seq peeks None");
+  }
+
+  #[test]
+  fn handle_nack_for_unknown_seq_returns_none() {
+    let r: AckRegistry<SocketAddr> = AckRegistry::new();
+    assert!(r.handle_nack(7).is_none());
+  }
+
+  #[test]
+  fn ack_resolution_payload_accessors() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(7, entry(now + Duration::from_secs(1), AckKind::Probe));
+    let mut resolution = r
+      .handle_ack(7, Bytes::from_static(b"pong"), now)
+      .expect("ack");
+    // received_at carries the ack timestamp; payload_bytes is a cheap clone.
+    assert_eq!(resolution.received_at(), Some(now));
+    assert_eq!(resolution.payload_bytes().as_deref(), Some(&b"pong"[..]));
+    // take_payload moves the buffer out, leaving None behind.
+    assert_eq!(resolution.take_payload().as_deref(), Some(&b"pong"[..]));
+    assert!(resolution.payload().is_none(), "payload taken");
+    assert!(resolution.payload_bytes().is_none());
+  }
+
+  #[test]
+  fn timeout_resolution_has_no_payload_or_timestamp() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    r.register(7, entry(now - Duration::from_millis(10), AckKind::Probe));
+    let resolution = r.poll_expired(now).expect("expired");
+    // A timeout resolution carries neither payload nor recv timestamp.
+    assert!(resolution.payload().is_none());
+    assert!(resolution.received_at().is_none());
+    assert!(matches!(resolution.entry_ref().kind_ref(), AckKind::Probe));
+  }
+
+  #[test]
+  fn poll_expired_includes_entry_exactly_at_deadline() {
+    let mut r: AckRegistry<SocketAddr> = AckRegistry::new();
+    let now = Instant::now();
+    // deadline == now must count as expired (`deadline <= now`).
+    r.register(
+      7,
+      AckEntry::new(now - Duration::from_secs(1), now, AckKind::Probe),
+    );
+    assert!(r.poll_expired(now).is_some(), "deadline == now is expired");
+  }
 }
