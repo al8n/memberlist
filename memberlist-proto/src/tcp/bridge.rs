@@ -835,4 +835,233 @@ mod tests {
       .expect("complete unit");
     assert_eq!(back, framed);
   }
+
+  /// A full push/pull request→response exchange over the byte pump drives the
+  /// generic bridge's [`StreamBridge::drain_payload_only`] /
+  /// [`StreamBridge::drain_then_reap`] `SendPushPullResponse` arm: the
+  /// acceptor decodes the dialer's request, the inner endpoint returns
+  /// `StreamCommand::SendPushPullResponse`, and the bridge encodes + loads the
+  /// reply into the inbound stream's `output_buf`. The reply then flows back to
+  /// the dialer, which decodes it as `PushPullReplyReceived` and applies the
+  /// merge — both bridges converge to `BothClosed` and reap cleanly.
+  #[test]
+  fn push_pull_request_response_round_trips_then_reaps() {
+    use crate::event::PushPullKind;
+
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Dialer initiates a push/pull. Seed an alive peer so the request carries a
+    // non-empty membership view (and so `start_push_pull` produces a real
+    // DialRequested for `dial_succeeded`).
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
+    let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let c_stream = ep_c
+      .dial_succeeded(sid, now)
+      .expect("dial_succeeded mints the outbound push/pull stream");
+    client.promote(c_stream);
+
+    // Acceptor side.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    let s_stream = ep_s.accept_stream(addr(7600), now);
+    server.promote(s_stream);
+
+    // Shuttle bytes + FINs both ways, draining non-terminal side effects every
+    // tick on BOTH sides (the dialer must run `drain_payload_only` to consume
+    // the `PushPullReplyReceived`, the acceptor to produce the response via the
+    // `SendPushPullResponse` arm).
+    let mut c_fin = false;
+    let mut s_fin = false;
+    for _ in 0..128 {
+      client.pump_out(now).ok();
+      server.pump_out(now).ok();
+      let moved = shuttle(&mut client, &mut server, &mut c_fin, &mut s_fin, now);
+      if !client.is_terminal() {
+        client.drain_payload_only(&mut ep_c, now);
+      }
+      if !server.is_terminal() {
+        server.drain_payload_only(&mut ep_s, now);
+      }
+      if client.is_terminal() && server.is_terminal() {
+        break;
+      }
+      if !moved {
+        break;
+      }
+    }
+
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::BothClosed)
+      ),
+      "the acceptor produced its push/pull response and closed, got {:?}",
+      phase_label(server.phase_ref())
+    );
+    assert!(
+      matches!(
+        client.phase_ref(),
+        StreamPhase::Established(BridgePhase::BothClosed)
+      ),
+      "the dialer received the reply and closed, got {:?}",
+      phase_label(client.phase_ref())
+    );
+
+    // Terminal reap on both sides — the clean-close lifecycle path.
+    server.drain_then_reap(&mut ep_s, now);
+    client.drain_then_reap(&mut ep_c, now);
+
+    // The acceptor merged the dialer's `cli` view: it now knows about `cli`.
+    assert!(
+      ep_s.member(&SmolStr::new("cli")).is_some(),
+      "the acceptor merged the dialer's membership view (knows `cli`); \
+       members: {:?}",
+      ep_s
+        .members()
+        .map(|m| m.id_ref().clone())
+        .collect::<Vec<_>>(),
+    );
+  }
+
+  /// An acceptor whose [`MergeDelegate`](crate::delegate::MergeDelegate) vetoes
+  /// the inbound JOIN push/pull drives the bridge's
+  /// [`StreamBridge::drain_payload_only`] `StreamCommand::Close` arm:
+  /// `handle_stream_event` returns `Close`, the bridge calls
+  /// `fail_with_retire(BridgeFailure::AdmissionClosed)`, and becomes terminal
+  /// within the same tick (no pinning to the exchange deadline).
+  #[test]
+  fn inbound_push_pull_admission_rejected_fails_bridge() {
+    use crate::event::PushPullKind;
+
+    /// Vetoes every merge.
+    struct RejectAll;
+    impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAll {
+      fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+        false
+      }
+    }
+
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Dialer initiates a JOIN push/pull (the merge delegate only fires on
+    // join, never refresh).
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7610)));
+    let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let c_stream = ep_c
+      .dial_succeeded(sid, now)
+      .expect("dial_succeeded mints the outbound push/pull stream");
+    client.promote(c_stream);
+
+    // Acceptor with a rejecting merge delegate.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    ep_s.set_merge_delegate(RejectAll);
+    let s_stream = ep_s.accept_stream(addr(7610), now);
+    server.promote(s_stream);
+
+    // Shuttle until the server reaches its admission decision. The acceptor's
+    // `drain_payload_only` consumes the decoded request → `handle_stream_event`
+    // returns `Close` → `fail_with_retire(AdmissionClosed)`.
+    let mut c_fin = false;
+    let mut s_fin = false;
+    for _ in 0..128 {
+      client.pump_out(now).ok();
+      server.pump_out(now).ok();
+      let moved = shuttle(&mut client, &mut server, &mut c_fin, &mut s_fin, now);
+      if !server.is_terminal() {
+        server.drain_payload_only(&mut ep_s, now);
+      }
+      if server.is_terminal() {
+        break;
+      }
+      if !moved {
+        break;
+      }
+    }
+
+    assert!(
+      matches!(
+        server.phase_ref(),
+        StreamPhase::Established(BridgePhase::Failed(BridgeFailure::AdmissionClosed))
+      ),
+      "a vetoed join push/pull fails the acceptor bridge with AdmissionClosed, \
+       got {:?}",
+      phase_label(server.phase_ref())
+    );
+    assert!(server.is_terminal());
+    // The veto means the dialer's `cli` view was NOT merged.
+    assert!(
+      ep_s.member(&SmolStr::new("cli")).is_none(),
+      "a vetoed merge must not apply the peer's state",
+    );
+  }
+
+  /// [`StreamBridge::drain_then_reap`]'s `SendPushPullResponse` arm: when the
+  /// terminal reap runs with an inbound push/pull request event still queued
+  /// (the request decoded but `drain_payload_only` never ran), the reap drains
+  /// the event, `handle_stream_event` returns `SendPushPullResponse`, and the
+  /// bridge encodes + loads the reply into the inbound stream's `output_buf`.
+  #[test]
+  fn drain_then_reap_loads_push_pull_response() {
+    use crate::event::PushPullKind;
+
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+    complete_label_exchange(&mut client, &mut server, now);
+
+    // Dialer produces a real push/pull request frame.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7620)));
+    let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let c_stream = ep_c
+      .dial_succeeded(sid, now)
+      .expect("dial mints the outbound stream");
+    client.promote(c_stream);
+    client.pump_out(now).expect("client pumps its request");
+
+    // Acceptor: promote the inbound stream, then feed the dialer's request
+    // ciphertext (NO FIN). The FSM dispatches `PushPullRequestReceived` and is
+    // left in `InboundSendingResponse` with the event queued.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    let s_stream = ep_s.accept_stream(addr(7620), now);
+    server.promote(s_stream);
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    assert!(!c_out.is_empty(), "the dialer queued its request bytes");
+    server
+      .handle_transport_data(&c_out, now)
+      .expect("the acceptor consumes the request");
+
+    // Reap directly — bypassing `drain_payload_only` — so the queued
+    // push/pull request event is consumed by `drain_then_reap`'s
+    // `SendPushPullResponse` arm.
+    server.drain_then_reap(&mut ep_s, now);
+
+    // The acceptor merged the dialer's `cli` view (the SendPushPullResponse arm
+    // ran `handle_stream_event`, which merges then asks for the reply).
+    assert!(
+      ep_s.member(&SmolStr::new("cli")).is_some(),
+      "the reap drained the request event, merging the dialer's view; \
+       members: {:?}",
+      ep_s
+        .members()
+        .map(|m| m.id_ref().clone())
+        .collect::<Vec<_>>(),
+    );
+    // The encoded push/pull response was loaded into the inbound stream and
+    // surfaces on the next pump.
+    let mut reply = Vec::new();
+    server.poll_transport_transmit(&mut reply);
+    assert!(
+      !reply.is_empty(),
+      "the reap encoded + loaded the push/pull response into out_transmit",
+    );
+  }
 }

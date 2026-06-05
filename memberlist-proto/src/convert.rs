@@ -316,4 +316,54 @@ mod tests {
     let bytes = socket_addr_to_bytes(&unscoped).unwrap();
     assert_eq!(socket_addr_from_bytes(&bytes).unwrap(), unscoped);
   }
+
+  #[test]
+  fn addr_length_mismatch_info_accessors() {
+    // A truncated v4 buffer surfaces the version, expected, and actual
+    // byte counts on the mismatch payload.
+    let invalid = Bytes::from_static(&[VERSION_TAG_V4, 1, 2, 3]);
+    match socket_addr_from_bytes(&invalid) {
+      Err(ConvertError::AddrLengthMismatch(info)) => {
+        assert_eq!(info.version(), VERSION_TAG_V4);
+        assert_eq!(info.expected(), ADDR_V4_LEN);
+        assert_eq!(info.actual(), 4);
+        assert!(!info.to_string().is_empty());
+      }
+      other => panic!("expected AddrLengthMismatch, got {other:?}"),
+    }
+    // The display impl on the error wrapper also renders.
+    let direct = AddrLengthMismatchInfo::new(VERSION_TAG_V6, ADDR_V6_LEN, 5);
+    assert_eq!(
+      (direct.version(), direct.expected(), direct.actual()),
+      (VERSION_TAG_V6, ADDR_V6_LEN, 5)
+    );
+  }
+
+  #[test]
+  fn addr_rejects_truncated_v6() {
+    // Version tag v6 but only a handful of the 19 required bytes.
+    let invalid = Bytes::from_static(&[VERSION_TAG_V6, 1, 2, 3, 4, 5]);
+    match socket_addr_from_bytes(&invalid) {
+      Err(ConvertError::AddrLengthMismatch(info)) => {
+        assert_eq!(info.version(), VERSION_TAG_V6);
+        assert_eq!(info.expected(), ADDR_V6_LEN);
+        assert_eq!(info.actual(), 6);
+      }
+      other => panic!("expected AddrLengthMismatch for v6, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn convert_error_variants_render_nonempty() {
+    // Every ConvertError variant must have a non-empty Display string.
+    assert!(!ConvertError::IdNotUtf8.to_string().is_empty());
+    assert!(!ConvertError::AddrEmpty(0).to_string().is_empty());
+    assert!(!ConvertError::AddrUnknownVersion(9).to_string().is_empty());
+    assert!(!ConvertError::AddrScopedV6.to_string().is_empty());
+    assert!(
+      !ConvertError::AddrLengthMismatch(AddrLengthMismatchInfo::new(0, 7, 3))
+        .to_string()
+        .is_empty()
+    );
+  }
 }

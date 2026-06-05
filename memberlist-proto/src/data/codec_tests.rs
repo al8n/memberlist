@@ -438,3 +438,293 @@ fn encode_error_from_varint_no_room() {
     "got {err:?}"
   );
 }
+
+// ─── primitive decode error paths ────────────────────────────────────────────
+
+#[test]
+fn ip_and_socket_addr_reject_unknown_tag() {
+  // The discriminant byte selects V4 (0) / V6 (1); anything else is unknown.
+  let err = IpAddr::decode(&[7, 0, 0, 0, 0]).expect_err("unknown IpAddr tag");
+  assert!(err.is_unknown_tag(), "got {err:?}");
+
+  let err = SocketAddr::decode(&[9, 0, 0, 0, 0, 0, 0]).expect_err("unknown SocketAddr tag");
+  assert!(err.is_unknown_tag(), "got {err:?}");
+}
+
+#[test]
+fn address_decoders_reject_truncated_buffers() {
+  // Each fixed-width address decoder underflows on a short buffer.
+  assert!(
+    Ipv4Addr::decode(&[1, 2, 3])
+      .unwrap_err()
+      .is_buffer_underflow()
+  );
+  assert!(
+    Ipv6Addr::decode(&[0u8; 8])
+      .unwrap_err()
+      .is_buffer_underflow()
+  );
+  assert!(IpAddr::decode(&[]).unwrap_err().is_buffer_underflow());
+  assert!(
+    SocketAddrV4::decode(&[1, 2, 3])
+      .unwrap_err()
+      .is_buffer_underflow()
+  );
+  assert!(
+    SocketAddrV6::decode(&[0u8; 10])
+      .unwrap_err()
+      .is_buffer_underflow()
+  );
+  assert!(SocketAddr::decode(&[]).unwrap_err().is_buffer_underflow());
+}
+
+#[test]
+fn address_encoders_reject_undersized_buffers() {
+  // Exercise the per-variant insufficient-buffer guards on the encode side.
+  assert!(matches!(
+    Ipv4Addr::LOCALHOST.encode(&mut [0u8; 3]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    Ipv6Addr::LOCALHOST.encode(&mut [0u8; 8]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    IpAddr::V4(Ipv4Addr::LOCALHOST).encode(&mut [0u8; 2]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    IpAddr::V6(Ipv6Addr::LOCALHOST).encode(&mut [0u8; 2]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1).encode(&mut [0u8; 3]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    SocketAddrV6::new(Ipv6Addr::LOCALHOST, 1, 0, 0).encode(&mut [0u8; 8]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 1)).encode(&mut [0u8; 2]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    SocketAddr::from((Ipv6Addr::LOCALHOST, 1)).encode(&mut [0u8; 2]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+}
+
+#[test]
+fn socket_addr_v6_rejects_scope_and_flowinfo() {
+  // The compact `[16B IP][2B port]` layout cannot carry flowinfo/scope_id;
+  // a scoped address is rejected rather than silently flattened to scope 0.
+  let scoped = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7946, 0, 7);
+  let err = scoped
+    .encode(&mut [0u8; 32])
+    .expect_err("scoped SocketAddrV6 must be rejected");
+  assert!(matches!(err, EncodeError::Custom(_)), "got {err:?}");
+
+  let flow = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7946, 0x1234, 0);
+  assert!(matches!(
+    flow.encode(&mut [0u8; 32]),
+    Err(EncodeError::Custom(_))
+  ));
+
+  // The SocketAddr::V6 wrapper forwards to the inner encoder, so a scoped
+  // address routed through it is rejected too.
+  assert!(matches!(
+    SocketAddr::V6(scoped).encode(&mut [0u8; 32]),
+    Err(EncodeError::Custom(_))
+  ));
+}
+
+#[test]
+fn char_decode_rejects_invalid_scalar_value() {
+  // 0xD800 is a surrogate; `char::from_u32` rejects it.
+  let surrogate = 0xD800u32;
+  let mut buf = std::vec![0u8; surrogate.encoded_len()];
+  surrogate.encode(&mut buf).expect("encode u32");
+  let err = char::decode(&buf).expect_err("surrogate is not a valid char");
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+}
+
+#[test]
+fn char_decode_rejects_empty_buffer() {
+  assert!(char::decode(&[]).unwrap_err().is_buffer_underflow());
+}
+
+#[test]
+fn u8_and_bool_decode_reject_empty_buffer() {
+  assert!(u8::decode(&[]).unwrap_err().is_buffer_underflow());
+  assert!(bool::decode(&[]).unwrap_err().is_buffer_underflow());
+}
+
+#[test]
+fn bool_decodes_any_nonzero_as_true() {
+  // The decoder maps any nonzero byte to `true`, byte 0 to `false`.
+  assert!(!bool::decode(&[0]).unwrap().1);
+  assert!(bool::decode(&[1]).unwrap().1);
+  assert!(bool::decode(&[0xFF]).unwrap().1);
+}
+
+#[test]
+fn duration_decode_rejects_malformed_bytes() {
+  // A lone continuation byte cannot form a valid duration varint pair.
+  let err = Duration::decode(&[0x80]).expect_err("malformed duration");
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+}
+
+// ─── Node decode/encode error paths ──────────────────────────────────────────
+
+/// A `Node` whose id+addr fields are both `u32` so the wire layout is small and
+/// easy to hand-craft. `u32` is varint-typed, so each field is `[tag][varint]`.
+type SmallNode = Node<u32, u32>;
+
+fn small_node_bytes() -> Vec<u8> {
+  Node::new(7u32, 9u32)
+    .encode_to_vec()
+    .expect("encode SmallNode")
+}
+
+#[test]
+fn node_decode_rejects_duplicate_id_field() {
+  // Concatenate the id field onto a full encoding so tag 1 appears twice.
+  let full = small_node_bytes();
+  let id_field_len = full.len() - (1 + 9u32.encoded_len()); // strip the addr field
+  let mut dup = full.clone();
+  dup.extend_from_slice(&full[..id_field_len]);
+  let err = SmallNode::decode(&dup).expect_err("duplicate id must fail");
+  assert!(err.is_duplicate_field(), "got {err:?}");
+}
+
+#[test]
+fn node_decode_rejects_duplicate_addr_field() {
+  let full = small_node_bytes();
+  let id_field_len = full.len() - (1 + 9u32.encoded_len());
+  let mut dup = full.clone();
+  // Append the addr field (the tail after the id field) a second time.
+  dup.extend_from_slice(&full[id_field_len..]);
+  let err = SmallNode::decode(&dup).expect_err("duplicate addr must fail");
+  assert!(err.is_duplicate_field(), "got {err:?}");
+}
+
+#[test]
+fn node_decode_rejects_missing_fields() {
+  // Only the id field present (truncate the addr field off the tail).
+  let full = small_node_bytes();
+  let id_field_len = full.len() - (1 + 9u32.encoded_len());
+  let err = SmallNode::decode(&full[..id_field_len]).expect_err("missing addr must fail");
+  assert!(err.is_missing_field(), "got {err:?}");
+
+  // Empty buffer ⇒ both fields missing ⇒ MissingField (id reported first).
+  let err = SmallNode::decode(&[]).expect_err("empty must fail");
+  assert!(err.is_missing_field(), "got {err:?}");
+}
+
+#[test]
+fn node_decode_skips_unknown_tag() {
+  // Prepend an unrelated byte-wire-type field (tag 5) the decoder must skip,
+  // then the genuine fields. The Node still decodes to its real values.
+  let mut buf = std::vec![merge(WireType::Byte, 5), 0xAB];
+  buf.extend_from_slice(&small_node_bytes());
+  let (_, node) = SmallNode::decode(&buf).expect("unknown tag is skipped");
+  assert_eq!(node, Node::new(7u32, 9u32));
+}
+
+#[test]
+fn node_encode_rejects_undersized_buffers() {
+  let node = Node::new(7u32, 9u32);
+  // Zero-length buffer fails at the very first guard.
+  assert!(matches!(
+    node.encode(&mut []),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  // A buffer big enough for the id field but not the addr field fails at the
+  // mid-encode guard.
+  let need = node.encoded_len();
+  assert!(matches!(
+    node.encode(&mut std::vec![0u8; need - 1]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+}
+
+// ─── tuple decode/encode error paths ─────────────────────────────────────────
+
+fn small_tuple_bytes() -> Vec<u8> {
+  (7u32, 9u32).encode_to_vec().expect("encode tuple")
+}
+
+#[test]
+fn tuple_decode_rejects_duplicate_fields() {
+  let full = small_tuple_bytes();
+  let a_field_len = full.len() - (1 + 9u32.encoded_len());
+  // Duplicate the A field (tag 1).
+  let mut dup_a = full.clone();
+  dup_a.extend_from_slice(&full[..a_field_len]);
+  assert!(
+    <(u32, u32)>::decode(&dup_a)
+      .unwrap_err()
+      .is_duplicate_field()
+  );
+  // Duplicate the B field (tag 2).
+  let mut dup_b = full.clone();
+  dup_b.extend_from_slice(&full[a_field_len..]);
+  assert!(
+    <(u32, u32)>::decode(&dup_b)
+      .unwrap_err()
+      .is_duplicate_field()
+  );
+}
+
+#[test]
+fn tuple_decode_rejects_missing_fields() {
+  let full = small_tuple_bytes();
+  let a_field_len = full.len() - (1 + 9u32.encoded_len());
+  // Only the A field present.
+  assert!(
+    <(u32, u32)>::decode(&full[..a_field_len])
+      .unwrap_err()
+      .is_missing_field()
+  );
+  // Empty buffer ⇒ both missing.
+  assert!(<(u32, u32)>::decode(&[]).unwrap_err().is_missing_field());
+}
+
+#[test]
+fn tuple_decode_skips_unknown_tag() {
+  let mut buf = std::vec![merge(WireType::Byte, 7), 0xCD];
+  buf.extend_from_slice(&small_tuple_bytes());
+  let (_, t) = <(u32, u32)>::decode(&buf).expect("unknown tag skipped");
+  assert_eq!(t, (7u32, 9u32));
+}
+
+#[test]
+fn tuple_encode_rejects_undersized_buffers() {
+  let t = (7u32, 9u32);
+  assert!(matches!(
+    t.encode(&mut []),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  let need = t.encoded_len();
+  assert!(matches!(
+    t.encode(&mut std::vec![0u8; need - 1]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+}
+
+#[test]
+fn tuple_encode_with_length_delimited_roundtrips_and_guards() {
+  use super::TupleEncoder;
+  let enc = TupleEncoder::new(&7u32, &9u32);
+  let len = enc.encoded_len_with_length_delimited();
+  let mut buf = std::vec![0u8; len];
+  let written = enc
+    .encode_with_length_delimited(&mut buf)
+    .expect("length-delimited encode");
+  assert_eq!(written, len);
+  let (read, decoded) =
+    <(u32, u32)>::decode_length_delimited(&buf).expect("length-delimited decode");
+  assert_eq!(read, len);
+  assert_eq!(decoded, (7u32, 9u32));
+}

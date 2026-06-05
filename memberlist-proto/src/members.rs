@@ -556,4 +556,150 @@ mod tests {
     m.insert(member("bob", 7001, State::Alive));
     assert!(m.any_alive());
   }
+
+  #[test]
+  fn local_node_state_server_accessors_and_replace() {
+    let now = Instant::now();
+    let mut s = LocalNodeState::new(make_node("a", 7000, State::Alive), now);
+    assert_eq!(s.server_ref().id_ref(), &SmolStr::new("a"));
+    assert_eq!(s.id_ref(), &SmolStr::new("a"));
+    assert_eq!(
+      s.address_ref(),
+      &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000)
+    );
+    let arc = s.server_arc();
+    assert!(Arc::ptr_eq(&arc, &s.server_arc()));
+
+    // Replacing the shared NodeState swaps the visible identity.
+    let replacement = Arc::new(make_node("a2", 7100, State::Alive));
+    s.set_server(replacement.clone());
+    assert!(Arc::ptr_eq(&s.server_arc(), &replacement));
+    assert_eq!(s.id_ref(), &SmolStr::new("a2"));
+  }
+
+  #[test]
+  fn local_node_state_incarnation_and_state_change_mutators() {
+    let now = Instant::now();
+    let mut s = LocalNodeState::new(make_node("a", 7000, State::Alive), now);
+    assert_eq!(s.incarnation(), 0);
+    s.set_incarnation(42);
+    assert_eq!(s.incarnation(), 42);
+
+    assert_eq!(s.state_change(), now);
+    let later = now + core::time::Duration::from_secs(3);
+    s.set_state_change(later);
+    assert_eq!(s.state_change(), later);
+    // set_state_change must not disturb the liveness state itself.
+    assert_eq!(s.state(), State::Alive);
+  }
+
+  fn suspicion(from: &str) -> Suspicion<SmolStr> {
+    Suspicion::new(
+      SmolStr::new(from),
+      3,
+      core::time::Duration::from_millis(100),
+      core::time::Duration::from_millis(500),
+      Instant::now(),
+    )
+  }
+
+  #[test]
+  fn member_suspicion_lifecycle() {
+    let now = Instant::now();
+    let s = LocalNodeState::new(make_node("a", 7000, State::Suspect), now);
+
+    // with_suspicion attaches at construction.
+    let mut m = Member::new(s).with_suspicion(suspicion("watcher"));
+    assert!(m.suspicion().is_some());
+    assert_eq!(m.suspicion().unwrap().k(), 3);
+
+    // suspicion_mut allows mutation in place.
+    assert!(m.suspicion_mut().is_some());
+
+    // set_suspicion(None) clears it.
+    m.set_suspicion(None);
+    assert!(m.suspicion().is_none());
+
+    // set_suspicion(Some) restores, take_suspicion removes and returns it.
+    m.set_suspicion(Some(suspicion("watcher2")));
+    let taken = m.take_suspicion().expect("suspicion present");
+    assert_eq!(taken.k(), 3);
+    assert!(m.suspicion().is_none(), "take must clear");
+  }
+
+  #[test]
+  fn member_state_ref_and_state_mut() {
+    let now = Instant::now();
+    let mut m = Member::new(LocalNodeState::new(make_node("a", 7000, State::Alive), now));
+    assert_eq!(m.state_ref().state(), State::Alive);
+    m.state_mut().set_state(State::Suspect, now);
+    assert_eq!(m.state_ref().state(), State::Suspect);
+  }
+
+  #[test]
+  fn members_local_ref_and_get_mut() {
+    let mut m = Members::new(local_node());
+    assert_eq!(m.local_ref().id_ref(), &SmolStr::new("local"));
+    m.insert(member("alice", 7000, State::Alive));
+    let alice = m.get_mut(&SmolStr::new("alice")).expect("alice present");
+    alice.state_mut().set_state(State::Dead, Instant::now());
+    assert_eq!(
+      m.get(&SmolStr::new("alice")).unwrap().state_ref().state(),
+      State::Dead
+    );
+    assert!(m.get_mut(&SmolStr::new("missing")).is_none());
+  }
+
+  #[test]
+  fn members_iter_and_iter_mut() {
+    let mut m = Members::new(local_node());
+    m.insert(member("a", 7000, State::Alive));
+    m.insert(member("b", 7001, State::Alive));
+    assert_eq!(m.iter().count(), 2);
+    for member in m.iter_mut() {
+      member.state_mut().set_state(State::Suspect, Instant::now());
+    }
+    assert!(
+      m.iter()
+        .all(|mem| mem.state_ref().state() == State::Suspect)
+    );
+  }
+
+  #[test]
+  fn insert_at_random_at_panics_on_duplicate_id() {
+    let mut m = Members::new(local_node());
+    m.insert(member("alice", 7000, State::Alive));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      m.insert_at_random_at(member("alice", 7000, State::Alive), 0);
+    }));
+    assert!(result.is_err(), "duplicate id must panic");
+  }
+
+  #[test]
+  fn insert_at_random_at_panics_on_out_of_range_target() {
+    let mut m = Members::new(local_node());
+    m.insert(member("alice", 7000, State::Alive));
+    // len is 1; target 5 is out of `0..=len`.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      m.insert_at_random_at(member("bob", 7001, State::Alive), 5);
+    }));
+    assert!(result.is_err(), "out-of-range target must panic");
+  }
+
+  #[test]
+  fn insert_at_random_into_empty_lands_at_zero() {
+    let mut m = Members::new(local_node());
+    let mut rng = SmallRng::seed_from_u64(7);
+    m.insert_at_random(member("solo", 7000, State::Alive), &mut rng);
+    assert_eq!(m.len(), 1);
+    assert_eq!(*m.node_map.get(&SmolStr::new("solo")).unwrap(), 0);
+  }
+
+  #[test]
+  fn remove_absent_id_returns_none() {
+    let mut m = Members::new(local_node());
+    m.insert(member("a", 7000, State::Alive));
+    assert!(m.remove(&SmolStr::new("ghost")).is_none());
+    assert_eq!(m.len(), 1);
+  }
 }

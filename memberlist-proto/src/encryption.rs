@@ -1552,4 +1552,103 @@ mod tests {
       other => panic!("expected Oversize, got {other:?}"),
     }
   }
+
+  #[test]
+  fn encrypt_algorithm_u8_conversions_roundtrip() {
+    for algo in [
+      EncryptAlgorithm::AesGcm,
+      EncryptAlgorithm::ChaCha20Poly1305,
+      EncryptAlgorithm::Unknown(200),
+    ] {
+      let byte: u8 = algo.into();
+      assert_eq!(byte, algo.tag());
+      assert_eq!(EncryptAlgorithm::from(byte), algo);
+    }
+    // The named tags pin their numeric values through the From<u8> path too.
+    assert_eq!(EncryptAlgorithm::from(1u8), EncryptAlgorithm::AesGcm);
+    assert_eq!(
+      EncryptAlgorithm::from(2u8),
+      EncryptAlgorithm::ChaCha20Poly1305
+    );
+    assert_eq!(EncryptAlgorithm::from(9u8), EncryptAlgorithm::Unknown(9));
+  }
+
+  #[test]
+  fn encryption_error_entropy_display_is_nonempty() {
+    assert!(!EncryptionError::Entropy.to_string().is_empty());
+  }
+
+  #[test]
+  fn keyring_error_display_strings_are_nonempty() {
+    assert!(!KeyringError::IsPrimary.to_string().is_empty());
+    assert!(!KeyringError::NotInRing.to_string().is_empty());
+  }
+
+  #[test]
+  fn encryption_options_update_and_maybe_keyring() {
+    let kr = Keyring::new(SecretKey::Aes128([3u8; 16]));
+    // update_keyring assigns the raw Option in place.
+    let mut opts = EncryptionOptions::new();
+    opts.update_keyring(Some(kr.clone()));
+    assert!(opts.is_enabled());
+    opts.update_keyring(None);
+    assert!(!opts.is_enabled());
+
+    // maybe_keyring is the consuming-builder twin.
+    let enabled = EncryptionOptions::new().maybe_keyring(Some(kr));
+    assert!(enabled.is_enabled());
+    let disabled = EncryptionOptions::new()
+      .with_keyring(Keyring::new(SecretKey::Aes256([4u8; 32])))
+      .maybe_keyring(None);
+    assert!(!disabled.is_enabled());
+  }
+
+  #[test]
+  fn decode_encrypted_frame_rejects_malformed_headers() {
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes128([0u8; 16])));
+    // Shorter than the 2-byte minimum.
+    assert!(matches!(
+      decode_encrypted_frame(&opts, &[ENCRYPTED_TAG], 1 << 20),
+      Err(EncryptionError::MalformedFrame)
+    ));
+    // Wrong leading tag.
+    assert!(matches!(
+      decode_encrypted_frame(&opts, &[0xAB, AES_GCM_TAG], 1 << 20),
+      Err(EncryptionError::MalformedFrame)
+    ));
+    // Correct tag + known algorithm, but shorter than header + auth tag.
+    let short = [ENCRYPTED_TAG, AES_GCM_TAG, 0, 0, 0];
+    assert!(matches!(
+      decode_encrypted_frame(&opts, &short, 1 << 20),
+      Err(EncryptionError::MalformedFrame)
+    ));
+  }
+
+  #[test]
+  fn decode_encrypted_frame_unknown_algo_beats_short_length() {
+    // The algorithm-tag check runs BEFORE the full-header length bound, so an
+    // unknown-algorithm frame is UnsupportedAlgorithm even when it is far too
+    // short to be a real wrapper.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes128([0u8; 16])));
+    let frame = [ENCRYPTED_TAG, 222u8];
+    assert!(matches!(
+      decode_encrypted_frame(&opts, &frame, 1 << 20),
+      Err(EncryptionError::UnsupportedAlgorithm(222))
+    ));
+  }
+
+  #[test]
+  fn decode_encrypted_frame_with_disabled_encryption_is_no_matching_key() {
+    // A well-formed-length encrypted frame but no keyring configured: the
+    // decoder cannot decrypt it and surfaces NoMatchingKey (the gossip-path
+    // drop disposition), not a panic.
+    let opts = EncryptionOptions::new();
+    let mut frame = vec![ENCRYPTED_TAG, AES_GCM_TAG];
+    frame.extend_from_slice(&[0u8; NONCE_LEN]);
+    frame.extend_from_slice(&[0u8; AUTH_TAG_LEN]); // minimal ciphertext+tag
+    assert!(matches!(
+      decode_encrypted_frame(&opts, &frame, 1 << 20),
+      Err(EncryptionError::NoMatchingKey)
+    ));
+  }
 }

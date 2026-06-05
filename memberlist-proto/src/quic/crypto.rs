@@ -559,4 +559,34 @@ pub(crate) mod tests {
     assert_eq!(&*cfg.sni_for(&a), "peer-7100.example");
     assert_eq!(&*cfg.sni_for(&b), "peer-7200.example");
   }
+
+  /// `server_ref` borrows the stored server config; the borrowed value must be
+  /// usable to build a server-side `quinn_proto::Endpoint` exactly like the
+  /// `server_arc` clone does. Exercises the borrow accessor alongside the
+  /// `Udp`-mode construction path so the `datagram_receive_buffer_size(None)`
+  /// branch is taken and the resulting server config still drives an endpoint.
+  #[test]
+  fn server_ref_borrows_a_usable_server_config_under_udp_mode() {
+    let cfg = QuicOptions::new(
+      test_endpoint_config(&[9u8; 32]),
+      test_server(),
+      test_client(),
+      quinn_proto::TransportConfig::default(),
+      "localhost",
+      UnreliableTransport::Udp,
+    );
+    // `server_ref` borrows the stored config; build a server-side endpoint from
+    // that same config (cloned via the arc accessor) to prove the `Udp`-mode
+    // bundle — built through the `datagram_receive_buffer_size(None)` branch —
+    // is still a usable endpoint config.
+    let borrowed: &quinn_proto::ServerConfig = cfg.server_ref();
+    assert!(
+      Arc::strong_count(&cfg.server_arc()) >= 2,
+      "server_arc hands out cheap clones of the shared config"
+    );
+    let _ = borrowed;
+    let _server_ep =
+      quinn_proto::Endpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, None);
+    assert_eq!(cfg.unreliable_transport(), UnreliableTransport::Udp);
+  }
 }

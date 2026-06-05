@@ -752,4 +752,84 @@ mod tests {
       "peers state unchanged (no resurrection)"
     );
   }
+
+  /// Race-defensive arm of `get_or_dial`: the `peers` map holds a handle whose
+  /// slab slot has already been vacated (the `None` arm of the `match
+  /// self.conns.get(ch.0)` → `(reusable=false, was_established=false)`). A
+  /// never-Established cached handle is authoritative — the call returns the
+  /// cached handle so `service_dials`'s `open(Bi)=None && !is_handshaking()`
+  /// path fires `dial_failed` rather than spawning a fresh handshake storm. No
+  /// new slab entry is created.
+  #[test]
+  fn get_or_dial_returns_cached_handle_when_peers_points_at_vacated_slab_slot() {
+    let (mut client, _server, cfg) = quinn_pair();
+    let mut t = ConnTable::new();
+    let now = Instant::now();
+    let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+    // Plant a `peers` mapping to a handle index that has no slab entry — the
+    // race-defensive `None` arm's input. `was_established` resolves to false,
+    // so this is the never-Established branch.
+    let phantom = ConnectionHandle(999);
+    t.peers.insert(peer, phantom);
+    assert!(t.conns.get(phantom.0).is_none(), "slab slot is vacant");
+
+    let ch = t
+      .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+      .expect("get_or_dial returns the cached handle");
+    assert_eq!(
+      ch, phantom,
+      "the stale never-Established handle is authoritative — returned so \
+       service_dials fires dial_failed, not a fresh handshake"
+    );
+    assert_eq!(
+      t.conns.len(),
+      0,
+      "no new slab entry was created for a phantom"
+    );
+  }
+
+  /// `reap_if_drained` on a handle whose slab slot is already gone returns
+  /// `false` without touching quinn or `peers` (the `None => return false`
+  /// guard). Idempotent: a second reap of a handle that was already reaped is a
+  /// no-op.
+  #[test]
+  fn reap_if_drained_on_absent_slab_slot_is_false_noop() {
+    let (mut client, _server, _cfg) = quinn_pair();
+    let mut t = ConnTable::new();
+    let phantom = ConnectionHandle(1234);
+    assert!(
+      !t.reap_if_drained(&mut client, phantom),
+      "reaping a handle with no slab entry must be a false no-op"
+    );
+  }
+
+  /// `ConnEntry`'s observation accessors on a freshly-dialed entry that has
+  /// not driven a handshake: `peer()` returns the dialed address,
+  /// `has_pending_events`/`pending_events_len` report an empty deferred queue,
+  /// and `take_pending_events` on an empty deque is a no-op drain. (The
+  /// `queue_pending_event` append path is covered end-to-end by the mod.rs
+  /// `conn_entry_pending_events_drop_with_entry_on_reap` regression.)
+  #[test]
+  fn conn_entry_observation_accessors_on_fresh_entry() {
+    let (mut client, _server, cfg) = quinn_pair();
+    let mut t = ConnTable::new();
+    let now = Instant::now();
+    let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+    let ch = t
+      .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+      .unwrap();
+    let e = t.get_mut(ch).unwrap();
+    assert_eq!(e.peer(), peer, "entry reports the dialed peer address");
+    assert!(
+      !e.has_pending_events(),
+      "fresh entry has no deferred events"
+    );
+    assert_eq!(e.pending_events_len(), 0);
+    let drained: Vec<quinn_proto::ConnectionEvent> = e.take_pending_events().collect();
+    assert!(drained.is_empty(), "draining an empty deque yields nothing");
+    assert!(
+      !e.has_pending_events(),
+      "deque still empty after the no-op drain"
+    );
+  }
 }
