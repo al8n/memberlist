@@ -36,6 +36,9 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod swim_parity_tests;
+
 /// Endpoint lifecycle state. Mutually exclusive: an Endpoint is in exactly
 /// one of these states. Replaces the legacy twin booleans `leaving` + `left`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
