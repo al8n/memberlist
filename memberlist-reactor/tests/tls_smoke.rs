@@ -280,6 +280,141 @@ async fn send_many_reliable_partial_pre_connect_failure_reports_err() {
   let _ = seed.shutdown().await;
 }
 
+/// A reliable `send_reliable` over TLS reaches the peer's `notify_user_msg`
+/// hook — the TLS reliable-stream data path end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_send_reliable_delivers_to_delegate() {
+  use std::{future::Future, sync::Mutex};
+
+  use memberlist_reactor::Delegate;
+
+  type Messages = Arc<Mutex<Vec<Vec<u8>>>>;
+  struct Recorder {
+    msgs: Messages,
+  }
+  impl Delegate for Recorder {
+    type Id = SmolStr;
+    type Address = SocketAddr;
+    fn notify_user_msg(&self, msg: Bytes) -> impl Future<Output = ()> + Send + '_ {
+      let msgs = self.msgs.clone();
+      async move { msgs.lock().unwrap().push(msg.to_vec()) }
+    }
+  }
+
+  let (cert, key) = support::generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("root");
+  let tls_seed = support::build_tls_options(cert.clone(), key.clone_key(), roots.clone());
+  let tls_sender = support::build_tls_options(cert, key, roots);
+
+  let msgs: Messages = Arc::new(Mutex::new(Vec::new()));
+  let seed = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("tls-rel-seed"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    Recorder { msgs: msgs.clone() },
+    tls_seed,
+    |_: &SocketAddr| Some("localhost".to_string()),
+  )
+  .await
+  .expect("seed");
+  let seed_addr = *seed.local().addr_ref();
+  let sender = make("tls-rel-sender", tls_sender).await;
+
+  sender
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .await
+    .expect("join");
+
+  let payload = Bytes::from_static(b"tls-reliable-payload");
+  tokio::time::timeout(
+    Duration::from_secs(10),
+    sender.send_reliable(seed_addr, payload.clone()),
+  )
+  .await
+  .expect("send_reliable must not hang")
+  .expect("send_reliable over TLS");
+
+  let saw = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if msgs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.as_slice() == payload.as_ref())
+      {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(
+    saw.is_ok(),
+    "TLS reliable payload not delivered; received: {:?}",
+    msgs.lock().unwrap()
+  );
+
+  let _ = sender.shutdown().await;
+  let _ = seed.shutdown().await;
+}
+
+/// Over TLS, after `leave()` the directed sends and policy setters funnel
+/// through the same running-node gate and are rejected with `NotRunning`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_commands_after_leave_are_rejected() {
+  let (cert, key) = support::generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("root");
+  let tls_a = support::build_tls_options(cert.clone(), key.clone_key(), roots.clone());
+  let tls_b = support::build_tls_options(cert, key, roots);
+
+  let a = make("tls-leave-a", tls_a).await;
+  let b = make("tls-leave-b", tls_b).await;
+  let a_addr = *a.local().addr_ref();
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if a.num_members() == 2 && b.num_members() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(converged.is_ok(), "TLS pair did not converge");
+
+  b.leave().await.expect("leave");
+
+  let send = tokio::time::timeout(
+    Duration::from_secs(5),
+    b.send_reliable(a_addr, Bytes::from_static(b"z")),
+  )
+  .await
+  .expect("send_reliable must not hang after leave");
+  assert!(
+    matches!(send, Err(Error::NotRunning)),
+    "expected NotRunning from TLS send_reliable after leave, got {send:?}"
+  );
+
+  let compr = tokio::time::timeout(
+    Duration::from_secs(5),
+    b.set_compression_options(memberlist_reactor::CompressionOptions::new()),
+  )
+  .await
+  .expect("set_compression_options must not hang after leave");
+  assert!(
+    matches!(compr, Err(Error::NotRunning)),
+    "expected NotRunning from TLS set_compression_options after leave, got {compr:?}"
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
 /// A different cluster label over shared TLS trust must not merge on the
 /// reliable plane: when two clusters share the same certificate and root CA,
 /// only the label header in the reliable stream distinguishes them.

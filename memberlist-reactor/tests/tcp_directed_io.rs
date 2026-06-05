@@ -364,6 +364,233 @@ async fn send_reliable_to_unreachable_returns_err_not_hang() {
   let _ = a.shutdown().await;
 }
 
+/// An oversized unreliable `send` payload is rejected with `PayloadTooLarge`
+/// rather than silently dropped on the wire: a single `UserData` frame larger
+/// than the gossip MTU is deterministically untransmittable, so the driver maps
+/// the machine's `UserPacketExceedsMtu` to `Error::PayloadTooLarge` and never
+/// queues it. 1 MiB is far over the default ~1400-byte gossip budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_send_is_rejected_payload_too_large() {
+  let a = make("oversized-a").await;
+  let huge = Bytes::from(vec![0xABu8; 1024 * 1024]);
+
+  let res = tokio::time::timeout(
+    Duration::from_secs(5),
+    a.send("127.0.0.1:9".parse::<SocketAddr>().unwrap(), huge),
+  )
+  .await
+  .expect("send must resolve, not hang");
+  assert!(
+    matches!(res, Err(Error::PayloadTooLarge(_))),
+    "an oversized unreliable send must be rejected with PayloadTooLarge, got {res:?}"
+  );
+
+  // A small payload on the SAME node is still accepted — the rejection is a
+  // size cap, not a blanket failure.
+  let ok = tokio::time::timeout(
+    Duration::from_secs(5),
+    a.send(
+      "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+      Bytes::from_static(b"small"),
+    ),
+  )
+  .await
+  .expect("small send must resolve");
+  assert!(
+    ok.is_ok(),
+    "a small directed send must still be accepted: {ok:?}"
+  );
+
+  let _ = a.shutdown().await;
+}
+
+/// `send_many` with no payloads is a no-op success (`Ok(())`): nothing to
+/// frame, so the driver replies immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_many_empty_is_ok_noop() {
+  let a = make("send-empty-a").await;
+  let res = tokio::time::timeout(
+    Duration::from_secs(5),
+    a.send_many(
+      "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+      std::iter::empty(),
+    ),
+  )
+  .await
+  .expect("empty send_many must resolve");
+  assert!(res.is_ok(), "empty send_many is a no-op Ok, got {res:?}");
+  let _ = a.shutdown().await;
+}
+
+/// `send_many_reliable` with no payloads is a no-op success (`Ok(())`): the
+/// driver short-circuits with nothing to track.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_many_reliable_empty_is_ok_noop() {
+  let a = make("send-rel-empty-a").await;
+  let res = tokio::time::timeout(
+    Duration::from_secs(5),
+    a.send_many_reliable(
+      "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+      std::iter::empty(),
+    ),
+  )
+  .await
+  .expect("empty send_many_reliable must resolve");
+  assert!(
+    res.is_ok(),
+    "empty send_many_reliable is a no-op Ok, got {res:?}"
+  );
+  let _ = a.shutdown().await;
+}
+
+/// `set_compression_options` on a LIVE (running) node succeeds: the change
+/// takes effect on the next outbound datagram, and the reply is `Ok(())`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_compression_options_on_live_node_succeeds() {
+  use memberlist_reactor::CompressionOptions;
+
+  let a = make("set-compr-a").await;
+  let res = tokio::time::timeout(
+    Duration::from_secs(5),
+    a.set_compression_options(CompressionOptions::new()),
+  )
+  .await
+  .expect("set_compression_options must resolve");
+  assert!(
+    res.is_ok(),
+    "set_compression_options on a running node must succeed, got {res:?}"
+  );
+  let _ = a.shutdown().await;
+}
+
+/// A custom `AddressResolver` is invoked for an `Unresolved` seed: the join
+/// resolves the host through the resolver, dispatches the resulting wire
+/// address, and converges. Exercises the `resolve`/`join_inner` resolver branch
+/// the all-`Resolved` smoke tests never reach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn join_resolves_unresolved_seed_via_resolver() {
+  use std::future::Future;
+
+  use memberlist_reactor::AddressResolver;
+
+  // Resolver mapping the sentinel label "seed" to a captured wire address.
+  struct FixedResolver(SocketAddr);
+  impl AddressResolver for FixedResolver {
+    type Address = &'static str;
+    type Error = std::convert::Infallible;
+    fn resolve(
+      &self,
+      _addr: &&'static str,
+    ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_ {
+      // The `let` before the async block keeps the explicit `+ Send` return
+      // form the `AddressResolver` contract requires (not bare `async fn`).
+      let a = self.0;
+      async move { Ok(vec![a]) }
+    }
+  }
+
+  let a = make("unres-a").await;
+  let b = make("unres-b").await;
+  let a_addr = *a.local().addr_ref();
+  let resolver = FixedResolver(a_addr);
+
+  let n = tokio::time::timeout(
+    Duration::from_secs(8),
+    b.join(&resolver, &[MaybeResolved::Unresolved("seed")]),
+  )
+  .await
+  .expect("unresolved-seed join must resolve")
+  .expect("join via resolver");
+  assert_eq!(n, 1, "the resolved seed was contacted");
+
+  let converged = tokio::time::timeout(Duration::from_secs(8), async {
+    loop {
+      if a.num_members() == 2 && b.num_members() == 2 {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  })
+  .await;
+  assert!(converged.is_ok(), "resolver-seed cluster did not converge");
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
+/// A non-empty seed list that resolves to ZERO wire addresses is a bootstrap
+/// failure (`JoinFailed`), not a successful zero-contact join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn join_resolver_yields_nothing_is_join_failed() {
+  use std::future::Future;
+
+  use memberlist_reactor::AddressResolver;
+
+  struct EmptyResolver;
+  impl AddressResolver for EmptyResolver {
+    type Address = &'static str;
+    type Error = std::convert::Infallible;
+    fn resolve(
+      &self,
+      _addr: &&'static str,
+    ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_ {
+      // Explicit `+ Send` form per the resolver contract.
+      let out: Vec<SocketAddr> = Vec::new();
+      async move { Ok(out) }
+    }
+  }
+
+  let b = make("empty-res-b").await;
+  let res = tokio::time::timeout(
+    Duration::from_secs(8),
+    b.join(&EmptyResolver, &[MaybeResolved::Unresolved("nothing")]),
+  )
+  .await
+  .expect("join must resolve");
+  assert!(
+    matches!(res, Err(Error::JoinFailed(1))),
+    "a non-empty seed resolving to nothing is JoinFailed, got {res:?}"
+  );
+  let _ = b.shutdown().await;
+}
+
+/// A resolver error propagates as `Error::Resolve` from `join`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn join_resolver_error_propagates() {
+  use std::future::Future;
+
+  use memberlist_reactor::AddressResolver;
+
+  struct FailingResolver;
+  impl AddressResolver for FailingResolver {
+    // `std::io::Error` satisfies the resolver's `core::error::Error` bound, so
+    // the test needs no extra error-derive dependency.
+    type Address = &'static str;
+    type Error = std::io::Error;
+    fn resolve(
+      &self,
+      _addr: &&'static str,
+    ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_ {
+      // Explicit `+ Send` form per the resolver contract.
+      let err = std::io::Error::other("boom");
+      async move { Err(err) }
+    }
+  }
+
+  let b = make("res-err-b").await;
+  let res = tokio::time::timeout(
+    Duration::from_secs(8),
+    b.join(&FailingResolver, &[MaybeResolved::Unresolved("bad")]),
+  )
+  .await
+  .expect("join must resolve");
+  assert!(
+    matches!(res, Err(Error::Resolve(_))),
+    "a resolver error must surface as Error::Resolve, got {res:?}"
+  );
+  let _ = b.shutdown().await;
+}
+
 /// `local_state()` / `by_id(local)` read IMMEDIATELY after construction
 /// reflects the configured `initial_meta`. The reactor builds its initial
 /// snapshot from the live endpoint (`snapshot_of(endpoint.endpoint_ref())`),
