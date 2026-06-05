@@ -1055,4 +1055,109 @@ mod tests {
     let drained = q.take_broadcasts(99, 0, 1_000_000);
     assert_eq!(drained.len(), 1);
   }
+
+  /// A broadcast whose `id()` is `Some` only when constructed with one, but
+  /// always reports `is_unique() == false` and `invalidates` by `key`. An
+  /// instance built with `id == None` takes the slow `invalidates` scan yet can
+  /// still supersede an id-bearing entry — driving the `m.remove(id)` arm of the
+  /// slow path (the existing slow-path test only invalidates no-id entries).
+  #[derive(Debug)]
+  struct MixedIdBroadcast {
+    id: Option<&'static str>,
+    key: &'static str,
+    msg: String,
+    finished: Arc<AtomicUsize>,
+  }
+
+  impl Broadcast for MixedIdBroadcast {
+    type Id = &'static str;
+    type Message = String;
+
+    fn id(&self) -> Option<&Self::Id> {
+      self.id.as_ref()
+    }
+    fn invalidates(&self, other: &Self) -> bool {
+      self.key == other.key
+    }
+    fn message(&self) -> &Self::Message {
+      &self.msg
+    }
+    fn encoded_len(msg: &Self::Message) -> usize {
+      msg.len()
+    }
+    fn finished(&self) {
+      self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  #[test]
+  fn slow_path_invalidation_removes_id_mapping_of_superseded_entry() {
+    // Queue an id-bearing entry, then a NO-id entry (slow path) whose `key`
+    // matches it. The slow scan supersedes the id-bearing entry and must drop
+    // its `m` mapping too (the `if let Some(id) = item.id()` → `m.remove(id)`
+    // arm), leaving the map and queue consistent.
+    let mut q: BroadcastQueue<&'static str, MixedIdBroadcast> = BroadcastQueue::new(3);
+    let f1 = Arc::new(AtomicUsize::new(0));
+    let f2 = Arc::new(AtomicUsize::new(0));
+    q.queue_broadcast(MixedIdBroadcast {
+      id: Some("peer"),
+      key: "k",
+      msg: "with-id".to_string(),
+      finished: f1.clone(),
+    });
+    assert_eq!(q.num_queued(), 1);
+    // A no-id broadcast forces the `else if !is_unique()` slow path.
+    q.queue_broadcast(MixedIdBroadcast {
+      id: None,
+      key: "k",
+      msg: "no-id".to_string(),
+      finished: f2.clone(),
+    });
+    assert_eq!(q.num_queued(), 1, "the id-bearing entry was superseded");
+    assert_eq!(f1.load(Ordering::SeqCst), 1, "superseded entry finished()");
+    // Re-queueing the original id must now insert fresh (its old `m` mapping
+    // was removed), not silently no-op against a stale map entry.
+    q.queue_broadcast(MixedIdBroadcast {
+      id: Some("peer"),
+      key: "other",
+      msg: "again".to_string(),
+      finished: f1.clone(),
+    });
+    assert_eq!(
+      q.num_queued(),
+      2,
+      "the id mapping was cleared, so this inserts"
+    );
+  }
+
+  #[test]
+  fn limited_broadcast_eq_and_ord_helpers() {
+    // `LimitedBroadcast`'s hand-written `PartialEq` / `PartialOrd` are not
+    // exercised by the `BTreeSet` (which uses `Ord::cmp`); drive them directly
+    // so the equality and ordering contract is covered. Two entries that share
+    // `(transmits, msg_len, id)` are equal; a lower transmit count sorts first.
+    let f = Arc::new(AtomicUsize::new(0));
+    let mk = |transmits: usize, msg_len: u64, id: u64| LimitedBroadcast {
+      transmits,
+      msg_len,
+      id,
+      broadcast: Arc::new(bcast("n", "m", f.clone())),
+    };
+    let a = mk(1, 5, 7);
+    let b = mk(1, 5, 7);
+    let c = mk(2, 5, 7);
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert!(a < c, "a lower transmit count sorts before a higher one");
+    assert_eq!(a.partial_cmp(&b), Some(core::cmp::Ordering::Equal));
+
+    // The `Cmp` probe key's `PartialEq<&LimitedBroadcast>` mirror.
+    let probe = Cmp {
+      transmits: 1,
+      msg_len: 5,
+      id: 7,
+    };
+    assert!(probe == &a);
+    assert!(probe != &c);
+  }
 }

@@ -3236,4 +3236,390 @@ mod tests {
       StreamAction::Abort(_) => "Abort",
     }
   }
+
+  /// Build a dialer / acceptor coordinator pair sharing a cluster label, each
+  /// rooted at its own loopback port.
+  fn coordinator_pair(
+    dialer_port: u16,
+    acceptor_port: u16,
+  ) -> (
+    StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+    StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+  ) {
+    let cfg_d = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let cfg_a = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let dialer = StreamEndpoint::new(
+      endpoint(dialer_port),
+      cfg_d,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    let acceptor = StreamEndpoint::new(
+      endpoint(acceptor_port),
+      cfg_a,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    (dialer, acceptor)
+  }
+
+  /// Drive a dialer ⊕ acceptor coordinator pair through ONE reliable exchange
+  /// over a simulated in-memory transport, modeling the natural driver loop:
+  /// the dialer's `Connect` opens a connection (the acceptor `accept_connection`s
+  /// it), per-exchange bytes shuttle both ways keyed by each side's exchange
+  /// handle, and a `Shutdown`/`Close`/`Abort` delivers the out-of-band TCP FIN
+  /// (an empty `read == 0`) to the peer. Runs to mutual quiescence (both sides
+  /// reaped their bridge) or the iteration cap.
+  ///
+  /// `acceptor_addr` is the socket the dialer dials; the acceptor accepts the
+  /// connection as coming `from` the dialer's advertised address.
+  fn drive_exchange(
+    dialer: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+    acceptor: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+    dialer_addr: SocketAddr,
+    now: Instant,
+  ) {
+    // Per-side connection handle, established when the dialer's Connect fires.
+    let mut acc_eid: Option<ExchangeId> = None;
+    let mut dial_eid: Option<ExchangeId> = None;
+    // One-shot FIN latches per direction.
+    let mut dialer_fin_to_acc = false;
+    let mut acc_fin_to_dialer = false;
+
+    for _ in 0..256 {
+      let mut progressed = false;
+
+      // (1) Dialer actions: a Connect opens the acceptor's inbound connection;
+      // a Shutdown/Close/Abort delivers the FIN to the acceptor.
+      while let Some(action) = dialer.poll_action() {
+        progressed = true;
+        match action {
+          StreamAction::Connect(c) => {
+            dial_eid = Some(c.id());
+            acc_eid = Some(acceptor.accept_connection(dialer_addr, now));
+          }
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
+            if let Some(aid) = acc_eid {
+              if !dialer_fin_to_acc {
+                dialer_fin_to_acc = true;
+                acceptor.handle_transport_data(aid, &[], true, now);
+              }
+            }
+          }
+        }
+      }
+
+      // (2) Acceptor actions: a Shutdown/Close/Abort delivers the FIN back to
+      // the dialer. (An acceptor never dials, so no Connect arm.)
+      while let Some(action) = acceptor.poll_action() {
+        progressed = true;
+        if action.as_connect().is_none() {
+          if let Some(did) = dial_eid {
+            if !acc_fin_to_dialer {
+              acc_fin_to_dialer = true;
+              dialer.handle_transport_data(did, &[], true, now);
+            }
+          }
+        }
+      }
+
+      // (3) Dialer → acceptor bytes.
+      if let Some(aid) = acc_eid {
+        let mut buf = Vec::new();
+        while let Some((_id, _peer, bytes)) = dialer.poll_transport_transmit() {
+          buf.extend_from_slice(&bytes);
+        }
+        if !buf.is_empty() {
+          progressed = true;
+          acceptor.handle_transport_data(aid, &buf, false, now);
+        }
+      }
+
+      // (4) Acceptor → dialer bytes.
+      if let Some(did) = dial_eid {
+        let mut buf = Vec::new();
+        while let Some((_id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+          buf.extend_from_slice(&bytes);
+        }
+        if !buf.is_empty() {
+          progressed = true;
+          dialer.handle_transport_data(did, &buf, false, now);
+        }
+      }
+
+      // (5) Advance both coordinators one tick. A real driver consults
+      // `poll_timeout` to schedule its next wakeup; calling it here exercises
+      // the unified-deadline fold across live bridges + pending dials.
+      let _ = dialer.poll_timeout();
+      let _ = acceptor.poll_timeout();
+      dialer.handle_timeout(now);
+      acceptor.handle_timeout(now);
+
+      if dialer.live_bridge_count() == 0 && acceptor.live_bridge_count() == 0 && !progressed {
+        break;
+      }
+    }
+  }
+
+  /// End-to-end push/pull JOIN between two real coordinators over the simulated
+  /// transport: the dialer merges the acceptor's view and the acceptor merges
+  /// the dialer's. This sweeps the coordinator's full reliable lifecycle —
+  /// `accept_connection`, the bytes + EOF `handle_transport_data` feeds,
+  /// `service_handshake_completions` mint, `pump_bridges`, `collect_bridge_transmits`,
+  /// `maybe_emit_shutdown`, and the clean `reap_bridge` → `Close` path — driven
+  /// only through the public driver surface.
+  #[test]
+  fn end_to_end_push_pull_join_merges_both_views() {
+    let now = Instant::now();
+    let dialer_addr = addr(7800);
+    let acceptor_addr = addr(7801);
+    let (mut dialer, mut acceptor) = coordinator_pair(dialer_addr.port(), acceptor_addr.port());
+
+    // Seed each side with a distinct alive peer so both membership views are
+    // non-empty and the merge is observable on both ends.
+    dialer.handle_alive(
+      dialer_addr,
+      crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("dpeer"), addr(7900))),
+      now,
+    );
+    acceptor.handle_alive(
+      acceptor_addr,
+      crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("apeer"), addr(7901))),
+      now,
+    );
+
+    let _sid = dialer.start_push_pull(acceptor_addr, PushPullKind::Join, now);
+    drive_exchange(&mut dialer, &mut acceptor, dialer_addr, now);
+
+    // Both bridges were reaped on the clean completion.
+    assert_eq!(dialer.live_bridge_count(), 0, "dialer reaped its bridge");
+    assert_eq!(
+      acceptor.live_bridge_count(),
+      0,
+      "acceptor reaped its bridge"
+    );
+
+    // The acceptor merged the dialer's view: it now knows `dpeer`.
+    assert!(
+      acceptor
+        .endpoint_ref()
+        .member(&SmolStr::new("dpeer"))
+        .is_some(),
+      "the acceptor merged the dialer's membership view",
+    );
+    // The dialer merged the acceptor's reply: it now knows `apeer`.
+    assert!(
+      dialer
+        .endpoint_ref()
+        .member(&SmolStr::new("apeer"))
+        .is_some(),
+      "the dialer merged the acceptor's push/pull reply",
+    );
+  }
+
+  /// End-to-end reliable user message between two coordinators: a one-way
+  /// `send_user_message` reliable delivery surfaces as `Event::UserPacket` on
+  /// the acceptor. Drives the outbound `UserMessage` FSM path + the inbound
+  /// `UserDataReceived` reap on the coordinator.
+  #[test]
+  fn end_to_end_reliable_user_message_delivers_on_acceptor() {
+    let now = Instant::now();
+    let dialer_addr = addr(7810);
+    let acceptor_addr = addr(7811);
+    let (mut dialer, mut acceptor) = coordinator_pair(dialer_addr.port(), acceptor_addr.port());
+
+    let payload = Bytes::from_static(b"reliable-hello");
+    dialer.start_user_message(acceptor_addr, payload.clone(), now);
+    drive_exchange(&mut dialer, &mut acceptor, dialer_addr, now);
+
+    assert_eq!(dialer.live_bridge_count(), 0, "dialer reaped its bridge");
+    assert_eq!(
+      acceptor.live_bridge_count(),
+      0,
+      "acceptor reaped its bridge"
+    );
+
+    let mut got = None;
+    while let Some(ev) = acceptor.poll_event() {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
+        got = Some(data);
+      }
+    }
+    assert_eq!(
+      got.as_deref(),
+      Some(payload.as_ref()),
+      "the reliable user message surfaced on the acceptor as UserPacket",
+    );
+  }
+
+  /// `poll_timeout` folds in a pending-dial intent's own deadline AND returns an
+  /// immediate-due wake while an unattempted `dial_pending` entry exists. Using
+  /// the raw `endpoint_mut().start_push_pull` (no in-band `service_dials`) plus
+  /// `poll_event` sieves a `DialRequested` into `dial_pending` without attempting
+  /// it, so `poll_timeout` exercises both the deadline fold and the
+  /// `has_unattempted` immediate-due rescue term.
+  #[test]
+  fn poll_timeout_folds_pending_dial_and_returns_immediate_due_when_unattempted() {
+    let now = Instant::now();
+    let ep = endpoint(7820);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // Seed `last_now = now` via a non-dial-servicing wrapper so the immediate-due
+    // anchor has a reference instant.
+    coord.handle_alive(
+      addr(7001),
+      crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("seed"), addr(7001))),
+      now,
+    );
+
+    // Raw start (no in-band service): emits a DialRequested on the inner queue.
+    coord
+      .endpoint_mut()
+      .start_push_pull(addr(7000), PushPullKind::Join, now);
+    // Sieve it into the private dial_pending deque without attempting it.
+    while coord.poll_event().is_some() {}
+
+    // poll_timeout now folds the dial_pending entry AND, because it is
+    // unattempted and `last_now` is set, returns an immediate-due wake (no later
+    // than `last_now`).
+    let t = coord
+      .poll_timeout()
+      .expect("a pending dial contributes a deadline");
+    assert!(
+      t <= now,
+      "an unattempted pending dial yields an immediate-due wake, got a future {t:?}"
+    );
+  }
+
+  /// A dial intent whose own deadline has already elapsed by the time
+  /// `service_dials` processes it is retired via `dial_failed` WITHOUT opening a
+  /// connection (no bridge, no Connect). Reached by sieving a `DialRequested`
+  /// into `dial_pending` (raw start + `poll_event`) and then servicing at a time
+  /// past its deadline.
+  #[test]
+  fn service_dials_retires_intent_whose_deadline_already_elapsed() {
+    let now = Instant::now();
+    let ep = endpoint(7830);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // Raw start at `now` (default deadline = now + 10s), sieved into
+    // dial_pending without attempting.
+    coord
+      .endpoint_mut()
+      .start_push_pull(addr(7000), PushPullKind::Join, now);
+    while coord.poll_event().is_some() {}
+
+    // Service the dial at a time PAST its 10s deadline: the intent is retired,
+    // no bridge is built, and no Connect is queued.
+    let past = now + Duration::from_secs(11);
+    coord.service_dials(past);
+
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "an expired dial intent builds no bridge"
+    );
+    assert!(
+      coord.poll_action().is_none(),
+      "an expired dial intent queues no Connect action"
+    );
+  }
+
+  /// With TWO live bridges plus an unattempted pending dial, `poll_timeout`
+  /// folds multiple deadline sources via `min` — exercising the `map_or` `min`
+  /// closures (a single source only takes the `map_or` default). Two in-band
+  /// dials build two `Active` bridges; a third raw dial sieved into
+  /// `dial_pending` adds its own deadline and an immediate-due term.
+  #[test]
+  fn poll_timeout_folds_multiple_deadline_sources_via_min() {
+    let now = Instant::now();
+    let ep = endpoint(7840);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+
+    // Two in-band dials → two live Active bridges (each contributes a deadline).
+    coord.start_user_message(addr(7000), Bytes::from_static(b"a"), now);
+    coord.start_user_message(addr(7002), Bytes::from_static(b"b"), now);
+    assert!(
+      coord.live_bridge_count() >= 2,
+      "two dials built two live bridges, got {}",
+      coord.live_bridge_count()
+    );
+
+    // The two bridges' deadlines fold via the `min` closure (the first sets
+    // `best = Some`, the second folds with `min`).
+    let t_two = coord
+      .poll_timeout()
+      .expect("two live bridges contribute a deadline");
+    assert!(t_two >= now, "the bridge deadlines are in the future");
+
+    // Add a third raw dial sieved into dial_pending (unattempted): poll_timeout
+    // now also folds the dial deadline and returns an immediate-due wake.
+    coord
+      .endpoint_mut()
+      .start_push_pull(addr(7004), PushPullKind::Join, now);
+    while coord.poll_event().is_some() {}
+    let t_three = coord
+      .poll_timeout()
+      .expect("the pending dial contributes a deadline");
+    assert!(
+      t_three <= now,
+      "the unattempted pending dial forces an immediate-due wake, got {t_three:?}"
+    );
+  }
+
+  /// `compress_gossip` never inflates a datagram and always round-trips, across
+  /// a size sweep of near-incompressible data: an incompressible datagram is
+  /// sent PLAIN (`apply` returns `Plain` because the raw LZ4 output did not
+  /// shrink), which the receiver passes through unchanged. This exercises the
+  /// `Compressed`-arm wrapper-vs-plain compare and the plain pass-through on the
+  /// gossip compression path under realistic incompressible payloads.
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn compress_gossip_incompressible_datagram_is_sent_plain_and_round_trips() {
+    use crate::{CompressAlgorithm, CompressionOptions};
+    let ep = endpoint(7850);
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let opts = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(1);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, test_sni_provider(), test_peer_to_socket(), opts);
+
+    let mut plain_count = 0;
+    for len in 16..=600usize {
+      // A near-incompressible LCG byte stream: LZ4 cannot shrink it, so `apply`
+      // returns Plain and the datagram is emitted verbatim.
+      let datagram: Vec<u8> = (0..len)
+        .map(|i| ((i as u32).wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+      let out = coord.compress_gossip(&datagram);
+      if out == datagram {
+        plain_count += 1;
+        let back = coord
+          .decrypt_gossip(&out)
+          .expect("plain gossip round-trips");
+        assert_eq!(
+          back, datagram,
+          "the plain datagram round-trips at len={len}"
+        );
+      }
+      assert!(
+        out.len() <= datagram.len(),
+        "compress_gossip inflated at len={len}: {} > {}",
+        out.len(),
+        datagram.len()
+      );
+    }
+    assert!(
+      plain_count > 0,
+      "incompressible datagrams are sent plain (no inflation)"
+    );
+  }
 }

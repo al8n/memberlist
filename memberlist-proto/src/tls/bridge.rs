@@ -793,6 +793,170 @@ mod tests {
     );
   }
 
+  /// A handshake flight delivered in two PARTIAL transport reads exercises the
+  /// `intake_handshaking` partial-header path: the first read is consumed in
+  /// full (`Intake::Done`) but leaves the server still `Handshaking` (the record
+  /// is incomplete), so the loop returns early (`matches!(Done) || !consumed`)
+  /// and waits for the rest. The second read completes the flight and the
+  /// handshake proceeds.
+  #[test]
+  fn handshake_flight_split_across_two_reads_buffers_partial() {
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+
+    // The client's first flight (ClientHello).
+    let mut hello = Vec::new();
+    client.poll_transport_transmit(&mut hello);
+    assert!(hello.len() > 8, "the ClientHello is large enough to split");
+
+    // Deliver it in two halves. The first half is a partial record: rustls
+    // consumes it (Done) but cannot complete the handshake — the server stays
+    // Handshaking with the partial buffered.
+    let mid = hello.len() / 2;
+    server
+      .handle_transport_data(&hello[..mid], now)
+      .expect("the partial first read is accepted");
+    assert!(
+      server.is_handshaking(),
+      "the server is still handshaking after a partial flight"
+    );
+    assert!(
+      server.stream_is_none(),
+      "no Stream is minted while the handshake is incomplete"
+    );
+
+    // The second half completes the flight; the handshake can now advance.
+    server
+      .handle_transport_data(&hello[mid..], now)
+      .expect("the second read completes the flight");
+
+    // Finish the handshake the rest of the way to prove the split did not
+    // corrupt it.
+    complete_handshake(&mut client, &mut server, now);
+    assert!(!client.is_handshaking() && !server.is_handshaking());
+  }
+
+  /// A retained pre-promotion ciphertext tail followed by a SECOND transport
+  /// read delivered via `handle_transport_data` (rather than `replay_pending`)
+  /// exercises the established-intake path that PREPENDS the retained tail to
+  /// the newly-supplied data: `pending_inbound` is non-empty, so the bytes are
+  /// combined (tail first, then the new read) and the whole >16 KiB frame
+  /// reassembles in wire order.
+  ///
+  /// The first read carries the dialer's final handshake flight plus PART of the
+  /// large frame's ciphertext — enough to complete the handshake and trip
+  /// rustls backpressure so a tail is retained; the remainder is withheld and
+  /// delivered post-promotion as the second transport read.
+  #[test]
+  fn retained_tail_then_second_read_via_handle_transport_data_reassembles() {
+    let now = Instant::now();
+    let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+
+    // Drive the handshake until the CLIENT has finished but withhold its final
+    // flight from the server (still Handshaking, no Stream).
+    for _ in 0..64 {
+      if !client.is_handshaking() {
+        break;
+      }
+      let mut c_out = Vec::new();
+      client.poll_transport_transmit(&mut c_out);
+      if !c_out.is_empty() {
+        server.handle_transport_data(&c_out, now).unwrap();
+      }
+      let mut s_out = Vec::new();
+      server.poll_transport_transmit(&mut s_out);
+      if !s_out.is_empty() {
+        client.handle_transport_data(&s_out, now).unwrap();
+      }
+      if c_out.is_empty() && s_out.is_empty() {
+        break;
+      }
+    }
+    assert!(!client.is_handshaking(), "client finished its handshake");
+    assert!(server.is_handshaking(), "server's final flight withheld");
+
+    // Mint + pump the client with a large one-way user message so its `Finished`
+    // flight + the >16 KiB app frame are produced together.
+    let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7560)));
+    let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
+    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+    client.promote(c_stream);
+    client.pump_out(now).expect("client pumps its request");
+
+    let mut all = Vec::new();
+    for _ in 0..64 {
+      let before = all.len();
+      client.poll_transport_transmit(&mut all);
+      if all.len() == before {
+        break;
+      }
+    }
+    assert!(all.len() > 16 * 1024, "coalesced ciphertext exceeds 16 KiB");
+
+    // FIRST read: the final flight + all but the last 2 KiB of the app
+    // ciphertext — completes the handshake and trips rustls backpressure well
+    // before the buffer is exhausted, so the bridge retains the unconsumed
+    // ciphertext tail.
+    let split = all.len() - 2 * 1024;
+    server
+      .handle_transport_data(&all[..split], now)
+      .expect("the partial coalesced read is accepted");
+    assert!(
+      !server.is_handshaking(),
+      "the handshake completed inside the first read"
+    );
+
+    // Promote, but DO NOT call replay_pending — instead deliver the remaining
+    // ciphertext via handle_transport_data while the retained tail is still
+    // present, so the established intake combines tail + new read.
+    let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    let s_stream = ep_s.accept_stream(addr(7560), now);
+    server.promote(s_stream);
+    assert!(
+      !server.pending_inbound_is_empty(),
+      "a ciphertext tail is retained after the first backpressured read"
+    );
+
+    // SECOND read: the remaining app ciphertext. `pending_inbound` is non-empty,
+    // so this is the combine-tail-then-data path.
+    server
+      .handle_transport_data(&all[split..], now)
+      .expect("the second read reassembles the frame with the retained tail");
+
+    // Finish the exchange and reap; the whole frame must have decoded.
+    server.drain_payload_only(&mut ep_s, now);
+    for _ in 0..64 {
+      client.pump_out(now).ok();
+      server.pump_out(now).ok();
+      let moved = shuttle(&mut client, &mut server, now);
+      if !server.is_terminal() {
+        server.drain_payload_only(&mut ep_s, now);
+      }
+      if client.is_terminal() && server.is_terminal() {
+        break;
+      }
+      if !moved {
+        break;
+      }
+    }
+    server.drain_then_reap(&mut ep_s, now);
+    let mut got = None;
+    while let Some(ev) = ep_s.poll_event() {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
+        got = Some(data);
+      }
+    }
+    assert_eq!(
+      got.as_deref(),
+      Some(payload.as_ref()),
+      "the >16 KiB frame reassembled from the retained tail + the second read"
+    );
+  }
+
   /// A `StreamBridge<TlsRecords>` built with an ENABLED `EncryptionOptions`
   /// ends up with a DISABLED effective `EncryptionOptions`: `TlsRecords
   /// ::is_secure() == true`, so the 5-arg `StreamBridge::new` zeroes the

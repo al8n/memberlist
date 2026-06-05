@@ -1333,4 +1333,134 @@ mod tests {
     let buf = [0x80, 0x80, 0x80, 0x80, 0x10, 0x00];
     assert!(take_reliable_unit(&buf, 1 << 20).is_err());
   }
+
+  #[test]
+  fn take_reliable_unit_with_encryption_rejects_corrupt_leading_varint() {
+    // The encryption-aware decoder propagates the same hard varint corruption
+    // (the non-Incomplete `Err(e)` arm) rather than stalling on `None`.
+    use crate::encryption::EncryptionOptions;
+    let buf = [0x80, 0x80, 0x80, 0x80, 0x10, 0x00];
+    assert!(take_reliable_unit_with_encryption(&buf, &EncryptionOptions::new(), 1 << 20).is_err());
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn lz4_decompress_rejects_orig_len_larger_than_actual() {
+    // A valid LZ4 block decoded against an `orig_len` larger than the true
+    // decompressed size produces fewer bytes than declared — the exact-length
+    // check rejects it rather than returning a short buffer.
+    let data = b"the quick brown fox".to_vec();
+    let packed = compress(CompressAlgorithm::Lz4, &data).expect("compress");
+    let err = decompress(CompressAlgorithm::Lz4, &packed, data.len() + 8)
+      .expect_err("oversized orig_len must be rejected");
+    assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
+  }
+
+  #[cfg(feature = "compression-snappy")]
+  #[test]
+  fn snappy_decompress_rejects_orig_len_mismatch() {
+    // Snappy embeds its own length, so an `orig_len` that disagrees with the
+    // body's true length is rejected at the exact-length check.
+    let data = b"the quick brown fox".to_vec();
+    let packed = compress(CompressAlgorithm::Snappy, &data).expect("compress");
+    let err = decompress(CompressAlgorithm::Snappy, &packed, data.len() + 8)
+      .expect_err("mismatched orig_len must be rejected");
+    assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
+  }
+
+  #[cfg(feature = "compression-zstd")]
+  #[test]
+  fn zstd_decompress_rejects_orig_len_larger_than_actual() {
+    // zstd's bulk decompressor allocates exactly `orig_len`; an oversized
+    // declaration leaves the produced length short and is rejected.
+    let data = b"the quick brown fox".to_vec();
+    let packed = compress(CompressAlgorithm::Zstd, &data).expect("compress");
+    let err = decompress(CompressAlgorithm::Zstd, &packed, data.len() + 8)
+      .expect_err("oversized orig_len must be rejected");
+    assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
+  }
+
+  #[cfg(feature = "compression-brotli")]
+  #[test]
+  fn brotli_decompress_rejects_orig_len_larger_than_actual() {
+    // The brotli stream EOFs at its true length; an oversized `orig_len`
+    // produces fewer bytes than declared and fails the exact-length check.
+    let data = b"the quick brown fox".to_vec();
+    let packed = compress(CompressAlgorithm::Brotli, &data).expect("compress");
+    let err = decompress(CompressAlgorithm::Brotli, &packed, data.len() + 8)
+      .expect_err("oversized orig_len must be rejected");
+    assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn encode_reliable_unit_falls_back_to_plain_when_wrapper_would_inflate() {
+    // An input that compresses by fewer bytes than the `[Compressed]` wrapper
+    // header costs: `apply` returns Compressed (raw bytes shrank), but the
+    // wrapped frame is not smaller than the plain bytes, so the unit is emitted
+    // plain (the don't-expand fallback). 30 PRNG bytes + a 12-byte run saves
+    // exactly one byte under LZ4 while the header is three.
+    let mut framed = Vec::new();
+    let mut x: u32 = 0x12345678;
+    for _ in 0..30 {
+      x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+      framed.push((x >> 24) as u8);
+    }
+    framed.extend(std::iter::repeat_n(0xAB, 12));
+    // Precondition: raw compression shrinks, but only by less than the wrapper.
+    let packed = compress(CompressAlgorithm::Lz4, &framed).expect("compress");
+    assert!(packed.len() < framed.len(), "precondition: raw shrinks");
+
+    let opts = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(8);
+    let unit = encode_reliable_unit(&opts, &framed);
+    // The unit's payload is the plain framed bytes, not a `[Compressed]` frame.
+    let (unit_len, vbytes) = decode_varint_u32(&unit).expect("unit_len");
+    let payload = &unit[vbytes..vbytes + unit_len as usize];
+    assert_eq!(
+      payload,
+      &framed[..],
+      "don't-expand fallback emits plain bytes"
+    );
+    assert_ne!(
+      payload[0],
+      MessageTag::Compressed as u8,
+      "payload must not be a Compressed wrapper"
+    );
+    // And it still round-trips through the receiver.
+    let (back, consumed) = take_reliable_unit(&unit, 1 << 20)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
+  }
+
+  #[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+  #[test]
+  fn encode_reliable_unit_with_encryption_falls_back_to_plain_compression() {
+    // Same don't-expand fallback on the encryption-aware path: compression
+    // shrinks by less than its wrapper, so the pre-encryption payload is the
+    // plain framed bytes (not a `[Compressed]` frame), then encrypted.
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    let mut framed = Vec::new();
+    let mut x: u32 = 0x12345678;
+    for _ in 0..30 {
+      x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+      framed.push((x >> 24) as u8);
+    }
+    framed.extend(std::iter::repeat_n(0xAB, 12));
+
+    let comp = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(8);
+    let key = SecretKey::Aes256([0x55; 32]);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (back, consumed) = take_reliable_unit_with_encryption(&unit, &enc, 1 << 20)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
+  }
 }

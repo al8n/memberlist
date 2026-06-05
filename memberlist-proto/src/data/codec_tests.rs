@@ -3,6 +3,7 @@
 
 use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  num::NonZeroUsize,
   sync::Arc,
   time::Duration,
 };
@@ -623,6 +624,38 @@ fn node_decode_rejects_missing_fields() {
 }
 
 #[test]
+fn node_encode_rejects_buffer_sized_to_only_the_id_field() {
+  // A buffer sized to EXACTLY the id field (tag + varint) leaves no room for
+  // the address tag byte, tripping the mid-encode guard between the two fields
+  // (distinct from the zero-length and one-byte-short guards). `u32` is
+  // varint-typed, so the id field is `1 (tag) + 7u32.encoded_len()` bytes.
+  let node = Node::new(7u32, 9u32);
+  let id_field_len = 1 + 7u32.encoded_len();
+  let err = node
+    .encode(&mut std::vec![0u8; id_field_len])
+    .expect_err("no room for the address tag");
+  assert!(
+    matches!(err, EncodeError::InsufficientBuffer(_)),
+    "got {err:?}"
+  );
+}
+
+#[test]
+fn tuple_encode_rejects_buffer_sized_to_only_the_first_field() {
+  // Same mid-encode guard for a tuple: a buffer sized to exactly the A field
+  // has no room for the B tag byte.
+  let t = (7u32, 9u32);
+  let a_field_len = 1 + 7u32.encoded_len();
+  let err = t
+    .encode(&mut std::vec![0u8; a_field_len])
+    .expect_err("no room for the B tag");
+  assert!(
+    matches!(err, EncodeError::InsufficientBuffer(_)),
+    "got {err:?}"
+  );
+}
+
+#[test]
 fn node_decode_skips_unknown_tag() {
   // Prepend an unrelated byte-wire-type field (tag 5) the decoder must skip,
   // then the genuine fields. The Node still decodes to its real values.
@@ -727,4 +760,248 @@ fn tuple_encode_with_length_delimited_roundtrips_and_guards() {
     <(u32, u32)>::decode_length_delimited(&buf).expect("length-delimited decode");
   assert_eq!(read, len);
   assert_eq!(decoded, (7u32, 9u32));
+}
+
+// ─── string / byte container encode guards ───────────────────────────────────
+
+#[test]
+fn string_decode_rejects_invalid_utf8() {
+  // A `String` is length-delimited, so `Data::decode` routes the raw payload
+  // bytes through `<&str as DataRef>::decode`, which validates UTF-8.
+  let err = String::decode(&[0xFF, 0xFE, 0xFD]).expect_err("invalid utf-8 must fail");
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+}
+
+#[test]
+fn string_encode_rejects_undersized_buffer() {
+  // A non-empty string whose byte length exceeds the buffer hits the
+  // insufficient-buffer guard (the empty-string short-circuit is skipped).
+  let s = String::from("hello");
+  let err = s
+    .encode(&mut [0u8; 2])
+    .expect_err("undersized buffer must fail");
+  assert!(
+    matches!(err, EncodeError::InsufficientBuffer(_)),
+    "got {err:?}"
+  );
+}
+
+#[test]
+fn byte_container_encode_rejects_undersized_buffer() {
+  // `Vec<u8>` / `Bytes` share the byte-slice encoder; a non-empty payload
+  // larger than the buffer trips the insufficient-buffer guard.
+  let err = b"hello world"
+    .to_vec()
+    .encode(&mut [0u8; 4])
+    .expect_err("undersized buffer must fail");
+  assert!(
+    matches!(err, EncodeError::InsufficientBuffer(_)),
+    "got {err:?}"
+  );
+}
+
+#[test]
+fn byte_array_decode_rejects_short_buffer() {
+  // The fixed-width `[u8; N]` decoder underflows when fewer than N bytes remain.
+  let err = <[u8; 8]>::decode(&[1, 2, 3]).expect_err("short buffer must underflow");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+#[test]
+fn byte_array_encode_rejects_undersized_buffer() {
+  // And the `[u8; N]` encoder rejects a buffer narrower than N.
+  let err = [0xABu8; 16]
+    .encode(&mut [0u8; 4])
+    .expect_err("undersized buffer must fail");
+  assert!(
+    matches!(err, EncodeError::InsufficientBuffer(_)),
+    "got {err:?}"
+  );
+}
+
+// ─── address inner-decode error propagation ──────────────────────────────────
+
+#[test]
+fn socket_addr_propagates_inner_decode_error() {
+  // A valid discriminant byte followed by a truncated body must surface the
+  // inner V4/V6 decoder's underflow (the `?` propagation arm), not panic.
+  let err = SocketAddr::decode(&[0, 1, 2, 3]).expect_err("V4 body truncated");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+  let err = SocketAddr::decode(&[1, 0, 0, 0]).expect_err("V6 body truncated");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+
+  // The `IpAddr` discriminant decoder propagates the same way.
+  let err = IpAddr::decode(&[0]).expect_err("V4 ip body absent");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+  let err = IpAddr::decode(&[1, 0, 0]).expect_err("V6 ip body truncated");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+// ─── float / u8 / wrapper edge arms ──────────────────────────────────────────
+
+#[test]
+fn float_decoders_reject_short_buffers() {
+  assert!(f32::decode(&[0u8; 2]).unwrap_err().is_buffer_underflow());
+  assert!(f64::decode(&[0u8; 4]).unwrap_err().is_buffer_underflow());
+}
+
+#[test]
+fn float_encoders_reject_undersized_buffers() {
+  assert!(matches!(
+    1.5f32.encode(&mut [0u8; 2]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+  assert!(matches!(
+    1.5f64.encode(&mut [0u8; 4]),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+}
+
+#[test]
+fn u8_encode_rejects_empty_buffer() {
+  assert!(matches!(
+    7u8.encode(&mut []),
+    Err(EncodeError::InsufficientBuffer(_))
+  ));
+}
+
+#[test]
+fn smart_pointer_wrapper_propagates_inner_decode_error() {
+  // The `Arc<T>` / `Box<T>` wrapper forwards `T::Ref::decode`; a truncated
+  // varint body surfaces through the `?` propagation arm.
+  let err = Arc::<u32>::decode(&[0x80]).expect_err("truncated varint must fail");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+  let err = Box::<u64>::decode(&[0x80]).expect_err("truncated varint must fail");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+// ─── tuple / node inner-field error propagation ──────────────────────────────
+
+#[test]
+fn tuple_propagates_inner_field_decode_error() {
+  // A well-formed A-field tag followed by a truncated length-delimited body
+  // surfaces the inner decoder's underflow from inside the match arm.
+  let a_tag = merge(<String as Data>::WIRE_TYPE, 1);
+  // tag, length=5, but only 2 payload bytes present.
+  let err =
+    <(String, u32)>::decode(&[a_tag, 5, b'h', b'i']).expect_err("truncated A field must fail");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+#[test]
+fn node_propagates_inner_field_decode_error() {
+  // Same shape for a `Node`'s id field (tag 1, length-delimited string).
+  let id_tag = merge(<String as Data>::WIRE_TYPE, 1);
+  let err = Node::<String, u32>::decode(&[id_tag, 5, b'h', b'i'])
+    .expect_err("truncated id field must fail");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+#[test]
+fn from_ref_round_trips_through_owned_tuple() {
+  // `(A, B)::from_ref` reassembles the owned tuple from its decoded ref;
+  // a heterogeneous string/socket pair exercises both `from_ref` legs.
+  let value = (
+    SmolStr::from("node"),
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 7000)),
+  );
+  let bytes = value.encode_to_vec().expect("encode");
+  let (read, decoded) = <(SmolStr, SocketAddr)>::decode(&bytes).expect("decode owned");
+  assert_eq!(read, bytes.len());
+  assert_eq!(decoded, value);
+}
+
+// ─── data.rs `From<varing::*>` conversions ───────────────────────────────────
+
+#[test]
+fn encode_error_from_varing_runtime_variants() {
+  // `varing::EncodeError::Other` maps to a custom `EncodeError`.
+  let err: EncodeError = varing::EncodeError::other("boom").into();
+  assert!(matches!(err, EncodeError::Custom(_)), "got {err:?}");
+  assert_eq!(err.to_string(), "boom");
+
+  // `InsufficientSpace` maps to the structured insufficient-buffer variant.
+  let space = varing::EncodeError::insufficient_space(NonZeroUsize::new(10).unwrap(), 4);
+  let err: EncodeError = space.into();
+  match err {
+    EncodeError::InsufficientBuffer(cap) => assert_eq!((cap.required(), cap.remaining()), (10, 4)),
+    other => panic!("expected InsufficientBuffer, got {other:?}"),
+  }
+}
+
+#[test]
+fn encode_error_from_varing_const_variants() {
+  // The const-flavoured varint error has its own `From` impl.
+  let err: EncodeError = varing::ConstEncodeError::other("nope").into();
+  assert!(matches!(err, EncodeError::Custom(_)), "got {err:?}");
+
+  let space = varing::ConstEncodeError::insufficient_space(NonZeroUsize::new(7).unwrap(), 2);
+  let err: EncodeError = space.into();
+  match err {
+    EncodeError::InsufficientBuffer(cap) => assert_eq!((cap.required(), cap.remaining()), (7, 2)),
+    other => panic!("expected InsufficientBuffer, got {other:?}"),
+  }
+}
+
+#[test]
+fn encode_error_from_cow() {
+  let err: EncodeError = std::borrow::Cow::Borrowed("via cow").into();
+  match err {
+    EncodeError::Custom(msg) => assert_eq!(msg, "via cow"),
+    other => panic!("expected Custom, got {other:?}"),
+  }
+}
+
+#[test]
+fn decode_error_from_varing_runtime_variants() {
+  // `Overflow` maps to the length-delimited-overflow decode error.
+  let err: DecodeError = varing::DecodeError::overflow().into();
+  assert!(
+    matches!(err, DecodeError::LengthDelimitedOverflow),
+    "got {err:?}"
+  );
+
+  // `Other` maps to a custom decode error.
+  let err: DecodeError = varing::DecodeError::other("bad").into();
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+
+  // `InsufficientData` maps to a buffer underflow.
+  let err: DecodeError = varing::DecodeError::insufficient_data(1).into();
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+#[test]
+fn decode_error_from_varing_const_variants() {
+  let err: DecodeError = varing::ConstDecodeError::overflow().into();
+  assert!(
+    matches!(err, DecodeError::LengthDelimitedOverflow),
+    "got {err:?}"
+  );
+
+  let err: DecodeError = varing::ConstDecodeError::other("bad").into();
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+
+  let err: DecodeError = varing::ConstDecodeError::insufficient_data(0).into();
+  assert!(err.is_buffer_underflow(), "got {err:?}");
+}
+
+// ─── decode_length_delimited error propagation ───────────────────────────────
+
+#[test]
+fn decode_length_delimited_propagates_inner_decode_error() {
+  // A length-delimited frame whose declared length covers the buffer but whose
+  // payload is an invalid UTF-8 string surfaces the inner decoder's error
+  // through the `?` after the length prefix is consumed.
+  // Frame: [len=3][0xFF 0xFE 0xFD] — length is honest, payload is not UTF-8.
+  let err =
+    String::decode_length_delimited(&[3, 0xFF, 0xFE, 0xFD]).expect_err("invalid utf-8 payload");
+  assert!(matches!(err, DecodeError::Custom(_)), "got {err:?}");
+}
+
+#[test]
+fn decode_length_delimited_rejects_truncated_length_prefix() {
+  // A length prefix that is itself an unterminated varint surfaces the varint
+  // decoder's underflow through the leading `?`.
+  let err = String::decode_length_delimited(&[0x80]).expect_err("truncated length prefix");
+  assert!(err.is_buffer_underflow(), "got {err:?}");
 }

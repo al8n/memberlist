@@ -1651,4 +1651,79 @@ mod tests {
       Err(EncryptionError::NoMatchingKey)
     ));
   }
+
+  #[test]
+  fn decrypt_rejects_key_variant_algorithm_mismatch() {
+    // The variant/algorithm precheck guards the decrypt path too (symmetric
+    // with `key_variant_must_match_algorithm`, which covers encrypt): an AES
+    // key handed to the ChaCha algorithm is KeyMismatch, never a panic.
+    let key = SecretKey::Aes128([0u8; 16]);
+    let err = decrypt(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &key,
+      &[0u8; 12],
+      b"ciphertext-bytes",
+      b"\x0d\x02",
+    )
+    .expect_err("variant/algo mismatch must err");
+    assert!(matches!(err, EncryptionError::KeyMismatch));
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn aes_gcm_aes128_and_aes192_decrypt_fail_auth_on_corrupt_ciphertext() {
+    // The AES-128 and AES-192 decrypt arms (distinct from the AES-256 arm the
+    // other failure tests use) must surface AuthFailed when the ciphertext is
+    // corrupted, not panic.
+    let nonce = [7u8; 12];
+    let aad = b"\x0d\x01";
+    for key in [SecretKey::Aes128([0x11; 16]), SecretKey::Aes192([0x22; 24])] {
+      let mut ct =
+        encrypt(EncryptAlgorithm::AesGcm, &key, &nonce, b"secret", aad).expect("encrypt");
+      // Flip a ciphertext byte so the AEAD tag check fails.
+      ct[0] ^= 0xFF;
+      let err = decrypt(EncryptAlgorithm::AesGcm, &key, &nonce, &ct, aad)
+        .expect_err("corrupt ciphertext must fail auth");
+      assert!(matches!(err, EncryptionError::AuthFailed), "got {err:?}");
+    }
+  }
+
+  #[test]
+  fn keyring_insert_secondary_equal_to_primary_is_dropped() {
+    // Inserting a key byte-equal to the primary hits the primary-equality
+    // guard (distinct from the existing-secondary guard) and is a no-op.
+    let mut kr = Keyring::new(k_a());
+    kr.insert_secondary(k_a());
+    assert!(
+      kr.secondaries().is_empty(),
+      "a duplicate of the primary must not be added as a secondary"
+    );
+  }
+
+  #[cfg(all(
+    feature = "encryption-aes-gcm",
+    feature = "encryption-chacha20-poly1305"
+  ))]
+  #[test]
+  fn decode_skips_secondary_whose_algorithm_does_not_match() {
+    // Frame encrypted under an outside ChaCha key. Keyring: a ChaCha primary
+    // (matches the algo, tried, fails auth → falls through) and an AES
+    // secondary (algorithm mismatch → skipped via the variant filter). With
+    // the only variant-matching candidate having failed, the verdict is the
+    // AEAD's own AuthFailed.
+    let outside = SecretKey::ChaCha20Poly1305([0x10; 32]);
+    let chacha_primary = SecretKey::ChaCha20Poly1305([0x11; 32]);
+    let aes_secondary = SecretKey::Aes256([0x22; 32]);
+    let kr = Keyring::with_secondaries(chacha_primary, vec![aes_secondary]);
+    let opts = EncryptionOptions::new().with_keyring(kr);
+    let frame = encode_encrypted_frame(
+      EncryptAlgorithm::ChaCha20Poly1305,
+      &outside,
+      b"unrelated bytes",
+    )
+    .expect("encode");
+    let err = decode_encrypted_frame(&opts, &frame, 1 << 20)
+      .expect_err("no usable key: AES secondary is skipped, ChaCha primary fails auth");
+    assert!(matches!(err, EncryptionError::AuthFailed), "got {err:?}");
+  }
 }

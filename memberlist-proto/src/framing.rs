@@ -1239,4 +1239,126 @@ mod tests {
       Err(FrameError::UnknownTag(_))
     ));
   }
+
+  /// One representative (non-empty-bodied) value of every [`AnyMessage`]
+  /// variant, so encode + both decode paths exercise each per-variant arm.
+  fn one_of_each_variant() -> [AnyMessage; 10] {
+    use crate::messages::memberlist::v1::{
+      Alive, Dead, ErrorResponse, IndirectPing, Nack, PushPull, Suspect, UserData,
+    };
+    [
+      AnyMessage::Alive(Alive {
+        incarnation: Some(3),
+        ..Default::default()
+      }),
+      AnyMessage::Suspect(Suspect {
+        incarnation: Some(4),
+        ..Default::default()
+      }),
+      AnyMessage::Dead(Dead {
+        incarnation: Some(5),
+        ..Default::default()
+      }),
+      sample_ping(),
+      AnyMessage::IndirectPing(IndirectPing {
+        sequence_number: Some(6),
+        ..Default::default()
+      }),
+      sample_ack(),
+      AnyMessage::Nack(Nack {
+        sequence_number: 7,
+        ..Default::default()
+      }),
+      AnyMessage::PushPull(PushPull {
+        join: true,
+        ..Default::default()
+      }),
+      AnyMessage::UserData(UserData {
+        data: bytes::Bytes::from_static(b"payload"),
+        ..Default::default()
+      }),
+      AnyMessage::ErrorResponse(ErrorResponse {
+        error: "boom".into(),
+        ..Default::default()
+      }),
+    ]
+  }
+
+  #[test]
+  fn every_variant_round_trips_through_decode_message() {
+    // Exercises encode_body_into + body_encoded_len + the per-variant
+    // decode_message arm for all 10 message types (not just Ping/Ack).
+    for msg in one_of_each_variant() {
+      let encoded = encode_message(&msg).expect("encode");
+      let (consumed, decoded) = decode_message(&encoded).expect("decode");
+      assert_eq!(consumed, encoded.len(), "consumed mismatch for {msg:?}");
+      assert_eq!(decoded, msg, "round-trip mismatch for {msg:?}");
+    }
+  }
+
+  #[test]
+  fn every_variant_round_trips_through_zerocopy() {
+    // Same coverage for the zero-copy decode path's per-variant arms.
+    for msg in one_of_each_variant() {
+      let encoded = Bytes::from(encode_message(&msg).expect("encode"));
+      let (consumed, decoded) = decode_message_zerocopy(&encoded).expect("zerocopy decode");
+      assert_eq!(consumed, encoded.len(), "consumed mismatch for {msg:?}");
+      assert_eq!(decoded, msg, "round-trip mismatch for {msg:?}");
+    }
+  }
+
+  #[test]
+  fn corrupt_body_is_rejected_for_representative_variants() {
+    // A frame whose tag is valid but whose body is malformed protobuf must
+    // surface FrameError::Decode (the per-variant `.map_err` arm), not panic.
+    // `[0x0A, 0x05]` is a length-delimited field (tag 1) declaring 5 payload
+    // bytes that are absent — buffa rejects it for any message shape.
+    for tag in [
+      MessageTag::Alive,
+      MessageTag::Suspect,
+      MessageTag::Dead,
+      MessageTag::IndirectPing,
+      MessageTag::Nack,
+      MessageTag::PushPull,
+      MessageTag::ErrorResponse,
+    ] {
+      let frame = encode_plain_frame(tag, &[0x0A, 0x05]).expect("encode");
+      assert!(
+        matches!(decode_message(&frame), Err(FrameError::Decode)),
+        "decode_message must reject corrupt {tag:?} body"
+      );
+      let zc = Bytes::from(encode_plain_frame(tag, &[0x0A, 0x05]).expect("encode"));
+      assert!(
+        matches!(decode_message_zerocopy(&zc), Err(FrameError::Decode)),
+        "zerocopy must reject corrupt {tag:?} body"
+      );
+    }
+  }
+
+  #[test]
+  fn compound_decode_rejects_overflowing_count_varint() {
+    // `[Compound][80 80 80 80 10]` — the count varint encodes 2^32, which the
+    // u32 varint decoder rejects as VarintOverflow. `decode_compound` must
+    // propagate that hard error (the non-Incomplete `Err(e)` arm), not stall.
+    let buf = [MessageTag::Compound as u8, 0x80, 0x80, 0x80, 0x80, 0x10];
+    assert!(matches!(
+      decode_compound(&buf),
+      Err(FrameError::VarintOverflow)
+    ));
+  }
+
+  #[test]
+  fn compound_decode_rejects_overflowing_inner_len_varint() {
+    // A structurally valid header `[Compound][count=2]` followed by a part
+    // whose inner_len varint overflows a u32 surfaces the per-part loop's
+    // non-Incomplete `Err(e)` propagation arm.
+    let mut buf = vec![MessageTag::Compound as u8];
+    encode_varint_u32(2, &mut buf);
+    // Overflowing inner_len varint (2^32) for the first part.
+    buf.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+    assert!(matches!(
+      decode_compound(&buf),
+      Err(FrameError::VarintOverflow)
+    ));
+  }
 }
