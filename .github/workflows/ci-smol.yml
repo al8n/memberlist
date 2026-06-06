@@ -47,6 +47,11 @@ jobs:
         with:
           toolchain: nightly-2026-05-22
 
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Test (smol suite cells)
         # `-- smol` selects only the `_smol` cells across the suite binaries;
         # the reactor's other integration tests are tokio-based and run in
