@@ -723,7 +723,7 @@ impl Cluster {
       return;
     };
     let alive = Alive::new(incarnation, Node::new(peer_id, peer_addr));
-    ep.handle_alive(host, alive, now);
+    ep.handle_packet(host, Message::Alive(alive), now);
   }
 
   /// Test helper: directly start a probe round on `host` (bypasses the
@@ -759,7 +759,7 @@ impl Cluster {
       return;
     };
     let s = Suspect::new(incarnation, target_id, from_id);
-    ep.handle_suspect(host, s, now);
+    ep.handle_packet(host, Message::Suspect(s), now);
   }
 
   /// Test helper: return the gossip-tracked liveness state of `peer` from
@@ -831,9 +831,9 @@ impl Cluster {
       return;
     };
     // The bootstrap distinction is documentation-only in the sim — both
-    // paths route through `handle_alive` identically.
+    // paths route through `handle_packet` identically.
     let _ = bootstrap;
-    ep.handle_alive(host, alive, now);
+    ep.handle_packet(host, Message::Alive(alive), now);
   }
 
   /// Inject a [`Suspect`] message at `host` (legacy `Memberlist::suspect_node`).
@@ -844,7 +844,7 @@ impl Cluster {
     let Some(ep) = self.net.endpoints.get_mut(&host) else {
       return;
     };
-    ep.handle_suspect(host, suspect, now);
+    ep.handle_packet(host, Message::Suspect(suspect), now);
   }
 
   /// Inject a [`Dead`] message at `host` (legacy `Memberlist::dead_node`).
@@ -855,7 +855,7 @@ impl Cluster {
     let Some(ep) = self.net.endpoints.get_mut(&host) else {
       return;
     };
-    ep.handle_dead(host, dead, now);
+    ep.handle_packet(host, Message::Dead(dead), now);
   }
 
   /// Merge a slice of [`PushNodeState`] entries directly into `host`'s view
@@ -1140,7 +1140,9 @@ impl Cluster {
   pub fn trigger_ping(&mut self, host: SocketAddr, peer_id: SmolStr, peer_addr: SocketAddr) {
     let now = self.clock.now();
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
-      ep.ping(Node::new(peer_id, peer_addr), now);
+      // Ignoring Err: a leaving/left host issues no ping; the harness treats
+      // that as a no-op.
+      let _ = ep.ping(Node::new(peer_id, peer_addr), now);
     }
   }
 
@@ -1302,7 +1304,9 @@ impl Cluster {
   pub fn send_reliable(&mut self, host: SocketAddr, peer_addr: SocketAddr, data: bytes::Bytes) {
     let now = self.clock.now();
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
-      ep.start_user_message(peer_addr, data, now);
+      // Ignoring Err: a leaving/left host starts no new reliable dial; the
+      // harness treats that as a no-op.
+      let _ = ep.start_user_message(peer_addr, data, now);
     }
   }
 

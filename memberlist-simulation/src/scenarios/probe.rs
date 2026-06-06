@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use memberlist_proto::typed::{Alive, Node};
+use memberlist_proto::typed::{Alive, Message, Node};
 use smol_str::SmolStr;
 
 use crate::Cluster;
@@ -21,7 +21,7 @@ pub fn probe_success(prober: SocketAddr, target: SocketAddr) -> Cluster {
   {
     let ep = c.net.endpoints.get_mut(&prober).unwrap();
     let a = Alive::new(1, Node::new(SmolStr::new("target"), target));
-    ep.handle_alive(prober, a, now);
+    ep.handle_packet(prober, Message::Alive(a), now);
   }
 
   // Trigger direct probe.
@@ -59,7 +59,7 @@ pub fn indirect_probe_dead_target(
     let ep = c.net.endpoints.get_mut(&prober).unwrap();
     for (id, addr) in [("helper", helper), ("target", target)] {
       let a = Alive::new(1, Node::new(SmolStr::new(id), addr));
-      ep.handle_alive(prober, a, now);
+      ep.handle_packet(prober, Message::Alive(a), now);
     }
   }
 

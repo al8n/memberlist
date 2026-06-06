@@ -62,7 +62,10 @@ fn replay_is_deterministic() {
 /// exhaustive run is `full_campaign` (ignored by default).
 #[test]
 fn safety_seed_sweep() {
-  let totals = run_campaign(0..64, 2500);
+  // 3000 ticks/seed is the convergence floor for the 0..64 band: a Leaving/Left
+  // node is gossip-inert, so the chaos band needs this much headroom for the
+  // quiesce phase to settle every seed (the full campaign uses 5000).
+  let totals = run_campaign(0..64, 3000);
   assert!(totals.drops > 0 && totals.dups > 0 && totals.partitions > 0,
     "network faults must fire across the sweep: {totals:?}");
   assert!(totals.partition_topologies.len() > 1,

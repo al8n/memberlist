@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use memberlist_proto::{
   PushPullKind,
-  typed::{Alive, Node},
+  typed::{Alive, Message, Node},
 };
 use smol_str::SmolStr;
 
@@ -25,7 +25,7 @@ pub fn two_node_push_pull(initiator: SocketAddr, acceptor: SocketAddr) -> Cluste
   {
     let ep = c.net.endpoints.get_mut(&initiator).unwrap();
     let a = Alive::new(1, Node::new(SmolStr::new("acceptor"), acceptor));
-    ep.handle_alive(initiator, a, now);
+    ep.handle_packet(initiator, Message::Alive(a), now);
     ep.start_push_pull(acceptor, PushPullKind::Refresh, now);
   }
 

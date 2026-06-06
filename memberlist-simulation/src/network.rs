@@ -590,6 +590,11 @@ impl Network {
           let ep = self.endpoints.get_mut(&peer_addr).unwrap();
           ep.accept_stream(addr, now)
         };
+        // A leaving/left acceptor admits no new stream; skip establishing the
+        // pair if it declined to accept.
+        let Some(acceptor_stream) = acceptor_stream else {
+          continue;
+        };
         streams.push(VirtualStream {
           initiator_addr: addr,
           initiator: initiator_stream,
@@ -812,33 +817,16 @@ fn apply_stream_command(
 
 /// Route a typed `Message` to the appropriate `Endpoint` handler.
 ///
-/// PushPull and ErrorResponse arrive via the stream layer and are
-/// ignored here. For now the `_` arm is necessary to remain non-exhaustive as
-/// new variants may be added.
+/// Delegates to the endpoint's public packet entry point, which applies the
+/// post-leave inertness gate and dispatches each variant. PushPull and
+/// ErrorResponse arrive via the stream layer and are dropped here.
 fn dispatch_message(
   ep: &mut Endpoint<SmolStr, SocketAddr>,
   from: SocketAddr,
   msg: memberlist_proto::typed::Message<SmolStr, SocketAddr>,
   now: Instant,
 ) {
-  use memberlist_proto::{Reliability, typed::Message};
-  match msg {
-    Message::Alive(a) => ep.handle_alive(from, a, now),
-    Message::Suspect(s) => ep.handle_suspect(from, s, now),
-    Message::Dead(d) => ep.handle_dead(from, d, now),
-    Message::Ping(p) => ep.handle_ping(from, p, now),
-    Message::IndirectPing(ip) => ep.handle_indirect_ping(from, ip, now),
-    Message::Ack(a) => ep.handle_ack(from, a, now),
-    Message::Nack(n) => ep.handle_nack(from, n, now),
-    Message::UserData(data) => {
-      ep.handle_user_data(from, data, Reliability::Unreliable);
-    }
-    // PushPull / ErrorResponse arrive via the stream layer.
-    // Route them through stream simulation when that is implemented.
-    // The wildcard arm also handles any future variants added to the
-    // non-exhaustive Message enum.
-    Message::PushPull(_) | Message::ErrorResponse(_) | _ => {}
-  }
+  ep.handle_packet(from, msg, now);
 }
 
 #[cfg(test)]
@@ -995,7 +983,7 @@ mod tests {
     // Seed bob's view of carol at Alive@1 (the baseline the compound supersedes).
     {
       let ep = net.endpoints.get_mut(&bob).unwrap();
-      ep.handle_alive(carol, Alive::new(1, Node::new(carol_id.clone(), carol)), now);
+      ep.handle_packet(carol, Message::Alive(Alive::new(1, Node::new(carol_id.clone(), carol))), now);
     }
     assert_eq!(net.endpoints[&bob].node_incarnation(&carol_id), Some(1));
 
@@ -1064,11 +1052,11 @@ mod tests {
     // a live endpoint. bob does not know carol yet.
     {
       let ep = net.endpoints.get_mut(&c1).unwrap();
-      ep.handle_alive(carol_addr, Alive::new(5, Node::new(carol_id.clone(), carol_addr)), now);
+      ep.handle_packet(carol_addr, Message::Alive(Alive::new(5, Node::new(carol_id.clone(), carol_addr))), now);
     }
     {
       let ep = net.endpoints.get_mut(&c2).unwrap();
-      ep.handle_alive(carol_addr, Alive::new(6, Node::new(carol_id.clone(), carol_addr)), now);
+      ep.handle_packet(carol_addr, Message::Alive(Alive::new(6, Node::new(carol_id.clone(), carol_addr))), now);
     }
     assert!(net.endpoints[&bob].node_incarnation(&carol_id).is_none());
 

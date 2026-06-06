@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use memberlist_proto::typed::{Alive, Node, Suspect};
+use memberlist_proto::typed::{Alive, Message, Node, Suspect};
 use smol_str::SmolStr;
 
 use crate::Cluster;
@@ -24,9 +24,9 @@ pub fn suspect_then_dead(
   {
     let ep = c.net.endpoints.get_mut(&observer).unwrap();
     let a = Alive::new(1, Node::new(target_id.clone(), target_addr));
-    ep.handle_alive(observer, a, now);
+    ep.handle_packet(observer, Message::Alive(a), now);
     let s = Suspect::new(1, target_id.clone(), SmolStr::new("observer"));
-    ep.handle_suspect(observer, s, now);
+    ep.handle_packet(observer, Message::Suspect(s), now);
   }
 
   // Advance well past suspicion timeout.

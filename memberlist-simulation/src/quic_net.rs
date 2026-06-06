@@ -491,10 +491,10 @@ impl QuicCluster {
     c.add_node("b", b);
     let now = c.clock.now();
     if let Some(n) = c.nodes.get_mut(&a) {
-      n.handle_alive(a, Alive::new(1, Node::new(SmolStr::new("b"), b)), now);
+      n.handle_packet(a, Message::Alive(Alive::new(1, Node::new(SmolStr::new("b"), b))), now);
     }
     if let Some(n) = c.nodes.get_mut(&b) {
-      n.handle_alive(b, Alive::new(1, Node::new(SmolStr::new("a"), a)), now);
+      n.handle_packet(b, Message::Alive(Alive::new(1, Node::new(SmolStr::new("a"), a))), now);
     }
     c
   }
@@ -610,9 +610,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           a,
-          Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
           now,
         );
       }
@@ -648,9 +648,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           a,
-          Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
           now,
         );
       }
@@ -688,9 +688,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("198.51.100.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           b,
-          Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr))),
           now,
         );
       }
@@ -702,9 +702,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           a,
-          Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr))),
           now,
         );
       }
@@ -754,9 +754,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("198.51.100.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           b,
-          Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr))),
           now,
         );
       }
@@ -766,9 +766,9 @@ impl QuicCluster {
         let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
           .parse()
           .unwrap();
-        n.handle_alive(
+        n.handle_packet(
           a,
-          Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr)),
+          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr))),
           now,
         );
       }
@@ -838,7 +838,7 @@ impl QuicCluster {
   pub fn inject_suspect(&mut self, host: SocketAddr, target: SmolStr, from: SmolStr, inc: u32) {
     let now = self.clock.now();
     if let Some(n) = self.nodes.get_mut(&host) {
-      n.handle_suspect(host, Suspect::new(inc, target, from), now);
+      n.handle_packet(host, Message::Suspect(Suspect::new(inc, target, from)), now);
     }
   }
 
@@ -847,7 +847,7 @@ impl QuicCluster {
   pub fn inject_alive(&mut self, host: SocketAddr, peer: SmolStr, paddr: SocketAddr, inc: u32) {
     let now = self.clock.now();
     if let Some(n) = self.nodes.get_mut(&host) {
-      n.handle_alive(host, Alive::new(inc, Node::new(peer, paddr)), now);
+      n.handle_packet(host, Message::Alive(Alive::new(inc, Node::new(peer, paddr))), now);
     }
   }
 
