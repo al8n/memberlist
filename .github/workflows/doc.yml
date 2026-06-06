@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 env:
-  nightly: nightly
+  nightly: nightly-2026-05-22
 
 jobs:
   docs:
