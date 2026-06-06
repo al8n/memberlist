@@ -9,23 +9,12 @@ members = [
   "memberlist-embassy",
   "memberlist-simulation",
   "memberlist-test-suite",
-  "fuzz",
-  "legacy/memberlist",
-  "legacy/memberlist-core",
-  "legacy/memberlist-wire",
 ]
-# Frozen reference crates (the legacy net/quic transports and the toydb
-# example). They do not compile against the current workspace stack and are
-# kept on disk for reference only, excluded from the active build.
-#
 # `memberlist-embassy-qemu` is the bare-metal qemu execution proof for the
 # embassy driver. It pins a foreign default target (a Cortex-M machine) and a
 # cortex-m-rt runtime, so it cannot participate in the host `--workspace` build;
 # it is built and run on its own via `cd memberlist-embassy-qemu && cargo run`.
 exclude = [
-  "legacy/memberlist-net",
-  "legacy/memberlist-quic",
-  "examples/toydb",
   "memberlist-embassy-qemu",
 ]
 resolver = "3"
@@ -96,17 +85,12 @@ viewit = "0.1.5"
 arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
-memberlist-core = { version = "0.8", path = "legacy/memberlist-core", default-features = false }
 memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
 memberlist-reactor = { version = "0.0.1", path = "memberlist-reactor", default-features = false }
 memberlist-compio = { version = "0.0.1", path = "memberlist-compio", default-features = false }
 memberlist-smoltcp = { version = "0.0.1", path = "memberlist-smoltcp", default-features = false }
 memberlist-embedded = { version = "0.0.1", path = "memberlist-embedded", default-features = false }
 memberlist-embassy = { version = "0.0.1", path = "memberlist-embassy", default-features = false }
-memberlist-net = { version = "0.8", path = "legacy/memberlist-net", default-features = false }
-memberlist-wire = { version = "0.3", path = "legacy/memberlist-wire", default-features = false }
-memberlist-quic = { version = "0.8", path = "legacy/memberlist-quic", default-features = false }
-memberlist = { version = "0.8", package = "memberlist-legacy", path = "legacy/memberlist", default-features = false }
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"

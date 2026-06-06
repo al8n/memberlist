@@ -31,7 +31,7 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
-use memberlist::codec::{
+use memberlist_proto::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
 };

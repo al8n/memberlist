@@ -53,8 +53,7 @@ jobs:
         run: cargo fmt -p memberlist-reactor -p memberlist-test-suite --check
 
       - name: Clippy
-        # --no-deps: the workspace-excluded legacy crates carry their own
-        # deny(warnings) and trip newer clippy lints; lint only our targets.
+        # --no-deps: lint only our own crate, not its external dependencies.
         run: cargo clippy -p memberlist-reactor --all-targets --features "$FEATURES" --no-deps -- -D warnings
 
       - name: Test (tokio cells; smol cells skipped — see ci-smol)

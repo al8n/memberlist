@@ -927,7 +927,7 @@ async fn two_node_join_converges_member_counts() {
 #[compio::test]
 async fn quic_compound_gossip_is_decoded_after_join() {
   use compio::{buf::BufResult, net::UdpSocket};
-  use memberlist::codec::{EncodeOptions, encode_outgoing_compound};
+  use memberlist_proto::codec::{EncodeOptions, encode_outgoing_compound};
   use memberlist_proto::{
     Node,
     typed::{Alive, Message},

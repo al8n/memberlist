@@ -21,7 +21,7 @@ use agnostic::{
 };
 use bytes::Bytes;
 use flume::Sender;
-use memberlist::codec::{
+use memberlist_proto::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
 };

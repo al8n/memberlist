@@ -27,9 +27,8 @@ encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
 dns = ["dep:hickory-proto", "dep:resolv-conf"]
 
 [dependencies]
-memberlist = { workspace = true }
-memberlist-proto = { workspace = true }
-hostaddr = { workspace = true }
+memberlist-proto = { workspace = true, features = ["std"] }
+hostaddr = { workspace = true, features = ["std", "smol_str"] }
 smol_str = { workspace = true }
 compio = { workspace = true, features = ["net", "runtime", "macros", "time"] }
 arc-swap = { workspace = true }

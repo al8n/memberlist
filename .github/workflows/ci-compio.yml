@@ -54,8 +54,7 @@ jobs:
         run: cargo fmt -p memberlist-compio -p memberlist-test-suite --check
 
       - name: Clippy
-        # --no-deps: the workspace-excluded legacy crates carry their own
-        # deny(warnings) and trip newer clippy lints; lint only our targets.
+        # --no-deps: lint only our own crate, not its external dependencies.
         run: cargo clippy -p memberlist-compio --all-targets --features "$FEATURES" --no-deps -- -D warnings
 
       - name: Test

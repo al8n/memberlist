@@ -578,7 +578,7 @@ pub(crate) fn validate_advertise_addr(
 /// real configured size so an over-budget `initial_meta` is still caught.
 ///
 /// Each is encoded through the PUBLIC codec
-/// ([`memberlist::codec::encode_outgoing`]) — the same plain-frame bytes the
+/// ([`memberlist_proto::codec::encode_outgoing`]) — the same plain-frame bytes the
 /// machine charges against `gossip_mtu`. Because the LOCAL node carries the
 /// ACTUAL advertise address, this also validates that address's
 /// wire-encodability: the compact `SocketAddrV6` encoder REJECTS a nonzero
@@ -615,7 +615,7 @@ pub(crate) fn validate_gossip_mtu_for_identity<I>(
 where
   I: memberlist_proto::Data + CheapClone,
 {
-  use memberlist::codec::{EncodeOptions, encode_outgoing};
+  use memberlist_proto::codec::{EncodeOptions, encode_outgoing};
   use memberlist_proto::{
     Node,
     typed::{Ack, Alive, Message, Ping},
@@ -728,7 +728,7 @@ pub(crate) fn validate_stream_frame_for_identity<I>(
 where
   I: memberlist_proto::Data + CheapClone,
 {
-  use memberlist::codec::{EncodeOptions, encode_outgoing};
+  use memberlist_proto::codec::{EncodeOptions, encode_outgoing};
   use memberlist_proto::typed::{Message, PushNodeState, PushPull, State};
 
   let max_frame = opts
