@@ -29,12 +29,12 @@ use futures_util::{
   future::{FusedFuture, pending},
   pin_mut, select, select_biased,
 };
-use memberlist_proto::codec::{
-  DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
-  parse_messages,
-};
 use memberlist_proto::{
   Instant, PingId,
+  codec::{
+    DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
+    parse_messages,
+  },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
 };

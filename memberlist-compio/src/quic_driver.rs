@@ -31,12 +31,12 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
-use memberlist_proto::codec::{
-  DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
-  parse_messages,
-};
 use memberlist_proto::{
   DatagramSendOutcome, Instant, Node, QuicEndpoint, UnreliableTransport,
+  codec::{
+    DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
+    parse_messages,
+  },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   typed::{NodeState, State},
 };

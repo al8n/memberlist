@@ -615,9 +615,9 @@ pub(crate) fn validate_gossip_mtu_for_identity<I>(
 where
   I: memberlist_proto::Data + CheapClone,
 {
-  use memberlist_proto::codec::{EncodeOptions, encode_outgoing};
   use memberlist_proto::{
     Node,
+    codec::{EncodeOptions, encode_outgoing},
     typed::{Ack, Alive, Message, Ping},
   };
 
@@ -728,8 +728,10 @@ pub(crate) fn validate_stream_frame_for_identity<I>(
 where
   I: memberlist_proto::Data + CheapClone,
 {
-  use memberlist_proto::codec::{EncodeOptions, encode_outgoing};
-  use memberlist_proto::typed::{Message, PushNodeState, PushPull, State};
+  use memberlist_proto::{
+    codec::{EncodeOptions, encode_outgoing},
+    typed::{Message, PushNodeState, PushPull, State},
+  };
 
   let max_frame = opts
     .max_stream_frame_size()
