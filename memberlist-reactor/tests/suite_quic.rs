@@ -362,7 +362,9 @@ fn quic_join_cancel_passive_smol() {
 
 #[test]
 fn quic_node_delegate_meta_update_smol() {
-  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<ReactorQuic<SmolRuntime>>());
+  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<
+    ReactorQuic<SmolRuntime>,
+  >());
 }
 
 #[test]

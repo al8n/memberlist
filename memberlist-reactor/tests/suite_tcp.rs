@@ -361,7 +361,9 @@ fn tcp_join_cancel_passive_smol() {
 
 #[test]
 fn tcp_node_delegate_meta_update_smol() {
-  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<ReactorTcp<SmolRuntime>>());
+  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<
+    ReactorTcp<SmolRuntime>,
+  >());
 }
 
 #[test]

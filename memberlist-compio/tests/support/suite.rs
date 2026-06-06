@@ -16,7 +16,8 @@ use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, MemberlistOptions, NodeDelegate, PingDelegate,
 };
 use memberlist_proto::{
-  ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring, typed::{Meta, NodeState},
+  ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring,
+  typed::{Meta, NodeState},
 };
 use memberlist_test_suite::{Captures, NodeConfig, PingObservation};
 use smol_str::SmolStr;

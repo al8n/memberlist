@@ -363,7 +363,9 @@ fn tls_join_cancel_passive_smol() {
 
 #[test]
 fn tls_node_delegate_meta_update_smol() {
-  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<ReactorTls<SmolRuntime>>());
+  SmolRuntime::block_on(scenarios::node_delegate_meta_update::<
+    ReactorTls<SmolRuntime>,
+  >());
 }
 
 #[test]

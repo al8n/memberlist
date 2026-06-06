@@ -461,7 +461,10 @@ pub async fn shutdown_cleanup<C: TestCluster>() {
     rebound.num_members()
   );
 
-  rebound.shutdown().await.expect("shut down the rebound node");
+  rebound
+    .shutdown()
+    .await
+    .expect("shut down the rebound node");
 }
 
 /// The socket-release guarantee for a node that was an active cluster member:
@@ -504,7 +507,10 @@ pub async fn shutdown_cleanup2<C: TestCluster>() {
   );
 
   a.shutdown().await.expect("shut down node a");
-  rebound.shutdown().await.expect("shut down the rebound node");
+  rebound
+    .shutdown()
+    .await
+    .expect("shut down the rebound node");
 }
 
 /// A merge admission predicate that returns false cancels the join merge, so
@@ -527,11 +533,7 @@ pub async fn join_cancel<C: TestCluster>() {
   // cancellation is asserted below by membership and the merge-hook flag.
   let _ = b.join(a.advertise_addr()).await;
 
-  let fired = wait_until::<C>(
-    || a.merge_invoked() || b.merge_invoked(),
-    CONVERGE_TIMEOUT,
-  )
-  .await;
+  let fired = wait_until::<C>(|| a.merge_invoked() || b.merge_invoked(), CONVERGE_TIMEOUT).await;
   assert!(
     fired,
     "the merge predicate never fired: a={}, b={}",
