@@ -175,6 +175,14 @@ struct ExchangeMeta<A> {
   /// `Some`, the kind carried on the emitted payload lets consumers
   /// filter (e.g. sync-join consumes only `ExchangeKind::PushPull`).
   kind: Option<crate::event::ExchangeKind>,
+  /// `true` for an outbound exchange — one WE dialed, via any `start_*` wrapper
+  /// OR the scheduler's anti-entropy push/pull — and `false` for an inbound
+  /// exchange accepted from a peer. Set explicitly at creation and never
+  /// inferred from `kind` (which only the public wrappers populate, so a
+  /// scheduler-created push/pull would otherwise look inbound). `leave()` uses
+  /// this to cancel exactly the outbound exchanges whose request is not yet on
+  /// the wire.
+  outbound: bool,
 }
 
 /// The [`ExchangeId`] a teardown directive ([`StreamAction::Shutdown`] /
@@ -562,6 +570,30 @@ where
   /// dropped.
   fn purge_transmit_for(&mut self, exchange: ExchangeId) {
     self.out_transmit.retain(|(eid, _, _)| *eid != exchange);
+  }
+
+  /// Fully cancel a not-yet-opened exchange: drop its bridge, metadata, and any
+  /// queued outbound bytes. Used by `leave()` for an unopened outbound exchange
+  /// (its `Connect` never drained) and by the post-leave inbound mint guard for
+  /// an un-minted acceptor bridge — so a cancelled exchange leaves no live
+  /// bridge (no stream deadline, no record-layer buffer) and emits no bytes.
+  fn cancel_exchange(&mut self, id: ExchangeId) {
+    // Ignoring the removed bridge: a never-opened exchange owes the peer no
+    // clean-close bytes, and dropping it clears its record-layer state.
+    let _ = self.conns.remove(id);
+    self.exchanges.remove(&id);
+    self.purge_transmit_for(id);
+    // Replace any teardown already queued for this id with an Abort, so the
+    // driver tears down a transport connection it may have already opened (the
+    // exchange's Connect could have been drained before leave). The driver
+    // no-ops the Abort if it never dialed; without it the connection / pool
+    // slot leaks and could keep post-leave reliable I/O alive at the driver.
+    self
+      .pending_teardowns
+      .retain(|a| teardown_exchange(a) != id);
+    self
+      .pending_teardowns
+      .push_back(StreamAction::Abort(ExchangeRef::new(id)));
   }
 
   /// Drop any pending [`StreamAction::Connect`] still queued for `exchange`.
@@ -1002,7 +1034,11 @@ where
   /// correlation token; the terminal event (`PingCompleted` / `PingFailed`)
   /// carries it so the driver can correlate the outcome.
   #[inline]
-  pub fn ping(&mut self, node: crate::Node<I, A>, now: Instant) -> crate::event::PingId {
+  pub fn ping(
+    &mut self,
+    node: crate::Node<I, A>,
+    now: Instant,
+  ) -> Result<crate::event::PingId, crate::error::Error> {
     self.last_now = Some(now);
     self.ep.ping(node, now)
   }
@@ -1061,6 +1097,22 @@ where
     self.ep.set_ack_payload(payload)
   }
 
+  /// Install a custom peer-admission predicate. Forwards to
+  /// [`Endpoint::set_alive_delegate`]; the machine consults it inline for every
+  /// inbound Alive (gossip and join push/pull).
+  #[inline]
+  pub fn set_alive_delegate(&mut self, delegate: impl crate::delegate::AliveDelegate<I, A>) {
+    self.ep.set_alive_delegate(delegate);
+  }
+
+  /// Install a custom join-merge predicate. Forwards to
+  /// [`Endpoint::set_merge_delegate`]; the machine consults it on each join
+  /// push/pull merge.
+  #[inline]
+  pub fn set_merge_delegate(&mut self, delegate: impl crate::delegate::MergeDelegate<I, A>) {
+    self.ep.set_merge_delegate(delegate);
+  }
+
   /// Initiate one SWIM probe tick on the inner membership endpoint.
   ///
   /// Pass-through to [`Endpoint::start_probe`]; sets `last_now`. The probe
@@ -1097,6 +1149,12 @@ where
     self.last_now = Some(now);
     match ev {
       Event::DialRequested(dial) => {
+        // A leaving/left node re-admits no dial: dropping a requeued
+        // DialRequested stops a held event from restarting a transport dial
+        // (service_dials would otherwise build a bridge and surface a Connect).
+        if !self.ep.is_running() {
+          return;
+        }
         let (id, peer, deadline) = dial.into_parts();
         self.dial_pending.push_back(PendingDial {
           id,
@@ -1109,9 +1167,42 @@ where
     }
   }
 
-  /// Begin a graceful leave; delegates to the membership endpoint.
+  /// Begin a graceful leave; delegates to the membership endpoint after making
+  /// the coordinator a cancellation point.
+  ///
+  /// A leaving node starts no new reliable I/O. Every outbound exchange whose
+  /// request bytes are not yet on the wire is cancelled here — unattempted dials,
+  /// queued `Connect` directives, and any outbound exchange still holding request
+  /// bytes in `out_transmit` whether or not its `Connect` was already drained —
+  /// so a pre-leave push/pull or user message cannot hand its (Alive-advertising)
+  /// request to the transport during the graceful drain. Buffered inbound gossip
+  /// is dropped. Outbound exchanges past the request boundary (request already on
+  /// the wire), and their teardown directives, are preserved so in-flight streams
+  /// still close cleanly.
   pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
     self.last_now = Some(now);
+    self.dial_pending.clear();
+    self.pending_outbound_kinds.clear();
+    self.pending_connects.clear();
+    // Drop inbound gossip buffered before leave — handle_packet would drop it
+    // anyway once not Running, so it must not linger or later decode.
+    self.mem_ingress.clear();
+    // Cancel every OUTBOUND exchange (kind is Some) whose request bytes are still
+    // queued in out_transmit: its `Connect` may already be drained, but the
+    // request is not yet on the wire, so writing it after leave would advertise
+    // our pre-leave Alive. Inbound exchanges and request-sent outbound exchanges
+    // are left to drain. A `Vec` keeps this no_std-clean (the set is small).
+    let unsent_outbound: Vec<ExchangeId> = self
+      .exchanges
+      .iter()
+      .filter(|(_, meta)| meta.outbound)
+      .map(|(eid, _)| *eid)
+      .collect();
+    for eid in unsent_outbound {
+      if self.exchange_has_pending_bytes(eid) {
+        self.cancel_exchange(eid);
+      }
+    }
     self.ep.leave(now)
   }
 
@@ -1625,12 +1716,21 @@ where
             self.pending_teardowns.push_back(action);
           }
         },
-        PendingMint::Inbound(peer) => {
-          let stream = self.ep.accept_stream(peer, now);
-          if let Some(br) = self.conns.get_mut(id) {
-            br.promote(stream);
+        PendingMint::Inbound(peer) => match self.ep.accept_stream(peer, now) {
+          Some(stream) => {
+            if let Some(br) = self.conns.get_mut(id) {
+              br.promote(stream);
+            }
           }
-        }
+          None => {
+            // A Leaving/Left node mints no inbound Stream and leaves no live
+            // bridge: a connection accepted before leave whose handshake only
+            // settles during the drain is fully cancelled, so its record layer
+            // queues and emits no bytes and it holds no buffers to the deadline.
+            // `accept_stream` owns the lifecycle decision; `None` is the signal.
+            self.cancel_exchange(id);
+          }
+        },
       }
     }
   }
@@ -1742,6 +1842,11 @@ where
   /// carried as gossip (reliable exchanges ride separate transport connections).
   pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
     self.last_now = Some(now);
+    // A leaving/left node buffers no inbound gossip: handle_packet would drop it
+    // anyway, so do not allocate or queue it during the drain.
+    if !self.ep.is_running() {
+      return;
+    }
     self
       .mem_ingress
       .push_back((from, Bytes::copy_from_slice(datagram)));
@@ -1829,6 +1934,14 @@ where
   pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
     self.last_now = Some(now);
     let id = self.conns.allocate();
+    // A leaving/left node accepts no NEW inbound reliable stream: it builds no
+    // bridge, so no Stream is ever minted and no push/pull response leaves the
+    // node. The handle is still returned (monotonic, never reused) so the driver
+    // has a stable id; the connection produces no bytes and the driver closes it
+    // on its own accept deadline. Streams accepted before leave keep draining.
+    if !self.ep.is_running() {
+      return id;
+    }
     // SocketAddr conversion needed: `peer_socket` tags entries on
     // `out_transmit` (driver-facing SocketAddr-typed queue) so the driver
     // writes bytes on the right transport connection.
@@ -1855,6 +1968,7 @@ where
             // the kind never ran locally. Leave unset; the reap path
             // does not emit kind-specific events for inbound.
             kind: None,
+            outbound: false,
           },
         );
       }
@@ -1924,15 +2038,20 @@ where
   /// Wrapper around [`Endpoint::start_user_message`]; see
   /// [`Self::start_push_pull`] for the dial-attempt and zero-time
   /// outbound-flush semantics.
-  pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
+  pub fn start_user_message(
+    &mut self,
+    peer: A,
+    payload: Bytes,
+    now: Instant,
+  ) -> Result<StreamId, crate::error::Error> {
     self.last_now = Some(now);
-    let id = self.ep.start_user_message(peer, payload, now);
+    let id = self.ep.start_user_message(peer, payload, now)?;
     self
       .pending_outbound_kinds
       .insert(id, crate::event::ExchangeKind::UserMessage);
     self.service_dials(now);
     self.flush_outbound(now);
-    id
+    Ok(id)
   }
 
   /// Timer tick from the driver.
@@ -2006,6 +2125,13 @@ where
   /// tick when invoked from a `start_*` flush, since a no-handshake dialer's
   /// label step settles at construction).
   pub(crate) fn service_dials(&mut self, now: Instant) {
+    // A leaving/left node initiates no dial: skip sieving and draining so no
+    // bridge is built or Connect surfaced after leave. Defensive — the start_*
+    // gates and requeue_event already prevent new DialRequested — but this
+    // guards any residual intent against opening a fresh connection.
+    if !self.ep.is_running() {
+      return;
+    }
     // Sieve any DialRequested newly emitted by the inner endpoint into the
     // private deque, then drain that deque as the sole input. Non-DialRequested
     // events stay in the inner endpoint's queue for the public `poll_event`.
@@ -2091,6 +2217,7 @@ where
           mint: Some(PendingMint::Outbound(id)),
           fin_emitted: false,
           kind: exchange_kind,
+          outbound: true,
         },
       );
       // `id` is the machine `StreamId` of the originating `start_*` dial,

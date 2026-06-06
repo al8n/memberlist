@@ -33,8 +33,9 @@ use memberlist_proto::{
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
-    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
+    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
+    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -264,7 +265,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           let _ = reply.send(Err(Error::NotRunning));
           return;
         }
-        let ping_id = self.endpoint.ping(node, now);
+        let ping_id = self.endpoint.ping(node, now).expect("issued while running");
         self.pending_pings.push(PendingPing { ping_id, reply });
       }
       Command::SendUser(SendUserCmd {
@@ -312,7 +313,10 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           // `ExchangeId` that the bridge-reap path stamps on
           // `Event::ExchangeCompleted(UserMessage)`.
           // Ignoring StreamId: only ExchangeId::from is needed for correlation.
-          let stream_id = self.endpoint.start_user_message(to, payload, now);
+          let stream_id = self
+            .endpoint
+            .start_user_message(to, payload, now)
+            .expect("issued while running");
           pending.insert(ExchangeId::from(stream_id));
         }
         self.pending_user_sends.push(PendingUserSend {
@@ -369,6 +373,70 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
             }
             Err(e) => Err(e),
           }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { meta, reply }) => {
+        // Gate on a running node: after `leave()` the schedulers are stopped, so
+        // a metadata change could never be gossiped. Build the validated `Meta`
+        // (rejecting an over-cap value) before applying.
+        let res = if self.endpoint.is_running() {
+          match memberlist_proto::typed::Meta::try_from(meta) {
+            Ok(m) => self
+              .endpoint
+              .update_meta(m)
+              .map_err(|e| Error::PayloadTooLarge(e.to_string())),
+            Err(e) => Err(Error::PayloadTooLarge(e.to_string())),
+          }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::QueueUserBroadcast(QueueUserBroadcastCmd { data, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the gossip scheduler is
+        // stopped, so the broadcast would never drain. The machine setter rejects
+        // an over-MTU lone datagram without storing it.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .queue_user_broadcast(data)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::SetLocalState(SetLocalStateCmd { state, reply }) => {
+        // Gate on a running node FIRST: after `leave()` no push/pull exchange
+        // will carry the snapshot. The machine setter rejects a snapshot whose
+        // framed PushPull exceeds the stream frame budget.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_local_state_snapshot(state)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::SetAckPayload(SetAckPayloadCmd { payload, reply }) => {
+        // Gate on a running node FIRST: after `leave()` no probe ack will carry
+        // the payload. The machine setter rejects an over-budget ack without
+        // storing it (an over-budget ack always fails to send, so a probing peer
+        // would otherwise falsely suspect this node).
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_ack_payload(payload)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
         } else {
           Err(Error::NotRunning)
         };
@@ -761,6 +829,22 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
             let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::QueueUserBroadcast(QueueUserBroadcastCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::SetLocalState(SetLocalStateCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::SetAckPayload(SetAckPayloadCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }

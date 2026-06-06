@@ -1410,7 +1410,7 @@ mod tests {
     // exchange deadline. Dispatching the frame BELOW transitions the
     // FSM out of `InboundAwaitingFirstMessage`, which is why the
     // bridge is constructed first.
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     let mut bridge = Bridge::new(
@@ -1495,7 +1495,7 @@ mod tests {
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
 
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     let mut bridge = Bridge::new(
@@ -1668,7 +1668,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     Bridge::new(
@@ -1711,7 +1711,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     Bridge::new(
@@ -1734,7 +1734,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     Bridge::new(
@@ -1757,7 +1757,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     Bridge::new(
@@ -1911,7 +1911,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     let bridge = Bridge::new(
@@ -2028,7 +2028,7 @@ mod tests {
     ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     Bridge::new(
@@ -2236,7 +2236,7 @@ mod tests {
     ep.set_merge_delegate(RejectAllMerges);
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
-    let stream = ep.accept_stream(peer, t0);
+    let stream = ep.accept_stream(peer, t0).expect("node is running");
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
     let mut bridge = Bridge::new(
@@ -2664,7 +2664,9 @@ mod tests {
       ep: &mut Endpoint<SmolStr, SocketAddr>,
       sid: QuicSid,
     ) -> Bridge<SmolStr, SocketAddr> {
-      let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(self.now));
+      let stream = ep
+        .accept_stream(CLIENT_ADDR, Instant::from_std(self.now))
+        .expect("node is running");
       Bridge::new(
         stream,
         self.server_ch,
@@ -2951,7 +2953,9 @@ mod tests {
     sid: QuicSid,
     label: bytes::Bytes,
   ) -> Bridge<SmolStr, SocketAddr> {
-    let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(pair.now));
+    let stream = ep
+      .accept_stream(CLIENT_ADDR, Instant::from_std(pair.now))
+      .expect("node is running");
     Bridge::new(
       stream,
       pair.server_ch,
@@ -2973,7 +2977,9 @@ mod tests {
     sid: QuicSid,
     label: bytes::Bytes,
   ) -> Bridge<SmolStr, SocketAddr> {
-    let stream = ep.accept_stream(CLIENT_ADDR, Instant::from_std(pair.now));
+    let stream = ep
+      .accept_stream(CLIENT_ADDR, Instant::from_std(pair.now))
+      .expect("node is running");
     Bridge::new(
       stream,
       pair.server_ch,

@@ -20,8 +20,8 @@ use std::collections::VecDeque;
 use std::{boxed::Box, collections::VecDeque};
 
 use memberlist_proto::{
-  AliveDelegate, Endpoint, EndpointOptions, Instant, LabelOptions, Node, PushPullKind, RawRecords,
-  StreamId,
+  AliveDelegate, Endpoint, EndpointOptions, Instant, LabelOptions, MergeDelegate, Node,
+  PushPullKind, RawRecords, StreamId,
   event::{PingId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, NodeState, State},
@@ -83,6 +83,26 @@ where
 {
   fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
     socket_addr_is_routable(peer.address_ref())
+  }
+}
+
+/// An [`AliveDelegate`] that admits a peer only when BOTH the built-in routable
+/// filter and a caller-supplied delegate accept it.
+///
+/// The routable filter is load-bearing on the no_std core — it stops a
+/// non-routable address from being stored and re-gossiped cluster-wide — so a
+/// caller's custom admission policy composes with it (logical AND) rather than
+/// replacing it: a custom delegate can further restrict admission, never loosen
+/// the routable guard.
+struct RoutableAnd<D>(D);
+
+impl<I, D> AliveDelegate<I, SocketAddr> for RoutableAnd<D>
+where
+  I: memberlist_proto::Id,
+  D: AliveDelegate<I, SocketAddr>,
+{
+  fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
+    socket_addr_is_routable(peer.address_ref()) && self.0.notify_alive(peer)
   }
 }
 
@@ -507,7 +527,12 @@ where
       return;
     }
     let alive = Alive::new(1, Node::new(id.cheap_clone(), peer));
-    self.endpoint.handle_alive(peer, alive, now);
+    // Route the injected Alive through the gated inbound chokepoint so a left
+    // node admits no injected peer either (handle_packet is the sole inbound
+    // entry; the typed handlers are crate-private).
+    self
+      .endpoint
+      .handle_packet(peer, memberlist_proto::typed::Message::Alive(alive), now);
   }
 
   /// Whether `id` is currently Alive from this node's perspective.
@@ -694,15 +719,19 @@ where
 
   /// Send a direct UDP ping to `node`.
   ///
-  /// Returns a [`PingId`] token. The caller should drain `poll_event()` after
-  /// subsequent `pump` ticks to observe the terminal event
-  /// (`Event::PingCompleted` / `Event::PingFailed`).
+  /// Returns a [`PingId`] token, or `NotRunning` after `leave()`. The caller
+  /// should drain `poll_event()` after subsequent `pump` ticks to observe the
+  /// terminal event (`Event::PingCompleted` / `Event::PingFailed`).
   ///
   /// Unlike a SWIM failure-detection probe, an application ping is direct-only: it
   /// does not fan out to indirect peers, request a reliable fallback, or mark the
   /// target as suspect on timeout.
   #[inline]
-  pub fn ping(&mut self, node: Node<I, SocketAddr>, now: Instant) -> PingId {
+  pub fn ping(
+    &mut self,
+    node: Node<I, SocketAddr>,
+    now: Instant,
+  ) -> Result<PingId, memberlist_proto::Error> {
     self.endpoint.ping(node, now)
   }
 
@@ -743,7 +772,7 @@ where
   /// Initiate a reliable TCP user-message delivery to `to`.
   ///
   /// The payload is encoded and sent over a dedicated TCP stream. Returns a
-  /// [`StreamId`] token. Completion surfaces as
+  /// [`StreamId`] token, or `NotRunning` after `leave()`. Completion surfaces as
   /// `Event::ExchangeCompleted { kind: ExchangeKind::UserMessage, .. }` via
   /// `poll_event()` after subsequent `pump` ticks.
   ///
@@ -759,7 +788,12 @@ where
   /// would collide at the listener (the second SYN is RST'd during the first's
   /// handshake).
   #[inline]
-  pub fn send_reliable(&mut self, to: SocketAddr, payload: bytes::Bytes, now: Instant) -> StreamId {
+  pub fn send_reliable(
+    &mut self,
+    to: SocketAddr,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, memberlist_proto::Error> {
     self.endpoint.start_user_message(to, payload, now)
   }
 
@@ -771,8 +805,13 @@ where
   /// each seed on the next tick. The caller should watch `is_joined()` or drain
   /// `poll_event()` for `Event::PushPullReplyReceived` / membership changes, and
   /// enforce its own join deadline — this method performs no I/O and imposes no
-  /// timeout.
-  pub fn join(&mut self, seeds: &[SocketAddr]) {
+  /// timeout. Returns `NotRunning` after `leave()`: a left node initiates no new
+  /// join.
+  pub fn join(&mut self, seeds: &[SocketAddr]) -> Result<(), memberlist_proto::Error> {
+    // A left node initiates no new join — the machine merges no remote state
+    // during the graceful-leave drain, so queued seeds could never take effect.
+    // Reject rather than enqueue work the pump would skip.
+    self.ensure_running()?;
     for s in seeds {
       // Drop a non-routable seed (unspecified/multicast/broadcast IP or port 0):
       // it could only produce a doomed dial — the link layer's `connect` rejects
@@ -782,6 +821,7 @@ where
         self.pending_seeds.push_back(*s);
       }
     }
+    Ok(())
   }
 
   /// Queue an application user-data payload for piggyback gossip to peers.
@@ -790,7 +830,9 @@ where
   /// on each receiving node as `Event::UserPacket` via `poll_event()`. A payload
   /// whose lone framed datagram would exceed the configured gossip MTU is rejected
   /// with `Error::UserBroadcastExceedsMtu` and not stored (it could never be
-  /// gossiped even alone). Delivery is best-effort, like all gossip.
+  /// gossiped even alone). Returns `NotRunning` after `leave()` (the gossip
+  /// scheduler is stopped, so the broadcast could never drain). Delivery is
+  /// otherwise best-effort, like all gossip.
   pub fn queue_user_broadcast(
     &mut self,
     data: bytes::Bytes,
@@ -808,6 +850,9 @@ where
   /// never started); the caller may choose to ignore this when tearing down
   /// unconditionally.
   pub fn leave(&mut self, now: Instant) -> Result<(), memberlist_proto::Error> {
+    // Drop any seeds still queued from a pre-leave join: the drain initiates no
+    // new push/pull, so they must not dial once we begin leaving.
+    self.pending_seeds.clear();
     self.endpoint.leave(now)
   }
 
@@ -815,9 +860,15 @@ where
   ///
   /// The new policy takes effect for all gossip datagrams emitted after this
   /// call and is fanned out to every live reliable bridge so long-lived
-  /// push/pull exchanges adopt it on their next outbound encode.
-  pub fn set_compression_options(&mut self, opts: memberlist_proto::CompressionOptions) {
+  /// push/pull exchanges adopt it on their next outbound encode. Returns
+  /// `NotRunning` after `leave()` (the change could never reach the wire).
+  pub fn set_compression_options(
+    &mut self,
+    opts: memberlist_proto::CompressionOptions,
+  ) -> Result<(), memberlist_proto::Error> {
+    self.ensure_running()?;
     self.endpoint.set_compression_options(opts);
+    Ok(())
   }
 
   /// Replace the gossip + reliable-plane encryption policy in place.
@@ -830,14 +881,19 @@ where
   ///
   /// # Errors
   ///
-  /// Returns [`memberlist_proto::EncryptionError`] when a key in the supplied
-  /// keyring cannot be used by this build (e.g.
-  /// `EncryptionError::UnsupportedAlgorithm`). The existing policy is
-  /// unchanged.
+  /// Returns [`ControlError::NotRunning`](crate::error::ControlError::NotRunning)
+  /// after `leave()` (gated before any validation), or
+  /// [`ControlError::Encryption`](crate::error::ControlError::Encryption) when a
+  /// key in the supplied keyring cannot be used by this build (e.g.
+  /// `EncryptionError::UnsupportedAlgorithm`). The existing policy is unchanged
+  /// in either case.
   pub fn set_encryption_options(
     &mut self,
     opts: memberlist_proto::EncryptionOptions,
-  ) -> Result<(), memberlist_proto::EncryptionError> {
+  ) -> Result<(), crate::error::ControlError> {
+    if !self.endpoint.is_running() {
+      return Err(crate::error::ControlError::NotRunning);
+    }
     if let Some(keyring) = opts.keyring() {
       for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
         memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")?;
@@ -845,6 +901,74 @@ where
     }
     self.endpoint.set_encryption_options(opts);
     Ok(())
+  }
+
+  /// `Ok` only while the node is running. After `leave()` the periodic
+  /// schedulers stop and the machine merges no remote state, so the runtime
+  /// operations that gate on this reject with `NotRunning` rather than queue or
+  /// store a change no peer would observe. The core data-state setters gate
+  /// inside the machine itself.
+  fn ensure_running(&self) -> Result<(), memberlist_proto::Error> {
+    if self.endpoint.is_running() {
+      Ok(())
+    } else {
+      Err(memberlist_proto::Error::NotRunning)
+    }
+  }
+
+  /// Replace this node's advertised metadata in place.
+  ///
+  /// Bumps the node's incarnation and gossips the new metadata; peers observe
+  /// the change as `Event::NodeUpdated` via `poll_event()`. Returns an error if
+  /// the metadata exceeds the configured cap or the node is not running.
+  pub fn update_node_metadata(
+    &mut self,
+    meta: memberlist_proto::typed::Meta,
+  ) -> Result<(), memberlist_proto::Error> {
+    self.endpoint.update_meta(meta)
+  }
+
+  /// Set the application state snapshot exchanged during push/pull.
+  ///
+  /// The bytes ride the next join / push-pull exchange and surface on the
+  /// receiving node as `Event::RemoteStateReceived` via `poll_event()`. Returns
+  /// `NotRunning` after `leave()`, or a size error if the framed snapshot
+  /// exceeds the reliable-stream frame budget.
+  pub fn set_local_state(&mut self, state: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    self.endpoint.set_local_state_snapshot(state)
+  }
+
+  /// Set the payload attached to outgoing ping acknowledgements.
+  ///
+  /// A peer that probes this node receives the payload in its
+  /// `Event::PingCompleted` via `poll_event()`. Returns `NotRunning` after
+  /// `leave()`, or a size error if the framed ack exceeds the gossip budget.
+  pub fn set_ack_payload(&mut self, payload: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    self.endpoint.set_ack_payload(payload)
+  }
+
+  /// Install a custom peer-admission predicate, composed with the built-in
+  /// routable-address filter (both must admit). The machine consults it inline
+  /// for every inbound Alive — gossip and join push/pull alike. Set it before
+  /// [`start`](Self::start) so no peer is admitted before the policy applies.
+  ///
+  /// The caller's delegate can only further restrict admission: the built-in
+  /// routable filter always runs first (see `RoutableAnd`).
+  ///
+  /// Installing after `leave()` is inert: the machine admits no inbound Alive
+  /// once leaving, so the delegate is never consulted again.
+  pub fn set_alive_delegate(&mut self, delegate: impl AliveDelegate<I, SocketAddr>) {
+    self.endpoint.set_alive_delegate(RoutableAnd(delegate));
+  }
+
+  /// Install a custom join-merge predicate, consulted on each join push/pull
+  /// merge (never an anti-entropy refresh). A delegate that rejects the merge
+  /// fails the join. Set it before [`start`](Self::start) / [`join`](Self::join).
+  ///
+  /// Installing after `leave()` is inert: the machine merges no remote state
+  /// once leaving, so the delegate is never consulted again.
+  pub fn set_merge_delegate(&mut self, delegate: impl MergeDelegate<I, SocketAddr>) {
+    self.endpoint.set_merge_delegate(delegate);
   }
 
   /// Whether this node has learned at least one peer.
@@ -992,11 +1116,17 @@ where
     // `flush_outbound`, queuing a `Connect` action that step 7a below will consume
     // this same tick, so the first TCP dial bytes are emitted without requiring an
     // additional pump.
-    while let Some(seed) = self.pending_seeds.pop_front() {
-      // StreamId is the machine's correlation token for this exchange. The dial is
-      // correlated via the ExchangeId carried in the resulting Connect action, not
-      // by the StreamId; the driver does not need to retain it.
-      let _sid = self.endpoint.start_push_pull(seed, PushPullKind::Join, now);
+    //
+    // Skip the drain once leaving/left: `join()` rejects post-leave and `leave()`
+    // clears the queue, so this guards the one site that dials against ever
+    // initiating a join push/pull the machine would merge nothing from.
+    if self.endpoint.is_running() {
+      while let Some(seed) = self.pending_seeds.pop_front() {
+        // StreamId is the machine's correlation token for this exchange. The dial is
+        // correlated via the ExchangeId carried in the resulting Connect action, not
+        // by the StreamId; the driver does not need to retain it.
+        let _sid = self.endpoint.start_push_pull(seed, PushPullKind::Join, now);
+      }
     }
 
     // 6. Machine tick: fire due timers (probe / gossip / push-pull).
@@ -2321,7 +2451,9 @@ mod tests {
     let mut engine = make_engine();
     let now = Instant::from_origin(Duration::from_secs(86_400));
 
-    engine.set_compression_options(CompressionOptions::default());
+    engine
+      .set_compression_options(CompressionOptions::default())
+      .expect("compression accepted while running");
     engine.start(now);
 
     let mut gossip = NoGossip;
@@ -2332,6 +2464,154 @@ mod tests {
       engine.num_members(),
       1,
       "single-node engine has exactly one member"
+    );
+  }
+
+  /// A caller `AliveDelegate` composes with the built-in routable filter: it can
+  /// reject an otherwise-admissible (routable) peer, while a peer it accepts is
+  /// admitted.
+  #[test]
+  fn custom_alive_delegate_restricts_admission() {
+    struct RejectId(SmolStr);
+    impl AliveDelegate<SmolStr, SocketAddr> for RejectId {
+      fn notify_alive(
+        &self,
+        peer: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>,
+      ) -> bool {
+        peer.id_ref() != &self.0
+      }
+    }
+
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    engine.set_alive_delegate(RejectId(SmolStr::new("blocked")));
+    engine.start(now);
+
+    // Rejected by the custom delegate even though its address is routable.
+    engine.inject_alive(SmolStr::new("blocked"), node_addr(7001), now);
+    assert!(
+      !engine.is_alive(&SmolStr::new("blocked")),
+      "a peer the custom delegate rejects must not be admitted"
+    );
+
+    // Passes both the routable filter and the custom delegate.
+    engine.inject_alive(SmolStr::new("allowed"), node_addr(7002), now);
+    assert!(
+      engine.is_alive(&SmolStr::new("allowed")),
+      "a peer that passes both the routable filter and the custom delegate is admitted"
+    );
+  }
+
+  /// A caller `MergeDelegate` installs cleanly and the engine stays operational.
+  /// (Merge-rejection behaviour itself is covered by the machine's own tests; the
+  /// engine only forwards the predicate.)
+  #[test]
+  fn custom_merge_delegate_installs_and_engine_still_pumps() {
+    struct RejectAllMerges;
+    impl MergeDelegate<SmolStr, SocketAddr> for RejectAllMerges {
+      fn notify_merge(
+        &self,
+        _peers: &[memberlist_proto::typed::NodeState<SmolStr, SocketAddr>],
+      ) -> bool {
+        false
+      }
+    }
+
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    engine.set_merge_delegate(RejectAllMerges);
+    engine.start(now);
+
+    let mut gossip = NoGossip;
+    let mut stream = NoStream::with_pool(2);
+    let _deadline = engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.num_members(),
+      1,
+      "single-node engine has exactly one member after installing a merge delegate"
+    );
+  }
+
+  /// After `leave()`, every runtime data- and policy-state setter rejects with
+  /// `NotRunning` rather than a false `Ok`, since a post-leave mutation could
+  /// never reach the wire.
+  #[test]
+  fn control_setters_reject_after_leave() {
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    engine.start(now);
+    engine.leave(now).expect("leave from a running node");
+
+    let meta =
+      memberlist_proto::typed::Meta::try_from(bytes::Bytes::from_static(b"x")).expect("meta");
+    assert!(
+      matches!(
+        engine.update_node_metadata(meta),
+        Err(memberlist_proto::Error::NotRunning)
+      ),
+      "update_node_metadata must reject after leave"
+    );
+    assert!(
+      matches!(
+        engine.set_local_state(bytes::Bytes::from_static(b"s")),
+        Err(memberlist_proto::Error::NotRunning)
+      ),
+      "set_local_state must reject after leave"
+    );
+    assert!(
+      matches!(
+        engine.set_ack_payload(bytes::Bytes::from_static(b"a")),
+        Err(memberlist_proto::Error::NotRunning)
+      ),
+      "set_ack_payload must reject after leave"
+    );
+    assert!(
+      matches!(
+        engine.queue_user_broadcast(bytes::Bytes::from_static(b"b")),
+        Err(memberlist_proto::Error::NotRunning)
+      ),
+      "queue_user_broadcast must reject after leave"
+    );
+    assert!(
+      matches!(
+        engine.set_compression_options(CompressionOptions::default()),
+        Err(memberlist_proto::Error::NotRunning)
+      ),
+      "set_compression_options must reject after leave"
+    );
+    assert!(
+      matches!(
+        engine.set_encryption_options(EncryptionOptions::default()),
+        Err(crate::error::ControlError::NotRunning)
+      ),
+      "set_encryption_options must reject after leave"
+    );
+  }
+
+  /// After `leave()` the machine admits no inbound Alive, so installing an
+  /// admission delegate is inert — it succeeds (matching the core machine's
+  /// infallible setter) but is never consulted.
+  #[test]
+  fn admission_delegate_install_after_leave_is_inert() {
+    struct AcceptAll;
+    impl AliveDelegate<SmolStr, SocketAddr> for AcceptAll {
+      fn notify_alive(&self, _: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+        true
+      }
+    }
+
+    let mut engine = make_engine();
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    engine.start(now);
+    engine.leave(now).expect("leave from a running node");
+
+    // Installing succeeds but the machine never consults it: an inbound Alive
+    // during the drain is not admitted, accept-all delegate notwithstanding.
+    engine.set_alive_delegate(AcceptAll);
+    engine.inject_alive(SmolStr::new("late"), node_addr(7050), now);
+    assert!(
+      !engine.is_alive(&SmolStr::new("late")),
+      "a left node admits no Alive even with an accept-all delegate installed"
     );
   }
 
@@ -2423,9 +2703,11 @@ mod tests {
     assert!(
       matches!(
         err,
-        memberlist_proto::EncryptionError::UnsupportedAlgorithm(_)
+        crate::error::ControlError::Encryption(
+          memberlist_proto::EncryptionError::UnsupportedAlgorithm(_)
+        )
       ),
-      "expected UnsupportedAlgorithm, got {err:?}"
+      "expected Encryption(UnsupportedAlgorithm), got {err:?}"
     );
 
     // The engine must still function under its original (no-encryption) policy.

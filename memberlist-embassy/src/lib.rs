@@ -68,7 +68,7 @@ pub use stream_io::{EmbassyStream, SlotId};
 pub use time::{EmbassyInstant, now};
 
 pub use memberlist_embedded::{
-  TransformOptions,
+  AliveDelegate, ControlError, MergeDelegate, TransformOptions,
   transform::{
     ChecksumAlgorithm, ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring, LabelError,
     SecretKey,

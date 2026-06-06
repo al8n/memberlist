@@ -72,7 +72,7 @@ fn join_from_seed_then_clean_leave() {
   b.start(now);
 
   // B joins via A as a seed: a REAL push/pull over TCP (no inject_alive).
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   // Drive both until both see 2 members (join push/pull synced state), bounded.
   let mut joined = false;

@@ -1158,7 +1158,7 @@ async fn dispatch_command<I>(
       if endpoint.is_running() {
         let (id, addr) = cmd.node().clone().into_parts();
         let node = Node::new(id, addr);
-        let ping_id = endpoint.ping(node, now);
+        let ping_id = endpoint.ping(node, now).expect("issued while running");
         pending_pings.push(PendingPing {
           ping_id,
           reply: cmd.reply,
@@ -1199,7 +1199,9 @@ async fn dispatch_command<I>(
         // `Event::ExchangeCompleted(UserMessage)`.
         // Ignoring StreamId: the ExchangeId::from coercion below is the only
         // consumer; the raw StreamId is not needed after parking.
-        let stream_id = endpoint.start_user_message(*cmd.to(), payload.clone(), now);
+        let stream_id = endpoint
+          .start_user_message(*cmd.to(), payload.clone(), now)
+          .expect("issued while running");
         pending.insert(ExchangeId::from(stream_id));
       }
       if pending.is_empty() {

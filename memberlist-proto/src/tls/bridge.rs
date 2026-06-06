@@ -127,7 +127,7 @@ mod tests {
 
     let mut ep: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let stream = ep.accept_stream(addr(7001), now);
+    let stream = ep.accept_stream(addr(7001), now).expect("node is running");
     let want_deadline = stream
       .poll_timeout()
       .expect("inbound stream has a deadline");
@@ -169,7 +169,9 @@ mod tests {
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
     let payload = Bytes::from_static(b"hello-tls");
-    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let sid = ep_c
+      .start_user_message(addr(7000), payload.clone(), now)
+      .expect("issued while running");
     let c_stream = ep_c
       .dial_succeeded(sid, now)
       .expect("dial_succeeded mints the outbound stream");
@@ -178,7 +180,9 @@ mod tests {
     // Inbound server: accept the exchange.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let s_stream = ep_s.accept_stream(addr(7100), now);
+    let s_stream = ep_s
+      .accept_stream(addr(7100), now)
+      .expect("node is running");
     server.promote(s_stream);
 
     // Pump the request out of the client and into the server, shuttling
@@ -253,7 +257,9 @@ mod tests {
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7400)));
     let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
-    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let sid = ep_c
+      .start_user_message(addr(7000), payload.clone(), now)
+      .expect("issued while running");
     let c_stream = ep_c
       .dial_succeeded(sid, now)
       .expect("dial_succeeded mints the outbound stream");
@@ -262,7 +268,9 @@ mod tests {
     // Inbound server: accept the exchange.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let s_stream = ep_s.accept_stream(addr(7400), now);
+    let s_stream = ep_s
+      .accept_stream(addr(7400), now)
+      .expect("node is running");
     server.promote(s_stream);
 
     // Pump the request out of the client and COALESCE every ciphertext byte the
@@ -380,7 +388,9 @@ mod tests {
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7500)));
     let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
-    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let sid = ep_c
+      .start_user_message(addr(7000), payload.clone(), now)
+      .expect("issued while running");
     let c_stream = ep_c
       .dial_succeeded(sid, now)
       .expect("dial_succeeded mints the outbound stream");
@@ -419,7 +429,9 @@ mod tests {
     // freshly-promoted `Stream` so the WHOLE frame reassembles.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let s_stream = ep_s.accept_stream(addr(7500), now);
+    let s_stream = ep_s
+      .accept_stream(addr(7500), now)
+      .expect("node is running");
     server.promote(s_stream);
     // Drive the replay exactly as the coordinator's post-mint `pump_bridges`
     // does: `replay_pending` feeds the retained tail through the established
@@ -522,7 +534,9 @@ mod tests {
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
     let payload = Bytes::from_static(b"small-coalesced-first-frame");
-    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let sid = ep_c
+      .start_user_message(addr(7000), payload.clone(), now)
+      .expect("issued while running");
     let c_stream = ep_c
       .dial_succeeded(sid, now)
       .expect("dial_succeeded mints the outbound stream");
@@ -573,7 +587,9 @@ mod tests {
     // anchor (`peer_has_closed()`), or the small frame never reaches the FSM.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let s_stream = ep_s.accept_stream(addr(7600), now);
+    let s_stream = ep_s
+      .accept_stream(addr(7600), now)
+      .expect("node is running");
     server.promote(s_stream);
     server
       .replay_pending(now)
@@ -880,7 +896,9 @@ mod tests {
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7560)));
     let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
-    let sid = ep_c.start_user_message(addr(7000), payload.clone(), now);
+    let sid = ep_c
+      .start_user_message(addr(7000), payload.clone(), now)
+      .expect("issued while running");
     let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
     client.promote(c_stream);
     client.pump_out(now).expect("client pumps its request");
@@ -913,7 +931,9 @@ mod tests {
     // present, so the established intake combines tail + new read.
     let mut ep_s: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
-    let s_stream = ep_s.accept_stream(addr(7560), now);
+    let s_stream = ep_s
+      .accept_stream(addr(7560), now)
+      .expect("node is running");
     server.promote(s_stream);
     assert!(
       !server.pending_inbound_is_empty(),

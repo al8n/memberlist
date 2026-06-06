@@ -42,8 +42,9 @@ use memberlist_proto::{
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
-    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
+    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
+    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -471,7 +472,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           let _ = reply.send(Err(Error::NotRunning));
           return;
         }
-        let ping_id = self.endpoint.ping(node, now);
+        let ping_id = self.endpoint.ping(node, now).expect("issued while running");
         self.pending_pings.push(PendingPing { ping_id, reply });
       }
       Command::SendUser(SendUserCmd {
@@ -534,7 +535,10 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         let mut pending = HashSet::with_capacity(n);
         let mut started: HashSet<StreamId> = HashSet::with_capacity(n);
         for payload in payloads {
-          let sid = self.endpoint.start_user_message(to, payload, now);
+          let sid = self
+            .endpoint
+            .start_user_message(to, payload, now)
+            .expect("issued while running");
           started.insert(sid);
           while let Some(action) = self.endpoint.poll_action() {
             if let StreamAction::Connect(ref info) = action
@@ -632,6 +636,70 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
             }
             Err(e) => Err(e),
           }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { meta, reply }) => {
+        // Gate on a running node: after `leave()` the schedulers are stopped, so
+        // a metadata change could never be gossiped. Build the validated `Meta`
+        // (rejecting an over-cap value) before applying.
+        let res = if self.endpoint.is_running() {
+          match memberlist_proto::typed::Meta::try_from(meta) {
+            Ok(m) => self
+              .endpoint
+              .update_meta(m)
+              .map_err(|e| Error::PayloadTooLarge(e.to_string())),
+            Err(e) => Err(Error::PayloadTooLarge(e.to_string())),
+          }
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::QueueUserBroadcast(QueueUserBroadcastCmd { data, reply }) => {
+        // Gate on a running node FIRST: after `leave()` the gossip scheduler is
+        // stopped, so the broadcast would never drain. The machine setter rejects
+        // an over-MTU lone datagram without storing it.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .queue_user_broadcast(data)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::SetLocalState(SetLocalStateCmd { state, reply }) => {
+        // Gate on a running node FIRST: after `leave()` no push/pull exchange
+        // will carry the snapshot. The machine setter rejects a snapshot whose
+        // framed PushPull exceeds the stream frame budget.
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_local_state_snapshot(state)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+        } else {
+          Err(Error::NotRunning)
+        };
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(res);
+      }
+      Command::SetAckPayload(SetAckPayloadCmd { payload, reply }) => {
+        // Gate on a running node FIRST: after `leave()` no probe ack will carry
+        // the payload. The machine setter rejects an over-budget ack without
+        // storing it (an over-budget ack always fails to send, so a probing peer
+        // would otherwise falsely suspect this node).
+        let res = if self.endpoint.is_running() {
+          self
+            .endpoint
+            .set_ack_payload(payload)
+            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
         } else {
           Err(Error::NotRunning)
         };
@@ -1041,6 +1109,22 @@ where
             let _ = reply.send(Err(Error::Shutdown));
           }
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::QueueUserBroadcast(QueueUserBroadcastCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::SetLocalState(SetLocalStateCmd { reply, .. }) => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.send(Err(Error::Shutdown));
+          }
+          Command::SetAckPayload(SetAckPayloadCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }
@@ -2045,7 +2129,9 @@ mod tests {
 
     // This command's own dial to the SAME peer; capture is keyed on `started`.
     let mut started: HashSet<StreamId> = HashSet::new();
-    let user_sid = endpoint.start_user_message(peer, Bytes::from_static(b"hi"), now);
+    let user_sid = endpoint
+      .start_user_message(peer, Bytes::from_static(b"hi"), now)
+      .expect("issued while running");
     started.insert(user_sid);
     assert_ne!(
       foreign_sid, user_sid,

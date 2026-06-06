@@ -32,6 +32,14 @@ pub(crate) enum Command<I> {
   SetChecksumOptions(SetChecksumOptionsCmd),
   /// Reconfigure the gossip encryption policy in place.
   SetEncryptionOptions(SetEncryptionOptionsCmd),
+  /// Replace this node's advertised metadata in place.
+  UpdateNodeMetadata(UpdateNodeMetadataCmd),
+  /// Queue an application user-broadcast for cluster-wide gossip.
+  QueueUserBroadcast(QueueUserBroadcastCmd),
+  /// Set the push/pull application local-state snapshot.
+  SetLocalState(SetLocalStateCmd),
+  /// Set the payload attached to outbound probe acks.
+  SetAckPayload(SetAckPayloadCmd),
 }
 
 /// Payload of [`Command::Join`].
@@ -107,5 +115,37 @@ pub(crate) struct SetEncryptionOptionsCmd {
   pub(crate) opts: EncryptionOptions,
   /// Replies with `Ok(())` once applied, `Err(NotRunning)`, or a
   /// keyring-validation error.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::UpdateNodeMetadata`].
+pub(crate) struct UpdateNodeMetadataCmd {
+  /// The new metadata bytes, validated against the meta cap on apply.
+  pub(crate) meta: Vec<u8>,
+  /// Replies with `Ok(())` once applied, `Err(NotRunning)`, or a size error.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::QueueUserBroadcast`].
+pub(crate) struct QueueUserBroadcastCmd {
+  /// The user-broadcast bytes to gossip cluster-wide.
+  pub(crate) data: Bytes,
+  /// Replies with `Ok(())` once queued, `Err(NotRunning)`, or a size error.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::SetLocalState`].
+pub(crate) struct SetLocalStateCmd {
+  /// The push/pull application state snapshot.
+  pub(crate) state: Bytes,
+  /// Replies with `Ok(())` once set, `Err(NotRunning)`, or a size error.
+  pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
+}
+
+/// Payload of [`Command::SetAckPayload`].
+pub(crate) struct SetAckPayloadCmd {
+  /// The payload attached to outbound probe acks.
+  pub(crate) payload: Bytes,
+  /// Replies with `Ok(())` once set, `Err(NotRunning)`, or a size error.
   pub(crate) reply: futures_channel::oneshot::Sender<Result<(), Error>>,
 }

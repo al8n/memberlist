@@ -148,7 +148,9 @@ mod tests {
         test_peer_to_socket(),
       );
       let payload = Bytes::from_static(b"hello-tcp");
-      let sid = coord.start_user_message(addr(7000), payload, now);
+      let sid = coord
+        .start_user_message(addr(7000), payload, now)
+        .expect("issued while running");
       let connect = coord
         .poll_action()
         .expect("Connect surfaced for the outbound user-message dial");
@@ -207,8 +209,12 @@ mod tests {
       test_peer_to_socket(),
     );
 
-    let sid_a = coord.start_user_message(addr(7000), Bytes::from_static(b"a"), now);
-    let sid_b = coord.start_user_message(addr(7000), Bytes::from_static(b"b"), now);
+    let sid_a = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"a"), now)
+      .expect("issued while running");
+    let sid_b = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"b"), now)
+      .expect("issued while running");
     assert_ne!(sid_a, sid_b, "each dial gets a fresh StreamId");
 
     let mut seen: std::collections::HashMap<StreamId, SocketAddr> =
@@ -227,6 +233,214 @@ mod tests {
       seen.len(),
       2,
       "both same-peer dials surfaced distinct Connects"
+    );
+  }
+
+  /// `leave()` is a coordinator cancellation point: an outbound exchange issued
+  /// while running but not yet opened by a driver is purged, so no connection
+  /// opens and no (Alive-advertising) request bytes are written during the drain.
+  #[test]
+  fn leave_cancels_unopened_outbound_exchange() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7100),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    // Issue a reliable user message while running: a Connect plus request bytes
+    // are now queued in the coordinator, not yet drained by any driver.
+    let _sid = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"secret"), now)
+      .expect("issued while running");
+
+    // Leave before the driver drains them.
+    coord.leave(now).expect("leave from a running node");
+
+    // No Connect action surfaces (the unopened exchange was cancelled)...
+    assert!(
+      !core::iter::from_fn(|| coord.poll_action()).any(|a| matches!(a, StreamAction::Connect(_))),
+      "a left node opens no new outbound connection"
+    );
+    // ...and no transport request bytes remain for it.
+    assert!(
+      coord.poll_transport_transmit().is_none(),
+      "a left node writes no queued request bytes after leave"
+    );
+    // The bridge itself is dropped, not just its metadata: no live bridge
+    // retains a stream deadline or record buffers for the cancelled exchange.
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "a cancelled unopened outbound exchange leaves no live bridge"
+    );
+  }
+
+  /// A leaving node accepts no NEW inbound reliable stream: `accept_connection`
+  /// builds no acceptor bridge, so a peer that dials in during the drain mints
+  /// no `Stream` and the node sends no push/pull response.
+  #[test]
+  fn leave_rejects_new_inbound_connection() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7100),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    // Leave, then a peer dials in during the drain.
+    coord.leave(now).expect("leave from a running node");
+    let eid = coord.accept_connection(addr(7000), now);
+
+    // No acceptor bridge was installed: feeding inbound bytes for this
+    // connection mints no Stream and produces no response or transport bytes.
+    coord.handle_transport_data(eid, b"inbound", false, now);
+    assert!(
+      coord.poll_transport_transmit().is_none(),
+      "a left node sends no reliable response to a new inbound connection"
+    );
+    assert!(
+      !core::iter::from_fn(|| coord.poll_action()).any(|a| matches!(a, StreamAction::Connect(_))),
+      "a left node opens no connection for a new inbound stream"
+    );
+  }
+
+  /// A connection accepted while running but whose handshake only settles after
+  /// `leave()` is NOT minted into a `Stream`: feeding a real labeled push/pull
+  /// request during the drain produces no push/pull response (only the
+  /// handshake label prefix may surface), so no local-state snapshot leaks.
+  #[test]
+  fn leave_does_not_mint_a_pre_leave_inbound_bridge() {
+    let now = Instant::now();
+    let server_addr = addr(7500);
+    let dialer_addr = addr(7501);
+
+    // Build a real dialer's [label || push/pull request] blob.
+    let cfg_d = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(dialer_addr.port()),
+      cfg_d,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    let _ = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
+    let _ = dialer.poll_action().expect("dialer Connect");
+    let mut dialer_bytes = Vec::new();
+    while let Some((_id, _peer, bytes)) = dialer.poll_transport_transmit() {
+      dialer_bytes.extend_from_slice(&bytes);
+    }
+    let (label_only, request_tail) = dialer_bytes.split_at(11);
+
+    // Acceptor: accept WHILE RUNNING, then leave before the handshake settles.
+    let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(server_addr.port()),
+      cfg_s,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    let server_exchange = server.accept_connection(dialer_addr, now);
+    server.leave(now).expect("leave from a running node");
+
+    // Feed the peer's label then request during the drain; the mint is skipped.
+    server.handle_transport_data(server_exchange, label_only, false, now);
+    server.handle_timeout(now);
+    server.handle_transport_data(server_exchange, request_tail, true, now);
+    server.handle_timeout(now);
+
+    // No Stream was minted, so no push/pull response frame is produced — at most
+    // the 11-byte handshake label prefix may surface for the exchange.
+    let mut response: Vec<u8> = Vec::new();
+    while let Some((id, _peer, bytes)) = server.poll_transport_transmit() {
+      if id == server_exchange {
+        response.extend_from_slice(&bytes);
+      }
+    }
+    assert!(
+      response.is_empty(),
+      "a left node mints no inbound Stream and emits no bytes; got {} bytes",
+      response.len()
+    );
+    assert_eq!(
+      server.live_bridge_count(),
+      0,
+      "the un-minted inbound bridge is fully cancelled, not left live"
+    );
+  }
+
+  /// `leave()` cancels an outbound exchange whose `Connect` was already drained
+  /// but whose request bytes are not yet on the wire — the request would
+  /// otherwise advertise our pre-leave Alive to the transport during the drain.
+  #[test]
+  fn leave_cancels_outbound_after_connect_drained() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7100),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    // Start a push/pull: request bytes are queued and a Connect surfaces.
+    let _sid = coord.start_push_pull(addr(7000), PushPullKind::Join, now);
+    // The driver pops the Connect but has NOT drained the request bytes yet.
+    let StreamAction::Connect(info) = coord
+      .poll_action()
+      .expect("the first action is the Connect")
+    else {
+      panic!("expected a Connect action");
+    };
+    let eid = info.id();
+
+    // Leave before the request bytes are handed to the transport.
+    coord.leave(now).expect("leave from a running node");
+
+    // The Alive-advertising request is cancelled even though its Connect drained.
+    assert!(
+      coord.poll_transport_transmit().is_none(),
+      "a left node writes no queued request bytes after its Connect was drained"
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the unsent outbound bridge is dropped, not left live"
+    );
+    // The driver is told to abort the connection it may already have opened, so
+    // the transport connection / pool slot is released rather than leaked.
+    assert!(
+      core::iter::from_fn(|| coord.poll_action())
+        .any(|a| matches!(a, StreamAction::Abort(r) if r.id() == eid)),
+      "leave enqueues an Abort for the cancelled outbound exchange"
+    );
+  }
+
+  /// `leave()` clears gossip buffered before leave, and `handle_gossip` drops
+  /// datagrams received during the drain instead of buffering them.
+  #[test]
+  fn leave_clears_and_drops_gossip_ingress() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7100),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    // A gossip datagram buffered while running...
+    coord.handle_gossip(addr(7000), b"pre-leave", now);
+    // ...is cleared by leave; a post-leave datagram is dropped, not buffered.
+    coord.leave(now).expect("leave from a running node");
+    coord.handle_gossip(addr(7000), b"post-leave", now);
+
+    assert!(
+      coord.poll_memberlist_ingress().is_none(),
+      "a left node buffers no inbound gossip"
     );
   }
 
@@ -257,7 +471,9 @@ mod tests {
     // `handle_timeout` the bridge pump observes `sent_any = true` with no
     // further yields and retires the send half, flipping `fin_owed()` true.
     let payload = Bytes::from_static(b"hello-tcp");
-    let _sid = coord.start_user_message(addr(7000), payload, now);
+    let _sid = coord
+      .start_user_message(addr(7000), payload, now)
+      .expect("issued while running");
 
     // Drain the in-band Connect, the dialer's label prefix, and the first
     // request bytes (still no Shutdown — `pump_out` has not seen poll_transmit
@@ -478,7 +694,9 @@ mod tests {
     let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let payload = Bytes::from_static(b"coalesced-with-eof");
-    let _sid = dialer.start_user_message(server_addr, payload.clone(), now);
+    let _sid = dialer
+      .start_user_message(server_addr, payload.clone(), now)
+      .expect("issued while running");
     // The user message reaches Done on the dialer this tick, so a second
     // `handle_timeout` retires its send half and `Shutdown` is emitted; we
     // only need the bytes for this assertion.
@@ -726,7 +944,9 @@ mod tests {
     // One-way user-message: the dialer's request and its half-close anchor
     // both land in the in-band `flush_outbound` tick.
     let payload = Bytes::from_static(b"orphan-canary");
-    let _sid = coord.start_user_message(addr(7000), payload, now);
+    let _sid = coord
+      .start_user_message(addr(7000), payload, now)
+      .expect("issued while running");
 
     // Naive driver loop: drain actions, drain transmits, repeat until idle.
     // Record what was observed per iteration so we can prove the LAST byte
@@ -3013,7 +3233,9 @@ mod tests {
       .expect("send_user_packets forwards");
 
     // An application ping returns a correlation token.
-    let _ping_id = coord.ping(Node::new(SmolStr::new("peer-a"), addr(7001)), now);
+    let _ping_id = coord
+      .ping(Node::new(SmolStr::new("peer-a"), addr(7001)), now)
+      .expect("issued while running");
 
     // `poll_memberlist_transmit` drains the inner endpoint's outbound gossip;
     // at least the seeded alive / broadcasts produced some transmit traffic.
@@ -3169,7 +3391,9 @@ mod tests {
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Dial a one-way user message so a live bridge + Connect exist.
-    let _sid = coord.start_user_message(addr(7000), Bytes::from_static(b"x"), now);
+    let _sid = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"x"), now)
+      .expect("issued while running");
     let exchange = match coord.poll_action() {
       Some(StreamAction::Connect(c)) => c.id(),
       other => panic!(
@@ -3230,7 +3454,9 @@ mod tests {
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // A live outbound bridge.
-    let _sid = coord.start_user_message(addr(7000), Bytes::from_static(b"x"), now);
+    let _sid = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"x"), now)
+      .expect("issued while running");
     while coord.poll_action().is_some() {}
     while coord.poll_transport_transmit().is_some() {}
     assert!(coord.live_bridge_count() >= 1);
@@ -3457,7 +3683,9 @@ mod tests {
     let (mut dialer, mut acceptor) = coordinator_pair(dialer_addr.port(), acceptor_addr.port());
 
     let payload = Bytes::from_static(b"reliable-hello");
-    dialer.start_user_message(acceptor_addr, payload.clone(), now);
+    dialer
+      .start_user_message(acceptor_addr, payload.clone(), now)
+      .expect("issued while running");
     drive_exchange(&mut dialer, &mut acceptor, dialer_addr, now);
 
     assert_eq!(dialer.live_bridge_count(), 0, "dialer reaped its bridge");
@@ -3572,8 +3800,12 @@ mod tests {
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Two in-band dials → two live Active bridges (each contributes a deadline).
-    coord.start_user_message(addr(7000), Bytes::from_static(b"a"), now);
-    coord.start_user_message(addr(7002), Bytes::from_static(b"b"), now);
+    coord
+      .start_user_message(addr(7000), Bytes::from_static(b"a"), now)
+      .expect("issued while running");
+    coord
+      .start_user_message(addr(7002), Bytes::from_static(b"b"), now)
+      .expect("issued while running");
     assert!(
       coord.live_bridge_count() >= 2,
       "two dials built two live bridges, got {}",

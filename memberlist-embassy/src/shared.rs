@@ -299,16 +299,16 @@ mod tests {
     );
     let shared: Shared<SmolStr> = Shared::new(engine);
 
-    let sid1 =
-      shared
-        .engine
-        .borrow_mut()
-        .send_reliable(sa(2), bytes::Bytes::from_static(b"one"), now);
-    let sid2 =
-      shared
-        .engine
-        .borrow_mut()
-        .send_reliable(sa(3), bytes::Bytes::from_static(b"two"), now);
+    let sid1 = shared
+      .engine
+      .borrow_mut()
+      .send_reliable(sa(2), bytes::Bytes::from_static(b"one"), now)
+      .expect("issued while running");
+    let sid2 = shared
+      .engine
+      .borrow_mut()
+      .send_reliable(sa(3), bytes::Bytes::from_static(b"two"), now)
+      .expect("issued while running");
     assert_ne!(sid1, sid2, "distinct sends mint distinct StreamIds");
 
     let reply1 = shared.register_send(sid1);
@@ -381,11 +381,13 @@ mod tests {
     let id1 = shared
       .engine
       .get_mut()
-      .ping(memberlist_proto::Node::new(SmolStr::new("p1"), sa(2)), now);
+      .ping(memberlist_proto::Node::new(SmolStr::new("p1"), sa(2)), now)
+      .expect("issued while running");
     let id2 = shared
       .engine
       .get_mut()
-      .ping(memberlist_proto::Node::new(SmolStr::new("p2"), sa(3)), now);
+      .ping(memberlist_proto::Node::new(SmolStr::new("p2"), sa(3)), now)
+      .expect("issued while running");
     assert_ne!(id1, id2, "distinct pings mint distinct PingIds");
 
     let reply = shared.register_ping(id1);
@@ -415,11 +417,13 @@ mod tests {
     let ping_id = shared
       .engine
       .get_mut()
-      .ping(memberlist_proto::Node::new(SmolStr::new("p"), sa(2)), now);
+      .ping(memberlist_proto::Node::new(SmolStr::new("p"), sa(2)), now)
+      .expect("issued while running");
     let sid = shared
       .engine
       .get_mut()
-      .send_reliable(sa(3), bytes::Bytes::from_static(b"x"), now);
+      .send_reliable(sa(3), bytes::Bytes::from_static(b"x"), now)
+      .expect("issued while running");
 
     let ping_reply = shared.register_ping(ping_id);
     let send_reply = shared.register_send(sid);

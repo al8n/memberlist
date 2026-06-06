@@ -223,7 +223,8 @@ fn single_node_accessor_surface_is_coherent() {
 
   // Swapping the compression policy at runtime is a pure forward that leaves the
   // membership view untouched (it only re-policies future encodes).
-  ml.set_compression_options(CompressionOptions::new());
+  ml.set_compression_options(CompressionOptions::new())
+    .expect("compression options set on a running node");
   assert_eq!(
     ml.num_members(),
     1,
@@ -347,7 +348,10 @@ fn join_then_query_then_leave_over_loopback() {
   block_on(async {
     let op = async {
       // 1. Converge to a 2-member cluster.
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
 
       // 2. Query the converged membership through the handle's forwards. A knows

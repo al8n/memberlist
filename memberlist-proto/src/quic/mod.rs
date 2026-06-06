@@ -1758,30 +1758,41 @@ where
   /// Wrapper around [`Endpoint::start_user_message`]; see
   /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-
   /// flush semantics.
-  pub fn start_user_message(&mut self, peer: SocketAddr, payload: Bytes, now: Instant) -> StreamId {
+  pub fn start_user_message(
+    &mut self,
+    peer: SocketAddr,
+    payload: Bytes,
+    now: Instant,
+  ) -> Result<StreamId, crate::error::Error> {
     self.last_now = Some(now);
-    let id = self.ep.start_user_message(peer, payload, now);
+    // Propagate the inner lifecycle refusal: a Leaving/Left node starts no new
+    // reliable user message and registers no outbound intent.
+    let id = self.ep.start_user_message(peer, payload, now)?;
     self
       .pending_outbound_kinds
       .insert(id, ExchangeKind::UserMessage);
     self.pending_outbound_peers.insert(id, peer);
     self.service_dials(now);
     self.flush_outbound(now);
-    id
+    Ok(id)
   }
 
-  /// Initiate a direct application-level ping to `node`. Returns a
-  /// [`crate::PingId`] correlation token; the driver parks a waiter and
-  /// resolves it on [`crate::event::Event::PingCompleted`] /
-  /// [`crate::event::Event::PingFailed`]. Forwards to the inner membership
-  /// [`Endpoint`].
+  /// Initiate a direct application-level ping to `node`. Returns
+  /// `Ok(`[`crate::PingId`]`)` — the correlation token the driver parks a
+  /// waiter on, resolved by [`crate::event::Event::PingCompleted`] /
+  /// [`crate::event::Event::PingFailed`] — or `Err(NotRunning)` once the node
+  /// has left. Forwards to the inner membership [`Endpoint`].
   ///
   /// `ping` only queues a UDP gossip datagram (via `pending_transmits`) — it
   /// does not touch QUIC bridge state — so it is safe to call without a
   /// preceding `service_dials` / `flush_outbound`.
   // No last_now update: ping only enqueues a packet transmit; it touches no dial/bridge state that poll_timeout must immediately re-examine.
   #[inline]
-  pub fn ping(&mut self, node: crate::Node<I, SocketAddr>, now: Instant) -> crate::PingId {
+  pub fn ping(
+    &mut self,
+    node: crate::Node<I, SocketAddr>,
+    now: Instant,
+  ) -> Result<crate::PingId, crate::error::Error> {
     self.ep.ping(node, now)
   }
 
@@ -1980,7 +1991,22 @@ where
             // inbound exchanges are stranded with no further wake-up.
             while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
               let peer = e.peer();
-              let stream = self.ep.accept_stream(peer, now);
+              let Some(stream) = self.ep.accept_stream(peer, now) else {
+                // Leaving/Left: admit no new inbound reliable stream. Reset both
+                // halves of the just-accepted QUIC stream so the peer is notified
+                // and the connection's stream slot is released instead of left
+                // orphaned with no Bridge to own it. Ignoring Err: `ClosedStream`
+                // means the half is already gone, which is the desired end state.
+                let _ = e
+                  .conn_mut()
+                  .send_stream(sid)
+                  .reset(quinn_proto::VarInt::from_u32(0));
+                let _ = e
+                  .conn_mut()
+                  .recv_stream(sid)
+                  .stop(quinn_proto::VarInt::from_u32(0));
+                continue;
+              };
               let id = stream.id();
               let reliable_max = self.ep.max_stream_frame_size();
               self.bridges.insert(
@@ -4122,7 +4148,9 @@ mod tests {
     // `dial_pending` with deadline `now + stream_timeout`. The returned
     // `StreamId` is the correlation handle the QUIC driver coerces to its
     // parked `ExchangeId`.
-    let id = a.start_user_message(unreachable, Bytes::from_static(b"hello"), now);
+    let id = a
+      .start_user_message(unreachable, Bytes::from_static(b"hello"), now)
+      .expect("issued while running");
     let expected_eid = ExchangeId::from(id);
 
     assert_eq!(
@@ -5281,7 +5309,9 @@ mod tests {
     ep.handle_suspect(peer, suspect, now);
 
     // ping returns a correlation token and queues an unreliable transmit.
-    let _ping_id = ep.ping(Node::new(SmolStr::new("peer"), peer), now);
+    let _ping_id = ep
+      .ping(Node::new(SmolStr::new("peer"), peer), now)
+      .expect("issued while running");
     assert!(
       ep.poll_memberlist_transmit().is_some(),
       "ping must enqueue an unreliable gossip transmit"

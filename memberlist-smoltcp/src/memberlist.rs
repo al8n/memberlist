@@ -3,7 +3,7 @@
 use core::{cell::RefCell, net::SocketAddr};
 
 use memberlist_embedded::{
-  Engine,
+  AliveDelegate, ControlError, Engine, MergeDelegate,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{EndpointOptions, Instant, Node, StreamId, event::PingId, typed::NodeState};
@@ -828,25 +828,72 @@ where
   /// it does not fan out to indirect peers, request a reliable fallback, or
   /// mark the target as suspect on timeout.
   #[inline]
-  pub fn ping(&mut self, node: Node<I, SocketAddr>, now: Instant) -> PingId {
+  pub fn ping(
+    &mut self,
+    node: Node<I, SocketAddr>,
+    now: Instant,
+  ) -> Result<PingId, memberlist_proto::Error> {
     self.engine.ping(node, now)
   }
 
-  /// Replace the gossip+stream compression policy at runtime.
+  /// Replace the gossip+stream compression policy at runtime. Returns
+  /// `NotRunning` after [`leave`](Self::leave).
   #[inline]
-  pub fn set_compression_options(&mut self, opts: CompressionOptions) {
-    self.engine.set_compression_options(opts);
+  pub fn set_compression_options(
+    &mut self,
+    opts: CompressionOptions,
+  ) -> Result<(), memberlist_proto::Error> {
+    self.engine.set_compression_options(opts)
   }
 
   /// Replace the gossip+stream encryption policy at runtime (key rotation). The
   /// keyring is validated before it is applied; an unusable key is rejected
-  /// without changing the live policy.
+  /// without changing the live policy. Returns `NotRunning` after
+  /// [`leave`](Self::leave) (gated before validation).
   #[inline]
-  pub fn set_encryption_options(
-    &mut self,
-    opts: EncryptionOptions,
-  ) -> Result<(), memberlist_proto::EncryptionError> {
+  pub fn set_encryption_options(&mut self, opts: EncryptionOptions) -> Result<(), ControlError> {
     self.engine.set_encryption_options(opts)
+  }
+
+  /// Replace this node's advertised metadata at runtime.
+  ///
+  /// Bumps the incarnation and gossips the change; peers observe it as
+  /// `Event::NodeUpdated` via `poll_event()`.
+  #[inline]
+  pub fn update_node_metadata(
+    &mut self,
+    meta: memberlist_proto::typed::Meta,
+  ) -> Result<(), memberlist_proto::Error> {
+    self.engine.update_node_metadata(meta)
+  }
+
+  /// Set the application state snapshot exchanged during push/pull. Surfaces on
+  /// the receiving node as `Event::RemoteStateReceived` via `poll_event()`.
+  #[inline]
+  pub fn set_local_state(&mut self, state: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    self.engine.set_local_state(state)
+  }
+
+  /// Set the payload attached to outgoing ping acknowledgements. A probing peer
+  /// receives it in its `Event::PingCompleted` via `poll_event()`.
+  #[inline]
+  pub fn set_ack_payload(&mut self, payload: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    self.engine.set_ack_payload(payload)
+  }
+
+  /// Install a custom peer-admission predicate, composed with the built-in
+  /// routable-address filter (both must admit). Set it before [`join`](Self::join)
+  /// so no peer is admitted before the policy applies.
+  #[inline]
+  pub fn set_alive_delegate(&mut self, delegate: impl AliveDelegate<I, SocketAddr>) {
+    self.engine.set_alive_delegate(delegate);
+  }
+
+  /// Install a custom join-merge predicate, consulted on each join push/pull
+  /// merge. A delegate that rejects the merge fails the join.
+  #[inline]
+  pub fn set_merge_delegate(&mut self, delegate: impl MergeDelegate<I, SocketAddr>) {
+    self.engine.set_merge_delegate(delegate);
   }
 
   /// Enqueue a directed unreliable UDP user-data packet to `to`.
@@ -906,7 +953,12 @@ where
   /// peer would collide at the listener (the second SYN is RST'd during the
   /// first's handshake).
   #[inline]
-  pub fn send_reliable(&mut self, to: SocketAddr, payload: bytes::Bytes, now: Instant) -> StreamId {
+  pub fn send_reliable(
+    &mut self,
+    to: SocketAddr,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, memberlist_proto::Error> {
     self.engine.send_reliable(to, payload, now)
   }
 
@@ -918,8 +970,9 @@ where
   /// changes, and enforce its own join deadline — this method performs no I/O
   /// and imposes no timeout. A non-routable seed (unspecified/multicast/broadcast
   /// IP or port 0) is dropped by the engine: it could only produce a doomed dial.
-  pub fn join(&mut self, seeds: &[SocketAddr]) {
-    self.engine.join(seeds);
+  /// Returns `NotRunning` after `leave()`: a left node initiates no new join.
+  pub fn join(&mut self, seeds: &[SocketAddr]) -> Result<(), memberlist_proto::Error> {
+    self.engine.join(seeds)
   }
 
   /// Queue an application user-data payload for piggyback gossip to peers.
