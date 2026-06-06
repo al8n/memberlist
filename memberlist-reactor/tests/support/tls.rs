@@ -2,7 +2,9 @@
 //! server/client configs bundled into `TlsOptions`. Dev-only; production callers
 //! supply their own rustls configs.
 
-use std::sync::Arc;
+#![allow(dead_code)] // Each test binary uses a subset of these helpers.
+
+use std::sync::{Arc, OnceLock};
 
 use memberlist_reactor::TlsOptions;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -43,6 +45,23 @@ pub fn build_tls_options(
 /// root (the single-node / shared-cluster-cert test case).
 pub fn self_trusted_tls_options() -> TlsOptions {
   let (cert, key) = generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("add root cert");
+  build_tls_options(cert, key, roots)
+}
+
+/// `TlsOptions` built from a process-wide shared self-signed cert, so every node
+/// in a multi-node suite cluster trusts every other node's identical server cert
+/// under real root verification. Caches the cert DER and rebuilds the consumed
+/// config per node.
+pub fn shared_tls_options() -> TlsOptions {
+  static SHARED: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+  let (cert_der, key_der) = SHARED.get_or_init(|| {
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen self-sign");
+    (ck.cert.der().to_vec(), ck.signing_key.serialize_der())
+  });
+  let cert = CertificateDer::from(cert_der.clone());
+  let key = PrivateKeyDer::Pkcs8(key_der.clone().into());
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("add root cert");
   build_tls_options(cert, key, roots)

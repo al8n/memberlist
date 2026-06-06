@@ -52,6 +52,7 @@ hickory-proto = { workspace = true, optional = true, default-features = false, f
 resolv-conf = { workspace = true, optional = true }
 
 [dev-dependencies]
+memberlist-test-suite = { path = "../memberlist-test-suite" }
 agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
 smol_str = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
@@ -63,6 +64,18 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = "1"
 quinn-proto = { version = "0.11", features = ["rustls-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[[test]]
+name = "suite_tcp"
+required-features = ["tcp"]
+
+[[test]]
+name = "suite_tls"
+required-features = ["tls-rustls-ring"]
+
+[[test]]
+name = "suite_quic"
+required-features = ["quic-rustls-ring"]
 
 [[test]]
 name = "quic_smoke"

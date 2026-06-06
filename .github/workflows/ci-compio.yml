@@ -1,0 +1,71 @@
+name: ci-compio
+
+# The compio async driver: the driver-agnostic test suite (suite_tcp / suite_tls
+# / suite_quic, including the transform matrix) plus compio's own integration
+# tests, all on compio's single runtime. Nodes bind ephemeral loopback ports, so
+# no subnet setup is required.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+  schedule: [cron: "0 1 */30 * *"]
+
+env:
+  # Every transport + a representative transform backend per kind, so every
+  # suite cell and the gated transform matrix run.
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm"
+
+jobs:
+  test:
+    name: ${{ matrix.os }} - compio
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup component add clippy
+          rustup component add rustfmt
+
+      - name: Format
+        run: cargo fmt -p memberlist-compio -p memberlist-test-suite --check
+
+      - name: Clippy
+        # --no-deps: the workspace-excluded legacy crates carry their own
+        # deny(warnings) and trip newer clippy lints; lint only our targets.
+        run: cargo clippy -p memberlist-compio --all-targets --features "$FEATURES" --no-deps -- -D warnings
+
+      - name: Test
+        run: cargo test -p memberlist-compio --features "$FEATURES"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-compio

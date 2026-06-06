@@ -1,0 +1,22 @@
+[package]
+name = "memberlist-test-suite"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# A driver-agnostic real-node test suite: the `TestCluster` trait plus the
+# scenario library, written once and run by every driver's tests over its own
+# adapter. Holds no driver dependency — each driver dev-depends on this crate
+# and supplies the adapter + the per-transport instantiations.
+
+[dependencies]
+bytes = { workspace = true }
+smol_str = { workspace = true }
+# For the transform-matrix knobs on `NodeConfig` (the algorithm enums + the
+# secret-key type). proto is the driver-agnostic type layer both drivers share;
+# naming a `CompressAlgorithm` variant needs no codec-backend feature. The
+# workspace dep is `default-features = false`, so enable `std` for this
+# (std-only, dev) crate's own standalone build.
+memberlist-proto = { workspace = true, features = ["std"] }

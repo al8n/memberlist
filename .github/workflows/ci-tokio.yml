@@ -1,0 +1,70 @@
+name: ci-tokio
+
+# The reactor async driver under tokio: the driver-agnostic test suite's tokio
+# cells (and the transform matrix) plus the reactor's own tokio integration
+# tests. The reactor suite binaries also carry smol cells; those are skipped
+# here and covered by ci-smol. Nodes bind ephemeral loopback ports, so no subnet
+# setup is required.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+  schedule: [cron: "0 1 */30 * *"]
+
+env:
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm"
+
+jobs:
+  test:
+    name: ${{ matrix.os }} - reactor - tokio
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup component add clippy
+          rustup component add rustfmt
+
+      - name: Format
+        run: cargo fmt -p memberlist-reactor -p memberlist-test-suite --check
+
+      - name: Clippy
+        # --no-deps: the workspace-excluded legacy crates carry their own
+        # deny(warnings) and trip newer clippy lints; lint only our targets.
+        run: cargo clippy -p memberlist-reactor --all-targets --features "$FEATURES" --no-deps -- -D warnings
+
+      - name: Test (tokio cells; smol cells skipped — see ci-smol)
+        run: cargo test -p memberlist-reactor --features "$FEATURES" -- --skip _smol
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-reactor-tokio

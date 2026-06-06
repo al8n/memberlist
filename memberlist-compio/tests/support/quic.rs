@@ -4,7 +4,10 @@
 #![cfg(feature = "quic-rustls-ring")]
 #![allow(dead_code)] // Each test binary uses a subset of these helpers.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+  sync::{Arc, OnceLock},
+  time::Duration,
+};
 
 use memberlist_compio::QuicOptions;
 use memberlist_proto::UnreliableTransport;
@@ -120,6 +123,24 @@ pub fn build_quic_config_with_mode(
 /// trusts that cert as its own root (the common case for single-cluster tests).
 pub fn self_trusted_quic_config() -> QuicOptions {
   let (cert, key) = generate_localhost_cert();
+  let mut roots = RootCertStore::empty();
+  roots.add(cert.clone()).expect("add root cert");
+  build_quic_config(cert, key, roots)
+}
+
+/// A `QuicOptions` built from a process-wide shared self-signed cert, so every
+/// node in a multi-node suite cluster trusts every other node's identical
+/// server cert. QUIC verifies the server chain against the client roots (unlike
+/// the accept-any TLS smoke verifier), so independent per-node certs would not
+/// validate; caching one cert and rebuilding the config per node fixes that.
+pub fn shared_quic_config() -> QuicOptions {
+  static SHARED: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+  let (cert_der, key_der) = SHARED.get_or_init(|| {
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen self-sign");
+    (ck.cert.der().to_vec(), ck.signing_key.serialize_der())
+  });
+  let cert = CertificateDer::from(cert_der.clone());
+  let key = PrivateKeyDer::Pkcs8(key_der.clone().into());
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("add root cert");
   build_quic_config(cert, key, roots)

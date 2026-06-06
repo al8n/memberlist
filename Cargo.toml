@@ -8,6 +8,7 @@ members = [
   "memberlist-smoltcp",
   "memberlist-embassy",
   "memberlist-simulation",
+  "memberlist-test-suite",
   "fuzz",
   "legacy/memberlist",
   "legacy/memberlist-core",

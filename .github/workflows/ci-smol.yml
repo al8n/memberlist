@@ -1,0 +1,65 @@
+name: ci-smol
+
+# The reactor async driver under smol: the driver-agnostic test suite's smol
+# cells (suite_tcp / suite_tls / suite_quic, the `_smol` tests), driven by smol's
+# block_on over the same runtime-generic adapter the tokio cells use. Nodes bind
+# ephemeral loopback ports, so no subnet setup is required.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+  schedule: [cron: "0 1 */30 * *"]
+
+env:
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring"
+
+jobs:
+  test:
+    name: ${{ matrix.os }} - reactor - smol
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+
+      - name: Test (smol suite cells)
+        # `-- smol` selects only the `_smol` cells across the suite binaries;
+        # the reactor's other integration tests are tokio-based and run in
+        # ci-tokio.
+        run: |
+          cargo test -p memberlist-reactor --features "$FEATURES" --test suite_tcp -- smol
+          cargo test -p memberlist-reactor --features "$FEATURES" --test suite_tls -- smol
+          cargo test -p memberlist-reactor --features "$FEATURES" --test suite_quic -- smol
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-reactor-smol
