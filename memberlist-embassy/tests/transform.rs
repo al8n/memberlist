@@ -171,7 +171,10 @@ fn encrypted_gossip_round_trips() {
   let start = StdInstant::now();
   block_on(async {
     let op = async {
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_b.num_members() == 2 {
           break;
@@ -244,7 +247,10 @@ fn checksummed_gossip_round_trips() {
   let start = StdInstant::now();
   block_on(async {
     let op = async {
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_b.num_members() == 2 {
           break;
@@ -401,7 +407,10 @@ fn gossip_label_isolates_clusters() {
     let start = StdInstant::now();
     block_on(async {
       let op = async {
-        ml_b2.join(&[addr(3, 7946)]).await;
+        ml_b2
+          .join(&[addr(3, 7946)])
+          .await
+          .expect("join from a running node");
         loop {
           if ml_a2.num_members() == 2 && ml_b2.num_members() == 2 {
             break;
@@ -500,7 +509,7 @@ fn runtime_set_encryption_rotates_key() {
       let seed_a = [addr(1, 7946)];
       let join_attempt = ml_c.join(&seed_a);
       match select(join_attempt, Timer::after(Duration::from_millis(1000))).await {
-        Either::First(()) => {
+        Either::First(_) => {
           // Join completed — that should not happen with mismatched keys.
           assert_eq!(
             ml_c.num_members(),
@@ -529,7 +538,7 @@ fn runtime_set_encryption_rotates_key() {
 
       // Phase 3: re-join after rotation — must converge.
       let seed_a2 = [addr(1, 7946)];
-      ml_c.join(&seed_a2).await;
+      ml_c.join(&seed_a2).await.expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_c.num_members() == 2 {
           break;

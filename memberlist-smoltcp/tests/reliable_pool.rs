@@ -81,7 +81,7 @@ fn min_pool_seed_accepts_repeated_inbound() {
     now,
   );
   b.start(now);
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   // Drive both until A has accepted at least two inbound connections (the first
   // join plus at least one periodic push/pull re-dial). Without listener
@@ -185,7 +185,7 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
   // address avoids putting SYN-retransmit noise on the shared paired-device wire
   // that would compete with A's real push/pull frames.)
   let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9)), 7946);
-  b.join(&[dead]);
+  b.join(&[dead]).expect("join from a running node");
 
   let mut joined = false;
   for i in 0..BUDGET {
@@ -196,7 +196,7 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
     // outlives the dead seed's socket-free event, leaving budget to complete the
     // push/pull once the freed socket finally backs the deferred dial.
     if i == 95 {
-      b.join(&[addr(1, 7946)]);
+      b.join(&[addr(1, 7946)]).expect("join from a running node");
     }
     let _ = a.poll(clk.now(), &mut da);
     let _ = b.poll(clk.now(), &mut db);
@@ -295,7 +295,7 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
   // and will never ACK or reply to — the FIN. B's socket is therefore wedged in
   // FinWait with a vanished peer, the exchange still mapped (the bridge awaits the
   // reply that never comes), and a socket held out of the pool.
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
   let mut froze_at = None;
   for _ in 0..BUDGET {
     // Poll A then B every iteration until B half-closes; A is never polled again
@@ -458,7 +458,7 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
   // has vanished mid-exchange. B's bridge keeps the half-closed exchange mapped
   // and then FAILS at `stream_timeout`. Record the virtual instant of the freeze;
   // the abort deadline is that instant plus `stream_timeout` plus a small slack.
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
   let mut froze_at = None;
   for _ in 0..BUDGET {
     // Poll A then B every iteration until B half-closes; A is never polled again
@@ -635,7 +635,7 @@ fn delayed_reply_after_half_close_still_completes() {
   b.start(now);
 
   let free_at_construction = b.pool_free_count();
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   let mut a_paused_for = 0u32;
   let mut withheld_reply = false;
@@ -823,7 +823,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   let d2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)), 7946);
 
   // Event 1: `d1` takes the lone dial socket immediately.
-  n.join(&[d1]);
+  n.join(&[d1]).expect("join from a running node");
 
   // Drive the race. The contended poll is the one where `p`'s inbound is accepted
   // (`accepted_inbound_count` first reaches 1): the accept consumes the listener
@@ -838,11 +838,11 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   for i in 0..BUDGET {
     // Event 2: the staggered second dead dial becomes a waiting `PendingDial`.
     if i == D2_JOIN_TICK {
-      n.join(&[d2]);
+      n.join(&[d2]).expect("join from a running node");
     }
     // Event 3: `p`'s single inbound, timed to settle as `d1`'s socket frees.
     if i == P_JOIN_TICK {
-      p.join(&[addr(1, 7946)]);
+      p.join(&[addr(1, 7946)]).expect("join from a running node");
     }
 
     let _ = n.poll(clk.now(), &mut dn);
@@ -876,7 +876,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // accepted. `p` dials `n` a second time; `n`'s accept count must climb past the
   // accept it had at the contended poll. On the buggy order the listener is gone
   // for good here, so this never happens.
-  p.join(&[addr(1, 7946)]);
+  p.join(&[addr(1, 7946)]).expect("join from a running node");
   let mut accepted_again = false;
   for _ in 0..BUDGET {
     let _ = n.poll(clk.now(), &mut dn);
@@ -1010,7 +1010,7 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   b.start(now);
   assert_eq!(b.num_members(), 1, "B starts as a lone member");
 
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   // Drive both until B has learned the FULL snapshot: itself + A + every injected
   // peer. A truncated reply decodes to nothing, so B would stay at 1.
@@ -1108,7 +1108,7 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
     now,
   );
   b.start(now);
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   let expected = 1 + a_members_before;
   let mut converged = false;
@@ -1259,7 +1259,8 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // claims the lone dial socket (`Dialing`); the second finds the pool empty and
   // defers to `PendingDial`. Whichever exchange frees its socket first must then
   // back the still-waiting second dial.
-  b.join(&[addr(1, 7946), addr(3, 7946)]);
+  b.join(&[addr(1, 7946), addr(3, 7946)])
+    .expect("join from a running node");
 
   // Witness that the second exchange was genuinely deferred at least once: the
   // single dial socket cannot back both at the join tick.

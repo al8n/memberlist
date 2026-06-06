@@ -1629,7 +1629,7 @@ async fn dispatch_command<I, A, R>(
         // this is always defined).
         let (id, addr) = cmd.node().clone().into_parts();
         let node_a = memberlist_proto::Node::new(id, A::from(addr));
-        let ping_id = endpoint.ping(node_a, now);
+        let ping_id = endpoint.ping(node_a, now).expect("issued while running");
         pending.pings.push(PendingPing {
           ping_id,
           reply: cmd.reply,
@@ -1679,7 +1679,9 @@ async fn dispatch_command<I, A, R>(
         // `StreamId`. The capture in `process_one_action` grabs that `ExchangeId`
         // for the Connect whose `stream_id()` is in `started`, so we can correlate
         // the terminal `Event::ExchangeCompleted(UserMessage)` with this waiter.
-        let sid = endpoint.start_user_message(peer_a.cheap_clone(), payload.clone(), now);
+        let sid = endpoint
+          .start_user_message(peer_a.cheap_clone(), payload.clone(), now)
+          .expect("issued while running");
         started.insert(sid);
         while let Some(action) = endpoint.poll_action() {
           process_one_action(
@@ -2955,7 +2957,9 @@ mod tests {
 
     // The user-message command's own dial to the SAME peer.
     let mut started: HashSet<StreamId> = HashSet::new();
-    let user_sid = endpoint.start_user_message(peer, bytes::Bytes::from_static(b"hi"), now);
+    let user_sid = endpoint
+      .start_user_message(peer, bytes::Bytes::from_static(b"hi"), now)
+      .expect("issued while running");
     started.insert(user_sid);
     assert_ne!(
       foreign_sid, user_sid,

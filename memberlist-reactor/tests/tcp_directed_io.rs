@@ -143,6 +143,179 @@ async fn ping_after_shutdown_returns_err() {
   );
 }
 
+// ── runtime control APIs (metadata / broadcast / local-state / ack payload) ─────
+
+/// Shared captures for a [`ControlDelegate`].
+#[derive(Clone, Default)]
+struct ControlCaptures {
+  user_msgs: Arc<Mutex<Vec<Vec<u8>>>>,
+  ping_payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+  remote_states: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+/// Records inbound user broadcasts, ping-ack payloads, and merged remote state.
+struct ControlDelegate {
+  c: ControlCaptures,
+}
+
+impl Delegate for ControlDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+
+  fn notify_user_msg(&self, msg: Bytes) -> impl Future<Output = ()> + Send + '_ {
+    let c = self.c.user_msgs.clone();
+    async move {
+      c.lock().unwrap().push(msg.to_vec());
+    }
+  }
+
+  fn notify_ping_complete(
+    &self,
+    _peer_id: SmolStr,
+    _peer_addr: SocketAddr,
+    _rtt: Duration,
+    payload: Bytes,
+  ) -> impl Future<Output = ()> + Send + '_ {
+    let c = self.c.ping_payloads.clone();
+    async move {
+      c.lock().unwrap().push(payload.to_vec());
+    }
+  }
+
+  fn merge_remote_state(&self, state: Bytes, _join: bool) -> impl Future<Output = ()> + Send + '_ {
+    let c = self.c.remote_states.clone();
+    async move {
+      c.lock().unwrap().push(state.to_vec());
+    }
+  }
+}
+
+async fn make_control(id: &str) -> (Memberlist<SmolStr>, ControlCaptures) {
+  let c = ControlCaptures::default();
+  let node = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new(id),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    ControlDelegate { c: c.clone() },
+  )
+  .await
+  .expect("bind tcp memberlist");
+  (node, c)
+}
+
+/// `update_node_metadata`, `queue_user_broadcast`, and `set_local_state` each
+/// reach a joined peer: the peer sees the new metadata on the member, the
+/// broadcast on its `notify_user_msg`, and the local state on its
+/// `merge_remote_state`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_apis_propagate_to_peer() {
+  let (b, caps) = make_control("ctrl-b").await;
+  let a = make("ctrl-a").await;
+  let a_addr = *a.local().addr_ref();
+
+  // Set local state and metadata before the join so the join push/pull carries
+  // the state and the metadata is gossiped as the cluster forms.
+  a.set_local_state(Bytes::from_static(b"app-state"))
+    .await
+    .expect("set_local_state");
+  a.update_node_metadata(b"web".to_vec())
+    .await
+    .expect("update_node_metadata");
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+
+  let meta_seen = wait_until(
+    || {
+      b.by_id(&SmolStr::new("ctrl-a"))
+        .map(|n| n.meta_ref().as_ref() == b"web")
+        .unwrap_or(false)
+    },
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(meta_seen, "peer never observed the updated metadata");
+
+  let state_seen = wait_until(
+    || {
+      caps
+        .remote_states
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| s == b"app-state")
+    },
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(state_seen, "peer never merged the local-state snapshot");
+
+  a.queue_user_broadcast(Bytes::from_static(b"bcast"))
+    .await
+    .expect("queue_user_broadcast");
+  let bcast_seen = wait_until(
+    || caps.user_msgs.lock().unwrap().iter().any(|m| m == b"bcast"),
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(bcast_seen, "peer never received the user broadcast");
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
+/// A node's `set_ack_payload` rides its probe acks: the periodic failure
+/// detector on the peer completes a probe and observes the payload in
+/// `notify_ping_complete`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_ack_payload_observed_by_prober() {
+  let (b, caps) = make_control("ack-b").await;
+  let a = make("ack-a").await;
+  let a_addr = *a.local().addr_ref();
+
+  a.set_ack_payload(Bytes::from_static(b"ackpay"))
+    .await
+    .expect("set_ack_payload");
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let joined = wait_until(
+    || b.by_id(&SmolStr::new("ack-a")).is_some(),
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(joined, "seed never appeared in membership");
+
+  // Each ping of a draws an ack carrying a's configured payload, which surfaces
+  // on b's `notify_ping_complete`.
+  let target = Node::new(SmolStr::new("ack-a"), a_addr);
+  let mut payload_seen = false;
+  for _ in 0..20 {
+    let _ = b.ping(target.clone()).await;
+    if caps
+      .ping_payloads
+      .lock()
+      .unwrap()
+      .iter()
+      .any(|p| p == b"ackpay")
+    {
+      payload_seen = true;
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  assert!(
+    payload_seen,
+    "prober never observed the configured ack payload"
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
 // ── unreliable send ───────────────────────────────────────────────────────────
 
 /// An unreliable `send` reaches the peer's `notify_user_msg` delegate hook.

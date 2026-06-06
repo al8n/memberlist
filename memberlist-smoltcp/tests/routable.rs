@@ -195,7 +195,7 @@ fn non_routable_seed_is_not_dialed() {
   // A multicast seed — non-routable, but accepted by smoltcp's `connect`, so a
   // queued dial WOULD take a socket.
   let mcast = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 7946);
-  m.join(&[mcast]);
+  m.join(&[mcast]).expect("join from a running node");
 
   // Drive a few ticks; a queued seed would be drained into a Connect/dial on the
   // first of these. No panic on any.

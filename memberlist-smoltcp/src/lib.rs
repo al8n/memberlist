@@ -50,6 +50,7 @@ pub use interface::{
 pub use memberlist::Memberlist;
 // Re-export types that appear in public `Memberlist` method signatures so
 // callers do not need to depend on `memberlist-proto` directly.
+pub use memberlist_embedded::{AliveDelegate, ControlError, MergeDelegate};
 pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeState};
 // The wire transforms live in the shared `memberlist-embedded` core and are
 // re-exported here so the smoltcp public API is self-contained.

@@ -299,6 +299,18 @@ where
     matches!(self.lifecycle, Lifecycle::Running)
   }
 
+  /// The single post-leave guard for the fallible runtime operations: `Ok`
+  /// while running, `Err(NotRunning)` once leaving or left. Every config setter,
+  /// data send, and reliable/ping initiator that returns a `Result` funnels its
+  /// lifecycle check through here so the leave contract is named in one place.
+  fn ensure_running(&self) -> Result<(), crate::error::Error> {
+    if self.is_running() {
+      Ok(())
+    } else {
+      Err(crate::error::Error::NotRunning)
+    }
+  }
+
   /// Whether the local node has finished leaving (after `leave()` and the
   /// dead-self broadcast has been emitted).
   pub fn is_left(&self) -> bool {
@@ -625,11 +637,14 @@ where
   pub(crate) fn process_alive(&mut self, alive: Alive<I, A>, bootstrap: bool, now: Instant) {
     let alive_id = alive.node_ref().id_ref().cheap_clone();
 
-    // If we're no longer Running (Leaving or Left) and this Alive is about
-    // us, ignore it — otherwise a self-Alive (e.g. a peer echoing our
-    // pre-leave state) would resurrect the just-left local node. We
-    // suppress self-handling for both Leaving and Left.
-    if self.lifecycle != Lifecycle::Running && &alive_id == self.cfg.local_id_ref() {
+    // A node that is Leaving or Left admits no Alive — neither a self-Alive (a
+    // peer echoing our pre-leave state would resurrect the just-left local
+    // node) nor a remote one (the graceful-leave drain must not re-establish or
+    // grow the membership the node is in the middle of leaving). Inbound gossip
+    // and push/pull merges both route Alives through here, so this single gate
+    // keeps membership admission inert for the entire drain while the dead-self
+    // flush and in-flight stream closes proceed.
+    if self.lifecycle != Lifecycle::Running {
       return;
     }
 
@@ -851,6 +866,13 @@ where
   /// 6. Otherwise: install a fresh Suspicion, transition to Suspect,
   ///    enqueue broadcast.
   pub(crate) fn process_suspect(&mut self, suspect: Suspect<I>, now: Instant) {
+    // A leaving/left node makes no membership change from a Suspect — whether
+    // from gossip, a confirming Suspect, an expired suspicion timer, or a failed
+    // detection probe. The self-Suspect refute path is already inert (see
+    // refute); the graceful-leave drain must not mutate membership.
+    if self.lifecycle != Lifecycle::Running {
+      return;
+    }
     let target = suspect.node_ref().cheap_clone();
     let from = suspect.from_ref().cheap_clone();
     let inc = suspect.incarnation();
@@ -988,6 +1010,14 @@ where
       return;
     }
 
+    // A leaving/left node makes no remote membership change. The self-Dead
+    // transition above drives leave to completion; an inbound or
+    // expired-suspicion Dead about a peer must not mark it Dead/Left or emit
+    // NodeLeft while we are draining.
+    if self.lifecycle != Lifecycle::Running {
+      return;
+    }
+
     {
       let m = self.members.get_mut(&target).unwrap();
       m.set_suspicion(None);
@@ -1093,17 +1123,17 @@ where
   // ─────────────────────── Public typed handlers ───────────────────────────
 
   /// Driver feeds an incoming Alive message.
-  pub fn handle_alive(&mut self, _from: A, alive: Alive<I, A>, at: Instant) {
+  pub(crate) fn handle_alive(&mut self, _from: A, alive: Alive<I, A>, at: Instant) {
     self.process_alive(alive, false, at);
   }
 
   /// Driver feeds an incoming Suspect message.
-  pub fn handle_suspect(&mut self, _from: A, suspect: Suspect<I>, at: Instant) {
+  pub(crate) fn handle_suspect(&mut self, _from: A, suspect: Suspect<I>, at: Instant) {
     self.process_suspect(suspect, at);
   }
 
   /// Driver feeds an incoming Dead message.
-  pub fn handle_dead(&mut self, _from: A, dead: Dead<I>, at: Instant) {
+  pub(crate) fn handle_dead(&mut self, _from: A, dead: Dead<I>, at: Instant) {
     self.process_dead(dead, at);
   }
 
@@ -1115,14 +1145,14 @@ where
   /// `accept_stream` → feed bytes via `handle_data` →
   /// drain `EndpointEvent::UserDataReceived` → call `handle_stream_event`.
   /// This method is retained for the UDP path only.
-  pub fn handle_user_data(&mut self, from: A, data: Bytes, reliability: Reliability) {
+  pub(crate) fn handle_user_data(&mut self, from: A, data: Bytes, reliability: Reliability) {
     self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
   }
 
   /// Driver feeds an incoming Ping. Replies with an Ack via
   /// `pending_transmits`. Misrouted Pings (not addressed to the local node)
   /// are silently dropped.
-  pub fn handle_ping(&mut self, from: A, ping: Ping<I, A>, _now: Instant) {
+  pub(crate) fn handle_ping(&mut self, from: A, ping: Ping<I, A>, _now: Instant) {
     // Verify the Ping is addressed to us.
     if ping.target_ref().id_ref() != self.cfg.local_id_ref() {
       return;
@@ -1142,7 +1172,7 @@ where
   /// Driver feeds an incoming Ack. Resolves the matching probe or
   /// relays the Ack to the original requester if we were forwarding an
   /// indirect ping. Untracked sequence numbers are silently dropped.
-  pub fn handle_ack(&mut self, from: A, ack: Ack, now: Instant) {
+  pub(crate) fn handle_ack(&mut self, from: A, ack: Ack, now: Instant) {
     let seq = ack.sequence_number();
 
     // Peek the entry kind WITHOUT consuming the slot. Keying ack handlers
@@ -1309,14 +1339,20 @@ where
   /// transitions, emits Nacks for expired indirect-ping forwards, and drives
   /// the periodic probe / gossip / push-pull schedulers.
   pub fn handle_timeout(&mut self, now: Instant) {
+    // A Leaving/Left node fires no SWIM timers: no suspicion expiry, no probe
+    // escalation, no indirect-forward Nacks, no periodic schedulers. The drain
+    // is driven by poll_transmit (the dead-self flush) and the driver's own
+    // stream-close deadlines, not by the machine clock; poll_timeout likewise
+    // reports no SWIM deadline once not Running, so the driver never spins.
+    if self.lifecycle != Lifecycle::Running {
+      return;
+    }
     self.fire_expired_suspicions(now);
     self.advance_probe_fsm(now);
     self.fire_expired_forwards(now);
-    if self.lifecycle == Lifecycle::Running {
-      self.fire_probe_scheduler(now);
-      self.fire_gossip_scheduler(now);
-      self.fire_pushpull_scheduler(now);
-    }
+    self.fire_probe_scheduler(now);
+    self.fire_gossip_scheduler(now);
+    self.fire_pushpull_scheduler(now);
   }
 
   /// Fire any expired suspicion timers, transitioning the peer to Dead.
@@ -1900,7 +1936,7 @@ where
   /// explicitly — deadline-bound, allowlisted, deduped — or a
   /// duplicate/late/forged Nack would inflate the count and suppress the
   /// Lifeguard health penalty in `probe_terminate_failure`.
-  pub fn handle_nack(&mut self, from: A, nack: Nack, now: Instant) {
+  pub(crate) fn handle_nack(&mut self, from: A, nack: Nack, now: Instant) {
     let seq = nack.sequence_number();
     let Some(probe) = self.probes.get_mut(&seq) else {
       return;
@@ -1944,6 +1980,14 @@ where
   /// driver hands one in by accident — the driver should route those through
   /// `accept_stream` + `Stream::handle_data` instead.
   pub fn handle_packet(&mut self, from: A, msg: Message<I, A>, now: Instant) {
+    // A Leaving/Left node processes no gossip-plane inbound: it does not reply to
+    // a Ping (which would advertise liveness against its own leave), forward an
+    // IndirectPing, or admit, merge, or suspect from gossip. The graceful-leave
+    // drain runs entirely on the dead-self flush and in-flight stream closes; the
+    // reliable plane is gated separately in handle_stream_event.
+    if self.lifecycle != Lifecycle::Running {
+      return;
+    }
     match msg {
       Message::Ping(p) => self.handle_ping(from, p, now),
       Message::IndirectPing(ip) => self.handle_indirect_ping(from, ip, now),
@@ -1971,6 +2015,11 @@ where
   /// any non-`PendingAlive` events that surfaced during the decision loop are
   /// re-enqueued so that callers can observe them via [`poll_event`](Self::poll_event).
   pub fn requeue_event(&mut self, ev: Event<I, A>) {
+    // A leaving/left node re-admits no dial: drop a requeued DialRequested so a
+    // held event cannot tell a raw driver to dial after leave.
+    if !self.is_running() && matches!(ev, Event::DialRequested(_)) {
+      return;
+    }
     self.pending_events.push_back(ev);
   }
 
@@ -2008,6 +2057,13 @@ where
   ///
   /// Returns `None` if all three sources are empty.
   pub fn poll_timeout(&self) -> Option<Instant> {
+    // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
+    // indirect forwards are inert (handle_timeout fires none of them), so
+    // surfacing their now-stale deadlines would spin the driver through
+    // immediate, no-progress wakeups during the drain.
+    if self.lifecycle != Lifecycle::Running {
+      return None;
+    }
     let suspicion_deadline = self
       .members
       .iter()
@@ -2136,6 +2192,9 @@ where
   /// node. Mirrors the fail-fast `update_meta` cap rather than storing a
   /// payload that can never leave the node.
   pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left, like update_meta: a node that has begun tearing
+    // down rejects further config mutations rather than report a false success.
+    self.ensure_running()?;
     // Charge the exact framed size of the Ack that would carry this payload.
     // `handle_ping` builds `Ack::new(seq).with_payload(...)`; the sequence
     // number's protobuf varint is 1–5 bytes wide, so validate against the
@@ -2212,6 +2271,9 @@ where
   /// bytes for initial-join vs anti-entropy. This setter takes a single
   /// snapshot used for both contexts.
   pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left, like update_meta: a node that has begun tearing
+    // down rejects further config mutations rather than report a false success.
+    self.ensure_running()?;
     validate_local_state_snapshot::<I, A>(&bytes, self.cfg.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
     Ok(())
@@ -2250,6 +2312,9 @@ where
   /// which broadcasts are still relevant. To bound queue growth, check
   /// `user_broadcast_queue_len()` and avoid pushing if too many are pending.
   pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left, like update_meta: a node that has begun tearing
+    // down rejects further config mutations rather than report a false success.
+    self.ensure_running()?;
     // Charge the exact framed size of the lone `UserData` packet that would
     // carry this payload — the same `encode_message` idiom the gossip
     // scheduler uses for its lone-payload fit check. A payload whose lone
@@ -2280,6 +2345,8 @@ where
   /// framed `UserData` size against the gossip MTU and emits one
   /// `Transmit::Packet`; the driver encodes it with the live policy.
   pub fn send_user_packet(&mut self, to: A, data: Bytes) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left: a departing node starts no new gossip-plane I/O.
+    self.ensure_running()?;
     let encoded_len = crate::wire::encode_message::<I, A>(&Message::UserData(data.cheap_clone()))
       .map(|b| b.len())
       .unwrap_or(usize::MAX);
@@ -2308,6 +2375,8 @@ where
     to: A,
     payloads: &[Bytes],
   ) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left: a departing node starts no new gossip-plane I/O.
+    self.ensure_running()?;
     match payloads {
       [] => Ok(()),
       [one] => self.send_user_packet(to, one.cheap_clone()),
@@ -2382,9 +2451,7 @@ where
     // Reject once leaving/left/shutdown: a post-leave meta update would bump
     // the incarnation and broadcast a higher-incarnation Alive that peers
     // accept over the dead-self leave, resurrecting the node.
-    if self.lifecycle != Lifecycle::Running {
-      return Err(crate::error::Error::NotRunning);
-    }
+    self.ensure_running()?;
     // Enforce the per-endpoint Meta cap. Wire's `Meta::MAX_SIZE` is the
     // absolute ceiling at construction; here we apply the tighter
     // configured `meta_max_size` so the local broadcast stays within
@@ -2429,6 +2496,10 @@ where
   /// local node, all peers are dead/leaving, etc.). The periodic scheduler
   /// calls this every `probe_interval` (scaled by Awareness).
   pub fn start_probe(&mut self, now: Instant) -> bool {
+    // A leaving/left node starts no failure-detection probe (no direct Ping I/O).
+    if !self.is_running() {
+      return false;
+    }
     let Some(target_id) = self.next_probe_target() else {
       return false;
     };
@@ -2601,7 +2672,7 @@ where
   /// on the requester's behalf. If the target acks within `cfg.probe_timeout`,
   /// we relay an Ack to the requester (see `handle_ack` Forward branch). If
   /// the deadline elapses without an ack, we send a Nack.
-  pub fn handle_indirect_ping(&mut self, from: A, ind: IndirectPing<I, A>, now: Instant) {
+  pub(crate) fn handle_indirect_ping(&mut self, from: A, ind: IndirectPing<I, A>, now: Instant) {
     let target_id = ind.target_ref().id_ref().cheap_clone();
     let target_addr = ind.target_ref().addr_ref().cheap_clone();
     let requester_addr = ind.source_ref().addr_ref().cheap_clone();
@@ -2680,7 +2751,9 @@ where
   /// Unlike a SWIM failure-detection probe, an application ping is
   /// direct-only: it does not fan out to indirect peers, request a reliable
   /// fallback, or mark the target as suspect on timeout.
-  pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> PingId {
+  pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> Result<PingId, crate::error::Error> {
+    // Reject once leaving/left: a departing node starts no new probe.
+    self.ensure_running()?;
     let target_id = node.id_ref().cheap_clone();
     let target_addr = node.addr_ref().cheap_clone();
     let target_arc = match self.members.get(&target_id) {
@@ -2721,7 +2794,7 @@ where
         target_addr,
         Message::Ping(ping),
       )));
-    PingId::new(seq)
+    Ok(PingId::new(seq))
   }
 
   /// Initiate an outbound push/pull state exchange with `peer`.
@@ -2735,6 +2808,13 @@ where
   /// for periodic anti-entropy.
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     let id = self.allocate_stream_id();
+    // A leaving/left node initiates no push/pull: it queues no dial intent and
+    // emits no DialRequested, so it advertises none of its pre-leave Alive state
+    // to a seed. The returned id is inert; the gated callers (join command
+    // handlers and seed drains) never reach this once not Running.
+    if !self.is_running() {
+      return id;
+    }
     let deadline = now + self.cfg.stream_timeout();
 
     // Encode: PushPull message with current member state.
@@ -2808,6 +2888,11 @@ where
     deadline: Instant,
   ) -> StreamId {
     let id = self.allocate_stream_id();
+    // A leaving/left node opens no reliable-ping fallback. The returned id is
+    // inert; the only caller is the probe FSM, gated by handle_timeout.
+    if !self.is_running() {
+      return id;
+    }
 
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
@@ -2847,7 +2932,14 @@ where
   /// the stream transitions to Done after bytes are drained.
   ///
   /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
-  pub fn start_user_message(&mut self, peer: A, payload: bytes::Bytes, now: Instant) -> StreamId {
+  pub fn start_user_message(
+    &mut self,
+    peer: A,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, crate::error::Error> {
+    // Reject once leaving/left: a departing node starts no new reliable dial.
+    self.ensure_running()?;
     let id = self.allocate_stream_id();
     let deadline = now + self.cfg.stream_timeout();
 
@@ -2869,7 +2961,7 @@ where
       .pending_events
       .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
 
-    id
+    Ok(id)
   }
 
   /// The driver successfully dialed the peer for stream `id`. Endpoint
@@ -2889,6 +2981,16 @@ where
     // `handle_data` fails the stream past the deadline, so no
     // `PushPullRequestReceived` is emitted and no response is ever loaded.
     if now >= intent.deadline {
+      if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
+        self.retire_reliable_fallback(probe_seq);
+      }
+      return None;
+    }
+    // A leaving/left node promotes no dial: a push/pull would hand the peer our
+    // pre-leave Alive state (resurrecting the node on a seed that never sees the
+    // dead-self notice), a reliable-ping is a detection fallback, and a user
+    // message is new outbound I/O the post-leave contract forbids.
+    if self.lifecycle != Lifecycle::Running {
       if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
         self.retire_reliable_fallback(probe_seq);
       }
@@ -2937,10 +3039,18 @@ where
   /// The driver accepted an inbound stream from `from`. Endpoint mints a
   /// fresh `StreamId` and returns an inbound-phase `Stream<I, A>`. The
   /// driver feeds bytes via `stream.handle_data(bytes, now)`.
-  pub fn accept_stream(&mut self, from: A, now: Instant) -> Stream<I, A> {
+  pub fn accept_stream(&mut self, from: A, now: Instant) -> Option<Stream<I, A>> {
+    // Reliable-inbound lifecycle chokepoint, the stream-plane twin of
+    // `handle_packet` refusing gossip-plane inbound once not Running. A
+    // Leaving/Left node admits no new inbound reliable stream: it mints
+    // nothing and returns `None`, and the caller drops the transport
+    // connection rather than servicing an exchange the node is leaving.
+    if !self.is_running() {
+      return None;
+    }
     let id = self.allocate_stream_id();
     let deadline = now + self.cfg.stream_timeout();
-    Stream {
+    Some(Stream {
       id,
       peer: from,
       local_id: self.cfg.local_id_ref().cheap_clone(),
@@ -2951,7 +3061,7 @@ where
       deadline: Some(deadline),
       endpoint_events: std::collections::VecDeque::new(),
       stream_events: std::collections::VecDeque::new(),
-    }
+    })
   }
 
   /// Route an [`EndpointEvent`] produced by a
@@ -2989,6 +3099,14 @@ where
         // `kind`; `peer` and `user_data` are forwarded to the application via
         // `Event::RemoteStateReceived` once the merge is admitted.
         let (peer, states, user_data, kind) = p.into_parts();
+        // A Leaving/Left node completes the in-flight exchange — the stream
+        // closes — but merges no remote membership or application state: the
+        // drain must not re-establish the membership the node is leaving, and a
+        // departing application should not observe a peer's state snapshot. We
+        // sent our own state when we initiated, so nothing remains to do here.
+        if self.lifecycle != Lifecycle::Running {
+          return None;
+        }
         if !self.merge_admitted(&states, kind) {
           return Some(StreamCommand::Close);
         }
@@ -3013,6 +3131,13 @@ where
         // admitted, a non-empty `user_data` is forwarded to the application
         // via `Event::RemoteStateReceived`.
         let (peer, states, user_data, kind) = p.into_parts();
+        // A Leaving/Left node sends no push/pull response: replying would start
+        // new reliable I/O and leak our local membership/state snapshot during
+        // the drain. Close the stream instead — the peer learns of the leave via
+        // the dead-self gossip, and the drain merges nothing.
+        if self.lifecycle != Lifecycle::Running {
+          return Some(StreamCommand::Close);
+        }
         if !self.merge_admitted(&states, kind) {
           return Some(StreamCommand::Close);
         }
@@ -3047,21 +3172,31 @@ where
           SendPushPullResponse::new(local_states, self.local_state_snapshot.clone()),
         ))
       }
+      // A Leaving/Left node processes no reliable-plane inbound: it completes no
+      // reliable-ping probe (no awareness mutation) and delivers no user data to
+      // a departing application. The stream still closes via its own lifecycle
+      // (StreamClosed/StreamErrored below), so the drain is unaffected.
       EndpointEvent::ReliablePingAcked(p) => {
-        self.handle_reliable_ping_response(EndpointEvent::ReliablePingAcked(p), now);
+        if self.lifecycle == Lifecycle::Running {
+          self.handle_reliable_ping_response(EndpointEvent::ReliablePingAcked(p), now);
+        }
         None
       }
       EndpointEvent::ReliablePingFailed(p) => {
-        self.handle_reliable_ping_response(EndpointEvent::ReliablePingFailed(p), now);
+        if self.lifecycle == Lifecycle::Running {
+          self.handle_reliable_ping_response(EndpointEvent::ReliablePingFailed(p), now);
+        }
         None
       }
       EndpointEvent::UserDataReceived(p) => {
-        let (peer, data) = p.into_parts();
-        self.emit_event(Event::UserPacket(UserPacket::new(
-          peer,
-          data,
-          Reliability::Reliable,
-        )));
+        if self.lifecycle == Lifecycle::Running {
+          let (peer, data) = p.into_parts();
+          self.emit_event(Event::UserPacket(UserPacket::new(
+            peer,
+            data,
+            Reliability::Reliable,
+          )));
+        }
         None
       }
       EndpointEvent::StreamClosed(_) | EndpointEvent::StreamErrored(_) => None,
@@ -3168,12 +3303,13 @@ where
   /// `leave()` returns immediately. `Event::LeftCluster` is the
   /// leave-*completion* signal. It is emitted **after** the dead-self
   /// packets `leave()` queued have been drained via `poll_transmit`
-  /// (handed to the I/O layer) — tracked by an explicit count, NOT by
-  /// `pending_transmits` becoming empty, so neither stale traffic queued
-  /// before `leave()` nor unrelated traffic queued after it can delay or
-  /// spuriously trigger completion. When there are no live peers it is
-  /// emitted immediately, regardless of any unrelated packets already
-  /// queued. A driver's high-level `leave(timeout)` MUST wait for
+  /// (handed to the I/O layer) — tracked by an explicit count of just the
+  /// dead-self fan-out. `leave()` first drops every gossip-plane packet
+  /// queued before it ran, so a departing node emits only its leave notice:
+  /// no stale Ack/Ping/Alive/user packet that would re-advertise pre-leave
+  /// state or pad the flush, and nothing a post-leave enqueue can use to
+  /// delay or spuriously trigger completion. When there are no live peers it
+  /// is emitted immediately. A driver's high-level `leave(timeout)` MUST wait for
   /// `LeftCluster` (racing its own timeout → `LeaveTimeout`) before
   /// reporting success or tearing down the socket; treating `leave()`'s
   /// `Ok(())` return or the `NodeLeft`/state transition as completion
@@ -3193,6 +3329,18 @@ where
     self.next_probe = None;
     self.next_gossip = None;
     self.next_pushpull = None;
+    // Drop all pending outbound dial intents: a left node promotes none of them
+    // (dial_succeeded refuses each kind once not Running). A push/pull would
+    // advertise our pre-leave Alive, a reliable-ping is a detection fallback,
+    // and a user message is new I/O the post-leave contract forbids.
+    self.pending_stream_intents.clear();
+    // Also drop any already-queued DialRequested events: a raw Endpoint driver
+    // that polls events after leave must not still be told to dial. dial_succeeded
+    // would refuse the promotion, but a driver opens the transport in response to
+    // the event itself, which would be new post-leave I/O.
+    self
+      .pending_events
+      .retain(|e| !matches!(e, Event::DialRequested(_)));
     let local_id = self.cfg.local_id_ref().cheap_clone();
     // The applied local incarnation is authoritative: an inbound self-Alive
     // is applied synchronously (no pending-decision gap), so there is no
@@ -3221,6 +3369,13 @@ where
       .map(|m| m.state_ref().address_ref().cheap_clone())
       .collect();
     let dead_self_count = live_peers.len();
+    // Drop every gossip-plane packet queued before leave(): a departing node
+    // emits only its leave notice, never a stale Ack/Ping/Alive/user packet. A
+    // buffered Alive would re-advertise our pre-leave state after the dead-self
+    // (a resurrection vector), and an arbitrarily long backlog would pad the
+    // flush and delay `LeftCluster`. Clearing here leaves the dead-self fan-out
+    // below as the only content of `pending_transmits`.
+    self.pending_transmits.clear();
     for to in live_peers {
       self
         .pending_transmits
@@ -3235,20 +3390,15 @@ where
     }
     if dead_self_count == 0 {
       // No live peers ⇒ nothing to flush ⇒ the leave is complete now.
-      // Emit `LeftCluster` immediately, regardless of any unrelated
-      // packets already sitting in `pending_transmits` (a stale ping Ack,
-      // gossip, etc.) — those are not the leave notice and must not delay
-      // or block completion.
       self.emit_event(Event::LeftCluster);
       self.leave_flush_remaining = None;
     } else {
-      // The dead-self packets were just appended to the tail. After
-      // exactly `pending_transmits.len()` pops (any stale prefix already
-      // queued ahead of them, then the fan-out itself) the last dead-self
-      // has been handed to the I/O layer. FIFO guarantees anything queued
-      // *after* leave() sits behind this boundary, so post-leave traffic
-      // cannot delay `LeftCluster`.
-      self.leave_flush_remaining = Some(self.pending_transmits.len());
+      // `pending_transmits` now holds exactly the dead-self fan-out. After
+      // `dead_self_count` pops the last leave notice has reached the I/O layer;
+      // FIFO keeps anything enqueued after leave() behind that boundary, so
+      // neither a stale prefix nor post-leave traffic can delay or spuriously
+      // trigger `LeftCluster`.
+      self.leave_flush_remaining = Some(dead_self_count);
     }
     Ok(())
   }

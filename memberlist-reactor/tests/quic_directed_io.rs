@@ -99,6 +99,126 @@ async fn wait_until(mut predicate: impl FnMut() -> bool, deadline: Duration) -> 
   predicate()
 }
 
+// ── runtime control APIs over QUIC ──────────────────────────────────────────────
+
+/// Records inbound user broadcasts and merged remote state for the control test.
+#[derive(Clone, Default)]
+struct ControlCaptures {
+  user_msgs: Arc<Mutex<Vec<Vec<u8>>>>,
+  remote_states: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+struct ControlDelegate {
+  c: ControlCaptures,
+}
+
+impl Delegate for ControlDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+
+  fn notify_user_msg(&self, msg: Bytes) -> impl Future<Output = ()> + Send + '_ {
+    let c = self.c.user_msgs.clone();
+    async move {
+      c.lock().unwrap().push(msg.to_vec());
+    }
+  }
+
+  fn merge_remote_state(&self, state: Bytes, _join: bool) -> impl Future<Output = ()> + Send + '_ {
+    let c = self.c.remote_states.clone();
+    async move {
+      c.lock().unwrap().push(state.to_vec());
+    }
+  }
+}
+
+async fn make_control(id: &str, qcfg: QuicOptions) -> (Memberlist<SmolStr>, ControlCaptures) {
+  let c = ControlCaptures::default();
+  let node = Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new(id),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    ControlDelegate { c: c.clone() },
+    qcfg,
+  )
+  .await
+  .expect("bind quic memberlist");
+  (node, c)
+}
+
+/// The four runtime control commands dispatch through the QUIC driver: metadata,
+/// broadcast, and local-state propagate to a joined peer, and the ack-payload
+/// command is accepted while running. (Full ack-payload propagation is covered
+/// by the transport-agnostic TCP test.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_control_apis_dispatch_to_peer() {
+  let (qcfg_a, qcfg_b) = shared_quic_pair();
+  let (b, caps) = make_control("quic-ctrl-b", qcfg_b).await;
+  let a = make("quic-ctrl-a", qcfg_a).await;
+  let a_addr = *a.local().addr_ref();
+
+  a.set_local_state(Bytes::from_static(b"app-state"))
+    .await
+    .expect("set_local_state");
+  a.update_node_metadata(b"web".to_vec())
+    .await
+    .expect("update_node_metadata");
+  a.set_ack_payload(Bytes::from_static(b"ackpay"))
+    .await
+    .expect("set_ack_payload accepted while running");
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+
+  let meta_seen = wait_until(
+    || {
+      b.by_id(&SmolStr::new("quic-ctrl-a"))
+        .map(|n| n.meta_ref().as_ref() == b"web")
+        .unwrap_or(false)
+    },
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    meta_seen,
+    "peer never observed the updated metadata over QUIC"
+  );
+
+  let state_seen = wait_until(
+    || {
+      caps
+        .remote_states
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|s| s == b"app-state")
+    },
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    state_seen,
+    "peer never merged the local-state snapshot over QUIC"
+  );
+
+  a.queue_user_broadcast(Bytes::from_static(b"bcast"))
+    .await
+    .expect("queue_user_broadcast");
+  let bcast_seen = wait_until(
+    || caps.user_msgs.lock().unwrap().iter().any(|m| m == b"bcast"),
+    Duration::from_secs(10),
+  )
+  .await;
+  assert!(
+    bcast_seen,
+    "peer never received the user broadcast over QUIC"
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
 // ── ping ──────────────────────────────────────────────────────────────────────
 
 /// Pinging a live QUIC peer returns a positive RTT.

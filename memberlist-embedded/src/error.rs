@@ -152,6 +152,51 @@ impl std::error::Error for InitError {
   }
 }
 
+/// Why a runtime control operation on a running [`Engine`](crate::Engine) was
+/// rejected.
+///
+/// Only [`set_encryption_options`](crate::Engine::set_encryption_options) needs
+/// this type: it can fail BOTH on lifecycle and on an unusable keyring. The
+/// other runtime setters have a single failure domain and report through the
+/// machine's [`memberlist_proto::Error`] (lifecycle + size).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ControlError {
+  /// The node has left the cluster (or never started): its schedulers are
+  /// stopped, so the change could never reach the wire.
+  NotRunning,
+  /// A key in the supplied keyring uses an AEAD backend not built into this
+  /// binary; the live encryption policy is left unchanged.
+  Encryption(memberlist_proto::EncryptionError),
+}
+
+impl fmt::Display for ControlError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      ControlError::NotRunning => {
+        f.write_str("endpoint is not running (already left or shut down)")
+      }
+      ControlError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
+    }
+  }
+}
+
+impl From<memberlist_proto::EncryptionError> for ControlError {
+  fn from(e: memberlist_proto::EncryptionError) -> Self {
+    ControlError::Encryption(e)
+  }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ControlError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    match self {
+      ControlError::Encryption(e) => Some(e),
+      ControlError::NotRunning => None,
+    }
+  }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
   use core::net::{IpAddr, Ipv4Addr, SocketAddr};

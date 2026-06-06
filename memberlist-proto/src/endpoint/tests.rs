@@ -561,11 +561,11 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
   );
 }
 
-/// A zero-live-peer leave must complete immediately even when unrelated
-/// traffic (a stale ping Ack here) is already queued. A `pending_transmits.
-/// is_empty()` boundary would wrongly defer this.
+/// A zero-live-peer leave completes immediately AND drops any gossip-plane
+/// packet queued before it: a departing node emits only its leave notice (here
+/// absent — no live peers), never a stale Ack.
 #[test]
-fn leave_no_live_peers_not_delayed_by_stale_transmit() {
+fn leave_no_live_peers_drops_stale_transmit_and_completes() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   // Queue an unrelated packet (Ack reply) WITHOUT adding any member.
@@ -579,39 +579,37 @@ fn leave_no_live_peers_not_delayed_by_stale_transmit() {
 
   e.leave(Instant::now()).expect("ok");
   assert!(e.is_left());
-  // LeftCluster must be emitted immediately (no live peers ⇒ legacy
-  // `if any_alive` is false), NOT held behind the stale Ack.
+  // LeftCluster fires immediately (no live peers).
   let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
     events.iter().any(|ev| matches!(ev, Event::LeftCluster)),
-    "zero-live-peer leave must complete immediately despite stale transmit"
+    "zero-live-peer leave must complete immediately"
   );
-  // The stale Ack is still queued (it is not the leave notice).
-  {
-    let tx = e.poll_transmit();
-    let is_ack_packet =
-      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_)));
-    assert!(is_ack_packet, "stale Ack packet expected");
-  }
+  // The stale Ack was dropped by leave() — a left node holds no buffered
+  // gossip that later produces I/O.
+  assert!(
+    e.poll_transmit().is_none(),
+    "leave drops gossip queued before it; nothing remains to send"
+  );
 }
 
-/// With a live peer, the completion boundary is exactly the queued
-/// dead-self (plus any stale prefix), never trailing post-leave traffic.
-/// LeftCluster fires when the dead-self is drained and is neither delayed
-/// by, nor spuriously emitted for, unrelated packets.
+/// With a live peer, leave() drops any stale prefix and queues only the
+/// dead-self, so the completion boundary is exactly that one notice: LeftCluster
+/// fires when the dead-self drains, and a packet enqueued after leave never
+/// re-triggers it.
 #[test]
-fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
+fn leave_left_cluster_boundary_is_exactly_the_dead_self() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
 
-  // Stale packet queued BEFORE leave (a prefix ahead of the dead-self).
+  // Stale packet queued BEFORE leave — leave() must drop it.
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
   e.handle_ping(from, ping_to("local", 7000, "alice", 8001, 1), t0);
 
-  e.leave(t0).expect("ok"); // queues dead-self ⇒ [stale Ack, dead-self]
+  e.leave(t0).expect("ok"); // drops the stale Ack, queues only the dead-self
   assert!(e.is_left());
   let pre: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(pre.iter().any(|ev| matches!(ev, Event::NodeLeft(_))));
@@ -620,28 +618,13 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
     "LeftCluster must not fire before the dead-self drains"
   );
 
-  // Pop #1: the stale prefix Ack — boundary not reached yet.
-  {
-    let tx = e.poll_transmit();
-    assert!(
-      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_))),
-      "expected stale Ack packet"
-    );
-  }
-  assert!(
-    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
-    "stale prefix packet must not trigger LeftCluster"
-  );
-
-  // Enqueue a TRAILING packet (post-leave) — sits behind the dead-self.
-  e.handle_ping(from, ping_to("local", 7000, "alice", 8001, 2), t0);
-
-  // Pop #2: the dead-self ⇒ boundary reached ⇒ LeftCluster now.
+  // Pop #1 is the dead-self itself — the stale prefix was dropped — and draining
+  // it reaches the completion boundary.
   {
     let tx = e.poll_transmit();
     assert!(
       matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Dead(_))),
-      "expected dead-self packet"
+      "the only queued packet is the dead-self; the stale Ack was dropped"
     );
   }
   assert!(
@@ -649,17 +632,19 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
     "LeftCluster fires exactly when the dead-self is handed off"
   );
 
-  // Pop #3: the trailing Ack — must NOT emit a second LeftCluster.
+  // A packet enqueued after leave sits behind the already-passed boundary and
+  // must not re-trigger completion.
+  e.handle_ping(from, ping_to("local", 7000, "alice", 8001, 2), t0);
   {
     let tx = e.poll_transmit();
     assert!(
       matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_))),
-      "expected trailing Ack packet"
+      "expected the post-leave Ack"
     );
   }
   assert!(
     !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
-    "trailing post-leave traffic must not re-trigger LeftCluster"
+    "post-leave traffic must not re-trigger LeftCluster"
   );
 }
 
@@ -1409,7 +1394,8 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
 
   let t0 = Instant::now();
   let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
+  e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0)
+    .expect("issued while running");
   let seq = match e.poll_transmit().expect("Ping") {
     Transmit::Packet(p) => {
       let (_, message) = p.into_parts();
@@ -2257,7 +2243,7 @@ fn ping_emits_ping_and_records_app_ping_state() {
     SmolStr::new("bob"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
   );
-  e.ping(bob_node, t0);
+  e.ping(bob_node, t0).expect("issued while running");
   let t = e.poll_transmit().expect("Ping expected");
   let seq = if let Transmit::Packet(p) = t {
     let (_, message) = p.into_parts();
@@ -2287,7 +2273,7 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
     SmolStr::new("bob"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
   );
-  e.ping(bob_node, t0);
+  e.ping(bob_node, t0).expect("issued while running");
   let seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
     let (_, message) = p.into_parts();
     if let Message::Ping(ping) = message {
@@ -2337,7 +2323,7 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
     SmolStr::new("bob"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
   );
-  let ping_id = e.ping(bob_node, t0);
+  let ping_id = e.ping(bob_node, t0).expect("issued while running");
   // Drain the single direct Ping.
   let seq = match e.poll_transmit().expect("direct Ping") {
     Transmit::Packet(p) => {
@@ -2724,7 +2710,7 @@ fn accept_stream_returns_inbound_stream() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   let now = Instant::now();
-  let s = e.accept_stream(from, now);
+  let s = e.accept_stream(from, now).expect("node is running");
   assert!(!s.is_done());
   assert!(matches!(s.phase, StreamPhase::InboundAwaitingFirstMessage));
   assert!(s.poll_timeout().is_some());
@@ -2810,7 +2796,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
   // Peer dials us.
   let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut stream = e.accept_stream(peer_addr, t0);
+  let mut stream = e.accept_stream(peer_addr, t0).expect("node is running");
 
   // Peer's inbound PushPull: join=true, one peer "dave".
   let dave_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
@@ -2858,6 +2844,466 @@ fn inbound_push_pull_decode_and_response_bytes() {
     }
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
   }
+}
+
+#[test]
+fn post_leave_inbound_alive_is_not_admitted() {
+  // The graceful-leave drain must not grow membership. An inbound Alive — from
+  // gossip or routed in from a push/pull merge — is dropped once the node has
+  // left, so no new peer is admitted while draining.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  let before = e.num_members();
+  process_alive_auto(&mut e, alive("intruder", 7009, 1), false, t0);
+  assert_eq!(
+    e.num_members(),
+    before,
+    "a left node must not admit a new Alive"
+  );
+  assert!(e.member(&SmolStr::new("intruder")).is_none());
+}
+
+#[test]
+fn post_leave_data_setters_reject_with_not_running() {
+  use bytes::Bytes;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  assert!(matches!(
+    e.set_ack_payload(Bytes::from_static(b"x")),
+    Err(crate::error::Error::NotRunning)
+  ));
+  assert!(matches!(
+    e.set_local_state_snapshot(Bytes::from_static(b"x")),
+    Err(crate::error::Error::NotRunning)
+  ));
+  assert!(matches!(
+    e.queue_user_broadcast(Bytes::from_static(b"x")),
+    Err(crate::error::Error::NotRunning)
+  ));
+}
+
+#[test]
+fn post_leave_push_pull_reply_does_not_merge() {
+  use crate::event::PushPullKind;
+  use PushNodeState;
+  use PushPull;
+  use State;
+  use bytes::Bytes;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("alice", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // A join push/pull is initiated while Running...
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let id = e.start_push_pull(peer_addr, PushPullKind::Join, t0);
+  while e.poll_event().is_some() {}
+  let mut stream = e.dial_succeeded(id, t0).expect("stream");
+  let mut req_buf = Vec::new();
+  stream.poll_transmit(t0, &mut req_buf);
+
+  // ...then the node leaves before the peer's reply lands. The in-flight reply
+  // must not re-establish membership during the drain.
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  let before = e.num_members();
+
+  let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
+  let carol_state = PushNodeState::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
+  let reply_pp = PushPull::new(true, core::iter::once(carol_state)).with_user_data(Bytes::new());
+  let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
+  let reply_bytes = crate::wire::encode_message::<SmolStr, SocketAddr>(&reply_msg).expect("encode");
+  stream
+    .handle_data(&reply_bytes, t0)
+    .expect("handle_data ok");
+  let ep_ev = stream.poll_endpoint_event().expect("endpoint event");
+
+  let cmd = e.handle_stream_event(ep_ev, t0);
+  assert!(cmd.is_none(), "outbound reply still returns None");
+  assert_eq!(
+    e.num_members(),
+    before,
+    "a left node must not merge a push/pull reply"
+  );
+  assert!(
+    e.member(&SmolStr::new("carol")).is_none(),
+    "carol must not be merged after leave"
+  );
+}
+
+#[test]
+fn post_leave_push_pull_request_closes_without_replying() {
+  use PushNodeState;
+  use PushPull;
+  use State;
+  use StreamCommand;
+  use bytes::Bytes;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // An inbound push/pull stream is accepted while Running...
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut stream = e.accept_stream(peer_addr, t0).expect("node is running");
+
+  // ...then the node leaves before the peer's request is routed.
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  let before = e.num_members();
+
+  let dave_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
+  let dave_state = PushNodeState::new(1, SmolStr::new("dave"), dave_addr, State::Alive);
+  let inbound_pp = PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
+  let inbound_msg = Message::<SmolStr, SocketAddr>::PushPull(inbound_pp);
+  let inbound_bytes =
+    crate::wire::encode_message::<SmolStr, SocketAddr>(&inbound_msg).expect("encode");
+  stream.handle_data(&inbound_bytes, t0).expect("handle_data");
+  let ep_ev = stream.poll_endpoint_event().expect("endpoint event");
+
+  // A leaving node closes the inbound push/pull rather than replying — a reply
+  // would start new reliable I/O and leak our local-state snapshot during drain.
+  let cmd = e
+    .handle_stream_event(ep_ev, t0)
+    .expect("a leaving node closes the inbound push/pull");
+  assert!(
+    matches!(cmd, StreamCommand::Close),
+    "a left node closes rather than replying"
+  );
+  // It also merges none of the peer's state.
+  assert_eq!(
+    e.num_members(),
+    before,
+    "a left node must not merge an inbound push/pull"
+  );
+  assert!(
+    e.member(&SmolStr::new("dave")).is_none(),
+    "dave must not be merged after leave"
+  );
+}
+
+#[test]
+fn post_leave_pending_push_pull_dial_is_refused() {
+  use crate::event::PushPullKind;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // A join push/pull is initiated while Running...
+  let id = e.start_push_pull(peer_addr, PushPullKind::Join, t0);
+  // ...then the node leaves before the dial completes. The pending dial must
+  // not promote: a left node must not hand the seed its pre-leave Alive state.
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  assert!(
+    e.dial_succeeded(id, t0).is_none(),
+    "a left node must refuse to promote a pending push/pull dial"
+  );
+}
+
+#[test]
+fn post_leave_detection_probe_does_not_fan_out() {
+  use core::time::Duration;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // A detection probe is in flight (direct Ping sent)...
+  e.start_probe(t0);
+  while e.poll_transmit().is_some() {}
+
+  // ...then the node leaves. Firing the timeout in the fan-out window must NOT
+  // escalate to IndirectPings (no new failure-detection I/O during the drain),
+  // and the probe target stays Alive (no suspect).
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  e.handle_timeout(t0 + Duration::from_millis(60));
+
+  let mut saw_indirect = false;
+  while let Some(tx) = e.poll_transmit() {
+    if let Transmit::Packet(p) = tx {
+      if matches!(p.message_ref(), Message::IndirectPing(_)) {
+        saw_indirect = true;
+      }
+    }
+  }
+  assert!(!saw_indirect, "a left node must not fan out IndirectPings");
+  assert_eq!(
+    e.member(&SmolStr::new("bob")).map(|m| m.state()),
+    Some(State::Alive),
+    "a left node must not suspect the probe target"
+  );
+}
+
+#[test]
+fn post_leave_remote_suspect_and_dead_are_inert() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("p1", 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("p2", 7002, 1), false, t0);
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  while e.poll_event().is_some() {}
+
+  let from_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+
+  // A remote Suspect about p1 must not mark it Suspect during the drain.
+  e.handle_suspect(
+    from_addr,
+    Suspect::new(1, SmolStr::new("p1"), SmolStr::new("p2")),
+    t0,
+  );
+  assert_eq!(
+    e.member(&SmolStr::new("p1")).map(|m| m.state()),
+    Some(State::Alive),
+    "a left node must not suspect a peer"
+  );
+
+  // A remote Dead about p2 must not mark it Dead or emit NodeLeft.
+  e.handle_dead(from_addr, dead("p2", "p1", 1), t0);
+  assert_eq!(
+    e.member(&SmolStr::new("p2")).map(|m| m.state()),
+    Some(State::Alive),
+    "a left node must not mark a peer Dead"
+  );
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::NodeLeft(_))),
+    "a left node must not emit NodeLeft for a remote Dead"
+  );
+}
+
+#[test]
+fn post_leave_inbound_ping_emits_no_ack() {
+  use Ping;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  while e.poll_transmit().is_some() {}
+
+  // An inbound Ping during the drain must not produce an Ack: replying would
+  // advertise liveness against our own leave. handle_packet drops all
+  // gossip-plane inbound once not Running.
+  let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
+  e.handle_packet(
+    from,
+    Message::Ping(Ping::new(
+      99,
+      Node::new(SmolStr::new("prober"), from),
+      Node::new(SmolStr::new("local"), local),
+    )),
+    t0,
+  );
+  assert!(
+    e.poll_transmit().is_none(),
+    "a left node must not Ack an inbound Ping"
+  );
+}
+
+#[test]
+fn post_leave_directed_io_rejects() {
+  use bytes::Bytes;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  assert!(matches!(
+    e.send_user_packet(peer, Bytes::from_static(b"x")),
+    Err(crate::error::Error::NotRunning)
+  ));
+  assert!(matches!(
+    e.send_user_packets(peer, &[Bytes::from_static(b"x")]),
+    Err(crate::error::Error::NotRunning)
+  ));
+  assert!(matches!(
+    e.ping(Node::new(SmolStr::new("bob"), peer), t0),
+    Err(crate::error::Error::NotRunning)
+  ));
+  assert!(matches!(
+    e.start_user_message(peer, Bytes::from_static(b"x"), t0),
+    Err(crate::error::Error::NotRunning)
+  ));
+}
+
+#[test]
+fn post_leave_poll_timeout_is_none_so_no_spin() {
+  use core::time::Duration;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+
+  // A probe is in flight, so a SWIM deadline is pending.
+  e.start_probe(t0);
+  assert!(
+    e.poll_timeout().is_some(),
+    "a probe deadline is pending while running"
+  );
+
+  // After leave, poll_timeout reports no SWIM deadline, so the driver does not
+  // spin on the now-stale probe deadline during the drain.
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  assert!(
+    e.poll_timeout().is_none(),
+    "a left node reports no SWIM deadline (no busy-loop)"
+  );
+}
+
+#[test]
+fn post_leave_initiators_are_inert() {
+  use crate::event::PushPullKind;
+  use core::time::Duration;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // A left node starts no failure-detection probe (no direct Ping I/O)...
+  assert!(!e.start_probe(t0), "a left node starts no probe");
+  // ...no push/pull dial (which would advertise our pre-leave Alive)...
+  // Ignoring the returned id: the post-leave no-op produces an inert StreamId.
+  let _ = e.start_push_pull(peer, PushPullKind::Join, t0);
+  // ...and no reliable-ping fallback dial.
+  // Ignoring the returned id: the post-leave no-op produces an inert StreamId.
+  let _ = e.start_reliable_ping(SmolStr::new("bob"), peer, 7, t0 + Duration::from_secs(5));
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(_))),
+    "a left node emits no DialRequested"
+  );
+  assert!(
+    e.poll_transmit().is_none(),
+    "a left node queues no probe or push/pull transmit"
+  );
+}
+
+#[test]
+fn post_leave_reliable_user_data_is_not_delivered() {
+  use crate::event::UserDataReceived;
+  use bytes::Bytes;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  while e.poll_event().is_some() {}
+
+  // A reliable UserData arriving during the drain must not surface a UserPacket
+  // to the departing application.
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let cmd = e.handle_stream_event(
+    EndpointEvent::UserDataReceived(UserDataReceived::new(peer, Bytes::from_static(b"late"))),
+    t0,
+  );
+  assert!(cmd.is_none());
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::UserPacket(_))),
+    "a left node delivers no reliable user data to the application"
+  );
+}
+
+#[test]
+fn post_leave_no_stale_dial_requested_event() {
+  use crate::event::PushPullKind;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // start_push_pull queues a DialRequested event while Running...
+  let _sid = e.start_push_pull(peer, PushPullKind::Join, t0);
+  // ...then the node leaves before the driver polls events. A raw Endpoint
+  // driver must not still be told to dial after leave.
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(_))),
+    "a left node surfaces no stale DialRequested event"
+  );
+}
+
+#[test]
+fn post_leave_requeue_event_drops_dial_requested() {
+  use crate::event::PushPullKind;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // A raw driver polls a DialRequested while Running and holds it.
+  let _sid = e.start_push_pull(peer, PushPullKind::Join, t0);
+  let dial = core::iter::from_fn(|| e.poll_event())
+    .find_map(|ev| match ev {
+      Event::DialRequested(d) => Some(d),
+      _ => None,
+    })
+    .expect("a DialRequested was emitted");
+
+  // ...then the node leaves and the driver requeues the held event. It must be
+  // dropped, not re-surfaced — a requeued dial would restart transport I/O.
+  e.leave(t0).expect("leave ok");
+  e.requeue_event(Event::DialRequested(dial));
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(_))),
+    "a left node drops a requeued DialRequested"
+  );
+}
+
+#[test]
+fn post_leave_accept_stream_returns_none() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // Running: the reliable-inbound door mints an inbound stream.
+  assert!(
+    e.accept_stream(peer, t0).is_some(),
+    "a running node admits inbound reliable streams"
+  );
+
+  e.leave(t0).expect("leave ok");
+  // Left: the chokepoint refuses — no stream is minted and the driver is
+  // expected to drop the transport connection.
+  assert!(
+    e.accept_stream(peer, t0).is_none(),
+    "a left node admits no new inbound reliable stream"
+  );
 }
 
 // ─────────────── Reliable ping / probe FSM tests ─────────────────────────
@@ -3019,7 +3465,7 @@ fn inbound_reliable_ping_encodes_ack() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut stream = e.accept_stream(peer, t0);
+  let mut stream = e.accept_stream(peer, t0).expect("node is running");
 
   // Construct a Ping from peer, correctly addressed to the local node
   // ("local" / 127.0.0.1:7000 per cfg()). A reliable Ping whose target is
@@ -3073,7 +3519,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   );
 
   // ── Inbound: accept → req → load response → drain ⇒ Done + Closed ──────
-  let mut s_in = e.accept_stream(peer, t0);
+  let mut s_in = e.accept_stream(peer, t0).expect("node is running");
   let pp = PushPull::new(
     true,
     core::iter::once(PushNodeState::new(
@@ -3156,7 +3602,7 @@ fn inbound_reliable_ping_rejects_wrong_target() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let t0 = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
   let ping = Ping::new(
     7,
     Node::new(SmolStr::new("peer"), peer),
@@ -3191,7 +3637,7 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
 
   // Header only: tag=8 (push/pull) + varint(body_len = 2048). total =
   // 1 + 2 + 2048 = 2051 > cap(1024). The body is NEVER sent.
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
   let header = [8u8, 0x80, 0x10]; // varint LE base-128 for 2048
   let r = s.handle_data(&header, t0);
   assert!(
@@ -3206,7 +3652,7 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
 
   // A never-terminating length varint overflows u32 within 5 bytes and is
   // rejected, not buffered indefinitely.
-  let mut s2 = e.accept_stream(peer, t0);
+  let mut s2 = e.accept_stream(peer, t0).expect("node is running");
   let overflow = [8u8, 0x80, 0x80, 0x80, 0x80, 0x80];
   assert!(
     s2.handle_data(&overflow, t0).is_err(),
@@ -3217,7 +3663,7 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
   // base-128 LE. Under u32 accumulation this wrapped to 0 and was accepted
   // as a complete 6-byte empty PushPull, bypassing the size guard. Decoding
   // via u64 keeps the true value (2^32) → total far exceeds cap → Err.
-  let mut s2b = e.accept_stream(peer, t0);
+  let mut s2b = e.accept_stream(peer, t0).expect("node is running");
   let terminal_overflow = [8u8, 0x80, 0x80, 0x80, 0x80, 0x10];
   let r = s2b.handle_data(&terminal_overflow, t0);
   assert!(
@@ -3231,7 +3677,7 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
 
   // A within-cap frame still decodes normally (no false positive): a real
   // small Ping addressed to local is accepted.
-  let mut s3 = e.accept_stream(peer, t0);
+  let mut s3 = e.accept_stream(peer, t0).expect("node is running");
   let ping = Ping::new(
     1,
     Node::new(SmolStr::new("peer"), peer),
@@ -3266,7 +3712,7 @@ fn over_u32_frame_length_rejected_even_with_huge_cap() {
     Endpoint::new(cfg().with_max_stream_frame_size(usize::MAX));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
   // tag=8 + varint for 0x10<<28 == 2^32 == u32::MAX+1 (> u32 wire limit).
   let terminal_over_u32 = [8u8, 0x80, 0x80, 0x80, 0x80, 0x10];
   let r = s.handle_data(&terminal_over_u32, t0);
@@ -3300,7 +3746,7 @@ fn handle_data_bounds_input_buf_before_append() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
   let mut frame = vec![8u8, 0x80, 0x20]; // varint LE base-128 for 4096
   frame.extend(core::iter::repeat_n(0u8, 4096));
   assert!(
@@ -3317,7 +3763,7 @@ fn handle_data_bounds_input_buf_before_append() {
   // (b) A valid small frame followed by a large trailing blob in the SAME
   // call. The append-time bound rejects before buffering the trailing.
   let mut e2: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
-  let mut s2 = e2.accept_stream(peer, t0);
+  let mut s2 = e2.accept_stream(peer, t0).expect("node is running");
   let ping = Ping::new(
     1,
     Node::new(SmolStr::new("peer"), peer),
@@ -3344,7 +3790,7 @@ fn handle_data_bounds_input_buf_before_append() {
 
   // Sanity: a within-cap delivery still works.
   let mut e3: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
-  let mut s3 = e3.accept_stream(peer, t0);
+  let mut s3 = e3.accept_stream(peer, t0).expect("node is running");
   let ping3 = Ping::new(
     2,
     Node::new(SmolStr::new("peer"), peer),
@@ -3390,7 +3836,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
     .expect("encode");
 
   // Exactly at the deadline (now == deadline): authoritative → fail.
-  let mut s = e.accept_stream(peer, t0); // deadline = t0 + 100ms
+  let mut s = e.accept_stream(peer, t0).expect("node is running"); // deadline = t0 + 100ms
   let at = s.handle_data(&req, t0 + Duration::from_millis(100));
   assert!(
     at.is_err(),
@@ -3403,7 +3849,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
   );
 
   // After the deadline, before any handle_timeout: same.
-  let mut s2 = e.accept_stream(peer, t0);
+  let mut s2 = e.accept_stream(peer, t0).expect("node is running");
   let after = s2.handle_data(&req, t0 + Duration::from_millis(101));
   assert!(
     after.is_err(),
@@ -3415,7 +3861,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
   );
 
   // Sanity: just before the deadline still decodes normally.
-  let mut s3 = e.accept_stream(peer, t0);
+  let mut s3 = e.accept_stream(peer, t0).expect("node is running");
   assert!(s3.handle_data(&req, t0 + Duration::from_millis(99)).is_ok());
   assert!(
     matches!(
@@ -3540,7 +3986,9 @@ fn start_user_message_encodes_user_data() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let id = e.start_user_message(peer, Bytes::from_static(b"hello"), t0);
+  let id = e
+    .start_user_message(peer, Bytes::from_static(b"hello"), t0)
+    .expect("issued while running");
 
   let ev = e.poll_event().expect("DialRequested");
   match ev {
@@ -3579,7 +4027,7 @@ fn inbound_user_data_emits_user_packet_event() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut stream = e.accept_stream(peer, t0);
+  let mut stream = e.accept_stream(peer, t0).expect("node is running");
 
   let msg = Message::<SmolStr, SocketAddr>::UserData(Bytes::from_static(b"world"));
   let msg_bytes = crate::wire::encode_message::<SmolStr, SocketAddr>(&msg).expect("encode");
@@ -3617,7 +4065,7 @@ fn stream_timeout_transitions_to_failed() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut stream = e.accept_stream(peer, t0);
+  let mut stream = e.accept_stream(peer, t0).expect("node is running");
 
   // Stream starts in InboundAwaitingFirstMessage with a deadline.
   assert!(matches!(
@@ -3715,7 +4163,7 @@ fn fatal_frame_error_terminalizes_stream_fsm() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(1024));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
   assert!(
     s.poll_timeout().is_some(),
     "an active stream pulls a deadline"
@@ -4089,7 +4537,7 @@ fn eof_with_incomplete_buffered_frame_fails_peer_closed() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // A single byte: a partial frame header, not yet decodable.
   assert!(s.handle_data(&[8u8], t0).is_ok(), "partial frame buffered");
@@ -4117,7 +4565,7 @@ fn eof_on_terminal_stream_is_a_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Time it out first.
   let deadline = s.poll_timeout().expect("deadline");
@@ -4212,7 +4660,9 @@ fn eof_in_outbound_sending_request_user_message_is_ok() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let id = e.start_user_message(peer, bytes::Bytes::from_static(b"payload"), t0);
+  let id = e
+    .start_user_message(peer, bytes::Bytes::from_static(b"payload"), t0)
+    .expect("issued while running");
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
 
@@ -4254,7 +4704,7 @@ fn eof_in_inbound_sending_response_empty_buf_is_ok() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Feed a complete push/pull request frame so the FSM transitions
   // from `InboundAwaitingFirstMessage` → `InboundSendingResponse`.
@@ -4344,7 +4794,7 @@ fn late_failure_emits_only_failed_lifecycle_not_closed() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   let req = build_push_pull_request_bytes();
   let second = build_push_pull_request_bytes();
@@ -4451,7 +4901,7 @@ fn done_phase_empty_eof_is_still_a_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Drive the FSM to Done by feeding a one-way UserData frame.
   use crate::typed::Message;
@@ -4490,7 +4940,7 @@ fn dispatched_frame_endpoint_events_discarded_on_late_failure() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Single delivery: legitimate request + a second complete frame.
   let req = build_push_pull_request_bytes();
@@ -4540,7 +4990,7 @@ fn single_delivery_request_plus_second_frame_fails_decode() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Single delivery: request bytes + a second complete frame.
   let req = build_push_pull_request_bytes();
@@ -4568,7 +5018,7 @@ fn second_frame_in_inbound_sending_response_fails_unexpected() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Feed a complete request frame so the FSM moves to
   // InboundSendingResponse.
@@ -4603,7 +5053,7 @@ fn eof_in_inbound_sending_response_partial_trailing_fails() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
-  let mut s = e.accept_stream(peer, t0);
+  let mut s = e.accept_stream(peer, t0).expect("node is running");
 
   // Feed a complete request frame (advances to InboundSendingResponse).
   let request_bytes = build_push_pull_request_bytes();
@@ -4696,7 +5146,9 @@ fn end_to_end_push_pull_membership_convergence() {
   );
 
   // ── Step 2: B accepts A's stream and handles the request ─────────────
-  let mut stream_b = b.accept_stream(make_addr(7000), t0);
+  let mut stream_b = b
+    .accept_stream(make_addr(7000), t0)
+    .expect("node is running");
   stream_b
     .handle_data(&a_request, t0)
     .expect("B handle_data ok");
@@ -6283,7 +6735,9 @@ fn app_ping_returns_token_carried_on_completion() {
   while e.poll_transmit().is_some() {}
 
   let t0 = Instant::now();
-  let ping_id = e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
+  let ping_id = e
+    .ping(Node::new(SmolStr::new("bob"), bob_addr), t0)
+    .expect("issued while running");
   // Drain the Ping transmit and extract the sequence number.
   let seq = match e.poll_transmit().expect("Ping transmit") {
     Transmit::Packet(p) => {
@@ -6324,7 +6778,9 @@ fn app_ping_timeout_emits_ping_failed_with_token() {
   while e.poll_transmit().is_some() {}
 
   let t0 = Instant::now();
-  let ping_id = e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
+  let ping_id = e
+    .ping(Node::new(SmolStr::new("bob"), bob_addr), t0)
+    .expect("issued while running");
   while e.poll_transmit().is_some() {}
   while e.poll_event().is_some() {}
 
@@ -7002,7 +7458,7 @@ fn ping_untracked_node_synthesizes_target_state() {
   let now = Instant::now();
   let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7099);
   let node = Node::new(SmolStr::new("stranger"), target_addr);
-  let ping_id = e.ping(node, now);
+  let ping_id = e.ping(node, now).expect("issued while running");
   // The probe was registered; drain the outbound direct Ping and its seq.
   let seq = core::iter::from_fn(|| e.poll_transmit())
     .find_map(|tx| match tx {

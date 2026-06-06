@@ -57,8 +57,11 @@ pub mod transform;
 pub use addr::socket_addr_is_routable;
 pub use config::{DEFAULT_CLOSE_TIMEOUT, Options};
 pub use engine::Engine;
-pub use error::{GossipMtuTooLarge, InitError};
+pub use error::{ControlError, GossipMtuTooLarge, InitError};
 pub use gossip_io::GossipIo;
+// Admission predicates a caller can install via `Engine::set_alive_delegate` /
+// `set_merge_delegate`.
+pub use memberlist_proto::{AliveDelegate, MergeDelegate};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
 pub use stream_io::{StreamIo, StreamIoError};
 pub use transform::{

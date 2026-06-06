@@ -71,7 +71,7 @@ fn converge_two_nodes() -> TwoNodes {
   );
   a.start(now);
   b.start(now);
-  b.join(&[addr(1, 7946)]);
+  b.join(&[addr(1, 7946)]).expect("join from a running node");
 
   for _ in 0..BUDGET {
     let _ = a.poll(clk.now(), &mut da);
@@ -246,7 +246,7 @@ fn ping_returns_ping_completed_on_reachable_peer() {
   let ((mut a, mut da), (mut b, mut db), mut clk) = converge_two_nodes();
 
   let target = Node::new(SmolStr::new("b"), addr(2, 7946));
-  let ping_id: PingId = a.ping(target, clk.now());
+  let ping_id: PingId = a.ping(target, clk.now()).expect("issued while running");
 
   // Drive both nodes until PingCompleted or PingFailed surfaces, bounded.
   const BUDGET: u32 = 500;
@@ -371,11 +371,13 @@ fn send_reliable_delivers_via_tcp_and_emits_exchange_completed() {
 
   let ((mut a, mut da), (mut b, mut db), mut clk) = converge_two_nodes();
 
-  let stream_id: StreamId = a.send_reliable(
-    addr(2, 7946),
-    Bytes::from_static(b"reliable msg"),
-    clk.now(),
-  );
+  let stream_id: StreamId = a
+    .send_reliable(
+      addr(2, 7946),
+      Bytes::from_static(b"reliable msg"),
+      clk.now(),
+    )
+    .expect("issued while running");
 
   const BUDGET: u32 = 2000;
   let mut exchange_succeeded = false;

@@ -14,7 +14,7 @@ use alloc::{rc::Rc, vec::Vec};
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
 use memberlist_embedded::{
-  Engine, Options as EngineConfig, TransformOptions,
+  AliveDelegate, ControlError, Engine, MergeDelegate, Options as EngineConfig, TransformOptions,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{
@@ -301,13 +301,19 @@ where
   /// `is_joined()` (woken by the Runner on each membership change, with a short
   /// timer backstop so a missed wake never hangs). A non-routable seed is dropped
   /// by the engine. The caller owns the overall deadline (drive this under a
-  /// `select` with a timeout).
-  pub async fn join(&self, seeds: &[SocketAddr]) {
+  /// `select` with a timeout). Returns `Err(OpError::NotRunning)` if the node
+  /// has left: a left node initiates no new join.
+  pub async fn join(&self, seeds: &[SocketAddr]) -> Result<(), OpError> {
     // Fast path: already joined (e.g. a peer was injected, or a prior join).
     if shared::is_joined(&self.shared) {
-      return;
+      return Ok(());
     }
-    self.shared.engine.borrow_mut().join(seeds);
+    self
+      .shared
+      .engine
+      .borrow_mut()
+      .join(seeds)
+      .map_err(|_| OpError::NotRunning)?;
     self.shared.wake_pump();
 
     // Park until joined. The Runner pulses `join_wake` on every membership change;
@@ -315,7 +321,7 @@ where
     // to another concurrent joiner only costs an interval, never a hang.
     loop {
       if shared::is_joined(&self.shared) {
-        return;
+        return Ok(());
       }
       // Ignoring the `Either`: whichever of the membership wake or the timer fired,
       // the loop simply re-checks `is_joined`.
@@ -353,7 +359,12 @@ where
   /// `PingFailed`.
   pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration, OpError> {
     let now = time::now();
-    let ping_id: PingId = self.shared.engine.borrow_mut().ping(node, now);
+    let ping_id: PingId = self
+      .shared
+      .engine
+      .borrow_mut()
+      .ping(node, now)
+      .map_err(|_| OpError::NotRunning)?;
     let reply = self.shared.register_ping(ping_id);
     self.shared.wake_pump();
     reply.wait().await
@@ -399,7 +410,8 @@ where
       .shared
       .engine
       .borrow_mut()
-      .send_reliable(to, payload, now);
+      .send_reliable(to, payload, now)
+      .map_err(|_| OpError::NotRunning)?;
     let reply = self.shared.register_send(sid);
     self.shared.wake_pump();
     reply.wait().await
@@ -414,6 +426,48 @@ where
     let r = self.shared.engine.borrow_mut().queue_user_broadcast(data);
     self.shared.wake_pump();
     r
+  }
+
+  /// Replace this node's advertised metadata at runtime (best-effort gossip).
+  /// Returns immediately; peers observe the change as `Event::NodeUpdated`.
+  pub fn update_node_metadata(
+    &self,
+    meta: memberlist_proto::typed::Meta,
+  ) -> Result<(), memberlist_proto::Error> {
+    let r = self.shared.engine.borrow_mut().update_node_metadata(meta);
+    self.shared.wake_pump();
+    r
+  }
+
+  /// Set the application state snapshot exchanged during push/pull. Returns
+  /// immediately; surfaces on the receiving peer as `Event::RemoteStateReceived`.
+  pub fn set_local_state(&self, state: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    let r = self.shared.engine.borrow_mut().set_local_state(state);
+    self.shared.wake_pump();
+    r
+  }
+
+  /// Set the payload attached to outgoing ping acknowledgements. Returns
+  /// immediately; a probing peer receives it in its `Event::PingCompleted`.
+  pub fn set_ack_payload(&self, payload: bytes::Bytes) -> Result<(), memberlist_proto::Error> {
+    let r = self.shared.engine.borrow_mut().set_ack_payload(payload);
+    self.shared.wake_pump();
+    r
+  }
+
+  /// Install a custom peer-admission predicate, composed with the built-in
+  /// routable-address filter (both must admit). Call before [`join`](Self::join)
+  /// so no peer is admitted before the policy applies.
+  pub fn set_alive_delegate(&self, delegate: impl AliveDelegate<I, SocketAddr>) {
+    self.shared.engine.borrow_mut().set_alive_delegate(delegate);
+    self.shared.wake_pump();
+  }
+
+  /// Install a custom join-merge predicate, consulted on each join push/pull
+  /// merge. A delegate that rejects the merge fails the join.
+  pub fn set_merge_delegate(&self, delegate: impl MergeDelegate<I, SocketAddr>) {
+    self.shared.engine.borrow_mut().set_merge_delegate(delegate);
+    self.shared.wake_pump();
   }
 
   // ── Sync queries / accessors ────────────────────────────────────────────────
@@ -602,24 +656,27 @@ where
     self.shared.engine.borrow().pending_dial_count()
   }
 
-  /// Replace the gossip+stream compression policy at runtime.
+  /// Replace the gossip+stream compression policy at runtime. Returns
+  /// `NotRunning` after [`leave`](Self::leave).
   #[inline]
-  pub fn set_compression_options(&self, opts: CompressionOptions) {
-    self
+  pub fn set_compression_options(
+    &self,
+    opts: CompressionOptions,
+  ) -> Result<(), memberlist_proto::Error> {
+    let r = self
       .shared
       .engine
       .borrow_mut()
       .set_compression_options(opts);
     self.shared.wake_pump();
+    r
   }
 
   /// Replace the gossip+stream encryption policy at runtime (key rotation). The
-  /// keyring is validated before it is applied.
+  /// keyring is validated before it is applied. Returns `NotRunning` after
+  /// [`leave`](Self::leave) (gated before validation).
   #[inline]
-  pub fn set_encryption_options(
-    &self,
-    opts: EncryptionOptions,
-  ) -> Result<(), memberlist_proto::EncryptionError> {
+  pub fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), ControlError> {
     let r = self.shared.engine.borrow_mut().set_encryption_options(opts);
     self.shared.wake_pump();
     r

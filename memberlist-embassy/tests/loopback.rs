@@ -212,7 +212,10 @@ fn two_node_join_converges() {
   block_on(async {
     // B joins A; then wait for both to see two members.
     let op = async {
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       // `join` resolves when B is joined; A learns B from the inbound push/pull.
       // Wait for BOTH to converge (A's view updates a tick after the exchange).
       loop {
@@ -278,7 +281,10 @@ fn send_reliable_round_trips() {
   block_on(async {
     let op = async {
       // Converge first.
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_b.num_members() == 2 {
           break;
@@ -363,7 +369,10 @@ fn ping_succeeds() {
   let start = StdInstant::now();
   block_on(async {
     let op = async {
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_b.num_members() == 2 {
           break;

@@ -32,8 +32,9 @@ use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 use crate::{
   NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
-    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
+    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
+    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
+    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
   error::Error,
@@ -838,6 +839,91 @@ impl<I: NodeId> Memberlist<I> {
       .shared
       .push_command(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
         opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Replaces this node's advertised metadata in place. The change bumps the
+  /// node's incarnation and gossips out; peers observe it via
+  /// [`Delegate::notify_update`]. Rejected with `Err(NotRunning)` once the node
+  /// has left, or a size error when the metadata exceeds the configured cap.
+  pub async fn update_node_metadata(&self, meta: Vec<u8>) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::UpdateNodeMetadata(UpdateNodeMetadataCmd {
+        meta,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Queues an application user-broadcast for cluster-wide gossip. The bytes
+  /// ride the gossip path and surface on peers via [`Delegate::notify_user_msg`].
+  /// Rejected with `Err(NotRunning)` once the node has left, or a size error
+  /// when the framed datagram exceeds the gossip MTU.
+  pub async fn queue_user_broadcast(&self, data: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::QueueUserBroadcast(QueueUserBroadcastCmd {
+        data,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sets the application push/pull local-state snapshot carried in subsequent
+  /// push/pull exchanges; it surfaces on peers via
+  /// [`Delegate::merge_remote_state`]. Rejected with `Err(NotRunning)` once the
+  /// node has left, or a size error when the framed snapshot exceeds the stream
+  /// frame budget.
+  pub async fn set_local_state(&self, state: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetLocalState(SetLocalStateCmd {
+        state,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sets the payload attached to outbound probe acks; it surfaces on the
+  /// probing peer via [`Delegate::notify_ping_complete`]. Rejected with
+  /// `Err(NotRunning)` once the node has left, or `Err(PayloadTooLarge)` when the
+  /// framed ack would exceed the gossip packet budget.
+  pub async fn set_ack_payload(&self, payload: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetAckPayload(SetAckPayloadCmd {
+        payload,
         reply: tx,
       }))
     {

@@ -187,7 +187,10 @@ fn abort_reuse_does_not_carry_stale_state() {
   block_on(async {
     let op = async {
       // 1. Establish the cluster first so B is a known member.
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
 
       // 2. Churn: A dials several dead on-link peers. Each fails to establish, its
@@ -307,7 +310,10 @@ fn silent_peer_does_not_wedge_the_pool() {
   let free_a_at_start = ml_a.pool_free_count();
   block_on(async {
     let op = async {
-      ml_b.join(&[addr(1, 7946)]).await;
+      ml_b
+        .join(&[addr(1, 7946)])
+        .await
+        .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
 
       // B goes silent: every frame B transmits is dropped, so A gets no ACKs.
