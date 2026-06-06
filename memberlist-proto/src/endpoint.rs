@@ -1222,7 +1222,13 @@ where
     let resolution_payload = resolution.payload_bytes().unwrap_or_default();
     match kind {
       AckKind::Probe => {
-        self.complete_probe_success(seq, resolution_payload, now);
+        // A direct ack comes from the probe target itself; an indirect-relayed
+        // ack is relayed by a peer, so its `from` is that relay, not the target.
+        let direct_target_ack = self
+          .probes
+          .get(&seq)
+          .is_some_and(|p| p.target.address_ref() == &from);
+        self.complete_probe_success(seq, direct_target_ack, resolution_payload, now);
       }
       AckKind::Forward(fa) => {
         let reply_to = fa.into_reply_to();
@@ -1238,7 +1244,13 @@ where
         }
       }
       AckKind::Ping => {
-        self.complete_probe_success(seq, resolution_payload, now);
+        // An application `Ping` is direct-only: its ack always comes from the
+        // target, so it always notifies completion.
+        let direct_target_ack = self
+          .probes
+          .get(&seq)
+          .is_some_and(|p| p.target.address_ref() == &from);
+        self.complete_probe_success(seq, direct_target_ack, resolution_payload, now);
       }
     }
   }
@@ -1286,8 +1298,14 @@ where
 
   /// Common terminal-success path for both Detection probes and Pings.
   /// Removes the probe from `probes`, ticks Awareness (Detection only),
-  /// emits PingCompleted (Ping only).
-  fn complete_probe_success(&mut self, seq: u32, payload: bytes::Bytes, now: Instant) {
+  /// emits PingCompleted (Ping always; Detection only on the direct ack).
+  fn complete_probe_success(
+    &mut self,
+    seq: u32,
+    direct_target_ack: bool,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) {
     // An Ack arriving at/after the probe's authoritative failure deadline
     // must not rescue it → route to failure. That deadline is the single
     // kind-aware, sent_at-anchored, phase-INDEPENDENT value defined by
@@ -1323,6 +1341,20 @@ where
         // self-awareness (`awareness_delta = -1`, persisting through
         // indirect-relayed Ack arrivals).
         self.awareness.record_success();
+        // A passive node observes ping completions from ordinary periodic SWIM
+        // traffic, but only on a direct ack from the probe target — not an
+        // indirect-relayed ack, nor a reliable-fallback success. The caller
+        // classifies the source (the ack's `from` versus the probe target), not
+        // the probe phase: a direct target ack can arrive after the probe has
+        // moved to `AwaitingIndirect` and still completes the ping.
+        if direct_target_ack {
+          self.emit_event(Event::PingCompleted(PingCompleted::new(
+            PingId::new(seq),
+            probe.target,
+            rtt,
+            payload,
+          )));
+        }
       }
       ProbeKind::Ping => {
         self.emit_event(Event::PingCompleted(PingCompleted::new(
@@ -3223,7 +3255,9 @@ where
     let _ = now;
     match ev {
       EndpointEvent::ReliablePingAcked(p) => {
-        self.complete_probe_success(p.seq(), bytes::Bytes::new(), p.at());
+        // A reliable-fallback success is not a direct UDP target ack, so it does
+        // not notify ping completion.
+        self.complete_probe_success(p.seq(), false, bytes::Bytes::new(), p.at());
       }
       EndpointEvent::ReliablePingFailed(p) => {
         self.retire_reliable_fallback(p.seq());

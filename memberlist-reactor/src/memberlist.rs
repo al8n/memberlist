@@ -440,10 +440,14 @@ impl<I: NodeId> Memberlist<I> {
     ));
 
     // Inbound connections arrive on a dedicated accept task (accept is async); it
-    // is cancelled when the driver drops accept_shutdown_tx, releasing the port.
+    // is cancelled when the driver drops accept_shutdown_tx. Retain its join
+    // handle (spawn, not spawn_detach) so the driver can AWAIT the task's exit on
+    // shutdown before acking: the listener FD lives in the task's `listener` local
+    // and is released only when the task actually exits, so a same-address rebind
+    // after `shutdown().await` would otherwise race the still-open listener.
     let (accepted_tx, accepted_rx) = flume::bounded(ACCEPT_CAP);
     let (accept_shutdown_tx, accept_shutdown_rx) = flume::bounded(1);
-    R::spawn_detach(accept_task(
+    let accept_join = R::spawn(accept_task(
       listener,
       accepted_tx,
       accept_shutdown_rx,
@@ -461,6 +465,7 @@ impl<I: NodeId> Memberlist<I> {
       obs_payload_budget,
       accepted_rx,
       accept_shutdown_tx,
+      accept_join,
       drv_opts.close_timeout(),
       label,
     );
@@ -691,14 +696,36 @@ impl<I: NodeId> Memberlist<I> {
     rx.await.map_err(|_| Error::Shutdown)?
   }
 
-  /// Stops the driver and releases its socket.
+  /// Stops the driver and releases its bound socket(s), so an immediate rebind on
+  /// the same address succeeds with no grace period. `shutdown()` returns once
+  /// those sockets are released; it aborts in-flight reliable-stream exchanges but
+  /// does not block on their connection cleanup, so the rebind guarantee holds
+  /// regardless of any in-flight stream sockets.
+  ///
+  /// What is released, and how in-flight reliable streams are reclaimed, depends on
+  /// the backend:
+  /// - **TCP / TLS**: the UDP gossip socket and the TCP listener are freed. An
+  ///   active established stream is preempted at once; a stream already in its
+  ///   graceful close keeps draining, with a non-reading peer dropped after
+  ///   `close_timeout` of no write progress (an idle bound, not a total one — a
+  ///   slow but progressing peer can take longer); an in-flight outbound dial is
+  ///   bounded by `DIAL_TIMEOUT`.
+  /// - **QUIC**: the single UDP transport socket is freed. Every reliable stream
+  ///   multiplexes over it, so there is no separate listener, accept task, or
+  ///   `close_timeout` / `DIAL_TIMEOUT` cleanup — dropping the socket tears the
+  ///   streams down with it.
   pub async fn shutdown(&self) -> Result<(), Error> {
     let (tx, rx) = futures_channel::oneshot::channel();
     if !self
       .shared
       .push_command(Command::Shutdown(ShutdownCmd { reply: tx }))
     {
-      // The driver already exited; shutdown is idempotent.
+      // The queue is already closed: a shutdown is in flight (or done). The
+      // driver may still hold its bind socket(s) — the stream driver's UDP gossip
+      // socket and TCP listener, or the QUIC driver's UDP transport socket — so do
+      // NOT return early; await teardown completion before reporting success,
+      // otherwise this caller could rebind into a still-bound port.
+      self.shared.wait_shutdown_complete().await;
       return Ok(());
     }
     rx.await.map_err(|_| Error::Shutdown)?

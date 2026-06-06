@@ -271,7 +271,6 @@ async fn quic_node_delegate_meta_update() {
 }
 
 #[compio::test]
-#[ignore = "periodic-probe ping completions are not surfaced to the ping delegate in-window; the ack-payload and capture wiring is verified, but this scenario needs an app-level directed ping or a driver probe-observability change, tracked separately"]
 async fn quic_ping_delegate() {
   scenarios::ping_delegate::<CompioQuic>().await;
 }

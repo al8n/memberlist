@@ -23,12 +23,6 @@ const ISOLATION_SETTLE: Duration = Duration::from_secs(3);
 /// soon as the peer drops, so this is only an upper bound, not added latency.
 const DETECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Grace window after a node shuts down before a fresh node rebinds its address.
-/// A driver whose `shutdown()` only signals teardown (releasing the socket when
-/// its driver task later exits) needs this so the rebind does not race the
-/// still-open listener; the legacy helpers sleep here for the same reason.
-const SOCKET_RELEASE_GRACE: Duration = Duration::from_secs(2);
-
 /// Two nodes; the second joins the first by its advertise address and the
 /// cluster converges to a 2-member view on both sides.
 ///
@@ -435,22 +429,18 @@ pub async fn transforms_roundtrip<C: TestCluster>(
   b.shutdown().await.expect("shut down node b");
 }
 
-/// A node's shutdown fully releases its socket, so a fresh node can rebind the
-/// very same address and come up healthy.
+/// A node's shutdown releases its bind socket(s) before it returns, so a fresh
+/// node can immediately rebind the very same address and come up healthy.
 ///
 /// Ports the legacy `memberlist_shutdown_cleanup` helper (which, after shutting
 /// a solo node down, constructs a new one on its recorded address and expects
-/// the rebind to succeed).
+/// the rebind to succeed). The rebind needs no grace window: `shutdown()` releases
+/// the backend's bind socket(s) before returning; connected reliable-stream FDs
+/// are not part of that rebind guarantee.
 pub async fn shutdown_cleanup<C: TestCluster>() {
   let m = C::spawn(NodeConfig::new("cleanup")).await;
   let addr = m.advertise_addr();
   m.shutdown().await.expect("shut down the solo node");
-
-  // A driver whose shutdown() signals teardown without awaiting it releases the
-  // bound socket only once its driver task exits; give that a grace window so
-  // the rebind does not race a still-open listener (the legacy helper sleeps
-  // here for the same reason).
-  C::sleep(SOCKET_RELEASE_GRACE).await;
 
   // The fresh node only comes up if the prior node truly released the socket.
   let rebound = C::spawn(NodeConfig::new("cleanup-rebind").with_advertise_addr(addr)).await;
@@ -468,7 +458,8 @@ pub async fn shutdown_cleanup<C: TestCluster>() {
 }
 
 /// The socket-release guarantee for a node that was an active cluster member:
-/// after it shuts down, a fresh node can rebind its address.
+/// its `shutdown()` releases the bind socket(s) before returning, so a fresh node
+/// can immediately rebind its address.
 ///
 /// Ports the legacy `memberlist_shutdown_cleanup2` helper (the same rebind, but
 /// for a node that had first joined a peer and converged).
@@ -493,9 +484,6 @@ pub async fn shutdown_cleanup2<C: TestCluster>() {
 
   let b_addr = b.advertise_addr();
   b.shutdown().await.expect("shut down node b");
-
-  // Grace window for the socket teardown (see `shutdown_cleanup`).
-  C::sleep(SOCKET_RELEASE_GRACE).await;
 
   // A fresh node binds the departed member's address only if it was released.
   let rebound = C::spawn(NodeConfig::new("cleanup2-rebind").with_advertise_addr(b_addr)).await;

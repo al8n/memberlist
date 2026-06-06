@@ -18,7 +18,7 @@ use std::{
 };
 
 use agnostic::{
-  Runtime,
+  AsyncSpawner, Runtime,
   net::{Net, TcpListener, TcpStream, UdpSocket},
 };
 use bytes::Bytes;
@@ -86,11 +86,16 @@ enum BridgeOut {
 }
 
 /// The pump's end of a live bridge: the write channel plus an explicit-abort
-/// channel. A graceful `StreamAction::Close` (or driver shutdown) drops the whole
-/// handle: `out_tx` disconnects, and the bridge tears down after draining the
-/// `BridgeOut::Data` it already queued. A failed `StreamAction::Abort` instead
-/// sends `()` on `cancel_tx` first, which preempts the bridge — even a write
-/// stalled on a peer that stopped reading — and discards the queued bytes.
+/// channel. A graceful `StreamAction::Close` drops the whole handle: `out_tx`
+/// disconnects, and the bridge tears down after draining the `BridgeOut::Data` it
+/// already queued. A failed `StreamAction::Abort` instead sends `()` on
+/// `cancel_tx` first, which preempts the bridge — even a write stalled on a peer
+/// that stopped reading — and discards the queued bytes.
+///
+/// Driver shutdown sends `cancel_tx.send(())` on every live handle (preempting
+/// even a stalled write) and then drops the handle; it does NOT await the bridge
+/// task. The preempted bridge tears down promptly on its own, so shutdown is not
+/// blocked on it.
 struct BridgeHandle {
   out_tx: Sender<BridgeOut>,
   cancel_tx: oneshot::Sender<()>,
@@ -196,7 +201,10 @@ struct PendingUserSend {
 pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   endpoint: StreamEndpoint<I, SocketAddr, T>,
   /// Unreliable gossip datagrams (the reliable exchanges run over TCP bridges).
-  socket: <R::Net as Net>::UdpSocket,
+  /// Wrapped in `Option` so the shutdown branch can drop it (releasing the bound
+  /// UDP port) BEFORE acking the shutdown caller; it is `Some` for the whole
+  /// running lifetime and only taken during teardown.
+  socket: Option<<R::Net as Net>::UdpSocket>,
   shared: Arc<Shared<I>>,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
@@ -228,13 +236,35 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   pending_user_sends: Vec<PendingUserSend>,
   /// Each live exchange's bridge: its write channel and teardown handle.
   bridges: HashMap<ExchangeId, BridgeHandle>,
+  /// The parked replies of `Shutdown` commands. A reply is NOT sent inline at
+  /// dispatch: every caller is parked here and acked only after the shutdown
+  /// branch drops the gossip socket and the accept task's listener, so the bound
+  /// ports are free when each caller resumes from `shutdown().await` and an
+  /// immediate rebind on the same address succeeds. A `Vec` because several
+  /// callers can race `shutdown()` concurrently — each must get its own ack, and
+  /// none before teardown.
+  shutdown_reply: Vec<oneshot::Sender<Result<(), Error>>>,
   /// Held only to be dropped on driver exit; closing the accept task's shutdown
   /// channel cancels its pending accept() so the listener is released at once.
-  _accept_shutdown_tx: Sender<()>,
+  /// Wrapped in `Option` so the shutdown branch can drop it (cancelling the
+  /// accept task and releasing the TCP listener) BEFORE acking the caller.
+  accept_shutdown_tx: Option<Sender<()>>,
+  /// Join handle of the accept task. The shutdown branch signals that task (by
+  /// dropping `accept_shutdown_tx`) and then polls this handle to completion
+  /// before acking the caller: the listener FD lives in the accept task's
+  /// `listener` local and is released only when that task actually exits, so the
+  /// driver must AWAIT the exit — not merely signal it — or a same-address rebind
+  /// after `shutdown().await` can race the still-open listener (`AddrInUse`).
+  /// Taken on the first shutdown poll and polled across subsequent polls.
+  accept_join: Option<<R::Spawner as AsyncSpawner>::JoinHandle<()>>,
   /// Inbound connections from the accept task.
   accepted_rx: Receiver<(<R::Net as Net>::TcpStream, SocketAddr)>,
-  /// Inbound transport bytes/EOF from the bridge read tasks.
-  inbound_rx: Receiver<BridgeInbound>,
+  /// Inbound transport bytes/EOF from the bridge read tasks. Wrapped in `Option`
+  /// so the shutdown branch can drop it: that disconnects every live bridge's
+  /// shared `inbound_tx`, so a bridge parked on the bounded inbound hand-off send
+  /// wakes with a disconnect error and exits promptly. `Some` for the whole
+  /// running lifetime; taken once during teardown.
+  inbound_rx: Option<Receiver<BridgeInbound>>,
   /// Cloned into each spawned bridge task to report inbound bytes/EOF.
   inbound_tx: Sender<BridgeInbound>,
   /// Dial completions from the dial tasks.
@@ -271,6 +301,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     obs_payload_budget: Option<u64>,
     accepted_rx: Receiver<(<R::Net as Net>::TcpStream, SocketAddr)>,
     accept_shutdown_tx: Sender<()>,
+    accept_join: <R::Spawner as AsyncSpawner>::JoinHandle<()>,
     close_timeout: Duration,
     label: Option<bytes::Bytes>,
   ) -> Self {
@@ -283,7 +314,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     let (dial_tx, dial_rx) = flume::unbounded();
     Self {
       endpoint,
-      socket,
+      socket: Some(socket),
       shared,
       obs_tx,
       obs_payload_bytes,
@@ -296,9 +327,11 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       pending_pings: Vec::new(),
       pending_user_sends: Vec::new(),
       bridges: HashMap::new(),
-      _accept_shutdown_tx: accept_shutdown_tx,
+      shutdown_reply: Vec::new(),
+      accept_shutdown_tx: Some(accept_shutdown_tx),
+      accept_join: Some(accept_join),
       accepted_rx,
-      inbound_rx,
+      inbound_rx: Some(inbound_rx),
       inbound_tx,
       dial_rx,
       dial_tx,
@@ -313,7 +346,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   }
 
   /// Spawns the per-exchange bridge task that moves bytes between `stream` and
-  /// the pump for `eid`.
+  /// the pump for `eid`. The task is detached: shutdown preempts a live bridge by
+  /// sending its `cancel_tx` (see [`BridgeHandle`]) rather than awaiting its exit.
   fn spawn_bridge(
     &self,
     eid: ExchangeId,
@@ -459,9 +493,12 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         }
       }
       Command::Shutdown(ShutdownCmd { reply }) => {
+        // Do NOT ack inline: the gossip socket and the TCP listener are still
+        // bound here. Flag shutdown and park the reply; the shutdown branch acks
+        // every parked caller only AFTER it drops both, so an immediate rebind on
+        // the same address after `shutdown().await` succeeds.
         self.shared.begin_shutdown();
-        // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.send(Ok(()));
+        self.shutdown_reply.push(reply);
       }
       Command::Ping(PingCmd { node, reply }) => {
         // Gate on a running node: after `leave()` the probe scheduler is
@@ -813,6 +850,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         let peer = info.peer();
         let (out_tx, out_rx) = flume::unbounded();
         let (cancel_tx, cancel_rx) = oneshot::channel();
+        // No bridge task yet — the dial owns the connecting FD until it completes,
+        // at which point `DialOutcome::Connected` spawns the bridge.
         self.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
         self.spawn_dial(eid, peer, out_rx, cancel_rx);
       }
@@ -946,9 +985,11 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         Ok(b) => b,
         Err(_) => continue,
       };
-      // Ignoring Poll: gossip is best-effort — a full or errored UDP send drops
-      // the datagram and SWIM recovers on the next round.
-      let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+      if let Some(socket) = self.socket.as_ref() {
+        // Ignoring Poll: gossip is best-effort — a full or errored UDP send drops
+        // the datagram and SWIM recovers on the next round.
+        let _ = socket.poll_send_to(cx, &on_wire, peer);
+      }
     }
     worked |= sent > 0;
     more |= sent == budget;
@@ -1069,92 +1110,181 @@ where
       progress = true;
     }
 
-    // Shutdown: best-effort leave, flush once, fail any parked waiters, stop.
-    // Dropping `this` afterwards drops the bridge/dial/accept channel ends, so
-    // those tasks observe their send/recv errors and exit.
+    // Shutdown: best-effort leave, flush once, fail any parked waiters, preempt
+    // every in-flight reliable exchange, then await ONLY the accept task's exit
+    // before acking the caller. The completion latch promises the bind address is
+    // free — the UDP gossip socket and the TCP listener — not that every connected
+    // stream FD has closed. Dropping `this` at the very end drops the dial channel
+    // ends, so any dial task observes its send/recv error and exits.
+    //
+    // The teardown is re-entrant: the one-time work (leave/flush/fail-waiters,
+    // dropping the gossip socket, signalling the accept task, and preempting the
+    // bridges) runs exactly once, guarded on `accept_shutdown_tx` still being
+    // `Some`; every shutdown poll then polls the retained `accept_join`. The accept
+    // task owns the TCP listener (its `listener` local), so the FD is released only
+    // when that task actually EXITS — not when it is merely signalled. Polling the
+    // join handle here registers the waker, so the driver re-polls when the accept
+    // task finishes; the stashed reply fires only after that, so a same-address
+    // rebind resuming from `shutdown().await` cannot race a still-open listener.
+    // The bridge tasks are preempted (each `cancel_tx` fired) but NOT awaited, so
+    // an exchange stalled on the bounded inbound hand-off cannot wedge shutdown.
     if this.shared.is_shutdown() {
-      // Ignoring Err: best-effort leave during shutdown.
-      let _ = this.endpoint.leave(Instant::now());
-      this.drain_surfaces(cx);
-      // Close the command queue and fail any still-queued commands, so a handle
-      // that raced the shutdown gets a reply instead of hanging.
-      for cmd in this.shared.close_and_drain() {
-        match cmd {
-          // Ignoring Err: the caller dropped its reply receiver.
-          Command::Join(JoinCmd { reply, .. }) => {
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::Leave(LeaveCmd { reply }) => {
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::Shutdown(ShutdownCmd { reply }) => {
-            let _ = reply.send(Ok(()));
-          }
-          // Ignoring Err: the caller dropped its reply receiver.
-          Command::Ping(PingCmd { reply, .. }) => {
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SendUser(SendUserCmd { reply, .. }) => {
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SendReliable(SendReliableCmd { reply, .. }) => {
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
+      if this.accept_shutdown_tx.is_some() {
+        // One-time teardown: runs on the first shutdown poll only (the
+        // `accept_shutdown_tx.take()` below clears this guard).
+        // Ignoring Err: best-effort leave during shutdown.
+        let _ = this.endpoint.leave(Instant::now());
+        this.drain_surfaces(cx);
+        // Close the command queue and fail any still-queued commands, so a handle
+        // that raced the shutdown gets a reply instead of hanging.
+        for cmd in this.shared.close_and_drain() {
+          match cmd {
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
+            Command::Join(JoinCmd { reply, .. }) => {
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::Leave(LeaveCmd { reply }) => {
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::Shutdown(ShutdownCmd { reply }) => {
+              // A straggler `Shutdown` racing the first one: park it too, so it is
+              // acked after the socket/listener drop like every other caller. Never
+              // ack inline here — the listener is still bound, so an inline ack
+              // would let that caller rebind into a still-open port.
+              this.shutdown_reply.push(reply);
+            }
             // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
-            // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => {
-            // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::QueueUserBroadcast(QueueUserBroadcastCmd { reply, .. }) => {
-            // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SetLocalState(SetLocalStateCmd { reply, .. }) => {
-            // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
-          }
-          Command::SetAckPayload(SetAckPayloadCmd { reply, .. }) => {
-            // Ignoring Err: the caller dropped its reply receiver.
-            let _ = reply.send(Err(Error::Shutdown));
+            Command::Ping(PingCmd { reply, .. }) => {
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SendUser(SendUserCmd { reply, .. }) => {
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SendReliable(SendReliableCmd { reply, .. }) => {
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::QueueUserBroadcast(QueueUserBroadcastCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SetLocalState(SetLocalStateCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
+            Command::SetAckPayload(SetAckPayloadCmd { reply, .. }) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::Shutdown));
+            }
           }
         }
-      }
-      for (_, pj) in this.pending_joins.drain() {
-        // Ignoring Err: the join caller dropped its reply receiver.
-        let _ = pj.reply.send(Err(Error::Shutdown));
-      }
-      if let Some(pl) = this.pending_leave.take() {
-        for replier in pl.repliers {
-          // Ignoring Err: the leave caller dropped its reply receiver.
-          let _ = replier.send(Err(Error::Shutdown));
+        for (_, pj) in this.pending_joins.drain() {
+          // Ignoring Err: the join caller dropped its reply receiver.
+          let _ = pj.reply.send(Err(Error::Shutdown));
         }
+        if let Some(pl) = this.pending_leave.take() {
+          for replier in pl.repliers {
+            // Ignoring Err: the leave caller dropped its reply receiver.
+            let _ = replier.send(Err(Error::Shutdown));
+          }
+        }
+        for pp in this.pending_pings.drain(..) {
+          // Ignoring Err: the ping caller dropped its reply receiver.
+          let _ = pp.reply.send(Err(Error::Shutdown));
+        }
+        for ps in this.pending_user_sends.drain(..) {
+          // Ignoring Err: the send_reliable caller dropped its reply receiver.
+          let _ = ps.reply.send(Err(Error::Shutdown));
+        }
+        // Signal the accept task and release the gossip socket. Dropping
+        // `accept_shutdown_tx` cancels the accept task's pending `accept()` so it
+        // breaks its loop and drops the `listener` local — but that drop happens
+        // when the task is next scheduled, NOT here, which is why the join handle
+        // is polled below before the ack. Dropping the gossip socket closes its
+        // UDP FD synchronously (the agnostic `UdpSocket` has no async `close`, so
+        // the local going out of scope here closes the FD). Taking
+        // `accept_shutdown_tx` also clears the one-time guard.
+        drop(this.accept_shutdown_tx.take());
+        drop(this.socket.take());
+        // Preempt every in-flight reliable exchange WITHOUT awaiting it. The
+        // completion latch promises only the bind address is free, not that every
+        // connected stream FD has closed, so shutdown does not block on the bridge
+        // tasks — a bridge parked on the bounded inbound hand-off send is not
+        // cancellable, and awaiting its join would hang shutdown under inbound
+        // backpressure. Sending `cancel_tx` preempts each ACTIVE bridge even
+        // mid-write on a stalled peer, so its established stream closes at once; an
+        // exchange already past `StreamAction::Close` (handle removed, draining its
+        // tail) is not in `bridges` — its connected stream FD closes on its own,
+        // with a non-reading peer dropped after `close_timeout` of no write
+        // progress (an idle bound, not a total one). Dropping the handle also
+        // disconnects `out_tx`. A dialing
+        // exchange has no bridge task yet (its connecting FD lives in the dial
+        // task, bounded by `DIAL_TIMEOUT`). Dropping `inbound_rx` then disconnects
+        // every bridge's shared `inbound_tx`, so a bridge parked on a full inbound
+        // hand-off send wakes with a disconnect error and exits promptly instead of
+        // lingering until this driver future is finally dropped.
+        for (_, handle) in this.bridges.drain() {
+          // Ignoring Err: the bridge may have already exited (cancel receiver
+          // gone); the preemption is best-effort.
+          let _ = handle.cancel_tx.send(());
+        }
+        drop(this.inbound_rx.take());
       }
-      for pp in this.pending_pings.drain(..) {
-        // Ignoring Err: the ping caller dropped its reply receiver.
-        let _ = pp.reply.send(Err(Error::Shutdown));
+
+      // Await the accept task's exit before acking, so the TCP listener FD is
+      // actually released (not merely signalled). Polling the handle registers the
+      // waker; the driver re-polls once the accept task finishes. The bridge tasks
+      // were preempted in the one-time block above and are NOT awaited here.
+      if let Some(join) = this.accept_join.as_mut() {
+        // Drive the handle to completion; its `Result<(), JoinError>` carries no
+        // value the driver needs (the accept task returns `()` and a join error
+        // only means the task was cancelled/panicked, which is still a terminal
+        // exit that has dropped the listener).
+        // Ignoring Ok/Err: only the readiness matters — the listener is released
+        // once the task has exited, regardless of how.
+        if join.poll_unpin(cx).is_pending() {
+          return Poll::Pending;
+        }
+        this.accept_join = None;
       }
-      for ps in this.pending_user_sends.drain(..) {
-        // Ignoring Err: the send_reliable caller dropped its reply receiver.
-        let _ = ps.reply.send(Err(Error::Shutdown));
+      // The accept task has exited, releasing the listener; the gossip socket was
+      // dropped above. The bind address is now free, so a caller resuming from
+      // `shutdown().await` can immediately rebind on the same address. Ack the
+      // stashed reply and stop.
+      for reply in this.shutdown_reply.drain(..) {
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(Ok(()));
       }
+      // The bind address is now free; release any late `shutdown()` caller that
+      // found the command queue already closed and parked on the completion latch.
+      this.shared.mark_shutdown_complete();
       return Poll::Ready(());
     }
 
-    // Receive gossip (bounded; a full batch means more may be waiting).
+    // Receive gossip (bounded; a full batch means more may be waiting). The
+    // socket is always `Some` here — the shutdown branch above (which takes it)
+    // returned `Poll::Ready` before reaching this point.
     let mut recv_n = 0;
     while recv_n < this.recv_batch {
-      match this.socket.poll_recv_from(cx, &mut this.recv_buf) {
+      let Some(socket) = this.socket.as_ref() else {
+        break;
+      };
+      match socket.poll_recv_from(cx, &mut this.recv_buf) {
         Poll::Ready(Ok((n, src))) => {
           this.endpoint.handle_gossip(src, &this.recv_buf[..n], now);
           recv_n += 1;
@@ -1178,8 +1308,8 @@ where
       let eid = this.endpoint.accept_connection(peer, now);
       let (out_tx, out_rx) = flume::unbounded();
       let (cancel_tx, cancel_rx) = oneshot::channel();
-      this.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       this.spawn_bridge(eid, stream, out_rx, cancel_rx);
+      this.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       progress = true;
     }
 
@@ -1193,7 +1323,8 @@ where
           cancel_rx,
         }) => {
           // If the exchange was reaped while dialing, its handle is gone; drop
-          // the stream and channels rather than bridge a dead exchange.
+          // the stream and channels rather than bridge a dead exchange. Otherwise
+          // spawn the bridge for the existing handle.
           if this.bridges.contains_key(&eid) {
             this.spawn_bridge(eid, stream, out_rx, cancel_rx);
           }
@@ -1215,10 +1346,14 @@ where
     }
 
     // Inbound transport bytes/EOF from the bridge read tasks (bounded per poll
-    // for fairness; a full batch self-wakes via `more`).
+    // for fairness; a full batch self-wakes via `more`). Always `Some` here — the
+    // shutdown branch above (which takes it) returned before reaching this point.
     let mut inbound_n = 0;
     while inbound_n < this.recv_batch {
-      let Ok(msg) = this.inbound_rx.try_recv() else {
+      let Some(inbound_rx) = this.inbound_rx.as_ref() else {
+        break;
+      };
+      let Ok(msg) = inbound_rx.try_recv() else {
         break;
       };
       inbound_n += 1;
@@ -1295,11 +1430,19 @@ pub(crate) async fn accept_task<I: NodeId, L: TcpListener>(
     select! {
       conn = listener.accept().fuse() => match conn {
         Ok((stream, peer)) => {
-          // Bounded channel: await space (accept backpressure), then wake the pump.
-          if accepted_tx.send_async((stream, peer)).await.is_err() {
-            break;
+          // Bounded channel: await space (accept backpressure). Race the send
+          // against shutdown so a full queue at shutdown cannot wedge the task —
+          // the driver stops draining `accepted_rx` once teardown begins and then
+          // awaits this task's exit, so an un-cancellable send would deadlock.
+          select! {
+            res = accepted_tx.send_async((stream, peer)).fuse() => {
+              if res.is_err() {
+                break;
+              }
+              shared.wake_driver();
+            }
+            _ = shutdown_rx.recv_async().fuse() => break,
           }
-          shared.wake_driver();
         }
         // Ignoring Err: a transient accept error (e.g. a reset mid-handshake) is
         // non-fatal; keep listening for the next connection.
@@ -1537,7 +1680,7 @@ where
 #[cfg(all(test, feature = "tcp"))]
 mod tests {
   use agnostic::{
-    Runtime,
+    Runtime, RuntimeLite,
     net::{Net, TcpListener, TcpStream},
     tokio::TokioRuntime,
   };
@@ -1699,8 +1842,20 @@ mod tests {
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
     let obs_payload_bytes = Arc::new(AtomicU64::new(0));
     let (obs_tx, obs_rx) = flume::bounded(obs_cap);
-    let (_accepted_tx, accepted_rx) = flume::bounded(ACCEPT_CAP);
-    let (accept_shutdown_tx, _accept_shutdown_rx) = flume::bounded(1);
+    let (accepted_tx, accepted_rx) = flume::bounded(ACCEPT_CAP);
+    let (accept_shutdown_tx, accept_shutdown_rx) = flume::bounded(1);
+    // Spawn the real accept task over a bound listener so the shutdown branch's
+    // join-on-exit behaves exactly as in production: dropping `accept_shutdown_tx`
+    // cancels its `accept()`, the task exits, and `accept_join` resolves.
+    let listener = <TokioNet as Net>::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind accept listener");
+    let accept_join = TokioRuntime::spawn(accept_task::<SmolStr, _>(
+      listener,
+      accepted_tx,
+      accept_shutdown_rx,
+      shared.clone(),
+    ));
     let driver = StreamDriver::<SmolStr, TokioRuntime, RawRecords>::new(
       endpoint,
       socket,
@@ -1712,6 +1867,7 @@ mod tests {
       obs_budget,
       accepted_rx,
       accept_shutdown_tx,
+      accept_join,
       Duration::from_secs(60),
       None,
     );
@@ -1876,6 +2032,17 @@ mod tests {
     Pin::new(driver).poll(&mut cx)
   }
 
+  /// Drives a shutting-down driver to `Poll::Ready`, polling it with the calling
+  /// task's real waker so the shutdown branch's awaited accept-task join handle
+  /// registers that waker and the runtime re-polls once the accept task exits (no
+  /// busy-loop, no fixed iteration bound). The one-time teardown — failing parked
+  /// waiters, closing the command queue — runs on the FIRST poll, so any parked
+  /// reply is already sent once this returns; the later polls only drain the
+  /// accept-task join.
+  async fn poll_to_ready(driver: &mut StreamDriver<SmolStr, TokioRuntime, RawRecords>) {
+    futures_util::future::poll_fn(|cx| Pin::new(&mut *driver).poll(cx)).await;
+  }
+
   /// On shutdown, a parked synchronous `WaitForCompletion` join is failed with
   /// `Err(Shutdown)` (the `pending_joins.drain()` arm). Dispatching the wait-join
   /// while still running parks it (its dial produces a `Connect`); the same poll's
@@ -1890,10 +2057,7 @@ mod tests {
       reply: tx,
     }));
     shared.begin_shutdown();
-    assert!(
-      poll_once(&mut driver).is_ready(),
-      "shutdown poll returns Ready"
-    );
+    poll_to_ready(&mut driver).await;
     assert!(
       matches!(rx.await, Ok(Err(Error::Shutdown))),
       "a parked wait-join is failed with Shutdown on driver exit"
@@ -1912,7 +2076,7 @@ mod tests {
     );
     shared.push_command(Command::Ping(PingCmd { node, reply: tx }));
     shared.begin_shutdown();
-    assert!(poll_once(&mut driver).is_ready());
+    poll_to_ready(&mut driver).await;
     assert!(
       matches!(rx.await, Ok(Err(Error::Shutdown))),
       "a parked ping is failed with Shutdown on driver exit"
@@ -1931,7 +2095,7 @@ mod tests {
       reply: tx,
     }));
     shared.begin_shutdown();
-    assert!(poll_once(&mut driver).is_ready());
+    poll_to_ready(&mut driver).await;
     assert!(
       matches!(rx.await, Ok(Err(Error::Shutdown))),
       "a parked reliable send is failed with Shutdown on driver exit"
@@ -2040,10 +2204,7 @@ mod tests {
       });
 
       barrier.wait();
-      assert!(
-        poll_once(&mut driver).is_ready(),
-        "a shutdown poll returns Ready"
-      );
+      poll_to_ready(&mut driver).await;
       pusher.join().expect("pusher thread joins");
 
       // Record any variant that `close_and_drain` failed with Shutdown this
@@ -2063,6 +2224,261 @@ mod tests {
       "every queued command variant must reply Shutdown via close_and_drain within \
        {MAX_ATTEMPTS} attempts (join={seen_join} user={seen_user} comp={seen_comp} \
        chk={seen_chk} enc={seen_enc})"
+    );
+  }
+
+  /// Two `Shutdown` commands queued before the SAME poll each get their own
+  /// `Ok(())` ack. The shutdown reply is a `Vec`, so the first caller is parked
+  /// alongside the second rather than overwritten — a single-slot reply would
+  /// drop the first sender (its receiver would observe a `Canceled` oneshot)
+  /// when the second `Shutdown` dispatched in the same drain. The ack fires only
+  /// after the gossip socket and the accept task's listener are released, which
+  /// `poll_to_ready` awaits.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_acks_every_same_poll_caller() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+
+    let (first_tx, first_rx) = oneshot::channel::<Result<(), Error>>();
+    let (second_tx, second_rx) = oneshot::channel::<Result<(), Error>>();
+    // Both land in one top-of-poll drain, so both dispatch (and park their reply)
+    // before the shutdown branch acks.
+    shared.push_command(Command::Shutdown(ShutdownCmd { reply: first_tx }));
+    shared.push_command(Command::Shutdown(ShutdownCmd { reply: second_tx }));
+
+    poll_to_ready(&mut driver).await;
+    assert!(
+      matches!(first_rx.await, Ok(Ok(()))),
+      "the first same-poll shutdown caller is acked Ok, not dropped"
+    );
+    assert!(
+      matches!(second_rx.await, Ok(Ok(()))),
+      "the second same-poll shutdown caller is acked Ok"
+    );
+  }
+
+  /// A second `Shutdown` racing the poll while one is already parked is itself
+  /// acked `Ok(())` — whether it is dispatched at the top of the poll or taken
+  /// by `close_and_drain` mid-poll — and the already-parked first caller is
+  /// STILL acked `Ok(())`. With a single-slot reply the second caller would
+  /// overwrite the first's parked sender (canceling its oneshot) when both land
+  /// in the same drain; the reply set holds every concurrent caller instead.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn shutdown_acks_concurrent_callers() {
+    use std::{sync::Barrier, thread};
+
+    const MAX_ATTEMPTS: usize = 20000;
+    // The first `Shutdown` is queued before the poll, so it is always drained and
+    // parked. A pusher thread races a second `Shutdown` into the poll: it lands
+    // either in the same top-of-poll drain as the first or in the window before
+    // `close_and_drain`. The first caller's ack must survive that race in EVERY
+    // attempt; the second's `Ok(())` is recorded when its push was accepted, to
+    // confirm the concurrent path is actually exercised within the bound.
+    let mut saw_second_ok = false;
+    for _ in 0..MAX_ATTEMPTS {
+      let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
+      shared.begin_shutdown();
+
+      let (first_tx, first_rx) = oneshot::channel::<Result<(), Error>>();
+      let (second_tx, second_rx) = oneshot::channel::<Result<(), Error>>();
+      // Queue the first caller before polling so it is always parked.
+      shared.push_command(Command::Shutdown(ShutdownCmd { reply: first_tx }));
+
+      let barrier = Arc::new(Barrier::new(2));
+      let pusher_barrier = barrier.clone();
+      let pusher_shared = shared.clone();
+      // The push returns false if the poll already closed the queue; in that case
+      // the second caller never enters and this attempt simply does not exercise
+      // the concurrent path. Report whether it was accepted so the assertion can
+      // ignore the receiver of a never-queued caller.
+      let pusher = thread::spawn(move || -> bool {
+        pusher_barrier.wait();
+        pusher_shared.push_command(Command::Shutdown(ShutdownCmd { reply: second_tx }))
+      });
+
+      barrier.wait();
+      poll_to_ready(&mut driver).await;
+      let second_queued = pusher.join().expect("pusher thread joins");
+
+      // The first, always-parked caller must be acked Ok regardless of how the
+      // second raced — a single-slot reply would drop it on a same-drain overwrite.
+      assert!(
+        matches!(first_rx.await, Ok(Ok(()))),
+        "the already-parked shutdown caller is acked Ok despite a concurrent shutdown"
+      );
+      // When the second push was accepted, its caller must also be acked Ok
+      // (parked at dispatch or via close_and_drain), never left hanging.
+      if second_queued {
+        assert!(
+          matches!(second_rx.await, Ok(Ok(()))),
+          "an accepted concurrent shutdown caller is also acked Ok"
+        );
+        saw_second_ok = true;
+      }
+    }
+    assert!(
+      saw_second_ok,
+      "a concurrent second shutdown must be accepted and acked Ok in some attempt within \
+       {MAX_ATTEMPTS}"
+    );
+  }
+
+  /// Shutdown completion promises only the bind address is free — it does NOT
+  /// await the connected-stream FD of an in-flight reliable exchange. The teardown
+  /// preempts every live bridge (`cancel_tx.send(())`) and then completes WITHOUT
+  /// blocking on the bridge task. A bridge that cannot exit on its own (parked,
+  /// e.g. stalled on the bounded inbound hand-off) must not wedge shutdown: were
+  /// the teardown to await the bridge instead, this test would time out.
+  ///
+  /// A controllable proxy stands in for the bridge task. It first awaits the
+  /// preemption (proving the teardown SENT the cancel), reports it observed it,
+  /// then parks on a gate the test NEVER releases — so the proxy is provably still
+  /// alive when shutdown completes. The driver must reach `Poll::Ready` and fire
+  /// the completion latch promptly, with the proxy still parked. Every wait is
+  /// bounded, so a regression that re-introduces awaiting the bridge surfaces as a
+  /// timeout, never a hang.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_preempts_live_bridge_without_awaiting_it() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+    // The gossip socket's address, captured before teardown drops it, so the
+    // post-shutdown rebind asserts the FD was actually released.
+    let gossip_addr = driver
+      .socket
+      .as_ref()
+      .expect("gossip socket is bound while running")
+      .local_addr()
+      .expect("gossip socket local_addr");
+
+    // Install one live bridge whose task is a controllable proxy. `out_tx` is kept
+    // on the handle (dropped by the teardown's `bridges.drain()`); `cancel_tx` is
+    // the channel the teardown preempts on. The proxy is spawned independently —
+    // the driver no longer stores a bridge join, so it cannot (and must not) await
+    // this task.
+    let (out_tx, _out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let (observed_cancel_tx, observed_cancel_rx) = oneshot::channel::<()>();
+    // The gate is held by the test and NEVER released, so the proxy can only exit
+    // if something cancels it — which nothing does. It is therefore provably still
+    // alive at the instant shutdown completes.
+    let (_gate_tx, gate_rx) = oneshot::channel::<()>();
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exited_in_task = exited.clone();
+    let proxy = TokioRuntime::spawn(async move {
+      // Wait for the teardown's explicit preemption; a teardown that merely dropped
+      // the handle (no cancel) would leave this parked and never report below.
+      let _ = cancel_rx.await;
+      // Ignoring Err: the test holds the receiver until it has observed this.
+      let _ = observed_cancel_tx.send(());
+      // Park forever on the never-released gate: the proxy stays alive, so a
+      // shutdown that completes while it is parked proves the driver did not await
+      // it.
+      let _ = gate_rx.await;
+      exited_in_task.store(true, Ordering::SeqCst);
+    });
+    let eid = fresh_eid();
+    driver
+      .bridges
+      .insert(eid, BridgeHandle { out_tx, cancel_tx });
+
+    shared.begin_shutdown();
+
+    // Drive shutdown to completion. The one-time teardown preempts the bridge and
+    // then awaits ONLY the accept task; with no bridge await, this resolves even
+    // though the proxy is still parked. The bound converts a regression (awaiting
+    // the bridge) into a loud timeout rather than an indefinite hang.
+    tokio::time::timeout(Duration::from_secs(5), poll_to_ready(&mut driver))
+      .await
+      .expect("shutdown completes without awaiting the live bridge task");
+
+    // (b) The preemption actually reached the bridge.
+    tokio::time::timeout(Duration::from_secs(5), observed_cancel_rx)
+      .await
+      .expect("the teardown sends the cancel preemption to the live bridge")
+      .expect("the proxy reports it observed the preemption");
+    // The proxy is still parked on the never-released gate: shutdown completed
+    // strictly without waiting for it to exit.
+    assert!(
+      !exited.load(Ordering::SeqCst),
+      "shutdown completes while the preempted bridge is still alive (not awaited)"
+    );
+
+    // (c) The bind address is free: an immediate rebind on the gossip address (no
+    // sleep, no retry) must succeed, mirroring the post-`shutdown().await` rebind.
+    <TokioNet as Net>::UdpSocket::bind(gossip_addr)
+      .await
+      .expect("the gossip socket FD is released, so its address rebinds immediately");
+
+    // Abandon the deliberately-parked proxy; dropping a tokio `JoinHandle`
+    // detaches the task, which the runtime reaps at test teardown.
+    drop(proxy);
+  }
+
+  /// The accept task exits when its shutdown channel is dropped EVEN IF it is
+  /// blocked handing a freshly accepted connection to a full `accepted` channel.
+  /// The inner hand-off send is raced against the shutdown signal, so a full
+  /// queue at shutdown cannot wedge the task and leak the TCP listener FD. An
+  /// un-cancellable hand-off send would never observe the dropped shutdown
+  /// channel and this join would never resolve — the timeout converts that wedge
+  /// into a loud failure instead of an indefinite hang.
+  ///
+  /// Driven on a single-threaded runtime so the cooperative schedule is
+  /// deterministic: the accept task is stepped (via `yield_now`) WHILE its
+  /// shutdown channel is still open, so it can only come to rest blocked on the
+  /// full-channel send (the connection is already accepted, the send cannot
+  /// progress, and the shutdown arm is not yet ready). Dropping the sender then
+  /// must wake exactly that inner select.
+  #[tokio::test(flavor = "current_thread")]
+  async fn accept_task_unwedges_from_full_queue_on_shutdown() {
+    // Bind the listener the accept task will own.
+    let listener = <TokioNet as Net>::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind accept listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    // A capacity-1 hand-off channel, pre-filled so the task's next send blocks.
+    // The slot is occupied by a throwaway connected stream of the right type. The
+    // receiver is held (never dropped, never drained) for the whole test: if it
+    // were dropped, the send itself would error out and free the task, masking
+    // the shutdown-race being tested.
+    let (accepted_tx, _accepted_rx) = flume::bounded::<(TokioTcpStream, SocketAddr)>(1);
+    let (filler, _filler_peer) = loopback_pair().await;
+    accepted_tx
+      .try_send((filler, "127.0.0.1:1".parse().unwrap()))
+      .expect("pre-fill the capacity-1 hand-off channel");
+
+    // An established inbound connection, so the task's `accept()` is immediately
+    // ready and it proceeds straight into the (blocking) hand-off send.
+    let _inbound = TokioTcpStream::connect(addr)
+      .await
+      .expect("inbound connect");
+
+    let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
+    let shared = test_shared();
+    let join = TokioRuntime::spawn(accept_task::<SmolStr, _>(
+      listener,
+      accepted_tx,
+      shutdown_rx,
+      shared,
+    ));
+
+    // Step the task while its shutdown channel is still open. On this
+    // single-threaded runtime that runs it until it parks — which it can only do
+    // blocked on the full-channel send, since `accept()` is ready and consumed
+    // and the shutdown arm is not yet signalled. (The receiver is never drained,
+    // so the send can never complete on its own.)
+    for _ in 0..16 {
+      tokio::task::yield_now().await;
+    }
+
+    // Signal shutdown by dropping the sender — the ONLY thing that can free the
+    // task here. The raced inner select observes the disconnect and breaks; an
+    // un-cancellable send would ignore it and hang (the held receiver keeps the
+    // full-channel send pending forever).
+    drop(shutdown_tx);
+
+    let exited = tokio::time::timeout(Duration::from_secs(5), join).await;
+    assert!(
+      exited.is_ok(),
+      "the accept task exits on shutdown even with a full hand-off queue"
     );
   }
 
@@ -2101,7 +2517,7 @@ mod tests {
     let (tx, rx) = oneshot::channel::<Result<(), Error>>();
     driver.pending_leave = Some(PendingLeave { repliers: vec![tx] });
     shared.begin_shutdown();
-    assert!(poll_once(&mut driver).is_ready());
+    poll_to_ready(&mut driver).await;
     assert!(
       matches!(rx.await, Ok(Err(Error::Shutdown))),
       "a parked leave waiter is failed with Shutdown on driver exit"

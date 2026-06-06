@@ -14,6 +14,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use flume::{Receiver, Sender};
 
 use crate::{command::Command, snapshot::MemberlistSnapshot};
 
@@ -41,12 +42,23 @@ pub(crate) struct Shared<I> {
   /// Count of live `Memberlist` handles. The last to drop flips `shutdown` and
   /// wakes the driver so it exits.
   handles: AtomicUsize,
+  /// The sole sender of the teardown-completion latch, held until the driver has
+  /// freed its bind socket(s). The latch fires once those are released — the
+  /// stream driver's UDP gossip socket and TCP listener, or the QUIC driver's
+  /// single UDP transport socket — NOT once every connected stream FD has closed.
+  /// Dropping it disconnects `shutdown_complete_rx`; a late `shutdown()` caller
+  /// (whose command the closed queue rejected) awaits that disconnect so it never
+  /// returns into a still-bound port.
+  shutdown_complete_tx: Mutex<Option<Sender<()>>>,
+  /// The receiving end of the teardown-completion latch.
+  shutdown_complete_rx: Receiver<()>,
 }
 
 impl<I> Shared<I> {
   /// Builds the shared state around an initial published snapshot, with one live
   /// handle.
   pub(crate) fn new(initial: MemberlistSnapshot<I, SocketAddr>) -> Self {
+    let (shutdown_complete_tx, shutdown_complete_rx) = flume::bounded(0);
     Self {
       inner: Mutex::new(Inner::<I> {
         commands: VecDeque::new(),
@@ -58,6 +70,8 @@ impl<I> Shared<I> {
       observation_dropped: AtomicU64::new(0),
       shutdown: AtomicBool::new(false),
       handles: AtomicUsize::new(1),
+      shutdown_complete_tx: Mutex::new(Some(shutdown_complete_tx)),
+      shutdown_complete_rx,
     }
   }
 
@@ -151,6 +165,30 @@ impl<I> Shared<I> {
     if let Some(waker) = self.inner.lock().unwrap().driver_waker.take() {
       waker.wake();
     }
+  }
+
+  /// Driver side, at the very end of teardown — once the bind socket(s) are free
+  /// (the stream driver has dropped its UDP gossip socket and released the accept
+  /// task's TCP listener; the QUIC driver has dropped its single UDP transport
+  /// socket): fire the completion latch so any late `shutdown()` caller parked in
+  /// [`wait_shutdown_complete`](Self::wait_shutdown_complete) returns. The latch
+  /// tracks the bind socket(s) only, not the close of every connected stream FD.
+  /// Dropping the sole sender disconnects the receiver; idempotent across
+  /// re-entrant polls.
+  pub(crate) fn mark_shutdown_complete(&self) {
+    let _ = self.shutdown_complete_tx.lock().unwrap().take();
+  }
+
+  /// Handle side: await teardown completion. Returns as soon as the driver has
+  /// fired the latch via [`mark_shutdown_complete`](Self::mark_shutdown_complete),
+  /// or immediately if it already has — i.e. once the bind address is free, not
+  /// once every connected stream FD has closed. A `shutdown()` caller whose
+  /// command the closed queue rejected waits here for the ports to free rather
+  /// than returning into a still-bound address.
+  pub(crate) async fn wait_shutdown_complete(&self) {
+    // Ignoring the recv result: the latch fires by sender-disconnect, never by a
+    // sent value, so recv resolves to Err exactly once teardown completes.
+    let _ = self.shutdown_complete_rx.recv_async().await;
   }
 }
 
@@ -333,6 +371,45 @@ mod tests {
     assert!(
       shared.handle_dropped(),
       "dropping the final handle reports true"
+    );
+  }
+
+  /// A late `shutdown()` caller whose command the closed queue rejected parks on
+  /// the completion latch and is released only once the driver marks teardown
+  /// done; a caller arriving after that is ready on its first poll.
+  #[test]
+  fn shutdown_complete_latch_releases_late_caller() {
+    use std::{future::Future, task::Context};
+
+    let shared = Shared::<SmolStr>::new(snapshot("me"));
+    // The driver has closed the queue (teardown underway) but not finished it.
+    let _ = shared.close_and_drain();
+    let woken = Arc::new(AtomicBool::new(false));
+    let waker = flag_waker(woken.clone());
+    let mut cx = Context::from_waker(&waker);
+
+    let mut late = std::pin::pin!(shared.wait_shutdown_complete());
+    assert!(
+      late.as_mut().poll(&mut cx).is_pending(),
+      "a late caller blocks while teardown is unfinished"
+    );
+
+    // The driver finishing teardown fires the latch and wakes the parked caller.
+    shared.mark_shutdown_complete();
+    assert!(
+      woken.load(AtomicOrdering::SeqCst),
+      "marking teardown complete wakes the parked caller"
+    );
+    assert!(
+      late.as_mut().poll(&mut cx).is_ready(),
+      "the latch releases the late caller once teardown is complete"
+    );
+
+    // A caller arriving after the latch has fired is ready immediately.
+    let mut after = std::pin::pin!(shared.wait_shutdown_complete());
+    assert!(
+      after.as_mut().poll(&mut cx).is_ready(),
+      "a wait after teardown completed returns at once"
     );
   }
 }

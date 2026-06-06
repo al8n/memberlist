@@ -90,7 +90,11 @@ struct PendingUserSend {
 /// dropped, or a `Shutdown` command).
 pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   endpoint: QuicEndpoint<I>,
-  socket: <R::Net as Net>::UdpSocket,
+  /// The shared UDP socket carrying QUIC packets (and gossip on the UDP-fallback
+  /// path). Wrapped in `Option` so the shutdown branch can drop it (releasing the
+  /// bound port) BEFORE acking the shutdown caller; it is `Some` for the whole
+  /// running lifetime and only taken during teardown.
+  socket: Option<<R::Net as Net>::UdpSocket>,
   shared: Arc<Shared<I>>,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
@@ -109,6 +113,13 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   /// Outstanding reliable-send calls; resolved when all tracked exchange ids
   /// surface a terminal `ExchangeCompleted(UserMessage)`.
   pending_user_sends: Vec<PendingUserSend>,
+  /// The parked replies of `Shutdown` commands. A reply is NOT sent inline at
+  /// dispatch: every caller is parked here and acked only after the shutdown
+  /// branch drops the UDP socket, so the bound port is free when each caller
+  /// resumes from `shutdown().await` and an immediate rebind on the same address
+  /// succeeds. A `Vec` because several callers can race `shutdown()` concurrently
+  /// — each must get its own ack, and none before the socket drop.
+  shutdown_reply: Vec<futures_channel::oneshot::Sender<Result<(), Error>>>,
   /// Bytes of payload-bearing events queued in `obs_tx` (added on enqueue,
   /// subtracted by the obs task on dequeue) — the byte backstop's counter.
   obs_payload_bytes: Arc<AtomicU64>,
@@ -149,7 +160,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       .min(GOSSIP_RECV_BUF_MAX);
     Self {
       endpoint,
-      socket,
+      socket: Some(socket),
       shared,
       obs_tx,
       label,
@@ -158,6 +169,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       pending_leave: None,
       pending_pings: Vec::new(),
       pending_user_sends: Vec::new(),
+      shutdown_reply: Vec::new(),
       obs_payload_bytes,
       obs_payload_budget,
       obs_overflow: VecDeque::new(),
@@ -252,9 +264,12 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         }
       }
       Command::Shutdown(ShutdownCmd { reply }) => {
+        // Do NOT ack inline: the UDP socket is still bound here. Flag shutdown
+        // and park the reply; the shutdown branch acks every parked caller only
+        // AFTER it drops the socket, so an immediate rebind on the same address
+        // after `shutdown().await` succeeds.
         self.shared.begin_shutdown();
-        // Ignoring Err: the caller dropped its reply receiver.
-        let _ = reply.send(Ok(()));
+        self.shutdown_reply.push(reply);
       }
       Command::Ping(PingCmd { node, reply }) => {
         // Gate on a running node: after `leave()` the probe scheduler is
@@ -624,9 +639,11 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       };
       match self.endpoint.unreliable_transport() {
         UnreliableTransport::Udp => {
-          // Ignoring Poll: gossip is best-effort — a full or errored UDP send
-          // drops the datagram and SWIM recovers on the next round.
-          let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+          if let Some(socket) = self.socket.as_ref() {
+            // Ignoring Poll: gossip is best-effort — a full or errored UDP send
+            // drops the datagram and SWIM recovers on the next round.
+            let _ = socket.poll_send_to(cx, &on_wire, peer);
+          }
         }
         UnreliableTransport::Datagram => {
           match self
@@ -640,16 +657,20 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
             // gossip itself still goes out immediately over the UDP fallback.
             DatagramSendOutcome::NotReady => {
               needs_flush = true;
-              // Ignoring Poll: a transient UDP send error is non-fatal — gossip
-              // is lossy and the next probe/gossip round recovers.
-              let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+              if let Some(socket) = self.socket.as_ref() {
+                // Ignoring Poll: a transient UDP send error is non-fatal — gossip
+                // is lossy and the next probe/gossip round recovers.
+                let _ = socket.poll_send_to(cx, &on_wire, peer);
+              }
             }
             // TooLarge: the connection is already Established (max_size was Some),
             // so there is no pending Initial to flush; just fall back to UDP.
             DatagramSendOutcome::TooLarge => {
-              // Ignoring Poll: a transient UDP send error is non-fatal — gossip
-              // is lossy and the next probe/gossip round recovers.
-              let _ = self.socket.poll_send_to(cx, &on_wire, peer);
+              if let Some(socket) = self.socket.as_ref() {
+                // Ignoring Poll: a transient UDP send error is non-fatal — gossip
+                // is lossy and the next probe/gossip round recovers.
+                let _ = socket.poll_send_to(cx, &on_wire, peer);
+              }
             }
           }
         }
@@ -673,8 +694,10 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         break;
       };
       raw_sent += 1;
-      // Ignoring Poll: a dropped QUIC datagram is retransmitted by quinn-proto.
-      let _ = self.socket.poll_send_to(cx, &bytes, dest);
+      if let Some(socket) = self.socket.as_ref() {
+        // Ignoring Poll: a dropped QUIC datagram is retransmitted by quinn-proto.
+        let _ = socket.poll_send_to(cx, &bytes, dest);
+      }
     }
     worked |= raw_sent > 0;
     more |= raw_sent == budget;
@@ -808,7 +831,11 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
             let _ = reply.send(Err(Error::Shutdown));
           }
           Command::Shutdown(ShutdownCmd { reply }) => {
-            let _ = reply.send(Ok(()));
+            // A straggler `Shutdown` racing the first one: park it too, so it is
+            // acked after the socket drop like every other caller. Never ack
+            // inline here — the socket is still bound, so an inline ack would let
+            // that caller rebind into a still-open port.
+            this.shutdown_reply.push(reply);
           }
           // Ignoring Err: the caller dropped its reply receiver.
           Command::Ping(PingCmd { reply, .. }) => {
@@ -868,13 +895,32 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
         // Ignoring Err: the send_reliable caller dropped its reply receiver.
         let _ = ps.reply.send(Err(Error::Shutdown));
       }
+      // Release the bound port BEFORE acking the shutdown caller. Drop the UDP
+      // socket, closing its FD synchronously (the agnostic `UdpSocket` has no
+      // async `close`, so the local going out of scope here closes the FD). Only
+      // after the port is free does the stashed reply fire, so a caller resuming
+      // from `shutdown().await` can immediately rebind on the same address
+      // without racing a still-open socket.
+      drop(this.socket.take());
+      for reply in this.shutdown_reply.drain(..) {
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.send(Ok(()));
+      }
+      // The port is now free; release any late `shutdown()` caller that found the
+      // command queue already closed and parked on the completion latch.
+      this.shared.mark_shutdown_complete();
       return Poll::Ready(());
     }
 
-    // Receive gossip (bounded; a full batch means more may be waiting).
+    // Receive gossip (bounded; a full batch means more may be waiting). The
+    // socket is always `Some` here — the shutdown branch above (which takes it)
+    // returned `Poll::Ready` before reaching this point.
     let mut recv_n = 0;
     while recv_n < this.recv_batch {
-      match this.socket.poll_recv_from(cx, &mut this.recv_buf) {
+      let Some(socket) = this.socket.as_ref() else {
+        break;
+      };
+      match socket.poll_recv_from(cx, &mut this.recv_buf) {
         Poll::Ready(Ok((n, src))) => {
           this.endpoint.handle_udp(src, &this.recv_buf[..n], now);
           recv_n += 1;
@@ -1426,6 +1472,105 @@ mod tests {
       "every queued command variant must reply Shutdown via close_and_drain within \
        {MAX_ATTEMPTS} attempts (join={seen_join} user={seen_user} comp={seen_comp} \
        chk={seen_chk} enc={seen_enc})"
+    );
+  }
+
+  /// Two `Shutdown` commands queued before the SAME poll each get their own
+  /// `Ok(())` ack. The shutdown reply is a `Vec`, so the first caller is parked
+  /// alongside the second rather than overwritten — a single-slot reply would
+  /// drop the first sender (its receiver would observe a `Canceled` oneshot)
+  /// when the second `Shutdown` dispatched in the same drain.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_acks_every_same_poll_caller() {
+    let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+
+    let (first_tx, first_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+    let (second_tx, second_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+    // Both land in one top-of-poll drain, so both dispatch (and park their reply)
+    // before the shutdown branch acks.
+    shared.push_command(Command::Shutdown(ShutdownCmd { reply: first_tx }));
+    shared.push_command(Command::Shutdown(ShutdownCmd { reply: second_tx }));
+
+    assert!(
+      poll_once(&mut driver).is_ready(),
+      "a shutdown poll returns Ready"
+    );
+    assert!(
+      matches!(first_rx.await, Ok(Ok(()))),
+      "the first same-poll shutdown caller is acked Ok, not dropped"
+    );
+    assert!(
+      matches!(second_rx.await, Ok(Ok(()))),
+      "the second same-poll shutdown caller is acked Ok"
+    );
+  }
+
+  /// A second `Shutdown` racing the poll while one is already parked is itself
+  /// acked `Ok(())` — whether it is dispatched at the top of the poll or taken
+  /// by `close_and_drain` mid-poll — and the already-parked first caller is
+  /// STILL acked `Ok(())`. With a single-slot reply the second caller would
+  /// overwrite the first's parked sender (canceling its oneshot) when both land
+  /// in the same drain; the reply set holds every concurrent caller instead.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn shutdown_acks_concurrent_callers() {
+    use std::sync::Barrier;
+
+    const MAX_ATTEMPTS: usize = 20000;
+    // The first `Shutdown` is queued before the poll, so it is always drained and
+    // parked. A pusher thread races a second `Shutdown` into the poll: it lands
+    // either in the same top-of-poll drain as the first or in the window before
+    // `close_and_drain`. The first caller's ack must survive that race in EVERY
+    // attempt; the second's `Ok(())` is recorded when its push was accepted, to
+    // confirm the concurrent path is actually exercised within the bound.
+    let mut saw_second_ok = false;
+    for _ in 0..MAX_ATTEMPTS {
+      let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
+      shared.begin_shutdown();
+
+      let (first_tx, first_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+      let (second_tx, second_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+      // Queue the first caller before polling so it is always parked.
+      shared.push_command(Command::Shutdown(ShutdownCmd { reply: first_tx }));
+
+      let barrier = Arc::new(Barrier::new(2));
+      let pusher_barrier = barrier.clone();
+      let pusher_shared = shared.clone();
+      // The push returns false if the poll already closed the queue; in that case
+      // the second caller never enters and this attempt simply does not exercise
+      // the concurrent path. Report whether it was accepted so the assertion can
+      // ignore the receiver of a never-queued caller.
+      let pusher = thread::spawn(move || -> bool {
+        pusher_barrier.wait();
+        pusher_shared.push_command(Command::Shutdown(ShutdownCmd { reply: second_tx }))
+      });
+
+      barrier.wait();
+      assert!(
+        poll_once(&mut driver).is_ready(),
+        "a shutdown poll returns Ready"
+      );
+      let second_queued = pusher.join().expect("pusher thread joins");
+
+      // The first, always-parked caller must be acked Ok regardless of how the
+      // second raced — a single-slot reply would drop it on a same-drain overwrite.
+      assert!(
+        matches!(first_rx.await, Ok(Ok(()))),
+        "the already-parked shutdown caller is acked Ok despite a concurrent shutdown"
+      );
+      // When the second push was accepted, its caller must also be acked Ok
+      // (parked at dispatch or via close_and_drain), never left hanging.
+      if second_queued {
+        assert!(
+          matches!(second_rx.await, Ok(Ok(()))),
+          "an accepted concurrent shutdown caller is also acked Ok"
+        );
+        saw_second_ok = true;
+      }
+    }
+    assert!(
+      saw_second_ok,
+      "a concurrent second shutdown must be accepted and acked Ok in some attempt within \
+       {MAX_ATTEMPTS}"
     );
   }
 }

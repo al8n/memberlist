@@ -87,3 +87,7 @@ required-features = ["tls-rustls-ring"]
 [[test]]
 name = "transform"
 required-features = ["tcp"]
+
+[[test]]
+name = "shutdown_rebind"
+required-features = ["tokio", "tcp"]

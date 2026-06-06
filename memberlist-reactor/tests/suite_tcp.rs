@@ -264,7 +264,6 @@ async fn tcp_node_delegate_meta_update_tokio() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "periodic-probe ping completions are not surfaced to the ping delegate in-window; the ack-payload and capture wiring is verified, but this scenario needs an app-level directed ping or a driver probe-observability change, tracked separately"]
 async fn tcp_ping_delegate_tokio() {
   scenarios::ping_delegate::<ReactorTcp<TokioRuntime>>().await;
 }
@@ -367,7 +366,6 @@ fn tcp_node_delegate_meta_update_smol() {
 }
 
 #[test]
-#[ignore = "periodic-probe ping completions are not surfaced to the ping delegate in-window; the ack-payload and capture wiring is verified, but this scenario needs an app-level directed ping or a driver probe-observability change, tracked separately"]
 fn tcp_ping_delegate_smol() {
   SmolRuntime::block_on(scenarios::ping_delegate::<ReactorTcp<SmolRuntime>>());
 }

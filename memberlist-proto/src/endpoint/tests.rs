@@ -1369,6 +1369,114 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   );
 }
 
+/// A periodic Detection probe must emit `Event::PingCompleted` on a DIRECT
+/// Ack from the probe target even when the Ack arrives LATE — after the
+/// direct sub-timeout (so `handle_timeout` has already moved the probe to
+/// `AwaitingIndirect` and fanned out indirect pings), but still before the
+/// cumulative failure deadline. Completion is keyed on the Ack SOURCE
+/// (`ack.from == probe.target.address`), not the probe phase, so a direct
+/// target Ack notifies completion in any phase. The contrast cases —
+/// an indirect-relayed Ack (different source) and a reliable-fallback
+/// success — do not emit `PingCompleted`.
+#[test]
+fn detection_late_direct_ack_in_awaiting_indirect_emits_ping_completed() {
+  let pt = Duration::from_millis(50);
+  // 4-node cluster so the direct-timeout escalation has real indirect peers
+  // to fan out to — the probe genuinely enters `AwaitingIndirect`.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
+  process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Trigger the periodic Detection probe and capture its seq + the target it
+  // round-robined onto from the emitted direct Ping.
+  let t0 = Instant::now();
+  e.start_probe(t0);
+  let (seq, target_addr, target_id) = match e.poll_transmit().expect("direct Ping") {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (
+          ping.sequence_number(),
+          to,
+          ping.target_ref().id_ref().cheap_clone(),
+        )
+      } else {
+        panic!("Ping message expected")
+      }
+    }
+    _ => panic!("Ping expected"),
+  };
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // Direct sub-timeout is t0+50ms; the cumulative deadline is t0+1s
+  // (sent + scaled probe_interval, default 1s, health 0 ⇒ identity). Fire
+  // handle_timeout at t0+60ms: past the direct sub-timeout, far short of the
+  // cumulative deadline → the probe transitions to AwaitingIndirect and fans
+  // out IndirectPings.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+
+  // Confirm the probe is genuinely in AwaitingIndirect (NOT AwaitingDirectAck)
+  // when the Ack lands.
+  match &e.probes.get(&seq).expect("probe still in flight").phase {
+    crate::probe::ProbePhase::AwaitingIndirect(_) => {}
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  }
+  // And that escalation traffic (indirect fan-out) was actually emitted.
+  assert!(
+    core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
+    )),
+    "the direct timeout must fan out IndirectPings",
+  );
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // The target itself answers LATE (t0+70ms): a DIRECT Ack (its own source
+  // address) while the probe sits in AwaitingIndirect, still inside the
+  // cumulative window.
+  e.handle_ack(
+    target_addr,
+    Ack::new(seq).with_payload(Bytes::from_static(b"pong")),
+    t0 + Duration::from_millis(70),
+  );
+
+  // The probe completes, the target stays Alive, and — because the Ack came
+  // direct from the target — PingCompleted IS emitted carrying that target,
+  // a positive RTT (~70ms since sent_at), and the ack payload. A phase-keyed
+  // success check (AwaitingDirectAck only) would suppress this event.
+  assert!(
+    !e.probes.contains_key(&seq),
+    "the late direct Ack completes the probe"
+  );
+  assert_eq!(
+    e.member_liveness(&target_id),
+    Some(State::Alive),
+    "a direct Ack within the cumulative window must NOT suspect the target",
+  );
+  let completed = core::iter::from_fn(|| e.poll_event())
+    .find_map(|ev| match ev {
+      Event::PingCompleted(c) => Some(c),
+      _ => None,
+    })
+    .expect("a late direct target Ack in AwaitingIndirect must emit PingCompleted");
+  assert_eq!(
+    completed.node_ref().id_ref(),
+    &target_id,
+    "PingCompleted carries the probe target",
+  );
+  assert_eq!(completed.ping_id(), PingId::new(seq));
+  assert!(
+    completed.rtt() >= Duration::from_millis(60),
+    "RTT is measured from the probe's sent_at",
+  );
+  assert_eq!(completed.payload_ref().as_ref(), b"pong");
+}
+
 #[test]
 fn handle_ack_for_unknown_seq_is_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
