@@ -34,11 +34,16 @@ jobs:
   test:
     name: ${{ matrix.os }} - reactor - smol
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -48,9 +53,9 @@ jobs:
           toolchain: nightly-2026-05-22
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Test (smol suite cells)
         # `-- smol` selects only the `_smol` cells across the suite binaries;

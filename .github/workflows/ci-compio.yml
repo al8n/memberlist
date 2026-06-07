@@ -38,11 +38,16 @@ jobs:
   test:
     name: ${{ matrix.os }} - compio
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -53,9 +58,9 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Format
         run: cargo fmt -p memberlist-compio -p memberlist-test-suite --check
@@ -65,12 +70,7 @@ jobs:
         run: cargo clippy -p memberlist-compio --all-targets --features "$FEATURES" --no-deps -- -D warnings
 
       - name: Test
-        # The compio drivers run on single-threaded runtimes, so several
-        # convergence-sensitive cluster tests executing concurrently oversubscribe
-        # the runner's cores and starve their SWIM probe/gossip timers (e.g. the
-        # 64-parallel-join bridge-backlog test). Run tests one at a time so the
-        # timing is stable.
-        run: cargo test -p memberlist-compio --features "$FEATURES" -- --test-threads=1
+        run: cargo test -p memberlist-compio --features "$FEATURES"
 
       - name: Cache Cargo registry
         uses: actions/cache@v5
