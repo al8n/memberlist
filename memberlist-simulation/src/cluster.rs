@@ -367,12 +367,13 @@ impl Cluster {
   }
 
   /// Restart the node at `addr` as a fresh endpoint at a strictly higher
-  /// incarnation than any incarnation the cluster has seen for this node.
+  /// incarnation than any incarnation the cluster has seen for this node,
+  /// WITHOUT initiating a rejoin — the caller drives the node back into the
+  /// cluster. [`restart`](Cluster::restart) wraps this with an automatic rejoin.
   ///
-  /// The stale endpoint is replaced in-place (the `addrs`/`ids` registration
-  /// is unchanged) and then a join push-pull is initiated toward the first
-  /// live peer. After enough [`step`](Cluster::step) calls, peers that
-  /// declared the node Dead will accept the fresh Alive as superseding it.
+  /// The stale endpoint is replaced in-place (the `addrs`/`ids` registration is
+  /// unchanged). Once the node rejoins and enough [`step`](Cluster::step) calls
+  /// pass, peers that declared it Dead accept the fresh Alive as superseding it.
   ///
   /// Returns `true` if the node was restarted. Returns `false` without
   /// modifying the cluster when `addr` is unregistered, or when the superseding
@@ -382,7 +383,7 @@ impl Cluster {
   /// incarnations; refusing it keeps an upper-half observed or pre-seeded
   /// incarnation from turning a restart into a panic.
   #[must_use]
-  pub fn restart(&mut self, addr: SocketAddr) -> bool {
+  pub fn restart_without_join(&mut self, addr: SocketAddr) -> bool {
     // Find the node id (addrs/ids are parallel).
     let Some(i) = self.addrs.iter().position(|a| *a == addr) else {
       return false;
@@ -448,6 +449,22 @@ impl Cluster {
       }
     }
 
+    true
+  }
+
+  /// Restart the node at `addr` and immediately initiate a rejoin push-pull
+  /// toward the first live peer — the chaos-phase restart, modeling a process
+  /// that comes back up and re-contacts a seed. The calm phase instead uses
+  /// [`restart_without_join`](Cluster::restart_without_join) so the single
+  /// post-settle reseed is a restarted node's only join, and a join that
+  /// completes without converging the node cannot be masked by a second attempt.
+  ///
+  /// Returns `true` if the node was restarted (see `restart_without_join`).
+  #[must_use]
+  pub fn restart(&mut self, addr: SocketAddr) -> bool {
+    if !self.restart_without_join(addr) {
+      return false;
+    }
     // Initiate a join toward the first live peer.
     let seed = self
       .addrs

@@ -16,6 +16,15 @@ use std::{
 /// `memberlist-proto/src/config.rs` (`suspicion_max_timeout_mult: 6`).
 const SUSPICION_MAX_MULT: u32 = 6;
 
+/// How long to let the just-healed topology settle before re-seeding any node
+/// still isolated from the cluster. `enter_calm`'s heal/restart/shutdown churn
+/// must clear first, or a re-seed join races it and is lost. Once settled, a
+/// single fault-free push-pull join converges the node (its own periodic
+/// push-pull finishes once it knows one peer), so the calm phase re-seeds
+/// exactly once: a node still isolated afterwards is a genuine liveness wedge the
+/// convergence check surfaces, not something a blind retry should mask.
+const RESEED_DELAY: Duration = Duration::from_secs(2);
+
 /// A protocol-derived upper bound on how long, in virtual time, a healed
 /// cluster of `n` nodes needs to re-converge. The formula is generous on
 /// purpose: the calm loop exits early on convergence, so a large floor only
@@ -135,7 +144,7 @@ pub fn run_vopr(seed: u64, ticks: usize) -> VoprReport {
 
   // Calm phase: heal + restart-all + zero faults, then run until the protocol
   // convergence floor of virtual time has elapsed. Safety stays live.
-  v.enter_calm(&mut c);
+  let calm_restarted = v.enter_calm(&mut c);
   let floor = convergence_floor(
     Duration::from_secs(30),     // push_pull_interval
     Duration::from_millis(1000), // probe_interval
@@ -145,6 +154,8 @@ pub fn run_vopr(seed: u64, ticks: usize) -> VoprReport {
     v.n,
   );
   let calm_start = c.now();
+  let reseed_at = calm_start + RESEED_DELAY;
+  let mut reseeded = false;
   let max_calm_ticks = 100_000usize; // backstop; the floor is the real bound
   let mut calm = 0usize;
   let mut tick = ticks;
@@ -161,6 +172,14 @@ pub fn run_vopr(seed: u64, ticks: usize) -> VoprReport {
     report.calm_ticks += 1;
     tick += 1;
     calm += 1;
+    // Once the just-healed topology has settled, re-seed exactly once: every
+    // calm-restarted node unconditionally (its single intended join) plus any
+    // other still-isolated node. A node that stays isolated afterwards is a real
+    // liveness wedge the convergence check surfaces, not something a retry masks.
+    if !reseeded && c.now() >= reseed_at {
+      v.reseed_isolated(&mut c, &calm_restarted);
+      reseeded = true;
+    }
     // When step returns false AND the clock did not advance (no next deadline
     // was found), the cluster is truly idle — no pending timers or in-flight
     // messages remain. Exit early rather than spin to the backstop cap.
@@ -365,21 +384,28 @@ impl Vopr {
   /// opportunity to propagate; now their endpoint goes silent so peers that
   /// missed the broadcast will probe → no ack → Suspect → Dead → convergence.
   ///
-  /// Crash-restarted or genuinely-isolated live nodes (no live Alive peers)
-  /// receive a targeted join toward the best-connected live peer. Well-connected
-  /// nodes are left to converge organically via gossip and push-pull.
-  fn enter_calm(&mut self, c: &mut Cluster) {
+  /// Crash-restarted nodes come back WITHOUT an auto-join, so the single
+  /// post-settle reseed is their only join attempt. Their addresses are returned
+  /// so the reseed can force exactly one join for each — never suppressed by
+  /// connectivity they may pick up organically — making a join that completes
+  /// without converging a node observable rather than masked.
+  fn enter_calm(&mut self, c: &mut Cluster) -> Vec<SocketAddr> {
     c.heal();
     // Iterate in addrs order (a fixed Vec) for a deterministic restart sequence.
     let still_gone: Vec<SocketAddr> =
       self.addrs.iter().copied().filter(|a| self.gone.contains(a)).collect();
+    let mut calm_restarted = Vec::new();
     for addr in still_gone {
       // Unreachable headroom-exhaustion aside (the VOPR keeps incarnations
       // small), a node that cannot restart stays in `gone` rather than panicking
       // the run; the post-calm convergence check then surfaces it as a wedge.
-      if c.restart(addr) {
+      // Restart WITHOUT an auto-join so the single post-settle reseed is this
+      // node's only join — a restart join that completed without converging it
+      // must not be masked by a later second attempt.
+      if c.restart_without_join(addr) {
         self.gone.remove(&addr);
         self.restarted.insert(addr);
+        calm_restarted.push(addr);
         self.incarnation.clear_observer(addr);
         self.resurrection.clear_observer(addr);
         self.illegal_pair.clear_observer(addr);
@@ -402,29 +428,80 @@ impl Vopr {
     for addr in departed {
       c.shutdown(addr);
     }
+    calm_restarted
+  }
 
-    // Re-seed only nodes that are genuinely isolated (no live Alive peers).
-    // A restarted node whose join landed on a departed/stale peer ends up
-    // here; a well-connected node converges on its own via gossip/push-pull.
+  /// Issue a rejoin (push-pull `join`) toward a CONNECTED live peer that knows
+  /// the cluster (the best-connected, by member count) for every node that needs
+  /// one: each `calm_restarted` node UNCONDITIONALLY (its single intended join,
+  /// not suppressed by a peer it may have learned organically), plus any other
+  /// live node still isolated — one that sees no *other* live node as `Alive`. A
+  /// darkened leaver still showing `Alive` does NOT count as connectivity, so a
+  /// node connected only to a leaver is re-seeded rather than isolating itself.
+  ///
+  /// The seed is chosen preferentially from connected nodes that are NOT
+  /// themselves calm-restarted, so every calm-restarted node is a non-seed and
+  /// receives its forced join; raw member count alone is unsafe, since a node
+  /// with many stale or departed rows can top it while being isolated. When the
+  /// only viable seed is itself calm-restarted (every connected node restarted,
+  /// or the all-isolated fallback), it is cross-joined to another live node so it
+  /// too gets exactly one intended join. Returns the addresses joined.
+  ///
+  /// A restarted node re-converges only via a successful push-pull join: peers
+  /// prune the crashed node and never contact it back, and a node with an empty
+  /// table initiates no push-pull of its own. The calm phase calls this once,
+  /// after the post-chaos churn has settled (see `RESEED_DELAY`), so the join is
+  /// not lost to the heal/restart/shutdown activity at calm entry.
+  fn reseed_isolated(&self, c: &mut Cluster, calm_restarted: &[SocketAddr]) -> Vec<SocketAddr> {
     let live: Vec<SocketAddr> = self.addrs.iter().copied().filter(|a| self.is_live(*a)).collect();
-    let best_seed = live.iter().copied().max_by_key(|&a| c.num_members(a));
-    if let Some(seed) = best_seed {
-      for &addr in &live {
-        if addr == seed {
-          continue;
-        }
-        // A node is isolated if it sees no other live (non-departed) node as
-        // Alive. A darkened leaver still shows Alive here until failure-detected,
-        // so it must NOT count as connectivity — otherwise a node connected only
-        // to a leaver would never be re-seeded and would isolate itself.
-        let connected = self.addrs.iter().zip(self.ids.iter()).any(|(&peer, peer_id)| {
+    // Classify each live node as connected (sees some OTHER live node as Alive)
+    // or isolated, up front so the join loop below can borrow `c` mutably.
+    let connected: Vec<bool> = live
+      .iter()
+      .map(|&addr| {
+        self.addrs.iter().zip(self.ids.iter()).any(|(&peer, peer_id)| {
           peer != addr && self.is_live(peer) && c.member_liveness(addr, peer_id) == Some(State::Alive)
-        });
-        if !connected {
-          c.join(addr, seed);
-        }
+        })
+      })
+      .collect();
+    let members: Vec<usize> = live.iter().map(|&a| c.num_members(a)).collect();
+    // Prefer a connected seed that is NOT itself calm-restarted, so every
+    // calm-restarted node is a non-seed and receives its forced join. Fall back
+    // to any connected node, then any live node (the all-isolated cross-join
+    // base). Raw member count alone is unsafe: a node with many stale or departed
+    // rows can top it while being isolated.
+    let seed_idx = (0..live.len())
+      .filter(|&i| connected[i] && !calm_restarted.contains(&live[i]))
+      .max_by_key(|&i| members[i])
+      .or_else(|| (0..live.len()).filter(|&i| connected[i]).max_by_key(|&i| members[i]))
+      .or_else(|| (!live.is_empty()).then_some(0));
+    let Some(seed_idx) = seed_idx else {
+      return Vec::new();
+    };
+    let seed = live[seed_idx];
+    let mut joined = Vec::new();
+    for (i, &addr) in live.iter().enumerate() {
+      // A calm-restarted node gets its single intended join unconditionally —
+      // never suppressed by connectivity it may have picked up organically, so a
+      // join that completes without merging is surfaced, not masked. Any other
+      // node is reseeded only when isolated.
+      if i != seed_idx && (calm_restarted.contains(&addr) || !connected[i]) {
+        c.join(addr, seed);
+        joined.push(addr);
       }
     }
+    // If the chosen seed is itself calm-restarted — only when every connected
+    // node is restarted, or in the all-isolated fallback — it would otherwise be
+    // the one calm-restarted node without a forced join. Cross-join it to another
+    // live node so it, too, gets exactly one intended join (it also re-converges
+    // from its joiners' inbound push-pull).
+    if calm_restarted.contains(&seed) {
+      if let Some(other) = live.iter().copied().find(|&a| a != seed) {
+        c.join(seed, other);
+        joined.push(seed);
+      }
+    }
+    joined
   }
 
   /// Install a two-group network partition: bit `i` of `mask` selects node `i`'s
@@ -636,6 +713,103 @@ mod tests {
     let fewer = v.effective_live_cut_key(0b0001);
     assert!(full.is_some() && fewer.is_some());
     assert_ne!(full, fewer);
+  }
+
+  /// A calm-restarted node that has already learned one peer (so the bare
+  /// isolation predicate would skip it) still receives its forced reseed join —
+  /// and if that join cannot merge, the node stays short of the cluster, so the
+  /// convergence check surfaces the wedge instead of organic gossip masking it.
+  #[test]
+  fn forced_reseed_of_connected_calm_restart_surfaces_a_nonmerging_join() {
+    // A cluster of >= 4 so the restarted node, its injected peer, and a distinct
+    // best-connected seed are all separate, and the full size exceeds the node's
+    // {self, injected peer} count.
+    let seed = (0u64..).find(|&s| Vopr::new(s).n >= 4).expect("a seed with n >= 4 exists");
+    let mut v = Vopr::new(seed);
+    let mut c = v.build_cluster();
+    for _ in 0..400 {
+      if !c.step() {
+        break;
+      }
+    }
+    let x = v.addrs[0];
+    let y = v.addrs[1];
+    let y_id = v.ids[1].clone();
+    // Crash and restart X without a rejoin: it knows only itself.
+    c.crash(x);
+    assert!(c.restart_without_join(x));
+    // X learns one live peer organically before the reseed -> "connected".
+    c.inject_alive(x, y_id.clone(), y, 1);
+    assert_eq!(c.member_liveness(x, &y_id), Some(State::Alive));
+    // X rejects every merge and every gossiped alive, so neither the forced
+    // reseed push-pull nor organic gossip can teach it the rest of the cluster:
+    // a join that completes without merging leaves it short of the cluster.
+    c.reject_merges(x);
+    c.reject_alives(x);
+    let joined = v.reseed_isolated(&mut c, &[x]);
+    // The force must issue X exactly one reseed join even though it is connected;
+    // this assertion fails if `calm_restarted` no longer overrides the isolation
+    // predicate.
+    assert!(joined.contains(&x), "a connected calm-restarted node must be force-joined");
+    for _ in 0..600 {
+      if !c.step() {
+        break;
+      }
+    }
+    // The reseed join completed but did not merge, so X is still short of the
+    // cluster — a wedge the convergence check would flag, not mask.
+    assert!(c.num_members(x) < v.n, "a non-merging reseed must leave the node isolated");
+  }
+
+  /// Every calm-restarted node receives exactly one join — including one selected
+  /// as the seed, which is cross-joined to another live node rather than exempted.
+  #[test]
+  fn every_calm_restart_is_joined_including_the_seed() {
+    let seed = (0u64..).find(|&s| Vopr::new(s).n >= 3).expect("a seed with n >= 3 exists");
+    let mut v = Vopr::new(seed);
+    let mut c = v.build_cluster();
+    for _ in 0..400 {
+      if !c.step() {
+        break;
+      }
+    }
+    // Treat every live node as calm-restarted: the chosen seed is itself
+    // calm-restarted, so it must be cross-joined, not exempted.
+    let all: Vec<SocketAddr> = v.addrs.clone();
+    let joined = v.reseed_isolated(&mut c, &all);
+    for &addr in &all {
+      assert!(
+        joined.contains(&addr),
+        "every calm-restarted node, including the seed, must be joined"
+      );
+    }
+  }
+
+  /// `enter_calm` reports the nodes it restarted (without a rejoin), and the
+  /// single forced reseed converges such a node.
+  #[test]
+  fn enter_calm_reports_restarts_and_reseed_converges_them() {
+    let mut v = Vopr::new(7);
+    let mut c = v.build_cluster();
+    for _ in 0..400 {
+      if !c.step() {
+        break;
+      }
+    }
+    let x = v.addrs[0];
+    assert_eq!(c.num_members(x), v.n);
+    c.crash(x);
+    v.gone.insert(x);
+    let restarted = v.enter_calm(&mut c);
+    assert!(restarted.contains(&x), "enter_calm must report the node it restarted");
+    assert_eq!(c.num_members(x), 1, "a restart-without-join node knows only itself");
+    v.reseed_isolated(&mut c, &restarted);
+    for _ in 0..600 {
+      if !c.step() {
+        break;
+      }
+    }
+    assert_eq!(c.num_members(x), v.n, "the forced reseed converges the restarted node");
   }
 }
 
