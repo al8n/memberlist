@@ -65,7 +65,12 @@ jobs:
         run: cargo clippy -p memberlist-compio --all-targets --features "$FEATURES" --no-deps -- -D warnings
 
       - name: Test
-        run: cargo test -p memberlist-compio --features "$FEATURES"
+        # The compio drivers run on single-threaded runtimes, so several
+        # convergence-sensitive cluster tests executing concurrently oversubscribe
+        # the runner's cores and starve their SWIM probe/gossip timers (e.g. the
+        # 64-parallel-join bridge-backlog test). Run tests one at a time so the
+        # timing is stable.
+        run: cargo test -p memberlist-compio --features "$FEATURES" -- --test-threads=1
 
       - name: Cache Cargo registry
         uses: actions/cache@v5
