@@ -28,9 +28,11 @@ on:
   schedule: [cron: "0 1 */30 * *"]
 
 env:
-  # Every transport + a representative transform backend per kind, so every
-  # suite cell and the gated transform matrix run.
-  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm"
+  # Every transport + a representative transform backend per kind, so every suite
+  # cell and the gated transform matrix run. Both AEAD backends are on so the
+  # encryption-validation usability probe sees a present backend for every
+  # SecretKey variant (it trial-encrypts AES and ChaCha20-Poly1305 keys).
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,encryption-chacha20-poly1305"
 
 jobs:
   test:
