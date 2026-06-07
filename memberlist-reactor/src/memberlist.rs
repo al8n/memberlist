@@ -360,14 +360,40 @@ impl<I: NodeId> Memberlist<I> {
     T::Options: Send + Unpin,
   {
     let advertise_socket = resolve_one(resolver, advertise).await?;
-    let socket = <R::Net as Net>::UdpSocket::bind(advertise_socket)
-      .await
-      .map_err(Error::Io)?;
-    let bound = socket.local_addr().map_err(Error::Io)?;
-    validate_advertise(bound)?;
-    let listener = <R::Net as Net>::TcpListener::bind(bound)
-      .await
-      .map_err(Error::Io)?;
+    // Bind the TCP listener first to claim an OS-assigned free port, then bind
+    // the gossip UDP socket to that same port. Binding UDP first and reusing its
+    // port for TCP races: an ephemeral UDP port can land on a TCP port still in
+    // TIME_WAIT or otherwise taken in the separate TCP space, failing the TCP
+    // bind with AddrInUse. TCP and UDP port spaces are independent, so a
+    // TCP-claimed port is not reserved against UDP either; for an ephemeral (`:0`)
+    // advertise we retry the pair on a fresh ephemeral port when the UDP bind
+    // collides. A fixed (nonzero) port is a single attempt, so a genuine conflict
+    // surfaces to the caller instead of looping.
+    const EPHEMERAL_BIND_RETRIES: usize = 16;
+    let ephemeral = advertise_socket.port() == 0;
+    let (listener, bound, socket) = {
+      let mut attempt = 0usize;
+      loop {
+        let listener = <R::Net as Net>::TcpListener::bind(advertise_socket)
+          .await
+          .map_err(Error::Io)?;
+        let bound = listener.local_addr().map_err(Error::Io)?;
+        validate_advertise(bound)?;
+        match <R::Net as Net>::UdpSocket::bind(bound).await {
+          Ok(socket) => break (listener, bound, socket),
+          Err(e)
+            if ephemeral
+              && e.kind() == std::io::ErrorKind::AddrInUse
+              && attempt < EPHEMERAL_BIND_RETRIES =>
+          {
+            // Release the claimed TCP port and retry on a fresh ephemeral pair.
+            drop(listener);
+            attempt += 1;
+          }
+          Err(e) => return Err(Error::Io(e)),
+        }
+      }
+    };
 
     let (ml_opts, drv_opts, alive, merge) = options.into_parts();
     // Reject a zero graceful-close drain timeout before any bridge spawns. The
