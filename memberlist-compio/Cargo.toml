@@ -30,7 +30,11 @@ dns = ["dep:hickory-proto", "dep:resolv-conf"]
 memberlist-proto = { workspace = true, features = ["std"] }
 hostaddr = { workspace = true, features = ["std", "smol_str"] }
 smol_str = { workspace = true }
-compio = { workspace = true, features = ["net", "runtime", "macros", "time"] }
+# `polling` (epoll/kqueue) is the portable I/O backend. The workspace pins
+# `default-features = false`, which strips compio's default `io-uring`; without a
+# backend feature compio-driver falls back to its stub PAL and panics at runtime
+# on Linux (macOS compiles its kqueue path unconditionally, so it is unaffected).
+compio = { workspace = true, features = ["net", "runtime", "macros", "time", "polling"] }
 arc-swap = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
