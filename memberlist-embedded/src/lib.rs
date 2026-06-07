@@ -46,6 +46,7 @@ extern crate std;
 compile_error!("memberlist-embedded requires the `std` or `alloc` feature");
 
 pub mod addr;
+mod cidr;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -62,6 +63,10 @@ pub use gossip_io::GossipIo;
 // Admission predicates a caller can install via `Engine::set_alive_delegate` /
 // `set_merge_delegate`.
 pub use memberlist_proto::{AliveDelegate, MergeDelegate};
+// CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
+#[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
 pub use stream_io::{StreamIo, StreamIoError};
 pub use transform::{

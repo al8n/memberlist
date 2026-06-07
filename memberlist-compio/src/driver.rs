@@ -47,7 +47,8 @@ use crate::{
   delegate::Delegate,
   driver_options::{DriverOptions, StreamTransportOptions},
   driver_shared::{
-    ExchangeId, add_obs_payload, dispatch_event_delegate, observation_payload_bytes, yield_once,
+    ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, observation_payload_bytes,
+    yield_once,
   },
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
@@ -293,9 +294,10 @@ pub(crate) struct OutboundFailReady {
 /// - `OutboundOk` → if the exchange's [`BridgeHandle`] is still in the
 ///   driver's table, spawn a per-bridge byte-mover; otherwise drop the
 ///   stream (the exchange was retired while the dial was in flight).
-/// - `OutboundFail` → feed an EOF anchor
-///   (`handle_transport_data(eid, &[], true, now)`) so the coordinator
-///   retires the exchange. A no-op if the exchange is already gone.
+/// - `OutboundFail` → terminalize the exchange as a dial failure
+///   (`handle_dial_failed(eid, now)`); a never-connected dial must FAIL the
+///   exchange — a benign EOF would let a one-way `UserMessage` send falsely
+///   report success. A no-op if the exchange is already gone.
 ///
 /// Inbound connections are NOT routed through this channel; the driver
 /// owns the [`TcpListener`] directly and processes accept results in
@@ -507,6 +509,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // is stamped with this label and inbound gossip must carry a matching label.
   // `None` disables per-cluster labeling, accepting datagrams from any cluster.
   label: Option<Bytes>,
+  // Driver-level CIDR filter: drop gossip datagrams from a blocked source and
+  // reject reliable streams from a blocked peer. `()` without the cidr feature.
+  cidr_policy: crate::transport::runtime::CidrFilter,
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id
@@ -653,6 +658,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             &mut bridges,
             &bridge_ready_tx,
             stream_opts,
+            &cidr_policy,
             &mut shutdown_reply,
             &mut pending,
             driver_opts.leave_timeout(),
@@ -740,8 +746,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       // drained and keeps the two exit paths identical in shape.
       let mut drained_any = false;
       loop {
-        let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
+        let did_actions = drain_actions::<I, A, R>(
+          &mut endpoint,
+          &mut bridges,
+          &bridge_ready_tx,
+          stream_opts,
+          &cidr_policy,
+        );
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
@@ -834,7 +845,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       select_biased! {
         gossip = peek_recv => {
           let BufResult(res, buf) = gossip;
-          if let Ok((n, src)) = res {
+          // CIDR: drop a datagram from a blocked source before any decode.
+          if let Ok((n, src)) = res
+            && !cidr_blocks(&cidr_policy, src.ip())
+          {
             let now = Instant::now();
             dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
             dirty = true;
@@ -862,8 +876,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
 
       loop {
-        let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
+        let did_actions = drain_actions::<I, A, R>(
+          &mut endpoint,
+          &mut bridges,
+          &bridge_ready_tx,
+          stream_opts,
+          &cidr_policy,
+        );
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
@@ -898,8 +917,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     // arm fires.
     if dirty {
       loop {
-        let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
+        let did_actions = drain_actions::<I, A, R>(
+          &mut endpoint,
+          &mut bridges,
+          &bridge_ready_tx,
+          stream_opts,
+          &cidr_policy,
+        );
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
@@ -979,6 +1003,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       gossip = recv_fut => {
         let BufResult(res, buf) = gossip;
         match res {
+          // CIDR: drop a datagram from a blocked source before any decode
+          // (this guard is always false without the cidr feature).
+          Ok((_n, src)) if cidr_blocks(&cidr_policy, src.ip()) => {}
           Ok((n, src)) => {
             let now = Instant::now();
             dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
@@ -1016,6 +1043,11 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
       accepted = accept_fut => {
         match accepted {
+          // CIDR: reject a reliable connection from a blocked peer at the
+          // boundary (this guard is always false without the cidr feature).
+          Ok((stream, peer)) if cidr_blocks(&cidr_policy, peer.ip()) => {
+            drop(stream);
+          }
           Ok((stream, peer)) => {
             // Inbound TCP/TLS connection from a peer. Allocate the
             // exchange id, create the bridge channels, spawn the byte
@@ -1062,6 +1094,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
               &mut bridges,
               &bridge_ready_tx,
               stream_opts,
+              &cidr_policy,
               &mut shutdown_reply,
               &mut pending,
               driver_opts.leave_timeout(),
@@ -1135,8 +1168,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     // at the moment the result lands), and Shutdown / Close just signal
     // the per-bridge channel.
     loop {
-      let did_actions =
-        drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
+      let did_actions = drain_actions::<I, A, R>(
+        &mut endpoint,
+        &mut bridges,
+        &bridge_ready_tx,
+        stream_opts,
+        &cidr_policy,
+      );
       let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
       let did_transmits =
         drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
@@ -1296,6 +1334,7 @@ async fn dispatch_command<I, A, R>(
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
+  cidr_policy: &crate::transport::runtime::CidrFilter,
   shutdown_reply: &mut Option<futures_channel::oneshot::Sender<Result<()>>>,
   pending: &mut PendingCommands,
   leave_timeout: core::time::Duration,
@@ -1363,7 +1402,14 @@ async fn dispatch_command<I, A, R>(
             // `start_push_pull` enqueues another. No capture: the
             // Dispatch arm tracks no per-exchange waiter state.
             while let Some(action) = endpoint.poll_action() {
-              process_one_action(action, bridges, bridge_ready_tx, stream_opts, None);
+              process_one_action(
+                action,
+                bridges,
+                bridge_ready_tx,
+                stream_opts,
+                None,
+                cidr_policy,
+              );
             }
             count += 1;
           }
@@ -1402,6 +1448,7 @@ async fn dispatch_command<I, A, R>(
                 bridge_ready_tx,
                 stream_opts,
                 Some((&started, &mut exchange_ids)),
+                cidr_policy,
               );
             }
           }
@@ -1642,13 +1689,18 @@ async fn dispatch_command<I, A, R>(
     Command::SendUser(cmd) => {
       // Gate on a running node: after `leave()` the gossip socket is
       // effectively closed to protocol traffic; reject immediately.
-      let res: Result<()> = if endpoint.is_running() {
+      let res: Result<()> = if !endpoint.is_running() {
+        Err(MemberlistError::NotRunning)
+      } else if cidr_blocks(cidr_policy, cmd.to().ip()) {
+        // Our own policy excludes the destination: do not emit an unreliable user
+        // datagram to a blocked peer (the reliable plane's outbound dial is gated
+        // at the Connect handler; this is the unreliable counterpart).
+        Err(MemberlistError::SendFailed)
+      } else {
         // Convert `SocketAddr` to `A` via the `A: From<SocketAddr>` bound.
         endpoint
           .send_user_packets(A::from(*cmd.to()), cmd.payloads())
           .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
-      } else {
-        Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
       let _ = cmd.reply.send(res);
@@ -1690,6 +1742,7 @@ async fn dispatch_command<I, A, R>(
             bridge_ready_tx,
             stream_opts,
             Some((&started, &mut exchange_ids)),
+            cidr_policy,
           );
         }
       }
@@ -1936,11 +1989,29 @@ fn process_one_action(
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
   capture: Option<(&HashSet<StreamId>, &mut HashSet<ExchangeId>)>,
+  cidr_policy: &crate::transport::runtime::CidrFilter,
 ) {
   match action {
     StreamAction::Connect(info) => {
       let eid = info.id();
       let peer = info.peer();
+      // Reject an outbound dial to a CIDR-blocked peer at the transport boundary:
+      // report a dial failure (no connect, no bridge recorded) so the exchange
+      // terminalizes without ever feeding the blocked peer's bytes to the machine,
+      // matching the inbound accept guard and the QUIC source filter.
+      if cidr_blocks(cidr_policy, peer.ip()) {
+        // Ignoring Err: `bridge_ready` is unbounded so the send never blocks, and
+        // a dropped failure (all receivers gone = driver exiting) is moot.
+        let _ = bridge_ready_tx.send(BridgeReady::OutboundFail(OutboundFailReady {
+          eid,
+          err: io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "peer blocked by CIDR policy",
+          ),
+          received_at: Instant::now(),
+        }));
+        return;
+      }
       if let Some((started, pending_exchanges)) = capture
         && started.contains(&info.stream_id())
       {
@@ -2053,6 +2124,7 @@ fn drain_actions<I, A, R>(
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
+  cidr_policy: &crate::transport::runtime::CidrFilter,
 ) -> bool
 where
   I: memberlist_proto::Id
@@ -2077,7 +2149,14 @@ where
   let mut progress = false;
   while let Some(action) = endpoint.poll_action() {
     progress = true;
-    process_one_action(action, bridges, bridge_ready_tx, stream_opts, None);
+    process_one_action(
+      action,
+      bridges,
+      bridge_ready_tx,
+      stream_opts,
+      None,
+      cidr_policy,
+    );
   }
   progress
 }
@@ -2983,6 +3062,7 @@ mod tests {
         &ready_tx,
         StreamTransportOptions::default(),
         Some((&started, &mut captured)),
+        &Default::default(),
       );
     }
 
@@ -3012,6 +3092,7 @@ mod tests {
         &ready_tx,
         StreamTransportOptions::default(),
         Some((&empty_started, &mut captured2)),
+        &Default::default(),
       );
     }
     assert!(
@@ -3115,6 +3196,7 @@ mod tests {
         &mut bridges,
         &ready_tx,
         StreamTransportOptions::default(),
+        &Default::default(),
       ),
       "an idle endpoint queues no actions",
     );

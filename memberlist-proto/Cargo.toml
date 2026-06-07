@@ -38,6 +38,7 @@ std = [
   "lz4_flex?/std",
   "brotli?/std",
   "crc32fast?/std",
+  "ipnet?/std",
 ]
 alloc = ["cheap-clone/alloc", "varing/alloc"]
 tracing = ["dep:tracing"]
@@ -119,9 +120,10 @@ tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]
 tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips"]
 
 # CIDR peer-admission allow-list ([`CidrPolicy`]), usable as an `AliveDelegate`.
-# std-only: the policy holds a `std` HashSet of `ipnet` networks and filters
-# inbound alives by the peer's advertised IP.
-cidr = ["std", "dep:ipnet", "ipnet/std"]
+# no_std+alloc: the policy holds a hashbrown set of `ipnet` networks (`ipnet` is
+# no_std-capable) and filters inbound alives by the peer's advertised IP. The
+# `std` feature additionally pulls `ipnet/std` for its `std::error::Error` impls.
+cidr = ["alloc", "dep:ipnet"]
 
 [dependencies]
 bytes.workspace = true

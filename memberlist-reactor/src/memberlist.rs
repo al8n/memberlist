@@ -147,7 +147,11 @@ impl<I: NodeId> Memberlist<I> {
     let bound = socket.local_addr().map_err(Error::Io)?;
     validate_advertise(bound)?;
 
-    let (ml_opts, drv_opts, alive, merge) = options.into_parts();
+    let (ml_opts, drv_opts, alive, merge, cidr_policy) = options.into_parts();
+    // Fold the CIDR policy into the alive delegate so one policy gates both the
+    // transport boundary (the driver's recv source guard below) and membership
+    // admission (the peer's self-advertised address).
+    let alive = crate::cidr::compose_alive(&cidr_policy, alive);
     // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet
     // before the endpoint is built: a near-MTU gossip packet above the ceiling
     // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
@@ -226,6 +230,7 @@ impl<I: NodeId> Memberlist<I> {
       obs_payload_bytes,
       obs_payload_budget,
       label,
+      cidr_policy,
     );
     R::spawn_detach(driver);
 
@@ -395,7 +400,11 @@ impl<I: NodeId> Memberlist<I> {
       }
     };
 
-    let (ml_opts, drv_opts, alive, merge) = options.into_parts();
+    let (ml_opts, drv_opts, alive, merge, cidr_policy) = options.into_parts();
+    // Fold the CIDR policy into the alive delegate so one policy gates both the
+    // transport boundary (the driver's recv source + accept peer guards below)
+    // and membership admission (the peer's self-advertised address).
+    let alive = crate::cidr::compose_alive(&cidr_policy, alive);
     // Reject a zero graceful-close drain timeout before any bridge spawns. The
     // stream driver bounds each post-Close drain write with `close_timeout`, so
     // zero fires immediately and a graceful close RSTs its queued push/pull
@@ -494,6 +503,7 @@ impl<I: NodeId> Memberlist<I> {
       accept_join,
       drv_opts.close_timeout(),
       label,
+      cidr_policy,
     );
     R::spawn_detach(driver);
 

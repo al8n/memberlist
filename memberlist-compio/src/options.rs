@@ -1042,6 +1042,8 @@ pub struct Options<T: Transport> {
   driver: DriverOptions,
   alive_delegate: Option<Box<dyn AliveDelegate<T::Id, SocketAddr>>>,
   merge_delegate: Option<Box<dyn MergeDelegate<T::Id, SocketAddr>>>,
+  #[cfg(feature = "cidr")]
+  cidr_policy: Option<memberlist_proto::CidrPolicy>,
 }
 
 impl<T: Transport> Options<T> {
@@ -1055,6 +1057,8 @@ impl<T: Transport> Options<T> {
       driver: DriverOptions::default(),
       alive_delegate: None,
       merge_delegate: None,
+      #[cfg(feature = "cidr")]
+      cidr_policy: None,
     }
   }
 
@@ -1090,6 +1094,27 @@ impl<T: Transport> Options<T> {
   pub fn with_merge_delegate(mut self, d: impl MergeDelegate<T::Id, SocketAddr>) -> Self {
     self.merge_delegate = Some(Box::new(d));
     self
+  }
+
+  /// Builder: install a [`CidrPolicy`](memberlist_proto::CidrPolicy) that gates
+  /// peers by IP. From this one setting the policy is enforced at every
+  /// IP-observable point: inbound gossip datagrams from a blocked source are
+  /// dropped, inbound streams from a blocked peer are rejected, and an alive
+  /// whose advertised address is blocked is ignored (composed with any
+  /// [`with_alive_delegate`](Self::with_alive_delegate)).
+  #[cfg(feature = "cidr")]
+  #[must_use]
+  #[inline]
+  pub fn with_cidr_policy(mut self, policy: memberlist_proto::CidrPolicy) -> Self {
+    self.cidr_policy = Some(policy);
+    self
+  }
+
+  /// Borrow the configured CIDR policy, if any.
+  #[cfg(feature = "cidr")]
+  #[inline]
+  pub(crate) fn cidr_policy(&self) -> Option<&memberlist_proto::CidrPolicy> {
+    self.cidr_policy.as_ref()
   }
 
   /// Borrow the per-backend transport options.

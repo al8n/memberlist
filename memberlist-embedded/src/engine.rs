@@ -32,6 +32,7 @@ use hashbrown::HashMap;
 use crate::{
   GossipIo, InitError, Options, StreamIo, TransformOptions,
   addr::socket_addr_is_routable,
+  cidr::{CidrFilter, cidr_blocks},
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane},
 };
@@ -162,6 +163,12 @@ where
   /// label (or no label). `None` disables labeling, which is the default
   /// behaviour for an unlabelled cluster.
   label: Option<bytes::Bytes>,
+  /// CIDR transport filter: a gossip datagram from a blocked source IP (recv) or
+  /// a reliable connection from a blocked peer IP (accept) is dropped before the
+  /// machine sees it. `()` when the `cidr` feature is off. The same policy also
+  /// gates membership admission via the routable-address alive filter, which the
+  /// constructor installs with this policy as its inner predicate.
+  cidr_policy: CidrFilter,
 }
 
 impl<I, C> Engine<I, C>
@@ -323,12 +330,27 @@ where
     // come from `transform`; with a default `TransformOptions` they are disabled,
     // reproducing the plain no-label endpoint.
     let mut ep = Endpoint::try_new_at(ep_cfg, now).map_err(InitError::Endpoint)?;
+    // The CIDR policy gates the alive delegate (composed just below) and the
+    // transport-boundary recv/accept guards (stored on the engine). Cloned out of
+    // `cfg` because `cfg` is moved into the engine below.
+    #[cfg(feature = "cidr")]
+    let cidr_policy: CidrFilter = cfg.cidr_policy.clone();
+    #[cfg(not(feature = "cidr"))]
+    let cidr_policy: CidrFilter = ();
     // Install the routable-address admission filter on the raw `Endpoint` BEFORE
     // it is moved into the `StreamEndpoint`. The machine consults it inline for
     // every inbound Alive (gossip AND join push/pull), so a peer advertising a
     // non-routable address is dropped at admission — never stored, never
     // re-gossiped — preventing cluster-wide propagation of an address no node
-    // could send a useful packet to.
+    // could send a useful packet to. When a CIDR policy is set, the routable
+    // filter wraps it (routable AND in-policy), so one policy also gates
+    // membership admission by the peer's self-advertised address.
+    #[cfg(feature = "cidr")]
+    match cidr_policy.clone() {
+      Some(policy) => ep.set_alive_delegate(RoutableAnd(policy)),
+      None => ep.set_alive_delegate(RoutableAddrFilter),
+    }
+    #[cfg(not(feature = "cidr"))]
     ep.set_alive_delegate(RoutableAddrFilter);
     // Build the reliable-plane label options from the single validated source.
     // The label is already validated at the TransformOptions setter; `new_in`
@@ -367,6 +389,7 @@ where
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
       label,
+      cidr_policy,
     })
   }
 
@@ -749,6 +772,14 @@ where
     to: SocketAddr,
     payload: bytes::Bytes,
   ) -> Result<(), memberlist_proto::Error> {
+    if cidr_blocks(&self.cidr_policy, to.ip()) {
+      // Our own policy excludes the destination: drop the directed unreliable
+      // packet before enqueueing rather than emit it to a blocked peer (the
+      // reliable plane's dial is rejected in `dial`; this is the unreliable
+      // counterpart, with the `drain_gossip_transmits` egress drop as last line).
+      // Best-effort UDP, so a clean drop matches the delivery contract.
+      return Ok(());
+    }
     self.endpoint.send_user_packet(to, payload)
   }
 
@@ -766,6 +797,11 @@ where
     to: SocketAddr,
     payloads: &[bytes::Bytes],
   ) -> Result<(), memberlist_proto::Error> {
+    if cidr_blocks(&self.cidr_policy, to.ip()) {
+      // See `send`: drop a directed unreliable batch to a CIDR-blocked
+      // destination before enqueueing (best-effort UDP).
+      return Ok(());
+    }
     self.endpoint.send_user_packets(to, payloads)
   }
 
@@ -953,11 +989,31 @@ where
   /// [`start`](Self::start) so no peer is admitted before the policy applies.
   ///
   /// The caller's delegate can only further restrict admission: the built-in
-  /// routable filter always runs first (see `RoutableAnd`).
+  /// routable filter always runs first (see `RoutableAnd`), and — when a CIDR
+  /// policy was set via [`Options::with_cidr_policy`](crate::Options::with_cidr_policy)
+  /// — that policy is folded in too, so installing a delegate here never drops the
+  /// configured CIDR admission. A peer must pass routable AND the policy AND the
+  /// caller's delegate.
   ///
   /// Installing after `leave()` is inert: the machine admits no inbound Alive
   /// once leaving, so the delegate is never consulted again.
   pub fn set_alive_delegate(&mut self, delegate: impl AliveDelegate<I, SocketAddr>) {
+    // Re-fold the stored CIDR policy so a caller's delegate composes with it
+    // (routable AND in-policy AND delegate) rather than replacing it. The
+    // transport-boundary recv/accept guards read `self.cidr_policy` directly and
+    // are unaffected either way; this keeps the membership-admission half in sync.
+    #[cfg(feature = "cidr")]
+    match self.cidr_policy.clone() {
+      Some(policy) => {
+        self
+          .endpoint
+          .set_alive_delegate(RoutableAnd(memberlist_proto::CidrAnd::new(
+            policy, delegate,
+          )))
+      }
+      None => self.endpoint.set_alive_delegate(RoutableAnd(delegate)),
+    }
+    #[cfg(not(feature = "cidr"))]
     self.endpoint.set_alive_delegate(RoutableAnd(delegate));
   }
 
@@ -1069,12 +1125,18 @@ where
       // so both can be borrowed across the drain loop at once.
       let buf = self.gossip_recv.as_mut_slice();
       let endpoint = &mut self.endpoint;
+      let cidr_policy = &self.cidr_policy;
       // The driver's datagram I/O pops one datagram per `recv` call and returns
       // `None` once the rx ring is empty (an over-budget datagram larger than this
       // buffer is consumed and skipped by the driver, so one oversized datagram
       // cannot stall the in-budget datagrams queued behind it).
       while let Some((src, n)) = gossip.recv(buf) {
-        endpoint.handle_gossip(src, &buf[..n], now);
+        // Drop a gossip datagram from a CIDR-blocked source before the machine
+        // sees it (the transport-source filter; the advertised-address filter is
+        // the composed routable-address alive delegate).
+        if !cidr_blocks(cidr_policy, src.ip()) {
+          endpoint.handle_gossip(src, &buf[..n], now);
+        }
       }
     }
 
@@ -1334,6 +1396,19 @@ where
       return;
     };
 
+    // Reject a reliable connection from a CIDR-blocked peer at the transport
+    // boundary: abort the connected listener socket and return it to the pool
+    // WITHOUT registering the exchange, then re-arm a fresh listener — the same
+    // abort-and-reclaim shape the `dial` reject path uses. (The advertised-address
+    // filter is the composed routable-address alive delegate.)
+    if cidr_blocks(&self.cidr_policy, peer.ip()) {
+      stream.abort(c);
+      self.plane.pool.give(c);
+      self.plane.listener = None;
+      self.ensure_listener(stream);
+      return;
+    }
+
     // Register the inbound exchange with the machine; it returns the ExchangeId the
     // driver uses to route subsequent inbound bytes. The listener socket already
     // completed its handshake, so the Connection starts Established.
@@ -1412,6 +1487,21 @@ where
     now: Instant,
     stream: &mut S,
   ) {
+    // Reject an outbound dial to a CIDR-blocked peer before `connect`: a blocked
+    // peer forms no reliable connection in either direction (the accept guard
+    // drops its passive opens; this drops our active dials, so a join toward a
+    // blocked seed fails rather than completing the push/pull). Reclaim the
+    // freshly-assigned socket and terminalize via `handle_dial_failed`: a
+    // never-connected dial must FAIL the exchange, not feed a benign EOF that a
+    // one-way user-message send would read as success.
+    if cidr_blocks(&self.cidr_policy, peer.ip()) {
+      stream.abort(c);
+      self.plane.pool.give(c);
+      self.plane.connections.remove(&eid);
+      self.endpoint.handle_dial_failed(eid, now);
+      return;
+    }
+
     // Screen a non-routable peer BEFORE `connect`. A non-routable peer can never be
     // a useful TCP destination: the link layer's `connect` rejects the unspecified
     // address and port 0 with `Unaddressable`, and a multicast/broadcast remote
@@ -1419,12 +1509,12 @@ where
     // `is_unicast` predicate so no doomed connect is started, and reclaim cleanly
     // exactly as the connect-rejection path does: the freshly-assigned socket is
     // still Closed, so `abort()` is a no-op that returns it reusable (never leaked),
-    // and latch the best-effort EOF so the bridge tears down by its own deadline.
+    // and terminalize the exchange as a dial failure.
     if !socket_addr_is_routable(&peer) {
       stream.abort(c);
       self.plane.pool.give(c);
       self.plane.connections.remove(&eid);
-      self.endpoint.handle_transport_data(eid, &[], true, now);
+      self.endpoint.handle_dial_failed(eid, now);
       return;
     }
 
@@ -1435,11 +1525,12 @@ where
     let local_port = 49152u16 + (eid.get() as u16 % 16384);
     if stream.connect(c, peer, local_port).is_err() {
       // The connect was rejected before any SYN: abort, reclaim the socket, drop the
-      // Connection (with all its parked state), and latch a best-effort EOF.
+      // Connection (with all its parked state), and terminalize the exchange as a
+      // dial failure.
       stream.abort(c);
       self.plane.pool.give(c);
       self.plane.connections.remove(&eid);
-      self.endpoint.handle_transport_data(eid, &[], true, now);
+      self.endpoint.handle_dial_failed(eid, now);
     }
   }
 
@@ -2230,6 +2321,14 @@ where
       if !socket_addr_is_routable(&dest) {
         continue;
       }
+      // Last-line CIDR egress drop: never emit a gossip or directed-user datagram to a
+      // destination our own policy excludes — the transmit-side counterpart to the recv
+      // source filter. The `send` / `send_many` paths already drop a blocked destination
+      // before enqueueing; this is the defense-in-depth catch for any other transmit
+      // (and a no-op without the `cidr` feature).
+      if cidr_blocks(&self.cidr_policy, dest.ip()) {
+        continue;
+      }
       // Best-effort enqueue: a full or errored gossip tx ring drops this datagram and SWIM
       // recovers on the next gossip round.
       gossip.send(&on_wire, dest);
@@ -2499,6 +2598,201 @@ mod tests {
     assert!(
       engine.is_alive(&SmolStr::new("allowed")),
       "a peer that passes both the routable filter and the custom delegate is admitted"
+    );
+  }
+
+  /// A CIDR policy set via `Options::with_cidr_policy` gates membership admission
+  /// by the peer's self-advertised address: a routable peer outside the allow-list
+  /// is rejected, while one inside is admitted. (The transport-boundary recv/accept
+  /// guards share the same `cidr_blocks` predicate and are exercised end-to-end by
+  /// the std drivers' integration tests; this pins the membership half on the
+  /// shared no_std core that smoltcp and embassy both drive.)
+  #[cfg(feature = "cidr")]
+  #[test]
+  fn cidr_policy_gates_membership_admission_by_advertised_address() {
+    use memberlist_proto::CidrPolicy;
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let mut engine: Engine<SmolStr, u32> =
+      Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    engine.start(now);
+
+    // Routable but outside 10.0.0.0/8 — rejected by the policy.
+    let outside = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+    engine.inject_alive(SmolStr::new("outside"), outside, now);
+    assert!(
+      !engine.is_alive(&SmolStr::new("outside")),
+      "a routable peer outside the CIDR allow-list must not be admitted"
+    );
+
+    // Inside 10.0.0.0/8 — admitted (non-vacuity: the policy gates by IP, not all).
+    let inside = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7002);
+    engine.inject_alive(SmolStr::new("inside"), inside, now);
+    assert!(
+      engine.is_alive(&SmolStr::new("inside")),
+      "a peer inside the CIDR allow-list is admitted"
+    );
+  }
+
+  /// Installing a caller alive delegate after a CIDR policy was set does NOT drop
+  /// the policy: `set_alive_delegate` re-folds the stored policy, so admission
+  /// stays routable AND in-policy AND delegate. Without the re-fold an accept-all
+  /// delegate would re-admit an out-of-policy peer — this is the regression guard
+  /// for that composition.
+  #[cfg(feature = "cidr")]
+  #[test]
+  fn set_alive_delegate_preserves_the_cidr_policy() {
+    use memberlist_proto::CidrPolicy;
+
+    struct AcceptAll;
+    impl AliveDelegate<SmolStr, SocketAddr> for AcceptAll {
+      fn notify_alive(&self, _: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+        true
+      }
+    }
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let mut engine: Engine<SmolStr, u32> =
+      Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    // An accept-all delegate installed AFTER the policy must not loosen it.
+    engine.set_alive_delegate(AcceptAll);
+    engine.start(now);
+
+    let outside = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+    engine.inject_alive(SmolStr::new("outside"), outside, now);
+    assert!(
+      !engine.is_alive(&SmolStr::new("outside")),
+      "the CIDR policy must survive a later set_alive_delegate (accept-all must not re-admit an \
+       out-of-policy peer)"
+    );
+
+    // Non-vacuity: an in-policy peer the accept-all delegate also accepts is admitted.
+    let inside = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7002);
+    engine.inject_alive(SmolStr::new("inside"), inside, now);
+    assert!(
+      engine.is_alive(&SmolStr::new("inside")),
+      "an in-policy peer is still admitted with the accept-all delegate"
+    );
+  }
+
+  /// A reliable user-message (`send_reliable`) to a CIDR-blocked peer terminalizes
+  /// as `Failed`, NOT a benign success. The outbound dial is rejected before
+  /// connect via `handle_dial_failed`: a clean EOF on a never-connected one-way
+  /// `UserMessage` would otherwise complete the exchange as `Succeeded`, falsely
+  /// reporting the send delivered when the bytes were dropped with the reclaimed
+  /// connection.
+  #[cfg(feature = "cidr")]
+  #[test]
+  fn cidr_blocked_send_reliable_fails_not_succeeds() {
+    use memberlist_proto::{
+      CidrPolicy,
+      event::{Event, ExchangeKind, ExchangeOutcome},
+    };
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let mut engine: Engine<SmolStr, u32> =
+      Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+
+    // Seed a reliable slot for the dial plus a listener slot, so the Connect drives
+    // a real dial this tick rather than deferring to PendingDial.
+    engine.set_listener(1);
+    engine.plane_mut().pool.push(0);
+    engine.start(now);
+
+    // A one-way reliable user-message to a routable-but-out-of-policy peer; the
+    // CIDR screen (which precedes the routable screen) rejects the dial.
+    let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+    engine
+      .send_reliable(blocked, bytes::Bytes::from_static(b"blocked-bytes"), now)
+      .expect("send_reliable queues the exchange");
+
+    // Pump until the exchange terminalizes: Connect -> dial(blocked) -> reject.
+    let mut gossip = NoGossip;
+    let mut stream = NoStream::with_pool(0);
+    let mut outcome = None;
+    for _ in 0..4 {
+      engine.pump(now, &mut gossip, &mut stream);
+      while let Some(ev) = engine.poll_event() {
+        if let Event::ExchangeCompleted(ec) = ev {
+          if ec.kind() == ExchangeKind::UserMessage {
+            outcome = Some(ec.outcome());
+          }
+        }
+      }
+      if outcome.is_some() {
+        break;
+      }
+    }
+    assert_eq!(
+      outcome,
+      Some(ExchangeOutcome::Failed),
+      "a CIDR-blocked send_reliable must complete as Failed (a benign EOF would falsely succeed it)"
+    );
+  }
+
+  /// A directed unreliable `send` to a CIDR-blocked destination emits NO gossip
+  /// datagram — the outbound counterpart to the recv source filter. An in-policy
+  /// destination still emits, proving the drop is the policy and not a vacuous
+  /// no-send.
+  #[cfg(feature = "cidr")]
+  #[test]
+  fn cidr_blocked_unreliable_send_emits_no_datagram() {
+    use memberlist_proto::CidrPolicy;
+
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42);
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let mut engine: Engine<SmolStr, u32> =
+      Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    engine.start(now);
+    let mut stream = NoStream::with_pool(0);
+
+    // A routable-but-out-of-policy destination: the send is dropped before
+    // enqueueing, so the gossip drain emits nothing.
+    let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+    engine
+      .send(blocked, bytes::Bytes::from_static(b"blocked"))
+      .expect("best-effort send returns Ok");
+    let mut gossip = CaptureGossip::new();
+    engine.pump(now, &mut gossip, &mut stream);
+    assert!(
+      gossip.sent.is_empty(),
+      "no datagram may be emitted to a CIDR-blocked destination, saw {}",
+      gossip.sent.len()
+    );
+
+    // Non-vacuity: an in-policy destination DOES emit the directed datagram.
+    let allowed = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7002);
+    engine
+      .send(allowed, bytes::Bytes::from_static(b"allowed"))
+      .expect("send");
+    let mut gossip2 = CaptureGossip::new();
+    engine.pump(now, &mut gossip2, &mut stream);
+    assert!(
+      !gossip2.sent.is_empty(),
+      "an in-policy directed send must emit a datagram (the block is by IP, not unconditional)"
     );
   }
 

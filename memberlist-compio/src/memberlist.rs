@@ -194,6 +194,8 @@ where
     RES: Resolver<Address = T::Address>,
     AR: AdvertiseAddrResolver,
   {
+    #[cfg(feature = "cidr")]
+    let cidr_policy = options.cidr_policy().cloned();
     let (transport_opts, memberlist_opts, driver_opts, alive_delegate, merge_delegate) =
       options.into_parts();
     // Fail fast on an impossible `gossip_mtu` BEFORE binding any socket: a
@@ -349,6 +351,20 @@ where
     let observation_dropped = Arc::new(AtomicU64::new(0));
     let cached_join_deadline = driver_opts.join_deadline();
 
+    // A CIDR policy gates the advertised address as an AliveDelegate (composed
+    // with any user-supplied one), and the SAME policy filters the gossip source
+    // and stream peer inside the driver loop. Compose the membership delegate
+    // here; the raw policy rides the runtime to the loop as `cidr_policy`.
+    #[cfg(feature = "cidr")]
+    let alive_delegate: Option<Box<dyn crate::delegate::AliveDelegate<T::Id, SocketAddr>>> =
+      match (cidr_policy.clone(), alive_delegate) {
+        (Some(policy), Some(user)) => Some(Box::new(memberlist_proto::CidrAnd::new(policy, user))),
+        (Some(policy), None) => Some(Box::new(policy)),
+        (None, user) => user,
+      };
+    #[cfg(not(feature = "cidr"))]
+    let cidr_policy = crate::transport::runtime::CidrFilter;
+
     let runtime = TransportRuntime::new(
       delegate,
       commands_rx,
@@ -361,6 +377,7 @@ where
       memberlist_opts,
       alive_delegate,
       merge_delegate,
+      cidr_policy,
     );
 
     let driver_handle = compio::runtime::spawn(transport.run(runtime));

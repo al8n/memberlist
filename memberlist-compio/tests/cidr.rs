@@ -39,6 +39,26 @@ async fn make_tcp(id: &str, policy: Option<CidrPolicy>) -> TcpMemberlist<SmolStr
   .expect("construct tcp memberlist")
 }
 
+/// Build a `TcpMemberlist` with a driver-level [`with_cidr_policy`] — the policy
+/// filters the gossip source and stream peer at the transport boundary AND the
+/// advertised address at membership admission, all from this one setting.
+async fn make_tcp_cidr(id: &str, policy: CidrPolicy) -> TcpMemberlist<SmolStr, SocketAddr> {
+  let opts = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
+  )
+  .with_cidr_policy(policy);
+  TcpMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
+}
+
 async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) -> bool {
   let start = std::time::Instant::now();
   while start.elapsed() < deadline {
@@ -158,3 +178,100 @@ async fn cidr_policy_on_joiner_blocks_seed_from_membership() {
   seed.shutdown().await.expect("seed shutdown");
   joiner.shutdown().await.expect("joiner shutdown");
 }
+
+/// `with_cidr_policy` filters the RELIABLE layer: a blocked peer's stream is
+/// rejected at `accept`, so its reliable join EXCHANGE fails outright — unlike
+/// the membership-only `with_alive_delegate` path, where the exchange completes
+/// and only the alive is ignored.
+#[compio::test]
+async fn cidr_policy_rejects_blocked_reliable_peer() {
+  // A admits only 10.0.0.0/8; the loopback peer is blocked at the transport.
+  let policy = CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr");
+  let a = make_tcp_cidr("cidr-tp-a", policy).await;
+  let b = make_tcp("cidr-tp-b", None).await;
+  let a_addr = a.advertise_address();
+
+  // B's reliable join is rejected at A's accept (B's loopback peer IP is out of
+  // policy), so the push/pull exchange never happens and the join fails.
+  let res = b
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await;
+  assert!(
+    res.is_err(),
+    "a blocked reliable peer's join must fail at the boundary, got {res:?}"
+  );
+
+  // Neither node learns the other: A rejected the connection, B's exchange errored.
+  assert_eq!(a.member_count(), 1, "A must not admit the blocked peer");
+  assert_eq!(
+    b.member_count(),
+    1,
+    "B's rejected join leaves it with only itself"
+  );
+
+  a.shutdown().await.expect("a shutdown");
+  b.shutdown().await.expect("b shutdown");
+}
+
+/// `with_cidr_policy` filters OUTBOUND dials too: a joiner whose OWN policy
+/// excludes the seed has its reliable dial rejected at the transport boundary, so
+/// the push/pull never happens and the join FAILS. This is the discriminator
+/// against the membership-only `with_alive_delegate` path
+/// ([`cidr_policy_on_joiner_blocks_seed_from_membership`]), where the SAME joiner
+/// excludes the SAME seed yet the exchange completes (`Ok(1)`) and only the seed's
+/// Alive is dropped.
+#[compio::test]
+async fn cidr_policy_blocks_joiner_outbound_dial() {
+  // The joiner admits only 10.0.0.0/8; its loopback seed is out of policy.
+  let policy = CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr");
+  let seed = make_tcp("cidr-dial-seed", None).await;
+  let joiner = make_tcp_cidr("cidr-dial-joiner", policy).await;
+  let seed_addr = seed.advertise_address();
+
+  // The joiner's own policy excludes the loopback seed, so its outbound reliable
+  // dial is rejected before connecting — the push/pull never happens and the join
+  // fails outright (vs. merely dropping membership admission).
+  let res = joiner
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .await;
+  assert!(
+    res.is_err(),
+    "an outbound dial to a CIDR-blocked seed must fail at the boundary, got {res:?}"
+  );
+
+  // Neither node learns the other: the joiner refused to dial, the seed was never
+  // contacted.
+  assert_eq!(joiner.member_count(), 1, "the joiner has only itself");
+  assert_eq!(seed.member_count(), 1, "the seed was never contacted");
+
+  seed.shutdown().await.expect("seed shutdown");
+  joiner.shutdown().await.expect("joiner shutdown");
+}
+
+/// `with_cidr_policy` gates the OUTBOUND unreliable plane too: a directed `send`
+/// to a peer the node's OWN policy excludes fails at the boundary without
+/// emitting a datagram (the reliable dial is gated at the Connect handler; this
+/// is the unreliable counterpart).
+#[compio::test]
+async fn cidr_policy_blocks_outbound_unreliable_send() {
+  // The node admits only 10.0.0.0/8, so any loopback peer is out of policy.
+  let policy = CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr");
+  let a = make_tcp_cidr("cidr-send-a", policy).await;
+
+  let res = a
+    .send(loopback_addr(9999), bytes::Bytes::from_static(b"blocked"))
+    .await;
+  assert!(
+    res.is_err(),
+    "an unreliable send to a CIDR-blocked peer must fail, got {res:?}"
+  );
+
+  a.shutdown().await.expect("a shutdown");
+}
+
+// NOTE: the datagram-layer (gossip source) filter applies the SAME
+// `cidr_blocks` predicate as the reliable-layer accept filter above — at the
+// `recv_from` site instead of the `accept` site. The reliable-peer test pins
+// that predicate's boundary behavior; a dedicated gossip-injection test is
+// awkward here because the loopback-blocking policy prevents the control node
+// from forming a cluster to process injected gossip.

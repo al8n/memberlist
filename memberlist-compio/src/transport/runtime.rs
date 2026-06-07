@@ -36,6 +36,19 @@ use crate::{
 // `Node<I, SocketAddr>` without an extra generic on `TransportRuntime`.
 type CommandReceiver<T> = Receiver<Command<<T as Transport>::Id>>;
 
+/// The driver-level CIDR source/peer filter threaded into the driver loop and
+/// stored on the runtime: `Option<CidrPolicy>` with the `cidr` feature.
+#[cfg(feature = "cidr")]
+pub(crate) type CidrFilter = Option<memberlist_proto::CidrPolicy>;
+/// Without the `cidr` feature the carrier is a distinct zero-sized type rather
+/// than `()`, so the runtime field and the loop parameter exist unconditionally
+/// (no cfg on the signatures) AND threading it as a driver-loop argument does not
+/// trip `clippy::unit_arg` — which fires on a unit-typed argument expression
+/// (e.g. a struct-field access) but not on this struct.
+#[cfg(not(feature = "cidr"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CidrFilter;
+
 /// Bundle handed to `Transport::run(self, runtime)`. Carries the delegate,
 /// command receiver, events sender, snapshot, and driver / SWIM tuning
 /// knobs. The machine endpoint is built inside `T::run` (it needs the
@@ -65,6 +78,8 @@ where
   /// Optional machine merge-admission predicate; `T::run` installs it into
   /// the `Endpoint`. `None` accepts every join merge.
   pub(crate) merge_delegate: Option<Box<dyn MergeDelegate<T::Id, SocketAddr>>>,
+  /// Driver-level CIDR source/peer filter (`()` when the `cidr` feature is off).
+  pub(crate) cidr_policy: CidrFilter,
 }
 
 impl<T, D> TransportRuntime<T, D>
@@ -87,6 +102,7 @@ where
     memberlist_options: MemberlistOptions,
     alive_delegate: Option<Box<dyn AliveDelegate<T::Id, SocketAddr>>>,
     merge_delegate: Option<Box<dyn MergeDelegate<T::Id, SocketAddr>>>,
+    cidr_policy: CidrFilter,
   ) -> Self {
     Self {
       delegate,
@@ -100,6 +116,7 @@ where
       memberlist_options,
       alive_delegate,
       merge_delegate,
+      cidr_policy,
     }
   }
 }

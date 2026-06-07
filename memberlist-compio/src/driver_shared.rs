@@ -124,6 +124,24 @@ pub(crate) fn add_obs_payload(counter: &AtomicU64, bytes: Option<u64>) {
   }
 }
 
+/// CIDR transport filter shared by the stream and QUIC driver loops: whether the
+/// policy blocks `ip` (always `false` without the `cidr` feature). Applied at recv
+/// (the gossip / QUIC datagram source) and at accept (the reliable stream peer).
+#[cfg(feature = "cidr")]
+pub(crate) fn cidr_blocks(
+  filter: &crate::transport::runtime::CidrFilter,
+  ip: std::net::IpAddr,
+) -> bool {
+  filter.as_ref().is_some_and(|p| p.is_blocked(&ip))
+}
+#[cfg(not(feature = "cidr"))]
+pub(crate) fn cidr_blocks(
+  _filter: &crate::transport::runtime::CidrFilter,
+  _ip: std::net::IpAddr,
+) -> bool {
+  false
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

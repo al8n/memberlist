@@ -96,3 +96,7 @@ required-features = ["tokio", "tcp"]
 [[test]]
 name = "cidr"
 required-features = ["tcp", "cidr"]
+
+[[test]]
+name = "cidr_quic"
+required-features = ["quic-rustls-ring", "cidr"]

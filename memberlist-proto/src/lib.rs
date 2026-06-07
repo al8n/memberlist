@@ -187,7 +187,7 @@ pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
 pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
 #[cfg(feature = "cidr")]
-pub use cidr::CidrPolicy;
+pub use cidr::{CidrAnd, CidrPolicy};
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};

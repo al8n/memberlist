@@ -9,6 +9,8 @@ use memberlist_proto::{
   label::validate_label, typed::Meta,
 };
 
+use crate::cidr::CidrFilter;
+
 /// SWIM-protocol-level overrides applied to the machine-layer
 /// [`EndpointOptions`](memberlist_proto::EndpointOptions) at construction.
 ///
@@ -426,6 +428,9 @@ pub struct Options<I> {
   driver: DriverOptions,
   alive_delegate: Option<Box<dyn AliveDelegate<I, SocketAddr>>>,
   merge_delegate: Option<Box<dyn MergeDelegate<I, SocketAddr>>>,
+  /// CIDR peer-admission policy. `()` when the `cidr` feature is off; otherwise
+  /// an optional [`CidrPolicy`](memberlist_proto::CidrPolicy), default `None`.
+  cidr_policy: CidrFilter,
 }
 
 impl<I> Default for Options<I> {
@@ -435,6 +440,7 @@ impl<I> Default for Options<I> {
       driver: DriverOptions::default(),
       alive_delegate: None,
       merge_delegate: None,
+      cidr_policy: Default::default(),
     }
   }
 }
@@ -474,6 +480,20 @@ impl<I> Options<I> {
     self
   }
 
+  /// Installs a CIDR peer-admission policy. One policy filters inbound gossip by
+  /// datagram source and inbound reliable connections by peer address at the
+  /// transport boundary, AND inbound alives by the peer's self-advertised address
+  /// at membership admission — set once, enforced on both the unreliable and
+  /// reliable planes. Composes with [`with_alive_delegate`](Self::with_alive_delegate):
+  /// a peer must pass both the policy and the user delegate.
+  #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+  #[must_use]
+  pub fn with_cidr_policy(mut self, policy: memberlist_proto::CidrPolicy) -> Self {
+    self.cidr_policy = Some(policy);
+    self
+  }
+
   /// The SWIM-level options.
   #[must_use]
   pub const fn memberlist(&self) -> &MemberlistOptions {
@@ -487,7 +507,8 @@ impl<I> Options<I> {
   }
 
   /// Decomposes the options into their parts for the backend constructor: the
-  /// SWIM options, the driver options, and the optional admission delegates.
+  /// SWIM options, the driver options, the optional admission delegates, and the
+  /// CIDR policy carrier (`()` when the `cidr` feature is off).
   #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
   #[allow(clippy::type_complexity)]
   pub(crate) fn into_parts(
@@ -497,12 +518,14 @@ impl<I> Options<I> {
     DriverOptions,
     Option<Box<dyn AliveDelegate<I, SocketAddr>>>,
     Option<Box<dyn MergeDelegate<I, SocketAddr>>>,
+    CidrFilter,
   ) {
     (
       self.memberlist,
       self.driver,
       self.alive_delegate,
       self.merge_delegate,
+      self.cidr_policy,
     )
   }
 }
@@ -671,7 +694,7 @@ mod builder_tests {
       .with_alive_delegate(DenyAlive)
       .with_merge_delegate(AllowMerge);
 
-    let (ml, drv, alive, merge) = opts.into_parts();
+    let (ml, drv, alive, merge, _cidr) = opts.into_parts();
     assert_eq!(ml.meta_max_size(), Some(64));
     assert_eq!(drv.transmit_batch(), 4);
     let alive = alive.expect("alive delegate installed");
@@ -697,7 +720,7 @@ mod builder_tests {
   #[test]
   fn options_into_parts_without_delegates_is_none() {
     let opts: Options<SmolStr> = Options::new();
-    let (_ml, _drv, alive, merge) = opts.into_parts();
+    let (_ml, _drv, alive, merge, _cidr) = opts.into_parts();
     assert!(alive.is_none(), "no alive delegate by default");
     assert!(merge.is_none(), "no merge delegate by default");
   }

@@ -385,6 +385,7 @@ where
       self.stream_options,
       runtime.delegate,
       label,
+      runtime.cidr_policy,
     )
     .await;
   }

@@ -75,3 +75,7 @@ pub use memberlist_embedded::{
   },
 };
 pub use memberlist_proto::{EncryptionError, EndpointOptions, Instant, Node, event};
+// CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
+#[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};

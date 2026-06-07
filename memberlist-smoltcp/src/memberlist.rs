@@ -519,6 +519,13 @@ where
     let embedded_cfg = memberlist_embedded::Options::new()
       .with_port(cfg.port)
       .with_close_timeout(cfg.close_timeout);
+    // Forward the CIDR policy into the engine, which enforces it at the gossip
+    // source (recv), the reliable accept, and membership admission.
+    #[cfg(feature = "cidr")]
+    let embedded_cfg = match cfg.cidr_policy.clone() {
+      Some(policy) => embedded_cfg.with_cidr_policy(policy),
+      None => embedded_cfg,
+    };
     let mut engine =
       Engine::try_new_at(embedded_cfg, transform, ep_cfg, now).map_err(InitError::from_embedded)?;
 

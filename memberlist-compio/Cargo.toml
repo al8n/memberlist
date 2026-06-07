@@ -87,6 +87,10 @@ name = "cidr"
 required-features = ["tcp", "cidr"]
 
 [[test]]
+name = "cidr_quic"
+required-features = ["quic-rustls-ring", "cidr"]
+
+[[test]]
 name = "tls_smoke"
 required-features = ["tls-rustls-ring"]
 

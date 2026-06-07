@@ -41,6 +41,7 @@ use memberlist_proto::{
 
 use crate::{
   NodeId,
+  cidr::{CidrFilter, cidr_blocks},
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
     SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
@@ -286,6 +287,11 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   /// (RST). A peer that keeps reading — even slowly — resets the deadline on
   /// every chunk and never trips it. Threaded into each spawned `bridge_task`.
   close_timeout: Duration,
+  /// CIDR transport filter: a gossip datagram from a blocked source IP (recv) or
+  /// a reliable connection from a blocked peer IP (accept) is dropped before the
+  /// machine sees it. `()` when the `cidr` feature is off. The same policy also
+  /// gates membership admission via the composed alive delegate.
+  cidr_policy: CidrFilter,
 }
 
 impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
@@ -304,6 +310,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     accept_join: <R::Spawner as AsyncSpawner>::JoinHandle<()>,
     close_timeout: Duration,
     label: Option<bytes::Bytes>,
+    cidr_policy: CidrFilter,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
@@ -342,6 +349,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       timer_deadline: None,
       idle_wake: Duration::from_secs(1),
       close_timeout,
+      cidr_policy,
     }
   }
 
@@ -522,6 +530,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         if !self.endpoint.is_running() {
           // Ignoring Err: the caller dropped its reply receiver.
           let _ = reply.send(Err(Error::NotRunning));
+          return;
+        }
+        if cidr_blocks(&self.cidr_policy, to.ip()) {
+          // Our own policy excludes the destination: do not emit an unreliable
+          // user datagram to a blocked peer (the reliable plane's outbound dial
+          // is gated at the Connect handler; this is the unreliable counterpart).
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.send(Err(Error::SendFailed));
           return;
         }
         let res = self
@@ -848,6 +864,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       StreamAction::Connect(info) => {
         let eid = info.id();
         let peer = info.peer();
+        // Reject an outbound dial to a CIDR-blocked peer at the transport boundary:
+        // terminalize as a dial failure (no bridge, no dial spawned) so a join
+        // toward a blocked seed fails rather than completing the push/pull —
+        // matching the inbound accept guard and the QUIC source filter.
+        if cidr_blocks(&self.cidr_policy, peer.ip()) {
+          self.endpoint.handle_dial_failed(eid, Instant::now());
+          return;
+        }
         let (out_tx, out_rx) = flume::unbounded();
         let (cancel_tx, cancel_rx) = oneshot::channel();
         // No bridge task yet — the dial owns the connecting FD until it completes,
@@ -1286,7 +1310,12 @@ where
       };
       match socket.poll_recv_from(cx, &mut this.recv_buf) {
         Poll::Ready(Ok((n, src))) => {
-          this.endpoint.handle_gossip(src, &this.recv_buf[..n], now);
+          // Drop a gossip datagram from a CIDR-blocked source before the machine
+          // sees it (the transport-source filter; the advertised-address filter
+          // is the composed alive delegate). The recv still counts toward the batch.
+          if !cidr_blocks(&this.cidr_policy, src.ip()) {
+            this.endpoint.handle_gossip(src, &this.recv_buf[..n], now);
+          }
           recv_n += 1;
         }
         // Ignoring Err: a transient recv error is non-fatal; re-armed next poll.
@@ -1305,6 +1334,14 @@ where
     // Aux tasks wake the driver after enqueueing, so try_recv (no waker
     // registration) is sufficient and does not drop a waker each poll.
     while let Ok((stream, peer)) = this.accepted_rx.try_recv() {
+      // Reject a reliable connection from a CIDR-blocked peer: drop the stream
+      // without registering it, so the push/pull exchange never starts (the
+      // advertised-address filter is the composed alive delegate).
+      if cidr_blocks(&this.cidr_policy, peer.ip()) {
+        drop(stream);
+        progress = true;
+        continue;
+      }
       let eid = this.endpoint.accept_connection(peer, now);
       let (out_tx, out_rx) = flume::unbounded();
       let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -1870,6 +1907,10 @@ mod tests {
       accept_join,
       Duration::from_secs(60),
       None,
+      #[cfg(feature = "cidr")]
+      None,
+      #[cfg(not(feature = "cidr"))]
+      (),
     );
     (driver, obs_rx, shared, obs_payload_bytes)
   }

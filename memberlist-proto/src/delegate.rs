@@ -15,6 +15,8 @@
 //! No delegate (`None`) accepts everything, mirroring Go's optional
 //! `config.Alive` / `config.Merge`.
 
+use std::boxed::Box;
+
 use crate::typed::NodeState;
 
 /// Filters inbound Alive messages. Returning `false` ignores the alive so
@@ -25,6 +27,15 @@ use crate::typed::NodeState;
 pub trait AliveDelegate<I, A>: Send + Sync + 'static {
   /// `true` to admit the peer, `false` to ignore this alive message.
   fn notify_alive(&self, peer: &NodeState<I, A>) -> bool;
+}
+
+/// A boxed alive delegate is itself an [`AliveDelegate`], so a driver can store
+/// or compose delegates as trait objects.
+impl<I: 'static, A: 'static> AliveDelegate<I, A> for Box<dyn AliveDelegate<I, A>> {
+  #[inline]
+  fn notify_alive(&self, peer: &NodeState<I, A>) -> bool {
+    (**self).notify_alive(peer)
+  }
 }
 
 /// Filters a **join** push/pull merge. Returning `false` cancels the merge

@@ -32,6 +32,7 @@ use memberlist_proto::{
 
 use crate::{
   NodeId,
+  cidr::{CidrFilter, cidr_blocks},
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
     SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
@@ -138,6 +139,10 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   timer: Option<Pin<Box<R::Sleep>>>,
   timer_deadline: Option<Instant>,
   idle_wake: Duration,
+  /// CIDR transport-source filter: a UDP packet (QUIC handshake or gossip
+  /// datagram) from a blocked source IP is dropped before the machine sees it, so
+  /// a blocked peer forms no connection. `()` when the `cidr` feature is off.
+  cidr_policy: CidrFilter,
 }
 
 impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
@@ -152,6 +157,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
     obs_payload_bytes: Arc<AtomicU64>,
     obs_payload_budget: Option<u64>,
     label: Option<Bytes>,
+    cidr_policy: CidrFilter,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
@@ -181,6 +187,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       timer: None,
       timer_deadline: None,
       idle_wake: Duration::from_secs(1),
+      cidr_policy,
     }
   }
 
@@ -197,6 +204,12 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           // Dispatch: fire-and-forget; reply the dispatched count.
           let mut count = 0usize;
           for addr in &addrs {
+            // Skip an outbound dial to a CIDR-blocked seed: starting the QUIC
+            // push/pull would open a connection and emit handshake packets to a
+            // peer our own policy excludes. The blocked seed is not contacted.
+            if cidr_blocks(&self.cidr_policy, addr.ip()) {
+              continue;
+            }
             // Ignoring StreamId: per-seed outcome surfaces via poll_event.
             let _ = self
               .endpoint
@@ -210,15 +223,29 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // WaitForCompletion: track each dispatched exchange; account_event
         // replies the contacted count once they all complete.
         let mut pending = HashSet::with_capacity(addrs.len());
+        let mut blocked = 0usize;
         for addr in &addrs {
+          // Skip a CIDR-blocked seed (see the non-wait arm): no QUIC handshake is
+          // emitted to a peer our own policy excludes.
+          if cidr_blocks(&self.cidr_policy, addr.ip()) {
+            blocked += 1;
+            continue;
+          }
           let sid = self
             .endpoint
             .start_push_pull(*addr, PushPullKind::Join, now);
           pending.insert(ExchangeId::from(sid));
         }
         if pending.is_empty() {
+          // No exchange to wait on. If some seeds were CIDR-blocked, the join
+          // contacted none of them — a bounded failure mirroring the stream
+          // driver; an empty (or fully blocked) seed set otherwise replies Ok(0).
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Ok(0));
+          let _ = reply.send(if blocked > 0 {
+            Err(Error::JoinFailed(addrs.len()))
+          } else {
+            Ok(0)
+          });
           return;
         }
         let requested = pending.len();
@@ -295,6 +322,13 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           let _ = reply.send(Err(Error::NotRunning));
           return;
         }
+        if cidr_blocks(&self.cidr_policy, to.ip()) {
+          // Our own policy excludes the destination: do not emit an unreliable
+          // user datagram to a blocked peer.
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.send(Err(Error::SendFailed));
+          return;
+        }
         let res = self
           .endpoint
           .send_user_packets(to, &payloads)
@@ -318,6 +352,14 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         if payloads.is_empty() {
           // Ignoring Err: the caller dropped its reply receiver.
           let _ = reply.send(Ok(()));
+          return;
+        }
+        if cidr_blocks(&self.cidr_policy, to.ip()) {
+          // Our own policy excludes the destination: fail the reliable send at the
+          // transport boundary without opening a QUIC stream (no handshake packets
+          // are emitted to a blocked peer).
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.send(Err(Error::SendFailed));
           return;
         }
         let mut pending = HashSet::with_capacity(payloads.len());
@@ -922,7 +964,13 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
       };
       match socket.poll_recv_from(cx, &mut this.recv_buf) {
         Poll::Ready(Ok((n, src))) => {
-          this.endpoint.handle_udp(src, &this.recv_buf[..n], now);
+          // Drop a UDP packet from a CIDR-blocked source before the QUIC machine
+          // sees it: a blocked peer completes no handshake and forms no
+          // connection (the advertised-address filter is the composed alive
+          // delegate). The recv still counts toward the batch.
+          if !cidr_blocks(&this.cidr_policy, src.ip()) {
+            this.endpoint.handle_udp(src, &this.recv_buf[..n], now);
+          }
           recv_n += 1;
         }
         // Ignoring Err: a transient recv error is non-fatal; re-armed next poll.
@@ -1133,6 +1181,10 @@ mod tests {
       obs_payload_bytes.clone(),
       obs_budget,
       None,
+      #[cfg(feature = "cidr")]
+      None,
+      #[cfg(not(feature = "cidr"))]
+      (),
     );
     (driver, obs_rx, shared, obs_payload_bytes)
   }

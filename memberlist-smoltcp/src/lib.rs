@@ -52,6 +52,10 @@ pub use memberlist::Memberlist;
 // callers do not need to depend on `memberlist-proto` directly.
 pub use memberlist_embedded::{AliveDelegate, ControlError, MergeDelegate};
 pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeState};
+// CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
+#[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 // The wire transforms live in the shared `memberlist-embedded` core and are
 // re-exported here so the smoltcp public API is self-contained.
 pub use memberlist_embedded::transform::{

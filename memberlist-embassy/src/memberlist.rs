@@ -230,6 +230,13 @@ where
     let engine_cfg = EngineConfig::new()
       .with_port(cfg.port)
       .with_close_timeout(cfg.close_timeout);
+    // Forward the CIDR policy into the engine, which enforces it at the gossip
+    // source (recv), the reliable accept, and membership admission.
+    #[cfg(feature = "cidr")]
+    let engine_cfg = match cfg.cidr_policy.clone() {
+      Some(policy) => engine_cfg.with_cidr_policy(policy),
+      None => engine_cfg,
+    };
     let mut engine: Engine<I, SlotId> =
       Engine::try_new_at(engine_cfg, transform, ep_cfg, now).map_err(InitError::from)?;
 

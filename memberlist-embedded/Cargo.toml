@@ -18,6 +18,13 @@ default = ["std"]
 std = ["memberlist-proto/std"]
 alloc = ["memberlist-proto/alloc"]
 
+# CIDR peer-admission allow-list. A `CidrPolicy` set via `Options::with_cidr_policy`
+# filters inbound gossip by datagram source and inbound reliable connections by
+# peer address at the transport boundary, AND inbound alives by the peer's
+# advertised address at membership admission. no_std+alloc (the policy holds a
+# hashbrown set of `ipnet` networks), so it pulls the heap tier.
+cidr = ["alloc", "memberlist-proto/cidr"]
+
 # Gossip/reliable-plane compression backends. Each pass-through enables the
 # matching machine backend so a driver's `TransformOptions` can carry a
 # `CompressionOptions` for that algorithm; without one the algorithm's

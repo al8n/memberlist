@@ -48,6 +48,14 @@ pub struct Options {
   /// recovery. A healthy close completes well before this and is reclaimed the
   /// moment it reaches `Closed`; the timeout only governs the vanished-peer case.
   pub close_timeout: Duration,
+  /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
+  /// inbound reliable connections by peer address at the transport boundary, AND
+  /// inbound alives by the peer's self-advertised address at membership
+  /// admission. `None` (the default) admits every address. Present only with the
+  /// `cidr` feature; set it via [`with_cidr_policy`](Options::with_cidr_policy).
+  #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+  pub cidr_policy: Option<memberlist_proto::CidrPolicy>,
 }
 
 impl Default for Options {
@@ -62,6 +70,8 @@ impl Default for Options {
       udp_rx_payload_bytes: 8 * 1500,
       udp_tx_payload_bytes: 8 * 1500,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
+      #[cfg(feature = "cidr")]
+      cidr_policy: None,
     }
   }
 }
@@ -88,6 +98,16 @@ impl Options {
   /// Override the graceful-close timeout (see [`Options::close_timeout`]).
   pub fn with_close_timeout(mut self, d: Duration) -> Self {
     self.close_timeout = d;
+    self
+  }
+
+  /// Install a CIDR peer-admission policy (see [`Options::cidr_policy`]). One
+  /// policy gates the gossip source and reliable peer at the transport boundary
+  /// AND the advertised address at membership admission.
+  #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+  pub fn with_cidr_policy(mut self, policy: memberlist_proto::CidrPolicy) -> Self {
+    self.cidr_policy = Some(policy);
     self
   }
 }

@@ -27,15 +27,14 @@
 //! not admitted to membership. The join "contacted" count reflects completed
 //! exchanges, not admission — inspect membership to confirm a peer was admitted.
 
-use std::{
-  collections::HashSet,
+use core::{
   net::{IpAddr, SocketAddr},
   str::FromStr,
 };
 
 use ipnet::IpNet;
 
-use crate::{delegate::AliveDelegate, typed::NodeState};
+use crate::{FxHashSet, delegate::AliveDelegate, typed::NodeState};
 
 /// A Classless Inter-Domain Routing (CIDR) peer-admission allow-list.
 ///
@@ -46,8 +45,8 @@ use crate::{delegate::AliveDelegate, typed::NodeState};
 ///
 /// Allow-all is reached ONLY through the explicit [`allow_all`](Self::allow_all)
 /// / [`new`](Self::new) / [`Default`] constructors. Building from a collection
-/// (`From` / `FromIterator` / `TryFrom`) — even an empty one — yields a policy
-/// that is in effect, and removing every entry leaves a block-all policy. So an
+/// ([`FromIterator`] / [`TryFrom`]) — even an empty one — yields a policy that is
+/// in effect, and removing every entry leaves a block-all policy. So an
 /// explicitly empty allow-list stays fail-closed (deny) rather than silently
 /// becoming allow-all.
 ///
@@ -57,7 +56,7 @@ use crate::{delegate::AliveDelegate, typed::NodeState};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct CidrPolicy {
-  allowed_cidrs: Option<HashSet<IpNet>>,
+  allowed_cidrs: Option<FxHashSet<IpNet>>,
 }
 
 impl Default for CidrPolicy {
@@ -80,7 +79,7 @@ impl CidrPolicy {
   #[inline]
   pub fn block_all() -> Self {
     Self {
-      allowed_cidrs: Some(HashSet::new()),
+      allowed_cidrs: Some(FxHashSet::default()),
     }
   }
 
@@ -94,7 +93,7 @@ impl CidrPolicy {
   pub fn add(&mut self, net: IpNet) {
     self
       .allowed_cidrs
-      .get_or_insert_with(HashSet::new)
+      .get_or_insert_with(FxHashSet::default)
       .insert(net);
   }
 
@@ -158,21 +157,21 @@ impl CidrPolicy {
   }
 }
 
-impl From<HashSet<IpNet>> for CidrPolicy {
-  /// An explicit set of allowed networks. An EMPTY set is block-all, not
-  /// allow-all — only [`allow_all`](CidrPolicy::allow_all) /
-  /// [`new`](CidrPolicy::new) / [`Default`] produce allow-all. This keeps an
-  /// explicitly empty allow-list fail-closed.
-  fn from(allowed_cidrs: HashSet<IpNet>) -> Self {
+/// An explicit set of allowed networks. An EMPTY set is block-all, not allow-all
+/// — only [`allow_all`](CidrPolicy::allow_all) / [`new`](CidrPolicy::new) /
+/// [`Default`] produce allow-all. (std only; no_std builds use [`FromIterator`]
+/// or [`TryFrom`].)
+#[cfg(feature = "std")]
+impl From<std::collections::HashSet<IpNet>> for CidrPolicy {
+  fn from(allowed_cidrs: std::collections::HashSet<IpNet>) -> Self {
     Self {
-      allowed_cidrs: Some(allowed_cidrs),
+      allowed_cidrs: Some(allowed_cidrs.into_iter().collect()),
     }
   }
 }
 
 impl<A: Into<IpNet>> FromIterator<A> for CidrPolicy {
-  /// Collect allowed networks. An empty iterator yields a block-all policy
-  /// (see [`CidrPolicy::from`]).
+  /// Collect allowed networks. An empty iterator yields a block-all policy.
   fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
     Self {
       allowed_cidrs: Some(iter.into_iter().map(Into::into).collect()),
@@ -185,9 +184,9 @@ impl<A: AsRef<str>> TryFrom<&[A]> for CidrPolicy {
 
   /// Parse a slice of CIDR strings (e.g. `["10.0.0.0/8", "127.0.0.1/32"]`).
   /// Whitespace around each entry is trimmed. An empty slice yields a block-all
-  /// policy (see [`CidrPolicy::from`]).
+  /// policy.
   fn try_from(iter: &[A]) -> Result<Self, Self::Error> {
-    let mut allowed_cidrs = HashSet::with_capacity(iter.len());
+    let mut allowed_cidrs = FxHashSet::with_capacity_and_hasher(iter.len(), Default::default());
     for cidr in iter {
       allowed_cidrs.insert(IpNet::from_str(cidr.as_ref().trim())?);
     }
@@ -207,6 +206,31 @@ impl<I> AliveDelegate<I, SocketAddr> for CidrPolicy {
   #[inline]
   fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
     self.is_allowed(&peer.address_ref().ip())
+  }
+}
+
+/// Composes a [`CidrPolicy`] with another [`AliveDelegate`]: a peer is admitted
+/// only when BOTH the policy and the inner delegate admit it. Lets a driver
+/// enforce a CIDR policy alongside a user-supplied alive delegate from a single
+/// `with_cidr_policy` setting.
+#[derive(Debug, Clone)]
+pub struct CidrAnd<D> {
+  policy: CidrPolicy,
+  inner: D,
+}
+
+impl<D> CidrAnd<D> {
+  /// Compose `policy` with `inner` — a peer must pass BOTH to be admitted.
+  #[inline]
+  pub fn new(policy: CidrPolicy, inner: D) -> Self {
+    Self { policy, inner }
+  }
+}
+
+impl<I, D: AliveDelegate<I, SocketAddr>> AliveDelegate<I, SocketAddr> for CidrAnd<D> {
+  #[inline]
+  fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
+    self.policy.is_allowed(&peer.address_ref().ip()) && self.inner.notify_alive(peer)
   }
 }
 
@@ -258,8 +282,6 @@ mod tests {
 
   #[test]
   fn empty_collection_inputs_are_block_all_not_allow_all() {
-    // From<HashSet<IpNet>>
-    assert!(CidrPolicy::from(HashSet::new()).is_block_all());
     // FromIterator
     let from_iter: CidrPolicy = core::iter::empty::<IpNet>().collect();
     assert!(from_iter.is_block_all());
@@ -270,6 +292,8 @@ mod tests {
         .expect("an empty slice parses")
         .is_block_all()
     );
+    // From<std HashSet> (std builds only)
+    assert!(CidrPolicy::from(std::collections::HashSet::new()).is_block_all());
   }
 
   #[test]

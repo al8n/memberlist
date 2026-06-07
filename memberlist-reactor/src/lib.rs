@@ -13,6 +13,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
+mod cidr;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod command;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]

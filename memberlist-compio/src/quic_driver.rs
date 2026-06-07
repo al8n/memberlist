@@ -48,9 +48,10 @@ use crate::{
   },
   delegate::Delegate,
   driver_options::DriverOptions,
-  driver_shared::{ExchangeId, dispatch_event_delegate},
+  driver_shared::{ExchangeId, cidr_blocks, dispatch_event_delegate},
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
+  transport::runtime::CidrFilter,
 };
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
@@ -211,6 +212,11 @@ struct QuicDriverState<I> {
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
+  /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
+  /// gossip datagram) from a blocked source IP is dropped before the QUIC machine
+  /// sees it, so a blocked peer completes no handshake. `()` without the `cidr`
+  /// feature. The advertised-address filter is the composed alive delegate.
+  cidr_policy: CidrFilter,
   /// Outstanding synchronous-join waiters. Populated when a
   /// `Command::Join` with `JoinKind::WaitForCompletion` lands;
   /// reduced on `Event::ExchangeCompleted` filtered to
@@ -291,6 +297,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   driver_opts: DriverOptions,
   delegate: D,
   label: Option<bytes::Bytes>,
+  cidr_policy: CidrFilter,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
   I: memberlist_proto::Id
@@ -365,6 +372,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
     snapshot,
     shutdown_flag,
     driver_opts,
+    cidr_policy,
     pending_joins: HashMap::new(),
     next_pending_join_id: 0,
     shutdown_reply: None,
@@ -425,6 +433,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
             &mut state.pending_pings,
             &mut state.pending_user_sends,
             leave_timeout,
+            &state.cidr_policy,
             c,
             now,
           )
@@ -586,7 +595,13 @@ pub(crate) async fn quic_driver_loop<I, D>(
         match res {
           Ok((n, src)) => {
             let received_at = Instant::now();
-            state.endpoint.handle_udp(src, &buf[..n], received_at);
+            // Drop a UDP packet from a CIDR-blocked source before the QUIC machine
+            // sees it: a blocked peer completes no handshake and forms no
+            // connection (the advertised-address filter is the composed alive
+            // delegate).
+            if !cidr_blocks(&state.cidr_policy, src.ip()) {
+              state.endpoint.handle_udp(src, &buf[..n], received_at);
+            }
             // The next iter-top dirty drain flushes the
             // poll_event / poll_memberlist_ingress / poll_*_transmit
             // queues the input may have populated; the drain has to
@@ -648,6 +663,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
               &mut state.pending_pings,
               &mut state.pending_user_sends,
               leave_timeout,
+              &state.cidr_policy,
               c,
               now,
             )
@@ -877,6 +893,7 @@ async fn dispatch_command<I>(
   pending_pings: &mut Vec<PendingPing>,
   pending_user_sends: &mut Vec<PendingUserSend>,
   leave_timeout: core::time::Duration,
+  cidr_policy: &CidrFilter,
   cmd: Command<I>,
   now: Instant,
 ) where
@@ -908,6 +925,12 @@ async fn dispatch_command<I>(
         JoinKind::Dispatch => {
           let mut count: usize = 0;
           for addr in &addrs {
+            // Skip an outbound dial to a CIDR-blocked seed: starting the QUIC
+            // push/pull would open a connection and emit handshake packets to a
+            // peer our own policy excludes. The blocked seed is not contacted.
+            if cidr_blocks(cidr_policy, addr.ip()) {
+              continue;
+            }
             // Ignoring StreamId return: per-seed completion / failure
             // surfaces through `poll_event` (the `NodeJoined` /
             // `DialFailed` events that the events_tx forwards to
@@ -939,11 +962,28 @@ async fn dispatch_command<I>(
           // discipline).
           let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
           for addr in &addrs {
+            // Skip a CIDR-blocked seed (see the Dispatch arm): no QUIC handshake
+            // is emitted to a peer our own policy excludes.
+            if cidr_blocks(cidr_policy, addr.ip()) {
+              continue;
+            }
             let stream_id = endpoint.start_push_pull(*addr, PushPullKind::Join, now);
             pending.insert(ExchangeId::from(stream_id));
           }
+          if pending.is_empty() {
+            // `join_with` rejects an empty seed list before the command is sent,
+            // so `addrs` is non-empty: an empty `pending` means every seed was
+            // CIDR-blocked and the join contacted none of them. Reply now —
+            // parking would hang with no terminal event incoming.
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = reply.send(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
+              addrs.len(),
+              0,
+            ))));
+            return;
+          }
           // `requested` is the number of outbound exchanges this call
-          // dispatched (one per address, including duplicates). The
+          // dispatched (one per non-blocked address, including duplicates). The
           // public `join_with` guards against the empty-input case
           // before sending the command, so `addrs` is non-empty here.
           let requested = pending.len();
@@ -1171,12 +1211,16 @@ async fn dispatch_command<I>(
     Command::SendUser(cmd) => {
       // Gate on a running node: after `leave()` the gossip scheduler is
       // stopped; reject immediately.
-      let res: Result<()> = if endpoint.is_running() {
+      let res: Result<()> = if !endpoint.is_running() {
+        Err(MemberlistError::NotRunning)
+      } else if cidr_blocks(cidr_policy, cmd.to().ip()) {
+        // Our own policy excludes the destination: do not emit an unreliable user
+        // datagram to a blocked peer.
+        Err(MemberlistError::SendFailed)
+      } else {
         endpoint
           .send_user_packets(*cmd.to(), cmd.payloads())
           .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
-      } else {
-        Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
       let _ = cmd.reply.send(res);
@@ -1188,6 +1232,14 @@ async fn dispatch_command<I>(
       if !endpoint.is_running() {
         // Ignoring Err: caller dropped the reply receiver.
         let _ = cmd.reply.send(Err(MemberlistError::NotRunning));
+        return;
+      }
+      if cidr_blocks(cidr_policy, cmd.to().ip()) {
+        // Our own policy excludes the destination: fail the reliable send at the
+        // transport boundary without opening a QUIC stream (no handshake packets
+        // are emitted to a blocked peer).
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply.send(Err(MemberlistError::SendFailed));
         return;
       }
       let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(cmd.payloads().len());
@@ -1295,7 +1347,11 @@ where
         // recv arm re-arms with a fresh buffer, so only the Ok case has work.
         if let Ok((n, src)) = res {
           let received_at = Instant::now();
-          state.endpoint.handle_udp(src, &buf[..n], received_at);
+          // Same CIDR source filter as the main recv arm: a blocked source's
+          // packet is dropped before the QUIC machine sees it.
+          if !cidr_blocks(&state.cidr_policy, src.ip()) {
+            state.endpoint.handle_udp(src, &buf[..n], received_at);
+          }
           dirty = true;
         }
       }
