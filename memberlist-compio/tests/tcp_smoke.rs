@@ -46,7 +46,7 @@ async fn make_tcp(
 
 #[compio::test]
 async fn construct_returns_handle_with_initial_snapshot() {
-  let m = make_tcp("n-7100", loopback_addr(7100), Some(b"cluster-x".to_vec()))
+  let m = make_tcp("node-a", loopback_addr(0), Some(b"cluster-x".to_vec()))
     .await
     .expect("construct");
 
@@ -64,7 +64,7 @@ async fn construct_returns_handle_with_initial_snapshot() {
 
 #[compio::test]
 async fn clone_handle_works() {
-  let m = make_tcp("n-7101", loopback_addr(7101), Some(b"cluster-x".to_vec()))
+  let m = make_tcp("node-b", loopback_addr(0), Some(b"cluster-x".to_vec()))
     .await
     .expect("construct");
 
@@ -80,12 +80,15 @@ async fn clone_handle_works() {
 /// `MemberlistError::Io`.
 #[compio::test]
 async fn double_bind_returns_io_error() {
-  let addr = loopback_addr(7102);
-
-  let m1 = make_tcp("n-7102a", addr, None).await.expect("first bind");
+  let m1 = make_tcp("node-dup-1", loopback_addr(0), None)
+    .await
+    .expect("first bind");
+  // The second node targets the first node's OS-assigned address, so the
+  // intentional collision still surfaces.
+  let addr = m1.advertise_address();
   // Use map_err + unwrap instead of expect_err — Memberlist<..> does not
   // implement Debug, so expect_err's T: Debug bound would fail to compile.
-  let err = make_tcp("n-7102b", addr, None)
+  let err = make_tcp("node-dup-2", addr, None)
     .await
     .map(|_| ())
     .expect_err("second bind on same port must fail");

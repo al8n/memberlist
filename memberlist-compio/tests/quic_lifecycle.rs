@@ -30,15 +30,30 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
-/// construction resolver is the identity `SocketAddrResolver` (never invoked
-/// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// The concrete bound address is read back from
+/// [`QuicMemberlist::advertise_address`] after construction, so no test
+/// hard-codes a port — a hard-coded port would collide with a sibling test
+/// binding the same value on another libtest thread in this binary.
+///
+/// The membership-input address type is `SocketAddr`, so the construction
+/// resolver is the identity `SocketAddrResolver` (never invoked for a resolved
+/// advertise).
+async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+  make_quic_at(id, loopback_addr(0), qcfg).await
+}
+
+/// Like [`make_quic`] but binds a caller-supplied address. Used by the rebind
+/// test, which must re-bind the *same* address a prior node has released.
+async fn make_quic_at(
+  id: &str,
+  addr: SocketAddr,
+  qcfg: QuicOptions,
+) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_quic_config(qcfg),
   );
   QuicMemberlist::<SmolStr, SocketAddr>::new(
@@ -70,11 +85,12 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 /// the sole address resource that must be released before `shutdown()` acks.
 #[compio::test]
 async fn rebind_after_shutdown_releases_udp_port() {
-  let first = make_quic("first", 7100, support::self_trusted_quic_config()).await;
+  let first = make_quic("first", support::self_trusted_quic_config()).await;
+  let addr = first.advertise_address();
   first.shutdown().await.expect("first shutdown");
 
-  // Same port, same address — must succeed.
-  let second = make_quic("second", 7100, support::self_trusted_quic_config()).await;
+  // Same address — rebinding the just-released port must succeed.
+  let second = make_quic_at("second", addr, support::self_trusted_quic_config()).await;
   second.shutdown().await.expect("second shutdown");
 }
 
@@ -90,13 +106,14 @@ async fn rebind_after_shutdown_releases_udp_port() {
 /// of any outstanding clones.
 #[compio::test]
 async fn rebind_after_shutdown_with_live_clone_works() {
-  let first = make_quic("first-cloned", 7110, support::self_trusted_quic_config()).await;
+  let first = make_quic("first-cloned", support::self_trusted_quic_config()).await;
+  let addr = first.advertise_address();
   // Hold a clone past the shutdown — the inner Arc<JoinHandle> stays
   // alive but the driver task itself has exited.
   let _live_clone = first.clone();
   first.shutdown().await.expect("first shutdown");
 
-  let second = make_quic("second-cloned", 7110, support::self_trusted_quic_config()).await;
+  let second = make_quic_at("second-cloned", addr, support::self_trusted_quic_config()).await;
   second.shutdown().await.expect("second shutdown");
 }
 
@@ -116,18 +133,15 @@ async fn rebind_after_shutdown_with_live_clone_works() {
 /// separate node must still complete within bounded time.
 #[compio::test]
 async fn udp_flood_does_not_starve_timer_under_join() {
-  let seed_port: u16 = 7120;
-  let joiner_port: u16 = 7121;
-  let seed_addr = loopback_addr(seed_port);
-
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
   let qcfg_seed = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_joiner = support::build_quic_config(cert, key, roots);
 
-  let seed = make_quic("udp-seed", seed_port, qcfg_seed).await;
-  let joiner = make_quic("udp-joiner", joiner_port, qcfg_joiner).await;
+  let seed = make_quic("udp-seed", qcfg_seed).await;
+  let joiner = make_quic("udp-joiner", qcfg_joiner).await;
+  let seed_addr = seed.advertise_address();
 
   // Continuously pump junk UDP datagrams at the seed's gossip socket
   // at ~200 pps. Slow enough that the seed's recv arm still hits
@@ -200,14 +214,13 @@ async fn udp_flood_does_not_starve_timer_under_join() {
 /// hangs.
 #[compio::test]
 async fn join_with_slow_resolver_does_not_hang_during_shutdown() {
-  let seed_addr = loopback_addr(7131);
-
   // Run a seed memberlist so the SocketAddrResolver target is real,
   // even though the join will be aborted by shutdown before it
   // converges.
-  let seed = make_quic("slowres-seed", 7131, support::self_trusted_quic_config()).await;
+  let seed = make_quic("slowres-seed", support::self_trusted_quic_config()).await;
+  let seed_addr = seed.advertise_address();
 
-  let m = make_quic("slowres", 7130, support::self_trusted_quic_config()).await;
+  let m = make_quic("slowres", support::self_trusted_quic_config()).await;
   let m_for_join = m.clone();
 
   // Spawn the slow join on the same runtime. The seed is handed in
@@ -274,7 +287,7 @@ impl memberlist_compio::Resolver for SlowResolver {
 /// the same Shutdown error.
 #[compio::test]
 async fn command_after_shutdown_returns_error_promptly() {
-  let m = make_quic("post-shutdown", 7140, support::self_trusted_quic_config()).await;
+  let m = make_quic("post-shutdown", support::self_trusted_quic_config()).await;
   let m_clone = m.clone();
 
   // Shut down via the original. After shutdown returns, the
@@ -337,18 +350,15 @@ async fn command_after_shutdown_returns_error_promptly() {
 /// and the cluster must stay alive (proving timer / recv are not starved).
 #[compio::test]
 async fn cmd_flood_does_not_starve_recv_or_timer_under_join() {
-  let seed_port: u16 = 7150;
-  let joiner_port: u16 = 7151;
-  let seed_addr = loopback_addr(seed_port);
-
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
   let qcfg_seed = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_joiner = support::build_quic_config(cert, key, roots);
 
-  let seed = make_quic("cmdflood-seed", seed_port, qcfg_seed).await;
-  let joiner = make_quic("cmdflood-joiner", joiner_port, qcfg_joiner).await;
+  let seed = make_quic("cmdflood-seed", qcfg_seed).await;
+  let joiner = make_quic("cmdflood-joiner", qcfg_joiner).await;
+  let seed_addr = seed.advertise_address();
 
   // Spawn 200 concurrent cmd-pumping tasks, each holding a clone of
   // the seed handle and looping update_node_metadata calls. Each call
@@ -403,7 +413,7 @@ async fn cmd_flood_does_not_starve_recv_or_timer_under_join() {
 /// constructed memberlist with no peers and no traffic.
 #[compio::test]
 async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
-  let m = make_quic("quiet", 7160, support::self_trusted_quic_config()).await;
+  let m = make_quic("quiet", support::self_trusted_quic_config()).await;
 
   // Let the driver settle into its main select wait.
   compio::time::sleep(Duration::from_millis(50)).await;
@@ -437,12 +447,7 @@ async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
 /// hang).
 #[compio::test]
 async fn concurrent_shutdown_from_cloned_handles() {
-  let m = make_quic(
-    "concurrent-shutdown",
-    7170,
-    support::self_trusted_quic_config(),
-  )
-  .await;
+  let m = make_quic("concurrent-shutdown", support::self_trusted_quic_config()).await;
   let m2 = m.clone();
 
   // Let the driver settle into its main select wait.
@@ -476,9 +481,8 @@ async fn concurrent_shutdown_from_cloned_handles() {
 /// dispatched, and the caller's `shutdown.await` would hang.
 #[compio::test]
 async fn shutdown_lands_under_continuous_network_flood() {
-  let seed_addr = loopback_addr(7180);
-
-  let seed = make_quic("flood-seed", 7180, support::self_trusted_quic_config()).await;
+  let seed = make_quic("flood-seed", support::self_trusted_quic_config()).await;
+  let seed_addr = seed.advertise_address();
 
   // UDP flood at the gossip socket.
   let udp_flood = compio::runtime::spawn(async move {
@@ -541,18 +545,15 @@ async fn shutdown_lands_under_continuous_network_flood() {
 /// `(member=2, alive=2)` snapshot on both nodes.
 #[compio::test]
 async fn post_join_stays_alive_through_probe_cycles() {
-  let seed_port: u16 = 7190;
-  let joiner_port: u16 = 7191;
-  let seed_addr = loopback_addr(seed_port);
-
   let (cert, key) = support::generate_localhost_cert();
   let mut roots = RootCertStore::empty();
   roots.add(cert.clone()).expect("root");
   let qcfg_seed = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_joiner = support::build_quic_config(cert, key, roots);
 
-  let seed = make_quic("stable-seed", seed_port, qcfg_seed).await;
-  let joiner = make_quic("stable-joiner", joiner_port, qcfg_joiner).await;
+  let seed = make_quic("stable-seed", qcfg_seed).await;
+  let joiner = make_quic("stable-joiner", qcfg_joiner).await;
+  let seed_addr = seed.advertise_address();
 
   joiner
     .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
@@ -613,15 +614,13 @@ async fn quic_leave_then_shutdown_is_observed_by_peer() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7170;
-  let b_port: u16 = 7171;
-  let a = make_quic("leaver-a", a_port, qcfg_a).await;
-  let b = make_quic("watcher-b", b_port, qcfg_b).await;
+  let a = make_quic("leaver-a", qcfg_a).await;
+  let b = make_quic("watcher-b", qcfg_b).await;
 
   // Converge: B joins A; both observe two alive members.
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -725,16 +724,13 @@ async fn quic_slow_observation_delegate_does_not_delay_leave_flush() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7530;
-  let b_port: u16 = 7531;
-
   // Node A carries the slow-leave observation delegate; built inline like
   // `make_quic` but with `SlowLeaveDelegate` in place of `VoidDelegate`.
   let a: Memberlist<QuicTransport<SmolStr, SocketAddr>, SlowLeaveDelegate> = {
     let opts = Options::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowleave-a"))
-        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(a_port)))
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_a),
     );
     Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowLeaveDelegate>::new(
@@ -748,12 +744,12 @@ async fn quic_slow_observation_delegate_does_not_delay_leave_flush() {
   };
 
   // Node B is a normal VoidDelegate node.
-  let b = make_quic("watcher-b", b_port, qcfg_b).await;
+  let b = make_quic("watcher-b", qcfg_b).await;
 
   // Converge: B joins A; both observe two alive members.
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -836,15 +832,13 @@ async fn leave_completes_only_after_peer_is_notified() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7540;
-  let b_port: u16 = 7541;
-  let a = make_quic("leave-notify-a", a_port, qcfg_a).await;
-  let b = make_quic("leave-notify-b", b_port, qcfg_b).await;
+  let a = make_quic("leave-notify-a", qcfg_a).await;
+  let b = make_quic("leave-notify-b", qcfg_b).await;
 
   // Converge: B joins A; both observe two alive members.
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -950,16 +944,13 @@ async fn quic_slow_observation_delegate_does_not_delay_join_completion() {
   let qcfg_seed = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_joiner = support::build_quic_config(cert, key, roots);
 
-  let seed_port: u16 = 7600;
-  let joiner_port: u16 = 7601;
-
   // Node J carries the slow-join observation delegate; built inline like
   // `make_quic` but with `SlowJoinDelegate` in place of `VoidDelegate`.
   let joiner: Memberlist<QuicTransport<SmolStr, SocketAddr>, SlowJoinDelegate> = {
     let opts = Options::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowjoin-j"))
-        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(joiner_port)))
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_joiner),
     );
     Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
@@ -973,7 +964,7 @@ async fn quic_slow_observation_delegate_does_not_delay_join_completion() {
   };
 
   // The seed is a normal VoidDelegate node.
-  let seed = make_quic("slowjoin-seed", seed_port, qcfg_seed).await;
+  let seed = make_quic("slowjoin-seed", qcfg_seed).await;
 
   // `join().await` must return Ok well within 1.5s even though the joiner's
   // own `notify_join` sleeps ~3s: the exchange completion resolves the waiter
@@ -983,7 +974,7 @@ async fn quic_slow_observation_delegate_does_not_delay_join_completion() {
     Duration::from_millis(1500),
     joiner.join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(seed_port))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     ),
   )
   .await;
@@ -1028,15 +1019,13 @@ async fn quic_concurrent_leave_from_cloned_handles_both_succeed() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7602;
-  let b_port: u16 = 7603;
-  let a = make_quic("quic-concurrent-leave-a", a_port, qcfg_a).await;
-  let b = make_quic("quic-concurrent-leave-b", b_port, qcfg_b).await;
+  let a = make_quic("quic-concurrent-leave-a", qcfg_a).await;
+  let b = make_quic("quic-concurrent-leave-b", qcfg_b).await;
 
   // Converge: B joins A; both observe two alive members.
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -1164,11 +1153,8 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7610;
-  let b_port: u16 = 7611;
-
   // Node A is a normal VoidDelegate node; it queues the broadcast.
-  let a = make_quic("slowuser-a", a_port, qcfg_a).await;
+  let a = make_quic("slowuser-a", qcfg_a).await;
 
   // Node B carries the slow-user-msg observation delegate; built inline like
   // `make_quic` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
@@ -1178,7 +1164,7 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
     let opts = Options::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowuser-b"))
-        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(b_port)))
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_b),
     );
     Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
@@ -1197,7 +1183,7 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
   // Converge: A joins B; both observe two alive members.
   a.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(b_port))],
+    &[MaybeResolved::Resolved(b.advertise_address())],
   )
   .await
   .expect("join");
@@ -1263,16 +1249,14 @@ async fn queue_user_broadcast_after_leave_is_rejected() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7700;
-  let b_port: u16 = 7701;
-  let a = make_quic("ub-after-leave-a", a_port, qcfg_a).await;
-  let b = make_quic("ub-after-leave-b", b_port, qcfg_b).await;
+  let a = make_quic("ub-after-leave-a", qcfg_a).await;
+  let b = make_quic("ub-after-leave-b", qcfg_b).await;
 
   // Converge so A is a real running cluster member (the leave then has a live
   // peer to flush its `Dead`-self notice to).
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -1315,7 +1299,7 @@ async fn queue_user_broadcast_after_leave_is_rejected() {
 /// the validation the call returns `Ok(())`.
 #[compio::test]
 async fn set_ack_payload_oversized_is_rejected() {
-  let a = make_quic("ack-oversized-a", 7770, support::self_trusted_quic_config()).await;
+  let a = make_quic("ack-oversized-a", support::self_trusted_quic_config()).await;
 
   let res = a
     .set_ack_payload(Bytes::from(vec![0xab_u8; 1024 * 1024]))
@@ -1355,16 +1339,15 @@ async fn join_after_leave_is_rejected() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7704;
-  let b_port: u16 = 7705;
-  let a = make_quic("join-after-leave-a", a_port, qcfg_a).await;
-  let b = make_quic("join-after-leave-b", b_port, qcfg_b).await;
+  let a = make_quic("join-after-leave-a", qcfg_a).await;
+  let b = make_quic("join-after-leave-b", qcfg_b).await;
+  let b_addr = b.advertise_address();
 
   // Converge so A is a real running member with a live peer to flush its
   // `Dead`-self notice to on leave.
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
@@ -1387,10 +1370,7 @@ async fn join_after_leave_is_rejected() {
 
   // The synchronous `join` (WaitForCompletion arm) must be rejected.
   let res = a
-    .join(
-      &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(b_port))],
-    )
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
     .await;
   assert!(
     matches!(res, Err(MemberlistError::NotRunning)),
@@ -1400,10 +1380,7 @@ async fn join_after_leave_is_rejected() {
   // The fire-and-forget `dispatch_join` (Dispatch arm) shares the same
   // `Command::Join` gate and must also be rejected.
   let res_dispatch = a
-    .dispatch_join(
-      &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(b_port))],
-    )
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
     .await;
   assert!(
     matches!(res_dispatch, Err(MemberlistError::NotRunning)),

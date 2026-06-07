@@ -71,13 +71,10 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 /// the window.
 #[compio::test]
 async fn crashed_peer_is_marked_not_alive() {
-  let a_addr = loopback_addr(7460);
-  let b_addr = loopback_addr(7461);
-  let c_addr = loopback_addr(7462);
-
-  let a = make_tcp("fd-a", a_addr).await;
-  let b = make_tcp("fd-b", b_addr).await;
-  let c = make_tcp("fd-c", c_addr).await;
+  let a = make_tcp("fd-a", loopback_addr(0)).await;
+  let b = make_tcp("fd-b", loopback_addr(0)).await;
+  let c = make_tcp("fd-c", loopback_addr(0)).await;
+  let a_addr = a.advertise_address();
 
   // B and C both join the seed A; gossip then converges all three.
   let b_contacted = b

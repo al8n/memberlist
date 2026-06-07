@@ -30,6 +30,7 @@ checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3"]
 checksum-murmur3 = ["memberlist-proto/checksum-murmur3"]
 encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
 encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+cidr = ["memberlist-proto/cidr"]
 # Runtime conveniences: pull in the concrete agnostic runtime impls.
 tokio = ["agnostic/tokio"]
 smol = ["agnostic/smol"]
@@ -91,3 +92,7 @@ required-features = ["tcp"]
 [[test]]
 name = "shutdown_rebind"
 required-features = ["tokio", "tcp"]
+
+[[test]]
+name = "cidr"
+required-features = ["tcp", "cidr"]

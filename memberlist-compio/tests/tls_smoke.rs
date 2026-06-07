@@ -88,18 +88,16 @@ async fn make_tls_labeled(
 /// merge, while `a2` (label "cluster-a") must converge with `a`.
 #[compio::test]
 async fn tls_label_isolates_reliable_plane() {
-  let a_addr = loopback_addr(7330);
-  let b_addr = loopback_addr(7331);
-  let a2_addr = loopback_addr(7332);
-  let a = make_tls_labeled("tls-iso-a", a_addr, b"cluster-a")
+  let a = make_tls_labeled("tls-iso-a", loopback_addr(0), b"cluster-a")
     .await
     .expect("bind a");
-  let b = make_tls_labeled("tls-iso-b", b_addr, b"cluster-b")
+  let b = make_tls_labeled("tls-iso-b", loopback_addr(0), b"cluster-b")
     .await
     .expect("bind b");
-  let a2 = make_tls_labeled("tls-iso-a2", a2_addr, b"cluster-a")
+  let a2 = make_tls_labeled("tls-iso-a2", loopback_addr(0), b"cluster-a")
     .await
     .expect("bind a2");
+  let a_addr = a.advertise_address();
 
   // A different label over shared TLS trust must not merge on the reliable plane.
   // Ignoring Err: join failure on a mismatched label is expected.
@@ -218,7 +216,7 @@ fn smoke_tls_options() -> TlsOptions {
 
 #[compio::test]
 async fn construct_returns_handle_with_initial_snapshot() {
-  let m = make_tls("n-7200", loopback_addr(7200))
+  let m = make_tls("n-7200", loopback_addr(0))
     .await
     .expect("construct");
 
@@ -236,7 +234,7 @@ async fn construct_returns_handle_with_initial_snapshot() {
 
 #[compio::test]
 async fn clone_handle_works() {
-  let m = make_tls("n-7201", loopback_addr(7201))
+  let m = make_tls("n-7201", loopback_addr(0))
     .await
     .expect("construct");
 
@@ -252,9 +250,10 @@ async fn clone_handle_works() {
 /// `MemberlistError::Io` with TLS options.
 #[compio::test]
 async fn double_bind_returns_io_error() {
-  let addr = loopback_addr(7202);
-
-  let m1 = make_tls("n-7202a", addr).await.expect("first bind");
+  let m1 = make_tls("n-7202a", loopback_addr(0))
+    .await
+    .expect("first bind");
+  let addr = m1.advertise_address();
   // Use map_err + unwrap instead of expect_err — Memberlist<..> does not
   // implement Debug, so expect_err's T: Debug bound would fail to compile.
   let err = make_tls("n-7202b", addr)
@@ -342,15 +341,13 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 /// FSM.
 #[compio::test]
 async fn two_node_join_converges_member_counts_tls() {
-  let seed_addr = loopback_addr(7300);
-  let joiner_addr = loopback_addr(7301);
-
-  let seed = make_tls("tls-seed", seed_addr)
+  let seed = make_tls("tls-seed", loopback_addr(0))
     .await
     .expect("seed construct");
-  let joiner = make_tls("tls-joiner", joiner_addr)
+  let joiner = make_tls("tls-joiner", loopback_addr(0))
     .await
     .expect("joiner construct");
+  let seed_addr = seed.advertise_address();
 
   let count = joiner
     .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
@@ -395,13 +392,11 @@ async fn two_node_join_converges_member_counts_tls() {
 /// second payload was never sent.
 #[compio::test]
 async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
-  let seed_addr = loopback_addr(7310);
-  let sender_addr = loopback_addr(7311);
-
   // Live TLS seed the first payload connects to.
-  let seed = make_tls("tls-pcf-seed", seed_addr)
+  let seed = make_tls("tls-pcf-seed", loopback_addr(0))
     .await
     .expect("seed construct");
+  let seed_addr = seed.advertise_address();
 
   // Sender's SNI provider: Some on the first dial, None on every later dial.
   let sni_calls = Arc::new(AtomicUsize::new(0));
@@ -409,7 +404,7 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
   let sender_opts = Options::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-pcf-sender"))
-      .with_advertise_addr(MaybeResolved::Resolved(sender_addr))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_tls_options(smoke_tls_options())
       .with_sni_provider(Box::new(move |_addr: &SocketAddr| {
         // First dial → Some (connects); subsequent dials → None (the TLS
@@ -472,13 +467,12 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
 /// must report `requested == 2`.
 #[compio::test]
 async fn tls_join_all_pre_connect_failure_reports_full_seed_count() {
-  let joiner_addr = loopback_addr(7312);
   // SNI provider always `None` → every TLS dial fails at `dial_context`, before
   // any `Connect`, so no exchange is created and `exchange_ids` stays empty.
   let opts = Options::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-nosni-joiner"))
-      .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_tls_options(smoke_tls_options())
       .with_sni_provider(Box::new(|_addr: &SocketAddr| None)),
   );

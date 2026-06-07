@@ -61,6 +61,8 @@ pub use error::{
 pub use events::EventStream;
 pub use maybe_resolved::MaybeResolved;
 pub use memberlist::Memberlist;
+#[cfg(feature = "cidr")]
+pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use memberlist_proto::{
   ChecksumAlgorithm, ChecksumOptions, Node, typed::NodeState as MemberlistNodeState,
 };

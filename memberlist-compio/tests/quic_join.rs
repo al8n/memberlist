@@ -99,26 +99,30 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
-/// construction resolver is the identity `SocketAddrResolver` (never invoked
-/// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
-  make_quic_with(id, port, qcfg, MemberlistOptions::new()).await
+/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// The concrete bound address is read back from
+/// [`QuicMemberlist::advertise_address`] after construction, so no test
+/// hard-codes a port — a hard-coded port would collide with a sibling test
+/// binding the same value on another libtest thread in this binary.
+///
+/// The membership-input address type is `SocketAddr`, so the construction
+/// resolver is the identity `SocketAddrResolver` (never invoked for a resolved
+/// advertise).
+async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+  make_quic_with(id, qcfg, MemberlistOptions::new()).await
 }
 
 /// Like [`make_quic`] but with explicit SWIM-level [`MemberlistOptions`]
-/// (gossip MTU, meta cap, initial meta).
+/// (gossip MTU, meta cap, initial meta). Also binds `127.0.0.1:0`.
 async fn make_quic_with(
   id: &str,
-  port: u16,
   qcfg: QuicOptions,
   mopts: MemberlistOptions,
 ) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   )
   .with_memberlist(mopts);
@@ -137,12 +141,9 @@ async fn make_quic_with(
 /// the stream driver's `join_with_waits_for_actual_contact` test
 /// (`memberlist-compio/tests/tcp_join.rs`).
 ///
-/// Distinct fixed ports (the QUIC `advertise_addr` is what the
-/// membership FSM stores and what subsequent peers must dial; an
-/// OS-pick port 0 would leave the FSM advertising port 0 and the
-/// dial would target the unbound port-0 alias). The chosen ports
-/// avoid overlap with `quic_smoke` (7401/7402) and the second test
-/// below.
+/// Both nodes bind OS-allocated ports; A dials B's real bound address
+/// (read back via `advertise_address()`), which carries the concrete
+/// OS-assigned port the membership FSM advertises.
 #[compio::test]
 async fn quic_join_with_waits_for_actual_contact() {
   // Two nodes sharing one self-signed cert + trust root — each
@@ -153,12 +154,10 @@ async fn quic_join_with_waits_for_actual_contact() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7411;
-  let b_port: u16 = 7412;
-  let a = make_quic("a", a_port, qcfg_a).await;
-  let b = make_quic("b", b_port, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
 
-  let b_addr = loopback_addr(b_port);
+  let b_addr = b.advertise_address();
 
   let n = a
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
@@ -188,7 +187,7 @@ async fn quic_join_with_blackhole_surfaces_join_all_failed() {
   // Local bind on OS-picked port 0 — A makes no inbound traffic
   // here, so the advertise-port-0 quirk that breaks two-node joins
   // is moot.
-  let a = make_quic("a", 0, qcfg).await;
+  let a = make_quic("a", qcfg).await;
 
   // Port 30199 is unbound — UDP datagrams to it vanish into the
   // kernel (no listener responds), so the QUIC handshake never
@@ -221,7 +220,7 @@ async fn quic_join_with_blackhole_surfaces_join_all_failed() {
 #[compio::test]
 async fn quic_join_to_unreachable_seed_returns_err_not_hang() {
   let qcfg = support::self_trusted_quic_config();
-  let node = make_quic("qj-unreach", 0, qcfg).await;
+  let node = make_quic("qj-unreach", qcfg).await;
   // Port 1 on loopback has no QUIC listener — the dial handshake cannot
   // complete, so the exchange is retired at its deadline.
   let unreachable = loopback_addr(1);
@@ -252,8 +251,8 @@ async fn quic_join_to_unreachable_seed_returns_err_not_hang() {
 /// service-discovery resolver that finds no endpoints for a configured
 /// service key is the canonical failure case this test guards against.
 ///
-/// Uses a single-node memberlist (port 7260); no peer is needed because
-/// the failure happens before any outbound dial.
+/// Uses a single-node memberlist on an OS-allocated port; no peer is needed
+/// because the failure happens before any outbound dial.
 #[compio::test]
 async fn join_with_empty_resolution_surfaces_join_all_failed() {
   let qcfg = support::self_trusted_quic_config();
@@ -263,7 +262,7 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
     Options::new(
       QuicTransportOptions::<SmolStr, String>::new()
         .with_local_id(SmolStr::new("joiner"))
-        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(7260)))
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg),
     ),
     VoidDelegate::default(),
@@ -318,20 +317,19 @@ async fn join_with_against_unresponsive_udp_endpoint_surfaces_join_all_failed() 
   use compio::net::UdpSocket;
 
   let qcfg = support::self_trusted_quic_config();
-  let joiner = make_quic("joiner", 7230, qcfg).await;
+  let joiner = make_quic("joiner", qcfg).await;
 
   // Bind a UDP socket that silently swallows every datagram — the
-  // QUIC handshake fails because no Initial response arrives.
-  let banner = UdpSocket::bind(loopback_addr(7231))
+  // QUIC handshake fails because no Initial response arrives. Bound on
+  // an OS-allocated port; its concrete address is the join target.
+  let banner = UdpSocket::bind(loopback_addr(0))
     .await
     .expect("banner bind");
+  let banner_addr = banner.local_addr().expect("banner local_addr");
   let _banner_guard = banner; // hold the binding; reads never performed
 
   let err = joiner
-    .join(
-      &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7231))],
-    )
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(banner_addr)])
     .await
     .expect_err("join against unresponsive UDP endpoint must not report contact");
   match err {
@@ -361,7 +359,6 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 
   let seed = make_quic_with(
     "seed",
-    7210,
     qcfg_a,
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -372,7 +369,6 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 
   let joiner = make_quic_with(
     "joiner",
-    7211,
     qcfg_b,
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -383,7 +379,7 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   let count = joiner
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7210))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against 18 KiB-meta seed");
@@ -418,12 +414,10 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 async fn quic_datagram_gossip_two_nodes_converge() {
   let (qcfg_a, qcfg_b) = two_node_quic_configs();
 
-  let a_port: u16 = 7290;
-  let b_port: u16 = 7291;
-  let a = make_quic("a", a_port, qcfg_a).await;
-  let b = make_quic("b", b_port, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
 
-  let b_addr = loopback_addr(b_port);
+  let b_addr = b.advertise_address();
 
   let count = a
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
@@ -525,7 +519,6 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
 
   let seed = make_quic_with(
     "seed",
-    7220,
     qcfg_a,
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -538,7 +531,6 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   // seed's 4 KiB meta and add the seed to membership.
   let joiner = make_quic_with(
     "joiner",
-    7221,
     qcfg_b,
     MemberlistOptions::new().with_gossip_mtu(32 * 1024),
   )
@@ -547,7 +539,7 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   let count = joiner
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7220))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against larger-meta seed");
@@ -581,15 +573,16 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
 async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
   let (qcfg_a, qcfg_b) = two_node_quic_configs();
 
-  let seed = make_quic("seed", 7240, qcfg_a).await;
-  let joiner = make_quic("joiner", 7241, qcfg_b).await;
+  let seed = make_quic("seed", qcfg_a).await;
+  let joiner = make_quic("joiner", qcfg_b).await;
 
+  let seed_addr = seed.advertise_address();
   let count = joiner
     .join(
       &SocketAddrResolver,
       &[
-        MaybeResolved::Resolved(loopback_addr(7240)),
-        MaybeResolved::Resolved(loopback_addr(7240)),
+        MaybeResolved::Resolved(seed_addr),
+        MaybeResolved::Resolved(seed_addr),
       ],
     )
     .await
@@ -631,15 +624,21 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   let qcfg_c = support::build_quic_config(cert_c, key_c, roots.clone());
   let qcfg_j = support::build_quic_config(cert_j, key_j, roots);
 
-  let c = make_quic("c", 7250, qcfg_c).await;
-  let a = make_quic("a", 7251, qcfg_a).await;
+  let c = make_quic("c", qcfg_c).await;
+  let a = make_quic("a", qcfg_a).await;
+  // Bind the joiner NOW, while C still holds its port, so a later `:0` bind can
+  // never be handed C's freed address after C is dropped — which would point the
+  // "closed transitive seed" at the live joiner and invalidate the count.
+  let joiner = make_quic("joiner", qcfg_j).await;
+
+  // Capture C's bound address before it is dropped — the joiner dials
+  // this same address later, when nothing is listening on it.
+  let c_addr = c.advertise_address();
+  let a_addr = a.advertise_address();
 
   // A joins C so A's membership records C as Alive.
   let n = a
-    .join(
-      &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7250))],
-    )
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(c_addr)])
     .await
     .expect("a joins c");
   assert_eq!(n, 1, "A directly contacted C");
@@ -654,14 +653,12 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   drop(c);
   compio::time::sleep(Duration::from_millis(100)).await;
 
-  let joiner = make_quic("joiner", 7252, qcfg_j).await;
-
   let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[
-        MaybeResolved::Resolved(loopback_addr(7251)),
-        MaybeResolved::Resolved(loopback_addr(7250)),
+        MaybeResolved::Resolved(a_addr),
+        MaybeResolved::Resolved(c_addr),
       ],
     )
     .await
@@ -698,13 +695,13 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
   let qcfg_j1 = support::build_quic_config(cert_j1, key_j1, roots.clone());
   let qcfg_j2 = support::build_quic_config(cert_j2, key_j2, roots);
 
-  let seed = make_quic("seed", 7200, qcfg_seed).await;
-  let j1 = make_quic("j1", 7201, qcfg_j1).await;
-  let j2 = make_quic("j2", 7202, qcfg_j2).await;
+  let seed = make_quic("seed", qcfg_seed).await;
+  let j1 = make_quic("j1", qcfg_j1).await;
+  let j2 = make_quic("j2", qcfg_j2).await;
 
   // Two concurrent join calls to the same seed. Each must resolve to
   // Ok(1) — its own exchange bytes — independently.
-  let seeds = [MaybeResolved::Resolved(loopback_addr(7200))];
+  let seeds = [MaybeResolved::Resolved(seed.advertise_address())];
   let fut1 = j1.join(&SocketAddrResolver, &seeds);
   let fut2 = j2.join(&SocketAddrResolver, &seeds);
   let (n1, n2) = futures_util::future::join(fut1, fut2).await;
@@ -729,8 +726,9 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
 async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions() {
   let (qcfg_seed, qcfg_joiner) = two_node_quic_configs();
 
-  let seed = make_quic("seed", 7270, qcfg_seed).await;
-  let joiner = make_quic("joiner", 7271, qcfg_joiner).await;
+  let seed = make_quic("seed", qcfg_seed).await;
+  let joiner = make_quic("joiner", qcfg_joiner).await;
+  let seed_addr = seed.advertise_address();
 
   // Issue many concurrent join calls. With 64 in-flight exchanges the
   // driver collectively processes hundreds of completion events,
@@ -740,7 +738,6 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
   let mut futures = Vec::with_capacity(N);
   for _ in 0..N {
     let joiner = joiner.clone();
-    let seed_addr = loopback_addr(7270);
     futures.push(async move {
       joiner
         .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
@@ -770,7 +767,7 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
 /// exchange, and the join reaps at the per-call deadline with
 /// `MemberlistError::JoinAllFailed { requested: 1, contacted: 0 }`.
 ///
-/// Uses fixed ports 7301/7302 — clear of every earlier test's range.
+/// Both nodes bind OS-allocated ports; A dials B's real bound address.
 /// Runs for the full `DEFAULT_JOIN_DEADLINE` (~10s) before reaping.
 #[compio::test]
 async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
@@ -788,13 +785,13 @@ async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
   roots_b.add(cert_b.clone()).expect("root b");
   let qcfg_b = support::build_quic_config(cert_b, key_b, roots_b);
 
-  let a = make_quic("a", 7301, qcfg_a).await;
-  let b = make_quic("b", 7302, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
 
   let result = a
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7302))],
+      &[MaybeResolved::Resolved(b.advertise_address())],
     )
     .await;
   match result {
@@ -842,13 +839,13 @@ async fn join_with_mismatched_server_name_surfaces_join_all_failed() {
   roots_b.add(cert_b.clone()).expect("self-root b");
   let qcfg_b = support::build_quic_config(cert_b, key_b, roots_b);
 
-  let a = make_quic("a", 7311, qcfg_a).await;
-  let b = make_quic("b", 7312, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
 
   let result = a
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7312))],
+      &[MaybeResolved::Resolved(b.advertise_address())],
     )
     .await;
   match result {
@@ -874,13 +871,13 @@ async fn join_with_mismatched_server_name_surfaces_join_all_failed() {
 async fn two_node_join_converges_member_counts() {
   let (qcfg_a, qcfg_b) = two_node_quic_configs();
 
-  let seed = make_quic("seed", 7280, qcfg_a).await;
-  let joiner = make_quic("joiner", 7281, qcfg_b).await;
+  let seed = make_quic("seed", qcfg_a).await;
+  let joiner = make_quic("joiner", qcfg_b).await;
 
   let count = joiner
     .dispatch_join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7280))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("dispatch_join");
@@ -935,16 +932,15 @@ async fn quic_compound_gossip_is_decoded_after_join() {
 
   let (qcfg_a, qcfg_b) = two_node_quic_configs();
 
-  let a = make_quic("a", 7420, qcfg_a).await;
-  let b = make_quic("b", 7421, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
+  let a_addr = a.advertise_address();
+  let b_addr = b.advertise_address();
 
   // B joins A via synchronous push/pull so B's membership contains A.
   // After this, B's alive_count == 2 (self + A).
   let n = b
-    .join(
-      &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7420))],
-    )
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("b joins a");
   assert_eq!(n, 1);
@@ -955,16 +951,16 @@ async fn quic_compound_gossip_is_decoded_after_join() {
   );
 
   // Craft a compound datagram carrying two Alive messages:
-  //   Alive(A, 127.0.0.1:7420, incarnation 1)
+  //   Alive(A, A's real advertise addr, incarnation 1)
   //   Alive(C, 127.0.0.1:7422, incarnation 1)  ← phantom node C
   // Both messages must be decoded and applied by B's ingress path.
   // With `parse_message` (the bug), the Compound tag causes an Err and
   // the whole datagram is dropped. With `parse_messages` (the fix),
   // both Alives land in B's FSM and B reaches alive_count >= 3.
-  let msg_a: Message<SmolStr, std::net::SocketAddr> = Message::Alive(Alive::new(
-    1,
-    Node::new(SmolStr::new("a"), loopback_addr(7420)),
-  ));
+  // A's address re-asserts the node B already learned (a no-op merge);
+  // C's `127.0.0.1:7422` is phantom packet data — no node ever binds it.
+  let msg_a: Message<SmolStr, std::net::SocketAddr> =
+    Message::Alive(Alive::new(1, Node::new(SmolStr::new("a"), a_addr)));
   let msg_c: Message<SmolStr, std::net::SocketAddr> = Message::Alive(Alive::new(
     1,
     Node::new(SmolStr::new("c"), loopback_addr(7422)),
@@ -980,9 +976,7 @@ async fn quic_compound_gossip_is_decoded_after_join() {
   let sender = UdpSocket::bind(loopback_addr(0))
     .await
     .expect("ephemeral bind");
-  let BufResult(res, _) = sender
-    .send_to(compound_bytes.to_vec(), loopback_addr(7421))
-    .await;
+  let BufResult(res, _) = sender.send_to(compound_bytes.to_vec(), b_addr).await;
   res.expect("send_to b");
 
   // B must now apply both Alive messages. alive_count >= 3 means B
@@ -1010,16 +1004,14 @@ async fn quic_compound_gossip_is_decoded_after_join() {
 async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
   let (qcfg_seed, qcfg_joiner) = two_node_quic_configs();
 
-  let seed_port: u16 = 7461;
-  let joiner_port: u16 = 7462;
-  let seed = make_quic("rr-seed", seed_port, qcfg_seed).await;
+  let seed = make_quic("rr-seed", qcfg_seed).await;
 
   // The joiner installs a reject-all admission `MergeDelegate` via `Options`.
   let joiner: QuicMemberlist<SmolStr, SocketAddr> = QuicMemberlist::<SmolStr, SocketAddr>::new(
     Options::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("rr-joiner"))
-        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(joiner_port)))
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_joiner),
     )
     .with_merge_delegate(RejectMerge),
@@ -1035,7 +1027,7 @@ async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
   let result = joiner
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(seed_port))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await;
   assert!(
@@ -1084,14 +1076,10 @@ async fn quic_label_isolates_reliable_plane() {
     .with_label(Some(b"cluster-a".to_vec()))
     .expect("valid label");
 
-  let a_port: u16 = 7470;
-  let b_port: u16 = 7471;
-  let a2_port: u16 = 7472;
-
-  let a = make_quic_with("ql-a", a_port, qcfg_a, a_opts).await;
-  let b = make_quic_with("ql-b", b_port, qcfg_b, b_opts).await;
-  let a2 = make_quic_with("ql-a2", a2_port, qcfg_a2, a2_opts).await;
-  let a_addr = loopback_addr(a_port);
+  let a = make_quic_with("ql-a", qcfg_a, a_opts).await;
+  let b = make_quic_with("ql-b", qcfg_b, b_opts).await;
+  let a2 = make_quic_with("ql-a2", qcfg_a2, a2_opts).await;
+  let a_addr = a.advertise_address();
 
   // Cross-label join: B's stream label mismatch must cause A to reject it.
   // Ignoring Err: join failure on a mismatched label is expected here.
@@ -1145,13 +1133,13 @@ async fn quic_label_isolates_reliable_plane() {
 async fn udp_opt_out_cluster_converges_over_plain_udp() {
   let (ca, cb) = two_node_quic_configs_with_mode(UnreliableTransport::Udp);
 
-  let seed = make_quic("udp-opt-seed", 7480, ca).await;
-  let joiner = make_quic("udp-opt-joiner", 7481, cb).await;
+  let seed = make_quic("udp-opt-seed", ca).await;
+  let joiner = make_quic("udp-opt-joiner", cb).await;
 
   let count = joiner
     .dispatch_join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(7480))],
+      &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("dispatch_join");

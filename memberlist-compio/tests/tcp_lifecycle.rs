@@ -47,6 +47,22 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAd
   .expect("construct tcp memberlist")
 }
 
+/// Reserve a concrete loopback address by binding an ephemeral node and
+/// releasing it. Lets a caller run two constructions against the SAME port
+/// (e.g. to prove a rejected construction left nothing bound); a bare `:0`
+/// would hand the two constructions unrelated OS-selected ports. The freed
+/// port could in principle be reclaimed by a sibling test before reuse — the
+/// same exposure any port-reuse test carries.
+async fn reserve_addr() -> SocketAddr {
+  let probe = make_tcp("addr-probe", loopback_addr(0)).await;
+  let addr = probe.advertise_address();
+  probe
+    .shutdown()
+    .await
+    .expect("probe shutdown releases the port");
+  addr
+}
+
 /// After `shutdown()` returns, the gossip UDP socket AND the TCP
 /// reliable listener must both be released so a fresh memberlist can
 /// rebind the same `(advertise_addr, port)` tuple immediately.
@@ -59,9 +75,8 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAd
 /// rebind would fail with `EADDRINUSE`.
 #[compio::test]
 async fn rebind_after_shutdown_releases_listener_port() {
-  let addr = loopback_addr(7400);
-
-  let first = make_tcp("first", addr).await;
+  let first = make_tcp("first", loopback_addr(0)).await;
+  let addr = first.advertise_address();
   first.shutdown().await.expect("first shutdown");
 
   // Same port, same address — must succeed.
@@ -81,9 +96,8 @@ async fn rebind_after_shutdown_releases_listener_port() {
 /// of any outstanding clones.
 #[compio::test]
 async fn rebind_after_shutdown_with_live_clone_works() {
-  let addr = loopback_addr(7402);
-
-  let first = make_tcp("first-cloned", addr).await;
+  let first = make_tcp("first-cloned", loopback_addr(0)).await;
+  let addr = first.advertise_address();
   // Hold a clone past the shutdown — the inner Arc<JoinHandle> stays
   // alive but the driver task itself has exited.
   let _live_clone = first.clone();
@@ -106,11 +120,9 @@ async fn rebind_after_shutdown_with_live_clone_works() {
 /// complete within bounded time.
 #[compio::test]
 async fn saturated_accept_does_not_starve_join_convergence() {
-  let seed_addr = loopback_addr(7410);
-  let joiner_addr = loopback_addr(7411);
-
-  let seed = make_tcp("sat-seed", seed_addr).await;
-  let joiner = make_tcp("sat-joiner", joiner_addr).await;
+  let seed = make_tcp("sat-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("sat-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // Saturate seed's accept arm: open 100 TCP connections that never
   // send anything. Each opens a server-side bridge on seed whose
@@ -184,11 +196,9 @@ async fn tokio_like_wait<F: FnMut() -> bool>(mut predicate: F, deadline: Duratio
 /// separate node must still complete within bounded time.
 #[compio::test]
 async fn udp_flood_does_not_starve_timer_under_join() {
-  let seed_addr = loopback_addr(7420);
-  let joiner_addr = loopback_addr(7421);
-
-  let seed = make_tcp("udp-seed", seed_addr).await;
-  let joiner = make_tcp("udp-joiner", joiner_addr).await;
+  let seed = make_tcp("udp-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("udp-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // Continuously pump junk UDP datagrams at the seed's gossip socket
   // at ~200 pps. Slow enough that the seed's recv arm still hits
@@ -255,7 +265,7 @@ async fn udp_flood_does_not_starve_timer_under_join() {
 /// be a no-op.
 #[compio::test]
 async fn shutdown_during_dial_does_not_leak_bridge() {
-  let local = loopback_addr(7401);
+  let local = loopback_addr(0);
   // Port 1 is a privileged port with no listener; the connect attempt
   // either fails fast (ECONNREFUSED) or stalls; either way the bridge
   // entry for the dial exists in the driver's bridges map until
@@ -298,9 +308,8 @@ async fn shutdown_during_dial_does_not_leak_bridge() {
 /// reads (snapshot publication) and shuts down promptly.
 #[compio::test]
 async fn bridge_inbound_backlog_does_not_stall_driver() {
-  let seed_addr = loopback_addr(7450);
-
-  let seed = make_tcp("backlog-seed", seed_addr).await;
+  let seed = make_tcp("backlog-seed", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // Open 200 inbound TCP connections in parallel; each writes 2 KiB
   // of junk bytes that the seed's record layer rejects (no valid
@@ -366,11 +375,9 @@ async fn bridge_inbound_backlog_does_not_stall_driver() {
 /// within 10s.
 #[compio::test]
 async fn bridge_in_pressure_does_not_starve_accept_under_join() {
-  let seed_addr = loopback_addr(7460);
-  let joiner_addr = loopback_addr(7461);
-
-  let seed = make_tcp("starve-seed", seed_addr).await;
-  let joiner = make_tcp("starve-joiner", joiner_addr).await;
+  let seed = make_tcp("starve-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("starve-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // Saturate bridge_in: 100 long-lived bridges each writing junk
   // bytes in a tight loop. Each push generates a `BridgeInbound::Bytes`
@@ -436,15 +443,13 @@ async fn bridge_in_pressure_does_not_starve_accept_under_join() {
 /// hangs.
 #[compio::test]
 async fn join_with_slow_resolver_does_not_hang_during_shutdown() {
-  let addr = loopback_addr(7515);
-  let seed_addr = loopback_addr(7516);
-
   // Run a seed memberlist so the SocketAddrResolver target is real,
   // even though the join will be aborted by shutdown before it
   // converges.
-  let seed = make_tcp("slowres-seed", seed_addr).await;
+  let seed = make_tcp("slowres-seed", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
-  let m = make_tcp("slowres", addr).await;
+  let m = make_tcp("slowres", loopback_addr(0)).await;
   let m_for_join = m.clone();
 
   // Spawn the slow join on the same runtime. The seed is handed in
@@ -518,8 +523,7 @@ impl memberlist_compio::Resolver for SlowResolver {
 /// `recv_async` on the reply would block forever.
 #[compio::test]
 async fn command_after_shutdown_returns_error_promptly() {
-  let addr = loopback_addr(7510);
-  let m = make_tcp("post-shutdown", addr).await;
+  let m = make_tcp("post-shutdown", loopback_addr(0)).await;
   let m_clone = m.clone();
 
   // Shut down via the original. After shutdown returns, the
@@ -583,11 +587,9 @@ async fn command_after_shutdown_returns_error_promptly() {
 /// (proving timer / recv are not starved).
 #[compio::test]
 async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
-  let seed_addr = loopback_addr(7470);
-  let joiner_addr = loopback_addr(7471);
-
-  let seed = make_tcp("cmdflood-seed", seed_addr).await;
-  let joiner = make_tcp("cmdflood-joiner", joiner_addr).await;
+  let seed = make_tcp("cmdflood-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("cmdflood-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // Spawn 200 concurrent cmd-pumping tasks, each holding a clone of
   // the seed handle and looping update_node_metadata calls. Each call
@@ -641,8 +643,7 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
 /// constructed memberlist with no peers and no traffic.
 #[compio::test]
 async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
-  let addr = loopback_addr(7490);
-  let m = make_tcp("quiet", addr).await;
+  let m = make_tcp("quiet", loopback_addr(0)).await;
 
   // Let the driver settle into its main select wait.
   compio::time::sleep(Duration::from_millis(50)).await;
@@ -676,8 +677,7 @@ async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
 /// hang).
 #[compio::test]
 async fn concurrent_shutdown_from_cloned_handles() {
-  let addr = loopback_addr(7500);
-  let m = make_tcp("concurrent-shutdown", addr).await;
+  let m = make_tcp("concurrent-shutdown", loopback_addr(0)).await;
   let m2 = m.clone();
 
   // Let the driver settle into its main select wait.
@@ -712,9 +712,8 @@ async fn concurrent_shutdown_from_cloned_handles() {
 /// `shutdown.await` would hang.
 #[compio::test]
 async fn shutdown_lands_under_continuous_network_flood() {
-  let seed_addr = loopback_addr(7480);
-
-  let seed = make_tcp("flood-seed", seed_addr).await;
+  let seed = make_tcp("flood-seed", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   // UDP flood at the gossip socket.
   let udp_flood = compio::runtime::spawn(async move {
@@ -780,7 +779,7 @@ async fn shutdown_lands_under_continuous_network_flood() {
 /// keeps the dial task itself from outliving the test.
 #[compio::test]
 async fn dial_to_blackhole_bounded_by_dial_timeout() {
-  let local = loopback_addr(7440);
+  let local = loopback_addr(0);
   // RFC 5737 TEST-NET-1 documentation prefix. Packets to this address
   // are dropped by sane routers, so `TcpStream::connect` will not
   // receive a SYN-ACK or a RST — the kernel sits in its connect
@@ -836,11 +835,9 @@ async fn dial_to_blackhole_bounded_by_dial_timeout() {
 /// `(member=2, alive=2)` snapshot on both nodes.
 #[compio::test]
 async fn post_join_stays_alive_through_probe_cycles() {
-  let seed_addr = loopback_addr(7430);
-  let joiner_addr = loopback_addr(7431);
-
-  let seed = make_tcp("stable-seed", seed_addr).await;
-  let joiner = make_tcp("stable-joiner", joiner_addr).await;
+  let seed = make_tcp("stable-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("stable-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   joiner
     .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
@@ -903,16 +900,16 @@ async fn post_join_stays_alive_through_probe_cycles() {
 /// `memberlist-proto`.
 #[compio::test]
 async fn leave_completes_only_after_peer_is_notified() {
-  let a_addr = loopback_addr(7520);
-  let b_addr = loopback_addr(7521);
-
-  let a = make_tcp("leave-notify-a", a_addr).await;
-  let b = make_tcp("leave-notify-b", b_addr).await;
+  let a = make_tcp("leave-notify-a", loopback_addr(0)).await;
+  let b = make_tcp("leave-notify-b", loopback_addr(0)).await;
 
   // Converge: B joins A; both observe two alive members.
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1010,16 +1007,13 @@ impl Delegate for SlowJoinDelegate {
 /// the stream backend as a parity guard.
 #[compio::test]
 async fn slow_observation_delegate_does_not_delay_join_completion() {
-  let seed_addr = loopback_addr(7610);
-  let joiner_addr = loopback_addr(7611);
-
   // Node J carries the slow-join observation delegate; built inline like
   // `make_tcp` but with `SlowJoinDelegate` in place of `VoidDelegate`.
   let joiner: Memberlist<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate> = {
     let opts = Options::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowjoin-j"))
-        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr)),
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
     );
     Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
       opts,
@@ -1032,7 +1026,7 @@ async fn slow_observation_delegate_does_not_delay_join_completion() {
   };
 
   // The seed is a normal VoidDelegate node.
-  let seed = make_tcp("slowjoin-seed", seed_addr).await;
+  let seed = make_tcp("slowjoin-seed", loopback_addr(0)).await;
 
   // `join().await` must return Ok well within 1.5s even though the joiner's
   // own `notify_join` sleeps ~3s: the exchange completion resolves the waiter
@@ -1040,7 +1034,10 @@ async fn slow_observation_delegate_does_not_delay_join_completion() {
   let start = std::time::Instant::now();
   let joined = compio::time::timeout(
     Duration::from_millis(1500),
-    joiner.join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)]),
+    joiner.join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(seed.advertise_address())],
+    ),
   )
   .await;
   let elapsed = start.elapsed();
@@ -1079,16 +1076,16 @@ async fn slow_observation_delegate_does_not_delay_join_completion() {
 /// `NodeLeft(A)` after both `leave()` futures resolve.
 #[compio::test]
 async fn concurrent_leave_from_cloned_handles_both_succeed() {
-  let a_addr = loopback_addr(7612);
-  let b_addr = loopback_addr(7613);
-
-  let a = make_tcp("concurrent-leave-a", a_addr).await;
-  let b = make_tcp("concurrent-leave-b", b_addr).await;
+  let a = make_tcp("concurrent-leave-a", loopback_addr(0)).await;
+  let b = make_tcp("concurrent-leave-b", loopback_addr(0)).await;
 
   // Converge: B joins A; both observe two alive members.
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1207,11 +1204,8 @@ impl Delegate for SlowUserMsgDelegate {
 /// tests cover directly.
 #[compio::test]
 async fn slow_user_msg_delegate_still_observes_broadcast() {
-  let a_addr = loopback_addr(7530);
-  let b_addr = loopback_addr(7531);
-
   // Node A is a normal VoidDelegate node; it queues the broadcast.
-  let a = make_tcp("slowuser-a", a_addr).await;
+  let a = make_tcp("slowuser-a", loopback_addr(0)).await;
 
   // Node B carries the slow-user-msg observation delegate; built inline like
   // `make_tcp` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
@@ -1221,7 +1215,7 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
     let opts = Options::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowuser-b"))
-        .with_advertise_addr(MaybeResolved::Resolved(b_addr)),
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
     );
     Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
       opts,
@@ -1237,9 +1231,12 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
   };
 
   // Converge: A joins B; both observe two alive members.
-  a.join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
-    .await
-    .expect("join");
+  a.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(b.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1296,17 +1293,17 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
 /// `Ok(())`.
 #[compio::test]
 async fn queue_user_broadcast_after_leave_is_rejected() {
-  let a_addr = loopback_addr(7700);
-  let b_addr = loopback_addr(7701);
-
-  let a = make_tcp("ub-after-leave-a", a_addr).await;
-  let b = make_tcp("ub-after-leave-b", b_addr).await;
+  let a = make_tcp("ub-after-leave-a", loopback_addr(0)).await;
+  let b = make_tcp("ub-after-leave-b", loopback_addr(0)).await;
 
   // Converge so A is a real running cluster member (the leave then has a live
   // peer to flush its `Dead`-self notice to).
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1343,15 +1340,15 @@ async fn queue_user_broadcast_after_leave_is_rejected() {
 /// gate the call returns `Ok(())`.
 #[compio::test]
 async fn update_node_metadata_after_leave_is_rejected() {
-  let a_addr = loopback_addr(7702);
-  let b_addr = loopback_addr(7703);
+  let a = make_tcp("meta-after-leave-a", loopback_addr(0)).await;
+  let b = make_tcp("meta-after-leave-b", loopback_addr(0)).await;
 
-  let a = make_tcp("meta-after-leave-a", a_addr).await;
-  let b = make_tcp("meta-after-leave-b", b_addr).await;
-
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1386,15 +1383,15 @@ async fn update_node_metadata_after_leave_is_rejected() {
 /// returns `Ok(())`.
 #[compio::test]
 async fn set_policy_options_after_leave_is_rejected() {
-  let a_addr = loopback_addr(7708);
-  let b_addr = loopback_addr(7709);
+  let a = make_tcp("policy-after-leave-a", loopback_addr(0)).await;
+  let b = make_tcp("policy-after-leave-b", loopback_addr(0)).await;
 
-  let a = make_tcp("policy-after-leave-a", a_addr).await;
-  let b = make_tcp("policy-after-leave-b", b_addr).await;
-
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1444,8 +1441,7 @@ async fn set_policy_options_after_leave_is_rejected() {
 /// gossip budget.
 #[compio::test]
 async fn set_ack_payload_oversized_is_rejected() {
-  let a_addr = loopback_addr(7760);
-  let a = make_tcp("ack-oversized-a", a_addr).await;
+  let a = make_tcp("ack-oversized-a", loopback_addr(0)).await;
 
   let res = a
     .set_ack_payload(Bytes::from(vec![0xab_u8; 1024 * 1024]))
@@ -1484,17 +1480,18 @@ async fn set_ack_payload_oversized_is_rejected() {
 /// returns `Ok(usize)`.
 #[compio::test]
 async fn join_after_leave_is_rejected() {
-  let a_addr = loopback_addr(7704);
-  let b_addr = loopback_addr(7705);
-
-  let a = make_tcp("join-after-leave-a", a_addr).await;
-  let b = make_tcp("join-after-leave-b", b_addr).await;
+  let a = make_tcp("join-after-leave-a", loopback_addr(0)).await;
+  let b = make_tcp("join-after-leave-b", loopback_addr(0)).await;
+  let b_addr = b.advertise_address();
 
   // Converge so A is a real running member with a live peer to flush its
   // `Dead`-self notice to on leave.
-  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
-    .await
-    .expect("join");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
   let converged = tokio_like_wait(
     || a.alive_count() == 2 && b.alive_count() == 2,
     Duration::from_secs(5),
@@ -1548,7 +1545,7 @@ async fn join_after_leave_is_rejected() {
 /// `Ok` over a silently-broken node. A nonzero value still constructs `Ok`.
 #[compio::test]
 async fn zero_bridge_recv_buf_len_is_rejected() {
-  let addr = loopback_addr(7706);
+  let addr = reserve_addr().await;
 
   let bad = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
@@ -1609,7 +1606,7 @@ async fn zero_bridge_recv_buf_len_is_rejected() {
 /// still constructs `Ok`.
 #[compio::test]
 async fn zero_idle_wake_interval_is_rejected() {
-  let addr = loopback_addr(7707);
+  let addr = reserve_addr().await;
 
   let bad = Options::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()

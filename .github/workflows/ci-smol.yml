@@ -28,7 +28,7 @@ on:
   schedule: [cron: "0 1 */30 * *"]
 
 env:
-  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring"
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,cidr"
 
 jobs:
   test:

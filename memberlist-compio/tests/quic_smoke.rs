@@ -18,15 +18,16 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
-/// `QuicOptions`. The membership-input address type is `SocketAddr`, so the
+/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// The concrete bound address is read back from `advertise_address()` after
+/// construction. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
-async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   );
   QuicMemberlist::<SmolStr, SocketAddr>::new(
@@ -41,8 +42,7 @@ async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<Smo
 
 #[compio::test]
 async fn quic_memberlist_binds_and_shuts_down_cleanly() {
-  // OS-pick port 0 — avoids parallel-test collisions.
-  let ml = make_quic("node-a", 0, support::self_trusted_quic_config()).await;
+  let ml = make_quic("node-a", support::self_trusted_quic_config()).await;
   assert_eq!(ml.alive_count(), 1);
   assert_eq!(ml.member_count(), 1);
   let timed = compio::time::timeout(Duration::from_secs(5), ml.shutdown())
@@ -58,9 +58,10 @@ async fn quic_memberlist_binds_and_shuts_down_cleanly() {
 /// poll_memberlist_ingress / poll_memberlist_transmit / poll_transmit)
 /// and the umbrella codec wrap/unwrap on the unreliable gossip path.
 ///
-/// Distinct fixed ports (7401, 7402) — config-supplied advertise
-/// ports are what the membership FSM stores and what subsequent
-/// peers must dial; OS-pick would leave the FSM advertising port 0.
+/// Both nodes bind an OS-allocated port. Construction resolves the `:0` request
+/// to the real bound port and stores THAT in the membership FSM, so
+/// `advertise_address()` returns the port subsequent peers dial — no hard-coded
+/// port is needed for the join to land.
 #[compio::test]
 async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
   // Two nodes sharing one self-signed cert + trust root — each
@@ -73,10 +74,8 @@ async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  let a_port: u16 = 7401;
-  let b_port: u16 = 7402;
-  let a = make_quic("a-7401", a_port, qcfg_a).await;
-  let b = make_quic("b-7402", b_port, qcfg_b).await;
+  let a = make_quic("a", qcfg_a).await;
+  let b = make_quic("b", qcfg_b).await;
 
   // Dispatch-style join — fire-and-forget, no synchronous wait. The
   // returned count is the number of seeds the driver accepted, not
@@ -86,7 +85,7 @@ async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
   let n = a
     .dispatch_join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(b_port))],
+      &[MaybeResolved::Resolved(b.advertise_address())],
     )
     .await
     .expect("dispatch_join");
@@ -131,7 +130,7 @@ async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
 /// push/pull deadlines.
 #[compio::test]
 async fn quic_memberlist_idle_timer_does_not_deadlock() {
-  let ml = make_quic("idle", 0, support::self_trusted_quic_config()).await;
+  let ml = make_quic("idle", support::self_trusted_quic_config()).await;
   assert_eq!(ml.alive_count(), 1);
 
   // Give the driver loop ample time to fire its wake timer at least
@@ -189,7 +188,7 @@ async fn quic_gossip_mtu_rejected_for_oversized_local_id() {
   }
 
   // A normal small id at the SAME gossip_mtu binds successfully.
-  let ml = make_quic("small-id", 0, support::self_trusted_quic_config()).await;
+  let ml = make_quic("small-id", support::self_trusted_quic_config()).await;
   let timed = compio::time::timeout(Duration::from_secs(5), ml.shutdown())
     .await
     .expect("shutdown within 5s");

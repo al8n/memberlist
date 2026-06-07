@@ -118,6 +118,11 @@ tls-rustls-ring = ["tls", "rustls/ring"]
 tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]
 tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips"]
 
+# CIDR peer-admission allow-list ([`CidrPolicy`]), usable as an `AliveDelegate`.
+# std-only: the policy holds a `std` HashSet of `ipnet` networks and filters
+# inbound alives by the peer's advertised IP.
+cidr = ["std", "dep:ipnet", "ipnet/std"]
+
 [dependencies]
 bytes.workspace = true
 indexmap = { version = "2", default-features = false }
@@ -134,6 +139,7 @@ quinn-proto = { version = "0.11", default-features = false, optional = true }
 slab = { version = "0.4", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 rustls-pki-types = { version = "1", default-features = false, optional = true }
+ipnet = { workspace = true, optional = true }
 
 # Wire types, codec, and framing.
 buffa = { version = "0.7", default-features = false }

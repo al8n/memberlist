@@ -250,18 +250,39 @@ where
       }
     };
 
-    let gossip_socket = UdpSocket::bind(advertise_socket)
-      .await
-      .map_err(MemberlistError::Io)?;
-    // Read back the actually-bound address: an ephemeral `:0` advertise
-    // request resolves to a concrete OS-assigned port here, and the TCP
-    // reliable listener MUST bind the same port the node gossips. Bind
-    // the listener to the gossip socket's resolved address so UDP gossip
-    // and TLS-over-TCP reliable share one port even when `:0` was requested.
-    let advertise_socket = gossip_socket.local_addr().map_err(MemberlistError::Io)?;
-    let tcp_listener = TcpListener::bind(advertise_socket)
-      .await
-      .map_err(MemberlistError::Io)?;
+    // memberlist reaches a node at ONE advertised address, so the UDP gossip
+    // socket and the TLS-over-TCP reliable listener MUST share a port. Bind the
+    // listener first to claim an OS-assigned free port, then bind the gossip
+    // socket to that same port. Binding UDP first and reusing its port for TCP
+    // races: an ephemeral UDP port can land on a TCP port still in TIME_WAIT
+    // (the spaces are independent), failing the TCP bind with AddrInUse. For an
+    // ephemeral (`:0`) advertise we retry the pair on a fresh port when the UDP
+    // bind collides; a fixed (nonzero) port is a single attempt, so a genuine
+    // conflict surfaces to the caller instead of looping.
+    const EPHEMERAL_BIND_RETRIES: usize = 16;
+    let ephemeral = advertise_socket.port() == 0;
+    let (tcp_listener, advertise_socket, gossip_socket) = {
+      let mut attempt = 0usize;
+      loop {
+        let tcp_listener = TcpListener::bind(advertise_socket)
+          .await
+          .map_err(MemberlistError::Io)?;
+        let bound = tcp_listener.local_addr().map_err(MemberlistError::Io)?;
+        match UdpSocket::bind(bound).await {
+          Ok(gossip_socket) => break (tcp_listener, bound, gossip_socket),
+          Err(e)
+            if ephemeral
+              && e.kind() == std::io::ErrorKind::AddrInUse
+              && attempt < EPHEMERAL_BIND_RETRIES =>
+          {
+            // Release the claimed TCP port and retry on a fresh ephemeral pair.
+            drop(tcp_listener);
+            attempt += 1;
+          }
+          Err(e) => return Err(MemberlistError::Io(e)),
+        }
+      }
+    };
 
     Ok(Self {
       local_id,

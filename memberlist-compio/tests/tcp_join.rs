@@ -86,18 +86,18 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 
 #[compio::test]
 async fn two_node_join_converges_member_counts() {
-  let seed_addr = loopback_addr(7200);
-  let joiner_addr = loopback_addr(7201);
-
-  let seed = make_tcp("seed", seed_addr, b"cluster-join").await;
-  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join").await;
+  let seed = make_tcp("seed", loopback_addr(0), b"cluster-join").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"cluster-join").await;
 
   // Drive the join. The resolver is the identity pass-through since
   // the seed list already carries concrete SocketAddrs. `dispatch_join`
   // returns the dispatched count immediately; convergence is
   // observed via the snapshot below.
   let count = joiner
-    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .dispatch_join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(seed.advertise_address())],
+    )
     .await
     .expect("dispatch_join");
   assert_eq!(count, 1, "one seed address dispatched");
@@ -133,14 +133,14 @@ async fn two_node_join_converges_member_counts() {
 /// `JOIN_DEADLINE` elapses.
 #[compio::test]
 async fn join_with_waits_for_actual_contact() {
-  let seed_addr = loopback_addr(7210);
-  let joiner_addr = loopback_addr(7211);
-
-  let seed = make_tcp("seed", seed_addr, b"cluster-join-sync").await;
-  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join-sync").await;
+  let seed = make_tcp("seed", loopback_addr(0), b"cluster-join-sync").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"cluster-join-sync").await;
 
   let count = joiner
-    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(seed.advertise_address())],
+    )
     .await
     .expect("join should succeed against a reachable seed");
   assert_eq!(count, 1, "one seed contacted");
@@ -170,13 +170,13 @@ async fn join_with_waits_for_actual_contact() {
 /// loopback port, so the call returns well before `JOIN_DEADLINE`.
 #[compio::test]
 async fn join_with_blackhole_surfaces_join_all_failed() {
-  let joiner_addr = loopback_addr(7212);
   // 127.0.0.1 with a port that has nothing listening — connect()
   // returns ECONNREFUSED immediately on Linux/macOS loopback, so the
   // bridge enters its EOF/Error path and no NodeJoined ever fires.
+  // This port is never bound by any node, so it cannot collide.
   let blackhole = loopback_addr(7213);
 
-  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join-fail").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"cluster-join-fail").await;
 
   let err = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(blackhole)])
@@ -200,14 +200,13 @@ async fn join_with_blackhole_surfaces_join_all_failed() {
 /// service key is the canonical failure case this test guards against.
 #[compio::test]
 async fn join_with_empty_resolution_surfaces_join_all_failed() {
-  let joiner_addr = loopback_addr(7214);
   // This joiner resolves `String` service keys via `EmptyResolver`, so its
   // membership-input address type is `String` (not the default `HostAddr`).
   let joiner: TcpMemberlist<SmolStr, String> = TcpMemberlist::<SmolStr, String>::new(
     Options::new(
       TcpTransportOptions::<SmolStr, String>::new()
         .with_local_id(SmolStr::new("joiner"))
-        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr)),
+        .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
     )
     .with_memberlist(
       MemberlistOptions::new()
@@ -261,16 +260,13 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
 /// 20 KiB Meta surfaces over UDP gossip and the two nodes converge.
 #[compio::test]
 async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
-  let seed_addr = loopback_addr(7300);
-  let joiner_addr = loopback_addr(7301);
-
   // 20 KiB meta — comfortably above 16 KiB (the old recv buffer cap)
   // and below the 32 KiB gossip_mtu configured below.
   let big_meta = Meta::try_from(vec![0x5au8; 20 * 1024]).expect("20 KiB within wire ceiling");
 
   let seed = make_tcp_with(
     "seed",
-    seed_addr,
+    loopback_addr(0),
     b"large-mtu",
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -281,7 +277,7 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 
   let joiner = make_tcp_with(
     "joiner",
-    joiner_addr,
+    loopback_addr(0),
     b"large-mtu",
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -290,7 +286,10 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   .await;
 
   let count = joiner
-    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(seed.advertise_address())],
+    )
     .await
     .expect("join against 20 KiB-meta seed");
   assert_eq!(count, 1);
@@ -325,15 +324,12 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 /// a 4 KiB meta while the joiner keeps the default 512-byte cap.
 #[compio::test]
 async fn join_with_accepts_seed_with_larger_meta_cap() {
-  let seed_addr = loopback_addr(7320);
-  let joiner_addr = loopback_addr(7321);
-
   // 4 KiB meta — well past the joiner's default 512-byte cap.
   let big_meta = Meta::try_from(vec![0x42u8; 4096]).expect("4 KiB within wire ceiling");
 
   let seed = make_tcp_with(
     "seed",
-    seed_addr,
+    loopback_addr(0),
     b"meta-cap-mismatch",
     MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
@@ -346,14 +342,17 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   // accept the seed's 4 KiB meta and add the seed to membership.
   let joiner = make_tcp_with(
     "joiner",
-    joiner_addr,
+    loopback_addr(0),
     b"meta-cap-mismatch",
     MemberlistOptions::new().with_gossip_mtu(32 * 1024),
   )
   .await;
 
   let count = joiner
-    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
+    .join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(seed.advertise_address())],
+    )
     .await
     .expect("join against larger-meta seed");
   assert_eq!(count, 1);
@@ -384,12 +383,10 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
 /// addresses (1).
 #[compio::test]
 async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
-  let seed_addr = loopback_addr(7280);
-  let joiner_addr = loopback_addr(7281);
+  let seed = make_tcp("seed", loopback_addr(0), b"join-duplicate").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"join-duplicate").await;
 
-  let seed = make_tcp("seed", seed_addr, b"join-duplicate").await;
-  let joiner = make_tcp("joiner", joiner_addr, b"join-duplicate").await;
-
+  let seed_addr = seed.advertise_address();
   let count = joiner
     .join(
       &SocketAddrResolver,
@@ -423,12 +420,18 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
 /// gossip.
 #[compio::test]
 async fn join_with_does_not_count_transitively_discovered_seeds() {
-  let a_addr = loopback_addr(7240);
-  let c_addr = loopback_addr(7241);
-  let joiner_addr = loopback_addr(7242);
+  let c = make_tcp("c", loopback_addr(0), b"transitive-discover").await;
+  let a = make_tcp("a", loopback_addr(0), b"transitive-discover").await;
+  // Bind the joiner NOW, while C still holds its port, so a later `:0` bind can
+  // never be handed C's freed address after C is dropped — which would point the
+  // "closed transitive seed" at the live joiner and invalidate the count.
+  let joiner = make_tcp("joiner", loopback_addr(0), b"transitive-discover").await;
 
-  let c = make_tcp("c", c_addr, b"transitive-discover").await;
-  let a = make_tcp("a", a_addr, b"transitive-discover").await;
+  // Capture C's bound address before C is dropped — the joiner below
+  // still lists it as a seed (a now-closed port) to exercise the
+  // transitive-discovery path.
+  let a_addr = a.advertise_address();
+  let c_addr = c.advertise_address();
 
   // A joins C directly so A's membership records C as Alive.
   let n = a
@@ -445,8 +448,6 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   // driver task is cancelled by the last-handle drop.
   drop(c);
   compio::time::sleep(Duration::from_millis(50)).await;
-
-  let joiner = make_tcp("joiner", joiner_addr, b"transitive-discover").await;
 
   let contacted = joiner
     .join(
@@ -476,13 +477,11 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
 /// the dispatching waiter only.
 #[compio::test]
 async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
-  let seed_addr = loopback_addr(7250);
-  let j1_addr = loopback_addr(7251);
-  let j2_addr = loopback_addr(7252);
+  let seed = make_tcp("seed", loopback_addr(0), b"concurrent-join").await;
+  let j1 = make_tcp("j1", loopback_addr(0), b"concurrent-join").await;
+  let j2 = make_tcp("j2", loopback_addr(0), b"concurrent-join").await;
 
-  let seed = make_tcp("seed", seed_addr, b"concurrent-join").await;
-  let j1 = make_tcp("j1", j1_addr, b"concurrent-join").await;
-  let j2 = make_tcp("j2", j2_addr, b"concurrent-join").await;
+  let seed_addr = seed.advertise_address();
 
   // Two concurrent join calls to the same seed. Each must resolve to
   // Ok(1) — its own bridge's bytes — independently. With
@@ -516,11 +515,10 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
 async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   use std::collections::HashSet;
 
-  let seed_addr = loopback_addr(7290);
-  let joiner_addr = loopback_addr(7291);
+  let seed = make_tcp("seed", loopback_addr(0), b"backlog-cap").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"backlog-cap").await;
 
-  let seed = make_tcp("seed", seed_addr, b"backlog-cap").await;
-  let joiner = make_tcp("joiner", joiner_addr, b"backlog-cap").await;
+  let seed_addr = seed.advertise_address();
 
   // Issue many concurrent join calls in parallel. Each succeeds
   // independently; with 64 of them the bridge byte-mover tasks
@@ -563,14 +561,15 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
 async fn join_with_against_banner_tcp_service_surfaces_join_all_failed() {
   use compio::{io::AsyncWriteExt, net::TcpListener};
 
-  let joiner_addr = loopback_addr(7270);
-  let banner_addr = loopback_addr(7271);
-
   // Spawn a TCP listener that immediately writes a non-memberlist
-  // banner on every accepted connection.
-  let banner_listener = TcpListener::bind(banner_addr)
+  // banner on every accepted connection. Bind `:0` and read back the
+  // OS-assigned address so the joiner dials the real port.
+  let banner_listener = TcpListener::bind(loopback_addr(0))
     .await
     .expect("banner listener bind");
+  let banner_addr = banner_listener
+    .local_addr()
+    .expect("banner listener local addr");
   compio::runtime::spawn(async move {
     if let Ok((mut stream, _)) = banner_listener.accept().await {
       // Ignoring Err: best-effort write into a test fixture; if the
@@ -581,7 +580,7 @@ async fn join_with_against_banner_tcp_service_surfaces_join_all_failed() {
   })
   .detach();
 
-  let joiner = make_tcp("joiner", joiner_addr, b"banner-trust").await;
+  let joiner = make_tcp("joiner", loopback_addr(0), b"banner-trust").await;
 
   let err = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(banner_addr)])

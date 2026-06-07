@@ -53,11 +53,9 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 
 #[compio::test]
 async fn handle_query_api_after_join() {
-  let seed_addr = loopback_addr(7700);
-  let joiner_addr = loopback_addr(7701);
-
-  let seed = make_tcp("q-seed", seed_addr).await;
-  let joiner = make_tcp("q-joiner", joiner_addr).await;
+  let seed = make_tcp("q-seed", loopback_addr(0)).await;
+  let joiner = make_tcp("q-joiner", loopback_addr(0)).await;
+  let seed_addr = seed.advertise_address();
 
   let _count = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
@@ -74,7 +72,16 @@ async fn handle_query_api_after_join() {
 
   // --- local_id / advertise_address ---
   assert_eq!(joiner.local_id(), SmolStr::new("q-joiner"));
-  assert_eq!(joiner.advertise_address(), joiner_addr);
+  // advertise_address() reports the OS-resolved bound port, not the `:0` request.
+  assert_eq!(
+    joiner.advertise_address().ip(),
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+  );
+  assert_ne!(
+    joiner.advertise_address().port(),
+    0,
+    "ephemeral advertise port must resolve to a real port"
+  );
   assert_eq!(seed.local_id(), SmolStr::new("q-seed"));
 
   // --- local_state ---

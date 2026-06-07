@@ -152,6 +152,8 @@ pub mod streams;
 pub mod ack;
 pub mod awareness;
 pub mod broadcast;
+#[cfg(feature = "cidr")]
+pub mod cidr;
 pub mod config;
 pub mod delegate;
 pub mod endpoint;
@@ -184,6 +186,8 @@ pub mod wire_type;
 pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
 pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
+#[cfg(feature = "cidr")]
+pub use cidr::CidrPolicy;
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
@@ -195,6 +199,8 @@ pub use event::{
   StreamClosed, StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived,
   UserPacket,
 };
+#[cfg(feature = "cidr")]
+pub use ipnet::{AddrParseError, IpNet};
 pub use members::{LocalNodeState, Member, Members};
 pub use stream::{PushPullSnapshot, Stream};
 pub use suspicion::{Confirmation, Suspicion};

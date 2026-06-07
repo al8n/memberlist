@@ -29,7 +29,7 @@ on:
   schedule: [cron: "0 1 */30 * *"]
 
 env:
-  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm"
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr"
 
 jobs:
   test:

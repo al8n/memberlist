@@ -24,6 +24,7 @@ checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3"]
 checksum-murmur3 = ["memberlist-proto/checksum-murmur3"]
 encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
 encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+cidr = ["memberlist-proto/cidr"]
 dns = ["dep:hickory-proto", "dep:resolv-conf"]
 
 [dependencies]
@@ -80,6 +81,10 @@ required-features = ["tcp"]
 [[test]]
 name = "tcp_lifecycle"
 required-features = ["tcp"]
+
+[[test]]
+name = "cidr"
+required-features = ["tcp", "cidr"]
 
 [[test]]
 name = "tls_smoke"

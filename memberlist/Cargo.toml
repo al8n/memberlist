@@ -73,6 +73,10 @@ xxhash64 = ["memberlist-proto/checksum-xxhash64", "memberlist-reactor?/checksum-
 xxhash3  = ["memberlist-proto/checksum-xxhash3",  "memberlist-reactor?/checksum-xxhash3",  "memberlist-compio?/checksum-xxhash3",  "memberlist-smoltcp?/checksum-xxhash3",  "memberlist-embassy?/checksum-xxhash3",  "memberlist-embedded?/checksum-xxhash3"]
 murmur3  = ["memberlist-proto/checksum-murmur3",  "memberlist-reactor?/checksum-murmur3",  "memberlist-compio?/checksum-murmur3",  "memberlist-smoltcp?/checksum-murmur3",  "memberlist-embassy?/checksum-murmur3",  "memberlist-embedded?/checksum-murmur3"]
 
+# CIDR peer-admission allow-list. std-only, so it forwards to the std drivers
+# (reactor / compio) but not the no_std ones (smoltcp / embassy / embedded).
+cidr = ["memberlist-proto/cidr", "memberlist-reactor?/cidr", "memberlist-compio?/cidr"]
+
 # misc
 dns     = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
 tracing = ["memberlist-proto/tracing"]

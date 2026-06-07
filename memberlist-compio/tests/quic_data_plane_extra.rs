@@ -53,11 +53,11 @@ fn trio_configs() -> (QuicOptions, QuicOptions, QuicOptions) {
   (a, b, c)
 }
 
-async fn make_quic(id: &str, port: u16, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   );
   QuicMemberlist::<SmolStr, SocketAddr>::new(
@@ -143,16 +143,12 @@ impl Delegate for RecordingDelegate {
 
 type RecordingMemberlist = Memberlist<QuicTransport<SmolStr, SocketAddr>, RecordingDelegate>;
 
-async fn make_recording_quic(
-  id: &str,
-  port: u16,
-  qcfg: QuicOptions,
-) -> (RecordingMemberlist, Arc<Sink>) {
+async fn make_recording_quic(id: &str, qcfg: QuicOptions) -> (RecordingMemberlist, Arc<Sink>) {
   let sink = Arc::new(Sink::default());
   let opts = Options::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
-      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   );
   let node = RecordingMemberlist::new(
@@ -174,11 +170,9 @@ async fn make_recording_quic(
 #[compio::test]
 async fn quic_set_local_state_succeeds_and_surfaces_on_peer_merge() {
   let (qcfg_peer, qcfg_setter) = pair_configs();
-  let peer_port: u16 = 7820;
-  let setter_port: u16 = 7821;
 
-  let (peer, peer_sink) = make_recording_quic("qsls-peer", peer_port, qcfg_peer).await;
-  let setter = make_quic("qsls-setter", setter_port, qcfg_setter).await;
+  let (peer, peer_sink) = make_recording_quic("qsls-peer", qcfg_peer).await;
+  let setter = make_quic("qsls-setter", qcfg_setter).await;
 
   let snapshot = Bytes::from_static(b"quic-app-state-v1");
   setter
@@ -189,7 +183,7 @@ async fn quic_set_local_state_succeeds_and_surfaces_on_peer_merge() {
   setter
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(peer_port))],
+      &[MaybeResolved::Resolved(peer.advertise_address())],
     )
     .await
     .expect("join the peer");
@@ -224,11 +218,9 @@ async fn quic_set_local_state_succeeds_and_surfaces_on_peer_merge() {
 #[compio::test]
 async fn quic_set_ack_payload_surfaces_on_prober_ping_complete() {
   let (qcfg_prober, qcfg_acker) = pair_configs();
-  let prober_port: u16 = 7822;
-  let acker_port: u16 = 7823;
 
-  let (prober, prober_sink) = make_recording_quic("qack-prober", prober_port, qcfg_prober).await;
-  let acker = make_quic("qack-acker", acker_port, qcfg_acker).await;
+  let (prober, prober_sink) = make_recording_quic("qack-prober", qcfg_prober).await;
+  let acker = make_quic("qack-acker", qcfg_acker).await;
 
   let ack_payload = Bytes::from_static(b"quic-ack-rtt-data");
   acker
@@ -239,7 +231,7 @@ async fn quic_set_ack_payload_surfaces_on_prober_ping_complete() {
   prober
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(acker_port))],
+      &[MaybeResolved::Resolved(acker.advertise_address())],
     )
     .await
     .expect("join");
@@ -252,7 +244,7 @@ async fn quic_set_ack_payload_surfaces_on_prober_ping_complete() {
 
   // The prober issues an application ping; the acker's ack carries the payload,
   // which surfaces on the prober's notify_ping_complete.
-  let target = Node::new(SmolStr::new("qack-acker"), loopback_addr(acker_port));
+  let target = Node::new(SmolStr::new("qack-acker"), acker.advertise_address());
   let rtt = prober.ping(target).await.expect("ping must succeed");
   assert!(rtt > Duration::ZERO, "ping RTT must be positive");
 
@@ -286,23 +278,20 @@ async fn quic_set_ack_payload_surfaces_on_prober_ping_complete() {
 #[compio::test]
 async fn quic_three_node_cluster_converges() {
   let (qcfg_a, qcfg_b, qcfg_c) = trio_configs();
-  let a_port: u16 = 7824;
-  let b_port: u16 = 7825;
-  let c_port: u16 = 7826;
 
-  let a = make_quic("qtri-a", a_port, qcfg_a).await;
-  let b = make_quic("qtri-b", b_port, qcfg_b).await;
-  let c = make_quic("qtri-c", c_port, qcfg_c).await;
+  let a = make_quic("qtri-a", qcfg_a).await;
+  let b = make_quic("qtri-b", qcfg_b).await;
+  let c = make_quic("qtri-c", qcfg_c).await;
 
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("b joins a");
   c.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("c joins a");
@@ -336,16 +325,14 @@ async fn quic_three_node_cluster_converges() {
 #[compio::test]
 async fn quic_peer_leave_shrinks_watcher_alive_count() {
   let (qcfg_watcher, qcfg_leaver) = pair_configs();
-  let watcher_port: u16 = 7827;
-  let leaver_port: u16 = 7828;
 
-  let watcher = make_quic("qshrink-watcher", watcher_port, qcfg_watcher).await;
-  let leaver = make_quic("qshrink-leaver", leaver_port, qcfg_leaver).await;
+  let watcher = make_quic("qshrink-watcher", qcfg_watcher).await;
+  let leaver = make_quic("qshrink-leaver", qcfg_leaver).await;
 
   leaver
     .join(
       &SocketAddrResolver,
-      &[MaybeResolved::Resolved(loopback_addr(watcher_port))],
+      &[MaybeResolved::Resolved(watcher.advertise_address())],
     )
     .await
     .expect("join");
@@ -378,18 +365,16 @@ async fn quic_peer_leave_shrinks_watcher_alive_count() {
 #[compio::test]
 async fn quic_drop_counters_are_zero_on_healthy_node() {
   let (qcfg_a, qcfg_b) = pair_configs();
-  let a_port: u16 = 7829;
-  let b_port: u16 = 7830;
 
-  let a = make_quic("qdrops-a", a_port, qcfg_a).await;
-  let b = make_quic("qdrops-b", b_port, qcfg_b).await;
+  let a = make_quic("qdrops-a", qcfg_a).await;
+  let b = make_quic("qdrops-b", qcfg_b).await;
 
   // Keep a live event subscriber so the EventStream is never a closed sink.
   let _events = b.events();
 
   b.join(
     &SocketAddrResolver,
-    &[MaybeResolved::Resolved(loopback_addr(a_port))],
+    &[MaybeResolved::Resolved(a.advertise_address())],
   )
   .await
   .expect("join");
