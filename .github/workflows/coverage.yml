@@ -92,7 +92,7 @@ jobs:
       - name: List contents of the reports directory
         run: ls -a reports
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           directory: reports
           fail_ci_if_error: false
