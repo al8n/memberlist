@@ -820,7 +820,9 @@ impl QuicCluster {
   pub fn start_user_message(&mut self, host: SocketAddr, peer: SocketAddr, payload: &[u8]) {
     let now = self.clock.now();
     if let Some(n) = self.nodes.get_mut(&host) {
-      n.start_user_message(peer, bytes::Bytes::copy_from_slice(payload), now);
+      // Ignoring Err: a leaving/left host starts no new reliable user message;
+      // the harness treats that as a no-op.
+      let _ = n.start_user_message(peer, bytes::Bytes::copy_from_slice(payload), now);
     }
   }
 
