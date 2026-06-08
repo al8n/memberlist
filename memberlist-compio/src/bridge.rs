@@ -740,6 +740,15 @@ mod tests {
   /// The outer `close_timeout * 5` bound fails fast: without the backstop the
   /// drain would block forever and trip it; with it the bridge reclaims within
   /// ~`close_timeout`. A SHORT `close_timeout` keeps the test fast.
+  // Windows accepts the oversized response in slow chunks rather than collapsing
+  // the peer's receive window to zero, so the no-progress stall this asserts never
+  // forms and the idle `close_timeout` never trips within the bound. The drain is
+  // still reclaimed (the write eventually completes), just not via the idle path
+  // this exercises — so the scenario is Linux/macOS-specific.
+  #[cfg_attr(
+    windows,
+    ignore = "Windows buffers the oversized response in chunks; the zero-window stall never forms"
+  )]
   #[compio::test]
   async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     let (server, mut client) = loopback_pair().await;

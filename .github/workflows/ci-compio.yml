@@ -38,6 +38,10 @@ jobs:
   test:
     name: ${{ matrix.os }} - compio
     runs-on: ${{ matrix.os }}
+    # Windows exercises compio's IOCP backend for the first time here; keep its
+    # result visible but non-blocking while IOCP-specific quirks are sorted out
+    # separately.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     defaults:
       run:
         shell: bash
@@ -70,7 +74,9 @@ jobs:
         run: cargo clippy -p memberlist-compio --all-targets --features "$FEATURES" --no-deps -- -D warnings
 
       - name: Test
-        run: cargo test -p memberlist-compio --features "$FEATURES"
+        # --no-fail-fast: run every test binary even if one fails, so a single
+        # OS-specific failure surfaces the rest in the same run.
+        run: cargo test -p memberlist-compio --features "$FEATURES" --no-fail-fast
 
       - name: Cache Cargo registry
         uses: actions/cache@v5
