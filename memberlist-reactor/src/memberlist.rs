@@ -372,8 +372,11 @@ impl<I: NodeId> Memberlist<I> {
     // bind with AddrInUse. TCP and UDP port spaces are independent, so a
     // TCP-claimed port is not reserved against UDP either; for an ephemeral (`:0`)
     // advertise we retry the pair on a fresh ephemeral port when the UDP bind
-    // collides. A fixed (nonzero) port is a single attempt, so a genuine conflict
-    // surfaces to the caller instead of looping.
+    // fails transiently: AddrInUse from the port-space race, or PermissionDenied
+    // (Windows WSAEACCES) when the TCP-claimed port falls in a UDP excluded range
+    // — CI hypervisors reserve disjoint TCP/UDP ranges, so a TCP-bindable port can
+    // still be UDP-forbidden. A fixed (nonzero) port is a single attempt, so a
+    // genuine conflict surfaces to the caller instead of looping.
     const EPHEMERAL_BIND_RETRIES: usize = 16;
     let ephemeral = advertise_socket.port() == 0;
     let (listener, bound, socket) = {
@@ -388,7 +391,10 @@ impl<I: NodeId> Memberlist<I> {
           Ok(socket) => break (listener, bound, socket),
           Err(e)
             if ephemeral
-              && e.kind() == std::io::ErrorKind::AddrInUse
+              && matches!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+              )
               && attempt < EPHEMERAL_BIND_RETRIES =>
           {
             // Release the claimed TCP port and retry on a fresh ephemeral pair.
