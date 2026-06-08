@@ -4,7 +4,10 @@
 //! A `Violation` carries a one-line reason; the driver panics with the seed +
 //! tick so the failure replays.
 
-use std::{collections::{HashMap, HashSet}, net::SocketAddr};
+use std::{
+  collections::{HashMap, HashSet},
+  net::SocketAddr,
+};
 
 use memberlist_proto::typed::State;
 use smol_str::SmolStr;
@@ -82,7 +85,13 @@ impl Transition {
     incarnation: Option<u32>,
     pruned: bool,
   ) -> Self {
-    Self { observer, subject, state, incarnation, pruned }
+    Self {
+      observer,
+      subject,
+      state,
+      incarnation,
+      pruned,
+    }
   }
 
   /// The observer whose view changed.
@@ -166,7 +175,11 @@ impl IncarnationMonotonicChecker {
       (Some(inc), Some(st)) => {
         // A prune this step means the current observation is a legal post-prune
         // re-learn, which may legitimately restart at a lower incarnation.
-        let live_prior = if pruned { None } else { self.seen.get(&key).copied() };
+        let live_prior = if pruned {
+          None
+        } else {
+          self.seen.get(&key).copied()
+        };
         if let Some(prev) = live_prior {
           if inc < prev.incarnation {
             return CheckResult::violation(format!(
@@ -178,7 +191,13 @@ impl IncarnationMonotonicChecker {
         // Carry the running max while continuously present; a pruned (or
         // absent) baseline restarts from the current incarnation.
         let max_inc = live_prior.map_or(inc, |p| p.incarnation.max(inc));
-        self.seen.insert(key, Sample { state: st, incarnation: max_inc });
+        self.seen.insert(
+          key,
+          Sample {
+            state: st,
+            incarnation: max_inc,
+          },
+        );
         CheckResult::Ok
       }
       _ => {
@@ -349,18 +368,20 @@ impl NoResurrectionChecker {
           let was_terminal = matches!(prev.state, State::Dead | State::Left);
           // A prune this step makes the current Alive a legal post-prune
           // re-learn; only an unpruned terminal baseline constrains it.
-          if was_terminal
-            && !pruned
-            && matches!(st, State::Alive)
-            && inc <= prev.incarnation
-          {
+          if was_terminal && !pruned && matches!(st, State::Alive) && inc <= prev.incarnation {
             return CheckResult::violation(format!(
               "false resurrection at {observer} for {subject}: {:?}@{} -> Alive@{inc}",
               prev.state, prev.incarnation
             ));
           }
         }
-        self.last.insert(key, Sample { state: st, incarnation: inc });
+        self.last.insert(
+          key,
+          Sample {
+            state: st,
+            incarnation: inc,
+          },
+        );
         CheckResult::Ok
       }
       _ => {
@@ -479,7 +500,13 @@ impl IllegalPairChecker {
             }
           }
         }
-        self.last.insert(key, Sample { state: st, incarnation: inc });
+        self.last.insert(
+          key,
+          Sample {
+            state: st,
+            incarnation: inc,
+          },
+        );
         CheckResult::Ok
       }
       _ => {
@@ -639,8 +666,12 @@ impl BoundednessChecker {
   pub fn observe(&mut self, c: &Cluster) -> CheckResult {
     let introduced = c.ids().len();
     for &host in c.addrs() {
-      let r =
-        self.observe_one(host, c.num_members(host), introduced, c.broadcast_queue_len(host));
+      let r = self.observe_one(
+        host,
+        c.num_members(host),
+        introduced,
+        c.broadcast_queue_len(host),
+      );
       if r.is_violation() {
         return r;
       }
@@ -670,9 +701,7 @@ impl SelfLivenessChecker {
     if running {
       if let Some(st) = self_state {
         if matches!(st, State::Dead | State::Left) {
-          return CheckResult::violation(format!(
-            "node {host} sees itself {st:?} while running"
-          ));
+          return CheckResult::violation(format!("node {host} sees itself {st:?} while running"));
         }
       }
     }

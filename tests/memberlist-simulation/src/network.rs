@@ -10,7 +10,7 @@ use std::{
   time::Duration,
 };
 
-use rand::{SeedableRng, RngExt, rngs::SmallRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use memberlist_proto::{
   Endpoint, EndpointEvent, EndpointOptions, Event, Instant, Stream, StreamCommand, StreamError,
@@ -379,7 +379,13 @@ impl Network {
               let (state, incarnation) = after[i];
               // A datagram never prunes: prunes are recorded only around the
               // `tick_all`/`reset_nodes` phase, so `pruned` is always false here.
-              out.push(Transition::new(d.to, subject.clone(), state, incarnation, false));
+              out.push(Transition::new(
+                d.to,
+                subject.clone(),
+                state,
+                incarnation,
+                false,
+              ));
             }
           }
         }
@@ -770,7 +776,13 @@ impl Network {
             let (state, incarnation) = after[i];
             // A stream merge never prunes: prunes are recorded only around the
             // `tick_all`/`reset_nodes` phase, so `pruned` is always false here.
-            out.push(Transition::new(observer, subject.clone(), state, incarnation, false));
+            out.push(Transition::new(
+              observer,
+              subject.clone(),
+              state,
+              incarnation,
+              false,
+            ));
           }
         }
       }
@@ -983,7 +995,11 @@ mod tests {
     // Seed bob's view of carol at Alive@1 (the baseline the compound supersedes).
     {
       let ep = net.endpoints.get_mut(&bob).unwrap();
-      ep.handle_packet(carol, Message::Alive(Alive::new(1, Node::new(carol_id.clone(), carol))), now);
+      ep.handle_packet(
+        carol,
+        Message::Alive(Alive::new(1, Node::new(carol_id.clone(), carol))),
+        now,
+      );
     }
     assert_eq!(net.endpoints[&bob].node_incarnation(&carol_id), Some(1));
 
@@ -1013,7 +1029,11 @@ mod tests {
     assert_eq!(transitions[0].observer(), bob);
     assert_eq!(transitions[0].subject(), &carol_id);
     assert_eq!(transitions[0].state(), Some(State::Alive));
-    assert_eq!(transitions[0].incarnation(), Some(5), "the masked intermediate must be recorded");
+    assert_eq!(
+      transitions[0].incarnation(),
+      Some(5),
+      "the masked intermediate must be recorded"
+    );
     assert!(!transitions[0].pruned(), "a datagram never prunes");
     assert_eq!(transitions[1].state(), Some(State::Alive));
     assert_eq!(transitions[1].incarnation(), Some(6));
@@ -1052,11 +1072,19 @@ mod tests {
     // a live endpoint. bob does not know carol yet.
     {
       let ep = net.endpoints.get_mut(&c1).unwrap();
-      ep.handle_packet(carol_addr, Message::Alive(Alive::new(5, Node::new(carol_id.clone(), carol_addr))), now);
+      ep.handle_packet(
+        carol_addr,
+        Message::Alive(Alive::new(5, Node::new(carol_id.clone(), carol_addr))),
+        now,
+      );
     }
     {
       let ep = net.endpoints.get_mut(&c2).unwrap();
-      ep.handle_packet(carol_addr, Message::Alive(Alive::new(6, Node::new(carol_id.clone(), carol_addr))), now);
+      ep.handle_packet(
+        carol_addr,
+        Message::Alive(Alive::new(6, Node::new(carol_id.clone(), carol_addr))),
+        now,
+      );
     }
     assert!(net.endpoints[&bob].node_incarnation(&carol_id).is_none());
 
@@ -1076,7 +1104,11 @@ mod tests {
     // Establish both stream pairs (c1→bob, c2→bob) from the queued dials.
     let mut streams = Vec::new();
     net.process_dial_requests(&mut streams, now);
-    assert_eq!(streams.len(), 2, "both push-pull dials must establish a stream pair");
+    assert_eq!(
+      streams.len(),
+      2,
+      "both push-pull dials must establish a stream pair"
+    );
 
     // One pump routes BOTH requests' PushPullRequestReceived into bob: bob's
     // view of carol passes 5 -> 6 within this single call.
@@ -1094,8 +1126,10 @@ mod tests {
     // BOTH intermediates recorded, in dispatch order — the masked carol@5 is
     // present, not collapsed into the final carol@6. A single post-phase diff
     // would have recorded only carol@6.
-    let carol_transitions: Vec<_> =
-      transitions.iter().filter(|t| t.subject() == &carol_id).collect();
+    let carol_transitions: Vec<_> = transitions
+      .iter()
+      .filter(|t| t.subject() == &carol_id)
+      .collect();
     assert_eq!(
       carol_transitions.len(),
       2,

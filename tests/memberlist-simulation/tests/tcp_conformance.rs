@@ -846,8 +846,7 @@ fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
     .with_threshold(8);
   let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xCC; 32])));
   let framed = b"a payload large enough to compress and to encrypt".repeat(8);
-  let unit =
-    encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+  let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
   // The leading varint is a single byte for payloads < 128 B after the varint;
   // the byte at index 1 is the first byte of the encoded payload.
   assert_eq!(

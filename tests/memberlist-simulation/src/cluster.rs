@@ -514,9 +514,12 @@ impl Cluster {
     //    per-message datagram recorder below.
     {
       let subjects = self.ids.clone();
-      self
-        .net
-        .step_streams_recording(&mut self.streams, now, &subjects, &mut self.history_transitions);
+      self.net.step_streams_recording(
+        &mut self.streams,
+        now,
+        &subjects,
+        &mut self.history_transitions,
+      );
     }
 
     // 4. Drain remaining non-DialRequested events (admission already applied
@@ -656,7 +659,9 @@ impl Cluster {
             now_state.is_none() && self.pruned_this_step.contains(&(observer, subject.clone()));
           self
             .history_transitions
-            .push(crate::checker::Transition::new(observer, subject, now_state, now_inc, pruned));
+            .push(crate::checker::Transition::new(
+              observer, subject, now_state, now_inc, pruned,
+            ));
         }
         idx += 1;
       }
@@ -1027,7 +1032,11 @@ impl Cluster {
   /// Whether `host`'s endpoint is still in the Running lifecycle (not leaving or
   /// left). `false` for an unknown host.
   pub fn is_running(&self, host: SocketAddr) -> bool {
-    self.net.endpoints.get(&host).is_some_and(|ep| ep.is_running())
+    self
+      .net
+      .endpoints
+      .get(&host)
+      .is_some_and(|ep| ep.is_running())
   }
 
   /// Whether `addr`'s endpoint is currently darkened in the fault model — a hard
@@ -1222,7 +1231,12 @@ impl Cluster {
     let before: Vec<(Option<State>, Option<u32>)> = self
       .ids
       .iter()
-      .map(|subject| (self.member_liveness(host, subject), self.get_node_incarnation(host, subject)))
+      .map(|subject| {
+        (
+          self.member_liveness(host, subject),
+          self.get_node_incarnation(host, subject),
+        )
+      })
       .collect();
 
     let ep = self
@@ -1257,13 +1271,15 @@ impl Cluster {
         let now_state = self.member_liveness(host, subject);
         let now_inc = self.get_node_incarnation(host, subject);
         if before_row != (now_state, now_inc) {
-          self.history_transitions.push(crate::checker::Transition::new(
-            host,
-            subject.clone(),
-            now_state,
-            now_inc,
-            false,
-          ));
+          self
+            .history_transitions
+            .push(crate::checker::Transition::new(
+              host,
+              subject.clone(),
+              now_state,
+              now_inc,
+              false,
+            ));
         }
       }
     }

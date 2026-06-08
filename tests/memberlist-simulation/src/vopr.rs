@@ -42,8 +42,8 @@ fn convergence_floor(
   n: usize,
 ) -> Duration {
   let log10n = (n as f64).log10().max(1.0);
-  let suspicion_max = probe_interval
-    .mul_f64(suspicion_mult as f64 * log10n * suspicion_max_mult as f64);
+  let suspicion_max =
+    probe_interval.mul_f64(suspicion_mult as f64 * log10n * suspicion_max_mult as f64);
   let gossip = gossip_interval * ((n as f64).log2().ceil() as u32 + 1);
   // Two full suspicion windows: one to failure-detect darkened leavers, one
   // for the remaining re-convergence. Plus one push-pull and gossip rounds.
@@ -120,7 +120,11 @@ pub struct VoprReport {
 pub fn run_vopr(seed: u64, ticks: usize) -> VoprReport {
   let mut v = Vopr::new(seed);
   let mut c = v.build_cluster();
-  let mut report = VoprReport { ticks, n: v.n, ..Default::default() };
+  let mut report = VoprReport {
+    ticks,
+    n: v.n,
+    ..Default::default()
+  };
 
   // Seed the three history checkers' baselines from the bootstrap snapshot, so
   // the pre-loop `alive_node` state is their baseline. Per step they then
@@ -150,7 +154,7 @@ pub fn run_vopr(seed: u64, ticks: usize) -> VoprReport {
     Duration::from_millis(1000), // probe_interval
     4,                           // suspicion_mult
     SUSPICION_MAX_MULT,
-    Duration::from_millis(200),  // gossip_interval
+    Duration::from_millis(200), // gossip_interval
     v.n,
   );
   let calm_start = c.now();
@@ -237,8 +241,9 @@ impl Vopr {
     let mut rng = SmallRng::seed_from_u64(seed);
     let n = rng.random_range(2..=8usize);
     let base = 40000u16;
-    let addrs: Vec<SocketAddr> =
-      (0..n).map(|i| format!("127.0.0.1:{}", base + i as u16).parse().unwrap()).collect();
+    let addrs: Vec<SocketAddr> = (0..n)
+      .map(|i| format!("127.0.0.1:{}", base + i as u16).parse().unwrap())
+      .collect();
     let ids: Vec<SmolStr> = (0..n).map(|i| format_smolstr!("v{i}")).collect();
     Self {
       rng,
@@ -273,8 +278,7 @@ impl Vopr {
     // the start — inject_alive always produces an empty-meta Alive.
     for i in 1..self.n {
       let peer_meta = Meta::try_from(&[i as u8][..]).expect("1-byte meta is always valid");
-      let alive = Alive::new(1, Node::new(self.ids[i].clone(), self.addrs[i]))
-        .with_meta(peer_meta);
+      let alive = Alive::new(1, Node::new(self.ids[i].clone(), self.addrs[i])).with_meta(peer_meta);
       c.alive_node(self.addrs[0], alive, true);
     }
     c
@@ -334,8 +338,12 @@ impl Vopr {
     // with a fresh membership view, so all checker baselines for it as an
     // *observer* are stale and must be cleared.
     if !masked_off("CRASH") && do_restart && !self.gone.is_empty() {
-      let gone: Vec<SocketAddr> =
-        self.addrs.iter().copied().filter(|a| self.gone.contains(a)).collect();
+      let gone: Vec<SocketAddr> = self
+        .addrs
+        .iter()
+        .copied()
+        .filter(|a| self.gone.contains(a))
+        .collect();
       let addr = gone[restart_pick % gone.len()];
       // A restart only fails when the superseding incarnation would leave the
       // safe range (unreachable here — the VOPR's incarnations stay small); if
@@ -392,8 +400,12 @@ impl Vopr {
   fn enter_calm(&mut self, c: &mut Cluster) -> Vec<SocketAddr> {
     c.heal();
     // Iterate in addrs order (a fixed Vec) for a deterministic restart sequence.
-    let still_gone: Vec<SocketAddr> =
-      self.addrs.iter().copied().filter(|a| self.gone.contains(a)).collect();
+    let still_gone: Vec<SocketAddr> = self
+      .addrs
+      .iter()
+      .copied()
+      .filter(|a| self.gone.contains(a))
+      .collect();
     let mut calm_restarted = Vec::new();
     for addr in still_gone {
       // Unreachable headroom-exhaustion aside (the VOPR keeps incarnations
@@ -423,8 +435,12 @@ impl Vopr {
     // process exit so a peer that missed the leave broadcast failure-detects
     // them (a still-acking left node would otherwise be held Alive forever).
     // Iterate in addrs order for a deterministic shutdown sequence.
-    let departed: Vec<SocketAddr> =
-      self.addrs.iter().copied().filter(|a| self.left.contains(a)).collect();
+    let departed: Vec<SocketAddr> = self
+      .addrs
+      .iter()
+      .copied()
+      .filter(|a| self.left.contains(a))
+      .collect();
     for addr in departed {
       c.shutdown(addr);
     }
@@ -453,15 +469,26 @@ impl Vopr {
   /// after the post-chaos churn has settled (see `RESEED_DELAY`), so the join is
   /// not lost to the heal/restart/shutdown activity at calm entry.
   fn reseed_isolated(&self, c: &mut Cluster, calm_restarted: &[SocketAddr]) -> Vec<SocketAddr> {
-    let live: Vec<SocketAddr> = self.addrs.iter().copied().filter(|a| self.is_live(*a)).collect();
+    let live: Vec<SocketAddr> = self
+      .addrs
+      .iter()
+      .copied()
+      .filter(|a| self.is_live(*a))
+      .collect();
     // Classify each live node as connected (sees some OTHER live node as Alive)
     // or isolated, up front so the join loop below can borrow `c` mutably.
     let connected: Vec<bool> = live
       .iter()
       .map(|&addr| {
-        self.addrs.iter().zip(self.ids.iter()).any(|(&peer, peer_id)| {
-          peer != addr && self.is_live(peer) && c.member_liveness(addr, peer_id) == Some(State::Alive)
-        })
+        self
+          .addrs
+          .iter()
+          .zip(self.ids.iter())
+          .any(|(&peer, peer_id)| {
+            peer != addr
+              && self.is_live(peer)
+              && c.member_liveness(addr, peer_id) == Some(State::Alive)
+          })
       })
       .collect();
     let members: Vec<usize> = live.iter().map(|&a| c.num_members(a)).collect();
@@ -473,7 +500,11 @@ impl Vopr {
     let seed_idx = (0..live.len())
       .filter(|&i| connected[i] && !calm_restarted.contains(&live[i]))
       .max_by_key(|&i| members[i])
-      .or_else(|| (0..live.len()).filter(|&i| connected[i]).max_by_key(|&i| members[i]))
+      .or_else(|| {
+        (0..live.len())
+          .filter(|&i| connected[i])
+          .max_by_key(|&i| members[i])
+      })
       .or_else(|| (!live.is_empty()).then_some(0));
     let Some(seed_idx) = seed_idx else {
       return Vec::new();
@@ -724,7 +755,9 @@ mod tests {
     // A cluster of >= 4 so the restarted node, its injected peer, and a distinct
     // best-connected seed are all separate, and the full size exceeds the node's
     // {self, injected peer} count.
-    let seed = (0u64..).find(|&s| Vopr::new(s).n >= 4).expect("a seed with n >= 4 exists");
+    let seed = (0u64..)
+      .find(|&s| Vopr::new(s).n >= 4)
+      .expect("a seed with n >= 4 exists");
     let mut v = Vopr::new(seed);
     let mut c = v.build_cluster();
     for _ in 0..400 {
@@ -750,7 +783,10 @@ mod tests {
     // The force must issue X exactly one reseed join even though it is connected;
     // this assertion fails if `calm_restarted` no longer overrides the isolation
     // predicate.
-    assert!(joined.contains(&x), "a connected calm-restarted node must be force-joined");
+    assert!(
+      joined.contains(&x),
+      "a connected calm-restarted node must be force-joined"
+    );
     for _ in 0..600 {
       if !c.step() {
         break;
@@ -758,14 +794,19 @@ mod tests {
     }
     // The reseed join completed but did not merge, so X is still short of the
     // cluster — a wedge the convergence check would flag, not mask.
-    assert!(c.num_members(x) < v.n, "a non-merging reseed must leave the node isolated");
+    assert!(
+      c.num_members(x) < v.n,
+      "a non-merging reseed must leave the node isolated"
+    );
   }
 
   /// Every calm-restarted node receives exactly one join — including one selected
   /// as the seed, which is cross-joined to another live node rather than exempted.
   #[test]
   fn every_calm_restart_is_joined_including_the_seed() {
-    let seed = (0u64..).find(|&s| Vopr::new(s).n >= 3).expect("a seed with n >= 3 exists");
+    let seed = (0u64..)
+      .find(|&s| Vopr::new(s).n >= 3)
+      .expect("a seed with n >= 3 exists");
     let mut v = Vopr::new(seed);
     let mut c = v.build_cluster();
     for _ in 0..400 {
@@ -801,15 +842,25 @@ mod tests {
     c.crash(x);
     v.gone.insert(x);
     let restarted = v.enter_calm(&mut c);
-    assert!(restarted.contains(&x), "enter_calm must report the node it restarted");
-    assert_eq!(c.num_members(x), 1, "a restart-without-join node knows only itself");
+    assert!(
+      restarted.contains(&x),
+      "enter_calm must report the node it restarted"
+    );
+    assert_eq!(
+      c.num_members(x),
+      1,
+      "a restart-without-join node knows only itself"
+    );
     v.reseed_isolated(&mut c, &restarted);
     for _ in 0..600 {
       if !c.step() {
         break;
       }
     }
-    assert_eq!(c.num_members(x), v.n, "the forced reseed converges the restarted node");
+    assert_eq!(
+      c.num_members(x),
+      v.n,
+      "the forced reseed converges the restarted node"
+    );
   }
 }
-

@@ -1,12 +1,16 @@
 //! A crashed node is declared Dead at its peers; a restart at a higher
 //! incarnation re-converges to Alive.
-use memberlist_simulation::checker::{IncarnationMonotonicChecker, NoResurrectionChecker, Transition};
-use memberlist_simulation::{Cluster, EndpointOptions, Event, Meta, Reliability};
 use memberlist_proto::typed::State;
+use memberlist_simulation::{
+  Cluster, EndpointOptions, Event, Meta, Reliability,
+  checker::{IncarnationMonotonicChecker, NoResurrectionChecker, Transition},
+};
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
-fn addr(p: u16) -> SocketAddr { format!("127.0.0.1:{p}").parse().unwrap() }
+fn addr(p: u16) -> SocketAddr {
+  format!("127.0.0.1:{p}").parse().unwrap()
+}
 
 /// Drain `host`'s events and report whether any `UserPacket` carrying exactly
 /// `payload` arrived (the observable for a delivered unreliable `send`).
@@ -31,18 +35,25 @@ fn packet_to_crashed_node_is_dropped_at_enqueue() {
   c.add_node("n1".into(), a1);
   c.inject_alive(a0, "n1".into(), a1, 1);
   c.inject_alive(a1, "n0".into(), a0, 1);
-  for _ in 0..200 { c.step(); }
+  for _ in 0..200 {
+    c.step();
+  }
 
   c.crash(a1);
   // n0 tries to send to the crashed n1 while it is down.
   c.send(a0, a1, bytes::Bytes::from_static(b"downtime"));
-  assert_eq!(c.queued_to(a1), 0,
-    "a packet to a crashed node must be dropped at enqueue, never queued for post-restart delivery");
+  assert_eq!(
+    c.queued_to(a1),
+    0,
+    "a packet to a crashed node must be dropped at enqueue, never queued for post-restart delivery"
+  );
 
   // Restart before any such packet could have been delivered; the fresh endpoint
   // must reconverge without ever receiving a downtime packet (none exist).
   assert!(c.restart(a1), "restart at a small incarnation must succeed");
-  for _ in 0..500 { c.step(); }
+  for _ in 0..500 {
+    c.step();
+  }
 }
 
 #[test]
@@ -64,24 +75,38 @@ fn crashed_node_dies_then_restart_reconverges() {
   c.inject_alive(a2, "n0".into(), a0, 1);
   c.inject_alive(a2, id1.clone(), a1, 1);
   // Let it settle, capture n2's incarnation as seen by n0.
-  for _ in 0..200 { c.step(); }
+  for _ in 0..200 {
+    c.step();
+  }
   let inc_before = c.get_node_incarnation(a0, &id2);
 
   // Crash n2; step long enough for n0's suspicion to mature to Dead.
   c.crash(a2);
-  for _ in 0..4000 { c.step(); }
+  for _ in 0..4000 {
+    c.step();
+  }
   let st = c.member_liveness(a0, &id2);
-  assert!(matches!(st, Some(State::Dead) | None),
-    "after crash, n0 must see n2 Dead or pruned, got {st:?}");
+  assert!(
+    matches!(st, Some(State::Dead) | None),
+    "after crash, n0 must see n2 Dead or pruned, got {st:?}"
+  );
 
   // Restart n2 (fresh, higher incarnation) and let it rejoin.
   assert!(c.restart(a2), "restart at a small incarnation must succeed");
-  for _ in 0..2000 { c.step(); }
+  for _ in 0..2000 {
+    c.step();
+  }
   let st2 = c.member_liveness(a0, &id2);
   let inc_after = c.get_node_incarnation(a0, &id2);
-  assert_eq!(st2, Some(State::Alive), "after restart, n0 must see n2 Alive again, got {st2:?}");
-  assert!(inc_after > inc_before,
-    "restart must supersede the dead incarnation: before={inc_before:?} after={inc_after:?}");
+  assert_eq!(
+    st2,
+    Some(State::Alive),
+    "after restart, n0 must see n2 Alive again, got {st2:?}"
+  );
+  assert!(
+    inc_after > inc_before,
+    "restart must supersede the dead incarnation: before={inc_before:?} after={inc_after:?}"
+  );
 }
 
 /// A crashed node is a dead process: it cannot SEND either. Neither an
@@ -97,22 +122,30 @@ fn crashed_source_cannot_inject_datagram() {
   c.add_node("n1".into(), a1);
   c.inject_alive(a0, "n1".into(), a1, 1);
   c.inject_alive(a1, "n0".into(), a0, 1);
-  for _ in 0..200 { c.step(); }
+  for _ in 0..200 {
+    c.step();
+  }
 
   // Crash n0 (the SOURCE).
   c.crash(a0);
 
   // An application send from the down n0 must escape nothing.
   c.send(a0, a1, bytes::Bytes::from_static(b"from-the-grave"));
-  assert_eq!(c.queued_to(a1), 0,
-    "a crashed source must not enqueue a datagram (application send)");
+  assert_eq!(
+    c.queued_to(a1),
+    0,
+    "a crashed source must not enqueue a datagram (application send)"
+  );
 
   // A leave fanout from the down n0 must also escape nothing. `leave` on a
   // crashed node may early-return (its endpoint is frozen, not removed); it
   // must not panic and must not queue a Dead self-broadcast to any peer.
   let _ = c.leave(a0);
-  assert_eq!(c.queued_to(a1), 0,
-    "a crashed source must not enqueue a datagram (leave fanout)");
+  assert_eq!(
+    c.queued_to(a1),
+    0,
+    "a crashed source must not enqueue a datagram (leave fanout)"
+  );
 }
 
 /// An established push-pull stream must NOT complete across a partition opened
@@ -131,25 +164,33 @@ fn push_pull_does_not_cross_partition_opened_mid_stream() {
   // Bootstrap the pair so they know each other (but NOT the secret node).
   c.inject_alive(a0, "n1".into(), a1, 1);
   c.inject_alive(a1, "n0".into(), a0, 1);
-  for _ in 0..200 { c.step(); }
+  for _ in 0..200 {
+    c.step();
+  }
 
   // Teach ONLY a1 about a third node. The only way a0 can learn `secret` here
   // is via a1's push-pull RESPONSE (no gossip path is given a chance: we cut
   // the link before any pumping and never heal).
   c.inject_alive(a1, id_secret.clone(), a_secret, 1);
-  assert!(c.member(a0, &id_secret).is_none(),
-    "precondition: a0 must not yet know the secret node");
+  assert!(
+    c.member(a0, &id_secret).is_none(),
+    "precondition: a0 must not yet know the secret node"
+  );
 
   // Initiate a push-pull a0 -> a1, then cut the link BEFORE stepping (so the
   // stream is reaped before a single response byte is pumped across).
   c.trigger_push_pull(a0, a1);
   c.partition(&[a0], &[a1]);
-  for _ in 0..300 { c.step(); }
+  for _ in 0..300 {
+    c.step();
+  }
 
   // The exchange could not complete across the cut: a0 never learned the fact
   // that only a1's post-cut response would have carried.
-  assert!(c.member(a0, &id_secret).is_none(),
-    "a push-pull response must not cross a partition opened mid-stream (anti-entropy leak)");
+  assert!(
+    c.member(a0, &id_secret).is_none(),
+    "a push-pull response must not cross a partition opened mid-stream (anti-entropy leak)"
+  );
 }
 
 /// A datagram enqueued BEFORE a partition (and held back by latency) must not
@@ -174,13 +215,18 @@ fn delayed_datagram_does_not_cross_partition_opened_after_enqueue() {
     // Enqueue at the current instant (deliver_at = now + 50ms). No partition is
     // active at enqueue, so it is genuinely queued — not dropped on the spot.
     c.send(a0, a1, bytes::Bytes::from_static(b"delayed"));
-    assert_eq!(c.queued_to(a1), 1,
-      "control: the delayed datagram must be queued (deliver_at in the future)");
+    assert_eq!(
+      c.queued_to(a1),
+      1,
+      "control: the delayed datagram must be queued (deliver_at in the future)"
+    );
 
     // Advance past deliver_at; with no cut it is delivered.
     c.advance(Duration::from_millis(60));
-    assert!(received_user_payload(&mut c, a1, payload),
-      "control: a delayed datagram with no partition must be delivered");
+    assert!(
+      received_user_payload(&mut c, a1, payload),
+      "control: a delayed datagram with no partition must be delivered"
+    );
   }
 
   // ── Cut after enqueue, before delivery → the datagram is DROPPED. ──
@@ -194,13 +240,18 @@ fn delayed_datagram_does_not_cross_partition_opened_after_enqueue() {
     // link before its deliver_at. The matured datagram must hit the
     // delivery-time partition check and be dropped, never reaching a1.
     c.send(a0, a1, bytes::Bytes::from_static(b"delayed"));
-    assert_eq!(c.queued_to(a1), 1,
-      "the datagram must be queued before the cut (else the test is vacuous)");
+    assert_eq!(
+      c.queued_to(a1),
+      1,
+      "the datagram must be queued before the cut (else the test is vacuous)"
+    );
     c.partition(&[a0], &[a1]);
 
     c.advance(Duration::from_millis(60));
-    assert!(!received_user_payload(&mut c, a1, payload),
-      "a datagram must NOT cross a partition that opened after it was enqueued");
+    assert!(
+      !received_user_payload(&mut c, a1, payload),
+      "a datagram must NOT cross a partition that opened after it was enqueued"
+    );
   }
 }
 
@@ -245,25 +296,37 @@ fn restart_preserves_ack_payload() {
   // Bootstrap the pair so n0 can ping n1.
   c.inject_alive(a0, id1.clone(), a1, 1);
   c.inject_alive(a1, "n0".into(), a0, 1);
-  for _ in 0..200 { c.step(); }
+  for _ in 0..200 {
+    c.step();
+  }
 
   // Precondition: before any crash, n0's ping to n1 returns the payload.
   let before = ping_ack_payload(&mut c, a0, "n1", a1, 200);
-  assert_eq!(before.as_deref(), Some(want),
-    "precondition: n1's configured ack payload must round-trip before the crash");
+  assert_eq!(
+    before.as_deref(),
+    Some(want),
+    "precondition: n1's configured ack payload must round-trip before the crash"
+  );
 
   // Crash and restart n1.
   c.crash(a1);
-  for _ in 0..4000 { c.step(); }
+  for _ in 0..4000 {
+    c.step();
+  }
   assert!(c.restart(a1), "restart at a small incarnation must succeed");
-  for _ in 0..2000 { c.step(); }
+  for _ in 0..2000 {
+    c.step();
+  }
 
   // The fresh endpoint must still attach the SAME configured payload — proving
   // `restart` re-installed the ack-payload behavior (without the fix the fresh
   // endpoint would carry an empty payload and this would fail).
   let after = ping_ack_payload(&mut c, a0, "n1", a1, 400);
-  assert_eq!(after.as_deref(), Some(want),
-    "restart must preserve the node's configured ack payload");
+  assert_eq!(
+    after.as_deref(),
+    Some(want),
+    "restart must preserve the node's configured ack payload"
+  );
 }
 
 /// A datagram already in flight when its SENDER crashes must still be
@@ -282,18 +345,26 @@ fn in_flight_datagram_from_crashed_sender_is_delivered() {
 
   // Enqueue the datagram; it is in the network, deliver_at is 50 ms away.
   c.send(a0, a1, bytes::Bytes::from_static(b"in-flight"));
-  assert_eq!(c.queued_to(a1), 1,
-    "precondition: datagram must be queued before the sender crashes");
+  assert_eq!(
+    c.queued_to(a1),
+    1,
+    "precondition: datagram must be queued before the sender crashes"
+  );
 
   // Crash the SENDER before the datagram matures.
   c.crash(a0);
-  assert_eq!(c.queued_to(a1), 1,
-    "crashing the sender must not retract the already-queued datagram");
+  assert_eq!(
+    c.queued_to(a1),
+    1,
+    "crashing the sender must not retract the already-queued datagram"
+  );
 
   // Advance past deliver_at; the datagram must reach a1.
   c.advance(Duration::from_millis(60));
-  assert!(received_user_payload(&mut c, a1, payload),
-    "an in-flight datagram from a crashed sender must still be delivered");
+  assert!(
+    received_user_payload(&mut c, a1, payload),
+    "an in-flight datagram from a crashed sender must still be delivered"
+  );
 }
 
 /// A restart must reincarnate the SAME node: its configured initial meta and
@@ -318,21 +389,33 @@ fn restart_preserves_meta_and_policy() {
   // merges (n0's MergeDelegate auto-accepts). n1's own reject-alives gate only
   // affects what n1 ADMITS, not what it advertises, so n0 learns the meta.
   c.join(a1, a0);
-  for _ in 0..400 { c.step(); }
+  for _ in 0..400 {
+    c.step();
+  }
   let meta_before = c.member_meta(a0, &id1).map(|(m, _, _)| m);
-  assert_eq!(meta_before.as_deref(), Some(b"role=db".as_ref()),
-    "precondition: n0 must learn n1's configured meta before the crash");
+  assert_eq!(
+    meta_before.as_deref(),
+    Some(b"role=db".as_ref()),
+    "precondition: n0 must learn n1's configured meta before the crash"
+  );
 
   // Crash and restart n1.
   c.crash(a1);
-  for _ in 0..4000 { c.step(); }
+  for _ in 0..4000 {
+    c.step();
+  }
   assert!(c.restart(a1), "restart at a small incarnation must succeed");
-  for _ in 0..2000 { c.step(); }
+  for _ in 0..2000 {
+    c.step();
+  }
 
   // (a) The restarted node re-advertises its ORIGINAL meta, not the default.
   let meta_after = c.member_meta(a0, &id1).map(|(m, _, _)| m);
-  assert_eq!(meta_after.as_deref(), Some(b"role=db".as_ref()),
-    "restart must preserve the node's configured initial meta");
+  assert_eq!(
+    meta_after.as_deref(),
+    Some(b"role=db".as_ref()),
+    "restart must preserve the node's configured initial meta"
+  );
 
   // (b) The reject-alives policy is still active on the fresh endpoint: an
   // injected Alive about a brand-new peer at a higher incarnation is vetoed,
@@ -340,8 +423,10 @@ fn restart_preserves_meta_and_policy() {
   let intruder: SmolStr = "intruder".into();
   let a_intruder = addr(33499);
   c.inject_alive(a1, intruder.clone(), a_intruder, 9);
-  assert!(c.member(a1, &intruder).is_none(),
-    "restart must re-install the reject-alives policy: a vetoed Alive must not be admitted");
+  assert!(
+    c.member(a1, &intruder).is_none(),
+    "restart must re-install the reject-alives policy: a vetoed Alive must not be admitted"
+  );
 }
 
 /// The VOPR chooser calls `leave` OUTSIDE `step`, marking the leaver's local
@@ -375,7 +460,9 @@ fn chooser_leave_records_terminal_transition_for_history_checkers() {
   }
 
   // Precondition: n0 sees its OWN self as Alive at some incarnation.
-  let self_inc = c.get_node_incarnation(a0, &id0).expect("n0 must know its own incarnation");
+  let self_inc = c
+    .get_node_incarnation(a0, &id0)
+    .expect("n0 must know its own incarnation");
   assert_eq!(
     c.member_liveness(a0, &id0),
     Some(State::Alive),
@@ -419,14 +506,21 @@ fn chooser_leave_records_terminal_transition_for_history_checkers() {
   // log, then a synthetic same-incarnation resurrection must FIRE.
   let mut ck = NoResurrectionChecker::new();
   assert!(
-    ck.observe_one(a0, &id0, Some(State::Alive), Some(self_inc), false).is_ok(),
+    ck.observe_one(a0, &id0, Some(State::Alive), Some(self_inc), false)
+      .is_ok(),
     "pre-leave baseline is Alive"
   );
   assert!(
     ck.observe_transitions(c.history_transitions()).is_ok(),
     "the recorded leave log is itself legal (Alive -> Left is not a resurrection)"
   );
-  let resurrection = [Transition::new(a0, id0.clone(), Some(State::Alive), Some(self_inc), false)];
+  let resurrection = [Transition::new(
+    a0,
+    id0.clone(),
+    Some(State::Alive),
+    Some(self_inc),
+    false,
+  )];
   let r = ck.observe_transitions(&resurrection);
   assert!(
     r.is_violation(),
@@ -489,8 +583,13 @@ fn restart_reseeds_observer_history_baseline() {
 
   // A synthetic regression on n0's own self row: an incarnation strictly below
   // the post-restart baseline.
-  let regress =
-    [Transition::new(a0, id0.clone(), Some(State::Alive), Some(next_inc - 1), false)];
+  let regress = [Transition::new(
+    a0,
+    id0.clone(),
+    Some(State::Alive),
+    Some(next_inc - 1),
+    false,
+  )];
 
   // Control: clear the observer (as the chooser does) but do NOT re-seed. With
   // no baseline the regression is the first observation and is silently
@@ -535,13 +634,19 @@ fn restart_refuses_when_superseding_would_exceed_safe_range() {
   let id1: SmolStr = "n1".into();
   let mut c = Cluster::new();
   c.add_node("n0".into(), a0);
-  c.add_node_with(id1.clone(), a1, |opts| opts.with_initial_incarnation(u32::MAX / 2));
+  c.add_node_with(id1.clone(), a1, |opts| {
+    opts.with_initial_incarnation(u32::MAX / 2)
+  });
   c.inject_alive(a0, id1.clone(), a1, u32::MAX / 2);
-  for _ in 0..100 { c.step(); }
+  for _ in 0..100 {
+    c.step();
+  }
 
   c.crash(a1);
-  assert!(!c.restart(a1),
-    "restart must refuse when the superseding incarnation would leave the safe range");
+  assert!(
+    !c.restart(a1),
+    "restart must refuse when the superseding incarnation would leave the safe range"
+  );
 }
 
 /// A peer can observe a node at an incarnation in the upper half of the u32
@@ -558,6 +663,8 @@ fn restart_refuses_upper_half_observed_incarnation() {
   c.add_node(id1.clone(), a1);
   c.inject_alive(a0, id1.clone(), a1, u32::MAX / 2 + 5);
   c.crash(a1);
-  assert!(!c.restart(a1),
-    "restart must refuse when an observed upper-half incarnation cannot be superseded");
+  assert!(
+    !c.restart(a1),
+    "restart must refuse when an observed upper-half incarnation cannot be superseded"
+  );
 }

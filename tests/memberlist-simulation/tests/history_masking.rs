@@ -42,15 +42,25 @@ fn no_resurrection_catches_masked_intermediate() {
   // A Dead@5 -> Alive@6 refute is legal, so the post-step path does NOT fire.
   // This is the false-negative the old once-per-step snapshot suffered.
   let mut control = NoResurrectionChecker::new();
-  assert!(control.observe_one(obs, &sub, Some(State::Dead), Some(5), false).is_ok());
   assert!(
-    control.observe_one(obs, &sub, Some(State::Alive), Some(6), false).is_ok(),
+    control
+      .observe_one(obs, &sub, Some(State::Dead), Some(5), false)
+      .is_ok()
+  );
+  assert!(
+    control
+      .observe_one(obs, &sub, Some(State::Alive), Some(6), false)
+      .is_ok(),
     "post-step Dead@5 -> Alive@6 is a legal refute: the masking hides the illegal intermediate"
   );
 
   // Per-mutation: the transition log carries the masked Alive@5 before Alive@6.
   let mut ck = NoResurrectionChecker::new();
-  assert!(ck.observe_one(obs, &sub, Some(State::Dead), Some(5), false).is_ok(), "baseline Dead@5");
+  assert!(
+    ck.observe_one(obs, &sub, Some(State::Dead), Some(5), false)
+      .is_ok(),
+    "baseline Dead@5"
+  );
   let log = [
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(5), false),
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(6), false),
@@ -76,15 +86,25 @@ fn incarnation_monotonic_catches_masked_regression() {
 
   // Control: Alive@5 -> Alive@7 is monotone, so the post-step path is silent.
   let mut control = IncarnationMonotonicChecker::new();
-  assert!(control.observe_one(obs, &sub, Some(5), Some(State::Alive), false).is_ok());
   assert!(
-    control.observe_one(obs, &sub, Some(7), Some(State::Alive), false).is_ok(),
+    control
+      .observe_one(obs, &sub, Some(5), Some(State::Alive), false)
+      .is_ok()
+  );
+  assert!(
+    control
+      .observe_one(obs, &sub, Some(7), Some(State::Alive), false)
+      .is_ok(),
     "post-step Alive@5 -> Alive@7 is monotone: the masking hides the intermediate regression"
   );
 
   // Per-mutation: the transition log carries the masked Alive@3 before Alive@7.
   let mut ck = IncarnationMonotonicChecker::new();
-  assert!(ck.observe_one(obs, &sub, Some(5), Some(State::Alive), false).is_ok(), "baseline Alive@5");
+  assert!(
+    ck.observe_one(obs, &sub, Some(5), Some(State::Alive), false)
+      .is_ok(),
+    "baseline Alive@5"
+  );
   let log = [
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(3), false),
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(7), false),
@@ -112,15 +132,25 @@ fn illegal_pair_catches_masked_intermediate() {
   // Control: Left@5 -> Alive@6 (higher incarnation) is a legal re-introduction,
   // so the post-step path is silent — the masking hides the Left -> Suspect.
   let mut control = IllegalPairChecker::new();
-  assert!(control.observe_one(obs, &sub, Some(State::Left), Some(5), false).is_ok());
   assert!(
-    control.observe_one(obs, &sub, Some(State::Alive), Some(6), false).is_ok(),
+    control
+      .observe_one(obs, &sub, Some(State::Left), Some(5), false)
+      .is_ok()
+  );
+  assert!(
+    control
+      .observe_one(obs, &sub, Some(State::Alive), Some(6), false)
+      .is_ok(),
     "post-step Left@5 -> Alive@6 is a legal re-introduction: the masking hides the bad pair"
   );
 
   // Per-mutation: the transition log carries the masked Suspect@5 before Alive@6.
   let mut ck = IllegalPairChecker::new();
-  assert!(ck.observe_one(obs, &sub, Some(State::Left), Some(5), false).is_ok(), "baseline Left@5");
+  assert!(
+    ck.observe_one(obs, &sub, Some(State::Left), Some(5), false)
+      .is_ok(),
+    "baseline Left@5"
+  );
   let log = [
     Transition::new(obs, sub.clone(), Some(State::Suspect), Some(5), false),
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(6), false),
@@ -149,7 +179,11 @@ fn observe_transitions_no_false_positive_on_legal_sequence() {
   // re-learn is a legal re-introduction even though it would otherwise look like
   // a resurrection.
   let mut ck = NoResurrectionChecker::new();
-  assert!(ck.observe_one(obs, &sub, Some(State::Dead), Some(5), false).is_ok(), "baseline Dead@5");
+  assert!(
+    ck.observe_one(obs, &sub, Some(State::Dead), Some(5), false)
+      .is_ok(),
+    "baseline Dead@5"
+  );
   let log = [
     Transition::new(obs, sub.clone(), None, None, true), // an actual prune
     Transition::new(obs, sub.clone(), Some(State::Alive), Some(1), false), // legal re-join
@@ -161,5 +195,8 @@ fn observe_transitions_no_false_positive_on_legal_sequence() {
 
   // An empty transition log is trivially clean.
   let mut ck2 = IncarnationMonotonicChecker::new();
-  assert!(ck2.observe_transitions(&[]).is_ok(), "an empty transition log is clean");
+  assert!(
+    ck2.observe_transitions(&[]).is_ok(),
+    "an empty transition log is clean"
+  );
 }

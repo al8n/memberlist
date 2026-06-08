@@ -63,7 +63,10 @@ fn stream_dial_does_not_consume_drop_next_token() {
 
   // Arm the one-shot drop for datagrams FROM a0.
   c.drop_next_datagram_from(a0);
-  assert!(c.drop_next_armed(a0), "precondition: drop_next must be armed");
+  assert!(
+    c.drop_next_armed(a0),
+    "precondition: drop_next must be armed"
+  );
 
   // Trigger a stream dial from a0 to a1 and step to process it. The dial path
   // must NOT consume the one-shot token.
@@ -80,6 +83,13 @@ fn stream_dial_does_not_consume_drop_next_token() {
   c.set_latency(Duration::from_millis(50));
   c.send(a0, a1, bytes::Bytes::from_static(b"probe"));
   // Token consumed at enqueue — datagram is dropped, not queued.
-  assert_eq!(c.queued_to(a1), 0, "the datagram must have been dropped by the one-shot token");
-  assert!(!c.drop_next_armed(a0), "token must be consumed by the datagram, not still armed");
+  assert_eq!(
+    c.queued_to(a1),
+    0,
+    "the datagram must have been dropped by the one-shot token"
+  );
+  assert!(
+    !c.drop_next_armed(a0),
+    "token must be consumed by the datagram, not still armed"
+  );
 }

@@ -29,13 +29,17 @@ pub mod quic_net;
 pub mod scenarios;
 #[cfg(feature = "tcp")]
 pub mod tcp_net;
-pub mod vopr;
 #[cfg(feature = "__tls-harness")]
 pub mod tls_net;
 #[cfg(any(feature = "__tls-harness", feature = "tcp"))]
 mod virtual_tcp;
+pub mod vopr;
 
-pub use checker::{BoundednessChecker, CheckResult, ConvergenceChecker, IllegalPairChecker, IncarnationMonotonicChecker, MetaPerIncarnationChecker, NoResurrectionChecker, SelfIncarnationChecker, SelfLivenessChecker, Transition};
+pub use checker::{
+  BoundednessChecker, CheckResult, ConvergenceChecker, IllegalPairChecker,
+  IncarnationMonotonicChecker, MetaPerIncarnationChecker, NoResurrectionChecker,
+  SelfIncarnationChecker, SelfLivenessChecker, Transition,
+};
 pub use clock::Clock;
 pub use cluster::{Cluster, DecisionPolicy};
 pub use faults::FaultConfig;

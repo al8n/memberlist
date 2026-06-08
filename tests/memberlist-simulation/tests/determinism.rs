@@ -33,7 +33,11 @@ fn run() -> Vec<(SocketAddr, SmolStr, Option<u32>)> {
 
 #[test]
 fn same_seed_is_reproducible() {
-  assert_eq!(run(), run(), "two runs of the same deterministic cluster diverged");
+  assert_eq!(
+    run(),
+    run(),
+    "two runs of the same deterministic cluster diverged"
+  );
 }
 
 #[test]

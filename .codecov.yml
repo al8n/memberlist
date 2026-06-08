@@ -2,27 +2,11 @@ codecov:
   require_ci_to_pass: false
 
 ignore:
-  - memberlist-core/src/state/tests.rs
-  - memberlist-core/src/base/tests.rs
-  - memberlist-core/src/delegate/mock.rs
-  - memberlist-core/src/transport/unimplemented.rs
-  - memberlist-core/src/error.rs
-  - memberlist-net/src/tests.rs
-  - memberlist-net/src/tests
-  - memberlist-net/src/error.rs
-  - memberlist-net/tests
-  - memberlist-proto/tests
-  - memberlist-proto/src/proto/error.rs
-  - memberlist-quic/src/tests.rs
-  - memberlist-quic/src/tests
-  - memberlist-quic/src/error.rs
-  - memberlist-quic/tests
-  - memberlist/tests
   - examples/
   - fuzz/
-  - tests/memberlist-embassy-qemu
-  - tests/memberlist-simulation
-  - tests/memberlist-test-suite
+  - "**/tests/**"
+  - "**/tests.rs"
+
 coverage:
   status:
     project: # Overall project status

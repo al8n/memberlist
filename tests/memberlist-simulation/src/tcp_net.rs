@@ -328,10 +328,18 @@ impl TcpCluster {
     c.add_node("b", b);
     let now = c.clock.now();
     if let Some(n) = c.nodes.get_mut(&a) {
-      n.handle_packet(a, Message::Alive(Alive::new(1, Node::new(SmolStr::new("b"), b))), now);
+      n.handle_packet(
+        a,
+        Message::Alive(Alive::new(1, Node::new(SmolStr::new("b"), b))),
+        now,
+      );
     }
     if let Some(n) = c.nodes.get_mut(&b) {
-      n.handle_packet(b, Message::Alive(Alive::new(1, Node::new(SmolStr::new("a"), a))), now);
+      n.handle_packet(
+        b,
+        Message::Alive(Alive::new(1, Node::new(SmolStr::new("a"), a))),
+        now,
+      );
     }
     c
   }
@@ -379,7 +387,10 @@ impl TcpCluster {
           .unwrap();
         n.handle_packet(
           a,
-          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
+          Message::Alive(Alive::new(
+            1,
+            Node::new(SmolStr::new(format!("extra-{i}")), paddr),
+          )),
           now,
         );
       }
@@ -417,7 +428,10 @@ impl TcpCluster {
           .unwrap();
         n.handle_packet(
           a,
-          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
+          Message::Alive(Alive::new(
+            1,
+            Node::new(SmolStr::new(format!("extra-{i}")), paddr),
+          )),
           now,
         );
       }
@@ -452,7 +466,10 @@ impl TcpCluster {
           .unwrap();
         n.handle_packet(
           b,
-          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
+          Message::Alive(Alive::new(
+            1,
+            Node::new(SmolStr::new(format!("extra-{i}")), paddr),
+          )),
           now,
         );
       }
@@ -492,7 +509,10 @@ impl TcpCluster {
           .unwrap();
         n.handle_packet(
           a,
-          Message::Alive(Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr))),
+          Message::Alive(Alive::new(
+            1,
+            Node::new(SmolStr::new(format!("extra-{i}")), paddr),
+          )),
           now,
         );
       }
@@ -659,7 +679,11 @@ impl TcpCluster {
   pub fn inject_alive(&mut self, host: SocketAddr, peer: SmolStr, paddr: SocketAddr, inc: u32) {
     let now = self.clock.now();
     if let Some(n) = self.nodes.get_mut(&host) {
-      n.handle_packet(host, Message::Alive(Alive::new(inc, Node::new(peer, paddr))), now);
+      n.handle_packet(
+        host,
+        Message::Alive(Alive::new(inc, Node::new(peer, paddr))),
+        now,
+      );
     }
   }
 
