@@ -63,6 +63,11 @@ either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
 ipnet = { version = "2", default-features = false }
+getifs = "0.6"
+# 0.2.2 fixes the RFC6890 IPv6 table (2001::/16 over-broad); the getifs-backed
+# `Public` advertise filter depends on that fix, so pin the floor explicitly —
+# getifs's own `iprfc = "0.2"` requirement would otherwise admit the buggy 0.2.0.
+iprfc = "0.2.2"
 getrandom = "0.4"
 metrics = "0.24"
 paste = "1"

@@ -79,4 +79,6 @@ cidr = ["memberlist-proto/cidr", "memberlist-reactor?/cidr", "memberlist-compio?
 
 # misc
 dns     = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
+# Auto-detect the advertise address from the host's own interfaces (std drivers only).
+getifs  = ["memberlist-reactor?/getifs", "memberlist-compio?/getifs"]
 tracing = ["memberlist-proto/tracing"]

@@ -145,7 +145,7 @@ Pick **one** runtime, **one or more** transports, and any transforms you need.
 - **Compression** (gossip plane) — `lz4`, `snappy`, `zstd`, `brotli`.
 - **Encryption** (gossip plane, AEAD) — `aes-gcm`, `chacha20-poly1305`.
 - **Checksum** (gossip plane) — `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3`.
-- **Other** — `cidr` (IP allow-list admission), `dns` (DNS address resolver), `tracing`.
+- **Other** — `cidr` (IP allow-list admission), `dns` (DNS address resolver), `getifs` (auto-detect the advertise address from local interfaces), `tracing`.
 
 QUIC and TLS reliable streams are already secure, so checksum / encryption apply only to
 the unreliable gossip plane.

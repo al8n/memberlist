@@ -26,6 +26,8 @@ encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
 encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
 cidr = ["memberlist-proto/cidr"]
 dns = ["dep:hickory-proto", "dep:resolv-conf"]
+# Auto-detect the advertise address from the host's own interfaces (via `getifs`).
+getifs = ["dep:getifs", "dep:iprfc"]
 
 [dependencies]
 memberlist-proto = { workspace = true, features = ["std"] }
@@ -48,6 +50,8 @@ futures-util = { workspace = true, default-features = false, features = ["std", 
 thiserror = { workspace = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
 resolv-conf = { workspace = true, optional = true }
+getifs = { workspace = true, optional = true }
+iprfc = { workspace = true, optional = true }
 
 [dev-dependencies]
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }

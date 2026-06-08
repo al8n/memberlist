@@ -78,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `encryption-aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
 | `checksum-crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
+| `getifs` | auto-detect the advertise address from the host's interfaces (`LocalAddrResolver`) |
 | `tracing` | forward structured `tracing` spans/events from the driver and `memberlist-proto` |
 
 ## Design

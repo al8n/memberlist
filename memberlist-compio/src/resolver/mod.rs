@@ -7,12 +7,17 @@ mod socket_addr;
 #[cfg(feature = "dns")]
 mod dns;
 
+#[cfg(feature = "getifs")]
+mod getifs;
+
 pub use advertise::{
   AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,
   Ipv6PreferringResolver,
 };
 #[cfg(feature = "dns")]
 pub use dns::{DEFAULT_DNS_TIMEOUT, DnsResolver};
+#[cfg(feature = "getifs")]
+pub use getifs::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use os::OsResolver;
 pub use socket_addr::SocketAddrResolver;
 

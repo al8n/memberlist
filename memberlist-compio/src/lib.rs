@@ -1,5 +1,6 @@
 //! Completion-based async driver for the Sans-I/O memberlist machine,
 //! powered by compio.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod address;
 mod command;
@@ -85,3 +86,6 @@ pub use quic::{Quic, QuicMemberlist, QuicOptions, QuicTransport, QuicTransportOp
 
 #[cfg(feature = "dns")]
 pub use resolver::{DEFAULT_DNS_TIMEOUT, DnsResolver};
+#[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
+pub use resolver::{LocalAddrResolver, LocalAddrScope, local_advertise};

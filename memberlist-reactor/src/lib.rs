@@ -40,6 +40,9 @@ pub use error::Error;
 pub use memberlist_proto::LabelError;
 pub use options::{Channel, DriverOptions, MemberlistOptions, Options};
 pub use resolver::{AddressResolver, MaybeResolved, SocketAddrResolver};
+#[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
+pub use resolver::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use snapshot::MemberlistSnapshot;
 
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]

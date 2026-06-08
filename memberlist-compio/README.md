@@ -83,6 +83,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 | `checksum-crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
 | `dns` | DNS address resolution (via `hickory-proto`) |
+| `getifs` | auto-detect the advertise address from the host's interfaces (`LocalAddrResolver`) |
 | `tracing` | forward structured `tracing` spans/events from the driver and `memberlist-proto` |
 
 ## Observability
