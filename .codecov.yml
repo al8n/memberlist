@@ -20,6 +20,9 @@ ignore:
   - memberlist/tests
   - examples/
   - fuzz/
+  - memberlist-embassy-qemu
+  - memberlist-simulation
+  - memberlist-test-suite
 coverage:
   status:
     project: # Overall project status
