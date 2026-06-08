@@ -95,7 +95,7 @@ pub fn build_quic_config_with_mode(
 
   // Stateless-reset HMAC key via ring — matches the pattern in
   // `memberlist-proto/src/quic/crypto.rs` test helpers and
-  // `memberlist-simulation/src/quic_net.rs`.
+  // `tests/memberlist-simulation/src/quic_net.rs`.
   let reset_key = [0x5au8; 32];
   let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key);
   let endpoint_cfg = EndpointConfig::new(Arc::new(hmac));

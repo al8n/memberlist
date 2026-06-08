@@ -29,7 +29,7 @@ on:
       - refactor/sansio
       - vopr
     paths:
-      - "memberlist-simulation/**"
+      - "tests/memberlist-simulation/**"
       - "memberlist-proto/**"
       - ".github/workflows/vopr.yml"
 

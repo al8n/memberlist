@@ -70,7 +70,7 @@ __sim-encryption-aes-gcm = ["tcp", "tls", "quic", "memberlist-proto/encryption-a
 
 [dependencies]
 bytes.workspace = true
-memberlist-proto = { path = "../memberlist-proto" }
+memberlist-proto = { path = "../../memberlist-proto" }
 rand.workspace = true
 smol_str.workspace = true
 # quic-harness-only. The crypto-provider feature on rustls/quinn-proto is

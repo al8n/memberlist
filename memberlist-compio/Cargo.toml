@@ -50,7 +50,7 @@ hickory-proto = { workspace = true, optional = true, default-features = false, f
 resolv-conf = { workspace = true, optional = true }
 
 [dev-dependencies]
-memberlist-test-suite = { path = "../memberlist-test-suite" }
+memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
 rcgen = "0.14"
 ring = "0.17"
 rustls = { version = "0.23", features = ["ring"] }

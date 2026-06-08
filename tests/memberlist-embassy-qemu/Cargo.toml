@@ -8,7 +8,7 @@ description = "Bare-metal QEMU execution proof: two memberlist-embassy nodes joi
 
 [dependencies]
 # memberlist-embassy driver, built no_std (+ alloc) like a real firmware would.
-memberlist-embassy = { path = "../memberlist-embassy", default-features = false, features = [
+memberlist-embassy = { path = "../../memberlist-embassy", default-features = false, features = [
   "alloc",
 ] }
 # Re-exported through the driver, but named directly here for socket buffers and

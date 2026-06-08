@@ -7,15 +7,15 @@ members = [
   "memberlist-reactor",
   "memberlist-smoltcp",
   "memberlist-embassy",
-  "memberlist-simulation",
-  "memberlist-test-suite",
+  "tests/memberlist-simulation",
+  "tests/memberlist-test-suite",
 ]
 # `memberlist-embassy-qemu` is the bare-metal qemu execution proof for the
 # embassy driver. It pins a foreign default target (a Cortex-M machine) and a
 # cortex-m-rt runtime, so it cannot participate in the host `--workspace` build;
-# it is built and run on its own via `cd memberlist-embassy-qemu && cargo run`.
+# it is built and run on its own via `cd tests/memberlist-embassy-qemu && cargo run`.
 exclude = [
-  "memberlist-embassy-qemu",
+  "tests/memberlist-embassy-qemu",
 ]
 resolver = "3"
 

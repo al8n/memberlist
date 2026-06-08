@@ -52,7 +52,7 @@ hickory-proto = { workspace = true, optional = true, default-features = false, f
 resolv-conf = { workspace = true, optional = true }
 
 [dev-dependencies]
-memberlist-test-suite = { path = "../memberlist-test-suite" }
+memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
 agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
 smol_str = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }

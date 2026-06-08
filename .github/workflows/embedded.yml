@@ -79,4 +79,4 @@ jobs:
           sudo apt-get install -y qemu-system-arm protobuf-compiler
       - name: Two nodes join under QEMU
         run: cargo run
-        working-directory: memberlist-embassy-qemu
+        working-directory: tests/memberlist-embassy-qemu
