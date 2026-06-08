@@ -1636,12 +1636,17 @@ fn dial_requested_is_coordinator_internal_external_drain_does_not_orphan_dial() 
     );
   }
 
-  // Drive to convergence. With the sieve in place the dial completes (the
-  // retry token survived every external drain inside `dial_pending`);
-  // without it the very first drain would have popped it, no future event
-  // would fire the retry, and the push/pull would never open.
+  // Drive to convergence, draining `a`'s public event queue on every tick the
+  // way a real external driver does. With the sieve in place the dial completes
+  // (the retry token survived every external drain inside `dial_pending`);
+  // without it the very first drain would have popped it, no future event would
+  // fire the retry, and the push/pull would never open. Draining each tick also
+  // keeps genuine application events — probe `PingCompleted`s, emitted once per
+  // probe interval — from piling up unboundedly across the run.
   for _ in 0..40_000 {
-    if !c.step() {
+    let progressed = c.step();
+    c.external_poll_event_drain(a);
+    if !progressed {
       break;
     }
   }
@@ -1657,10 +1662,10 @@ fn dial_requested_is_coordinator_internal_external_drain_does_not_orphan_dial() 
   );
 
   // Post-settle external drain: even after convergence the public surface
-  // never returns `DialRequested` (the private storage is the only place
-  // it ever lives). The drain count is bounded by the number of genuine
-  // application-visible events the host emits (joins, updates) — it must
-  // not include any retry token.
+  // never returns `DialRequested` (the private storage is the only place it
+  // ever lives). Because the loop above drained every tick, only the final
+  // tick's genuine application events remain here — a small residual, never a
+  // retry token and never an unbounded backlog.
   let post = c.external_poll_event_drain(a);
   assert!(
     post < 64,
