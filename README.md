@@ -32,6 +32,8 @@ English | [简体中文][zh-cn-url]
 
 memberlist is a rust crate that manages cluster membership and member failure detection using a gossip based protocol.
 
+Its protocol logic is a runtime-agnostic **Sans-I/O** state machine ([`memberlist-proto`](https://crates.io/crates/memberlist-proto)), modeled on `quinn-proto`; thin async drivers adapt it to `tokio` / `smol`, `compio`, and bare-metal `no_std` targets, so the same SWIM core runs on a server or a microcontroller.
+
 The use cases for such a library are far-reaching: all distributed systems require membership, and memberlist is a re-usable solution to managing cluster membership and node failure detection.
 
 memberlist is eventually consistent but converges quickly on average. The speed at which it converges can be heavily tuned via various knobs on the protocol. Node failures are detected and network partitions are partially tolerated by attempting to communicate to potentially dead nodes through multiple routes.
@@ -40,48 +42,37 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
 
 ## Installation
 
-- By using `TCP/UDP`, `TLS/UDP` transport
+```toml
+[dependencies]
+memberlist = "0.1" # tokio runtime + tcp transport by default
+```
 
-  ```toml
-  memberlist = { version = "0.8", features = [
-    "tcp",
-    # Enable a checksum, as UDP is not reliable.
-    # Built in supports are: "crc32", "xxhash64", "xxhash32", "xxhash3", "murmur3"
-    "crc32",
-    # Enable a compression, this is optional,
-    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
-    # You can enable all.
-    "snappy",
-    # Enable encryption, this is optional,
-    "encryption",
-    # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`
-    "tokio",
-    # Enable one tls implementation. This is optional.
-    # Users can just use encryption feature with plain TCP.
-    #
-    # "tls",
-  ] }
-  ```
+Pick **one** runtime, **one or more** transports, and any gossip-plane transforms.
+Checksum / compression / encryption apply only to the unreliable gossip (UDP / datagram)
+plane — TLS and QUIC reliable streams are already secure.
 
-- By using `QUIC/QUIC` transport
+```toml
+[dependencies]
+memberlist = { version = "0.1", default-features = false, features = [
+  # Runtime (pick one): tokio (default), smol, compio, or a no_std driver
+  # (smoltcp / embassy / embedded). `reactor` = generic over an `agnostic` runtime.
+  "tokio",
 
-  For `QUIC/QUIC` transport, as QUIC is secure and reliable, so enable checksum or encryption makes no sense.
+  # Transport (one or more): tcp (default), tls + a backend, quic + a backend.
+  "tcp",
+  # "tls", "tls-rustls-ring",
+  # "quic", "quic-rustls-ring",
 
-  ```toml
-  memberlist = { version = "0.8", features = [
-    # Enable a compression, this is optional,
-    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
-    # You can enable all.
-    "snappy",
-    # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`
-    "tokio",
-    # Enable one of the QUIC implementation
-    # Builtin support is `quinn`
-    "quinn",
-  ] }
-  ```
+  # Gossip-plane checksum: crc32 / xxhash64 / xxhash32 / xxhash3 / murmur3.
+  "crc32",
+  # Gossip-plane compression: lz4 / snappy / zstd / brotli.
+  "lz4",
+  # Gossip-plane encryption (AEAD): aes-gcm / chacha20-poly1305.
+  "aes-gcm",
+
+  # Optional: cidr (IP allow-list admission), dns (DNS resolver), tracing.
+] }
+```
 
 ## Examples
 
@@ -102,33 +93,21 @@ Unlike the original Go implementation, Rust's memberlist use highly generic and 
 
 Here are the layers:
 
-- **Transport Layer**
+- **Transport drivers**
 
-  By default, Rust's memberlist provides two kinds of transport -- [`QuicTransport`](https://docs.rs/memberlist-quic/struct.QuicTransport.html) and [`NetTransport`](https://docs.rs/memberlist-net/struct.NetTransport.html).
+  The protocol logic is a runtime-agnostic Sans-I/O state machine ([`memberlist-proto`](https://crates.io/crates/memberlist-proto), modeled on `quinn-proto`). Each driver pairs that core with one async runtime; protocol behavior is identical across all of them. Select the driver matching your runtime via a feature on the [`memberlist`](https://crates.io/crates/memberlist) facade, or depend on a driver crate directly:
 
-  - **Runtime Layer**
+  | Crate | Role |
+  |-------|------|
+  | [`memberlist`](https://crates.io/crates/memberlist) | batteries-included facade (core + default `tokio` driver) |
+  | [`memberlist-proto`](https://crates.io/crates/memberlist-proto) | Sans-I/O protocol state machines (`no_std`-capable) |
+  | [`memberlist-reactor`](https://crates.io/crates/memberlist-reactor) | runtime-agnostic async driver (`tokio` & `smol`) |
+  | [`memberlist-compio`](https://crates.io/crates/memberlist-compio) | `compio` (thread-per-core, io_uring / IOCP) async driver |
+  | [`memberlist-embedded`](https://crates.io/crates/memberlist-embedded) | shared `no_std` driving core for the embedded drivers |
+  | [`memberlist-smoltcp`](https://crates.io/crates/memberlist-smoltcp) | executor-free `no_std` driver over smoltcp (caller-poll) |
+  | [`memberlist-embassy`](https://crates.io/crates/memberlist-embassy) | embassy-net async `no_std` driver |
 
-    Async runtime agnostic are provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) trait, `tokio`, and `smol` are supported by default. Users can implement their own [`Runtime`](https://docs.rs/agnostic/trait.Runtime.html) and plug it into the memberlist.
-
-  - **Address Resolver Layer**
-
-    The address resolver layer is supported by [`nodecraft`'s AddressResolver](https://docs.rs/nodecraft/latest/nodecraft/resolver/trait.AddressResolver.html) trait.
-
-  - **[`NetTransport`](https://docs.rs/memberlist-net/struct.NetTransport.html)**
-
-    Builtin stream layers for `NetTransport`:
-
-    - [`Tcp`](https://docs.rs/memberlist-net/stream_layer/tcp/struct.Tcp.html): based on TCP and UDP
-    - [`Tls`](https://docs.rs/memberlist-net/stream_layer/tls/struct.Tls.html): based on [`rustls`](https://docs.rs/rustls) and UDP
-
-  - **[`QuicTransport`](https://docs.rs/memberlist-quic/struct.QuicTransport.html)**
-
-    QUIC transport is an experimental transport implementation, it is well tested but still experimental.
-
-    Builtin stream layers for `QuicTransport`:
-    - [`Quinn`](https://docs.rs/memberlist-quic/stream_layer/quinn/struct.Quinn.html): based on [`quinn`](https://docs.rs/quinn)
-
-  Users can still implement their own stream layer for different kinds of transport implementations.
+  Every driver carries three transports — plain **TCP**, **TLS-over-TCP** (`rustls`), and **QUIC** (`quinn-proto`) — each a reliable stream plane plus a UDP / datagram gossip plane. The runtime layer is provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) (for the reactor driver), and the address-resolver layer by [`nodecraft`'s AddressResolver](https://docs.rs/nodecraft/latest/nodecraft/resolver/trait.AddressResolver.html). You can bring your own `Id`, `Address`, and `AddressResolver`.
 
 - **Delegate Layer**
   
@@ -154,7 +133,7 @@ Here are the layers:
 
     - **`MergeDelegate`**
 
-      Used to involve a client in a potential cluster merge operation. Namely, when a node does a promised push/pull (as part of a join), the delegate is involved and allowed to cancel the join based on custom logic. The merge delegate is NOT invoked as part of the push-pull anti-entropy.
+      Used to involve a client in a potential cluster merge operation: on every promised push/pull — both the initial join and ongoing anti-entropy — the delegate is consulted and may veto the exchange based on custom logic. (This deliberately tightens HashiCorp's memberlist, which consults the merge delegate only on join.)
 
     - **`NodeDelegate`**
 
@@ -202,7 +181,7 @@ Copyright (c) 2025 Al Liu.
 Copyright (c) 2013 HashiCorp, Inc.
 
 [Github-url]: https://github.com/al8n/memberlist/
-[CI-url]: https://github.com/al8n/memberlist/actions/workflows/ci.yml
+[CI-url]: https://github.com/al8n/memberlist/actions/workflows/coverage.yml
 [doc-url]: https://docs.rs/memberlist
 [crates-url]: https://crates.io/crates/memberlist
 [codecov-url]: https://app.codecov.io/gh/al8n/memberlist/
