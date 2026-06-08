@@ -1,0 +1,89 @@
+name: coverage
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-22
+          components: llvm-tools-preview
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Collect coverage
+        run: |
+          # Accumulate per-crate runs into a shared profile, then emit one lcov
+          # report. Each crate runs the representative feature combo that
+          # maximizes covered code (every transport plus a transform backend per
+          # kind and `cidr` where the feature exists).
+          cargo llvm-cov --no-report -p memberlist-proto \
+            --features "std,cidr,tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,compression-snappy,checksum-crc32,checksum-xxhash64,encryption-aes-gcm,encryption-chacha20-poly1305"
+          cargo llvm-cov --no-report -p memberlist-reactor \
+            --features "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr,tokio"
+          # This test exercises an io_uring-only driver-timing path covered by
+          # ci-compio and is skipped here so coverage stays deterministic.
+          cargo llvm-cov --no-report -p memberlist-compio \
+            --features "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,encryption-chacha20-poly1305,cidr" \
+            -- --skip join_with_under_bridge_backlog_does_not_timeout_arrived_completions
+          cargo llvm-cov --no-report -p memberlist-embedded \
+            --features "std,cidr,compression-lz4,compression-snappy,checksum-crc32,checksum-xxhash64,encryption-aes-gcm,encryption-chacha20-poly1305"
+          cargo llvm-cov --no-report -p memberlist-simulation \
+            --features "__sim-encryption-aes-gcm,compression-lz4"
+          cargo llvm-cov --no-report -p memberlist-test-suite
+          cargo llvm-cov report --lcov --output-path lcov.info
+
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-coverage
