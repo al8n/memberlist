@@ -38,10 +38,6 @@ jobs:
   test:
     name: ${{ matrix.os }} - compio
     runs-on: ${{ matrix.os }}
-    # Windows exercises compio's IOCP backend for the first time here; keep its
-    # result visible but non-blocking while IOCP-specific quirks are sorted out
-    # separately.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     defaults:
       run:
         shell: bash
