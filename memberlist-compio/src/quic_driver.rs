@@ -783,13 +783,16 @@ pub(crate) async fn quic_driver_loop<I, D>(
     pl.resolve_all(|| Err(MemberlistError::Shutdown)).await;
   }
 
-  // Drop the bound UDP socket BEFORE acking the observed shutdown
-  // caller so an immediate rebind on the same port after
-  // `shutdown.await` succeeds. The `Memberlist::shutdown` caller is
-  // waiting on the stashed reply; once dropped here and the reply
-  // fires below, the awaited future resolves and any subsequent
-  // bind to the same port observes the released kernel slot.
-  drop(state.udp_socket);
+  // Close the bound UDP socket BEFORE acking the observed shutdown caller so an
+  // immediate rebind on the same port after `shutdown.await` succeeds. A plain
+  // drop releases the port synchronously on Linux/macOS, but Windows IOCP closes
+  // the handle ASYNCHRONOUSLY — the port lingers past the drop and a same-port
+  // rebind races into `AddrInUse`. Awaiting the explicit close (as the stream
+  // driver does for its gossip socket) drains the close to completion, so the
+  // kernel slot is released before the stashed reply fires below.
+  //
+  // Ignoring Err: a close error during teardown is unactionable.
+  let _ = state.udp_socket.close().await;
 
   // Ack any stashed Shutdown command reply.
   if let Some(reply) = state.shutdown_reply.take() {
