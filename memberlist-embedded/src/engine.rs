@@ -1017,9 +1017,9 @@ where
     self.endpoint.set_alive_delegate(RoutableAnd(delegate));
   }
 
-  /// Install a custom join-merge predicate, consulted on each join push/pull
-  /// merge (never an anti-entropy refresh). A delegate that rejects the merge
-  /// fails the join. Set it before [`start`](Self::start) / [`join`](Self::join).
+  /// Install a custom merge predicate, consulted on every push/pull merge (a
+  /// join and an anti-entropy refresh alike). A delegate that rejects the merge
+  /// fails the exchange. Set it before [`start`](Self::start) / [`join`](Self::join).
   ///
   /// Installing after `leave()` is inert: the machine merges no remote state
   /// once leaving, so the delegate is never consulted again.

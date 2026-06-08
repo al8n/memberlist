@@ -519,8 +519,8 @@ where
   }
 
   /// Install the synchronous [`MergeDelegate`](crate::delegate::MergeDelegate)
-  /// filter, consulted only for a join push/pull (never anti-entropy
-  /// refresh). `None` (the default) admits all.
+  /// filter, consulted for every push/pull (a join and an anti-entropy
+  /// refresh alike). `None` (the default) admits all.
   pub fn set_merge_delegate(&mut self, d: impl crate::delegate::MergeDelegate<I, A>) {
     self.merge_delegate = Some(Box::new(d));
   }
@@ -1106,14 +1106,16 @@ where
   }
 
   /// Whether a push/pull merge of `states` is admitted. The
-  /// [`MergeDelegate`](crate::delegate::MergeDelegate) is consulted
-  /// **only for a join push/pull**, never for periodic anti-entropy
-  /// refresh; with no delegate, all merges are admitted. Called inline
-  /// (synchronous) — no deferral.
-  fn merge_admitted(&self, states: &[PushNodeState<I, A>], kind: PushPullKind) -> bool {
-    if !kind.is_join() {
-      return true;
-    }
+  /// [`MergeDelegate`](crate::delegate::MergeDelegate) is consulted for
+  /// **every** push/pull — a join AND a periodic anti-entropy refresh — so a
+  /// peer the delegate rejects can never slip its membership or state in
+  /// through a later refresh; with no delegate, all merges are admitted.
+  /// Called inline (synchronous) — no deferral.
+  ///
+  /// This deliberately tightens Go memberlist, whose `mergeRemoteState` gates
+  /// `NotifyMerge` on the join flag only and so still merges a rejected peer's
+  /// state on anti-entropy — an incomplete split-brain guard.
+  fn merge_admitted(&self, states: &[PushNodeState<I, A>]) -> bool {
     match &self.merge_delegate {
       None => true,
       Some(d) => d.notify_merge(&Self::merge_peers_view(states)),
@@ -3100,11 +3102,11 @@ where
   /// [`Stream`] back into the Endpoint.
   ///
   /// - `PushPullReplyReceived`: applies the inbound merge inline (synchronous
-  ///   `MergeDelegate` filter, join-only). A rejected join merge returns
+  ///   `MergeDelegate` filter on every push/pull). A rejected merge returns
   ///   `Some(StreamCommand::Close)` to fail the exchange; otherwise returns
   ///   `None` (we sent our state before the peer replied).
   /// - `PushPullRequestReceived`: applies the same inline merge filter. A
-  ///   rejected join merge returns `Some(StreamCommand::Close)`; otherwise
+  ///   rejected merge returns `Some(StreamCommand::Close)`; otherwise
   ///   returns `Some(StreamCommand::SendPushPullResponse)` so the driver can
   ///   encode and load the inbound stream's response payload.
   /// - `ReliablePingAcked` / `ReliablePingFailed`: drives the probe FSM via
@@ -3122,13 +3124,11 @@ where
     match ev {
       EndpointEvent::PushPullReplyReceived(p) => {
         // Outbound: we initiated; peer replied. Consult the MergeDelegate
-        // inline (synchronous filter, join-only). A rejected join merge
+        // inline on every push/pull (synchronous filter). A rejected merge
         // terminalizes this exchange via `StreamCommand::Close`: the bridge
         // fails with `AdmissionClosed`, so the synchronous join counts the
-        // seed as NOT contacted — a rejected `NotifyMerge` fails the push/pull,
-        // matching both the inbound arm and Go memberlist's `mergeRemoteState`
-        // error propagation. The membership merge needs only `states` and
-        // `kind`; `peer` and `user_data` are forwarded to the application via
+        // seed as NOT contacted. The membership merge needs only `states`;
+        // `peer` and `user_data` are forwarded to the application via
         // `Event::RemoteStateReceived` once the merge is admitted.
         let (peer, states, user_data, kind) = p.into_parts();
         // A Leaving/Left node completes the in-flight exchange — the stream
@@ -3139,7 +3139,7 @@ where
         if self.lifecycle != Lifecycle::Running {
           return None;
         }
-        if !self.merge_admitted(&states, kind) {
+        if !self.merge_admitted(&states) {
           return Some(StreamCommand::Close);
         }
         self.merge_state(&states, now);
@@ -3155,8 +3155,8 @@ where
         None
       }
       EndpointEvent::PushPullRequestReceived(p) => {
-        // Inbound: peer initiated. Consult the MergeDelegate inline (join
-        // only). A rejected join merge closes the stream — a rejected
+        // Inbound: peer initiated. Consult the MergeDelegate inline on every
+        // push/pull. A rejected merge closes the stream — a rejected
         // `NotifyMerge` aborts the push/pull connection. Otherwise apply
         // the merge and reply with our state. The membership merge does not
         // consult `peer` or `user_data` at the FSM layer; once the merge is
@@ -3170,7 +3170,7 @@ where
         if self.lifecycle != Lifecycle::Running {
           return Some(StreamCommand::Close);
         }
-        if !self.merge_admitted(&states, kind) {
+        if !self.merge_admitted(&states) {
           return Some(StreamCommand::Close);
         }
         self.merge_state(&states, now);

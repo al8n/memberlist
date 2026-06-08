@@ -38,12 +38,13 @@ impl<I: 'static, A: 'static> AliveDelegate<I, A> for Box<dyn AliveDelegate<I, A>
   }
 }
 
-/// Filters a **join** push/pull merge. Returning `false` cancels the merge
-/// — the Sans-I/O analog of Go `MergeDelegate.NotifyMerge` returning a
-/// non-nil error (`net.go:1297`). Invoked inline ONLY for a join push/pull,
-/// never for periodic anti-entropy refresh (`net.go:1280`, gated on
-/// `if join`).
+/// Filters a push/pull merge. Returning `false` cancels the merge — the
+/// Sans-I/O analog of Go `MergeDelegate.NotifyMerge` returning a non-nil error
+/// (`net.go:1297`). Invoked inline for EVERY push/pull — a join AND a periodic
+/// anti-entropy refresh. This deliberately tightens Go memberlist, which gates
+/// `NotifyMerge` on the join flag only (`net.go:1280`, `if join`) and so still
+/// merges a rejected peer's state on anti-entropy.
 pub trait MergeDelegate<I, A>: Send + Sync + 'static {
-  /// `true` to proceed with the merge, `false` to cancel the join merge.
+  /// `true` to proceed with the merge, `false` to cancel it.
   fn notify_merge(&self, peers: &[NodeState<I, A>]) -> bool;
 }

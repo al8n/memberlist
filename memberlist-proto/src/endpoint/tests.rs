@@ -827,10 +827,12 @@ fn merge_delegate_vetoes_outbound_push_pull_reply() {
   );
 }
 
-/// The `MergeDelegate` is join-only: a periodic Refresh push/pull is never
-/// gated, so it merges even with a reject-all delegate installed.
+/// The `MergeDelegate` gates EVERY push/pull, a periodic Refresh included: a
+/// reject-all delegate vetoes the refresh merge, closing the stream and
+/// applying nothing. This deliberately tightens Go memberlist, which consults
+/// `NotifyMerge` on join only and so merges a rejected peer's refresh state.
 #[test]
-fn merge_delegate_not_consulted_for_refresh() {
+fn merge_delegate_vetoes_refresh_push_pull() {
   use EndpointEvent;
   use PushPullKind;
   use StreamCommand;
@@ -856,16 +858,16 @@ fn merge_delegate_not_consulted_for_refresh() {
   let cmd = e.handle_stream_event(ev, Instant::now());
 
   assert!(
-    matches!(cmd, Some(StreamCommand::SendPushPullResponse(_))),
-    "refresh must respond, not close, got {cmd:?}"
+    matches!(cmd, Some(StreamCommand::Close)),
+    "a vetoed refresh must close the stream, not respond, got {cmd:?}"
   );
   assert!(
-    e.member(&SmolStr::new("carol")).is_some(),
-    "refresh merge must apply despite a reject-all MergeDelegate"
+    e.member(&SmolStr::new("carol")).is_none(),
+    "a vetoed refresh merge must apply nothing"
   );
   assert!(
-    d.seen.lock().unwrap().is_empty(),
-    "MergeDelegate must not be consulted for a Refresh push/pull"
+    !d.seen.lock().unwrap().is_empty(),
+    "the MergeDelegate must be consulted for a Refresh push/pull"
   );
 }
 
@@ -2872,9 +2874,9 @@ fn outbound_push_pull_decode_and_merge() {
     ref other => panic!("expected PushPullReplyReceived, got {other:?}"),
   }
 
-  // Route event through Endpoint. This is a Refresh reply, so the
-  // MergeDelegate gate is not consulted (join-only) and the merge applies
-  // synchronously and inline.
+  // Route event through Endpoint. This is a Refresh reply; with no
+  // MergeDelegate installed the merge is admitted and applies synchronously
+  // and inline.
   let cmd = e.handle_stream_event(ep_ev, t0);
   // Outbound reply: no StreamCommand expected.
   assert!(cmd.is_none(), "outbound reply must return None");

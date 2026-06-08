@@ -26,8 +26,10 @@ use compio::{
   buf::BufResult,
   net::{TcpListener, TcpStream, UdpSocket},
 };
+use core::task::{Context, Poll, Waker};
 use flume::{Receiver, Sender};
-use futures_util::{FutureExt, pin_mut, select_biased};
+
+use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 use memberlist_proto::{
   Instant,
   codec::{
@@ -630,9 +632,64 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // passive inbound traffic.
   endpoint.start_scheduling(Instant::now());
 
+  // Hoist the listener-accept future ACROSS loop iterations. On a
+  // completion-based backend (io_uring) `accept()` is an in-flight SQE; if it
+  // were recreated each iteration like the other select arms, every wakeup on a
+  // non-accept arm would DROP it, cancelling the accept — and a connection the
+  // kernel already accepted into a fresh fd is then closed, surfacing to the
+  // peer as a reset mid-handshake. Under concurrent inbound joins that loses a
+  // large fraction of connections. Persisting the future means it is only ever
+  // recreated when it RESOLVES (below), never dropped mid-flight, so no accepted
+  // connection is silently discarded. A readiness-based backend (kqueue/epoll)
+  // would not lose the connection either way, but this keeps both correct.
+  let mut accept_fut = Box::pin(listener.accept().fuse());
+
   loop {
     let mut dirty = false;
     let mut exit = false;
+
+    // Re-arm a resolved accept, then SERVICE any already-ready accept before the
+    // select. `accept_fut` is hoisted above the loop so a competing select arm
+    // never drops an in-flight accept (which on io_uring would cancel a kernel-
+    // accepted connection) — but it sits at the THIRD biased select arm, so
+    // without draining it here a continuous recv/timer-ready socket could hold a
+    // kernel-accepted connection unbridged until the peer's handshake deadline.
+    // Polling it here, off the select's borrow, gives accept bounded fairness
+    // symmetric with the iter-top cmd drain below. The throwaway-waker poll is an
+    // early check; the select re-registers the real waker if an accept is still
+    // pending. Capped by `iter_drain_cap` so an accept flood cannot starve the
+    // other arms in turn.
+    if accept_fut.is_terminated() {
+      accept_fut.set(listener.accept().fuse());
+    }
+    {
+      let mut accept_cx = Context::from_waker(Waker::noop());
+      let mut accepted_n = 0;
+      // Floor the accept budget at 1. `iter_drain_cap == 0` is a supported config
+      // (it makes the bridge drains rendezvous through their select arms), but the
+      // accept arm has no equivalent fallback — leaving it at 0 would reopen the
+      // recv/timer starvation this drain closes — so at least one ready accept is
+      // always serviced per iteration regardless of the configured cap.
+      while accepted_n < driver_opts.iter_drain_cap().max(1) {
+        match accept_fut.as_mut().poll(&mut accept_cx) {
+          Poll::Ready(accepted) => {
+            if handle_accepted::<I, A, R>(
+              accepted,
+              &mut endpoint,
+              &mut bridges,
+              &bridge_inbound_tx,
+              &cidr_policy,
+              stream_opts,
+            ) {
+              dirty = true;
+            }
+            accept_fut.set(listener.accept().fuse());
+            accepted_n += 1;
+          }
+          Poll::Pending => break,
+        }
+      }
+    }
 
     // Iter-top command fairness drain. The `cmd` select arm sits at
     // MEDIUM priority so a network flood does not let a cmd flood
@@ -957,16 +1014,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     let cmd_fut = commands.recv_async().fuse();
     let bridge_in_fut = bridge_inbound_rx.recv_async().fuse();
     let ready_fut = bridge_ready_rx.recv_async().fuse();
-    let accept_fut = listener.accept().fuse();
     let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
-    pin_mut!(
-      recv_fut,
-      cmd_fut,
-      bridge_in_fut,
-      ready_fut,
-      accept_fut,
-      timer_fut
-    );
+    pin_mut!(recv_fut, cmd_fut, bridge_in_fut, ready_fut, timer_fut);
 
     // Arm priority (top → bottom; `select_biased!` resolves the first
     // ready arm in source order):
@@ -1041,43 +1090,20 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           dirty = true;
         }
       }
-      accepted = accept_fut => {
-        match accepted {
-          // CIDR: reject a reliable connection from a blocked peer at the
-          // boundary (this guard is always false without the cidr feature).
-          Ok((stream, peer)) if cidr_blocks(&cidr_policy, peer.ip()) => {
-            drop(stream);
-          }
-          Ok((stream, peer)) => {
-            // Inbound TCP/TLS connection from a peer. Allocate the
-            // exchange id, create the bridge channels, spawn the byte
-            // mover. The record-layer codec inside
-            // `StreamEndpoint::handle_transport_data` decrypts handshake
-            // bytes for the TLS path; the bridge itself sees only raw
-            // socket bytes.
-            let now = Instant::now();
-            let eid = endpoint.accept_connection(peer.into(), now);
-            let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-            let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-            bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
-            spawn_bridge(
-              stream,
-              eid,
-              out_rx,
-              cancel_rx,
-              &bridge_inbound_tx,
-              stream_opts.bridge_recv_buf_len(),
-              stream_opts.close_timeout(),
-            );
-            dirty = true;
-          }
-          Err(_) => {
-            // Transient accept error (file-descriptor pressure, peer
-            // reset during the 3-way handshake). The kernel keeps the
-            // listening socket open across these errors; the next loop
-            // iteration re-arms `listener.accept().fuse()` and the
-            // next connection succeeds.
-          }
+      accepted = accept_fut.as_mut() => {
+        // A connection that landed while the select was parked. Ready accepts
+        // are normally serviced by the iter-top drain; this arm wakes the loop
+        // for one that arrives mid-await. The resolved future is re-armed at the
+        // loop top.
+        if handle_accepted::<I, A, R>(
+          accepted,
+          &mut endpoint,
+          &mut bridges,
+          &bridge_inbound_tx,
+          &cidr_policy,
+          stream_opts,
+        ) {
+          dirty = true;
         }
       }
       cmd = cmd_fut => {
@@ -1296,6 +1322,11 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     // notification is best-effort.
     let _ = handle.out_tx.try_send(BridgeOut::Close);
   }
+  // Drop the persistent accept future before the listener: it holds an
+  // in-flight accept borrowing `listener`, so the listener cannot be moved while
+  // it is alive. Cancelling a pending accept during shutdown is correct — a
+  // connection arriving as the driver tears down has nothing to be served.
+  drop(accept_fut);
   // Drop the TCP reliable listener FIRST so the bound port is released
   // immediately. The listener does not have an explicit close API
   // distinct from drop — the local going out of scope here closes the
@@ -2943,6 +2974,76 @@ fn handle_bridge_ready<I, A, R>(
       bridges.remove(&eid);
       endpoint.handle_dial_failed(eid, received_at);
     }
+  }
+}
+
+/// Route one accepted inbound connection: reject a CIDR-blocked peer, else
+/// allocate the exchange, register the bridge handle, and spawn the byte mover.
+/// Returns `true` iff a bridge was spawned. Shared by the iter-top accept drain
+/// and the select's accept arm so both paths stay byte-identical.
+#[allow(clippy::too_many_arguments)]
+fn handle_accepted<I, A, R>(
+  accepted: io::Result<(TcpStream, SocketAddr)>,
+  endpoint: &mut StreamEndpoint<I, A, R>,
+  bridges: &mut HashMap<ExchangeId, BridgeHandle>,
+  bridge_inbound_tx: &Sender<BridgeInbound>,
+  cidr_policy: &crate::transport::runtime::CidrFilter,
+  stream_opts: StreamTransportOptions,
+) -> bool
+where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + From<SocketAddr>
+    + Send
+    + Sync
+    + 'static,
+  R: StreamTransport,
+{
+  match accepted {
+    // CIDR: reject a reliable connection from a blocked peer at the boundary
+    // (this guard is always false without the cidr feature).
+    Ok((stream, peer)) if cidr_blocks(cidr_policy, peer.ip()) => {
+      drop(stream);
+      false
+    }
+    Ok((stream, peer)) => {
+      // Inbound TCP/TLS connection from a peer. Allocate the exchange id, create
+      // the bridge channels, spawn the byte mover. The record-layer codec inside
+      // `StreamEndpoint::handle_transport_data` decrypts handshake bytes for the
+      // TLS path; the bridge itself sees only raw socket bytes.
+      let now = Instant::now();
+      let eid = endpoint.accept_connection(peer.into(), now);
+      let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+      let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+      bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
+      spawn_bridge(
+        stream,
+        eid,
+        out_rx,
+        cancel_rx,
+        bridge_inbound_tx,
+        stream_opts.bridge_recv_buf_len(),
+        stream_opts.close_timeout(),
+      );
+      true
+    }
+    // Transient accept error (file-descriptor pressure, peer reset during the
+    // 3-way handshake). The kernel keeps the listening socket open across these
+    // errors; the resolved accept is re-armed at the loop top and the next
+    // connection succeeds.
+    Err(_) => false,
   }
 }
 
