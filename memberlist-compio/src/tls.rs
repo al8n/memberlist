@@ -257,8 +257,12 @@ where
     // races: an ephemeral UDP port can land on a TCP port still in TIME_WAIT
     // (the spaces are independent), failing the TCP bind with AddrInUse. For an
     // ephemeral (`:0`) advertise we retry the pair on a fresh port when the UDP
-    // bind collides; a fixed (nonzero) port is a single attempt, so a genuine
-    // conflict surfaces to the caller instead of looping.
+    // bind fails transiently: AddrInUse from the port-space race, or
+    // PermissionDenied (Windows WSAEACCES) when the listener's OS-assigned port
+    // falls in a UDP excluded range — CI hypervisors reserve disjoint TCP/UDP
+    // ranges, so a TCP-bindable port can still be UDP-forbidden. A fixed
+    // (nonzero) port is a single attempt, so a genuine conflict surfaces to the
+    // caller instead of looping.
     const EPHEMERAL_BIND_RETRIES: usize = 16;
     let ephemeral = advertise_socket.port() == 0;
     let (tcp_listener, advertise_socket, gossip_socket) = {
@@ -272,7 +276,10 @@ where
           Ok(gossip_socket) => break (tcp_listener, bound, gossip_socket),
           Err(e)
             if ephemeral
-              && e.kind() == std::io::ErrorKind::AddrInUse
+              && matches!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+              )
               && attempt < EPHEMERAL_BIND_RETRIES =>
           {
             // Release the claimed TCP port and retry on a fresh ephemeral pair.
