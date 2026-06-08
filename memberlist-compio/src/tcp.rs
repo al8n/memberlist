@@ -222,7 +222,13 @@ where
               && attempt < EPHEMERAL_BIND_RETRIES =>
           {
             // Release the claimed TCP port and retry on a fresh ephemeral pair.
-            drop(tcp_listener);
+            // On Windows `drop` closes asynchronously (IOCP), so the port would
+            // linger and the retries — especially many in parallel during a test
+            // run — would exhaust the ephemeral pool before finding a
+            // UDP-bindable port; `close().await` releases it synchronously first.
+            // Ignoring Err: this attempt's listener is being discarded regardless
+            // and a fresh pair is rebound, so a close error is not actionable.
+            let _ = tcp_listener.close().await;
             attempt += 1;
           }
           Err(e) => return Err(MemberlistError::Io(e)),
