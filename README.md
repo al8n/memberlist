@@ -107,7 +107,7 @@ Here are the layers:
   | [`memberlist-smoltcp`](https://crates.io/crates/memberlist-smoltcp) | executor-free `no_std` driver over smoltcp (caller-poll) |
   | [`memberlist-embassy`](https://crates.io/crates/memberlist-embassy) | embassy-net async `no_std` driver |
 
-  Every driver carries three transports — plain **TCP**, **TLS-over-TCP** (`rustls`), and **QUIC** (`quinn-proto`) — each a reliable stream plane plus a UDP / datagram gossip plane. The runtime layer is provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) (for the reactor driver), and the address-resolver layer by [`nodecraft`'s AddressResolver](https://docs.rs/nodecraft/latest/nodecraft/resolver/trait.AddressResolver.html). You can bring your own `Id`, `Address`, and `AddressResolver`.
+  Every driver carries three transports — plain **TCP**, **TLS-over-TCP** (`rustls`), and **QUIC** (`quinn-proto`) — each a reliable stream plane plus a UDP / datagram gossip plane. The runtime layer is provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) (for the reactor driver), and each driver provides its own `AddressResolver` trait (with built-in resolvers such as `SocketAddrResolver`) for the address-resolver layer. You can bring your own `Id`, `Address`, and `AddressResolver`.
 
 - **Delegate Layer**
   
@@ -162,9 +162,6 @@ Here are the layers:
 ## Related Projects
 
 - [`agnostic`](https://github.com/al8n/agnostic): helps you to develop runtime agnostic crates
-- [`getifs`](https://github.com/al8n/getifs): A bunch of cross platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
-- [`nodecraft`](https://github.com/al8n/nodecraft): crafting seamless node operations for distributed systems, which provides foundational traits for node identification and address resolution.
-- [`peekable`](https://github.com/al8n/peekable): peekable reader and async reader
 
 ### Which crates are using memberlist?
 

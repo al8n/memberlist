@@ -63,12 +63,9 @@ either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
 ipnet = { version = "2", default-features = false }
-getifs = "0.6"
 getrandom = "0.4"
 metrics = "0.24"
-nodecraft = { version = "0.9", default-features = false }
 paste = "1"
-peekable = "0.6"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
