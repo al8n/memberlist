@@ -105,9 +105,32 @@ pub trait StreamTransport: Sized {
   /// Drain decrypted application plaintext into `out`, returning the
   /// number of bytes appended.
   fn read_plaintext(&mut self, out: &mut Vec<u8>) -> usize;
-  /// Encrypt `plaintext` into the record layer's outbound queue (drained
-  /// via [`Self::poll_transport_transmit`]).
-  fn write_plaintext(&mut self, plaintext: &[u8]);
+  /// Encrypt `plaintext` into the record layer's outbound queue (drained via
+  /// [`Self::poll_transport_transmit`]).
+  ///
+  /// Returns `false` if the outbound bound (see [`Self::set_send_capacity`])
+  /// could not admit the whole unit: the unit is NOT queued (no partial frame
+  /// is ever buffered), and the caller MUST fail the exchange synchronously
+  /// rather than proceed — a dropped frame otherwise surfaces only as a later
+  /// timeout or a clean close. A record layer whose outbound is unbounded by
+  /// construction (plain TCP's `Vec`) always returns `true`.
+  fn write_plaintext(&mut self, plaintext: &[u8]) -> bool;
+
+  /// Bound the outbound buffer so a peer that reads slowly cannot grow it
+  /// without limit. `max_frame` is the endpoint's
+  /// [`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)
+  /// — the ceiling on a single reliable unit — so the buffer is sized to always
+  /// admit one full unit (a healthy exchange is never false-closed) while
+  /// rejecting any further accumulation beyond it.
+  ///
+  /// Called once by `StreamBridge::new`, before any plaintext is written.
+  /// Default no-op: a record layer whose outbound is already bounded by
+  /// construction (plain TCP's one-unit `outbound` `Vec`, drained each pump)
+  /// needs nothing here. TLS overrides it to bound rustls's send buffer, whose
+  /// constructors otherwise leave it unbounded.
+  fn set_send_capacity(&mut self, max_frame: usize) {
+    let _ = max_frame;
+  }
 
   /// TLS: queue the `close_notify` alert (in-band). TCP: no-op (the
   /// FIN is the out-of-band TCP `shutdown(write)` at the driver layer).

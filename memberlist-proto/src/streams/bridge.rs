@@ -198,12 +198,17 @@ where
   /// coordinator passes `EndpointOptions::max_stream_frame_size` so the bound
   /// always matches the Stream FSM's configured frame limit.
   pub(crate) fn new(
-    records: R,
+    mut records: R,
     deadline: Instant,
     compression: crate::CompressionOptions,
     encryption: crate::EncryptionOptions,
     reliable_max: usize,
   ) -> Self {
+    // Bound the record layer's outbound buffer to one reliable unit so a
+    // slow-reading peer cannot grow it without limit (the TLS record layer is
+    // otherwise unbounded by construction). No-op for record layers already
+    // bounded by their one-unit-per-pump cadence (plain TCP).
+    records.set_send_capacity(reliable_max);
     // A transport that already provides confidentiality (TLS) forces a
     // disabled `EncryptionOptions` here: double-encrypting on the reliable
     // path costs CPU and bandwidth without adding security, and the peer's
@@ -768,9 +773,11 @@ where
     // uniformly — `fail_with_retire` reaches `fail` via its own atomic
     // retire-then-fail step. Clean closes go through `pump_out` /
     // `observe_send_fin` and never call `fail`, so a same-tick clean half-close
-    // cannot be observed clearing outbound here. For a record layer that owns
-    // its own write queue (rustls) `R::clear_outbound` is a documented no-op;
-    // the call stays uniform either way.
+    // cannot be observed clearing outbound here. Both record layers drop their
+    // staged outbound here — the TCP passthrough's plaintext queue and the TLS
+    // layer's staged plaintext (`pending`) — so a failed exchange cannot leak a
+    // partial reply; rustls still owns any ciphertext already fed on a prior
+    // transmit, harmless because the failed exchange's socket is torn down.
     self.records.clear_outbound();
     self.phase = StreamPhase::Established(BridgePhase::Failed(reason));
   }
@@ -980,7 +987,17 @@ where
           return Err(());
         }
       };
-      self.records.write_plaintext(&unit);
+      // Fail the exchange synchronously if the record layer cannot admit the
+      // whole unit (its outbound bound is exceeded). The unit was NOT queued, so
+      // proceeding would silently drop the frame and surface only as a later
+      // timeout; retire-then-fail now. For one-unit-per-exchange the bound
+      // always admits the unit, so this never fires.
+      if !self.records.write_plaintext(&unit) {
+        self.fail_with_retire(BridgeFailure::Transport(
+          "reliable send buffer overflow".to_string(),
+        ));
+        return Err(());
+      }
     }
 
     // FSM-failure detection AFTER `poll_transmit`: the FSM checks its own

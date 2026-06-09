@@ -97,8 +97,12 @@ impl StreamTransport for TlsRecords {
     TlsRecords::read_plaintext(self, out)
   }
 
-  fn write_plaintext(&mut self, plaintext: &[u8]) {
+  fn write_plaintext(&mut self, plaintext: &[u8]) -> bool {
     TlsRecords::write_plaintext(self, plaintext)
+  }
+
+  fn set_send_capacity(&mut self, max_frame: usize) {
+    TlsRecords::set_send_capacity(self, max_frame)
   }
 
   fn send_close_notify(&mut self) {
@@ -110,15 +114,12 @@ impl StreamTransport for TlsRecords {
   }
 
   fn clear_outbound(&mut self) {
-    // No-op for TLS: there is no separately-queued outbound buffer in
-    // `TlsRecords`. `write_plaintext` encrypts straight into rustls and
-    // `poll_transport_transmit` drains rustls's own `write_tls` queue —
-    // rustls exposes no API to discard that pending ciphertext. The failure
-    // path's leak prevention for TLS is the FSM's `enter_failed` clearing its
-    // `output_buf` (so no further plaintext is ever handed to `write_plaintext`),
-    // not a record-layer buffer clear. TCP's `RawRecords`, which DOES hold a
-    // plaintext-side `outbound` buffer (the label prefix + raw bytes), is the
-    // record layer this trait method exists to serve.
+    // Drop the staged outbound plaintext (`pending`), so a failed exchange can
+    // never feed a partial reply into rustls and onto the wire. rustls still
+    // owns any ciphertext already fed on a prior transmit and exposes no API to
+    // discard it; for the reliable plane that is harmless because each exchange
+    // owns its socket, which is torn down on failure.
+    TlsRecords::clear_outbound(self)
   }
 
   fn is_secure() -> bool {

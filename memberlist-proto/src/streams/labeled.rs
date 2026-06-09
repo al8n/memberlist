@@ -115,8 +115,11 @@ impl StreamTransport for Passthrough {
     n
   }
 
-  fn write_plaintext(&mut self, plaintext: &[u8]) {
+  fn write_plaintext(&mut self, plaintext: &[u8]) -> bool {
+    // Plain passthrough: the outbound `Vec` is bounded by the bridge's
+    // one-unit-per-pump cadence, so a unit is always accepted.
     self.outbound.extend_from_slice(plaintext);
+    true
   }
 
   fn send_close_notify(&mut self) {}
@@ -341,7 +344,11 @@ where
       // later validation must still get one chance to flush.
       return;
     }
-    self.inner.write_plaintext(&prefix);
+    // Ignoring the accept bool: the cluster label is a short fixed prefix
+    // (`[12][len][label]`, at most a few hundred bytes) written first into an
+    // empty buffer whose floor is `MIN_TLS_SEND_BUFFER` (64 KiB), so it always
+    // fits the send bound.
+    let _ = self.inner.write_plaintext(&prefix);
     self.prefix_emitted = true;
   }
 
@@ -509,8 +516,15 @@ where
     n
   }
 
-  fn write_plaintext(&mut self, plaintext: &[u8]) {
-    self.inner.write_plaintext(plaintext);
+  fn write_plaintext(&mut self, plaintext: &[u8]) -> bool {
+    self.inner.write_plaintext(plaintext)
+  }
+
+  fn set_send_capacity(&mut self, max_frame: usize) {
+    // The label prefix is a few bytes prepended once via the inner layer's own
+    // `write_plaintext`, so the inner bound (sized to one reliable unit) already
+    // covers it; thread it straight through.
+    self.inner.set_send_capacity(max_frame);
   }
 
   fn send_close_notify(&mut self) {

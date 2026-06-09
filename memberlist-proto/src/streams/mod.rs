@@ -1489,10 +1489,10 @@ where
     //     withhold the `Abort` behind those stale bytes and a driver doing the
     //     natural "drain actions, drain transmits, repeat" loop would emit them
     //     after the exchange already failed — leaking membership state.
-    // (b) Do NOT collect the bridge's current record-layer buffer. For plain TCP
-    //     `clear_outbound` already emptied it on the failure transition, so there
-    //     is nothing to collect; but for TLS `clear_outbound` is a no-op and the
-    //     failure path queued a `close_notify` into rustls's write buffer.
+    // (b) Do NOT collect the bridge's current record-layer buffer. `clear_outbound`
+    //     emptied the STAGED plaintext on the failure transition (both layers), so
+    //     no staged frame remains; but for TLS rustls still holds any ciphertext
+    //     fed on a prior transmit plus the `close_notify` the failure path queued.
     //     Collecting would drain that alert (and any pending rustls ciphertext)
     //     into `out_transmit`, and the gate would then withhold the `Abort`
     //     behind it until the driver put the alert on the wire. Both are safe to

@@ -22,6 +22,21 @@ use rustls::{
   ClientConfig, ClientConnection, ServerConfig, ServerConnection, pki_types::ServerName,
 };
 
+/// Floor for the rustls send-buffer limit, so a small configured
+/// `max_stream_frame_size` cannot starve the handshake flights of buffer space
+/// (a TLS 1.3 handshake flight with a cert chain is a few KiB).
+const MIN_TLS_SEND_BUFFER: usize = 64 * 1024;
+
+/// The rustls send-buffer limit for a `max_frame`-sized reliable unit: the unit
+/// plus headroom for TLS record framing/overhead, floored so the handshake
+/// always fits. Saturating so a huge configured frame size cannot wrap.
+fn sized_send_limit(max_frame: usize) -> usize {
+  max_frame
+    .saturating_add(max_frame / 16)
+    .saturating_add(16 * 1024)
+    .max(MIN_TLS_SEND_BUFFER)
+}
+
 /// One side of a TLS connection, behind a byte-only Sans-I/O interface.
 /// Accessor-only; no `pub` fields. Built via the crate-internal `client` /
 /// `server` constructors.
@@ -30,6 +45,26 @@ pub struct TlsRecords {
   /// `peer_has_closed` latched once observed (`process_new_packets` reports it
   /// per-call; rustls only surfaces the close once, so we sticky it).
   peer_closed: bool,
+  /// Cap on `pending` — the bound a slow-reading peer cannot grow past. Sized to
+  /// one reliable unit (plus framing/TLS-record headroom) by
+  /// [`Self::set_send_capacity`], so a single legitimate unit is always admitted
+  /// while accumulation beyond it is refused.
+  send_limit: usize,
+  /// Outbound application plaintext staged for the next transmit, bounded by
+  /// `send_limit`. This — not rustls's internal send buffers — is the bound
+  /// authority: [`Self::write_plaintext`] stages here, and
+  /// [`Self::poll_transport_transmit`] feeds it to rustls (only post-handshake,
+  /// only what rustls accepts; the rest stays staged). Tracking our OWN
+  /// plaintext, rather than a counter against rustls's opaque ciphertext queue,
+  /// is what keeps the accounting honest across handshake flights and record
+  /// overhead.
+  pending: Vec<u8>,
+  /// A graceful close was requested but `pending` was not yet fully fed to
+  /// rustls. The `close_notify` alert is deferred until `pending` drains, so it
+  /// can never overtake a still-staged frame (a short rustls accept would
+  /// otherwise leave a suffix the alert would jump ahead of). Fired by
+  /// [`Self::flush_close`] the moment `pending` empties.
+  close_requested: bool,
 }
 
 /// Outcome of one [`TlsRecords::handle_transport_data`] intake step.
@@ -107,23 +142,22 @@ impl Conn {
     }
     total
   }
-  fn write_plaintext(&mut self, plaintext: &[u8]) {
-    // `Writer::write_all` buffers into rustls's send queue. With the buffer
-    // limit set to `None` (unbounded) in the constructors, there is no
-    // backpressure: the bridge writes at most one `max_stream_frame_size`
-    // frame per exchange, so memory stays bounded by the FSM cap, not by
-    // rustls's own DEFAULT_BUFFER_LIMIT. `write_all` loops internally and
-    // returns `Err` only if the underlying `Write::write` returns 0, which
-    // cannot happen against an unbounded buffer.
+  /// Hand staged plaintext to rustls, returning how many bytes it accepted. Uses
+  /// `Writer::write` (short-write-tolerant), NOT `write_all`: rustls clamps the
+  /// accepted count against its send-buffer limit (which also bounds the
+  /// ciphertext queue still holding the handshake flight), so a short write is
+  /// normal back-pressure — the caller leaves the unaccepted suffix staged. An
+  /// in-memory `Writer::write` never errors; map the impossible `Err` to 0.
+  fn write(&mut self, plaintext: &[u8]) -> usize {
     match self {
-      Conn::Client(c) => c
-        .writer()
-        .write_all(plaintext)
-        .expect("rustls Writer::write_all to an unbounded buffer is infallible"),
-      Conn::Server(c) => c
-        .writer()
-        .write_all(plaintext)
-        .expect("rustls Writer::write_all to an unbounded buffer is infallible"),
+      Conn::Client(c) => c.writer().write(plaintext).unwrap_or(0),
+      Conn::Server(c) => c.writer().write(plaintext).unwrap_or(0),
+    }
+  }
+  fn set_buffer_limit(&mut self, limit: usize) {
+    match self {
+      Conn::Client(c) => c.set_buffer_limit(Some(limit)),
+      Conn::Server(c) => c.set_buffer_limit(Some(limit)),
     }
   }
   fn send_close_notify(&mut self) {
@@ -157,13 +191,19 @@ impl TlsRecords {
     name: ServerName<'static>,
   ) -> Result<Self, rustls::Error> {
     let mut c = ClientConnection::new(client, name)?;
-    // Unbounded plaintext buffer: the bridge writes at most one
-    // `max_stream_frame_size` frame per exchange, so memory is bounded by the
-    // FSM cap — rustls's DEFAULT_BUFFER_LIMIT would cause silent short-writes.
-    c.set_buffer_limit(None);
+    // rustls's own send-buffer limit is only a LOOSE BACKSTOP at 2x our staging
+    // cap: `pending <= send_limit` plaintext encrypts to well under 2x, so it
+    // never binds on the normal path. The real bound is `pending`/`send_limit`.
+    // `StreamBridge::new` re-sizes both via `set_send_capacity` right after
+    // construction; this default keeps a direct caller bounded too.
+    let limit = sized_send_limit(crate::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    c.set_buffer_limit(Some(limit.saturating_mul(2)));
     Ok(Self {
       conn: Conn::Client(c),
       peer_closed: false,
+      send_limit: limit,
+      pending: Vec::new(),
+      close_requested: false,
     })
   }
 
@@ -171,11 +211,15 @@ impl TlsRecords {
   /// installed on `server`.
   pub(crate) fn server(server: Arc<ServerConfig>) -> Result<Self, rustls::Error> {
     let mut s = ServerConnection::new(server)?;
-    // Unbounded plaintext buffer: same rationale as the client constructor.
-    s.set_buffer_limit(None);
+    // Loose 2x backstop; same rationale as the client constructor.
+    let limit = sized_send_limit(crate::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    s.set_buffer_limit(Some(limit.saturating_mul(2)));
     Ok(Self {
       conn: Conn::Server(s),
       peer_closed: false,
+      send_limit: limit,
+      pending: Vec::new(),
+      close_requested: false,
     })
   }
 
@@ -250,21 +294,72 @@ impl TlsRecords {
     Ok(Intake::Done)
   }
 
+  /// Hand staged plaintext to rustls, ready to be encrypted by `write_tls`.
+  /// Only ONCE the handshake has completed: mid-handshake rustls cannot encrypt
+  /// app data (no traffic keys yet), so the eagerly-staged cluster label must
+  /// stay in `pending` — where `pending.len()` still accounts for it — until the
+  /// handshake clears. Feed only what rustls accepts and keep the unaccepted
+  /// suffix staged; a short accept is normal back-pressure (rustls clamps against
+  /// its own send-buffer limit), never a dropped frame.
+  fn flush_pending(&mut self) {
+    if !self.conn.is_handshaking() && !self.pending.is_empty() {
+      let accepted = self.conn.write(&self.pending);
+      self.pending.drain(..accepted);
+    }
+  }
+
+  /// Flush staged plaintext, then fire a deferred `close_notify` ONLY once
+  /// `pending` is fully drained — so the close alert can never overtake a
+  /// staged frame even when [`Self::flush_pending`] short-accepts. While
+  /// `pending` is non-empty (mid-handshake, or rustls back-pressured) the close
+  /// stays deferred and re-fires on the next transmit.
+  fn flush_close(&mut self) {
+    self.flush_pending();
+    if self.close_requested && self.pending.is_empty() {
+      self.conn.send_close_notify();
+      self.close_requested = false;
+    }
+  }
+
   /// Drain ciphertext rustls wants to write (handshake flights, app records,
   /// close_notify) into `out`. Returns the number of bytes appended.
+  ///
+  /// Drains `pending` to EMPTY before returning (post-handshake): each
+  /// `write_tls` pass frees rustls's send-buffer room, so a `flush_close` that
+  /// short-accepted re-feeds the suffix on the next pass. This leaves NO hidden
+  /// outbound — staged plaintext or a deferred `close_notify` — after the call,
+  /// so the coordinator's teardown gating (which sees only `out`, not `pending`)
+  /// can never let a `Shutdown` overtake a staged suffix. While handshaking,
+  /// `flush_close` makes no progress on `pending` (no traffic keys yet), so the
+  /// loop drains the handshake flight once and stops, leaving `pending` staged.
   pub(crate) fn poll_transport_transmit(&mut self, out: &mut Vec<u8>) -> usize {
     let before = out.len();
     // `write_tls` writes one record-layer message per call into the
-    // `&mut dyn Write`; loop until rustls has nothing more buffered.
-    // Writing into a `Vec<u8>` is infallible (Vec writes do not fail; the
-    // only `Err` path is a rustls-internal consistency guard that signals a
-    // bug, never a normal runtime condition).
-    while self
-      .conn
-      .write_tls(out)
-      .expect("write_tls to an in-memory Vec<u8> is infallible")
-      > 0
-    {}
+    // `&mut dyn Write`; the inner loop drains rustls fully. Writing into a
+    // `Vec<u8>` is infallible (the only `Err` path is a rustls-internal
+    // consistency guard signalling a bug, never a normal runtime condition).
+    loop {
+      let pending_before = self.pending.len();
+      self.flush_close();
+      let fed = self.pending.len() < pending_before;
+      let mut drained = false;
+      while self
+        .conn
+        .write_tls(out)
+        .expect("write_tls to an in-memory Vec<u8> is infallible")
+        > 0
+      {
+        drained = true;
+      }
+      // Re-feed while `pending` remains AND this pass made progress — either
+      // `flush_close` accepted bytes, OR `write_tls` freed rustls room so the
+      // NEXT feed can accept (the case where rustls was full at entry: the feed
+      // takes 0 but the drain unblocks it). Break when `pending` is empty, or no
+      // progress at all (mid-handshake gate, or genuinely stuck): never spin.
+      if self.pending.is_empty() || (!fed && !drained) {
+        break;
+      }
+    }
     out.len() - before
   }
 
@@ -279,16 +374,52 @@ impl TlsRecords {
     self.conn.read_plaintext(out)
   }
 
-  /// Queue application plaintext to be encrypted; drained as ciphertext via
-  /// [`Self::poll_transport_transmit`].
-  pub(crate) fn write_plaintext(&mut self, plaintext: &[u8]) {
-    self.conn.write_plaintext(plaintext);
+  /// Stage application plaintext for the next transmit (fed to rustls + drained
+  /// as ciphertext by [`Self::poll_transport_transmit`]). Returns `false` if the
+  /// unit would overflow `send_limit`.
+  ///
+  /// Staged WHOLE into `pending`: a unit that would push `pending` past the bound
+  /// (a second unit offered before the first drained) is rejected entirely —
+  /// never staging a partial frame — so the caller fails the exchange
+  /// synchronously. For memberlist's one-unit-per-exchange the bound always
+  /// admits the unit, so this never rejects; it is the by-construction bound the
+  /// FSM cadence otherwise relied on implicitly.
+  pub(crate) fn write_plaintext(&mut self, plaintext: &[u8]) -> bool {
+    if self.pending.len().saturating_add(plaintext.len()) > self.send_limit {
+      return false;
+    }
+    self.pending.extend_from_slice(plaintext);
+    true
+  }
+
+  /// Drop staged outbound plaintext on a failure transition, so a failed
+  /// exchange cannot leak a partial reply onto the wire, and cancel any deferred
+  /// graceful close (a failed exchange resets rather than half-closes).
+  pub(crate) fn clear_outbound(&mut self) {
+    self.pending.clear();
+    self.close_requested = false;
+  }
+
+  /// Bound the staging buffer to one `max_frame`-sized reliable unit. Called once
+  /// by `StreamBridge::new` before any plaintext is staged, replacing the
+  /// generous construction-time default with the configured frame size; the
+  /// rustls backstop tracks at 2x.
+  pub(crate) fn set_send_capacity(&mut self, max_frame: usize) {
+    let limit = sized_send_limit(max_frame);
+    self.send_limit = limit;
+    self.conn.set_buffer_limit(limit.saturating_mul(2));
   }
 
   /// Begin a graceful close: queue a `close_notify` alert (drained via
   /// [`Self::poll_transport_transmit`]).
   pub(crate) fn send_close_notify(&mut self) {
-    self.conn.send_close_notify();
+    // Defer the close alert until all staged plaintext has reached rustls, so
+    // close_notify never overtakes a frame. The bridge stages a unit and
+    // requests the close in the same tick (before the transmit drain), and a
+    // short rustls accept can leave a suffix staged — so `flush_close` only
+    // queues the alert once `pending` is empty, here or on a later transmit.
+    self.close_requested = true;
+    self.flush_close();
   }
 
   /// `true` once the peer has sent us a `close_notify` (latched).
@@ -518,5 +649,279 @@ mod tests {
       Intake::Done
     ));
     assert!(server.peer_has_closed(), "close latch stays sticky");
+  }
+
+  /// A unit sized to the configured `max_stream_frame_size` is always admitted
+  /// (no false-close), and draining the ciphertext resets the fit-check
+  /// accounting so the next unit is measured from empty.
+  #[test]
+  fn full_unit_admitted_and_drain_resets_accounting() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking());
+
+    let frame = 200 * 1024;
+    client.set_send_capacity(frame);
+
+    // A full-frame-sized unit fits the bound (sized to the frame + headroom).
+    assert!(
+      client.write_plaintext(&vec![7u8; frame]),
+      "a full-frame unit is admitted, never false-closed"
+    );
+    assert_eq!(client.pending.len(), frame);
+
+    // Draining the ciphertext empties the send buffer and resets the accounting.
+    let mut out = Vec::new();
+    client.poll_transport_transmit(&mut out);
+    assert!(!out.is_empty(), "the unit's ciphertext was produced");
+    assert_eq!(
+      client.pending.len(),
+      0,
+      "a post-handshake full drain resets the fit-check accounting"
+    );
+
+    // After the drain, the next full unit is admitted again.
+    assert!(client.write_plaintext(&vec![8u8; frame]));
+    assert_eq!(client.pending.len(), frame);
+  }
+
+  /// A second unit offered before the first drains, overflowing the bound, is
+  /// rejected WHOLE (`write_plaintext` returns `false`, never buffering a
+  /// partial frame) so the caller fails the exchange synchronously — the
+  /// by-construction backstop for the one-unit-per-exchange cadence.
+  #[test]
+  fn send_capacity_overflow_returns_false_not_partial() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking());
+
+    // Floor-sized bound (a tiny frame size floors at MIN_TLS_SEND_BUFFER).
+    client.set_send_capacity(8 * 1024);
+    let limit = client.send_limit;
+    assert_eq!(
+      limit, MIN_TLS_SEND_BUFFER,
+      "a sub-floor frame size uses the floor"
+    );
+
+    // One unit well under the bound is admitted.
+    let unit1 = vec![0u8; 30 * 1024];
+    assert!(client.write_plaintext(&unit1));
+    assert_eq!(client.pending.len(), unit1.len());
+
+    // A second unit that would exceed the bound, before any drain, is rejected.
+    let unit2 = vec![1u8; 40 * 1024];
+    assert!(
+      unit1.len() + unit2.len() > limit,
+      "the two units together exceed the bound"
+    );
+    assert!(
+      !client.write_plaintext(&unit2),
+      "the overflowing unit is rejected so the caller can fail the exchange"
+    );
+    assert_eq!(
+      client.pending.len(),
+      unit1.len(),
+      "the rejected unit was NOT buffered — no partial frame reaches the wire"
+    );
+  }
+
+  /// The eagerly-queued cluster label is written via `write_plaintext` BEFORE
+  /// the handshake completes. A `poll_transport_transmit` DURING the handshake
+  /// (which drains handshake flights but cannot yet send app plaintext) must NOT
+  /// clear `buffered`, or a later near-limit write would over-fill the real
+  /// rustls buffer. The accounting stays until a post-handshake drain.
+  #[test]
+  fn pre_handshake_plaintext_stays_accounted_during_handshake() {
+    let (mut client, mut server) = pair();
+    assert!(client.is_handshaking());
+    client.set_send_capacity(64 * 1024);
+
+    // Queue app plaintext (stand-in for the eagerly-written label) before the
+    // handshake clears.
+    let label = vec![9u8; 4 * 1024];
+    assert!(client.write_plaintext(&label));
+    assert_eq!(client.pending.len(), label.len());
+
+    // A mid-handshake drain shuttles the ClientHello flight but CANNOT send the
+    // app plaintext yet (it stays in rustls's send buffer), so the accounting
+    // must survive — clearing it here would under-count the still-buffered label.
+    let mut out = Vec::new();
+    client.poll_transport_transmit(&mut out);
+    assert!(
+      client.is_handshaking(),
+      "still handshaking after ClientHello"
+    );
+    assert!(!out.is_empty(), "the ClientHello flight was produced");
+    assert_eq!(
+      client.pending.len(),
+      label.len(),
+      "pre-handshake plaintext stays counted while handshaking"
+    );
+
+    // Deliver the just-drained ClientHello so the handshake can proceed, then
+    // complete it; the label is sent and a post-handshake drain clears the count.
+    server
+      .handle_transport_data(&out)
+      .expect("server consumes the ClientHello");
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking(), "handshake completed");
+    assert_eq!(
+      client.pending.len(),
+      0,
+      "the post-handshake drain clears the accounting"
+    );
+  }
+
+  /// `write_plaintext` only STAGES into `pending`; it never feeds rustls. So it
+  /// cannot short-write or panic regardless of what rustls holds in its send
+  /// buffers — the failure mode of feeding `write_all` straight into rustls
+  /// while its ciphertext queue still held an undrained handshake flight. The
+  /// staged unit is fed to rustls and drained by `poll_transport_transmit`,
+  /// round-tripping intact.
+  #[test]
+  fn write_plaintext_only_stages_and_round_trips_via_transmit() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking());
+
+    assert!(client.write_plaintext(b"a reliable unit"));
+    assert_eq!(
+      client.pending.len(),
+      15,
+      "the unit is staged, not yet in rustls"
+    );
+
+    let mut out = Vec::new();
+    client.poll_transport_transmit(&mut out);
+    assert!(
+      client.pending.is_empty(),
+      "transmit feeds the staged unit to rustls"
+    );
+    assert!(!out.is_empty(), "the unit's ciphertext was produced");
+    server
+      .handle_transport_data(&out)
+      .expect("server consumes the frame");
+    let mut got = Vec::new();
+    server.read_plaintext(&mut got);
+    assert_eq!(
+      &got, b"a reliable unit",
+      "the staged unit round-trips intact"
+    );
+  }
+
+  /// A close requested while staged plaintext cannot yet reach rustls (here the
+  /// handshake gate keeps it in `pending`) DEFERS the `close_notify` rather than
+  /// queueing the alert ahead of the still-staged frame.
+  #[test]
+  fn close_notify_defers_while_plaintext_is_still_staged() {
+    let (mut client, _server) = pair();
+    assert!(client.is_handshaking());
+    client.set_send_capacity(64 * 1024);
+
+    assert!(client.write_plaintext(b"staged"));
+    client.send_close_notify();
+    assert!(
+      client.close_requested,
+      "the close defers while the staged frame cannot yet reach rustls"
+    );
+    assert_eq!(
+      client.pending.len(),
+      6,
+      "the frame stays staged ahead of the close, never dropped"
+    );
+  }
+
+  /// One transmit drains the staged frame AND the deferred close — leaving NO
+  /// hidden outbound (`pending` empty, no deferred close) — so the coordinator's
+  /// teardown gating (which sees only the drained bytes) can never let a
+  /// shutdown overtake a staged suffix.
+  #[test]
+  fn frame_and_deferred_close_both_drain_in_one_transmit() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking());
+    client.set_send_capacity(64 * 1024);
+
+    assert!(client.write_plaintext(b"final frame"));
+    client.send_close_notify();
+
+    let mut out = Vec::new();
+    client.poll_transport_transmit(&mut out);
+    assert!(
+      client.pending.is_empty(),
+      "no staged plaintext is hidden after the transmit"
+    );
+    assert!(
+      !client.close_requested,
+      "no deferred close is hidden after the transmit"
+    );
+
+    server
+      .handle_transport_data(&out)
+      .expect("server consumes the frame + close");
+    let mut got = Vec::new();
+    server.read_plaintext(&mut got);
+    assert_eq!(
+      &got, b"final frame",
+      "the frame arrived intact, before the close"
+    );
+    assert!(
+      server.peer_has_closed(),
+      "and the close_notify followed it in the same transmit"
+    );
+  }
+
+  /// A pathologically large `max_stream_frame_size` must not overflow the 2x
+  /// rustls backstop multiply (saturating), and a normal unit still stages.
+  #[test]
+  fn send_capacity_saturates_for_a_huge_frame_size() {
+    let (mut client, _server) = pair();
+    client.set_send_capacity(usize::MAX);
+    assert!(client.send_limit > 0);
+    assert!(
+      client.write_plaintext(b"unit"),
+      "a normal unit stages without panic under a saturated backstop"
+    );
+  }
+
+  /// The drain loop must fully empty `pending` in ONE poll even when rustls is
+  /// already at its send-buffer limit at entry (the first feed takes 0, but the
+  /// `write_tls` drain frees room and the loop must re-feed) — otherwise a suffix
+  /// stays hidden from the coordinator. A small rustls limit + a larger staging
+  /// cap + a pre-flush that fills rustls reproduce that entry state.
+  #[test]
+  fn drain_loop_re_feeds_after_freeing_a_full_rustls_buffer() {
+    let (mut client, mut server) = pair();
+    pump(&mut client, &mut server);
+    assert!(!client.is_handshaking());
+
+    // Decouple the staging cap from a deliberately tiny rustls limit so a unit
+    // can only reach rustls a little per drain cycle.
+    client.send_limit = 8 * 1024;
+    client.conn.set_buffer_limit(256);
+
+    let unit = vec![5u8; 2000];
+    assert!(client.write_plaintext(&unit));
+    // Pre-fill rustls to its limit WITHOUT draining: now a poll enters with
+    // rustls full (the first feed accepts 0) and `pending` still non-empty.
+    client.flush_pending();
+    assert!(!client.pending.is_empty(), "rustls accepted only a prefix");
+
+    let mut out = Vec::new();
+    client.poll_transport_transmit(&mut out);
+    assert!(
+      client.pending.is_empty(),
+      "the loop re-fed after each drain freed rustls room, fully emptying pending"
+    );
+
+    server
+      .handle_transport_data(&out)
+      .expect("server consumes the streamed unit");
+    let mut got = Vec::new();
+    server.read_plaintext(&mut got);
+    assert_eq!(
+      got, unit,
+      "the unit streamed across constrained writes, reassembled intact"
+    );
   }
 }
