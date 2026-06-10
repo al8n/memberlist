@@ -3278,6 +3278,65 @@ mod tests {
     );
   }
 
+  /// The back-pressure safety of `pump_out`: when the stream is flow-control
+  /// blocked, the staged `pending_out` flush RETAINS the remainder intact and
+  /// returns `Ok` (the bridge waits for credit) rather than losing it, growing
+  /// it, or failing the exchange — and `pump_out` returns at the flush WITHOUT
+  /// reaching the gather loop, so a new unit is never started while a remainder
+  /// is outstanding (the one-unit-in-flight invariant). The companion of the
+  /// deadline test: same staged tail, but pumped before the deadline against a
+  /// saturated send window.
+  #[test]
+  fn pump_out_blocked_pending_out_flush_retains_tail_and_waits() {
+    let mut pair = RawQuicPair::handshaked();
+    let server_open_sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
+
+    // Saturate the stream's flow-control window so the next write blocks.
+    let big = vec![0u8; 64 * 1024];
+    loop {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      match e.conn_mut().send_stream(server_open_sid).write(&big) {
+        Ok(_) => continue,
+        Err(quinn_proto::WriteError::Blocked) => break,
+        Err(other) => panic!("unexpected write error while saturating the window: {other:?}"),
+      }
+    }
+
+    // Stage a back-pressured tail and pump BEFORE the exchange deadline.
+    bridge.pending_out.extend_from_slice(b"back-pressured tail");
+    let result = bridge.pump_out(&mut pair.server_conns, Instant::from_std(pair.now));
+
+    assert_eq!(
+      result,
+      Ok(()),
+      "a flow-control-blocked flush waits for credit; it does not fail"
+    );
+    assert_eq!(
+      bridge.pending_out_bytes(),
+      b"back-pressured tail",
+      "the blocked flush retains the staged tail intact — no loss, no growth, no duplication"
+    );
+    assert!(
+      !matches!(bridge.phase, BridgePhase::Failed(_)),
+      "a flow-control block is normal back-pressure, not a failure: phase = {:?}",
+      bridge.phase
+    );
+  }
+
   /// `pump_out`'s post-`poll_transmit` FSM-failure retire (the
   /// `if let Some(e) = self.stream.is_failed()` block AFTER the gather loop):
   /// an outbound stream with an EMPTY `pending_out` (so the pre-write deadline
