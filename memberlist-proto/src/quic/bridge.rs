@@ -2387,11 +2387,17 @@ mod tests {
     /// Mint a client+server endpoint pair and drive the handshake to
     /// Established on both sides by ferrying datagrams.
     fn handshaked() -> Self {
+      Self::handshaked_with_transport(quinn_proto::TransportConfig::default())
+    }
+
+    /// `handshaked` with a caller-supplied `TransportConfig` (e.g. a tiny
+    /// `stream_receive_window` to force flow-control back-pressure on a write).
+    fn handshaked_with_transport(transport: quinn_proto::TransportConfig) -> Self {
       let cfg = super::super::crypto::QuicOptions::new(
         test_endpoint_config(&[9u8; 32]),
         test_server(),
         test_client(),
-        quinn_proto::TransportConfig::default(),
+        transport,
         "localhost",
         super::super::UnreliableTransport::Datagram,
       );
@@ -3334,6 +3340,107 @@ mod tests {
       !matches!(bridge.phase, BridgePhase::Failed(_)),
       "a flow-control block is normal back-pressure, not a failure: phase = {:?}",
       bridge.phase
+    );
+  }
+
+  /// Full multi-pump round-trip: a reliable unit LARGER than the stream's
+  /// flow-control window is staged in `pending_out` (a prior pump's gathered-
+  /// then-Blocked remainder) and streamed to the peer across several
+  /// flow-control-limited `pump_out` flushes. Each flush writes up to one
+  /// window; the peer reads (granting credit); the next flush replays the
+  /// remainder head-first. The unit must arrive EXACTLY once — reassembling
+  /// intact with no duplication and no loss.
+  #[test]
+  fn pump_out_back_pressured_unit_streams_across_windows_and_reassembles() {
+    use crate::{CompressionOptions, encode_reliable_unit, take_reliable_unit};
+
+    // A tiny per-stream receive window so a multi-hundred-byte unit needs many
+    // flow-control-limited pumps to drain.
+    const WINDOW: u32 = 256;
+    let mut transport = quinn_proto::TransportConfig::default();
+    transport.stream_receive_window(VarInt::from_u32(WINDOW));
+    let mut pair = RawQuicPair::handshaked_with_transport(transport);
+
+    let server_open_sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let mut ep = make_server_endpoint();
+    let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
+
+    // A real reliable unit several windows long, staged as a back-pressured
+    // remainder — exactly what pump_out's gather-then-Blocked arm leaves behind.
+    let payload = b"the quick brown fox jumps over the lazy dog. ".repeat(48);
+    let unit = encode_reliable_unit(&CompressionOptions::new(), &payload);
+    assert!(
+      unit.len() > 3 * WINDOW as usize,
+      "the unit must span several windows to exercise back-pressure ({} bytes)",
+      unit.len()
+    );
+    bridge.pending_out.extend_from_slice(&unit);
+
+    // Flush up to a window, ferry it to the peer, the peer reads (granting
+    // credit), repeat until pending_out drains.
+    let now = Instant::from_std(pair.now);
+    let mut client_recv = Vec::new();
+    let mut csid = None;
+    let mut progress_pumps = 0;
+    for _ in 0..200 {
+      if bridge.pending_out_bytes().is_empty() {
+        break;
+      }
+      let before = bridge.pending_out_bytes().len();
+      bridge
+        .pump_out(&mut pair.server_conns, now)
+        .expect("a flow-control-blocked flush returns Ok, never fails");
+      if bridge.pending_out_bytes().len() < before {
+        progress_pumps += 1;
+      }
+      pair.ferry();
+      if csid.is_none() {
+        csid = pair.client_conn.streams().accept(Dir::Bi);
+      }
+      if let Some(id) = csid
+        && let Ok(mut chunks) = pair.client_conn.recv_stream(id).read(true)
+      {
+        while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+          client_recv.extend_from_slice(&chunk.bytes);
+        }
+        // Ignoring Err: the read-finalize wakeup is unused here.
+        let _ = chunks.finalize();
+      }
+      pair.ferry();
+    }
+
+    assert!(
+      bridge.pending_out_bytes().is_empty(),
+      "the unit fully drained across the windowed transfer"
+    );
+    assert!(
+      progress_pumps >= 3,
+      "the tiny window genuinely forced a multi-pump transfer — got {progress_pumps} flushes"
+    );
+
+    // The peer received EXACTLY the unit: no duplication (replay-head-first never
+    // double-writes), no loss, and it reassembles to the original payload.
+    assert_eq!(
+      client_recv.len(),
+      unit.len(),
+      "exactly the unit's bytes reached the wire — no duplication, no loss"
+    );
+    let (back, consumed) = take_reliable_unit(&client_recv, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("a complete unit");
+    assert_eq!(consumed, unit.len(), "the whole unit was consumed");
+    assert_eq!(
+      back, payload,
+      "the unit reassembled to the original payload across the windowed transfer"
     );
   }
 
