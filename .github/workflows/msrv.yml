@@ -1,10 +1,11 @@
 name: msrv
 
 # Validate the std crates build on the stable channel and on the declared MSRV
-# (rust-version = 1.85.0). Every other workflow pins a specific nightly, so
-# without this nothing proves the crate compiles on stable or at its stated
-# minimum. The embedded line (no_std, bare-metal targets) is covered by
-# embedded.yml and excluded here.
+# (rust-version = 1.96.0 — floored by the dependency tree: compio-buf adopts the
+# just-stabilized maybe_uninit_slice, so the workspace does not build below this).
+# Every other workflow pins a specific nightly, so without this nothing proves the
+# crate compiles on stable or at its stated minimum. The embedded line (no_std,
+# bare-metal targets) is covered by embedded.yml and excluded here.
 
 on:
   push:
@@ -30,7 +31,7 @@ jobs:
       matrix:
         toolchain:
           - stable
-          - "1.85.0"
+          - "1.96.0"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
