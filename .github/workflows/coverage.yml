@@ -37,7 +37,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-05-22
+          toolchain: nightly
           components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2

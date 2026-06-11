@@ -49,7 +49,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-05-22
+          toolchain: nightly
           components: clippy, rustfmt
 
       - name: Cache Cargo registry
@@ -87,7 +87,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-05-22
+          toolchain: nightly
           components: rustfmt
 
       - name: Cache Cargo registry

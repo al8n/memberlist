@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-05-22
+          toolchain: nightly
       - uses: Swatinem/rust-cache@v2
       # memberlist-proto's build.rs runs protoc for the wire codegen.
       - name: Install protoc
