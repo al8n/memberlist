@@ -161,6 +161,7 @@ pub mod error;
 pub mod event;
 mod mathf;
 pub mod members;
+pub mod metrics;
 pub(crate) mod probe;
 pub mod stream;
 pub mod suspicion;

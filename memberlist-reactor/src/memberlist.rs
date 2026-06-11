@@ -522,6 +522,14 @@ impl<I: NodeId> Memberlist<I> {
     self.shared.load_snapshot()
   }
 
+  /// The machine's cumulative load-shedding counters, read lock-free. The counts
+  /// are monotonic for the node's lifetime; difference successive reads for rates.
+  /// See [`memberlist_proto::metrics::Metrics`].
+  #[must_use]
+  pub fn metrics(&self) -> memberlist_proto::metrics::Metrics {
+    self.shared.load_metrics()
+  }
+
   /// This node's own identity and advertised address.
   #[must_use]
   pub fn local(&self) -> Node<I, SocketAddr> {
@@ -659,6 +667,7 @@ impl<I: NodeId> Memberlist<I> {
   /// Joins the cluster by contacting `seeds` (resolved via `resolver`), waiting
   /// for the push/pull exchanges to complete and returning the number contacted.
   /// Errors with `JoinFailed` if seeds were dispatched but none was reached.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(seeds = seeds.len())))]
   pub async fn join<Res>(
     &self,
     resolver: &Res,
@@ -724,6 +733,7 @@ impl<I: NodeId> Memberlist<I> {
   }
 
   /// Gracefully leaves the cluster (the node stops participating).
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn leave(&self) -> Result<(), Error> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
@@ -756,6 +766,7 @@ impl<I: NodeId> Memberlist<I> {
   ///   multiplexes over it, so there is no separate listener, accept task, or
   ///   `close_timeout` / `DIAL_TIMEOUT` cleanup — dropping the socket tears the
   ///   streams down with it.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn shutdown(&self) -> Result<(), Error> {
     let (tx, rx) = futures_channel::oneshot::channel();
     if !self
@@ -793,6 +804,7 @@ impl<I: NodeId> Memberlist<I> {
   }
 
   /// Sends a single unreliable directed user message to `to` via gossip.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
   pub async fn send(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
     self.send_many(to, core::iter::once(payload)).await
   }
@@ -820,6 +832,7 @@ impl<I: NodeId> Memberlist<I> {
 
   /// Sends a single reliable directed user message to `to` via the stream
   /// plane (TCP or QUIC), waiting for the exchange to complete.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
   pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
     self.send_many_reliable(to, core::iter::once(payload)).await
   }

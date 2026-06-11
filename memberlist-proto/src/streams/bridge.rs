@@ -1269,6 +1269,15 @@ where
     self.deadline
   }
 
+  /// Whether this bridge must be re-pumped on the next tick even without new
+  /// transport input: it retained a record-layer ciphertext tail (TLS large-frame
+  /// receive back-pressure) that replays once its consumer drains. A reliable
+  /// exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND to
+  /// re-drive here — `pump_out` gathers the whole unit in one pass.
+  pub(crate) fn needs_repump(&self) -> bool {
+    !self.pending_inbound.is_empty()
+  }
+
   /// Test-only: expose whether the pre-promote inbound buffer is empty
   /// (always `true` for a raw-passthrough record layer; may be non-empty for a
   /// TLS bridge that retained a ciphertext tail).

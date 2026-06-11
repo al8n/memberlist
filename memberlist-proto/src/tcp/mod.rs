@@ -2180,6 +2180,48 @@ mod tests {
     );
   }
 
+  /// A key rotation fails every live (non-secure) bridge and latches the reap.
+  /// A bridge marked terminal by the policy change MUST be reaped by the NEXT
+  /// tick even if that tick only feeds an UNRELATED exchange — the dirty-scoped
+  /// pump would otherwise skip the failed bridge yet still clear the reap latch,
+  /// stranding the terminal exchange until an idle sweep.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn policy_failed_bridge_reaped_by_an_unrelated_tick() {
+    use crate::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(None, ());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7250),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    let mut dial = |coord: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>, port: u16| {
+      coord.start_push_pull(addr(port), PushPullKind::Refresh, now);
+      match coord.poll_action().expect("the dial surfaces a Connect") {
+        StreamAction::Connect(c) => c.id(),
+        other => panic!("expected Connect, got {:?}", action_kind(&other)),
+      }
+    };
+    let a = dial(&mut coord, 7000);
+    let b = dial(&mut coord, 7001);
+
+    // A runtime key rotation fails BOTH bridges and sets the reap latch.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    // A tick that touches ONLY bridge A must still reap B.
+    coord.handle_transport_data(a, b"noise", false, now);
+    assert!(
+      coord.bridge_encryption_enabled(b).is_none(),
+      "the policy-failed bridge B must be reaped by an unrelated single-bridge \
+       tick, not leaked until the idle sweep"
+    );
+  }
+
   /// The builder variant [`StreamEndpoint::with_encryption`] MUST route
   /// through [`StreamEndpoint::set_encryption_options`] so the bridge-fan-out
   /// is shared. A naive `self.encryption = encryption; self` would leave every

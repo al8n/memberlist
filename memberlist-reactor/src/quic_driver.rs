@@ -100,6 +100,8 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   /// The endpoint snapshot version last published to `shared`; the snapshot is
   /// republished only when it differs (see the stream driver for the rationale).
   last_snapshot_version: u64,
+  /// The load-shedding counters last published to `shared` (republished on change).
+  last_metrics: memberlist_proto::metrics::Metrics,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
   /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
@@ -173,6 +175,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       socket: Some(socket),
       shared,
       last_snapshot_version,
+      last_metrics: memberlist_proto::metrics::Metrics::default(),
       obs_tx,
       label,
       pending_joins: HashMap::new(),
@@ -1038,6 +1041,11 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
       this
         .shared
         .publish(snapshot_of(this.endpoint.endpoint_ref()));
+    }
+    let metrics = this.endpoint.endpoint_ref().metrics();
+    if metrics != this.last_metrics {
+      this.last_metrics = metrics;
+      this.shared.publish_metrics(metrics);
     }
 
     // Yield to other tasks, but re-poll promptly while work remains.

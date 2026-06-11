@@ -391,6 +391,9 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   /// rebuilt + republished only when `endpoint.snapshot_version()` differs from
   /// this, not on every productive poll (rebuilding clones every `NodeState`).
   last_snapshot_version: u64,
+  /// The load-shedding counters last published to `shared`; republished only when
+  /// `endpoint.metrics()` differs from this.
+  last_metrics: memberlist_proto::metrics::Metrics,
 }
 
 impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
@@ -456,6 +459,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       cidr_policy,
       transform,
       last_snapshot_version,
+      last_metrics: memberlist_proto::metrics::Metrics::default(),
     }
   }
 
@@ -1571,6 +1575,13 @@ where
       this
         .shared
         .publish(snapshot_of(this.endpoint.endpoint_ref()));
+    }
+    // Republish the load-shedding counters only when they change (a cheap u64
+    // compare; the publish allocates only on a real change, which is rare).
+    let metrics = this.endpoint.endpoint_ref().metrics();
+    if metrics != this.last_metrics {
+      this.last_metrics = metrics;
+      this.shared.publish_metrics(metrics);
     }
 
     // Yield to other tasks, but re-poll promptly while work remains.

@@ -7673,6 +7673,32 @@ fn max_members_none_admits_unlimited() {
 }
 
 #[test]
+fn metrics_count_membership_load_shed() {
+  // Cap at 2 (local + one peer); the over-cap admission is shed and counted.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(2)));
+  let t0 = Instant::now();
+  assert_eq!(
+    e.metrics().members_rejected,
+    0,
+    "no load shed at construction"
+  );
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("peer-2", 7002, 1), false, t0);
+  assert_eq!(
+    e.metrics().members_rejected,
+    1,
+    "the over-cap admission is counted"
+  );
+  // A known-id update is never gated, so the counter does not advance.
+  process_alive_auto(&mut e, alive("peer-1", 7001, 2), false, t0);
+  assert_eq!(
+    e.metrics().members_rejected,
+    1,
+    "a known-id update is not shed"
+  );
+}
+
+#[test]
 fn unknown_alive_with_zero_incarnation_admits_visibly_and_bumps() {
   // A first Alive carrying incarnation 0 (a peer that starts at incarnation 0, or
   // a forged id) for an unknown member must admit a VISIBLE Alive — not insert a

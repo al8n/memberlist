@@ -88,6 +88,13 @@ where
     self.bridges.keys().copied().collect()
   }
 
+  /// Iterate the live bridges WITHOUT allocating — for the per-tick deadline scan
+  /// and the periodic dirty sweep, which must not pay an O(N) `Vec` allocation on
+  /// every driver poll.
+  pub(crate) fn iter(&self) -> impl Iterator<Item = (ExchangeId, &StreamBridge<I, A, R>)> {
+    self.bridges.iter().map(|(id, br)| (*id, br))
+  }
+
   pub(crate) fn len(&self) -> usize {
     self.bridges.len()
   }

@@ -339,6 +339,27 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   /// after a `start_*` / `handle_*` call has anchored `last_now`, so the
   /// wake is always reachable.
   policy_reap_pending: bool,
+  /// The set of bridges that need pumping this tick — those that received
+  /// transport input, were just created/promoted, or carry residual work (a
+  /// retained record-layer tail or un-flushed application output). `pump_bridges`
+  /// services ONLY this set instead of iterating every bridge on every transport
+  /// read, so a join wave that drives N reads is O(N) bridge-pumps rather than
+  /// O(N^2). `handle_timeout` marks every bridge dirty, so the periodic path
+  /// remains the catch-all for deadline reaping and back-pressure re-drive.
+  /// Ordered by `ExchangeId` (creation order) for deterministic pump order.
+  dirty: std::collections::BTreeSet<ExchangeId>,
+  /// The bridges `pump_bridges` actually serviced (and left alive) this tick.
+  /// `collect_transmits` drains ONLY these for outbound bytes instead of every
+  /// bridge — a bridge that was not pumped produced no new outbound. Reaped
+  /// bridges collect their final bytes inline in `reap_bridge`, so they are not
+  /// recorded here.
+  pumped: std::collections::BTreeSet<ExchangeId>,
+  /// Bridges whose `ExchangeMeta::mint` is still `Some` — i.e. awaiting the
+  /// label / handshake step to settle so their `Stream` can be minted.
+  /// `service_handshake_completions` scans ONLY this set instead of every bridge;
+  /// an id is added when its exchange is created (dial / accept) and removed when
+  /// the mint is taken (or the bridge terminalizes before settling).
+  unminted: std::collections::BTreeSet<ExchangeId>,
 }
 
 /// Compress one outbound gossip datagram for the wire — the body of
@@ -733,6 +754,9 @@ where
       pending_outbound_kinds: FxHashMap::default(),
       last_now: None,
       policy_reap_pending: false,
+      dirty: std::collections::BTreeSet::new(),
+      pumped: std::collections::BTreeSet::new(),
+      unminted: std::collections::BTreeSet::new(),
     }
   }
 
@@ -913,6 +937,12 @@ where
     }
     let any_failed = !newly_failed.is_empty();
     for id in newly_failed {
+      // Mark the policy-failed bridge dirty so the NEXT `run_tick` reaps it —
+      // any tick, not only a `handle_timeout` mark-all. Without this the
+      // dirty-scoped `pump_bridges` would skip the failed bridge while still
+      // clearing the `policy_reap_pending` latch, stranding the terminal exchange
+      // until the idle sweep (or forever for a strict poll_timeout-driven driver).
+      self.dirty.insert(id);
       self.purge_transmit_for(id);
       self.purge_pending_connect_for(id);
       // The bridge is in a FAILED terminal phase (the policy change rejected
@@ -1298,11 +1328,9 @@ where
   /// always reachable.
   pub fn poll_timeout(&mut self) -> Option<Instant> {
     let mut best = self.ep.poll_timeout();
-    for id in self.conns.ids() {
-      if let Some(b) = self.conns.get_mut(id) {
-        if let Some(t) = b.poll_timeout() {
-          best = Some(best.map_or(t, |b| b.min(t)));
-        }
+    for (_id, b) in self.conns.iter() {
+      if let Some(t) = b.poll_timeout() {
+        best = Some(best.map_or(t, |b| b.min(t)));
       }
     }
     let mut has_unattempted = false;
@@ -1449,7 +1477,12 @@ where
   /// `StreamBridge::handle_transport_data` directly; this step only drives the
   /// outbound side and the endpoint-event drain.
   fn pump_bridges(&mut self, now: Instant) {
-    for id in self.conns.ids() {
+    // Service ONLY the dirty bridges. The set is drained here; a bridge that
+    // still carries a retained record-layer tail after this pass re-marks itself
+    // dirty below so the next tick re-drives it. A bridge with neither new input
+    // nor a tail is left out of the set and skipped until it receives data again
+    // (or `handle_timeout` marks every bridge dirty on the periodic path).
+    for id in core::mem::take(&mut self.dirty) {
       // Split borrow: take the bridge out, operate, put back (or reap).
       let Some(mut br) = self.conns.remove(id) else {
         continue;
@@ -1498,7 +1531,18 @@ where
           // while it is still alive — only a reaped (dropped) bridge needs
           // the inline reap-time collection in `reap_bridge`.
           self.maybe_emit_shutdown(id, &br);
+          // Keep re-driving a bridge that retained a record-layer ciphertext tail
+          // (TLS large-frame receive back-pressure): it has unconsumed input to
+          // replay once its consumer drains, so it must stay dirty. A reliable
+          // exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND
+          // to re-drive — `pump_out` gathers the whole unit in one pass.
+          if br.needs_repump() {
+            self.dirty.insert(id);
+          }
           self.conns.insert(id, br);
+          // Collect this bridge's outbound in `collect_transmits` below — only
+          // pumped-and-alive bridges can have produced new bytes this tick.
+          self.pumped.insert(id);
         }
       }
     }
@@ -1667,19 +1711,23 @@ where
   /// the label / handshake step is terminal (and not handshaking); it is
   /// skipped here and reaped by `pump_bridges`.
   fn service_handshake_completions(&mut self, now: Instant) {
-    for id in self.conns.ids() {
-      let needs_mint = matches!(
-        self.exchanges.get(&id),
-        Some(meta) if meta.mint.is_some()
-      );
-      if !needs_mint {
-        continue;
-      }
+    // Scan ONLY the bridges still awaiting a mint, not every bridge. Drain the
+    // candidate set: one that has not settled yet (still handshaking) is put
+    // back for a later tick; one that terminalized before settling, or already
+    // vanished, drops out (`pump_bridges` reaps a terminal bridge). The
+    // `unminted` invariant — exactly the ids whose `meta.mint` is still `Some` —
+    // is preserved because the mint is taken below only on the settled path.
+    for id in core::mem::take(&mut self.unminted) {
       let ready = match self.conns.get_mut(id) {
-        Some(br) => !br.is_terminal() && !br.is_handshaking(),
-        None => false,
+        // Terminal before settling: drop (reaped by `pump_bridges`).
+        Some(br) if br.is_terminal() => continue,
+        Some(br) => !br.is_handshaking(),
+        // Already gone: drop.
+        None => continue,
       };
       if !ready {
+        // Still handshaking: remains a candidate for a later tick.
+        self.unminted.insert(id);
         continue;
       }
       // Take the mint decision out of the meta (single-shot).
@@ -1687,7 +1735,11 @@ where
         .exchanges
         .get_mut(&id)
         .and_then(|m| m.mint.take())
-        .expect("needs_mint implies the mint decision is present");
+        .expect("an unminted candidate has its mint decision present");
+      // A bridge that mints this tick is promoted (needs its post-promotion
+      // replay pumped) or fails the mint (needs reaping); either way the
+      // following `pump_bridges` must service it.
+      self.dirty.insert(id);
       match mint {
         PendingMint::Outbound(stream_id) => match self.ep.dial_succeeded(stream_id, now) {
           Some(stream) => {
@@ -1842,10 +1894,12 @@ where
     }
   }
 
-  /// Collect outbound bytes from every live bridge into the outbound queue,
-  /// tagged with the exchange handle + peer.
+  /// Collect outbound bytes from the bridges pumped this tick into the outbound
+  /// queue, tagged with the exchange handle + peer. Only a bridge `pump_bridges`
+  /// serviced can have produced new bytes, so draining `pumped` (rather than
+  /// every bridge) keeps this O(pumped) instead of O(all bridges) per tick.
   fn collect_transmits(&mut self) {
-    for id in self.conns.ids() {
+    for id in core::mem::take(&mut self.pumped) {
       if let Some(mut br) = self.conns.remove(id) {
         self.collect_bridge_transmits(id, &mut br);
         self.conns.insert(id, br);
@@ -1906,6 +1960,7 @@ where
     // cap; the QUIC plane's per-peer cap is meaningful only because its datagrams
     // ride authenticated connections.
     if self.mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
+      self.ep.metrics_mut().gossip_ingress_dropped += 1;
       return;
     }
     self
@@ -1953,6 +2008,7 @@ where
         let _ = bridge.handle_transport_data(&[], now);
       }
     }
+    self.dirty.insert(id);
     self.run_tick(now);
   }
 
@@ -1978,6 +2034,7 @@ where
     if let Some(bridge) = self.conns.get_mut(id) {
       bridge.fail_dial_retired();
     }
+    self.dirty.insert(id);
     self.run_tick(now);
   }
 
@@ -1999,6 +2056,7 @@ where
     if let Some(bridge) = self.conns.get_mut(id) {
       bridge.fail_connection_lost();
     }
+    self.dirty.insert(id);
     self.run_tick(now);
   }
 
@@ -2028,6 +2086,7 @@ where
     if let Some(max) = self.ep.max_inbound_streams() {
       let inbound = self.exchanges.values().filter(|m| !m.outbound).count();
       if inbound >= max {
+        self.ep.metrics_mut().inbound_streams_rejected += 1;
         return None;
       }
     }
@@ -2051,6 +2110,10 @@ where
       self.ep.max_stream_frame_size(),
     );
     self.conns.insert(id, bridge);
+    // The accepted bridge awaits its `Stream` mint once its label / handshake
+    // step settles, so it is a handshake-completion candidate. (No dirty mark:
+    // a fresh accepted bridge has no work until its first inbound bytes arrive.)
+    self.unminted.insert(id);
     self.exchanges.insert(
       id,
       ExchangeMeta {
@@ -2142,8 +2205,16 @@ where
   }
 
   /// Timer tick from the driver.
+  ///
+  /// The periodic catch-all: marks EVERY bridge dirty so this tick reaps any
+  /// bridge whose handshake / flush deadline has elapsed and re-drives any
+  /// back-pressured bridge, independent of which bridges saw transport input.
+  /// The driver fires this only on a due deadline or the idle-wake interval (not
+  /// per read), so the O(N) sweep here is amortized — the per-read
+  /// `handle_transport_data` path stays scoped to the one bridge it touched.
   pub fn handle_timeout(&mut self, now: Instant) {
     self.last_now = Some(now);
+    self.dirty.extend(self.conns.iter().map(|(id, _)| id));
     self.run_tick(now);
   }
 
@@ -2196,12 +2267,12 @@ where
     // tick.
     self.pump_bridges(now);
     self.finalize_tick(now);
-    // Clear the policy-change reap latch: both `pump_bridges` calls above
-    // have reaped every terminal bridge in `conns` (a bridge failed by
-    // `set_encryption_options` is in `BridgePhase::Failed` and therefore
-    // `is_terminal()`), so any wake the latch was asking for has been
-    // serviced this tick. Leaving the latch set would have `poll_timeout`
-    // keep returning immediate-due wakes forever once the reap is done.
+    // Clear the policy-change reap latch: a bridge failed by
+    // `set_encryption_options` was marked `dirty` there, so the `pump_bridges`
+    // calls above (which drain the dirty set) reaped it this tick — terminal
+    // bridges never re-mark themselves dirty (only a retained tail does), so the
+    // reap is complete. Leaving the latch set would have `poll_timeout` keep
+    // returning immediate-due wakes forever once the reap is done.
     self.policy_reap_pending = false;
   }
 
@@ -2296,6 +2367,12 @@ where
         self.ep.max_stream_frame_size(),
       );
       self.conns.insert(exchange, bridge);
+      // A fresh dial bridge needs pumping this tick to flush its request bytes
+      // once its label / handshake step settles (a no-handshake dialer settles at
+      // construction), so the following `pump_bridges` must service it; it also
+      // awaits its `Stream` mint, so it is a handshake-completion candidate.
+      self.dirty.insert(exchange);
+      self.unminted.insert(exchange);
       self.exchanges.insert(
         exchange,
         ExchangeMeta {

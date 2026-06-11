@@ -199,6 +199,9 @@ pub struct Endpoint<I, A> {
   /// when this differs, instead of on every productive poll. Wraps (only
   /// equality matters).
   snapshot_version: u64,
+  /// Cumulative operational counters bumped as the machine sheds load at its
+  /// bounds. Read by drivers via [`Self::metrics`].
+  metrics: crate::metrics::Metrics,
   /// Round-robin index into `members` for `start_probe`'s target selection.
   probe_index: usize,
   /// Probe ticks since the last `reset_nodes` sweep. Once it reaches the
@@ -463,6 +466,7 @@ where
       indirect_forwards: FxHashMap::default(),
       next_seq: 0,
       snapshot_version: 0,
+      metrics: crate::metrics::Metrics::default(),
       probe_index: 0,
       probes_since_reset: 0,
       incarnation: initial_incarnation,
@@ -631,6 +635,19 @@ where
     self.snapshot_version
   }
 
+  /// A snapshot of the machine's cumulative operational counters (load shed at
+  /// the membership / ingress / amplification bounds). See [`crate::metrics`].
+  #[inline]
+  pub fn metrics(&self) -> crate::metrics::Metrics {
+    self.metrics
+  }
+
+  /// Mutable access for the machine's own bound-shedding sites to bump a counter.
+  #[inline(always)]
+  pub(crate) fn metrics_mut(&mut self) -> &mut crate::metrics::Metrics {
+    &mut self.metrics
+  }
+
   /// increment + return the next incarnation.
   ///
   /// Wraps at `u32::MAX`. The u32 incarnation space is the wire protocol;
@@ -770,6 +787,7 @@ where
       // members' state transitions are unaffected — this branch is new-ids only.
       if let Some(max) = self.cfg.max_members() {
         if self.members.len() >= max {
+          self.metrics.members_rejected += 1;
           return;
         }
       }
@@ -1250,6 +1268,7 @@ where
     let ack = if include_payload {
       Ack::new(ping.sequence_number()).with_payload(self.ack_payload.clone())
     } else {
+      self.metrics.ack_payloads_withheld += 1;
       Ack::new(ping.sequence_number())
     };
 
@@ -2915,6 +2934,7 @@ where
     // requester, requester seq, and target) so a retransmitted IndirectPing
     // does not double the state. Both drop entirely (no forward, no Nack).
     if self.indirect_forwards.len() >= self.cfg.max_indirect_forwards() {
+      self.metrics.indirect_forwards_dropped += 1;
       return;
     }
     if self.indirect_forwards.values().any(|f| {

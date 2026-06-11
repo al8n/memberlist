@@ -33,6 +33,9 @@ struct Inner<I> {
 pub(crate) struct Shared<I> {
   inner: Mutex<Inner<I>>,
   snapshot: ArcSwap<MemberlistSnapshot<I, SocketAddr>>,
+  /// The machine's load-shedding counters, republished by the driver when they
+  /// change so a handle reads them lock-free (see `Memberlist::metrics`).
+  metrics: ArcSwap<memberlist_proto::metrics::Metrics>,
   /// Recoverable EventStream-forward drops (membership / control gaps).
   events_dropped: AtomicU64,
   /// Observation-channel drops (a slow delegate; may lose application data).
@@ -66,6 +69,7 @@ impl<I> Shared<I> {
         closed: false,
       }),
       snapshot: ArcSwap::from_pointee(initial),
+      metrics: ArcSwap::from_pointee(memberlist_proto::metrics::Metrics::default()),
       events_dropped: AtomicU64::new(0),
       observation_dropped: AtomicU64::new(0),
       shutdown: AtomicBool::new(false),
@@ -117,6 +121,16 @@ impl<I> Shared<I> {
   /// Loads the latest published snapshot.
   pub(crate) fn load_snapshot(&self) -> Arc<MemberlistSnapshot<I, SocketAddr>> {
     self.snapshot.load_full()
+  }
+
+  /// Publishes the machine's load-shedding counters for handles to read.
+  pub(crate) fn publish_metrics(&self, m: memberlist_proto::metrics::Metrics) {
+    self.metrics.store(Arc::new(m));
+  }
+
+  /// Loads the latest published counters.
+  pub(crate) fn load_metrics(&self) -> memberlist_proto::metrics::Metrics {
+    *self.metrics.load_full()
   }
 
   /// Records `n` recoverable EventStream-forward drops.

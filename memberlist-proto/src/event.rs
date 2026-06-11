@@ -26,7 +26,7 @@ use bytes::Bytes;
 /// ExchangeId` below) because the bridge and the stream are born
 /// together. Within a single endpoint's lifetime, the token is unique
 /// per bridge — both producers preserve that uniqueness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExchangeId(u64);
 
 impl ExchangeId {
