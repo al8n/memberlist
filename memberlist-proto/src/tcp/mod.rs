@@ -2199,7 +2199,7 @@ mod tests {
       test_peer_to_socket(),
     );
 
-    let mut dial = |coord: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>, port: u16| {
+    let dial = |coord: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>, port: u16| {
       coord.start_push_pull(addr(port), PushPullKind::Refresh, now);
       match coord.poll_action().expect("the dial surfaces a Connect") {
         StreamAction::Connect(c) => c.id(),
