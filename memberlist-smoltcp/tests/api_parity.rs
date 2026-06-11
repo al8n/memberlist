@@ -6,6 +6,10 @@
 //!
 //! All tests use the existing 2-node loopback harness (`harness::link`) and the
 //! deterministic `Clock`.
+
+// nested `if let X = ev { if cond }` kept for readability, as in the crate roots.
+#![allow(clippy::collapsible_if)]
+
 mod harness;
 
 use core::{

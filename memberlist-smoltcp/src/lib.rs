@@ -24,7 +24,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-#![allow(clippy::type_complexity, unexpected_cfgs)]
+// `collapsible_if`: the nested `if cond { if let ... }` form is kept deliberately —
+// flattening multi-level guards into one long let-chain reads worse here.
+#![allow(clippy::collapsible_if, clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 

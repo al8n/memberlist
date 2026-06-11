@@ -11,6 +11,9 @@
 //! TCP push/pull, a reliable user message round-tripping, and an application ping
 //! measuring an RTT — all over real sockets, not mocks.
 
+// nested `if let X = ev { if cond }` kept for readability, as in the crate roots.
+#![allow(clippy::collapsible_if)]
+
 mod support;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
