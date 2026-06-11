@@ -92,6 +92,8 @@ where
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
   snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
+  /// The machine's load-shedding counters, read lock-free via `metrics()`.
+  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
   events_rx: Receiver<Event<T::Id, SocketAddr>>,
@@ -149,6 +151,7 @@ where
     Self {
       commands: self.commands.clone(),
       snapshot: self.snapshot.clone(),
+      metrics: self.metrics.clone(),
       events_rx: self.events_rx.clone(),
       driver_handle: self.driver_handle.clone(),
       shutdown_flag: self.shutdown_flag.clone(),
@@ -351,6 +354,9 @@ where
       1,
       0,
     )));
+    let metrics = Arc::new(ArcSwap::from_pointee(
+      memberlist_proto::metrics::Metrics::default(),
+    ));
 
     let (commands_tx, commands_rx) = flume::unbounded();
     let (events_tx, events_rx) = flume::bounded(driver_opts.event_queue_cap());
@@ -380,6 +386,7 @@ where
       events_dropped.clone(),
       observation_dropped.clone(),
       snapshot.clone(),
+      metrics.clone(),
       shutdown_flag.clone(),
       driver_opts,
       memberlist_opts,
@@ -400,6 +407,7 @@ where
     Ok(Self {
       commands: commands_tx,
       snapshot,
+      metrics,
       events_rx,
       driver_handle: Arc::new(driver_handle),
       shutdown_flag,
@@ -444,6 +452,14 @@ where
   #[inline]
   pub fn snapshot(&self) -> Arc<MemberlistSnapshot<T::Id, SocketAddr>> {
     self.snapshot.load_full()
+  }
+
+  /// The machine's cumulative load-shedding counters, read lock-free. The counts
+  /// are monotonic for the node's lifetime; difference successive reads for rates.
+  /// See [`memberlist_proto::metrics::Metrics`].
+  #[inline]
+  pub fn metrics(&self) -> memberlist_proto::metrics::Metrics {
+    *self.metrics.load_full()
   }
 
   /// Number of alive members in the latest published snapshot.
@@ -594,6 +610,7 @@ where
   /// Callers that want to enqueue a join without waiting for completion
   /// (long-lived background re-discovery loops, etc.) should use
   /// [`Self::dispatch_join`].
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(seeds = seeds.len())))]
   pub async fn join<RES>(
     &self,
     resolver: &RES,
@@ -691,6 +708,7 @@ where
   /// if the flush does not complete within that budget the call returns
   /// [`MemberlistError::LeaveTimeout`] — the local node has still left,
   /// but the driver could not confirm peers were notified.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn leave(&self) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -987,6 +1005,7 @@ where
   /// Returns `Err(PayloadTooLarge)` if the framed `UserData` packet
   /// exceeds the gossip MTU, `Err(NotRunning)` after `leave()`, and
   /// `Err(Shutdown)` after `shutdown()`.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, msg), fields(to = %to, len = msg.len())))]
   pub async fn send(&self, to: SocketAddr, msg: Bytes) -> Result<()> {
     self.send_many(to, core::iter::once(msg)).await
   }
@@ -1017,6 +1036,7 @@ where
   /// exchange. The future resolves once the stream exchange completes
   /// (success) or fails (e.g. dial failure, stream timeout). Mirrors
   /// `memberlist-core`'s `send_reliable`.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, msg), fields(to = %to, len = msg.len())))]
   pub async fn send_reliable(&self, to: SocketAddr, msg: Bytes) -> Result<()> {
     self.send_many_reliable(to, core::iter::once(msg)).await
   }
@@ -1055,6 +1075,7 @@ where
   /// subsequent write call observes either `CommandSend` (if the channel
   /// is now closed) or `ReplyClosed` (if the send raced ahead of the
   /// shutdown).
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn shutdown(self) -> Result<()> {
     // First-caller-wins: the racing clone that flips the flag to true
     // owns the shutdown sequence; every other clone observing an

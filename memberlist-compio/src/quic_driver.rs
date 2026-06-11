@@ -213,6 +213,9 @@ struct QuicDriverState<I> {
   /// The endpoint snapshot version last stored into `snapshot`; the snapshot is
   /// rebuilt only when it differs (a rebuild clones every NodeState).
   last_snapshot_version: u64,
+  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  /// The load-shedding counters last stored into `metrics` (published on change).
+  last_metrics: memberlist_proto::metrics::Metrics,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
@@ -296,6 +299,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   events_dropped: Arc<AtomicU64>,
   observation_dropped: Arc<AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   delegate: D,
@@ -374,6 +378,8 @@ pub(crate) async fn quic_driver_loop<I, D>(
     obs_payload_budget,
     snapshot,
     last_snapshot_version: 0,
+    metrics,
+    last_metrics: memberlist_proto::metrics::Metrics::default(),
     shutdown_flag,
     driver_opts,
     cidr_policy,
@@ -472,6 +478,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
+        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -495,6 +502,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
+        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
       }
       // Reap any pending-join waiter whose `pending` set was emptied
       // by the drain (a push/pull ExchangeCompleted reduction) or
@@ -548,6 +556,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
+        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -1952,6 +1961,29 @@ fn refresh_snapshot_if_changed<I>(
   if v != *last_version {
     *last_version = v;
     refresh_snapshot_inner::<I>(ep, snapshot);
+  }
+}
+
+/// Republish the machine's load-shedding counters if they changed (publish-on-
+/// change; a cheap `Copy` compare, allocating only on a real change).
+fn refresh_metrics_if_changed<I>(
+  endpoint: &QuicEndpoint<I>,
+  metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  last: &mut memberlist_proto::metrics::Metrics,
+) where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  let m = endpoint.metrics();
+  if m != *last {
+    *last = m;
+    metrics.store(Arc::new(m));
   }
 }
 

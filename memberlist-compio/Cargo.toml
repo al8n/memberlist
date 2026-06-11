@@ -13,6 +13,9 @@ description = "compio-based async driver for the Sans-I/O memberlist machine"
 [features]
 default = ["tcp"]
 tcp = ["memberlist-proto/tcp"]
+# Emit `tracing` spans around the public driver operations and forward the
+# machine's `tracing` feature.
+tracing = ["dep:tracing", "memberlist-proto/tracing"]
 tls-rustls-ring = ["memberlist-proto/tls-rustls-ring", "compio/rustls"]
 tls-rustls-aws-lc-rs = ["memberlist-proto/tls-rustls-aws-lc-rs"]
 quic = ["memberlist-proto/quic"]
@@ -53,6 +56,7 @@ flume = { workspace = true, default-features = false, features = ["async"] }
 futures-channel = { workspace = true }
 futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
 thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
 resolv-conf = { workspace = true, optional = true }
 getifs = { workspace = true, optional = true }

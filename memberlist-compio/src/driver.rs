@@ -502,6 +502,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   events_dropped: Arc<std::sync::atomic::AtomicU64>,
   observation_dropped: Arc<std::sync::atomic::AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
   shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -628,6 +629,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // Track the published snapshot version so the per-iteration republishes below
   // rebuild only on an actual membership/health change.
   let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
+  // Same publish-on-change for the load-shedding counters.
+  let mut last_metrics = endpoint.endpoint_ref().metrics();
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
@@ -836,6 +839,11 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       if drained_any {
         refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
       }
+      // Publish the counters unconditionally before exit: a load-shed (e.g. a
+      // rejected accept at the max_inbound_streams cap) can bump them on a path
+      // that produced no drainable work, so gating on `drained_any` would drop
+      // the final increment from the metrics a caller inspects after shutdown.
+      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
       break;
     }
 
@@ -964,6 +972,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
         refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
+        refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
       }
       if exit {
         break;
@@ -1004,6 +1013,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
+      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
       dirty = false;
     }
 
@@ -1226,6 +1236,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
 
     if dirty {
       refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
+      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
     }
 
     if exit {
@@ -2937,6 +2948,40 @@ fn refresh_snapshot_if_changed<I, A, R>(
   if v != *last_version {
     *last_version = v;
     refresh_snapshot::<I, A, R>(endpoint, snapshot);
+  }
+}
+
+/// Republish the machine's load-shedding counters into `metrics` if they changed
+/// since `last` (a cheap `Copy` compare; the `ArcSwap` store allocates only on a
+/// real change, which is rare).
+fn refresh_metrics_if_changed<I, A, R>(
+  endpoint: &StreamEndpoint<I, A, R>,
+  metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  last: &mut memberlist_proto::metrics::Metrics,
+) where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  R: StreamTransport,
+{
+  let m = endpoint.endpoint_ref().metrics();
+  if m != *last {
+    *last = m;
+    metrics.store(Arc::new(m));
   }
 }
 

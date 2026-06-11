@@ -1042,7 +1042,7 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
         .shared
         .publish(snapshot_of(this.endpoint.endpoint_ref()));
     }
-    let metrics = this.endpoint.endpoint_ref().metrics();
+    let metrics = this.endpoint.metrics();
     if metrics != this.last_metrics {
       this.last_metrics = metrics;
       this.shared.publish_metrics(metrics);

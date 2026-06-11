@@ -290,6 +290,7 @@ where
       runtime.events_dropped,
       runtime.observation_dropped,
       runtime.snapshot,
+      runtime.metrics,
       runtime.shutdown_flag,
       runtime.driver_options,
       runtime.delegate,

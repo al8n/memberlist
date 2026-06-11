@@ -391,6 +391,7 @@ where
       runtime.events_dropped,
       runtime.observation_dropped,
       runtime.snapshot,
+      runtime.metrics,
       bridge_ready_rx,
       bridge_ready_tx,
       runtime.shutdown_flag,

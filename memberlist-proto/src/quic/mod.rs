@@ -594,6 +594,20 @@ where
     &self.ep
   }
 
+  /// The machine's load-shedding counters for this QUIC endpoint. Folds the QUIC
+  /// datagram-plane ingress shed (`datagram_ingress_dropped`) into
+  /// [`gossip_ingress_dropped`](crate::metrics::Metrics::gossip_ingress_dropped)
+  /// — the inner `Endpoint`'s own gossip-ingress count is the STREAM plane's
+  /// (zero on a QUIC endpoint) — so a driver reads one unified counter regardless
+  /// of transport.
+  pub fn metrics(&self) -> crate::metrics::Metrics {
+    let mut m = self.ep.metrics();
+    m.gossip_ingress_dropped = m
+      .gossip_ingress_dropped
+      .saturating_add(self.datagram_ingress_dropped);
+    m
+  }
+
   /// Mutably borrow the inner membership endpoint — test-only. Production
   /// code accesses `self.ep` directly inside `QuicEndpoint`'s own methods.
   /// A public raw `&mut Endpoint` would let external callers drain
@@ -3712,6 +3726,13 @@ mod tests {
     assert!(
       a.datagram_ingress_dropped() > dropped_before,
       "a datagram arriving with mem_ingress at cap must be dropped and counted"
+    );
+    // The public Metrics fold the QUIC datagram-plane ingress shed into
+    // gossip_ingress_dropped, so a driver sees one unified counter.
+    assert_eq!(
+      a.metrics().gossip_ingress_dropped,
+      a.datagram_ingress_dropped(),
+      "QuicEndpoint::metrics must surface the QUIC ingress drops, not a zero stream-plane count"
     );
   }
 
