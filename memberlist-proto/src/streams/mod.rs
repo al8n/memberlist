@@ -104,6 +104,13 @@ use conn::StreamConns;
 #[allow(dead_code)]
 const ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Machine-side backstop on the buffered inbound gossip datagrams
+/// ([`StreamEndpoint::mem_ingress`]). A driver that does not gate its socket
+/// reads on the buffer depth cannot grow it past this; the reactor additionally
+/// stops reading well below it, so this is the floor for any driver. Mirrors the
+/// QUIC datagram plane's total cap.
+const MAX_MEM_INGRESS_DATAGRAMS: usize = 8192;
+
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
 /// `attempted` distinguishes a freshly-sieved entry (never yet processed by
@@ -334,6 +341,59 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   policy_reap_pending: bool,
 }
 
+/// Compress one outbound gossip datagram for the wire — the body of
+/// [`StreamEndpoint::compress_gossip`], factored out so a driver can run it
+/// off-thread (e.g. on a CPU worker pool) with a cloned [`crate::CompressionOptions`].
+/// The on-wire form is kept only if it shrinks the datagram, so compressed
+/// gossip can never inflate past the uncompressed datagram.
+pub fn compress_gossip_datagram(opts: &crate::CompressionOptions, datagram: &[u8]) -> Vec<u8> {
+  match opts.apply(datagram) {
+    Ok(crate::CompressionOutcome::Compressed(packed)) => {
+      let wrapped = crate::encode_compressed_frame(
+        opts
+          .algorithm()
+          .expect("a Compressed outcome implies an algorithm is set"),
+        datagram.len(),
+        &packed,
+      );
+      if wrapped.len() < datagram.len() {
+        wrapped
+      } else {
+        datagram.to_vec()
+      }
+    }
+    _ => datagram.to_vec(),
+  }
+}
+
+/// Checksum one outbound gossip datagram — the body of
+/// [`StreamEndpoint::checksum_gossip`], factored out for off-thread use with a
+/// cloned [`crate::ChecksumOptions`].
+pub fn checksum_gossip_datagram(
+  opts: &crate::ChecksumOptions,
+  datagram: &[u8],
+) -> Result<Vec<u8>, crate::ChecksumError> {
+  match opts.apply(datagram)? {
+    crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
+    crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+  }
+}
+
+/// Encrypt one outbound gossip datagram — the body of
+/// [`StreamEndpoint::encrypt_gossip`], factored out for off-thread use with a
+/// cloned [`crate::EncryptionOptions`].
+pub fn encrypt_gossip_datagram(
+  opts: &crate::EncryptionOptions,
+  datagram: &[u8],
+) -> Result<Vec<u8>, crate::EncryptionError> {
+  let keyring = match opts.keyring() {
+    Some(kr) => kr,
+    None => return Ok(datagram.to_vec()),
+  };
+  let key = keyring.primary_ref();
+  crate::encode_encrypted_frame(key.algorithm(), key, datagram)
+}
+
 // Accessors whose bodies touch only non-generic fields (`compression`,
 // `encryption`, `out_transmit`, `pending_connects`, `pending_teardowns`,
 // `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
@@ -389,34 +449,7 @@ where
   /// handing them to the UDP socket. When compression is disabled, or the
   /// datagram does not benefit, the original bytes are returned.
   pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
-    match self.compression.apply(datagram) {
-      Ok(crate::CompressionOutcome::Compressed(packed)) => {
-        let wrapped = crate::encode_compressed_frame(
-          self
-            .compression
-            .algorithm()
-            .expect("a Compressed outcome implies an algorithm is set"),
-          datagram.len(),
-          &packed,
-        );
-        // The wrapper header (tag + algorithm + `orig_len` varint) is overhead
-        // on top of the raw compressed bytes; if it pushes the wrapped
-        // datagram to `datagram`'s size or larger, send `datagram` plain so
-        // compressed gossip can never inflate past the uncompressed datagram
-        // (and never cross a gossip MTU the plain datagram already fit
-        // within). The receiver's `unwrap_transforms` passes a non-wrapper
-        // buffer through unchanged.
-        if wrapped.len() < datagram.len() {
-          wrapped
-        } else {
-          datagram.to_vec()
-        }
-      }
-      // Plain outcome, or a backend error: emit the datagram uncompressed. A
-      // backend compress error is non-fatal — the uncompressed datagram is
-      // always valid and the decoder's leading tag tells it which form it got.
-      _ => datagram.to_vec(),
-    }
+    compress_gossip_datagram(&self.compression, datagram)
   }
 
   /// The configured cross-transport checksum options.
@@ -434,10 +467,7 @@ where
   /// not built into this binary; the driver MUST drop the gossip rather than
   /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
   pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
-    match self.checksum.apply(datagram)? {
-      crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
-      crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
-    }
+    checksum_gossip_datagram(&self.checksum, datagram)
   }
 
   /// The configured cross-transport encryption options.
@@ -461,12 +491,7 @@ where
   /// driver MUST drop the gossip in that case; emitting unencrypted bytes
   /// on an encrypted-cluster path would bypass authentication silently.
   pub fn encrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::EncryptionError> {
-    let keyring = match self.encryption.keyring() {
-      Some(kr) => kr,
-      None => return Ok(datagram.to_vec()),
-    };
-    let key = keyring.primary_ref();
-    crate::encode_encrypted_frame(key.algorithm(), key, datagram)
+    encrypt_gossip_datagram(&self.encryption, datagram)
   }
 
   /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
@@ -581,6 +606,11 @@ where
     // Ignoring the removed bridge: a never-opened exchange owes the peer no
     // clean-close bytes, and dropping it clears its record-layer state.
     let _ = self.conns.remove(id);
+    // No `ExchangeCompleted` here. This path runs on leave, where a driver
+    // resolves a parked waiter via its own leave/shutdown drain with the clearer
+    // `Shutdown` signal; emitting a generic `Failed` would double-resolve it and
+    // mask that. The genuinely-stranding case (a dial that retired without a
+    // drain covering it) emits from the `dial_succeeded(None)` reap instead.
     self.exchanges.remove(&id);
     self.purge_transmit_for(id);
     // Replace any teardown already queued for this id with an Abort, so the
@@ -628,6 +658,13 @@ where
   /// [`Self::handle_packet`].
   pub fn poll_memberlist_ingress(&mut self) -> Option<(A, Bytes)> {
     self.mem_ingress.pop_front()
+  }
+
+  /// The number of gossip datagrams buffered awaiting
+  /// [`poll_memberlist_ingress`](Self::poll_memberlist_ingress). A driver gates
+  /// its socket reads on this so a flood cannot grow the buffer without bound.
+  pub fn pending_memberlist_ingress(&self) -> usize {
+    self.mem_ingress.len()
   }
 }
 
@@ -803,10 +840,10 @@ where
   /// The bridge remains in [`Self::conns`] until the next
   /// `pump_bridges` reaps it via the existing `reap_bridge` flow,
   /// which drains the bridge's stream events into the inner endpoint
-  /// (the `StreamErrored` lifecycle notice the SWIM FSM consumes to
-  /// retry the affected exchange under a fresh bridge constructed
-  /// under the new policy) and emits its OWN `Abort` (the reap is
-  /// failed). The driver may therefore observe two `Abort` actions for
+  /// (a resulting `StreamErrored` is ignored at the FSM layer — the
+  /// driver owns stream lifetime, and a failed exchange is re-attempted
+  /// by the next scheduled push/pull, not retried FSM-side) and emits
+  /// its OWN `Abort` (the reap is failed). The driver may therefore observe two `Abort` actions for
   /// the same exchange across the policy-change and the subsequent reap
   /// — the second is a no-op for the documented driver contract (the
   /// socket was torn down on the first `Abort` and the driver-side
@@ -1698,7 +1735,21 @@ where
             if let Some(br) = self.conns.remove(id) {
               drop(br);
             }
-            self.exchanges.remove(&id);
+            // Surface the terminal Failed outcome (as `reap_bridge` does on a
+            // promoted bridge's failure) so an ExchangeId-keyed waiter resolves
+            // now instead of only via its own timeout.
+            if let Some(meta) = self.exchanges.remove(&id)
+              && let Some(kind) = meta.kind
+            {
+              self
+                .ep
+                .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
+                  id,
+                  crate::CheapClone::cheap_clone(&meta.peer),
+                  ExchangeOutcome::Failed,
+                  kind,
+                )));
+            }
             // (5) Emit `Abort` so a driver that had already drained
             //     `Connect` from an earlier tick can tear the open socket
             //     down and DISCARD any bytes it queued before the dial was
@@ -1847,6 +1898,16 @@ where
     if !self.ep.is_running() {
       return;
     }
+    // Machine-side backstop: bound the gossip ingress buffer so a driver that
+    // does not gate its socket reads cannot grow it without limit. A per-SOURCE
+    // fairness cap like the QUIC datagram plane's is deliberately omitted here —
+    // UDP source addresses are forgeable, so a per-source cap gives little
+    // protection, while a chatty single source is already bounded by this total
+    // cap; the QUIC plane's per-peer cap is meaningful only because its datagrams
+    // ride authenticated connections.
+    if self.mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
+      return;
+    }
     self
       .mem_ingress
       .push_back((from, Bytes::copy_from_slice(datagram)));
@@ -1920,65 +1981,91 @@ where
     self.run_tick(now);
   }
 
-  /// The driver accepted an inbound transport connection from `from`.
-  /// Allocates an [`ExchangeId`], builds a server-side `Handshaking` bridge
-  /// bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns the handle the
-  /// driver tags this connection's inbound bytes with. The `Stream` is minted
-  /// later (at label / handshake step settled, via `Endpoint::accept_stream`).
+  /// The driver observed a mid-exchange transport ERROR (a read/write I/O
+  /// failure or a peer RESET) for exchange `id` AFTER the wire was established.
+  /// Fails the owning bridge with [`BridgeFailure::ConnectionLost`] so the next
+  /// coordinator tick reaps it with [`ExchangeOutcome::Failed`] and emits the
+  /// terminal [`Event::ExchangeCompleted`].
   ///
-  /// An `R::acceptor` construction error (a misconfigured record layer) is
-  /// unrecoverable for this connection: no bridge is inserted and the returned
-  /// handle has no exchange. The driver observes this as a connection that
-  /// never produces bytes (and may close it on its own accept-side deadline);
-  /// the membership layer is untouched because no `Stream` ever existed.
-  pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
+  /// Use this — NOT `handle_transport_data(id, &[], eof = true, now)` — for a
+  /// transport error. A clean `read == 0` EOF is benign for a one-way
+  /// `UserMessage`: the FSM is already `Done` once its bytes are gathered, so
+  /// the EOF maps to a SUCCESSFUL completion. Feeding a genuine transport error
+  /// down that benign path would falsely resolve the exchange's `send_reliable`
+  /// as success though the write never reached the peer. A no-op if the bridge
+  /// was already reaped (a same-tick `Close` / `Abort` from the machine).
+  pub fn handle_transport_error(&mut self, id: ExchangeId, now: Instant) {
     self.last_now = Some(now);
-    let id = self.conns.allocate();
-    // A leaving/left node accepts no NEW inbound reliable stream: it builds no
-    // bridge, so no Stream is ever minted and no push/pull response leaves the
-    // node. The handle is still returned (monotonic, never reused) so the driver
-    // has a stable id; the connection produces no bytes and the driver closes it
-    // on its own accept deadline. Streams accepted before leave keep draining.
-    if !self.ep.is_running() {
-      return id;
+    if let Some(bridge) = self.conns.get_mut(id) {
+      bridge.fail_connection_lost();
     }
+    self.run_tick(now);
+  }
+
+  /// The driver accepted an inbound transport connection from `from`.
+  /// On admission, allocates an [`ExchangeId`], builds a server-side
+  /// `Handshaking` bridge bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns
+  /// `Some(id)` — the handle the driver tags this connection's inbound bytes
+  /// with. The `Stream` is minted later (at label / handshake settled, via
+  /// `Endpoint::accept_stream`).
+  ///
+  /// Returns `None` when the connection is NOT admitted: the node is
+  /// leaving/left, the optional `max_inbound_streams` ceiling is reached, or the
+  /// record-layer acceptor is misconfigured. No bridge is built, so the driver
+  /// should drop the connection immediately rather than spawn a per-connection
+  /// servicing task — the rejection is observable BEFORE that resource is
+  /// committed, which is what makes the inbound cap bound driver-side state too.
+  pub fn accept_connection(&mut self, from: A, now: Instant) -> Option<ExchangeId> {
+    self.last_now = Some(now);
+    // A leaving/left node accepts no NEW inbound reliable stream; streams
+    // accepted before leave keep draining.
+    if !self.ep.is_running() {
+      return None;
+    }
+    // Admission-gate inbound exchanges against the optional ceiling so a peer
+    // cannot grow inbound bridge state — each pins up to ~3x the max frame size
+    // transiently — without bound. Outbound exchanges are never gated here.
+    if let Some(max) = self.ep.max_inbound_streams() {
+      let inbound = self.exchanges.values().filter(|m| !m.outbound).count();
+      if inbound >= max {
+        return None;
+      }
+    }
+    // A record-layer acceptor construction error (a misconfigured record layer)
+    // is unrecoverable for this connection: no bridge, no exchange.
+    let records = match R::acceptor(&self.cfg) {
+      Ok(records) => records,
+      Err(_) => return None,
+    };
+    let id = self.conns.allocate();
     // SocketAddr conversion needed: `peer_socket` tags entries on
     // `out_transmit` (driver-facing SocketAddr-typed queue) so the driver
     // writes bytes on the right transport connection.
     let peer_socket = (self.peer_to_socket)(&from);
     let peer = crate::CheapClone::cheap_clone(&from);
-    match R::acceptor(&self.cfg) {
-      Ok(records) => {
-        let bridge = StreamBridge::new(
-          records,
-          now + self.ep.accept_handshake_deadline(),
-          self.compression,
-          self.encryption.clone(),
-          self.ep.max_stream_frame_size(),
-        );
-        self.conns.insert(id, bridge);
-        self.exchanges.insert(
-          id,
-          ExchangeMeta {
-            peer_socket,
-            peer,
-            mint: Some(PendingMint::Inbound(from)),
-            fin_emitted: false,
-            // Inbound exchange — the initiator-side wrapper that picks
-            // the kind never ran locally. Leave unset; the reap path
-            // does not emit kind-specific events for inbound.
-            kind: None,
-            outbound: false,
-          },
-        );
-      }
-      Err(_) => {
-        // No bridge for a config-rejected server connection. The handle is
-        // still returned (monotonic; never reused) so the driver has a stable
-        // key, but it maps to no exchange.
-      }
-    }
-    id
+    let bridge = StreamBridge::new(
+      records,
+      now + self.ep.accept_handshake_deadline(),
+      self.compression,
+      self.encryption.clone(),
+      self.ep.max_stream_frame_size(),
+    );
+    self.conns.insert(id, bridge);
+    self.exchanges.insert(
+      id,
+      ExchangeMeta {
+        peer_socket,
+        peer,
+        mint: Some(PendingMint::Inbound(from)),
+        fin_emitted: false,
+        // Inbound exchange — the initiator-side wrapper that picks the kind
+        // never ran locally. Leave unset; the reap path does not emit
+        // kind-specific events for inbound.
+        kind: None,
+        outbound: false,
+      },
+    );
+    Some(id)
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt the

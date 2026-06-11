@@ -1,0 +1,58 @@
+[package]
+name = "memberlist-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+smol_str = "0.3"
+memberlist-proto = { path = "..", features = [
+  "std",
+  "compression-lz4",
+  "compression-snappy",
+  "compression-zstd",
+  "compression-brotli",
+  "checksum-crc32",
+  "checksum-xxhash64",
+  "encryption-aes-gcm",
+] }
+
+# The untrusted-input parsers reached pre-authentication by a single inbound
+# datagram. Each target feeds arbitrary bytes and discards the result; the
+# harness asserts no panic / abort / unbounded allocation.
+[[bin]]
+name = "parse_messages"
+path = "fuzz_targets/parse_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_compound"
+path = "fuzz_targets/decode_compound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_incoming"
+path = "fuzz_targets/decode_incoming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unwrap_transforms"
+path = "fuzz_targets/unwrap_transforms.rs"
+test = false
+doc = false
+bench = false
+
+# Isolated from the parent workspace: cargo-fuzz needs nightly + the sanitizer
+# runtime, so this crate builds only via `cargo +nightly fuzz run <target>`.
+[workspace]

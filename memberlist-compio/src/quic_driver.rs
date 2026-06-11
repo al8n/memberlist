@@ -210,6 +210,9 @@ struct QuicDriverState<I> {
   /// (which opts out of dropping).
   obs_payload_budget: Option<u64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  /// The endpoint snapshot version last stored into `snapshot`; the snapshot is
+  /// rebuilt only when it differs (a rebuild clones every NodeState).
+  last_snapshot_version: u64,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
@@ -370,6 +373,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
     obs_payload_bytes,
     obs_payload_budget,
     snapshot,
+    last_snapshot_version: 0,
     shutdown_flag,
     driver_opts,
     cidr_policy,
@@ -463,7 +467,11 @@ pub(crate) async fn quic_driver_loop<I, D>(
       // `drain_actions` iterates to fixed point internally. Mirrors the
       // stream driver's exit drain (`memberlist-compio/src/driver.rs`).
       if drain_actions::<I>(&mut state).await {
-        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
+        refresh_snapshot_if_changed::<I>(
+          &state.endpoint,
+          &state.snapshot,
+          &mut state.last_snapshot_version,
+        );
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -482,7 +490,11 @@ pub(crate) async fn quic_driver_loop<I, D>(
     // (`memberlist-compio/src/driver.rs:688`).
     if dirty {
       if drain_actions::<I>(&mut state).await {
-        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
+        refresh_snapshot_if_changed::<I>(
+          &state.endpoint,
+          &state.snapshot,
+          &mut state.last_snapshot_version,
+        );
       }
       // Reap any pending-join waiter whose `pending` set was emptied
       // by the drain (a push/pull ExchangeCompleted reduction) or
@@ -531,7 +543,11 @@ pub(crate) async fn quic_driver_loop<I, D>(
       && setup_now >= t
     {
       if fire_timeout_with_drain::<I>(&mut state, recv_buf_len).await {
-        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
+        refresh_snapshot_if_changed::<I>(
+          &state.endpoint,
+          &state.snapshot,
+          &mut state.last_snapshot_version,
+        );
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -851,7 +867,14 @@ async fn observation_task<I, D>(
     if let Some(b) = payload {
       obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
     }
-    dispatch_event_delegate(&delegate, &ev).await;
+    // Contain a panicking delegate hook so the task SURVIVES and keeps releasing
+    // the byte-backstop reservations of still-queued events; a dead obs task
+    // would strand them (wedging the byte budget) and silently stop all delegate
+    // dispatch and EventStream fan-out. Ignoring the unwind result: the panic is
+    // contained and this event is simply dropped.
+    let _ = std::panic::AssertUnwindSafe(dispatch_event_delegate(&delegate, &ev))
+      .catch_unwind()
+      .await;
     // Fan out membership / control events only — app-data went to the delegate
     // (above), never the bounded best-effort `events_tx`, so a slow subscriber
     // cannot retain large payloads there. See the stream driver's
@@ -1904,6 +1927,47 @@ fn refresh_snapshot<I>(
     + 'static,
 {
   let ep = endpoint.endpoint_ref();
+  refresh_snapshot_inner::<I>(ep, snapshot);
+}
+
+/// As [`refresh_snapshot`], but rebuilds + stores only when the endpoint's
+/// snapshot version changed since `*last_version` (the rebuild clones every
+/// NodeState).
+fn refresh_snapshot_if_changed<I>(
+  endpoint: &QuicEndpoint<I>,
+  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  last_version: &mut u64,
+) where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  let ep = endpoint.endpoint_ref();
+  let v = ep.snapshot_version();
+  if v != *last_version {
+    *last_version = v;
+    refresh_snapshot_inner::<I>(ep, snapshot);
+  }
+}
+
+fn refresh_snapshot_inner<I>(
+  ep: &memberlist_proto::Endpoint<I, SocketAddr>,
+  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+) where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
   // Build a snapshot-local NodeState for each member with the FSM-tracked
   // liveness state (`member_liveness`) rather than the wire-protocol state
   // (`ns.state()`, which is fixed at the last Alive broadcast and does not

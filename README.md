@@ -42,9 +42,16 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
 
 ## Installation
 
+> **Build requirement:** `memberlist-proto`'s build script runs `protoc` to
+> generate the wire codec, so the [Protocol Buffers compiler][protoc] must be on
+> `PATH` when building (e.g. `apt install protobuf-compiler`, `brew install
+> protobuf`). CI installs it via `arduino/setup-protoc`.
+
+[protoc]: https://grpc.io/docs/protoc-installation/
+
 ```toml
 [dependencies]
-memberlist = "0.1" # tokio runtime + tcp transport by default
+memberlist = "0.9" # tokio runtime + tcp transport by default
 ```
 
 Pick **one** runtime, **one or more** transports, and any gossip-plane transforms.

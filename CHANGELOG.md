@@ -1,5 +1,23 @@
 # Releases
 
+## Unreleased — Sans-I/O rewrite
+
+A ground-up rewrite of memberlist as a synchronous, single-owner Sans-I/O state
+machine, with the async runtime concerns moved into thin per-runtime drivers.
+
+- **`memberlist-proto`** — the deterministic, no-locks SWIM state machine
+  (membership, failure detection, gossip, push/pull, reliable streams over
+  TCP/TLS/QUIC, the codec, and the optional compression / checksum / encryption
+  transforms). `no_std + alloc` capable.
+- **`memberlist`** — the umbrella facade re-exporting the machine and the async
+  drivers behind runtime features.
+- **Drivers** — `memberlist-reactor` (tokio / smol via `agnostic`),
+  `memberlist-compio` (io_uring), and the embedded line (`memberlist-embedded`,
+  `memberlist-smoltcp`, `memberlist-embassy`).
+
+This release line forms new↔new clusters only; it does not interoperate on the
+wire with the legacy `0.x` hand-rolled codec below.
+
 ## 0.6.0
 
 ### Features

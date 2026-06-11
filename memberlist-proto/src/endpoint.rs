@@ -192,6 +192,13 @@ pub struct Endpoint<I, A> {
   indirect_forwards: FxHashMap<u32, IndirectForward<A>>,
   /// Monotonically-increasing sequence number for outgoing Pings.
   next_seq: u32,
+  /// Bumped whenever a snapshot-relevant fact changes: membership (every
+  /// `NodeJoined` / `NodeUpdated` / `NodeLeft`), a Suspect transition, a
+  /// `reset_nodes` removal, or a health-score change. A driver caches the last
+  /// value it published and rebuilds + republishes its membership snapshot only
+  /// when this differs, instead of on every productive poll. Wraps (only
+  /// equality matters).
+  snapshot_version: u64,
   /// Round-robin index into `members` for `start_probe`'s target selection.
   probe_index: usize,
   /// Probe ticks since the last `reset_nodes` sweep. Once it reaches the
@@ -282,11 +289,13 @@ where
   /// state without running a full failed probe.
   pub fn degrade_health(&mut self, severity: u32) {
     self.awareness.record_failure(severity);
+    self.bump_snapshot_version();
   }
 
   /// Record one health success, lowering the health score toward fully healthy.
   pub fn improve_health(&mut self) {
     self.awareness.record_success();
+    self.bump_snapshot_version();
   }
 
   /// The current lifecycle state of this endpoint.
@@ -387,16 +396,21 @@ where
   /// integrator-provided getrandom backend that is not ready on a no_std
   /// target). See [`Endpoint::new_at`] for the panicking convenience.
   pub fn try_new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Result<Self, EndpointInitError> {
-    // Operator-time misconfiguration guard: `initial_meta` was set
-    // via the builder, but its size exceeds the per-endpoint cap
-    // set via `with_meta_max_size`. The configs disagree — the
-    // local Alive broadcast would carry a meta peers will reject.
-    debug_assert!(
-      cfg.initial_meta_ref().len() <= cfg.meta_max_size(),
-      "EndpointOptions::initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
-      cfg.initial_meta_ref().len(),
-      cfg.meta_max_size(),
-    );
+    // Operator-time misconfiguration guards (release-mode, fallible): the
+    // local Alive broadcast would otherwise carry a meta peers reject, or the
+    // awareness tracker would be unconstructable. Reject at construction rather
+    // than panicking or silently shipping a mismatch.
+    if cfg.initial_meta_ref().len() > cfg.meta_max_size() {
+      return Err(EndpointInitError::MetaTooLarge(
+        crate::error::MetaTooLarge {
+          meta_len: cfg.initial_meta_ref().len(),
+          max: cfg.meta_max_size(),
+        },
+      ));
+    }
+    if cfg.awareness_max_multiplier() == 0 {
+      return Err(EndpointInitError::AwarenessMultiplierZero);
+    }
     let rng = match cfg.rng_seed() {
       Some(seed) => SmallRng::seed_from_u64(seed),
       None => {
@@ -448,6 +462,7 @@ where
       probes: FxHashMap::default(),
       indirect_forwards: FxHashMap::default(),
       next_seq: 0,
+      snapshot_version: 0,
       probe_index: 0,
       probes_since_reset: 0,
       incarnation: initial_incarnation,
@@ -485,7 +500,7 @@ where
   /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed),
   /// to handle that case without panicking.
   pub fn new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Self {
-    Self::try_new_at(cfg, now).expect("endpoint construction: system entropy source unavailable")
+    Self::try_new_at(cfg, now).expect("endpoint construction failed (entropy or invalid options)")
   }
 
   /// Fallibly construct a new endpoint, stamping the local node at the current
@@ -588,7 +603,32 @@ where
   }
 
   pub(crate) fn emit_event(&mut self, ev: Event<I, A>) {
+    // Membership-content changes always flow through one of these three events
+    // (insert -> Joined, meta/addr/incarnation update -> Updated, dead/left ->
+    // Left), so bumping here covers them; the silent snapshot-relevant changes
+    // (Suspect transition, reset_nodes removal, health) bump explicitly.
+    if matches!(
+      ev,
+      Event::NodeJoined(_) | Event::NodeUpdated(_) | Event::NodeLeft(_)
+    ) {
+      self.bump_snapshot_version();
+    }
     self.pending_events.push_back(ev);
+  }
+
+  /// Mark the membership/health snapshot dirty so a driver republishes it.
+  #[inline(always)]
+  pub(crate) fn bump_snapshot_version(&mut self) {
+    self.snapshot_version = self.snapshot_version.wrapping_add(1);
+  }
+
+  /// A monotonically-changing version of the snapshot-relevant state
+  /// (membership + health). A driver caches the last value it published and
+  /// rebuilds its snapshot only when this differs. See [`Self::snapshot_version`
+  /// field docs](Endpoint).
+  #[inline(always)]
+  pub fn snapshot_version(&self) -> u64 {
+    self.snapshot_version
   }
 
   /// increment + return the next incarnation.
@@ -684,18 +724,15 @@ where
     let alive_protocol = alive.protocol_version();
     let alive_delegate = alive.delegate_version();
 
-    let server_for_conflict = NodeState::new(
-      alive_id.cheap_clone(),
-      alive_addr.cheap_clone(),
-      State::Alive,
-    )
-    .with_meta(alive_meta.cheap_clone())
-    .with_protocol_version(alive_protocol)
-    .with_delegate_version(alive_delegate);
-
     let is_local = &alive_id == self.cfg.local_id_ref();
 
     let mut updates_address = false;
+    // Whether this Alive inserts a brand-new member below. A just-inserted Dead
+    // placeholder carries incarnation 0, so the staleness guard must NOT apply to
+    // it — an `Alive(incarnation = 0)` (a peer that starts at incarnation 0, or a
+    // forged id) would otherwise be rejected against the placeholder's own 0 and
+    // leave a Dead, snapshot-invisible entry that still consumes `max_members`.
+    let mut is_new = false;
     if let Some(existing) = self.members.get(&alive_id) {
       let existing_addr = existing.state_ref().address_ref().cheap_clone();
       if existing_addr != alive_addr {
@@ -707,8 +744,18 @@ where
           // Adopt the new address.
           updates_address = true;
         } else {
-          // Conflict.
-          let other = Arc::new(server_for_conflict);
+          // Conflict. Build the conflicting NodeState lazily here — the common
+          // (non-conflict) path never needs it, so it does not pay the clones.
+          let other = Arc::new(
+            NodeState::new(
+              alive_id.cheap_clone(),
+              alive_addr.cheap_clone(),
+              State::Alive,
+            )
+            .with_meta(alive_meta.cheap_clone())
+            .with_protocol_version(alive_protocol)
+            .with_delegate_version(alive_delegate),
+          );
           self.emit_event(Event::NodeConflict(NodeConflict::new(
             existing.state_ref().server_arc(),
             other,
@@ -717,7 +764,16 @@ where
         }
       }
     } else {
-      // New peer: insert at random offset.
+      // New peer. Admission-gate against the optional membership ceiling first:
+      // at the cap, refuse to admit a new id so an open network cannot grow
+      // membership (and every per-member structure) without bound. Known
+      // members' state transitions are unaffected — this branch is new-ids only.
+      if let Some(max) = self.cfg.max_members() {
+        if self.members.len() >= max {
+          return;
+        }
+      }
+      // Insert at random offset.
       let initial = NodeState::new(
         alive_id.cheap_clone(),
         alive_addr.cheap_clone(),
@@ -736,6 +792,7 @@ where
         self.rng.random_range(0..=n)
       };
       self.members.insert_at_random_at(new_member, offset);
+      is_new = true;
     }
 
     // Re-fetch (insert_at_random_at may have moved indices).
@@ -747,7 +804,7 @@ where
     let old_state = member.state_ref().state();
     let old_meta = member.state_ref().server_ref().meta_ref().cheap_clone();
 
-    if !updates_address && !is_local && alive_incarnation <= local_incarnation {
+    if !is_new && !updates_address && !is_local && alive_incarnation <= local_incarnation {
       return;
     }
     // Strict-less-than for self (unlike peers, which use <=).
@@ -810,6 +867,14 @@ where
       self.emit_event(Event::NodeJoined(new_server));
     } else if old_meta != new_meta {
       self.emit_event(Event::NodeUpdated(new_server));
+    } else {
+      // The update applied a strictly-newer incarnation (the older/equal guards
+      // returned above), changing the member's incarnation and possibly its
+      // state (e.g. a Suspect -> Alive refutation), but NEITHER a resurrection
+      // NOR a meta change fired an event. The published snapshot reflects that
+      // new state/incarnation, so bump explicitly — otherwise a driver would
+      // serve a stale `Suspect` for a node that is now `Alive`.
+      self.bump_snapshot_version();
     }
   }
 
@@ -830,6 +895,7 @@ where
       new_inc = self.skip_incarnation_past(accused_inc);
     }
     self.awareness.record_failure(1);
+    self.bump_snapshot_version();
     if let Some(local) = self.members.get_mut(self.cfg.local_id_ref()) {
       local.state_mut().set_incarnation(new_inc);
       let id = local.state_ref().id_ref().cheap_clone();
@@ -853,7 +919,12 @@ where
     let min_ms =
       (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
     let min = Duration::from_millis(min_ms);
-    let max = min * self.cfg.suspicion_max_timeout_mult();
+    // `checked_mul` to degrade a pathologically-large configured product to the
+    // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
+    // discipline as `Awareness::scale_timeout`); unreachable for any sane config.
+    let max = min
+      .checked_mul(self.cfg.suspicion_max_timeout_mult())
+      .unwrap_or(min);
     (min, max)
   }
 
@@ -941,6 +1012,9 @@ where
     member.set_suspicion(Some(suspicion));
     member.state_mut().set_incarnation(inc);
     member.state_mut().set_state(State::Suspect, now);
+    // The Alive -> Suspect transition emits no membership event, so bump the
+    // snapshot version explicitly.
+    self.bump_snapshot_version();
 
     self.broadcast_message(
       target.cheap_clone(),
@@ -1160,8 +1234,24 @@ where
       return;
     }
 
-    // Build the Ack carrying our current ack_payload.
-    let ack = Ack::new(ping.sequence_number()).with_payload(self.ack_payload.clone());
+    // Build the Ack carrying our current ack_payload. When configured to
+    // restrict the payload to known members, omit it unless the Ping's claimed
+    // source id maps to a tracked member WHOSE ADDRESS matches the transport
+    // source we observed (`from`, where the Ack is sent). Binding the claimed id
+    // to the observed address — the same address-as-identity model as the
+    // indirect-ping relay guard — is what bounds the amplification: a Ping that
+    // spoofs a member's id from a victim's address (so the large Ack reflects to
+    // the victim) fails the address check, while a genuine member ping passes.
+    let include_payload = !self.cfg.ack_payload_to_members_only()
+      || self
+        .members
+        .get(ping.source_ref().id_ref())
+        .is_some_and(|m| m.state_ref().address_ref() == &from);
+    let ack = if include_payload {
+      Ack::new(ping.sequence_number()).with_payload(self.ack_payload.clone())
+    } else {
+      Ack::new(ping.sequence_number())
+    };
 
     self
       .pending_transmits
@@ -1274,8 +1364,8 @@ where
   /// An entry with no backing probe/forward state is conservatively
   /// rejected — they are registered together, so this only happens if the
   /// outcome was already decided; there is nothing to validate against and
-  /// nothing for a "success" to complete. The stale registry slot (if any)
-  /// is reaped by `poll_expired` at its own deadline.
+  /// nothing for a "success" to complete. Any registry slot is reaped by its
+  /// paired `remove` when the probe/forward terminates, not by a sweep.
   fn ack_source_is_valid(&self, seq: u32, kind: &AckKind<A>, from: &A) -> bool {
     match kind {
       AckKind::Probe | AckKind::Ping => {
@@ -1343,6 +1433,7 @@ where
         // self-awareness (`awareness_delta = -1`, persisting through
         // indirect-relayed Ack arrivals).
         self.awareness.record_success();
+        self.bump_snapshot_version();
         // A passive node observes ping completions from ordinary periodic SWIM
         // traffic, but only on a direct ack from the probe target — not an
         // indirect-relayed ack, nor a reliable-fallback success. The caller
@@ -1384,9 +1475,33 @@ where
     self.fire_expired_suspicions(now);
     self.advance_probe_fsm(now);
     self.fire_expired_forwards(now);
+    self.fire_expired_stream_intents(now);
     self.fire_probe_scheduler(now);
     self.fire_gossip_scheduler(now);
     self.fire_pushpull_scheduler(now);
+  }
+
+  /// Drop pending stream-dial intents whose deadline has elapsed without a
+  /// `dial_succeeded` / `dial_failed` callback. A correct driver always reports
+  /// a dial outcome, but a lost result would otherwise leak the intent — which
+  /// for a push/pull holds a full encoded membership snapshot — forever. This
+  /// machine-side backstop mirrors `dial_failed` for each swept intent: a
+  /// reliable-ping fallback is retired so a late event cannot match it; a
+  /// push/pull or user-message intent is dropped silently.
+  fn fire_expired_stream_intents(&mut self, now: Instant) {
+    let expired: Vec<StreamId> = self
+      .pending_stream_intents
+      .iter()
+      .filter(|(_, intent)| now >= intent.deadline)
+      .map(|(id, _)| *id)
+      .collect();
+    for id in expired {
+      if let Some(intent) = self.pending_stream_intents.remove(&id) {
+        if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
+          self.retire_reliable_fallback(probe_seq);
+        }
+      }
+    }
   }
 
   /// Fire any expired suspicion timers, transitioning the peer to Dead.
@@ -1646,6 +1761,7 @@ where
           _ => 1, // No indirect peers available; penalize ourselves.
         };
         self.awareness.record_failure(severity);
+        self.bump_snapshot_version();
 
         // Mark the target as suspect.
         let target_id = probe.target.id_ref().cheap_clone();
@@ -1769,6 +1885,10 @@ where
         match m.state_ref().state() {
           State::Alive | State::Suspect => true,
           State::Dead => now.saturating_duration_since(m.state_ref().state_change()) <= dead_window,
+          // `State::Left` is deliberately excluded (the window covers only
+          // `Dead`): a node that intentionally left does not need to hear and
+          // refute a dead accusation, so unlike the falsely-`Dead` case there is
+          // nothing to gossip to it for.
           _ => false,
         }
       })
@@ -1797,7 +1917,7 @@ where
     let compound_budget = self
       .gossip_mtu()
       .saturating_sub(crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN);
-    let membership_broadcasts = self.broadcast.take_broadcasts(
+    let (membership_broadcasts, membership_used) = self.broadcast.take_broadcasts_measured(
       num_nodes,
       crate::wire::COMPOUND_MAX_PART_PREFIX_LEN,
       compound_budget,
@@ -1829,15 +1949,9 @@ where
     //     does not log). A fitting message is never permanently stranded,
     //     and a lone message ships as its own datagram.
     let all_broadcasts: Vec<Message<I, A>> = if !membership_broadcasts.is_empty() {
-      let membership_used: usize = membership_broadcasts
-        .iter()
-        .map(|m| {
-          crate::wire::encode_message::<I, A>(m)
-            .expect("outbound membership broadcast must bridge to wire form")
-            .len()
-            + crate::wire::COMPOUND_MAX_PART_PREFIX_LEN
-        })
-        .sum();
+      // `membership_used` came back from `take_broadcasts_measured` (the bytes it
+      // charged: each message's encoded plain-frame length + the per-part
+      // varint), so the selected messages are NOT re-encoded here.
       // take_broadcasts guarantees membership_used <= compound_budget;
       // saturating_sub defends a contract break into an empty user budget
       // rather than a wrapped (usize::MAX) one that re-opens the Critical.
@@ -2070,12 +2184,17 @@ where
     // packets cannot trigger or delay it.
     if tx.is_some() {
       if let Some(rem) = self.leave_flush_remaining {
-        let rem = rem - 1;
-        if rem == 0 {
-          self.emit_event(Event::LeftCluster);
-          self.leave_flush_remaining = None;
-        } else {
-          self.leave_flush_remaining = Some(rem);
+        // `checked_sub` so a future invariant break cannot wrap the count to
+        // `usize::MAX` and silently suppress `LeftCluster` forever (leaving
+        // drivers to hit their leave timeout). A reached-zero count emits.
+        match rem.checked_sub(1) {
+          Some(0) | None => {
+            self.emit_event(Event::LeftCluster);
+            self.leave_flush_remaining = None;
+          }
+          Some(rem) => {
+            self.leave_flush_remaining = Some(rem);
+          }
         }
       }
     }
@@ -2105,10 +2224,16 @@ where
       .min();
     let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
     let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
+    let intent_deadline = self
+      .pending_stream_intents
+      .values()
+      .map(|i| i.deadline)
+      .min();
     [
       suspicion_deadline,
       probe_deadline,
       forward_deadline,
+      intent_deadline,
       self.next_probe,
       self.next_gossip,
       self.next_pushpull,
@@ -2121,6 +2246,36 @@ where
   /// Number of broadcasts currently in the gossip queue.
   pub fn broadcast_queue_len(&self) -> usize {
     self.broadcast.num_queued()
+  }
+
+  /// Number of transmits queued for `poll_transmit`. A driver can read this to
+  /// shed or apply back-pressure when the machine's outbound backlog grows
+  /// (it advances one or two entries per inbound packet while the driver lags).
+  #[inline(always)]
+  pub fn pending_transmits_len(&self) -> usize {
+    self.pending_transmits.len()
+  }
+
+  /// Number of events queued for `poll_event`. A driver can read this to shed
+  /// or apply back-pressure when the machine's event backlog grows.
+  #[inline(always)]
+  pub fn pending_events_len(&self) -> usize {
+    self.pending_events.len()
+  }
+
+  /// The configured full-exchange stream timeout. The stream coordinator uses it
+  /// to bound an inbound push/pull RESPONSE window, so a large response on a slow
+  /// link is not cut by a hardcoded deadline shorter than the request side's.
+  #[inline(always)]
+  pub(crate) fn stream_timeout(&self) -> Duration {
+    self.cfg.stream_timeout()
+  }
+
+  /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
+  /// it to admission-gate inbound exchanges.
+  #[inline(always)]
+  pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
+    self.cfg.max_inbound_streams()
   }
 
   /// Drain all queued broadcasts and return their messages.
@@ -2205,9 +2360,20 @@ where
       })
       .map(|m| m.state_ref().id_ref().cheap_clone())
       .collect();
+    if !ids_to_remove.is_empty() {
+      // Removing reclaimed Dead/Left members shrinks the membership list (the
+      // snapshot) but emits no event, so bump the version explicitly.
+      self.bump_snapshot_version();
+    }
     for id in ids_to_remove {
       self.members.remove(&id);
     }
+    // Decorrelate probe order across rounds: without a reshuffle the round-robin
+    // cursor walks the members in a fixed insertion-derived order every pass, so
+    // probe patterns are predictable and correlated. Reshuffle the post-prune
+    // list and restart the cursor (mirrors upstream `resetNodes`).
+    self.members.shuffle(&mut self.rng);
+    self.probe_index = 0;
   }
 
   // ────────────────────────── Application API ──────────────────────────────
@@ -2695,11 +2861,23 @@ where
   }
 
   fn allocate_seq(&mut self) -> u32 {
-    self.next_seq = self.next_seq.wrapping_add(1);
-    if self.next_seq == 0 {
-      self.next_seq = 1;
+    // Skip 0 (reserved) and any seq still live in a probe / ack-registry /
+    // indirect-forward slot, so a `u32` wrap cannot silently replace an
+    // in-flight probe's slot and orphan it into a spurious suspect. Bounded:
+    // the live maps are tiny relative to the 2^32 space, so this almost never
+    // iterates more than once.
+    loop {
+      self.next_seq = self.next_seq.wrapping_add(1);
+      if self.next_seq == 0 {
+        continue;
+      }
+      if !self.probes.contains_key(&self.next_seq)
+        && !self.indirect_forwards.contains_key(&self.next_seq)
+        && !self.ack_registry.contains(self.next_seq)
+      {
+        return self.next_seq;
+      }
     }
-    self.next_seq
   }
 
   /// Driver feeds an incoming IndirectPing. We forward a Ping to the target
@@ -2729,6 +2907,21 @@ where
     // On mismatch drop entirely: no forwarded Ping, no AckRegistry/forward
     // registration, no Nack-on-expiry.
     if from != requester_addr {
+      return;
+    }
+
+    // Flood backstop: bound the relay state a peer can induce. Drop a fresh
+    // forward at the cap, and dedup an identical in-flight relay (same
+    // requester, requester seq, and target) so a retransmitted IndirectPing
+    // does not double the state. Both drop entirely (no forward, no Nack).
+    if self.indirect_forwards.len() >= self.cfg.max_indirect_forwards() {
+      return;
+    }
+    if self.indirect_forwards.values().any(|f| {
+      f.reply_to_addr == requester_addr
+        && f.requester_seq == requester_seq
+        && f.target_addr == target_addr
+    }) {
       return;
     }
 
@@ -3493,7 +3686,9 @@ pub(crate) fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   let multiplier =
     crate::mathf::ceil(crate::mathf::log2(n as f64) - crate::mathf::log2(THRESHOLD as f64)) as u32
       + 1;
-  interval * multiplier
+  // `checked_mul` to degrade a pathologically-large configured product to the
+  // unscaled `interval` instead of panicking on `Duration * u32` overflow.
+  interval.checked_mul(multiplier).unwrap_or(interval)
 }
 
 /// Return a random duration uniformly in `[0, interval)`.
@@ -3509,9 +3704,4 @@ fn random_stagger(interval: Duration, rng: &mut SmallRng) -> Duration {
     return Duration::ZERO;
   }
   Duration::from_nanos(rng.random_range(0..nanos))
-}
-
-// Suppress unused-warnings until later phases consume the placeholder fields.
-fn _phase2_placeholder(_e: ()) {
-  // intentionally empty
 }

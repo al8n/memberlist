@@ -1144,6 +1144,17 @@ impl Cluster {
     self.net.faults.drop_per_mille = v;
   }
 
+  /// Set a ONE-WAY (asymmetric) per-datagram drop rate (per mille) on the
+  /// `from -> to` link, on top of the global rate. Setting `(a, b)` without
+  /// `(b, a)` models a half-open failure: `a` hears `b` but `b` never hears `a`.
+  pub fn set_directional_drop_per_mille(&mut self, from: SocketAddr, to: SocketAddr, v: u32) {
+    self
+      .net
+      .faults
+      .directional_drop_per_mille
+      .insert((from, to), v);
+  }
+
   /// Set the probabilistic per-datagram duplicate rate (per mille).
   pub fn set_duplicate_per_mille(&mut self, v: u32) {
     self.net.faults.duplicate_per_mille = v;

@@ -292,13 +292,16 @@ mod tests {
       test_peer_to_socket(),
     );
 
-    // Leave, then a peer dials in during the drain.
+    // Leave, then a peer dials in during the drain: the left node does not admit
+    // the connection, so it builds no bridge and accept_connection returns None
+    // (the driver drops the connection without servicing it).
     coord.leave(now).expect("leave from a running node");
-    let eid = coord.accept_connection(addr(7000), now);
+    assert!(
+      coord.accept_connection(addr(7000), now).is_none(),
+      "a left node must not admit a new inbound connection"
+    );
 
-    // No acceptor bridge was installed: feeding inbound bytes for this
-    // connection mints no Stream and produces no response or transport bytes.
-    coord.handle_transport_data(eid, b"inbound", false, now);
+    // No acceptor bridge exists, so the node emits no response and no Connect.
     assert!(
       coord.poll_transport_transmit().is_none(),
       "a left node sends no reliable response to a new inbound connection"
@@ -343,7 +346,9 @@ mod tests {
       test_sni_provider(),
       test_peer_to_socket(),
     );
-    let server_exchange = server.accept_connection(dialer_addr, now);
+    let server_exchange = server
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
     server.leave(now).expect("leave from a running node");
 
     // Feed the peer's label then request during the drain; the mint is skipped.
@@ -560,7 +565,9 @@ mod tests {
     let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
-    let id = coord.accept_connection(addr(7000), now);
+    let id = coord
+      .accept_connection(addr(7000), now)
+      .expect("test: connection admitted");
     assert_eq!(coord.live_bridge_count(), 1);
     // The handle's monotonic-id property is exercised in StreamConns tests;
     // this assertion only proves the bridge was inserted.
@@ -682,7 +689,9 @@ mod tests {
     let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
-    let server_exchange = server.accept_connection(dialer_addr, now);
+    let server_exchange = server
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
     assert_eq!(server.live_bridge_count(), 1);
 
     // Dialer coordinator. Starting a one-way user-message produces the
@@ -1169,7 +1178,9 @@ mod tests {
     // peer. The acceptor stays Handshaking until its inbound label is
     // validated; its lazy label gate has queued no outbound prefix yet, so
     // nothing is owed to the wire.
-    let exchange = coord.accept_connection(addr(7000), now);
+    let exchange = coord
+      .accept_connection(addr(7000), now)
+      .expect("test: connection admitted");
     assert!(
       coord.poll_transport_transmit().is_none(),
       "accept_connection emits no transmits in-band",
@@ -1261,7 +1272,9 @@ mod tests {
 
     // (1) Driver accepts an inbound connection; the acceptor's lazy label
     // gate queues no outbound prefix until its inbound label validates.
-    let exchange = coord.accept_connection(addr(7000), now);
+    let exchange = coord
+      .accept_connection(addr(7000), now)
+      .expect("test: connection admitted");
     assert!(
       coord.poll_transport_transmit().is_none(),
       "accept_connection emits no transmits in-band",
@@ -1345,7 +1358,9 @@ mod tests {
     // (1) Driver accepts an inbound TCP connection; the acceptor is
     // Handshaking with an EMPTY `records.outbound` (lazy queue not yet
     // fired). No same-tick transmits surface from `accept_connection`.
-    let exchange = coord.accept_connection(addr(7000), now);
+    let exchange = coord
+      .accept_connection(addr(7000), now)
+      .expect("test: connection admitted");
     assert!(
       coord.poll_transport_transmit().is_none(),
       "accept_connection emits no transmits in-band",
@@ -1418,7 +1433,9 @@ mod tests {
       StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Accept the connection; nothing on the wire yet.
-    let exchange = coord.accept_connection(addr(7000), now);
+    let exchange = coord
+      .accept_connection(addr(7000), now)
+      .expect("test: connection admitted");
     assert!(coord.poll_transport_transmit().is_none());
 
     // (2) Deliver a matching labeled header from the peer; the acceptor's
@@ -1535,7 +1552,9 @@ mod tests {
     let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
-    let server_exchange = server.accept_connection(dialer_addr, now);
+    let server_exchange = server
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
 
     // (3) First transport read: ONLY the dialer's label prefix, no FIN.
     // The acceptor's inbound label validates, the lazy outbound label fires
@@ -2729,7 +2748,9 @@ mod tests {
     // connection. This inserts a server-side bridge into `conns` and anchors
     // `last_now = Some(now)` (the known-past anchor the policy-reap fold in
     // `poll_timeout` requires).
-    let exchange = coord.accept_connection(addr(7800), now);
+    let exchange = coord
+      .accept_connection(addr(7800), now)
+      .expect("test: connection admitted");
     assert_eq!(
       coord.live_bridge_count(),
       1,
@@ -2853,7 +2874,9 @@ mod tests {
     let cfg_s = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
     let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
       StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
-    let server_exchange = server.accept_connection(dialer_addr, now);
+    let server_exchange = server
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
 
     // (3) Split-read the dialer's label, tick to drain the acceptor's lazy
     // label into `out_transmit`, then feed the request tail with FIN. After
@@ -3550,7 +3573,11 @@ mod tests {
         match action {
           StreamAction::Connect(c) => {
             dial_eid = Some(c.id());
-            acc_eid = Some(acceptor.accept_connection(dialer_addr, now));
+            acc_eid = Some(
+              acceptor
+                .accept_connection(dialer_addr, now)
+                .expect("test: connection admitted"),
+            );
           }
           StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
             if let Some(aid) = acc_eid {

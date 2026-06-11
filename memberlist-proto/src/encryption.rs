@@ -12,6 +12,13 @@
 //! per encryption (no counter, no per-peer state). The 16-byte authenticator
 //! is appended inline by the AEAD constructions (AES-GCM / ChaCha20-Poly1305).
 //!
+//! Nonce-reuse safety: with random 96-bit nonces the birthday bound caps a
+//! single key at roughly 2^32 encryptions before the nonce-collision
+//! probability becomes non-negligible (the NIST SP 800-38D guidance for
+//! random-IV AES-GCM). At realistic gossip rates that is many years per key;
+//! deployments approaching it should rotate the keyring's primary key (which
+//! re-randomises the key, not just the nonce) well before the bound.
+//!
 //! The two-byte AAD `[Encrypted tag, algorithm tag]` binds the wrapper
 //! identity and the cipher choice to AEAD authentication: a peer cannot
 //! downgrade-swap algorithms without breaking the tag check.

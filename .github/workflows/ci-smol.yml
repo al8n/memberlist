@@ -52,6 +52,17 @@ jobs:
         with:
           toolchain: nightly-2026-05-22
 
+      # Cache BEFORE the build steps so the restore actually warms this run; a
+      # cache placed after the test step only saves, never restores.
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-reactor-smol
+
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -65,12 +76,3 @@ jobs:
           cargo test -p memberlist-reactor --features "$FEATURES" --test suite_tcp -- smol
           cargo test -p memberlist-reactor --features "$FEATURES" --test suite_tls -- smol
           cargo test -p memberlist-reactor --features "$FEATURES" --test suite_quic -- smol
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-reactor-smol

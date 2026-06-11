@@ -1,0 +1,114 @@
+name: ci-core
+
+# The runtime-independent core: the memberlist-proto state machine + codec (its
+# ~1000 tests otherwise run only inside the coverage job, on one OS and one
+# feature combo) and the deterministic simulation suite (which otherwise has no
+# pull_request gate). Both are pure-CPU and bind no sockets.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+  schedule: [cron: "0 1 */30 * *"]
+
+jobs:
+  proto:
+    name: ${{ matrix.os }} - proto
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      FEATURES: "std,tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,compression-snappy,compression-zstd,compression-brotli,checksum-crc32,checksum-xxhash32,checksum-xxhash64,checksum-xxhash3,checksum-murmur3,encryption-aes-gcm,encryption-chacha20-poly1305,cidr"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-22
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-proto
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Format
+        run: cargo fmt -p memberlist-proto --check
+
+      - name: Clippy
+        run: cargo clippy -p memberlist-proto --all-targets --features "$FEATURES" --no-deps -- -D warnings
+
+      - name: Test
+        run: cargo test -p memberlist-proto --features "$FEATURES"
+
+  sim:
+    name: simulation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-22
+          components: rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-sim
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Format
+        run: cargo fmt -p memberlist-simulation --check
+
+      # Routine suites only (conformance, determinism, crash/restart, the safety
+      # seed sweep, the legacy ports). The long VOPR campaign is #[ignore]d and
+      # runs in vopr.yml, so it is not selected here.
+      - name: Test
+        run: cargo test -p memberlist-simulation --features __sim-encryption-aes-gcm

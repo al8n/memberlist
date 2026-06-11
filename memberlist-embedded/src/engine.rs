@@ -1409,15 +1409,28 @@ where
       return;
     }
 
-    // Register the inbound exchange with the machine; it returns the ExchangeId the
-    // driver uses to route subsequent inbound bytes. The listener socket already
-    // completed its handshake, so the Connection starts Established.
-    let eid = self.endpoint.accept_connection(peer, now);
-    self
-      .plane
-      .connections
-      .insert(eid, Connection::accepted(peer, c));
-    self.plane.accepted_inbound += 1;
+    // Register the inbound exchange with the machine; on admission it returns the
+    // ExchangeId the driver uses to route subsequent inbound bytes (the listener
+    // socket already completed its handshake, so the Connection starts
+    // Established). `None` means NOT admitted (leaving, the max_inbound_streams
+    // cap, or a record-layer config error): drop the connection without
+    // registering it. Either way the listener slot is replenished below.
+    match self.endpoint.accept_connection(peer, now) {
+      Some(eid) => {
+        self
+          .plane
+          .connections
+          .insert(eid, Connection::accepted(peer, c));
+        self.plane.accepted_inbound += 1;
+      }
+      // Abort the just-accepted socket AND return its handle to the pool — the
+      // same abort-and-reclaim shape the CIDR reject path above uses — so a
+      // rejection does not shrink the finite reliable pool one slot at a time.
+      None => {
+        stream.abort(c);
+        self.plane.pool.give(c);
+      }
+    }
 
     // The listener slot is now the exchange; the slot is empty.
     self.plane.listener = None;
@@ -2449,12 +2462,16 @@ mod tests {
 
   struct NoStream {
     free: std::vec::Vec<u32>,
+    /// What `accepted_peer` reports for any slot — `Some` to simulate a settled
+    /// inbound handshake so `check_listener` proceeds to `accept_connection`.
+    accept_peer: Option<SocketAddr>,
   }
 
   impl NoStream {
     fn with_pool(size: u32) -> Self {
       Self {
         free: (0..size).collect(),
+        accept_peer: None,
       }
     }
   }
@@ -2479,7 +2496,7 @@ mod tests {
     }
 
     fn accepted_peer(&self, _c: u32) -> Option<SocketAddr> {
-      None
+      self.accept_peer
     }
 
     fn connect(
@@ -2745,6 +2762,45 @@ mod tests {
       outcome,
       Some(ExchangeOutcome::Failed),
       "a CIDR-blocked send_reliable must complete as Failed (a benign EOF would falsely succeed it)"
+    );
+  }
+
+  /// A rejected inbound accept must abort the socket AND return its slot to the
+  /// reliable pool — the same abort-and-reclaim the CIDR reject path uses — or
+  /// each rejection (a peer hitting `max_inbound_streams`, or any accept while
+  /// leaving) shrinks the finite pool one slot at a time until the listener can
+  /// no longer be restored and inbound reliable connections stop working.
+  #[test]
+  fn rejected_inbound_accept_returns_its_slot_to_the_pool() {
+    let now = Instant::from_origin(Duration::from_secs(86_400));
+    let cfg = Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10));
+    // A zero inbound-stream ceiling refuses every passive-open admission while the
+    // node stays running, so `check_listener` always takes the `None` arm.
+    let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+      .with_rng_seed(42)
+      .with_max_inbound_streams(Some(0));
+    let mut engine: Engine<SmolStr, u32> =
+      Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+
+    // Two free reliable slots plus a listener on a third: capacity is three.
+    engine.plane_mut().pool.push(10);
+    engine.plane_mut().pool.push(11);
+    engine.set_listener(12);
+    engine.start(now);
+    let capacity = engine.pool_free_count() + engine.listener_present() as usize;
+
+    // A settled inbound handshake the endpoint refuses (the cap): the slot must
+    // come back to the pool (possibly re-armed as the listener), never leak.
+    let mut stream = NoStream::with_pool(0);
+    stream.accept_peer = Some(node_addr(7950));
+    engine.check_listener(now, &mut stream);
+
+    assert_eq!(
+      engine.pool_free_count() + engine.listener_present() as usize,
+      capacity,
+      "a rejected inbound accept leaked a reliable-pool slot"
     );
   }
 

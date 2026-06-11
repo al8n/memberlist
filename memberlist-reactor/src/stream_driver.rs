@@ -5,6 +5,7 @@
 //! are accepted by a dedicated task (the listener's `accept` is async-only).
 
 use std::{
+  borrow::Cow,
   collections::{HashMap, HashSet, VecDeque},
   future::Future,
   net::{Shutdown, SocketAddr},
@@ -30,13 +31,18 @@ use futures_util::{
   pin_mut, select, select_biased,
 };
 use memberlist_proto::{
-  Instant, PingId,
+  ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, PingId,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
-  streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
+  streams::{
+    ExchangeId, StreamAction, StreamEndpoint, StreamTransport, checksum_gossip_datagram,
+    compress_gossip_datagram, encrypt_gossip_datagram,
+  },
+  typed::Message,
+  unwrap_transforms_with_encryption,
 };
 
 use crate::{
@@ -76,6 +82,10 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// channel (the payload byte budget bounds their bytes; this bounds their count).
 const OBS_OVERFLOW_MAX: usize = 1024;
 
+/// Max raw inbound datagrams buffered in the endpoint's `mem_ingress` before the
+/// recv loop stops reading the socket (a memory-DoS backstop).
+const MAX_BUFFERED_INGRESS: usize = 1024;
+
 /// A message from the pump to a bridge's TCP write side. Teardown is signalled
 /// out of band by dropping the [`BridgeHandle`], not by a variant here, so it can
 /// preempt even a write stalled on an unresponsive peer.
@@ -110,8 +120,12 @@ struct BridgeHandle {
 enum BridgeInbound {
   /// Bytes read from the peer for an exchange.
   Data(BridgeData),
-  /// The peer closed its write side (or the read errored) for an exchange.
+  /// The peer cleanly closed its write side (transport `read == 0`).
   Eof(BridgeEof),
+  /// A transport READ ERROR (not a clean EOF). Routed to
+  /// `handle_transport_error` so a one-way UserMessage is NOT falsely completed
+  /// as success by the benign-EOF path.
+  Error(BridgeEof),
 }
 
 /// Payload of [`BridgeInbound::Data`].
@@ -121,7 +135,7 @@ struct BridgeData {
   at: Instant,
 }
 
-/// Payload of [`BridgeInbound::Eof`].
+/// Payload of [`BridgeInbound::Eof`] and [`BridgeInbound::Error`].
 struct BridgeEof {
   eid: ExchangeId,
   at: Instant,
@@ -195,6 +209,84 @@ struct PendingUserSend {
   /// makes the final reply `Err(SendFailed)`.
   failed: usize,
   reply: oneshot::Sender<Result<(), Error>>,
+}
+
+/// The gossip transform context: the wire-transform options used to unwrap
+/// inbound and wrap outbound gossip datagrams inline on the pump. Rebuilt
+/// whenever the runtime options change ([`StreamDriver::rebuild_transform`]).
+struct TransformCtx {
+  compression: CompressionOptions,
+  checksum: ChecksumOptions,
+  encryption: EncryptionOptions,
+  gossip_mtu: usize,
+  label: Option<Bytes>,
+}
+
+/// Transform one inbound gossip datagram: decrypt + decompress (one pass) →
+/// strip label → parse. Returns the source and the parsed messages — empty on
+/// any malformed/undecryptable datagram (gossip is lossy; the driver drops it).
+/// Runs inline on the pump (the transform is microsecond-scale per datagram).
+fn transform_ingress<I: NodeId>(
+  ctx: &TransformCtx,
+  from: SocketAddr,
+  raw: Bytes,
+) -> (SocketAddr, Vec<Message<I, SocketAddr>>) {
+  // The only `Cow::Borrowed` result is the no-transform passthrough (the whole
+  // input unchanged), so reuse the input `Bytes` instead of copying it — this is
+  // the common plain-gossip path. A real transform yields `Owned`.
+  let transformed = match unwrap_transforms_with_encryption(&raw, ctx.gossip_mtu, &ctx.encryption) {
+    Ok(Cow::Borrowed(_)) => None,
+    Ok(Cow::Owned(v)) => Some(Bytes::from(v)),
+    Err(_) => return (from, Vec::new()),
+  };
+  let plain = transformed.unwrap_or(raw);
+  let inner = match decode_incoming(plain, &DecodeOptions::new(ctx.label.clone())) {
+    Ok(b) => b,
+    Err(_) => return (from, Vec::new()),
+  };
+  match parse_messages::<I, SocketAddr>(inner) {
+    Ok(msgs) => (from, msgs),
+    Err(_) => (from, Vec::new()),
+  }
+}
+
+/// Transform one outbound gossip [`Transmit`]: encode (plain or compound) →
+/// compress → checksum → encrypt. Returns the peer and on-wire bytes, or `None`
+/// when encoding fails or a configured checksum/encryption backend is missing
+/// (the driver drops the datagram). Pure and `Send`.
+fn transform_egress<I: NodeId>(
+  ctx: &TransformCtx,
+  transmit: Transmit<I, SocketAddr>,
+) -> Option<(SocketAddr, Vec<u8>)> {
+  let encode_opts = EncodeOptions::new(ctx.label.clone());
+  let (peer, plain) = match transmit {
+    Transmit::Packet(pkt) => {
+      let (to, msg) = pkt.into_parts();
+      (to, encode_outgoing(&msg, &encode_opts).ok()?)
+    }
+    Transmit::Compound(cmp) => {
+      let (to, msgs) = cmp.into_parts();
+      (to, encode_outgoing_compound(&msgs, &encode_opts).ok()?)
+    }
+  };
+  let compressed = compress_gossip_datagram(&ctx.compression, &plain);
+  let checksummed = checksum_gossip_datagram(&ctx.checksum, &compressed).ok()?;
+  let on_wire = encrypt_gossip_datagram(&ctx.encryption, &checksummed).ok()?;
+  Some((peer, on_wire))
+}
+
+/// Build the transform context from the endpoint's current options.
+fn build_transform<I: NodeId, T: StreamTransport>(
+  endpoint: &StreamEndpoint<I, SocketAddr, T>,
+  label: &Option<Bytes>,
+) -> Arc<TransformCtx> {
+  Arc::new(TransformCtx {
+    compression: endpoint.compression(),
+    checksum: endpoint.checksum(),
+    encryption: endpoint.encryption_options().clone(),
+    gossip_mtu: endpoint.gossip_mtu(),
+    label: label.clone(),
+  })
 }
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
@@ -292,6 +384,13 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   /// machine sees it. `()` when the `cidr` feature is off. The same policy also
   /// gates membership admission via the composed alive delegate.
   cidr_policy: CidrFilter,
+  /// The gossip transform context used to unwrap inbound (and wrap outbound)
+  /// gossip datagrams inline on the pump. Rebuilt on a runtime options change.
+  transform: Arc<TransformCtx>,
+  /// The endpoint snapshot version last published to `shared`. The snapshot is
+  /// rebuilt + republished only when `endpoint.snapshot_version()` differs from
+  /// this, not on every productive poll (rebuilding clones every `NodeState`).
+  last_snapshot_version: u64,
 }
 
 impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
@@ -319,6 +418,11 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       .min(GOSSIP_RECV_BUF_MAX);
     let (inbound_tx, inbound_rx) = flume::bounded(BRIDGE_INBOUND_CAP);
     let (dial_tx, dial_rx) = flume::unbounded();
+    let transform = build_transform(&endpoint, &label);
+    // `shared` already holds the initial snapshot (published at its construction
+    // with the endpoint at this version), so start in sync — the first poll
+    // republishes only after a real membership/health change.
+    let last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
     Self {
       endpoint,
       socket: Some(socket),
@@ -350,7 +454,16 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       idle_wake: Duration::from_secs(1),
       close_timeout,
       cidr_policy,
+      transform,
+      last_snapshot_version,
     }
+  }
+
+  /// Rebuild the cached transform context after a runtime options change
+  /// (`Set{Compression,Checksum,Encryption}Options`), so the inline transform
+  /// path observes the new options.
+  fn rebuild_transform(&mut self) {
+    self.transform = build_transform(&self.endpoint, &self.label);
   }
 
   /// Spawns the per-exchange bridge task that moves bytes between `stream` and
@@ -648,6 +761,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // change that will never be observed.
         let res = if self.endpoint.is_running() {
           self.endpoint.set_compression_options(opts);
+          self.rebuild_transform();
           Ok(())
         } else {
           Err(Error::NotRunning)
@@ -665,10 +779,13 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // so a "successful" change would silently disable ALL gossip after a
         // false `Ok`.
         let res = if self.endpoint.is_running() {
-          self
-            .endpoint
-            .set_checksum_options(opts)
-            .map_err(Error::Checksum)
+          match self.endpoint.set_checksum_options(opts) {
+            Ok(()) => {
+              self.rebuild_transform();
+              Ok(())
+            }
+            Err(e) => Err(Error::Checksum(e)),
+          }
         } else {
           Err(Error::NotRunning)
         };
@@ -684,7 +801,12 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         let res = if self.endpoint.is_running() {
           match crate::transform::validate_encryption(&opts) {
             Ok(()) => {
+              // The endpoint clears its synchronous `mem_ingress` on a key change,
+              // and every inbound transform runs inline on the pump with the
+              // current key, so a rotation cannot leave a datagram to be decrypted
+              // under the old key after the switch.
               self.endpoint.set_encryption_options(opts);
+              self.rebuild_transform();
               Ok(())
             }
             Err(e) => Err(e),
@@ -913,32 +1035,24 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   /// Returns `(worked, more)`: whether any surface produced work (republish the
   /// snapshot) and whether any surface hit its cap with work left (self-wake).
   fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool) {
-    let decode_opts = DecodeOptions::new(self.label.clone());
-    let encode_opts = EncodeOptions::new(self.label.clone());
-    let budget = self.transmit_batch.max(1);
     let now = Instant::now();
+    let budget = self.transmit_batch.max(1);
     let mut worked = false;
     let mut more = false;
 
-    // Inbound gossip: decrypt, strip label, decode, feed each message back.
+    // Inbound gossip: decrypt + decompress + strip-label + parse, inline on the
+    // pump. The transform is microsecond-scale per datagram, so even a full batch
+    // of near-MTU encrypted datagrams is a sub-millisecond pass — negligible
+    // against the probe/suspicion deadlines — and the latency-critical Ping/Ack
+    // path is a small standalone datagram. The parsed messages reach the
+    // single-owner machine HERE, on the pump, with their arrival-time `now`.
     let mut ingress = 0;
     while ingress < budget {
       let Some((from, raw)) = self.endpoint.poll_memberlist_ingress() else {
         break;
       };
       ingress += 1;
-      let plain = match self.endpoint.decrypt_gossip(&raw) {
-        Ok(p) => Bytes::from(p),
-        Err(_) => continue,
-      };
-      let inner = match decode_incoming(plain, &decode_opts) {
-        Ok(b) => b,
-        Err(_) => continue,
-      };
-      let msgs = match parse_messages::<I, SocketAddr>(inner) {
-        Ok(m) => m,
-        Err(_) => continue,
-      };
+      let (from, msgs) = transform_ingress::<I>(&self.transform, from, raw);
       for msg in msgs {
         self.endpoint.handle_packet(from, msg, now);
       }
@@ -975,41 +1089,21 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     worked |= tx > 0;
     more |= tx == budget;
 
-    // Outbound gossip: encode (plain or compound), compress, encrypt, send.
+    // Outbound gossip: encode (plain or compound) + compress + checksum +
+    // encrypt, then send. Popping the last transmit is the endpoint's
+    // leave-completion fence (it emits `LeftCluster`, which resolves `leave()`),
+    // so the leave/shutdown datagrams must reach the socket synchronously, before
+    // that fence fires. Egress is bounded fanout, so the transform is not a
+    // throughput concern.
     let mut sent = 0;
     while sent < budget {
       let Some(transmit) = self.endpoint.poll_memberlist_transmit() else {
         break;
       };
       sent += 1;
-      let (peer, plain) = match transmit {
-        Transmit::Packet(pkt) => {
-          let (to, msg) = pkt.into_parts();
-          match encode_outgoing(&msg, &encode_opts) {
-            Ok(b) => (to, b.to_vec()),
-            Err(_) => continue,
-          }
-        }
-        Transmit::Compound(cmp) => {
-          let (to, msgs) = cmp.into_parts();
-          match encode_outgoing_compound(&msgs, &encode_opts) {
-            Ok(b) => (to, b.to_vec()),
-            Err(_) => continue,
-          }
-        }
-      };
-      let compressed = self.endpoint.compress_gossip(&plain);
-      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
-        Ok(b) => b,
-        // Checksum configured but its backend was not built in — drop rather
-        // than emit an unverifiable datagram on a checksum-configured path.
-        Err(_) => continue,
-      };
-      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
-        Ok(b) => b,
-        Err(_) => continue,
-      };
-      if let Some(socket) = self.socket.as_ref() {
+      if let Some((peer, on_wire)) = transform_egress::<I>(&self.transform, transmit)
+        && let Some(socket) = self.socket.as_ref()
+      {
         // Ignoring Poll: gossip is best-effort — a full or errored UDP send drops
         // the datagram and SWIM recovers on the next round.
         let _ = socket.poll_send_to(cx, &on_wire, peer);
@@ -1300,11 +1394,29 @@ where
       return Poll::Ready(());
     }
 
-    // Receive gossip (bounded; a full batch means more may be waiting). The
-    // socket is always `Some` here — the shutdown branch above (which takes it)
-    // returned `Poll::Ready` before reaching this point.
+    // Receive gossip (bounded by recv_batch; a full batch means more may be
+    // waiting). The socket is always `Some` here — the shutdown branch above
+    // (which takes it) returned `Poll::Ready` before reaching this point.
+    //
+    // The gate is the RAW BUFFER depth (`mem_ingress`): recv stops reading the
+    // socket once the buffer is full, so it only grows if recv truly outruns the
+    // pump, which this cap bounds (a memory-DoS backstop). The kernel buffer
+    // absorbs and lossily drops the overflow; gossip self-heals.
+    // Operators expecting sustained high gossip rates (large clusters, fast
+    // gossip_interval) should raise the OS receive buffer (SO_RCVBUF) on the
+    // gossip socket so the kernel absorbs a deeper burst before dropping.
     let mut recv_n = 0;
+    let mut recv_gated = false;
     while recv_n < this.recv_batch {
+      if this.endpoint.pending_memberlist_ingress() >= MAX_BUFFERED_INGRESS {
+        // Gated WITHOUT polling the socket, so NO socket waker is registered
+        // this pass. The flag forces a self-wake after the ingress drain below
+        // frees buffer space (the drain always makes inline progress), so the
+        // next pass re-polls the socket instead of parking until the idle
+        // timer with readable packets queued in the kernel.
+        recv_gated = true;
+        break;
+      }
       let Some(socket) = this.socket.as_ref() else {
         break;
       };
@@ -1326,6 +1438,7 @@ where
     if recv_n > 0 {
       progress = true;
     }
+    more |= recv_gated;
     if recv_n == this.recv_batch {
       more = true;
     }
@@ -1342,7 +1455,15 @@ where
         progress = true;
         continue;
       }
-      let eid = this.endpoint.accept_connection(peer, now);
+      let Some(eid) = this.endpoint.accept_connection(peer, now) else {
+        // Not admitted (leaving, the inbound-stream cap is reached, or a
+        // record-layer config error): no bridge exists, so drop the accepted
+        // stream immediately rather than spawn a servicing task for a connection
+        // the machine will never feed.
+        drop(stream);
+        progress = true;
+        continue;
+      };
       let (out_tx, out_rx) = flume::unbounded();
       let (cancel_tx, cancel_rx) = oneshot::channel();
       this.spawn_bridge(eid, stream, out_rx, cancel_rx);
@@ -1401,6 +1522,9 @@ where
         BridgeInbound::Eof(BridgeEof { eid, at }) => {
           this.endpoint.handle_transport_data(eid, &[], true, at);
         }
+        BridgeInbound::Error(BridgeEof { eid, at }) => {
+          this.endpoint.handle_transport_error(eid, at);
+        }
       }
     }
     if inbound_n > 0 {
@@ -1438,8 +1562,12 @@ where
       }
     }
 
-    // Republish the snapshot if anything advanced.
-    if progress {
+    // Republish the snapshot only when membership/health actually changed —
+    // rebuilding clones every NodeState, so doing it on every productive poll is
+    // wasted under steady traffic.
+    let snap_v = this.endpoint.endpoint_ref().snapshot_version();
+    if progress && snap_v != this.last_snapshot_version {
+      this.last_snapshot_version = snap_v;
       this
         .shared
         .publish(snapshot_of(this.endpoint.endpoint_ref()));
@@ -1597,9 +1725,18 @@ async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
     }
     select! {
       read = read_half.read(&mut buf).fuse() => match read {
+        // A clean `read == 0` (peer half-closed) is a benign EOF anchor; a read
+        // ERROR is a transport failure and must NOT take the benign-EOF path (it
+        // would falsely complete a one-way UserMessage as success). Both stop
+        // this task's reads.
         Ok(0) | Err(_) => {
           // Timestamp at read completion, before any send backpressure.
-          let msg = BridgeInbound::Eof(BridgeEof { eid, at: Instant::now() });
+          let payload = BridgeEof { eid, at: Instant::now() };
+          let msg = if read.is_err() {
+            BridgeInbound::Error(payload)
+          } else {
+            BridgeInbound::Eof(payload)
+          };
           // Bounded channel: await space (backpressure), then wake the pump.
           if inbound_tx.send_async(msg).await.is_err() {
             break;
@@ -1752,7 +1889,9 @@ mod tests {
       Box::new(|_| None),
       Box::new(|addr| *addr),
     );
-    endpoint.accept_connection("127.0.0.1:1".parse().unwrap(), Instant::now())
+    endpoint
+      .accept_connection("127.0.0.1:1".parse().unwrap(), Instant::now())
+      .expect("test: connection admitted")
   }
 
   /// Connects a loopback TCP pair, returning `(server, client)`. The bridge owns
@@ -1862,6 +2001,28 @@ mod tests {
     Arc<Shared<SmolStr>>,
     Arc<AtomicU64>,
   ) {
+    build_driver_with(obs_cap, obs_budget, 8, |endpoint| {
+      endpoint.start_scheduling(Instant::now());
+    })
+    .await
+  }
+
+  /// [`build_driver`] with a caller-chosen `transmit_batch` and a hook that runs
+  /// on the endpoint BEFORE the driver takes ownership. The hook also owns
+  /// scheduler startup ([`build_driver`] starts them; a wake-counting test leaves
+  /// them OFF so no staggered scheduler deadline can supply a wake the test means
+  /// to attribute to something else).
+  async fn build_driver_with(
+    obs_cap: usize,
+    obs_budget: Option<u64>,
+    transmit_batch: usize,
+    prep: impl FnOnce(&mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>),
+  ) -> (
+    StreamDriver<SmolStr, TokioRuntime, RawRecords>,
+    Receiver<Event<SmolStr, SocketAddr>>,
+    Arc<Shared<SmolStr>>,
+    Arc<AtomicU64>,
+  ) {
     let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
       .await
       .expect("bind gossip socket");
@@ -1875,7 +2036,7 @@ mod tests {
       Box::new(|_| None),
       Box::new(|a: &SocketAddr| *a),
     );
-    endpoint.start_scheduling(Instant::now());
+    prep(&mut endpoint);
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
     let obs_payload_bytes = Arc::new(AtomicU64::new(0));
     let (obs_tx, obs_rx) = flume::bounded(obs_cap);
@@ -1898,7 +2059,7 @@ mod tests {
       socket,
       shared.clone(),
       8,
-      8,
+      transmit_batch,
       obs_tx,
       obs_payload_bytes.clone(),
       obs_budget,
@@ -1913,6 +2074,59 @@ mod tests {
       (),
     );
     (driver, obs_rx, shared, obs_payload_bytes)
+  }
+
+  /// The recv loop, when gated by a full raw-ingress buffer, skips
+  /// `poll_recv_from` entirely — so NO socket waker is registered that pass. A
+  /// `transmit_batch` larger than the cap then lets the ingress drain empty the
+  /// whole buffer without exhausting its budget, so without the gate's
+  /// self-wake flag the driver would park with readable datagrams queued in the
+  /// kernel until the idle timer. This drives exactly that shape and asserts
+  /// the gated pass self-wakes.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn recv_gate_self_wakes_after_draining_full_ingress_buffer() {
+    let src: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let (driver, _obs_rx, _shared, _bytes) =
+      build_driver_with(16, None, MAX_BUFFERED_INGRESS * 2, |endpoint| {
+        // Deliberately NO start_scheduling: with the schedulers off there is no
+        // machine deadline whose elapse could fire the timer branch and supply
+        // a wake this test would falsely attribute to the recv gate.
+        //
+        // Fill the raw buffer to the recv-gate cap so the first poll's recv loop
+        // is gated before it ever touches the socket.
+        let now = Instant::now();
+        for _ in 0..MAX_BUFFERED_INGRESS {
+          endpoint.handle_gossip(src, b"x", now);
+        }
+        assert_eq!(endpoint.pending_memberlist_ingress(), MAX_BUFFERED_INGRESS);
+      })
+      .await;
+
+    struct CountWaker(AtomicU64);
+    impl std::task::Wake for CountWaker {
+      fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+      }
+      fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+      }
+    }
+    let count = Arc::new(CountWaker(AtomicU64::new(0)));
+    let waker = std::task::Waker::from(count.clone());
+    let mut cx = Context::from_waker(&waker);
+
+    // One pass: the gated recv loop registers no socket interest; the drain
+    // then empties every buffered datagram under its oversized budget (so no
+    // budget-exhaustion self-wake fires); the schedulers are off (no timer
+    // wake). The gate flag is therefore the pass's ONLY wake source — assert
+    // EXACTLY one wake, so an unrelated wake cannot mask a broken gate.
+    let mut driver = core::pin::pin!(driver);
+    assert!(driver.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(
+      count.0.load(Ordering::SeqCst),
+      1,
+      "the gate flag must be the gated pass's only self-wake"
+    );
   }
 
   /// `send_observation`'s byte backstop: when enqueuing a payload event would push
@@ -2687,7 +2901,7 @@ mod tests {
         .await
         .expect("bridge reports inbound")
       {
-        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Eof(_) | BridgeInbound::Error(_) => break,
         BridgeInbound::Data(_) => continue,
       }
     }
@@ -2826,7 +3040,7 @@ mod tests {
         .await
         .expect("bridge reports inbound")
       {
-        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Eof(_) | BridgeInbound::Error(_) => break,
         BridgeInbound::Data(_) => continue,
       }
     }
@@ -2909,7 +3123,7 @@ mod tests {
         .await
         .expect("bridge reports inbound")
       {
-        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Eof(_) | BridgeInbound::Error(_) => break,
         BridgeInbound::Data(_) => continue,
       }
     }

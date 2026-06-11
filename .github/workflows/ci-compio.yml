@@ -57,6 +57,17 @@ jobs:
           toolchain: nightly-2026-05-22
           components: clippy, rustfmt
 
+      # Cache BEFORE the build steps so the restore actually warms this run; a
+      # cache placed after the test step only saves, never restores.
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-compio
+
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -84,12 +95,3 @@ jobs:
           else
             cargo test -p memberlist-compio --features "$FEATURES" --no-fail-fast
           fi
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-compio

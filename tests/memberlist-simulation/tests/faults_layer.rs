@@ -93,3 +93,48 @@ fn stream_dial_does_not_consume_drop_next_token() {
     "token must be consumed by the datagram, not still armed"
   );
 }
+
+/// A one-way (asymmetric) cut must not fragment membership: SWIM's indirect
+/// probing routes around it. Totally drop every datagram from `a2` to `a0` (so
+/// `a0` never hears `a2` directly, and `a0`'s direct probe of `a2` always times
+/// out because the ack is cut), while `a0 -> a2` and both directions to/from the
+/// relay `a1` stay clean. All three nodes must still converge on full membership.
+#[test]
+fn one_way_cut_is_routed_around_by_indirect_probing() {
+  let a0 = addr(31920);
+  let a1 = addr(31921);
+  let a2 = addr(31922);
+  let ids = ["n0", "n1", "n2"];
+  let addrs = [a0, a1, a2];
+
+  let mut c = Cluster::new();
+  c.seed_faults(7);
+  for (id, &a) in ids.iter().zip(&addrs) {
+    c.add_node((*id).into(), a);
+  }
+  // Seed full membership from a0.
+  for i in 1..3 {
+    c.inject_alive(a0, ids[i].into(), addrs[i], 1);
+  }
+  // Total one-way cut: a2's datagrams to a0 are always dropped. a0 -> a2 and
+  // a1 <-> {a0, a2} stay clean, so a1 can relay a2's liveness to a0.
+  c.set_directional_drop_per_mille(a2, a0, 1000);
+
+  for _ in 0..1500 {
+    c.step();
+  }
+
+  let mut known = 0;
+  for &h in &addrs {
+    for id in &ids {
+      if c.member(h, &smol_str::SmolStr::from(*id)).is_some() {
+        known += 1;
+      }
+    }
+  }
+  assert_eq!(
+    known, 9,
+    "all three nodes must know all three members despite the one-way a2->a0 cut \
+     (indirect probing via a1 routes around it); got {known}/9",
+  );
+}

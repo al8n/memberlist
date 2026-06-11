@@ -108,6 +108,13 @@ where
   /// reply-receiver hanging on a command buffered in a channel that
   /// already has its Receiver gone.
   shutdown_flag: Arc<AtomicBool>,
+  /// Teardown-completion latch. The driver task holds the matching sender and
+  /// drops it only after `run` returns (all sockets closed). A `shutdown` caller
+  /// that LOST the flag race awaits this before returning, so it cannot resume
+  /// and rebind the same port while the driver's listener / UDP socket is still
+  /// bound. `recv_async` resolves (with `Disconnected`) the moment the sender
+  /// drops.
+  shutdown_done_rx: Receiver<()>,
   /// Monotonic count of events dropped at the `EventStream` (`events()`)
   /// fan-out: a slow subscriber let the bounded events queue fill, so the driver
   /// dropped the newest event rather than block. App-data is routed to the
@@ -145,6 +152,7 @@ where
       events_rx: self.events_rx.clone(),
       driver_handle: self.driver_handle.clone(),
       shutdown_flag: self.shutdown_flag.clone(),
+      shutdown_done_rx: self.shutdown_done_rx.clone(),
       events_dropped: self.events_dropped.clone(),
       observation_dropped: self.observation_dropped.clone(),
       cached_join_deadline: self.cached_join_deadline,
@@ -380,7 +388,14 @@ where
       cidr_policy,
     );
 
-    let driver_handle = compio::runtime::spawn(transport.run(runtime));
+    // Teardown-completion latch: moved into the driver task and dropped only
+    // when `run` returns (all sockets closed), unblocking any `shutdown` caller
+    // that lost the flag race (see `shutdown`).
+    let (shutdown_done_tx, shutdown_done_rx) = flume::bounded::<()>(1);
+    let driver_handle = compio::runtime::spawn(async move {
+      transport.run(runtime).await;
+      drop(shutdown_done_tx);
+    });
 
     Ok(Self {
       commands: commands_tx,
@@ -388,6 +403,7 @@ where
       events_rx,
       driver_handle: Arc::new(driver_handle),
       shutdown_flag,
+      shutdown_done_rx,
       events_dropped,
       observation_dropped,
       cached_join_deadline,
@@ -1047,6 +1063,13 @@ where
     // first caller; otherwise the driver has already observed (or will
     // observe) a prior Shutdown command and is tearing down on its own.
     if self.shutdown_flag.swap(true, Ordering::AcqRel) {
+      // Lost the race: the winning caller owns the teardown. Await its
+      // completion before returning so this caller cannot resume and rebind the
+      // same port while the driver's sockets are still bound. `recv_async`
+      // resolves (with `Disconnected`) the moment the driver drops the latch
+      // sender after `run` returns. Ignoring the result: either arm means
+      // teardown is done.
+      let _ = self.shutdown_done_rx.recv_async().await;
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();

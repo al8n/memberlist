@@ -317,8 +317,9 @@ pub(crate) enum BridgeReady {
 /// entry-point:
 /// - `Bytes` → `handle_transport_data(eid, bytes, eof=false, now)`.
 /// - `Eof` → `handle_transport_data(eid, &[], eof=true, now)`.
-/// - `Error` → `handle_transport_data(eid, &[], eof=true, now)` and the
-///   bridge is dropped from the driver-side table.
+/// - `Error` → `handle_transport_error(eid, now)` — a transport error fails the
+///   bridge rather than taking the benign-EOF path that would falsely complete a
+///   one-way UserMessage as success.
 pub(crate) enum BridgeInbound {
   /// Plaintext bytes read from the stream.
   Bytes(BridgeBytes),
@@ -624,6 +625,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   };
 
   refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+  // Track the published snapshot version so the per-iteration republishes below
+  // rebuild only on an actual membership/health change.
+  let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
@@ -830,7 +834,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if drained_any {
-        refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+        refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
       }
       break;
     }
@@ -959,7 +963,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
-        refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+        refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
       }
       if exit {
         break;
@@ -999,7 +1003,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
-      refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+      refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
       dirty = false;
     }
 
@@ -1221,7 +1225,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     reap_pending_leave(&mut pending.leave, Instant::now()).await;
 
     if dirty {
-      refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+      refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
     }
 
     if exit {
@@ -1331,6 +1335,14 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // immediately. The listener does not have an explicit close API
   // distinct from drop — the local going out of scope here closes the
   // file descriptor.
+  //
+  // Windows caveat: unlike the gossip UDP socket below (which gets an awaited
+  // `close()` because IOCP handle close is asynchronous), the listener has no
+  // such API, so its close rides `drop`. If IOCP closes the listening handle
+  // asynchronously, a same-port TCP rebind issued the instant `shutdown().await`
+  // returns could in principle race `AddrInUse`. In practice the integration
+  // suite rebinds on ephemeral ports (and retries `AddrInUse`), so this has not
+  // surfaced; a fully synchronous fix needs a compio `TcpListener` async-close.
   drop(listener);
   // Ignoring Err: socket close on shutdown — the runtime tears down
   // file descriptors anyway and the error is unactionable.
@@ -1897,12 +1909,12 @@ where
       err: _,
       received_at,
     }) => {
-      // A transport error and an orderly close both retire the recv
-      // half from the coordinator's view; feed an EOF anchor and let
-      // the machine reap the bridge through `pump_bridges`. Same
-      // removal discipline as the Eof arm — let the eventual
-      // `StreamAction::Close` clean up the driver-side entry.
-      endpoint.handle_transport_data(eid, &[], true, received_at);
+      // A transport ERROR is NOT a clean EOF: route it to handle_transport_error
+      // so the bridge fails with ConnectionLost. Feeding it as the benign EOF
+      // anchor (handle_transport_data with eof=true) would, for a one-way
+      // UserMessage, falsely resolve send_reliable as success. The eventual
+      // StreamAction::Close still cleans up the driver-side entry.
+      endpoint.handle_transport_error(eid, received_at);
     }
   }
 }
@@ -2292,7 +2304,7 @@ where
       Transmit::Packet(pkt) => {
         let (to, msg) = pkt.into_parts();
         match encode_outgoing(&msg, &encode_opts) {
-          Ok(b) => (to, b.to_vec()),
+          Ok(b) => (to, b),
           // A locally-built message that fails to encode is dropped so a
           // single bad codec invocation cannot wedge the driver.
           Err(_) => continue,
@@ -2301,7 +2313,7 @@ where
       Transmit::Compound(cmp) => {
         let (to, msgs) = cmp.into_parts();
         match encode_outgoing_compound(&msgs, &encode_opts) {
-          Ok(b) => (to, b.to_vec()),
+          Ok(b) => (to, b),
           Err(_) => continue,
         }
       }
@@ -2630,7 +2642,15 @@ async fn observation_task<I, A, D>(
     if let Some(b) = payload {
       obs_payload_bytes.fetch_sub(b, std::sync::atomic::Ordering::Relaxed);
     }
-    dispatch_event_delegate(&delegate, &ev).await;
+    // Contain a panicking delegate hook so the task SURVIVES and keeps releasing
+    // the byte-backstop reservations of still-queued events. A dead obs task
+    // would strand them — permanently wedging the byte budget against all future
+    // app-data — and silently stop all delegate dispatch and EventStream
+    // fan-out. Mirrors the reactor's obs task. Ignoring the unwind result: the
+    // panic is contained and this event is simply dropped.
+    let _ = std::panic::AssertUnwindSafe(dispatch_event_delegate(&delegate, &ev))
+      .catch_unwind()
+      .await;
     // Fan out membership / control events only. App-data was delivered to the
     // delegate above; the EventStream cannot reconstruct it from the snapshot,
     // and forwarding the large reliable payloads would let a slow subscriber
@@ -2885,6 +2905,41 @@ fn refresh_snapshot<I, A, R>(
   snapshot.store(Arc::new(snap));
 }
 
+/// As [`refresh_snapshot`], but rebuilds + stores only when the endpoint's
+/// snapshot version changed since `*last_version` — the rebuild clones every
+/// `NodeState`, so skipping it on a dirty iteration that did not actually change
+/// membership/health is the largest steady-state saving.
+fn refresh_snapshot_if_changed<I, A, R>(
+  endpoint: &StreamEndpoint<I, A, R>,
+  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  last_version: &mut u64,
+) where
+  I: memberlist_proto::Id
+    + memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  R: StreamTransport,
+{
+  let v = endpoint.endpoint_ref().snapshot_version();
+  if v != *last_version {
+    *last_version = v;
+    refresh_snapshot::<I, A, R>(endpoint, snapshot);
+  }
+}
+
 /// Route one [`BridgeReady`] message — either a freshly-accepted inbound
 /// connection or the result of an outbound dial — into the coordinator,
 /// spawning a per-bridge byte-mover on success.
@@ -3024,7 +3079,14 @@ where
       // `StreamEndpoint::handle_transport_data` decrypts handshake bytes for the
       // TLS path; the bridge itself sees only raw socket bytes.
       let now = Instant::now();
-      let eid = endpoint.accept_connection(peer.into(), now);
+      let Some(eid) = endpoint.accept_connection(peer.into(), now) else {
+        // Not admitted (leaving, the inbound-stream cap is reached, or a
+        // record-layer config error): no bridge exists, so drop the accepted
+        // stream immediately rather than spawn a byte mover for a connection the
+        // machine will never feed.
+        drop(stream);
+        return true;
+      };
       let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });

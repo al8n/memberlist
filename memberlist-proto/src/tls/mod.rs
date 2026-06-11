@@ -567,7 +567,9 @@ mod tests {
 
     // A live inbound TLS bridge (still Handshaking — the TLS handshake has not
     // run, but the bridge exists in `conns`).
-    let _exchange = coord.accept_connection(addr(7311), now);
+    let _exchange = coord
+      .accept_connection(addr(7311), now)
+      .expect("test: connection admitted");
     assert_eq!(coord.live_bridge_count(), 1);
 
     // Publish an enabling encryption policy. For the TLS bridge, `set_encryption`
@@ -707,7 +709,9 @@ mod tests {
 
     // (1) The driver accepts an inbound TLS connection. The acceptor builds a
     // server-side `Handshaking` bridge bounded by `ACCEPT_HANDSHAKE_DEADLINE`.
-    let exchange = acceptor.accept_connection(dialer_addr, now);
+    let exchange = acceptor
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
 
     // (2) A bare client record layer (the dialer's TLS half) handshakes with the
     // acceptor coordinator carrying NO application request — the realistic case
@@ -899,7 +903,11 @@ mod tests {
           StreamAction::Connect(info) => {
             dialer_ex = Some(info.id());
             if acceptor_ex.is_none() {
-              acceptor_ex = Some(acceptor.accept_connection(dialer_addr, now));
+              acceptor_ex = Some(
+                acceptor
+                  .accept_connection(dialer_addr, now)
+                  .expect("test: connection admitted"),
+              );
             }
           }
           StreamAction::Shutdown(r) | StreamAction::Close(r) => {
@@ -1016,7 +1024,9 @@ mod tests {
         test_peer_to_socket(),
       );
 
-    let exchange = acceptor.accept_connection(dialer_addr, now);
+    let exchange = acceptor
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
 
     // A bare client TLS half drives the handshake to completion, then sends a
     // WRONG-cluster label `[12][7][other-x]` followed by a payload — all as TLS
@@ -1147,7 +1157,9 @@ mod tests {
         test_peer_to_socket(),
       );
 
-    let exchange = acceptor.accept_connection(dialer_addr, now);
+    let exchange = acceptor
+      .accept_connection(dialer_addr, now)
+      .expect("test: connection admitted");
 
     let mut client = TlsRecords::client(
       Arc::new(test_client()),

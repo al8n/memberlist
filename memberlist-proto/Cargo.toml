@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-proto"
-version = "0.1.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,7 +12,28 @@ categories.workspace = true
 description = "Sans-I/O state machine for the memberlist gossip protocol."
 
 [package.metadata.docs.rs]
-all-features = true
+# Explicit set instead of all-features: the *-fips backends pull aws-lc-rs-fips,
+# which needs a Go toolchain docs.rs does not provide. This set documents the
+# full public API (every codec / transport / crypto backend) without fips.
+features = [
+  "std",
+  "tracing",
+  "tcp",
+  "cidr",
+  "tls-rustls-ring",
+  "quic-rustls-ring",
+  "compression-lz4",
+  "compression-snappy",
+  "compression-zstd",
+  "compression-brotli",
+  "checksum-crc32",
+  "checksum-xxhash32",
+  "checksum-xxhash64",
+  "checksum-xxhash3",
+  "checksum-murmur3",
+  "encryption-aes-gcm",
+  "encryption-chacha20-poly1305",
+]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -175,6 +196,7 @@ buffa-build = "0.7"
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1"
 # Naming the concrete `Message<SmolStr, SocketAddr>` payload types in benches.
 bytes = { workspace = true, features = ["std"] }
 smol_str = { workspace = true, features = ["std"] }

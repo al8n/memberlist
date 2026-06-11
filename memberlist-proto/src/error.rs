@@ -90,6 +90,31 @@ pub enum EndpointInitError {
   /// errored or was not yet ready.
   #[error("entropy source failed while seeding the gossip RNG")]
   Entropy,
+  /// `EndpointOptions::initial_meta` is larger than the configured
+  /// `meta_max_size`, so the local Alive broadcast would carry a meta that
+  /// peers reject. Fix the builder configuration: shrink `initial_meta` or
+  /// raise `with_meta_max_size`.
+  #[error(
+    "initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
+    .0.meta_len,
+    .0.max
+  )]
+  MetaTooLarge(MetaTooLarge),
+  /// `with_awareness_max_multiplier` was set to 0. The Lifeguard awareness
+  /// score is clamped to `[0, max - 1]`, which is empty when `max == 0`, so a
+  /// zero multiplier is rejected rather than constructing an unusable tracker.
+  #[error("awareness_max_multiplier must be >= 1")]
+  AwarenessMultiplierZero,
+}
+
+/// Payload for [`EndpointInitError::MetaTooLarge`]: the configured
+/// `initial_meta` length and the `meta_max_size` it exceeded, both in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaTooLarge {
+  /// The configured `initial_meta` length in bytes.
+  pub meta_len: usize,
+  /// The configured `meta_max_size` ceiling in bytes.
+  pub max: usize,
 }
 
 /// Error from a per-stream reliable-exchange state machine.

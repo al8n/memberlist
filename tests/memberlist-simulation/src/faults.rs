@@ -23,6 +23,13 @@ pub struct FaultConfig {
   /// Probabilistic drop: each datagram is dropped with probability
   /// drop_per_mille/1000.
   pub(crate) drop_per_mille: u32,
+  /// Per-direction probabilistic drop: a datagram from `a` to `b` is dropped
+  /// with probability `directional_drop_per_mille[(a, b)] / 1000`, applied ON
+  /// TOP of the global `drop_per_mille`. Unlike the symmetric global rate this
+  /// models a ONE-WAY (asymmetric) lossy or cut link — `(a, b)` set without
+  /// `(b, a)` means a hears b but b never hears a, the classic
+  /// half-open-failure case SWIM must still resolve.
+  pub(crate) directional_drop_per_mille: HashMap<(SocketAddr, SocketAddr), u32>,
   /// Probabilistic duplicate: each datagram is duplicated with probability
   /// duplicate_per_mille/1000.
   pub(crate) duplicate_per_mille: u32,

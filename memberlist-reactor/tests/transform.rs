@@ -372,6 +372,61 @@ mod encryption {
     let _ = c.shutdown().await;
   }
 
+  /// An encrypted `leave()` must put the node's Dead-self broadcast on the wire
+  /// before it resolves — the leave-completion fence. The egress transform runs
+  /// synchronously on the pump precisely so this fence holds: the leave/shutdown
+  /// datagrams reach the socket before the fence fires. This exercises the
+  /// encrypted leave end to end — the peer must observe the departure (its
+  /// membership drops the leaver).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn encrypted_leave_reaches_peer() {
+    let keyring = Keyring::new(SecretKey::Aes256([0x42u8; 32]));
+    let ml_opts =
+      MemberlistOptions::new().with_encryption(EncryptionOptions::new().with_keyring(keyring));
+
+    let a = make_with_opts("enc-leave-a", ml_opts.clone()).await;
+    let b = make_with_opts("enc-leave-b", ml_opts).await;
+    let a_addr = *a.local().addr_ref();
+
+    b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+      .await
+      .expect("join with encryption");
+    tokio::time::timeout(Duration::from_secs(10), async {
+      loop {
+        if a.num_online_members() == 2 && b.num_online_members() == 2 {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+      }
+    })
+    .await
+    .expect("encrypted cluster converges to 2 online");
+
+    // A leaves: `leave()` resolving means its encrypted Dead-self was popped and
+    // (inline) sent. B must observe the departure via the leave broadcast — A
+    // drops out of B's online membership (`num_members` still lists A as Left
+    // until reaped, so check the ONLINE count).
+    a.leave().await.expect("encrypted leave");
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+      loop {
+        if b.num_online_members() == 1 {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+      }
+    })
+    .await;
+    assert!(
+      observed.is_ok(),
+      "B did not observe A's encrypted leave (Dead-self not delivered): online={}",
+      b.num_online_members(),
+    );
+
+    // Ignoring Err: best-effort teardown; the assertion already passed.
+    let _ = a.shutdown().await;
+    let _ = b.shutdown().await;
+  }
+
   /// Construction with an invalid keyring (algorithm not compiled in) is
   /// rejected at construction time rather than silently discarding datagrams.
   ///

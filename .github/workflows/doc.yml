@@ -1,0 +1,55 @@
+name: doc
+
+# Build the rustdoc for the publishable crates with the docs.rs cfg, so a doc
+# break (a bad intra-doc link target, an unbuildable feature combination, a
+# rustdoc regression) is caught BEFORE publish instead of on docs.rs. Not
+# warnings-as-errors yet: memberlist-proto carries pre-existing intra-doc-link
+# warnings; this gate catches hard failures and can ratchet to -D warnings later.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.txt"
+      - "art"
+  pull_request:
+    paths-ignore:
+      - "**.txt"
+      - "art"
+  workflow_dispatch:
+
+env:
+  RUSTDOCFLAGS: "--cfg docsrs"
+
+jobs:
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-22
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Doc memberlist-proto
+        run: >
+          cargo doc -p memberlist-proto --no-deps
+          --features std,tracing,tcp,cidr,tls-rustls-ring,quic-rustls-ring,compression-lz4,compression-snappy,compression-zstd,compression-brotli,checksum-crc32,checksum-xxhash32,checksum-xxhash64,checksum-xxhash3,checksum-murmur3,encryption-aes-gcm,encryption-chacha20-poly1305
+
+      - name: Doc memberlist-reactor
+        run: >
+          cargo doc -p memberlist-reactor --no-deps
+          --features tokio,tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr
+
+      - name: Doc memberlist-compio
+        run: >
+          cargo doc -p memberlist-compio --no-deps
+          --features tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr
+
+      - name: Doc memberlist (umbrella)
+        run: cargo doc -p memberlist --no-deps --features tokio,tcp,quic-rustls-ring

@@ -289,8 +289,21 @@ where
     overhead: usize,
     limit: usize,
   ) -> Vec<B::Message> {
+    self.take_broadcasts_measured(num_nodes, overhead, limit).0
+  }
+
+  /// As [`take_broadcasts`](Self::take_broadcasts), but also returns the total
+  /// bytes the selection charged (each message's encoded length plus `overhead`).
+  /// The gossip assembler uses this to size the residual user-data budget without
+  /// re-encoding the selected messages.
+  pub fn take_broadcasts_measured(
+    &mut self,
+    num_nodes: u32,
+    overhead: usize,
+    limit: usize,
+  ) -> (Vec<B::Message>, usize) {
     if self.q.is_empty() {
-      return Vec::new();
+      return (Vec::new(), 0);
     }
 
     let transmit_limit: u32 = retransmit_limit(self.retransmit_mult, num_nodes);
@@ -322,18 +335,19 @@ where
         id: u64::MAX,
       };
 
+      // Use the stored `msg_len` (computed once at `queue_broadcast`; the message
+      // is immutable behind the `Arc`) instead of re-encoding each candidate.
       let candidate = self
         .q
         .iter()
         .filter(|item| geq <= item && lt > item)
-        .find(|item| B::encoded_len(item.broadcast.message()) <= fit)
+        .find(|item| item.msg_len <= fit as u64)
         .cloned();
 
       match candidate {
         Some(mut keep) => {
-          let msg = keep.broadcast.message();
-          bytes_used += B::encoded_len(msg) + overhead;
-          to_send.push(msg.clone());
+          bytes_used += keep.msg_len as usize + overhead;
+          to_send.push(keep.broadcast.message().clone());
 
           self.q.remove(&keep);
           if let Some(id) = keep.broadcast.id() {
@@ -360,7 +374,7 @@ where
     if self.q.is_empty() {
       self.id_gen = 0;
     }
-    to_send
+    (to_send, bytes_used)
   }
 
   /// Take exactly ONE broadcast whose encoded plain-frame length is
@@ -394,7 +408,7 @@ where
         .q
         .iter()
         .filter(|item| geq <= item && lt > item)
-        .find(|item| B::encoded_len(item.broadcast.message()) <= limit)
+        .find(|item| item.msg_len <= limit as u64)
         .cloned();
       match candidate {
         Some(mut keep) => {
@@ -437,6 +451,12 @@ where
 
   /// Drop oldest broadcasts (highest retransmit count) until the queue has
   /// at most `max_retain` entries.
+  ///
+  /// Not wired into the `Endpoint` today: queued broadcasts are id-deduplicated,
+  /// so the queue is already bounded by live membership (itself optionally
+  /// capped via `EndpointOptions::max_members`). This is an available helper for
+  /// a future hard queue-length ceiling; nothing currently calls it, so do not
+  /// assume the queue is bounded by anything other than the membership dedup.
   pub fn prune(&mut self, max_retain: usize) {
     while self.q.len() > max_retain {
       let Some(item) = self.q.pop_last() else { break };

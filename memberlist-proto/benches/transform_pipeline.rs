@@ -1,12 +1,12 @@
-//! UDP gossip-plane transform-pipeline benchmark (issue #128).
+//! UDP gossip-plane transform-pipeline benchmark.
 //!
 //! The gossip (UDP) plane runs a serial transform inline in the driver pump:
 //! egress `encode → compress → encrypt`, ingress `decrypt → decompress → parse`.
-//! `handle_packet` (the SWIM state transition) is cheap by design; the question
-//! #128 gates on is whether this transform is hot enough to justify offloading
-//! it to a worker pool. This benchmark measures the per-packet cost of each
-//! stage and of the full pipeline, on a small probe (a `Ping`) and a near-MTU
-//! gossip batch (a compound of `Alive`s), so the decision is data-driven.
+//! `handle_packet` (the SWIM state transition) is cheap by design. This
+//! benchmark measures the per-packet cost of each stage and of the full
+//! pipeline, on a small probe (a `Ping`) and a near-MTU gossip batch (a compound
+//! of `Alive`s) — the data that establishes the transform is microsecond-scale,
+//! so running it inline on the pump is sound.
 //!
 //! Run:
 //!   cargo bench -p memberlist-proto --bench transform_pipeline \

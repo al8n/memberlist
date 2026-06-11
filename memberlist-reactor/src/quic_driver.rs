@@ -97,6 +97,9 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   /// running lifetime and only taken during teardown.
   socket: Option<<R::Net as Net>::UdpSocket>,
   shared: Arc<Shared<I>>,
+  /// The endpoint snapshot version last published to `shared`; the snapshot is
+  /// republished only when it differs (see the stream driver for the rationale).
+  last_snapshot_version: u64,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
   /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
@@ -164,10 +167,12 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
       .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
+    let last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
     Self {
       endpoint,
       socket: Some(socket),
       shared,
+      last_snapshot_version,
       obs_tx,
       label,
       pending_joins: HashMap::new(),
@@ -611,6 +616,11 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
     // and applied before a probe deadline can fire (a QUIC packet's handle_udp
     // queues datagram payloads here without advancing membership time). Bounded
     // by the proto mem_ingress cap, so a flood cannot make this loop unbounded.
+    //
+    // The transform runs inline on the pump (as on every plane): the per-poll
+    // work is bounded by the mem_ingress drain (itself capped), and the
+    // microsecond-scale transform is negligible against the probe FSM's absolute
+    // failure_deadline.
     let mut ingress = 0;
     while let Some((from, raw)) = self.endpoint.poll_memberlist_ingress() {
       ingress += 1;
@@ -653,14 +663,14 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         Transmit::Packet(pkt) => {
           let (to, msg) = pkt.into_parts();
           match encode_outgoing(&msg, &encode_opts) {
-            Ok(b) => (to, b.to_vec()),
+            Ok(b) => (to, b),
             Err(_) => continue,
           }
         }
         Transmit::Compound(cmp) => {
           let (to, msgs) = cmp.into_parts();
           match encode_outgoing_compound(&msgs, &encode_opts) {
-            Ok(b) => (to, b.to_vec()),
+            Ok(b) => (to, b),
             Err(_) => continue,
           }
         }
@@ -1020,8 +1030,11 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
       }
     }
 
-    // Republish the snapshot if anything advanced.
-    if progress {
+    // Republish the snapshot only when membership/health actually changed (a
+    // rebuild clones every NodeState), not on every productive poll.
+    let snap_v = this.endpoint.endpoint_ref().snapshot_version();
+    if progress && snap_v != this.last_snapshot_version {
+      this.last_snapshot_version = snap_v;
       this
         .shared
         .publish(snapshot_of(this.endpoint.endpoint_ref()));

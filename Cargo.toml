@@ -29,10 +29,6 @@ rust-version = "1.85.0"
 keywords = ["gossip", "membership", "failure-detection", "cluster", "distributed"]
 categories = ["network-programming", "asynchronous", "algorithms"]
 
-[workspace.package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
 [workspace.dependencies]
 among = "0.2"
 arc-swap = "1"
@@ -85,10 +81,7 @@ thiserror = { version = "2", default-features = false }
 tracing = "0.1"
 viewit = "0.1.5"
 
-arbitrary = { version = "1", default-features = false }
-quickcheck = { version = "1", default-features = false }
-
-memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
+memberlist-proto = { version = "0.4", path = "memberlist-proto", default-features = false }
 memberlist-reactor = { version = "0.0.1", path = "memberlist-reactor", default-features = false }
 memberlist-compio = { version = "0.0.1", path = "memberlist-compio", default-features = false }
 memberlist-smoltcp = { version = "0.0.1", path = "memberlist-smoltcp", default-features = false }
@@ -97,10 +90,3 @@ memberlist-embassy = { version = "0.0.1", path = "memberlist-embassy", default-f
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
-  'cfg(compression)',
-  'cfg(checksum)',
-  'cfg(offload)',
-  'cfg(tarpaulin)',
-] }

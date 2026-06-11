@@ -1086,12 +1086,21 @@ impl TlsCluster {
           self.pipes.insert((src, dialer_exch), pipe);
           return true;
         }
-        // Accept on the peer: it allocates its own exchange handle.
-        let acceptor_exch = self
+        // Accept on the peer: it allocates its own exchange handle. `None` means
+        // the peer did NOT admit the connection (leaving, the inbound-stream cap,
+        // or a config error) — treat it like a refusal: reset the dialer's pipe so
+        // no bytes flow and its bridge is reaped on the dial deadline.
+        let Some(acceptor_exch) = self
           .nodes
           .get_mut(&peer)
           .unwrap()
-          .accept_connection(src, now);
+          .accept_connection(src, now)
+        else {
+          let mut pipe = TcpPipe::new(self.tcp_window);
+          pipe.reset = true;
+          self.pipes.insert((src, dialer_exch), pipe);
+          return true;
+        };
         // Record the bidirectional mapping and create both reader pipes.
         self
           .peer_of

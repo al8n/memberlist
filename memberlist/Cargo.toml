@@ -1,10 +1,15 @@
 [package]
 name = "memberlist"
-version = "0.1.0"
-edition = "2021"
-license = "MPL-2.0"
+version = "0.9.0"
+edition.workspace = true
+license.workspace = true
 description = "Sans-I/O memberlist: a Rust implementation of the SWIM gossip membership protocol."
-repository = "https://github.com/al8n/memberlist"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
@@ -47,7 +52,14 @@ smoltcp  = ["dep:memberlist-smoltcp",  "alloc", "memberlist-smoltcp/alloc"]
 embassy  = ["dep:memberlist-embassy",  "alloc", "memberlist-embassy/alloc"]
 embedded = ["dep:memberlist-embedded", "alloc", "memberlist-embedded/alloc"]
 
-# transports (kept prefix) — only drivers that DEFINE the feature
+# transports (kept prefix) — only drivers that DEFINE the feature.
+#
+# Bare `tls` / `quic` enable the record-layer TYPES only; they do not pick a
+# crypto provider, so a build with just `tls` (or `quic`) has no usable backend.
+# Always select a backend feature instead — `tls-rustls-ring` /
+# `quic-rustls-ring` (or the `-aws-lc-rs` variants) — which turn on `tls` / `quic`
+# transitively. The checksum (`crc32`, `xxhash*`, `murmur3`) and compression
+# (`lz4`, `snappy`, `zstd`, `brotli`) features below are each self-contained.
 tcp = ["memberlist-proto/tcp", "memberlist-reactor?/tcp", "memberlist-compio?/tcp"]
 tls = ["memberlist-proto/tls", "memberlist-reactor?/tls"]
 tls-rustls-ring      = ["tls", "memberlist-proto/tls-rustls-ring",      "memberlist-reactor?/tls-rustls-ring",      "memberlist-compio?/tls-rustls-ring"]

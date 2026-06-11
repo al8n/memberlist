@@ -212,6 +212,14 @@ impl Network {
       self.fault_drops += 1;
       return;
     }
+    // One-way (asymmetric) loss on the (from -> to) link, on top of the global
+    // rate. `drop_roll` is reused; the directional rate is independent per link.
+    if let Some(&rate) = self.faults.directional_drop_per_mille.get(&(from, to)) {
+      if rate > 0 && drop_roll < rate {
+        self.fault_drops += 1;
+        return;
+      }
+    }
     let scaled = |roll: u64, max: Duration| -> Duration {
       if max.is_zero() {
         Duration::ZERO

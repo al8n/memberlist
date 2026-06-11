@@ -808,7 +808,10 @@ where
       },
       PhaseKind::OutboundUserMessage => {
         // Outbound user messages expect no reply; any bytes are noise.
-        // Do nothing; driver will close the stream.
+        // Deliberately lenient (NOT UnexpectedMessage): a one-way send already
+        // succeeded once its bytes were gathered, so stray inbound bytes from
+        // the peer must not retroactively fail it — the driver just closes the
+        // stream. (Locked by `outbound_user_message_ignores_inbound_noise`.)
       }
 
       // ── Inbound: awaiting first message from peer ───────────────────────

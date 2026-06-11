@@ -151,9 +151,14 @@ impl<A> AckResolution<A> {
 
 /// Registry of outstanding ack-awaiting entries keyed by sequence number.
 ///
-/// Sync, single-threaded. The owning `Endpoint` is responsible for
-/// reading `next_deadline()` to inform `Endpoint::poll_timeout()`, and calling
-/// `poll_expired(now)` from `Endpoint::handle_timeout`.
+/// Sync, single-threaded. Expiry is driven per-`seq` by the owning `Endpoint`:
+/// a terminating probe or an expiring indirect-forward removes its own slot via
+/// [`remove`](Self::remove), so removal is exactly paired with the registering
+/// path and no orphan can accumulate. [`poll_expired`](Self::poll_expired) and
+/// [`next_deadline`](Self::next_deadline) are global-sweep helpers retained for
+/// callers that want a deadline-ordered backstop drain; the `Endpoint` does NOT
+/// currently call them, so do not assume a slot is reaped by anything other than
+/// its paired `remove`.
 #[derive(Debug)]
 pub struct AckRegistry<A> {
   pending: FxHashMap<u32, AckEntry<A>>,
@@ -184,6 +189,13 @@ impl<A> AckRegistry<A> {
   #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.pending.is_empty()
+  }
+
+  /// True iff `seq` is currently registered. Used by sequence allocation to
+  /// skip a still-live slot on a `u32` wrap.
+  #[inline(always)]
+  pub fn contains(&self, seq: u32) -> bool {
+    self.pending.contains_key(&seq)
   }
 
   /// Register a new pending entry. If `seq` was already present, the old

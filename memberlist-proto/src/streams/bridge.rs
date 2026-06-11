@@ -362,6 +362,17 @@ where
       // request as inbound plaintext, leaving the bridge still pre-`Stream` since
       // the mint runs in `service_handshake_completions`).
       if data.is_empty() {
+        // A pre-`Stream` EOF. If the handshake / label step has NOT settled, the
+        // peer half-closed before establishing the exchange — that handshake can
+        // never complete, so fail now (ConnectionLost) rather than holding a
+        // zombie bridge (and its record-layer buffers) until the accept
+        // deadline. If it HAS settled (the mint is merely deferred to the tick),
+        // this is the benign coalesced-close case: latch the FIN for
+        // post-promotion replay.
+        if self.records.is_handshaking() {
+          self.fail(BridgeFailure::ConnectionLost);
+          return Err(());
+        }
         self.pending_eof = true;
       }
       return self.intake_handshaking(data, now);
@@ -535,6 +546,15 @@ where
         break;
       }
       if !consumed && drained == 0 {
+        // Defensive: retain the unconsumed input tail so a future backpressured
+        // record layer that stalls mid-buffer replays it on the next read
+        // (handle_transport_data's established branch prepends `pending_inbound`)
+        // instead of silently dropping it. Unreachable for the current record
+        // layers — passthrough consumes all input; a TLS `Pending` surfaces
+        // plaintext on the next `read_plaintext` — so normally a no-op.
+        if offset < input.len() {
+          self.pending_inbound.extend_from_slice(&input[offset..]);
+        }
         break;
       }
     }
@@ -861,6 +881,16 @@ where
     self.fail(BridgeFailure::DialRetired);
   }
 
+  /// A mid-exchange transport error (a read/write I/O failure or a peer RESET)
+  /// terminated the connection AFTER the wire was established. Like every
+  /// failure transition this runs `records.clear_outbound()` via `fail`.
+  /// Distinct from a clean `read == 0` EOF, which is benign for a one-way
+  /// `UserMessage`: feeding a transport error as a clean EOF would falsely
+  /// complete that exchange as success.
+  pub(crate) fn fail_connection_lost(&mut self) {
+    self.fail(BridgeFailure::ConnectionLost);
+  }
+
   /// Pump outbound memberlist bytes through the record layer.
   ///
   /// Handshake-deadline guard FIRST, before the no-`Stream` early return: a
@@ -1088,11 +1118,13 @@ where
             // the inbound stream's `output_buf` still empty: encode the snapshot
             // and load it before any of it can be transmitted, or the peer is
             // left with a half-applied merge (split-brain). The bridge-level
-            // `self.deadline` is advanced to the SAME `now + 5s` value
-            // `stream_load_response` writes into the inner stream so the
-            // `Done`-but-awaiting-peer-close abandon does not fire on the stale
-            // accept deadline before the fresh response window elapses.
-            let response_deadline = now + core::time::Duration::from_secs(5);
+            // `self.deadline` is advanced to the SAME value `stream_load_response`
+            // writes into the inner stream so the `Done`-but-awaiting-peer-close
+            // abandon does not fire on the stale accept deadline before the fresh
+            // response window elapses. Derived from the configured `stream_timeout`
+            // (not a hardcoded constant) so a large response on a slow link gets
+            // the same budget the request side had.
+            let response_deadline = now + ep.stream_timeout();
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(
@@ -1184,7 +1216,10 @@ where
         match cmd {
           StreamCommand::SendPushPullResponse(resp) => {
             let (local_states, user_data) = resp.into_parts();
-            let response_deadline = now + core::time::Duration::from_secs(5);
+            // Derived from the configured `stream_timeout` (not a hardcoded
+            // constant) so a large response on a slow link gets the same budget
+            // the request side had.
+            let response_deadline = now + ep.stream_timeout();
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(

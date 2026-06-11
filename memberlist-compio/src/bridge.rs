@@ -103,6 +103,16 @@
 //! on the cancellation path is deliberate: keeping the recv future pinned
 //! across iterations with a stashed buffer requires an unnameable-future
 //! slot that adds complexity without affecting correctness.
+//!
+//! No-data-loss depends on the exchanges being strictly HALF-DUPLEX. Dropping a
+//! recv that already completed in the kernel (its CQE consumed bytes off the
+//! socket) would lose those bytes — but every exchange kind here is request-then-
+//! response, so a recv is only in flight while our out channel is silent, and the
+//! late out-messages for a live exchange are `Close` (delivered in read-closed
+//! mode, where no recv is in flight) or `Abort` (the exchange already failed, so
+//! loss is moot). If a FULL-DUPLEX exchange kind is ever added, its recv must
+//! move to a persistent (never-dropped) future like the hoisted accept future,
+//! or a completed-but-dropped read will silently lose mid-stream bytes.
 
 use std::{future::Future, io, time::Duration};
 
@@ -526,7 +536,9 @@ mod tests {
       Box::new(|_| None),
       Box::new(|addr| *addr),
     );
-    endpoint.accept_connection("127.0.0.1:1".parse().unwrap(), Instant::now())
+    endpoint
+      .accept_connection("127.0.0.1:1".parse().unwrap(), Instant::now())
+      .expect("test: connection admitted")
   }
 
   /// Connect a loopback TCP pair, returning `(server, client)`.

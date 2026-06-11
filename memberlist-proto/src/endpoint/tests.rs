@@ -7622,3 +7622,125 @@ fn gossip_scheduler_skips_left_members_as_candidates() {
     "a Left-only membership must yield no gossip target"
   );
 }
+
+#[test]
+fn try_new_at_rejects_meta_larger_than_meta_max_size() {
+  let meta = Meta::try_from(Bytes::from(vec![0u8; 64])).expect("within wire ceiling");
+  let c = cfg().with_initial_meta(meta).with_meta_max_size(10);
+  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at(c, t0);
+  assert!(
+    matches!(res, Err(crate::error::EndpointInitError::MetaTooLarge(_))),
+    "initial_meta over meta_max_size must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_zero_awareness_multiplier() {
+  let c = cfg().with_awareness_max_multiplier(0);
+  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at(c, t0);
+  assert!(
+    matches!(
+      res,
+      Err(crate::error::EndpointInitError::AwarenessMultiplierZero)
+    ),
+    "a zero awareness multiplier must be rejected, not panic"
+  );
+}
+
+#[test]
+fn max_members_rejects_new_id_at_cap() {
+  // Cap total membership at 2 (local + one peer).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(2)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  assert_eq!(e.num_members(), 2, "first peer admitted (local + peer-1)");
+  process_alive_auto(&mut e, alive("peer-2", 7002, 1), false, t0);
+  assert_eq!(e.num_members(), 2, "second peer rejected at the cap");
+  // A state update for an already-known id is never rejected by the cap.
+  process_alive_auto(&mut e, alive("peer-1", 7001, 2), false, t0);
+  assert_eq!(e.num_members(), 2, "known-id update is not gated");
+}
+
+#[test]
+fn max_members_none_admits_unlimited() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("peer-2", 7002, 1), false, t0);
+  assert_eq!(e.num_members(), 3, "default None admits both peers");
+}
+
+#[test]
+fn unknown_alive_with_zero_incarnation_admits_visibly_and_bumps() {
+  // A first Alive carrying incarnation 0 (a peer that starts at incarnation 0, or
+  // a forged id) for an unknown member must admit a VISIBLE Alive — not insert a
+  // Dead placeholder that is invisible to snapshot readers yet still consumes a
+  // max_members slot, which would let zero-incarnation Alives silently fill the
+  // cap and reject later legitimate members.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(3)));
+  let t0 = Instant::now();
+  let v0 = e.snapshot_version();
+
+  process_alive_auto(&mut e, alive("peer-0", 7000, 0), false, t0);
+
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("peer-0")),
+    Some(State::Alive),
+    "Alive(incarnation=0) for an unknown id must admit a visible Alive member"
+  );
+  assert_eq!(
+    e.num_members(),
+    2,
+    "the zero-incarnation peer counts as a member (local + peer-0)"
+  );
+  assert!(
+    e.snapshot_version() != v0,
+    "admitting the new member must bump the snapshot version"
+  );
+}
+
+#[test]
+fn snapshot_version_bumps_on_membership_and_health_changes() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  let v0 = e.snapshot_version();
+
+  // New member (NodeJoined) bumps.
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  let v1 = e.snapshot_version();
+  assert!(v1 != v0, "a new member must bump the snapshot version");
+
+  // A stale (older-incarnation) alive for the same node is ignored — no bump.
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  assert_eq!(
+    e.snapshot_version(),
+    v1,
+    "an ignored (no-op) alive must not bump the version"
+  );
+
+  // A health change bumps.
+  e.degrade_health(2);
+  assert!(
+    e.snapshot_version() != v1,
+    "a health change must bump the snapshot version"
+  );
+}
+
+#[test]
+fn snapshot_version_bumps_on_incarnation_only_alive_update() {
+  // A newer-incarnation Alive for an already-Alive member with the SAME meta
+  // and address emits NO event (not a resurrection, not a meta change), but the
+  // member's incarnation — and, for a Suspect->Alive refutation, its FSM state —
+  // changes, so the published snapshot must still be republished.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
+  let v1 = e.snapshot_version();
+  process_alive_auto(&mut e, alive("peer-1", 7001, 5), false, t0);
+  assert!(
+    e.snapshot_version() != v1,
+    "an incarnation-only (no event) alive update must still bump the snapshot version"
+  );
+}

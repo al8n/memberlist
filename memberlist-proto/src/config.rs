@@ -44,6 +44,13 @@ pub const DEFAULT_MAX_STREAM_FRAME_SIZE: usize = 64 * 1024 * 1024;
 /// connect-but-never-send attacker.
 pub const DEFAULT_ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Default value for [`EndpointOptions::max_indirect_forwards`]: 256. A node
+/// relays at most this many concurrent indirect pings on others' behalf; a
+/// healthy cluster never approaches it (a probe fans out to `indirect_checks`
+/// peers for one `probe_timeout`), so it is purely a flood backstop bounding the
+/// relay state a peer can induce.
+pub const DEFAULT_MAX_INDIRECT_FORWARDS: usize = 256;
+
 /// Construction-time settings for [`Endpoint`](crate::endpoint::Endpoint).
 #[derive(Debug, Clone)]
 pub struct EndpointOptions<I, A> {
@@ -58,6 +65,32 @@ pub struct EndpointOptions<I, A> {
   dead_node_reclaim_time: Duration,
   awareness_max_multiplier: u32,
   indirect_checks: u32,
+  /// Hard cap on concurrent indirect-ping relays this node tracks on behalf of
+  /// other probers. A fresh IndirectPing is dropped (no forwarded Ping, no
+  /// registry/forward state, no Nack-on-expiry) when the cap is reached, so a
+  /// peer cannot grow this node's relay state without bound. Default
+  /// [`DEFAULT_MAX_INDIRECT_FORWARDS`].
+  max_indirect_forwards: usize,
+  /// Optional admission ceiling on total cluster membership. When `Some(n)`, an
+  /// Alive for a NEW id is rejected once the node already tracks `n` members, so
+  /// an open (unauthenticated) network cannot grow membership — and every
+  /// per-member structure (timers, broadcast queue, O(n) scans) — without bound.
+  /// `None` (the default) preserves unlimited open-join. Existing members and
+  /// state transitions of known ids are never rejected.
+  max_members: Option<usize>,
+  /// When `true`, the optional ack payload (set via `Endpoint::set_ack_payload`)
+  /// is attached to an outgoing Ack ONLY when the Ping's source id is a known
+  /// member; an Ack to an unknown (e.g. spoofed-source) Ping carries no payload.
+  /// Bounds the byte amplification a spoofed Ping can elicit toward a victim.
+  /// Default `false` (the payload is always attached, matching upstream).
+  ack_payload_to_members_only: bool,
+  /// Optional ceiling on concurrently accepted INBOUND reliable-stream
+  /// exchanges. When `Some(n)`, a fresh inbound connection beyond `n` live
+  /// inbound exchanges builds no bridge (the driver closes it), so a peer cannot
+  /// grow inbound bridge state — each pins up to ~3x `max_stream_frame_size`
+  /// transiently — without bound. `None` (the default) is unlimited. Outbound
+  /// (self-initiated) exchanges are never gated by this.
+  max_inbound_streams: Option<usize>,
   probe_timeout: Duration,
   /// Deadline for a complete stream exchange (dial + request + response).
   /// Default: 10 seconds. Used for push/pull, reliable ping, and user messages.
@@ -135,6 +168,10 @@ impl<I, A> EndpointOptions<I, A> {
       dead_node_reclaim_time: Duration::ZERO,
       awareness_max_multiplier: 8,
       indirect_checks: 3,
+      max_indirect_forwards: DEFAULT_MAX_INDIRECT_FORWARDS,
+      max_members: None,
+      ack_payload_to_members_only: false,
+      max_inbound_streams: None,
       probe_timeout: Duration::from_millis(500),
       stream_timeout: Duration::from_secs(10),
       max_stream_frame_size: DEFAULT_MAX_STREAM_FRAME_SIZE,
@@ -221,6 +258,42 @@ impl<I, A> EndpointOptions<I, A> {
   #[inline(always)]
   pub const fn with_indirect_checks(mut self, n: u32) -> Self {
     self.indirect_checks = n;
+    self
+  }
+
+  /// Builder: set the concurrent indirect-forward relay cap. See
+  /// [`Self::max_indirect_forwards`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_indirect_forwards(mut self, n: usize) -> Self {
+    self.max_indirect_forwards = n;
+    self
+  }
+
+  /// Builder: set the optional membership admission ceiling. `None` (the
+  /// default) leaves open-join unbounded. See [`Self::max_members`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_members(mut self, n: Option<usize>) -> Self {
+    self.max_members = n;
+    self
+  }
+
+  /// Builder: restrict the ack payload to known members. See
+  /// [`Self::ack_payload_to_members_only`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_ack_payload_to_members_only(mut self, yes: bool) -> Self {
+    self.ack_payload_to_members_only = yes;
+    self
+  }
+
+  /// Builder: set the optional concurrent inbound-stream ceiling. `None` (the
+  /// default) is unlimited. See [`Self::max_inbound_streams`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_inbound_streams(mut self, n: Option<usize>) -> Self {
+    self.max_inbound_streams = n;
     self
   }
 
@@ -485,6 +558,33 @@ impl<I, A> EndpointOptions<I, A> {
   #[inline(always)]
   pub const fn indirect_checks(&self) -> u32 {
     self.indirect_checks
+  }
+
+  /// The concurrent indirect-forward relay cap. See
+  /// [`Self::max_indirect_forwards`].
+  #[inline(always)]
+  pub const fn max_indirect_forwards(&self) -> usize {
+    self.max_indirect_forwards
+  }
+
+  /// The optional membership admission ceiling. See [`Self::max_members`].
+  #[inline(always)]
+  pub const fn max_members(&self) -> Option<usize> {
+    self.max_members
+  }
+
+  /// Whether the ack payload is restricted to known members. See
+  /// [`Self::ack_payload_to_members_only`].
+  #[inline(always)]
+  pub const fn ack_payload_to_members_only(&self) -> bool {
+    self.ack_payload_to_members_only
+  }
+
+  /// The optional concurrent inbound-stream ceiling. See
+  /// [`Self::max_inbound_streams`].
+  #[inline(always)]
+  pub const fn max_inbound_streams(&self) -> Option<usize> {
+    self.max_inbound_streams
   }
 
   /// Direct-ping timeout before fallback to indirect.
