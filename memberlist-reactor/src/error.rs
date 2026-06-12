@@ -131,8 +131,8 @@ pub enum Error {
   /// An encryption keyring was rejected (a key's algorithm backend is
   /// missing), so the node refuses to start rather than run plaintext on an
   /// encrypted-cluster configuration.
-  #[error("encryption: {0}")]
-  Encryption(memberlist_proto::EncryptionError),
+  #[error(transparent)]
+  Encryption(#[from] memberlist_proto::EncryptionError),
 
   /// A gossip checksum algorithm was rejected because its backend feature is
   /// not compiled into this build. The options builder accepts the algorithm,
@@ -142,8 +142,8 @@ pub enum Error {
   /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) setter so
   /// the misconfiguration is rejected rather than disabling gossip after a false
   /// `Ok`.
-  #[error("checksum: {0}")]
-  Checksum(memberlist_proto::ChecksumError),
+  #[error(transparent)]
+  Checksum(#[from] memberlist_proto::ChecksumError),
 
   /// The configured `gossip_mtu` exceeds the largest plaintext gossip payload
   /// whose on-wire datagram still fits one UDP packet (after the checksum and
@@ -158,6 +158,6 @@ pub enum Error {
   /// violates the wire constraints: it exceeds the 253-byte maximum or is not
   /// valid UTF-8. Rejected at the setter so the error surfaces at configuration
   /// time rather than at construction.
-  #[error("invalid cluster label: {0}")]
-  InvalidLabel(memberlist_proto::LabelError),
+  #[error(transparent)]
+  InvalidLabel(#[from] memberlist_proto::LabelError),
 }

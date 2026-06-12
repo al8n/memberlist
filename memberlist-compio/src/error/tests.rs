@@ -63,7 +63,6 @@ fn invalid_option_accessors_and_display() {
 }
 
 // Every `MemberlistError` variant must render a non-empty Display and Debug.
-// The `#[from]` variants additionally expose their inner error via `source()`.
 #[test]
 fn every_variant_displays_and_debugs() {
   let label_err = memberlist_proto::label::validate_label(&vec![b'x'; 254])
@@ -79,7 +78,9 @@ fn every_variant_displays_and_debugs() {
     MemberlistError::LeaveTimeout,
     MemberlistError::Shutdown,
     MemberlistError::NotRunning,
-    MemberlistError::Proto(memberlist_proto::Error::AckPayloadExceedsMtu(1500, 1400)),
+    MemberlistError::Proto(memberlist_proto::Error::AckPayloadExceedsMtu(
+      memberlist_proto::SizeExceeded::new(1500, 1400),
+    )),
     MemberlistError::InvalidGossipMtu(InvalidGossipMtu::new(70_000, 65_467)),
     MemberlistError::GossipMtuTooSmall(GossipMtuTooSmall::new(64, 512)),
     MemberlistError::InvalidAdvertiseAddr(InvalidAdvertiseAddr::new(
@@ -103,40 +104,29 @@ fn every_variant_displays_and_debugs() {
   }
 }
 
-// The `#[from]` variants wrap an inner error that `source()` exposes; the
-// hand-rolled variants and the unit variants carry no source.
 #[test]
-fn source_is_present_only_for_from_variants() {
-  assert!(
-    MemberlistError::Io(io::Error::other("x"))
-      .source()
-      .is_some()
+fn transparent_variants_delegate_display() {
+  // The variants that wrap a self-describing typed error are
+  // `#[error(transparent)]`: their `Display` is exactly the inner error's,
+  // with no added prefix. Callers reach the typed inner by matching the
+  // variant; `source()` delegates to the inner (so a chain-walk shows the
+  // message once, not duplicated).
+  assert_eq!(
+    MemberlistError::Io(io::Error::other("boom")).to_string(),
+    io::Error::other("boom").to_string()
   );
-  assert!(
-    MemberlistError::Encryption(memberlist_proto::EncryptionError::AuthFailed)
-      .source()
-      .is_some()
+  assert_eq!(
+    MemberlistError::Encryption(memberlist_proto::EncryptionError::AuthFailed).to_string(),
+    memberlist_proto::EncryptionError::AuthFailed.to_string()
   );
-  assert!(
-    MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch)
-      .source()
-      .is_some()
+  assert_eq!(
+    MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch).to_string(),
+    memberlist_proto::ChecksumError::Mismatch.to_string()
   );
-  assert!(
-    MemberlistError::Frame(memberlist_proto::FrameError::Empty)
-      .source()
-      .is_some()
+  assert_eq!(
+    MemberlistError::Frame(memberlist_proto::FrameError::Empty).to_string(),
+    memberlist_proto::FrameError::Empty.to_string()
   );
-  // `Resolve` carries an `io::Error` but is NOT `#[from]` (no `#[source]`),
-  // so thiserror reports no source for it.
-  assert!(
-    MemberlistError::Resolve(io::Error::other("x"))
-      .source()
-      .is_none()
-  );
-  assert!(MemberlistError::LeaveTimeout.source().is_none());
-  assert!(MemberlistError::Shutdown.source().is_none());
-  assert!(MemberlistError::NotRunning.source().is_none());
 }
 
 // The `#[from]` derives let `?` lift the wire/io errors into `MemberlistError`.

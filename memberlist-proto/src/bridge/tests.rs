@@ -1,4 +1,5 @@
 use core::net::SocketAddr;
+use std::borrow::Cow;
 
 use bytes::Bytes;
 use smol_str::SmolStr;
@@ -312,7 +313,7 @@ fn alive_missing_node_returns_error() {
   };
   let err = alive_from_buffa::<I, A>(&pb_alive).unwrap_err();
   assert!(
-    matches!(err, BridgeError::MissingField("Alive.node")),
+    matches!(err, BridgeError::MissingField(Cow::Borrowed("Alive.node"))),
     "got: {err:?}"
   );
 }
@@ -512,7 +513,9 @@ fn p1_missing_required_fields_are_rejected() {
   assert!(
     matches!(
       alive_from_buffa::<I, A>(&a),
-      Err(BridgeError::MissingField("Alive.incarnation"))
+      Err(BridgeError::MissingField(Cow::Borrowed(
+        "Alive.incarnation"
+      )))
     ),
     "omitted Alive.incarnation must be rejected"
   );
@@ -526,7 +529,7 @@ fn p1_missing_required_fields_are_rejected() {
   };
   assert!(matches!(
     suspect_from_buffa::<I>(&s),
-    Err(BridgeError::MissingField("Suspect.node"))
+    Err(BridgeError::MissingField(Cow::Borrowed("Suspect.node")))
   ));
 
   // Ping: sequence_number omitted.
@@ -538,7 +541,9 @@ fn p1_missing_required_fields_are_rejected() {
   };
   assert!(matches!(
     ping_from_buffa::<I, A>(&p),
-    Err(BridgeError::MissingField("Ping.sequence_number"))
+    Err(BridgeError::MissingField(Cow::Borrowed(
+      "Ping.sequence_number"
+    )))
   ));
 
   // Node: id omitted.
@@ -549,7 +554,7 @@ fn p1_missing_required_fields_are_rejected() {
   };
   assert!(matches!(
     node_from_buffa::<I, A>(&n),
-    Err(BridgeError::MissingField("Node.id"))
+    Err(BridgeError::MissingField(Cow::Borrowed("Node.id")))
   ));
 
   // PushNodeState: state omitted.
@@ -562,7 +567,9 @@ fn p1_missing_required_fields_are_rejected() {
   };
   assert!(matches!(
     push_node_state_from_buffa::<I, A>(&pns),
-    Err(BridgeError::MissingField("PushNodeState.state"))
+    Err(BridgeError::MissingField(Cow::Borrowed(
+      "PushNodeState.state"
+    )))
   ));
 
   // Sanity: a fully-populated Alive still round-trips (present values

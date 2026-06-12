@@ -901,7 +901,8 @@ fn set_ack_payload_oversized_is_rejected() {
   let budget = cfg().gossip_mtu();
   let res = e.set_ack_payload(Bytes::from(vec![0xab_u8; 4096]));
   match res {
-    Err(crate::error::Error::AckPayloadExceedsMtu(encoded, reported_budget)) => {
+    Err(crate::error::Error::AckPayloadExceedsMtu(info)) => {
+      let (encoded, reported_budget) = (info.size(), info.limit());
       assert!(
         encoded > reported_budget,
         "rejected ack frame ({encoded}) must exceed the reported budget ({reported_budget})"
@@ -1051,7 +1052,7 @@ fn set_local_state_snapshot_rejects_oversized() {
   let oversized = Bytes::from(vec![0u8; 8192]);
   let res = e.set_local_state_snapshot(oversized);
   assert!(
-    matches!(res, Err(crate::error::Error::LocalStateExceedsFrame(_, _))),
+    matches!(res, Err(crate::error::Error::LocalStateExceedsFrame(_))),
     "oversized snapshot must be rejected with LocalStateExceedsFrame, got {res:?}"
   );
   // Rejected, not stored: the snapshot is still empty.
@@ -6620,7 +6621,7 @@ fn gossip_oversized_user_broadcast_rejected_at_enqueue() {
   // deterministically untransmittable and rejected without being stored.
   assert!(matches!(
     e.queue_user_broadcast(bytes::Bytes::from(vec![0x5a_u8; 2000])),
-    Err(crate::error::Error::UserBroadcastExceedsMtu(_, _))
+    Err(crate::error::Error::UserBroadcastExceedsMtu(_))
   ));
   assert_eq!(
     e.user_broadcast_queue_len(),
@@ -7434,7 +7435,7 @@ fn update_meta_rejects_oversized_meta() {
     .update_meta(big)
     .expect_err("oversized meta must be rejected");
   assert!(
-    matches!(err, crate::error::Error::MetaExceedsCap(_, _)),
+    matches!(err, crate::error::Error::MetaExceedsCap(_)),
     "got {err:?}"
   );
 }

@@ -12,11 +12,6 @@ pub enum Error {
   #[error("endpoint is not running (already left or shut down)")]
   NotRunning,
 
-  /// The endpoint received a message of an unexpected type for the current
-  /// state (e.g. a `PushPull` arriving on the UDP path).
-  #[error("unexpected message type: {0}")]
-  UnexpectedMessage(&'static str),
-
   /// An incoming message had a state value the local node doesn't recognise.
   /// The payload is the raw state identifier received from the wire.
   #[error("unknown peer state: {0}")]
@@ -24,9 +19,9 @@ pub enum Error {
 
   /// A caller-supplied `Meta` exceeded the per-endpoint
   /// [`EndpointOptions::meta_max_size`](crate::config::EndpointOptions::meta_max_size)
-  /// cap. Payload: `(supplied_len, cap)`.
-  #[error("meta size {0} exceeds per-endpoint cap {1}")]
-  MetaExceedsCap(usize, usize),
+  /// cap. Carries the supplied size and the cap (see [`SizeExceeded`]).
+  #[error("meta size {} exceeds per-endpoint cap {}", _0.0, _0.1)]
+  MetaExceedsCap(SizeExceeded),
 
   /// A caller-supplied ack payload, once framed, would not fit a single
   /// gossip datagram. Acks are emitted as one UDP datagram on the gossip
@@ -34,9 +29,9 @@ pub enum Error {
   /// probe reply would silently fail (`send_to` errors are dropped under
   /// the lossy-gossip policy), peers would receive no ack and falsely
   /// suspect this node. Rejected at the setter so the payload is never
-  /// stored. Payload: `(encoded_ack_len, gossip_mtu)`.
-  #[error("encoded ack ({0} bytes) exceeds the gossip packet budget ({1} bytes)")]
-  AckPayloadExceedsMtu(usize, usize),
+  /// stored.
+  #[error("encoded ack ({} bytes) exceeds the gossip packet budget ({} bytes)", _0.0, _0.1)]
+  AckPayloadExceedsMtu(SizeExceeded),
 
   /// A caller-supplied local-state snapshot, once framed into a PushPull,
   /// would not fit the reliable-stream frame cap. The snapshot rides every
@@ -48,12 +43,14 @@ pub enum Error {
   /// the co-resident membership-state list) is deterministically untransmittable:
   /// every push/pull carrying it is rejected and the application state never
   /// reaches any peer. Rejected at the setter so the snapshot is never stored.
-  /// Payload: `(minimal_framed_pushpull_len, frame_budget)`, where the budget
-  /// is `max_stream_frame_size` minus the reserved membership-state headroom.
+  /// The limit is `max_stream_frame_size` minus the reserved membership-state
+  /// headroom.
   #[error(
-    "framed local-state snapshot ({0} bytes) exceeds the reliable-stream frame budget ({1} bytes)"
+    "framed local-state snapshot ({} bytes) exceeds the reliable-stream frame budget ({} bytes)",
+    _0.0,
+    _0.1
   )]
-  LocalStateExceedsFrame(usize, usize),
+  LocalStateExceedsFrame(SizeExceeded),
 
   /// A caller-supplied user-broadcast payload, once framed as a lone
   /// `UserData` packet, would not fit a single gossip datagram. User
@@ -61,18 +58,44 @@ pub enum Error {
   /// datagram, so a payload whose minimal lone frame already exceeds the
   /// gossip packet budget is deterministically untransmittable — it can never
   /// be gossiped and would otherwise sit queued until a gossip tick discards
-  /// it. Rejected at the setter so the payload is never stored. Payload:
-  /// `(encoded_userdata_len, gossip_mtu)`.
-  #[error("framed user broadcast ({0} bytes) exceeds the gossip packet budget ({1} bytes)")]
-  UserBroadcastExceedsMtu(usize, usize),
+  /// it. Rejected at the setter so the payload is never stored.
+  #[error("framed user broadcast ({} bytes) exceeds the gossip packet budget ({} bytes)", _0.0, _0.1)]
+  UserBroadcastExceedsMtu(SizeExceeded),
 
   /// A caller-supplied directed user packet (or multi-packet compound),
   /// once framed including compound framing overhead, would not fit a single
   /// gossip datagram. Directed user packets are emitted as one UDP datagram
   /// and a compound whose assembled framed size exceeds the gossip MTU is
-  /// deterministically unsendable. Payload: `(framed_len, gossip_mtu)`.
-  #[error("framed user packet ({0} bytes) exceeds the packet MTU ({1} bytes)")]
-  UserPacketExceedsMtu(usize, usize),
+  /// deterministically unsendable.
+  #[error("framed user packet ({} bytes) exceeds the packet MTU ({} bytes)", _0.0, _0.1)]
+  UserPacketExceedsMtu(SizeExceeded),
+}
+
+/// Payload for [`Error`]'s size-limit variants: a measured size in bytes that
+/// exceeded a limit in bytes. The variant names the specific size and limit
+/// (a per-endpoint cap, a gossip-packet budget, or a reliable-stream frame
+/// budget).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeExceeded(usize, usize);
+
+impl SizeExceeded {
+  /// Build from the measured size and the limit, both in bytes.
+  #[inline]
+  pub const fn new(size: usize, limit: usize) -> Self {
+    Self(size, limit)
+  }
+
+  /// The measured size in bytes.
+  #[inline(always)]
+  pub const fn size(&self) -> usize {
+    self.0
+  }
+
+  /// The limit — cap, budget, or MTU — in bytes.
+  #[inline(always)]
+  pub const fn limit(&self) -> usize {
+    self.1
+  }
 }
 
 /// Error constructing an [`Endpoint`](crate::endpoint::Endpoint) via the

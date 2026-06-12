@@ -194,7 +194,7 @@ pub use cidr::{CidrAnd, CidrPolicy};
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
-pub use error::{EndpointInitError, Error, StreamError};
+pub use error::{EndpointInitError, Error, SizeExceeded, StreamError};
 pub use event::{
   CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
   PingCompleted, PingFailed, PingId, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,

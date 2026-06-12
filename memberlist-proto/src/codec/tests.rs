@@ -392,7 +392,7 @@ fn decode_incoming_rejects_empty_input() {
 #[test]
 fn codec_error_display_strings_are_nonempty() {
   let cases = [
-    CodecError::Bridge(crate::BridgeError::MissingField("x")),
+    CodecError::Bridge(crate::BridgeError::MissingField("x".into())),
     CodecError::Frame(crate::framing::FrameError::Empty),
     CodecError::Incomplete(framing::IncompleteFrame::new(3, 10)),
     CodecError::Label(LabelError::TooLong(300)),

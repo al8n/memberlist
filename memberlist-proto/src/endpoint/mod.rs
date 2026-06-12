@@ -98,8 +98,7 @@ where
   let budget = max_stream_frame_size.saturating_sub(LOCAL_STATE_FRAME_BUDGET);
   if encoded_len > budget {
     return Err(crate::error::Error::LocalStateExceedsFrame(
-      encoded_len,
-      budget,
+      crate::error::SizeExceeded::new(encoded_len, budget),
     ));
   }
   Ok(())
@@ -2427,8 +2426,7 @@ where
     let budget = self.gossip_mtu();
     if encoded_len > budget {
       return Err(crate::error::Error::AckPayloadExceedsMtu(
-        encoded_len,
-        budget,
+        crate::error::SizeExceeded::new(encoded_len, budget),
       ));
     }
     self.ack_payload = payload;
@@ -2546,8 +2544,7 @@ where
     let budget = self.gossip_mtu();
     if encoded_len > budget {
       return Err(crate::error::Error::UserBroadcastExceedsMtu(
-        encoded_len,
-        budget,
+        crate::error::SizeExceeded::new(encoded_len, budget),
       ));
     }
     self.user_broadcasts.push_back(data);
@@ -2572,8 +2569,7 @@ where
     let budget = self.gossip_mtu();
     if encoded_len > budget {
       return Err(crate::error::Error::UserPacketExceedsMtu(
-        encoded_len,
-        budget,
+        crate::error::SizeExceeded::new(encoded_len, budget),
       ));
     }
     self
@@ -2614,7 +2610,9 @@ where
         }
         let budget = self.gossip_mtu();
         if assembled > budget {
-          return Err(crate::error::Error::UserPacketExceedsMtu(assembled, budget));
+          return Err(crate::error::Error::UserPacketExceedsMtu(
+            crate::error::SizeExceeded::new(assembled, budget),
+          ));
         }
         self
           .pending_transmits
@@ -2679,7 +2677,9 @@ where
     // signal — silent truncation would hide config drift.
     let cap = self.cfg.meta_max_size();
     if meta.len() > cap {
-      return Err(crate::error::Error::MetaExceedsCap(meta.len(), cap));
+      return Err(crate::error::Error::MetaExceedsCap(
+        crate::error::SizeExceeded::new(meta.len(), cap),
+      ));
     }
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();

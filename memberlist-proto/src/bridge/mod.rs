@@ -9,6 +9,8 @@
 #[cfg(not(feature = "std"))]
 use std::{string::ToString, vec::Vec};
 
+use std::borrow::Cow;
+
 use buffa::MessageField as BuffaMessageField;
 use bytes::Bytes;
 
@@ -26,14 +28,15 @@ use crate::{
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BridgeError {
   /// An encode error occurred while serialising an `I` or `A` field.
-  #[error("encode error: {0}")]
+  #[error(transparent)]
   Encode(#[from] EncodeError),
   /// A decode error occurred while deserialising an `I` or `A` field.
-  #[error("decode error: {0}")]
+  #[error(transparent)]
   Decode(#[from] DecodeError),
-  /// A required `MessageField` was unset when it must be present.
+  /// A required `MessageField` was unset when it must be present. The payload
+  /// names the wire field (e.g. `"Alive.node"`).
   #[error("missing required field: {0}")]
-  MissingField(&'static str),
+  MissingField(Cow<'static, str>),
 }
 
 // ─── I / A ↔ Bytes helpers ───────────────────────────────────────────────────
@@ -71,7 +74,7 @@ fn data_from_bytes<T: Data>(buf: &Bytes) -> Result<T, BridgeError> {
 /// one with `MissingField` — faithful to the frozen `memberlist-proto`
 /// decoder which presence-tracks and rejects missing required fields.
 fn require_bytes<'a>(f: &'a Option<Bytes>, field: &'static str) -> Result<&'a Bytes, BridgeError> {
-  f.as_ref().ok_or(BridgeError::MissingField(field))
+  f.as_ref().ok_or(BridgeError::MissingField(field.into()))
 }
 
 /// Copy a decoded wire `bytes` field into an owned buffer, detaching it from the
@@ -219,13 +222,13 @@ pub fn node_state_from_buffa<I: Data, A: Data>(
   // (frozen rejects a PushNodeState missing it); enforce presence. The
   // value itself is discarded — only the `ok_or(...).? ` early-return
   // matters for missing-field validation.
-  let _ = b
-    .incarnation
-    .ok_or(BridgeError::MissingField("PushNodeState.incarnation"))?;
+  let _ = b.incarnation.ok_or(BridgeError::MissingField(
+    "PushNodeState.incarnation".into(),
+  ))?;
   let state = state_from_buffa(
     b.state
       .as_ref()
-      .ok_or(BridgeError::MissingField("PushNodeState.state"))?,
+      .ok_or(BridgeError::MissingField("PushNodeState.state".into()))?,
   )?;
   let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
@@ -261,13 +264,13 @@ pub fn push_node_state_from_buffa<I: Data, A: Data>(
 ) -> Result<typed::PushNodeState<I, A>, BridgeError> {
   let id: I = data_from_bytes(require_bytes(&b.id, "PushNodeState.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "PushNodeState.addr")?)?;
-  let incarnation = b
-    .incarnation
-    .ok_or(BridgeError::MissingField("PushNodeState.incarnation"))?;
+  let incarnation = b.incarnation.ok_or(BridgeError::MissingField(
+    "PushNodeState.incarnation".into(),
+  ))?;
   let state = state_from_buffa(
     b.state
       .as_ref()
-      .ok_or(BridgeError::MissingField("PushNodeState.state"))?,
+      .ok_or(BridgeError::MissingField("PushNodeState.state".into()))?,
   )?;
   let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
@@ -301,14 +304,14 @@ pub fn alive_from_buffa<I: Data, A: Data>(
   let pb_node = b
     .node
     .as_option()
-    .ok_or(BridgeError::MissingField("Alive.node"))?;
+    .ok_or(BridgeError::MissingField("Alive.node".into()))?;
   let node = node_from_buffa(pb_node)?;
   let meta = meta_from_wire(&b.meta)?;
   let protocol_version: typed::ProtocolVersion = versioned(b.protocol_version, "protocol_version")?;
   let delegate_version: typed::DelegateVersion = versioned(b.delegate_version, "delegate_version")?;
   let incarnation = b
     .incarnation
-    .ok_or(BridgeError::MissingField("Alive.incarnation"))?;
+    .ok_or(BridgeError::MissingField("Alive.incarnation".into()))?;
   let alive = typed::Alive::new(incarnation, node)
     .with_meta(meta)
     .with_protocol_version(protocol_version)
@@ -334,7 +337,7 @@ pub fn suspect_from_buffa<I: Data>(b: &pb::Suspect) -> Result<typed::Suspect<I>,
   let from: I = data_from_bytes(require_bytes(&b.from, "Suspect.from")?)?;
   let incarnation = b
     .incarnation
-    .ok_or(BridgeError::MissingField("Suspect.incarnation"))?;
+    .ok_or(BridgeError::MissingField("Suspect.incarnation".into()))?;
   Ok(typed::Suspect::new(incarnation, node, from))
 }
 
@@ -356,7 +359,7 @@ pub fn dead_from_buffa<I: Data>(b: &pb::Dead) -> Result<typed::Dead<I>, BridgeEr
   let from: I = data_from_bytes(require_bytes(&b.from, "Dead.from")?)?;
   let incarnation = b
     .incarnation
-    .ok_or(BridgeError::MissingField("Dead.incarnation"))?;
+    .ok_or(BridgeError::MissingField("Dead.incarnation".into()))?;
   Ok(typed::Dead::new(incarnation, node, from))
 }
 
@@ -377,14 +380,14 @@ pub fn ping_from_buffa<I: Data, A: Data>(b: &pb::Ping) -> Result<typed::Ping<I, 
   let source_pb = b
     .source
     .as_option()
-    .ok_or(BridgeError::MissingField("Ping.source"))?;
+    .ok_or(BridgeError::MissingField("Ping.source".into()))?;
   let target_pb = b
     .target
     .as_option()
-    .ok_or(BridgeError::MissingField("Ping.target"))?;
+    .ok_or(BridgeError::MissingField("Ping.target".into()))?;
   let sequence_number = b
     .sequence_number
-    .ok_or(BridgeError::MissingField("Ping.sequence_number"))?;
+    .ok_or(BridgeError::MissingField("Ping.sequence_number".into()))?;
   Ok(typed::Ping::new(
     sequence_number,
     node_from_buffa(source_pb)?,
@@ -413,14 +416,14 @@ pub fn indirect_ping_from_buffa<I: Data, A: Data>(
   let source_pb = b
     .source
     .as_option()
-    .ok_or(BridgeError::MissingField("IndirectPing.source"))?;
+    .ok_or(BridgeError::MissingField("IndirectPing.source".into()))?;
   let target_pb = b
     .target
     .as_option()
-    .ok_or(BridgeError::MissingField("IndirectPing.target"))?;
-  let sequence_number = b
-    .sequence_number
-    .ok_or(BridgeError::MissingField("IndirectPing.sequence_number"))?;
+    .ok_or(BridgeError::MissingField("IndirectPing.target".into()))?;
+  let sequence_number = b.sequence_number.ok_or(BridgeError::MissingField(
+    "IndirectPing.sequence_number".into(),
+  ))?;
   Ok(typed::IndirectPing::new(
     sequence_number,
     node_from_buffa(source_pb)?,

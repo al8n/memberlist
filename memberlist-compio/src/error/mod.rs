@@ -252,11 +252,11 @@ impl core::fmt::Display for InvalidOption {
 #[non_exhaustive]
 pub enum MemberlistError {
   /// I/O error from the OS, socket, or compio runtime.
-  #[error("I/O error: {0}")]
+  #[error(transparent)]
   Io(#[from] io::Error),
 
   /// Encryption codec error from memberlist-wire.
-  #[error("encryption: {0}")]
+  #[error(transparent)]
   Encryption(#[from] memberlist_proto::EncryptionError),
 
   /// Checksum codec error from memberlist-wire. Surfaced when a configured
@@ -267,11 +267,11 @@ pub enum MemberlistError {
   /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) setter so
   /// the misconfiguration is rejected rather than disabling gossip after a false
   /// `Ok`.
-  #[error("checksum: {0}")]
+  #[error(transparent)]
   Checksum(#[from] memberlist_proto::ChecksumError),
 
   /// Frame decode error from memberlist-wire.
-  #[error("frame: {0}")]
+  #[error(transparent)]
   Frame(#[from] memberlist_proto::FrameError),
 
   /// Address resolution failed (DNS error, etc.).
@@ -417,8 +417,8 @@ pub enum MemberlistError {
   /// violates the wire constraints: it exceeds the 253-byte maximum or is not
   /// valid UTF-8. Rejected at the setter so the error surfaces at configuration
   /// time rather than at construction.
-  #[error("invalid cluster label: {0}")]
-  InvalidLabel(memberlist_proto::LabelError),
+  #[error(transparent)]
+  InvalidLabel(#[from] memberlist_proto::LabelError),
 }
 
 /// Convenience [`Result`] for [`MemberlistError`].
