@@ -1,0 +1,116 @@
+//! Runtime, alloc-backed sizing for the smoltcp driver. The machine is
+//! alloc-backed, so fixed-array const generics would buy nothing.
+
+use core::time::Duration;
+
+/// Default [`Options::close_timeout`]: 10 seconds.
+///
+/// A graceful TCP close (FIN/ACK exchange) over a healthy link completes in a
+/// few round-trips; 10 s is a generous bound that rides out WAN latency while
+/// still promptly reclaiming a socket whose peer vanished mid-close. It mirrors
+/// the machine's default stream/handshake deadline so a stuck reliable exchange
+/// and its closing socket are reclaimed on the same order of timescale.
+pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sizing and ports for [`Memberlist`](crate::Memberlist). All buffers are
+/// fixed-capacity at construction (smoltcp has no growable backing on no_std);
+/// gossip overflow drops, reliable overflow backpressures.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Options {
+  /// Local port the node binds. The gossip UDP socket and the reliable-plane
+  /// TCP listener both use it, and it is the port peers reach the node at — the
+  /// single-port memberlist model (one advertised `SocketAddr` serves both
+  /// planes, since a UDP and a TCP socket on the same port number are
+  /// independent).
+  pub port: u16,
+  /// Pooled TCP sockets (max concurrent reliable exchanges + 1 listener).
+  pub tcp_pool_size: usize,
+  /// Per-TCP-socket rx ring bytes.
+  pub tcp_socket_rx_bytes: usize,
+  /// Per-TCP-socket tx ring bytes.
+  pub tcp_socket_tx_bytes: usize,
+  /// UDP rx datagram metadata slots.
+  pub udp_rx_packets: usize,
+  /// UDP tx datagram metadata slots.
+  pub udp_tx_packets: usize,
+  /// UDP rx payload byte arena.
+  pub udp_rx_payload_bytes: usize,
+  /// UDP tx payload byte arena.
+  pub udp_tx_payload_bytes: usize,
+  /// Maximum time a gracefully-closing TCP socket may stay parked before it is
+  /// force-aborted and returned to the pool.
+  ///
+  /// smoltcp applies no TCP timeout by default, so a peer that vanishes during
+  /// the FIN handshake (FinWait/LastAck) keeps the socket open indefinitely and
+  /// the handle never returns to the free-list — permanently shrinking the pool
+  /// and the listener replenished from it. Bounding the close guarantees
+  /// recovery. A healthy close completes well before this and is reclaimed the
+  /// moment it reaches `Closed`; the timeout only governs the vanished-peer case.
+  pub close_timeout: Duration,
+  /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
+  /// inbound reliable connections by peer address at the transport boundary, AND
+  /// inbound alives by the peer's self-advertised address at membership
+  /// admission. `None` (the default) admits every address. Present only with the
+  /// `cidr` feature; set it via [`with_cidr_policy`](Options::with_cidr_policy).
+  #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+  pub cidr_policy: Option<memberlist_proto::CidrPolicy>,
+}
+
+impl Default for Options {
+  fn default() -> Self {
+    Self {
+      port: 7946,
+      tcp_pool_size: 4,
+      tcp_socket_rx_bytes: 4096,
+      tcp_socket_tx_bytes: 4096,
+      udp_rx_packets: 8,
+      udp_tx_packets: 8,
+      udp_rx_payload_bytes: 8 * 1500,
+      udp_tx_payload_bytes: 8 * 1500,
+      close_timeout: DEFAULT_CLOSE_TIMEOUT,
+      #[cfg(feature = "cidr")]
+      cidr_policy: None,
+    }
+  }
+}
+
+impl Options {
+  /// Defaults tuned for a small embedded cluster.
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Override the pooled TCP socket count.
+  pub fn with_tcp_pool_size(mut self, n: usize) -> Self {
+    self.tcp_pool_size = n;
+    self
+  }
+
+  /// Override the local port (the gossip UDP socket and the reliable-plane TCP
+  /// listener both bind it).
+  pub fn with_port(mut self, p: u16) -> Self {
+    self.port = p;
+    self
+  }
+
+  /// Override the graceful-close timeout (see [`Options::close_timeout`]).
+  pub fn with_close_timeout(mut self, d: Duration) -> Self {
+    self.close_timeout = d;
+    self
+  }
+
+  /// Install a CIDR peer-admission policy (see [`Options::cidr_policy`]). One
+  /// policy gates the gossip source and reliable peer at the transport boundary
+  /// AND the advertised address at membership admission.
+  #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
+  pub fn with_cidr_policy(mut self, policy: memberlist_proto::CidrPolicy) -> Self {
+    self.cidr_policy = Some(policy);
+    self
+  }
+}
+
+#[cfg(test)]
+mod tests;
