@@ -468,7 +468,7 @@ fn with_label_rejects_invalid_at_setter() {
   let too_long = vec![b'x'; 254];
   let result = TransformOptions::default().with_label(Some(too_long));
   assert!(
-    matches!(result, Err(LabelError::TooLong)),
+    matches!(result, Err(LabelError::TooLong(_))),
     "a label exceeding 253 bytes must be rejected at the setter"
   );
 

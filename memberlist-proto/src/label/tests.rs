@@ -37,7 +37,10 @@ fn validate_label_max_len_is_ok() {
 #[test]
 fn validate_label_one_over_max_len_is_too_long() {
   let l = vec![b'x'; MAX_LABEL_LEN + 1];
-  assert_eq!(validate_label(&l), Err(LabelError::TooLong));
+  assert_eq!(
+    validate_label(&l),
+    Err(LabelError::TooLong(MAX_LABEL_LEN + 1))
+  );
 }
 
 #[test]
@@ -137,7 +140,7 @@ fn classify_header_over_long_declared_length_too_long() {
   // `[12][254]` — two bytes are sufficient for the guard to fire immediately.
   let buf = [LABELED_TAG, 254u8];
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::TooLong) => {}
+    LabelOutcome::Rejected(LabelError::TooLong(_)) => {}
     other => panic!("expected Rejected(TooLong), got {other:?}"),
   }
 }
@@ -146,7 +149,7 @@ fn classify_header_over_long_declared_length_too_long() {
 fn classify_header_over_long_255_too_long() {
   let buf = [LABELED_TAG, 255u8];
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::TooLong) => {}
+    LabelOutcome::Rejected(LabelError::TooLong(_)) => {}
     other => panic!("expected Rejected(TooLong) for len=255, got {other:?}"),
   }
 }

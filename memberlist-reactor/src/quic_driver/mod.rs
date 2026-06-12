@@ -340,7 +340,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         let res = self
           .endpoint
           .send_user_packets(to, &payloads)
-          .map_err(|e| Error::PayloadTooLarge(e.to_string()));
+          .map_err(Error::Proto);
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
@@ -450,11 +450,8 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // (rejecting an over-cap value) before applying.
         let res = if self.endpoint.is_running() {
           match memberlist_proto::typed::Meta::try_from(meta) {
-            Ok(m) => self
-              .endpoint
-              .update_meta(m)
-              .map_err(|e| Error::PayloadTooLarge(e.to_string())),
-            Err(e) => Err(Error::PayloadTooLarge(e.to_string())),
+            Ok(m) => self.endpoint.update_meta(m).map_err(Error::Proto),
+            Err(e) => Err(Error::MetaTooLarge(e)),
           }
         } else {
           Err(Error::NotRunning)
@@ -470,7 +467,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           self
             .endpoint
             .queue_user_broadcast(data)
-            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+            .map_err(Error::Proto)
         } else {
           Err(Error::NotRunning)
         };
@@ -485,7 +482,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           self
             .endpoint
             .set_local_state_snapshot(state)
-            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+            .map_err(Error::Proto)
         } else {
           Err(Error::NotRunning)
         };
@@ -498,10 +495,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // storing it (an over-budget ack always fails to send, so a probing peer
         // would otherwise falsely suspect this node).
         let res = if self.endpoint.is_running() {
-          self
-            .endpoint
-            .set_ack_payload(payload)
-            .map_err(|e| Error::PayloadTooLarge(e.to_string()))
+          self.endpoint.set_ack_payload(payload).map_err(Error::Proto)
         } else {
           Err(Error::NotRunning)
         };

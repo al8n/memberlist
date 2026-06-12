@@ -314,17 +314,14 @@ pub enum MemberlistError {
   #[error("the local node has left the cluster; the operation requires a running node")]
   NotRunning,
 
-  /// A data-plane payload, once framed, would not fit a single gossip
-  /// datagram and is therefore deterministically unsendable. Currently
-  /// returned by [`set_ack_payload`](crate::Memberlist::set_ack_payload):
-  /// an Ack is emitted as one UDP datagram on the gossip socket, so an
-  /// over-budget ack payload would make every probe reply silently fail
-  /// (`send_to` errors are dropped under the lossy-gossip policy) and peers
-  /// would falsely suspect this node. Rejected instead of a false success;
-  /// the payload is not stored. The message carries the framed size and the
-  /// gossip packet budget.
-  #[error("payload too large to send: {0}")]
-  PayloadTooLarge(String),
+  /// A coordinator operation failed — most commonly a data-plane payload that,
+  /// once framed, would not fit a single gossip datagram (e.g. an over-budget
+  /// ack payload from [`set_ack_payload`](crate::Memberlist::set_ack_payload),
+  /// which the machine rejects as a structured size error rather than emit a
+  /// silently-failing datagram). Carries the typed [`memberlist_proto::Error`]
+  /// so callers can dispatch on the specific cause.
+  #[error(transparent)]
+  Proto(#[from] memberlist_proto::Error),
 
   /// The configured `gossip_mtu`
   /// ([`MemberlistOptions::with_gossip_mtu`](crate::MemberlistOptions::with_gossip_mtu))

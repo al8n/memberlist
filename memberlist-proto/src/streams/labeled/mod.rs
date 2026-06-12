@@ -274,8 +274,8 @@ impl LabelOptionsError {
   /// [`Self::InvalidLabel`] defensively.
   fn from_label_error(e: LabelError) -> Self {
     match e {
-      LabelError::TooLong => Self::LabelTooLong,
-      LabelError::NotUtf8 | LabelError::Mismatch | LabelError::DoubleLabel => Self::InvalidLabel,
+      LabelError::TooLong(_) => Self::LabelTooLong,
+      _ => Self::InvalidLabel,
     }
   }
 }

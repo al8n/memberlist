@@ -234,7 +234,7 @@ impl OversizeCiphertext {
 
 /// An encryption or decryption failure. Variants are unit or newtype only.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum EncryptionError {
   /// AEAD authentication failed — corrupt ciphertext, mismatched AAD, or a
   /// wrong key. Surfaced for every algorithm; never a panic.

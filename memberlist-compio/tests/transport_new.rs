@@ -363,9 +363,9 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
 /// An `initial_local_state` snapshot whose framed PushPull would exceed the
 /// reliable-stream frame budget rides every push/pull exchange, so it would be
 /// rejected by every receiver's frame-length gate and the application state
-/// would never reach a peer. `Memberlist::new` must reject it fail-fast with
-/// `PayloadTooLarge` BEFORE binding any socket, while a reasonable snapshot
-/// constructs successfully.
+/// would never reach a peer. `Memberlist::new` must reject it fail-fast as
+/// `LocalStateExceedsFrame` BEFORE binding any socket, while a reasonable
+/// snapshot constructs successfully.
 ///
 /// The frame budget is `max_stream_frame_size` (default 64 MiB) minus the
 /// `LOCAL_STATE_FRAME_BUDGET` (1 MiB) reserve, i.e. ~63 MiB. A 64 MiB snapshot
@@ -387,8 +387,8 @@ async fn transport_new_rejects_oversized_initial_local_state() {
   )
   .await;
   match res {
-    Err(MemberlistError::PayloadTooLarge(_)) => {}
-    Err(other) => panic!("expected PayloadTooLarge, got {other:?}"),
+    Err(MemberlistError::Proto(memberlist_proto::Error::LocalStateExceedsFrame(..))) => {}
+    Err(other) => panic!("expected LocalStateExceedsFrame, got {other:?}"),
     Ok(_) => panic!("a 64 MiB initial_local_state must be rejected, but construction succeeded"),
   }
 

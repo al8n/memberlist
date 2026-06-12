@@ -124,7 +124,7 @@ impl core::fmt::Display for UnitLenExceedsMaxInfo {
 
 /// A compression or decompression failure.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum CompressionError {
   /// The algorithm tag is unknown or its backend feature is not built in.
   #[error("unsupported compression algorithm: tag {0}")]

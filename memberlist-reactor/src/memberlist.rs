@@ -712,7 +712,7 @@ impl<I: NodeId> Memberlist<I> {
           resolver
             .resolve(a)
             .await
-            .map_err(|e| Error::Resolve(e.to_string()))?,
+            .map_err(|e| Error::Resolve(Box::new(e)))?,
         ),
       }
     }
@@ -995,7 +995,7 @@ impl<I: NodeId> Memberlist<I> {
 
   /// Sets the payload attached to outbound probe acks; it surfaces on the
   /// probing peer via [`Delegate::notify_ping_complete`]. Rejected with
-  /// `Err(NotRunning)` once the node has left, or `Err(PayloadTooLarge)` when the
+  /// `Err(NotRunning)` once the node has left, or `Err(Proto)` when the
   /// framed ack would exceed the gossip packet budget.
   pub async fn set_ack_payload(&self, payload: bytes::Bytes) -> Result<(), Error> {
     if self.shared.is_shutdown() {
@@ -1025,10 +1025,10 @@ async fn resolve_one<Res: AddressResolver>(
     MaybeResolved::Unresolved(a) => resolver
       .resolve(&a)
       .await
-      .map_err(|e| Error::Resolve(e.to_string()))?
+      .map_err(|e| Error::Resolve(Box::new(e)))?
       .into_iter()
       .next()
-      .ok_or_else(|| Error::Resolve("no addresses resolved".into())),
+      .ok_or_else(|| Error::NoAddresses),
   }
 }
 

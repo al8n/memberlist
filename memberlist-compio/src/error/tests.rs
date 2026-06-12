@@ -79,7 +79,7 @@ fn every_variant_displays_and_debugs() {
     MemberlistError::LeaveTimeout,
     MemberlistError::Shutdown,
     MemberlistError::NotRunning,
-    MemberlistError::PayloadTooLarge("1500 > 1400".to_string()),
+    MemberlistError::Proto(memberlist_proto::Error::AckPayloadExceedsMtu(1500, 1400)),
     MemberlistError::InvalidGossipMtu(InvalidGossipMtu::new(70_000, 65_467)),
     MemberlistError::GossipMtuTooSmall(GossipMtuTooSmall::new(64, 512)),
     MemberlistError::InvalidAdvertiseAddr(InvalidAdvertiseAddr::new(

@@ -74,8 +74,10 @@ pub enum DnsError {
   Decode(#[from] DecodeError),
 
   /// The hostname could not be parsed into a wire-format DNS name.
+  /// Carries the hickory `ProtoError` via `#[source]` rather than `#[from]`,
+  /// since [`Self::Encode`] already owns the `From<ProtoError>` conversion.
   #[error("hostname parse error: {0}")]
-  Hostname(String),
+  Hostname(#[source] ProtoError),
 }
 
 impl From<DnsError> for io::Error {
@@ -166,7 +168,7 @@ impl DnsResolver {
 
     // Build a TYPE ANY query message. `Message::query()` initializes a
     // fresh ID with the standard query flags; we add the question.
-    let name = Name::from_ascii(host).map_err(|e| DnsError::Hostname(e.to_string()))?;
+    let name = Name::from_ascii(host).map_err(DnsError::Hostname)?;
     let mut msg = Message::query();
     msg.add_query(Query::query(name, RecordType::ANY));
 

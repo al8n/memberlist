@@ -1151,7 +1151,7 @@ fn established_intake_inner_frame_decode_failure_fails_bridge() {
     phase_label(server.phase_ref())
   );
   assert!(
-    matches!(server.stream_is_failed(), Some(StreamError::Decode(_))),
+    matches!(server.stream_is_failed(), Some(StreamError::Frame(_))),
     "the inner FSM recorded the decode failure"
   );
 }

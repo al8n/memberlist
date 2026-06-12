@@ -619,8 +619,13 @@ async fn set_local_state_rejects_oversized_snapshot() {
   let oversized = Bytes::from(vec![0u8; 64 * 1024 * 1024]);
   let res = node.set_local_state(oversized).await;
   assert!(
-    matches!(res, Err(MemberlistError::PayloadTooLarge(_))),
-    "an oversized local-state snapshot must be rejected with PayloadTooLarge, got {res:?}"
+    matches!(
+      res,
+      Err(MemberlistError::Proto(
+        memberlist_proto::Error::LocalStateExceedsFrame(..)
+      ))
+    ),
+    "an oversized local-state snapshot must be rejected as LocalStateExceedsFrame, got {res:?}"
   );
 
   // A reasonable snapshot is accepted.

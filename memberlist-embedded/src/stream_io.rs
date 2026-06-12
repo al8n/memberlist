@@ -4,6 +4,7 @@ use core::net::SocketAddr;
 
 /// A non-fatal stream-I/O fault surfaced by a [`StreamIo`] implementation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum StreamIoError {
   /// The address could not be used (e.g. an unspecified/zero endpoint).
   Unaddressable,

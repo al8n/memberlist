@@ -13,10 +13,7 @@
 //! convention for messages the machine itself constructed.
 
 #[cfg(not(feature = "std"))]
-use std::{
-  string::{String, ToString},
-  vec::Vec,
-};
+use std::vec::Vec;
 
 use crate::{Data, framing, message_from_any, message_to_any, typed::Message};
 
@@ -38,23 +35,23 @@ pub(crate) use crate::framing::{
 #[inline]
 pub(crate) fn encode_message<I: Data, A: Data>(
   msg: &Message<I, A>,
-) -> Result<Vec<u8>, crate::BridgeError> {
+) -> Result<Vec<u8>, crate::error::StreamError> {
   let any = message_to_any::<I, A>(msg)?;
-  framing::encode_message(&any)
-    .map_err(|e| crate::BridgeError::Encode(crate::EncodeError::custom(e.to_string())))
+  Ok(framing::encode_message(&any)?)
 }
 
 /// Decode a single plain frame into an owned `typed::Message<I, A>`.
 ///
 /// Returns the message and the number of bytes consumed from `buf`
-/// (`== buf.len()` for an exact single-frame buffer). Errors are returned as
-/// a human-readable string so the per-stream FSM can wrap them in
-/// `StreamError::Decode` without leaking the two distinct wire error types.
+/// (`== buf.len()` for an exact single-frame buffer). The two distinct wire
+/// failures are returned typed — `StreamError::Frame` for the inner-frame codec
+/// and `StreamError::Bridge` for the typed-to-buffa bridge — so the FSM keeps
+/// the `source()` chain rather than a flattened string.
 #[inline]
 pub(crate) fn decode_message<I: Data, A: Data>(
   buf: &[u8],
-) -> Result<(usize, Message<I, A>), String> {
-  let (consumed, any) = framing::decode_message(buf).map_err(|e| e.to_string())?;
-  let msg = message_from_any::<I, A>(&any).map_err(|e| e.to_string())?;
+) -> Result<(usize, Message<I, A>), crate::error::StreamError> {
+  let (consumed, any) = framing::decode_message(buf)?;
+  let msg = message_from_any::<I, A>(&any)?;
   Ok((consumed, msg))
 }

@@ -1170,12 +1170,12 @@ async fn dispatch_command<I>(
       // the framed lone `UserData` packet against the gossip budget: an
       // over-budget payload is deterministically untransmittable, so the
       // machine setter rejects it without storing it — surface that as
-      // `PayloadTooLarge` rather than a false `Ok`. The single-task driver
+      // `Proto` rather than a false `Ok`. The single-task driver
       // makes the check + apply atomic.
       let res: Result<()> = if endpoint.is_running() {
         endpoint
           .queue_user_broadcast(cmd.data().clone())
-          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+          .map_err(MemberlistError::Proto)
       } else {
         Err(MemberlistError::NotRunning)
       };
@@ -1189,11 +1189,11 @@ async fn dispatch_command<I>(
       // budget: a snapshot whose framed PushPull exceeds it would be rejected
       // by every receiver's frame-length gate, so the application state would
       // never reach a peer. The machine setter rejects such a snapshot without
-      // storing it; surface that as `PayloadTooLarge` rather than a false `Ok`.
+      // storing it; surface that as `Proto` rather than a false `Ok`.
       let res: Result<()> = if endpoint.is_running() {
         endpoint
           .set_local_state_snapshot(cmd.state().clone())
-          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+          .map_err(MemberlistError::Proto)
       } else {
         Err(MemberlistError::NotRunning)
       };
@@ -1207,11 +1207,11 @@ async fn dispatch_command<I>(
       // is emitted as a single UDP datagram that always fails to send, so a
       // probing peer would receive no ack and falsely suspect this node. The
       // machine setter rejects such a payload without storing it; surface
-      // that as `PayloadTooLarge` rather than a false `Ok`.
+      // that as `Proto` rather than a false `Ok`.
       let res: Result<()> = if endpoint.is_running() {
         endpoint
           .set_ack_payload(cmd.payload().clone())
-          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+          .map_err(MemberlistError::Proto)
       } else {
         Err(MemberlistError::NotRunning)
       };
@@ -1255,7 +1255,7 @@ async fn dispatch_command<I>(
       } else {
         endpoint
           .send_user_packets(*cmd.to(), cmd.payloads())
-          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+          .map_err(MemberlistError::Proto)
       };
       // Ignoring Err: caller dropped the reply receiver.
       let _ = cmd.reply.send(res);

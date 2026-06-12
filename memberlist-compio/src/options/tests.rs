@@ -316,7 +316,7 @@ fn validate_initial_local_state_honors_configured_cap() {
         .with_max_stream_frame_size(256)
         .with_initial_local_state(snapshot)
     ),
-    Err(crate::error::MemberlistError::PayloadTooLarge(_))
+    Err(crate::error::MemberlistError::Proto(_))
   ));
 }
 

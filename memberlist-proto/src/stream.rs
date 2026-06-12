@@ -639,8 +639,7 @@ where
     // path (`framing::decode_message` → `message_from_any`), yielding an
     // owned `typed::Message<I, A>`. `typed::Message` carries no codec, so
     // the zero-copy `MessageRef`/`DataRef` decode is no longer available.
-    let (consumed, msg) = crate::wire::decode_message::<I, A>(&frame_bytes)
-      .map_err(|e| StreamError::Decode(e.into()))?;
+    let (consumed, msg) = crate::wire::decode_message::<I, A>(&frame_bytes)?;
     // A well-formed frame must consume exactly the bytes `probe_frame`
     // measured. A mismatch means the pre-scan and the real decoder
     // disagree on framing (a malformed/adversarial frame, or a framing
@@ -1833,9 +1832,9 @@ mod fsm_tests {
       .handle_data(&bytes, t0)
       .expect_err("a well-framed but undecodable body fails decode");
     assert!(
-      matches!(err, StreamError::Decode(_)),
-      "an undecodable body surfaces as Decode, got {err:?}"
+      matches!(err, StreamError::Frame(_)),
+      "an undecodable body surfaces as Frame (the inner-frame codec decode fails), got {err:?}"
     );
-    assert!(matches!(s.is_failed(), Some(StreamError::Decode(_))));
+    assert!(matches!(s.is_failed(), Some(StreamError::Frame(_))));
   }
 }

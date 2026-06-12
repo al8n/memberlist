@@ -23,7 +23,7 @@ use crate::{
 
 /// Errors that can occur when converting between typed shapes and buffa types.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum BridgeError {
   /// An encode error occurred while serialising an `I` or `A` field.
   #[error("encode error: {0}")]

@@ -71,9 +71,16 @@ pub enum Error {
   #[error("memberlist is not running")]
   NotRunning,
 
-  /// Address resolution failed.
+  /// The address resolver returned an error. The resolver's error type is a
+  /// generic `Res::Error` (so it can't be a typed `#[from]` variant); it is
+  /// boxed to preserve the `source()` chain — a caller that knows its concrete
+  /// resolver can downcast.
   #[error("address resolution failed: {0}")]
-  Resolve(String),
+  Resolve(#[source] Box<dyn core::error::Error + Send + Sync + 'static>),
+
+  /// Address resolution succeeded but yielded no usable addresses.
+  #[error("address resolution returned no addresses")]
+  NoAddresses,
 
   /// A join dispatched push/pulls to seeds but contacted none of them.
   #[error("join contacted none of {0} seed(s)")]
@@ -104,9 +111,18 @@ pub enum Error {
   #[error("reliable send failed")]
   SendFailed,
 
-  /// A directed user-message payload exceeds the per-packet wire limit.
-  #[error("payload too large: {0}")]
-  PayloadTooLarge(String),
+  /// A coordinator operation failed — most commonly a directed user-message or
+  /// metadata payload exceeding its wire limit, which the machine reports as a
+  /// structured size error. Carries the typed [`memberlist_proto::Error`] so
+  /// callers can dispatch on the specific cause.
+  #[error(transparent)]
+  Proto(#[from] memberlist_proto::Error),
+
+  /// The supplied node metadata exceeds the wire ceiling
+  /// ([`Meta::MAX_SIZE`](memberlist_proto::typed::Meta::MAX_SIZE)) and was
+  /// rejected before any coordinator mutation.
+  #[error(transparent)]
+  MetaTooLarge(#[from] memberlist_proto::typed::LargeMeta),
 
   /// An I/O error.
   #[error(transparent)]

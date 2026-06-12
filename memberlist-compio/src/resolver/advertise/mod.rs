@@ -17,6 +17,7 @@ pub trait AdvertiseAddrResolver: 'static {
 /// Error variants returned by the default [`AdvertiseAddrResolver`] impls
 /// shipped with this crate.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AdvertiseResolutionError {
   /// The candidate set was empty.
   #[error("advertise resolution: no candidate addresses returned")]

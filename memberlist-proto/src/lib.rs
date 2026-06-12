@@ -216,8 +216,8 @@ pub use checksum::{
   ChecksumOutcome, decode_checksummed_frame, digest, encode_checksummed_frame, verify,
 };
 pub use codec::{
-  CodecError, DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing,
-  encode_outgoing_compound, parse_message, parse_messages,
+  CodecError, DecodeOptions, EncodeOptions, TrailingData, TruncatedInput, decode_incoming,
+  encode_outgoing, encode_outgoing_compound, parse_message, parse_messages,
 };
 pub use compression::{
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,

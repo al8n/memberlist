@@ -102,7 +102,7 @@ fn with_label_rejects_overlong() {
   let too_long = Bytes::from(vec![b'x'; crate::label::MAX_LABEL_LEN + 1]);
   let result = make_endpoint("n", "127.0.0.1:7602".parse().unwrap(), Instant::now())
     .with_label(Some(too_long), false);
-  assert!(matches!(result, Err(crate::label::LabelError::TooLong)));
+  assert!(matches!(result, Err(crate::label::LabelError::TooLong(_))));
 }
 
 #[test]

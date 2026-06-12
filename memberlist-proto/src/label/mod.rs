@@ -51,10 +51,13 @@ pub const MAX_LABEL_LEN: usize = u8::MAX as usize - 2;
 
 /// Errors that can arise from cluster-label frame operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum LabelError {
-  /// The label exceeds the 253-byte wire maximum (`MAX_LABEL_LEN`).
-  #[error("label too long")]
-  TooLong,
+  /// The label exceeds the 253-byte wire maximum (`MAX_LABEL_LEN`). Carries the
+  /// offending length (the supplied label's byte count on encode, or the
+  /// declared header length on decode).
+  #[error("label too long: {0} bytes (max {max})", max = MAX_LABEL_LEN)]
+  TooLong(usize),
   /// The label bytes are not valid UTF-8, as required by
   /// `memberlist-proto::Label` (labels round-trip through `SmolStr`).
   #[error("label is not valid UTF-8")]
@@ -110,7 +113,7 @@ pub fn effective_label(label: Option<&[u8]>) -> Option<&[u8]> {
 /// responsible for treating an empty label as "no label".
 pub fn validate_label(label: &[u8]) -> Result<(), LabelError> {
   if label.len() > MAX_LABEL_LEN {
-    return Err(LabelError::TooLong);
+    return Err(LabelError::TooLong(label.len()));
   }
   if core::str::from_utf8(label).is_err() {
     return Err(LabelError::NotUtf8);
@@ -185,7 +188,7 @@ pub fn classify_header(
       // A faithful peer never declares a length above the cap; reject
       // immediately without waiting for the remaining bytes.
       if len > MAX_LABEL_LEN {
-        return LabelOutcome::Rejected(LabelError::TooLong);
+        return LabelOutcome::Rejected(LabelError::TooLong(len));
       }
       if buf.len() < LABEL_OVERHEAD + len {
         return LabelOutcome::Incomplete;

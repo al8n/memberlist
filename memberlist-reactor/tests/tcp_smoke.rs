@@ -373,7 +373,7 @@ async fn unresolved_advertise_is_resolved_at_bootstrap() {
 }
 
 /// A bootstrap `Unresolved` advertise whose resolver yields ZERO addresses
-/// fails construction with `Error::Resolve` rather than binding an unusable
+/// fails construction with `Error::NoAddresses` rather than binding an unusable
 /// node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unresolved_advertise_empty_resolution_fails() {
@@ -402,8 +402,8 @@ async fn unresolved_advertise_empty_resolution_fails() {
   )
   .await;
   assert!(
-    matches!(res, Err(Error::Resolve(_))),
-    "an advertise resolving to nothing must fail with Resolve, got a non-Resolve result"
+    matches!(res, Err(Error::NoAddresses)),
+    "an advertise resolving to nothing must fail with NoAddresses, got a non-NoAddresses result"
   );
 }
 

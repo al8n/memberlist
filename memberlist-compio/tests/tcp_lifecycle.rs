@@ -1431,7 +1431,7 @@ async fn set_policy_options_after_leave_is_rejected() {
 }
 
 /// An ack payload too large to frame into a single gossip datagram must be
-/// REJECTED with `MemberlistError::PayloadTooLarge`, NOT falsely acked.
+/// REJECTED as `AckPayloadExceedsMtu`, NOT falsely acked.
 /// An ack rides one UDP datagram on the gossip socket, so an over-budget
 /// payload makes every probe reply silently fail to send (the lossy-gossip
 /// policy drops `send_to` errors) — peers would receive no ack and falsely
@@ -1449,9 +1449,11 @@ async fn set_ack_payload_oversized_is_rejected() {
   assert!(
     matches!(
       res,
-      Err(memberlist_compio::MemberlistError::PayloadTooLarge(_))
+      Err(memberlist_compio::MemberlistError::Proto(
+        memberlist_proto::Error::AckPayloadExceedsMtu(..)
+      ))
     ),
-    "expected PayloadTooLarge for a 1 MiB ack payload, got {res:?}",
+    "expected AckPayloadExceedsMtu for a 1 MiB ack payload, got {res:?}",
   );
 
   // A reasonable payload on the SAME running node is still accepted: the

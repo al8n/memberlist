@@ -794,7 +794,7 @@ where
   /// the cluster (after [`leave`](Self::leave)): no further probe ack will
   /// carry the payload.
   ///
-  /// Returns [`MemberlistError::PayloadTooLarge`] if the framed ack carrying
+  /// Returns [`MemberlistError::Proto`] if the framed ack carrying
   /// `payload` would exceed the node's gossip packet budget. An ack is sent
   /// as a single UDP datagram, so an over-budget payload is rejected (and
   /// not stored): every probe reply would otherwise silently fail to send
@@ -1002,7 +1002,7 @@ where
   /// Send an unreliable directed user message to `to`. Best-effort
   /// delivery; no completion event. Mirrors `memberlist-core`'s `send`.
   ///
-  /// Returns `Err(PayloadTooLarge)` if the framed `UserData` packet
+  /// Returns `Err(Proto)` if the framed `UserData` packet
   /// exceeds the gossip MTU, `Err(NotRunning)` after `leave()`, and
   /// `Err(Shutdown)` after `shutdown()`.
   #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, msg), fields(to = %to, len = msg.len())))]

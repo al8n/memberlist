@@ -270,7 +270,7 @@ impl core::fmt::Display for InsufficientBufferCapacity {
 
 /// A data encoding error
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum EncodeError {
   /// Returned when the encoded buffer is too small to hold the bytes format of the types.
   #[error("insufficient buffer capacity, {0}")]

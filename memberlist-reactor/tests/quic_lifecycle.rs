@@ -4,7 +4,7 @@
 //! Brings up a converged two-node QUIC cluster (gossip + probes over QUIC
 //! datagrams by default), gracefully `leave()` one node, and verifies every
 //! command the driver gates on a running node is rejected with `NotRunning`.
-//! Also covers an oversized `send` (`PayloadTooLarge`), the live-node policy
+//! Also covers an oversized `send` (`UserPacketExceedsMtu`), the live-node policy
 //! setters, a silent-peer ping timeout, and convergence over the plain-UDP
 //! gossip transport.
 
@@ -212,7 +212,7 @@ async fn quic_concurrent_leave_both_succeed() {
   let _ = b.shutdown().await;
 }
 
-/// An oversized unreliable `send` over QUIC is rejected with `PayloadTooLarge`.
+/// An oversized unreliable `send` over QUIC is rejected as `UserPacketExceedsMtu`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quic_oversized_send_is_rejected() {
   let a = make("q-oversized-a", support::self_trusted_quic_config()).await;
@@ -225,8 +225,13 @@ async fn quic_oversized_send_is_rejected() {
   .await
   .expect("send must resolve, not hang");
   assert!(
-    matches!(res, Err(Error::PayloadTooLarge(_))),
-    "an oversized QUIC send must be rejected with PayloadTooLarge, got {res:?}"
+    matches!(
+      res,
+      Err(Error::Proto(memberlist_proto::Error::UserPacketExceedsMtu(
+        ..
+      )))
+    ),
+    "an oversized QUIC send must be rejected as UserPacketExceedsMtu, got {res:?}"
   );
 
   let _ = a.shutdown().await;

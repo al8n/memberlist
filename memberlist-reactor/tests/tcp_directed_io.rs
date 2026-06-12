@@ -537,13 +537,13 @@ async fn send_reliable_to_unreachable_returns_err_not_hang() {
   let _ = a.shutdown().await;
 }
 
-/// An oversized unreliable `send` payload is rejected with `PayloadTooLarge`
-/// rather than silently dropped on the wire: a single `UserData` frame larger
-/// than the gossip MTU is deterministically untransmittable, so the driver maps
-/// the machine's `UserPacketExceedsMtu` to `Error::PayloadTooLarge` and never
-/// queues it. 1 MiB is far over the default ~1400-byte gossip budget.
+/// An oversized unreliable `send` payload is rejected rather than silently
+/// dropped on the wire: a single `UserData` frame larger than the gossip MTU is
+/// deterministically untransmittable, so the driver surfaces the machine's
+/// `UserPacketExceedsMtu` as `Error::Proto` and never queues it. 1 MiB is far
+/// over the default ~1400-byte gossip budget.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oversized_send_is_rejected_payload_too_large() {
+async fn oversized_send_is_rejected() {
   let a = make("oversized-a").await;
   let huge = Bytes::from(vec![0xABu8; 1024 * 1024]);
 
@@ -554,8 +554,13 @@ async fn oversized_send_is_rejected_payload_too_large() {
   .await
   .expect("send must resolve, not hang");
   assert!(
-    matches!(res, Err(Error::PayloadTooLarge(_))),
-    "an oversized unreliable send must be rejected with PayloadTooLarge, got {res:?}"
+    matches!(
+      res,
+      Err(Error::Proto(memberlist_proto::Error::UserPacketExceedsMtu(
+        ..
+      )))
+    ),
+    "an oversized unreliable send must be rejected as UserPacketExceedsMtu, got {res:?}"
   );
 
   // A small payload on the SAME node is still accepted — the rejection is a

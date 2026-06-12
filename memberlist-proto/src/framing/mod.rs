@@ -167,7 +167,8 @@ pub enum AnyMessage {
 
 /// The `(available, required)` byte-count pair carried by
 /// [`FrameError::Incomplete`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("incomplete frame: {available} bytes available, {required} required")]
 pub struct IncompleteFrame {
   available: usize,
   required: usize,
@@ -196,25 +197,15 @@ impl IncompleteFrame {
   }
 }
 
-impl core::fmt::Display for IncompleteFrame {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(
-      f,
-      "{} bytes available, {} required",
-      self.available, self.required
-    )
-  }
-}
-
 /// Errors returned by [`decode_plain_frame`] and [`decode_message`].
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FrameError {
   /// The input buffer is empty; no frame to decode.
   #[error("frame buffer is empty")]
   Empty,
   /// The buffer holds a partial frame.
-  #[error("incomplete frame: {0}")]
+  #[error(transparent)]
   Incomplete(IncompleteFrame),
   /// The tag byte does not correspond to a known message type.
   #[error("unknown message tag: {0}")]

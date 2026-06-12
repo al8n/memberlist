@@ -918,7 +918,7 @@ where
       .max_stream_frame_size()
       .unwrap_or(memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
     memberlist_proto::endpoint::validate_local_state_snapshot::<I, A>(state, cap)
-      .map_err(|e| crate::error::MemberlistError::PayloadTooLarge(e.to_string()))?;
+      .map_err(crate::error::MemberlistError::Proto)?;
   }
   Ok(())
 }

@@ -220,8 +220,11 @@ fn dns_error_display_and_debug() {
   assert!(io_err.to_string().contains("boom"));
   assert!(!format!("{io_err:?}").is_empty());
 
-  let host_err = DnsError::Hostname("bad name".to_string());
-  assert_eq!(host_err.to_string(), "hostname parse error: bad name");
+  // A 64-octet single label exceeds the 63-octet DNS limit, yielding a real
+  // hickory `ProtoError`.
+  let proto_err = hickory_proto::rr::Name::from_ascii("x".repeat(64)).unwrap_err();
+  let host_err = DnsError::Hostname(proto_err);
+  assert!(host_err.to_string().starts_with("hostname parse error: "));
   assert!(format!("{host_err:?}").contains("Hostname"));
 }
 
@@ -237,10 +240,11 @@ fn dns_error_from_io_error() {
 fn dns_error_into_io_error_roundtrips() {
   // `From<DnsError> for io::Error` wraps via `io::Error::other`, so the
   // kind is `Other` and the source string is preserved.
-  let original = DnsError::Hostname("xyz".to_string());
+  let original =
+    DnsError::Hostname(hickory_proto::rr::Name::from_ascii("x".repeat(64)).unwrap_err());
   let io_err: io::Error = original.into();
   assert_eq!(io_err.kind(), io::ErrorKind::Other);
-  assert!(io_err.to_string().contains("hostname parse error: xyz"));
+  assert!(io_err.to_string().starts_with("hostname parse error: "));
 }
 
 #[test]

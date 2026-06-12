@@ -136,8 +136,16 @@ pub enum StreamError {
   /// The payload is a free-form description of what was unexpected.
   #[error("unexpected message from peer: {0}")]
   UnexpectedMessage(Cow<'static, str>),
-  /// The peer sent bytes that could not be decoded.
-  /// The payload is the free-form wire-decode error reason.
+  /// The inner message frame failed to decode (or encode) — wire structure,
+  /// compression, encryption, or checksum. Carries the typed `FrameError`.
+  #[error("frame error: {0}")]
+  Frame(#[from] crate::framing::FrameError),
+  /// The typed-to-buffa message bridge failed. Carries the typed `BridgeError`.
+  #[error("bridge error: {0}")]
+  Bridge(#[from] crate::BridgeError),
+  /// A protocol-level decode condition described free-form (e.g. an inbound
+  /// frame exceeding the buffer cap) — distinct from the typed `Frame` /
+  /// `Bridge` wire-codec errors above.
   #[error("decode error: {0}")]
   Decode(Cow<'static, str>),
   /// The peer closed the stream before sending a response.

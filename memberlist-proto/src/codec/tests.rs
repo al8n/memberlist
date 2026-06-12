@@ -5,7 +5,7 @@ use smol_str::SmolStr;
 
 use super::*;
 use crate::{
-  label::LABELED_TAG,
+  label::{LABELED_TAG, LabelError},
   typed::{Ack, Message},
 };
 
@@ -127,7 +127,10 @@ fn label_mismatch_errors() {
   let encoded = encode_outgoing(&msg, &opts).unwrap();
   let dec_opts = DecodeOptions::new(Some(Bytes::from_static(b"b")));
   let result = decode_incoming(encoded, &dec_opts);
-  assert!(matches!(result, Err(CodecError::LabelMismatch)));
+  assert!(matches!(
+    result,
+    Err(CodecError::Label(LabelError::Mismatch))
+  ));
 }
 
 #[test]
@@ -136,7 +139,10 @@ fn missing_expected_label_errors() {
   let encoded = encode_outgoing(&msg, &EncodeOptions::default()).unwrap();
   let dec_opts = DecodeOptions::new(Some(Bytes::from_static(b"x")));
   let result = decode_incoming(encoded, &dec_opts);
-  assert!(matches!(result, Err(CodecError::LabelMismatch)));
+  assert!(matches!(
+    result,
+    Err(CodecError::Label(LabelError::Mismatch))
+  ));
 }
 
 #[test]
@@ -152,7 +158,7 @@ fn labeled_frame_with_no_expected_label_is_rejected() {
 
   let result = decode_incoming(encoded, &DecodeOptions::new(None));
   assert!(
-    matches!(result, Err(CodecError::DoubleLabel)),
+    matches!(result, Err(CodecError::Label(LabelError::DoubleLabel))),
     "labeled frame + no expected label must be DoubleLabel, got {result:?}"
   );
 }
@@ -163,7 +169,10 @@ fn label_too_long_errors() {
   let opts = EncodeOptions::new(Some(long_label));
   let msg = ack_msg();
   let result = encode_outgoing(&msg, &opts);
-  assert!(matches!(result, Err(CodecError::LabelTooLong(256))));
+  assert!(matches!(
+    result,
+    Err(CodecError::Label(LabelError::TooLong(256)))
+  ));
 }
 
 #[test]
@@ -181,7 +190,7 @@ fn label_length_cap_is_253_not_255() {
     &EncodeOptions::new(Some(Bytes::from(vec![b'x'; 254]))),
   );
   assert!(
-    matches!(too_long, Err(CodecError::LabelTooLong(254))),
+    matches!(too_long, Err(CodecError::Label(LabelError::TooLong(254)))),
     "254-byte label must be rejected, got {too_long:?}"
   );
 }
@@ -217,7 +226,7 @@ fn empty_label_header_is_rejected() {
   framed.extend_from_slice(&encode_outgoing(&ack_msg(), &EncodeOptions::default()).unwrap());
   let result = decode_incoming(Bytes::from(framed), &DecodeOptions::default());
   assert!(
-    matches!(result, Err(CodecError::DoubleLabel)),
+    matches!(result, Err(CodecError::Label(LabelError::DoubleLabel))),
     "[12][0] must be rejected, got {result:?}"
   );
 }
@@ -229,7 +238,7 @@ fn non_utf8_label_is_rejected_on_encode() {
   let opts = EncodeOptions::new(Some(Bytes::from_static(&[0xff, 0xfe, 0x00])));
   let result = encode_outgoing(&ack_msg(), &opts);
   assert!(
-    matches!(result, Err(CodecError::InvalidLabel(_))),
+    matches!(result, Err(CodecError::Label(LabelError::NotUtf8))),
     "non-UTF-8 label must be rejected on encode, got {result:?}"
   );
 }
@@ -246,7 +255,7 @@ fn oversized_inbound_label_is_rejected_before_match() {
   let dec = DecodeOptions::new(Some(Bytes::from(vec![b'x'; 254])));
   let result = decode_incoming(Bytes::from(framed), &dec);
   assert!(
-    matches!(result, Err(CodecError::LabelTooLong(254))),
+    matches!(result, Err(CodecError::Label(LabelError::TooLong(254)))),
     "inbound 254-byte label must be rejected, got {result:?}"
   );
 }
@@ -261,7 +270,7 @@ fn non_utf8_inbound_label_is_rejected() {
   let dec = DecodeOptions::new(Some(Bytes::from_static(&[0xff, 0xfe])));
   let result = decode_incoming(Bytes::from(framed), &dec);
   assert!(
-    matches!(result, Err(CodecError::InvalidLabel(_))),
+    matches!(result, Err(CodecError::Label(LabelError::NotUtf8))),
     "non-UTF-8 inbound label must be rejected, got {result:?}"
   );
 }
@@ -276,7 +285,8 @@ fn parse_message_rejects_trailing_datagram_bytes() {
   smuggled.extend_from_slice(b"junk");
   let inner = decode_incoming(Bytes::from(smuggled), &DecodeOptions::default()).unwrap();
   match parse_message::<I, A>(inner) {
-    Err(CodecError::TrailingData(c, t)) => {
+    Err(CodecError::TrailingData(td)) => {
+      let (c, t) = (td.consumed(), td.total());
       assert!(c < t, "consumed {c} must be < total {t}");
     }
     other => panic!("expected TrailingData, got {other:?}"),
@@ -332,7 +342,7 @@ fn incomplete_inner_frame_is_distinguishable() {
   assert_eq!(inner, truncated, "no-label path returns bytes unchanged");
 
   match parse_message::<SmolStr, SocketAddr>(inner) {
-    Err(CodecError::Incomplete(_, _)) => {}
+    Err(CodecError::Incomplete(_)) => {}
     other => panic!("expected CodecError::Incomplete, got {other:?}"),
   }
 }
@@ -382,21 +392,21 @@ fn decode_incoming_rejects_empty_input() {
 #[test]
 fn codec_error_display_strings_are_nonempty() {
   let cases = [
-    CodecError::Bridge("b".to_string()),
-    CodecError::Frame("f".to_string()),
-    CodecError::Incomplete(3, 10),
-    CodecError::LabelTooLong(300),
-    CodecError::InvalidLabel("x"),
-    CodecError::LabelMismatch,
-    CodecError::DoubleLabel,
-    CodecError::Truncated("t"),
-    CodecError::TrailingData(4, 9),
+    CodecError::Bridge(crate::BridgeError::MissingField("x")),
+    CodecError::Frame(crate::framing::FrameError::Empty),
+    CodecError::Incomplete(framing::IncompleteFrame::new(3, 10)),
+    CodecError::Label(LabelError::TooLong(300)),
+    CodecError::Label(LabelError::NotUtf8),
+    CodecError::Label(LabelError::Mismatch),
+    CodecError::Label(LabelError::DoubleLabel),
+    CodecError::Truncated(TruncatedInput::EmptyInput),
+    CodecError::TrailingData(TrailingData::new(4, 9)),
   ];
   for e in &cases {
     assert!(!e.to_string().is_empty(), "empty display for {e:?}");
   }
   // The Incomplete display surfaces both byte counts.
-  let s = CodecError::Incomplete(3, 10).to_string();
+  let s = CodecError::Incomplete(framing::IncompleteFrame::new(3, 10)).to_string();
   assert!(s.contains('3') && s.contains("10"), "got {s}");
 }
 
@@ -410,7 +420,7 @@ fn parse_messages_plain_frame_rejects_trailing_bytes() {
   let inner = decode_incoming(Bytes::from(smuggled), &DecodeOptions::default()).unwrap();
   assert!(matches!(
     parse_messages::<I, A>(inner),
-    Err(CodecError::TrailingData(_, _))
+    Err(CodecError::TrailingData(_))
   ));
 }
 
@@ -440,7 +450,7 @@ fn parse_messages_maps_truncated_compound_to_incomplete() {
   let truncated = encoded.slice(0..encoded.len() - 1);
   assert!(matches!(
     parse_messages::<I, A>(truncated),
-    Err(CodecError::Incomplete(_, _))
+    Err(CodecError::Incomplete(_))
   ));
 }
 
@@ -499,7 +509,7 @@ fn parse_messages_maps_incomplete_compound_part_to_incomplete() {
   let raw = compound_of(&good, &short_frame_part);
   assert!(matches!(
     parse_messages::<I, A>(raw),
-    Err(CodecError::Incomplete(_, _))
+    Err(CodecError::Incomplete(_))
   ));
 }
 
@@ -521,6 +531,6 @@ fn parse_messages_maps_compound_part_with_trailing_bytes_to_trailing_data() {
   let raw = compound_of(&good, &part_with_trailing);
   assert!(matches!(
     parse_messages::<I, A>(raw),
-    Err(CodecError::TrailingData(_, _))
+    Err(CodecError::TrailingData(_))
   ));
 }

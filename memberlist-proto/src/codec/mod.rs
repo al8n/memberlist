@@ -10,10 +10,7 @@
 //! here.
 
 #[cfg(not(feature = "std"))]
-use std::{
-  string::{String, ToString},
-  vec::Vec,
-};
+use std::vec::Vec;
 
 use crate::{
   Data, framing,
@@ -31,49 +28,80 @@ use bytes::Bytes;
 
 /// Errors from the umbrella codec layer.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CodecError {
-  /// typed <-> buffa bridge failure.
-  #[error("bridge error: {0}")]
-  Bridge(String),
-  /// Inner plain-frame decode failure.
-  #[error("frame error: {0}")]
-  Frame(String),
-  /// The inner frame is incomplete: `have` bytes present, `need` required.
-  /// A streaming (TCP) caller should buffer more bytes and retry; a
-  /// datagram (UDP) caller should treat this as a malformed packet.
-  #[error("incomplete frame: have {0} bytes, need {1}")]
-  Incomplete(usize, usize),
-  /// A label longer than `MAX_LABEL_LEN` was supplied for encoding, or an
-  /// inbound label header declared a length above it.
-  #[error("label too long: {0} bytes (max {max})", max = MAX_LABEL_LEN)]
-  LabelTooLong(usize),
-  /// A label was not valid UTF-8. Faithful to frozen
-  /// `memberlist-proto::Label`, which is a validated UTF-8 type — a
-  /// non-UTF-8 label is neither emitted nor accepted.
-  #[error("invalid label: {0}")]
-  InvalidLabel(&'static str),
-  /// The decoded label did not match the expected label.
-  #[error("unexpected label")]
-  LabelMismatch,
-  /// A labeled frame arrived but no inbound label is configured. Faithful
-  /// to the frozen `memberlist-proto` decoder
-  /// (`ProtoDecoderError::double_label()`): when inbound label checking is
-  /// disabled, a present label header is rejected rather than silently
-  /// stripped, so an unlabeled node cannot accept traffic explicitly
-  /// labeled for another cluster.
-  #[error(
-    "unexpected double label header: a labeled frame was received but no label is configured"
-  )]
-  DoubleLabel,
-  /// Input ended before a complete label/frame could be read.
-  #[error("truncated input: {0}")]
-  Truncated(&'static str),
+  /// Typed ↔ buffa bridge failure.
+  #[error(transparent)]
+  Bridge(#[from] crate::BridgeError),
+  /// Inner plain-frame encode/decode failure.
+  #[error(transparent)]
+  Frame(#[from] framing::FrameError),
+  /// The inner frame is incomplete. A streaming (TCP) caller should buffer
+  /// more bytes and retry; a datagram (UDP) caller should treat this as a
+  /// malformed packet.
+  #[error(transparent)]
+  Incomplete(#[from] framing::IncompleteFrame),
+  /// A cluster-label frame failed to encode, decode, or match — length,
+  /// UTF-8, a mismatching label, or an unexpected label header on an
+  /// unlabeled node. See [`LabelError`] for the specific case.
+  #[error(transparent)]
+  Label(#[from] LabelError),
+  /// Input ended before a complete label or inner frame could be read. See
+  /// [`TruncatedInput`] for the specific point.
+  #[error(transparent)]
+  Truncated(#[from] TruncatedInput),
   /// A single-message datagram contained extra bytes after the framed
   /// message. The UDP/QUIC drivers carry exactly one message per
   /// datagram, so trailing bytes are malformed/smuggled data and are
   /// rejected (parity with the stream path's `consumed == total` check).
-  #[error("trailing data after message: consumed {0} of {1} bytes")]
-  TrailingData(usize, usize),
+  #[error(transparent)]
+  TrailingData(#[from] TrailingData),
+}
+
+/// The point at which inbound bytes ended before a complete label or inner
+/// frame could be read. Payload of [`CodecError::Truncated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TruncatedInput {
+  /// The input was empty — no bytes at all.
+  #[error("truncated input: empty input")]
+  EmptyInput,
+  /// The frame was empty after a non-empty label prefix was stripped.
+  #[error("truncated input: empty inner frame after label")]
+  EmptyInnerFrame,
+  /// A label header was present but ended before it was complete.
+  #[error("truncated input: incomplete label header")]
+  LabelHeader,
+}
+
+/// Trailing bytes after the single framed message in a datagram: of `total`
+/// bytes, `consumed` were the message and the remainder is unexpected.
+/// Payload of [`CodecError::TrailingData`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("trailing data after message: consumed {consumed} of {total} bytes")]
+pub struct TrailingData {
+  consumed: usize,
+  total: usize,
+}
+
+impl TrailingData {
+  /// Build from the consumed and total datagram byte counts.
+  #[inline]
+  pub(crate) const fn new(consumed: usize, total: usize) -> Self {
+    Self { consumed, total }
+  }
+
+  /// Bytes consumed by the framed message.
+  #[inline]
+  pub const fn consumed(&self) -> usize {
+    self.consumed
+  }
+
+  /// Total bytes in the datagram.
+  #[inline]
+  pub const fn total(&self) -> usize {
+    self.total
+  }
 }
 
 /// Outbound encoding options. Zero value = plain frame, no label.
@@ -155,11 +183,7 @@ impl DecodeOptions {
 fn wrap_label(inner: Vec<u8>, opts: &EncodeOptions) -> Result<Bytes, CodecError> {
   let out = if let Some(label) = effective_label(opts.label_ref().map(|b| b.as_ref())) {
     let label_len = label.len();
-    validate_label(label).map_err(|e| match e {
-      LabelError::TooLong => CodecError::LabelTooLong(label_len),
-      LabelError::NotUtf8 => CodecError::InvalidLabel("label is not valid UTF-8"),
-      _ => CodecError::InvalidLabel("invalid label"),
-    })?;
+    validate_label(label)?;
     let mut buf = Vec::with_capacity(LABEL_OVERHEAD + label_len + inner.len());
     encode_label_prefix(label, &mut buf);
     buf.extend_from_slice(&inner);
@@ -180,8 +204,8 @@ where
   I: Data,
   A: Data,
 {
-  let any = message_to_any(msg).map_err(|e| CodecError::Bridge(e.to_string()))?;
-  let inner = framing::encode_message(&any).map_err(|e| CodecError::Frame(e.to_string()))?;
+  let any = message_to_any(msg)?;
+  let inner = framing::encode_message(&any)?;
   wrap_label(inner, opts)
 }
 
@@ -199,9 +223,9 @@ where
 {
   let mut anys = Vec::with_capacity(msgs.len());
   for m in msgs {
-    anys.push(message_to_any(m).map_err(|e| CodecError::Bridge(e.to_string()))?);
+    anys.push(message_to_any(m)?);
   }
-  let inner = framing::encode_compound(&anys).map_err(|e| CodecError::Frame(e.to_string()))?;
+  let inner = framing::encode_compound(&anys)?;
   wrap_label(inner, opts)
 }
 
@@ -229,27 +253,14 @@ pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecE
       let inner = raw.slice(consumed..);
       if inner.is_empty() {
         if consumed > 0 {
-          return Err(CodecError::Truncated("empty inner frame after label"));
+          return Err(CodecError::Truncated(TruncatedInput::EmptyInnerFrame));
         }
-        return Err(CodecError::Truncated("empty input"));
+        return Err(CodecError::Truncated(TruncatedInput::EmptyInput));
       }
       Ok(inner)
     }
-    LabelOutcome::Incomplete => Err(CodecError::Truncated("label header")),
-    LabelOutcome::Rejected(e) => match e {
-      LabelError::TooLong => {
-        // Re-derive the declared length for the error payload.
-        let label_len = if raw.len() >= LABEL_OVERHEAD {
-          raw[1] as usize
-        } else {
-          raw.len()
-        };
-        Err(CodecError::LabelTooLong(label_len))
-      }
-      LabelError::NotUtf8 => Err(CodecError::InvalidLabel("inbound label is not valid UTF-8")),
-      LabelError::Mismatch => Err(CodecError::LabelMismatch),
-      LabelError::DoubleLabel => Err(CodecError::DoubleLabel),
-    },
+    LabelOutcome::Incomplete => Err(CodecError::Truncated(TruncatedInput::LabelHeader)),
+    LabelOutcome::Rejected(e) => Err(CodecError::Label(e)),
   }
 }
 
@@ -268,13 +279,16 @@ where
   A: Data,
 {
   let (consumed, any) = framing::decode_message_zerocopy(&plain).map_err(|e| match e {
-    framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
-    other => CodecError::Frame(other.to_string()),
+    framing::FrameError::Incomplete(f) => CodecError::Incomplete(f),
+    other => CodecError::Frame(other),
   })?;
   if consumed != plain.len() {
-    return Err(CodecError::TrailingData(consumed, plain.len()));
+    return Err(CodecError::TrailingData(TrailingData::new(
+      consumed,
+      plain.len(),
+    )));
   }
-  message_from_any::<I, A>(&any).map_err(|e| CodecError::Bridge(e.to_string()))
+  message_from_any::<I, A>(&any).map_err(CodecError::Bridge)
 }
 
 /// Parse a (label-stripped) inbound datagram into its messages, in order.
@@ -301,8 +315,8 @@ where
 {
   if plain.first() == Some(&(framing::MessageTag::Compound as u8)) {
     let parts = framing::decode_compound(&plain).map_err(|e| match e {
-      framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
-      other => CodecError::Frame(other.to_string()),
+      framing::FrameError::Incomplete(f) => CodecError::Incomplete(f),
+      other => CodecError::Frame(other),
     })?;
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
@@ -311,13 +325,16 @@ where
       // (they alias `plain`) instead of copying out of the buffer.
       let part = plain.slice_ref(part);
       let (consumed, any) = framing::decode_message_zerocopy(&part).map_err(|e| match e {
-        framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
-        other => CodecError::Frame(other.to_string()),
+        framing::FrameError::Incomplete(f) => CodecError::Incomplete(f),
+        other => CodecError::Frame(other),
       })?;
       if consumed != part.len() {
-        return Err(CodecError::TrailingData(consumed, part.len()));
+        return Err(CodecError::TrailingData(TrailingData::new(
+          consumed,
+          part.len(),
+        )));
       }
-      out.push(message_from_any::<I, A>(&any).map_err(|e| CodecError::Bridge(e.to_string()))?);
+      out.push(message_from_any::<I, A>(&any).map_err(CodecError::Bridge)?);
     }
     Ok(out)
   } else {

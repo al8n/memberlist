@@ -1291,7 +1291,7 @@ async fn queue_user_broadcast_after_leave_is_rejected() {
 
 /// QUIC mirror of the TCP `set_ack_payload_oversized_is_rejected`. An ack
 /// payload too large to frame into a single gossip datagram must be REJECTED
-/// with `MemberlistError::PayloadTooLarge`, NOT falsely acked: acks ride one
+/// as `AckPayloadExceedsMtu`, NOT falsely acked: acks ride one
 /// UDP datagram on the gossip socket, so an over-budget payload makes every
 /// probe reply silently fail to send and peers falsely suspect this node.
 /// The driver validates at the machine setter (mirror-symmetric with the TCP
@@ -1305,8 +1305,13 @@ async fn set_ack_payload_oversized_is_rejected() {
     .set_ack_payload(Bytes::from(vec![0xab_u8; 1024 * 1024]))
     .await;
   assert!(
-    matches!(res, Err(MemberlistError::PayloadTooLarge(_))),
-    "expected PayloadTooLarge for a 1 MiB ack payload, got {res:?}",
+    matches!(
+      res,
+      Err(MemberlistError::Proto(
+        memberlist_proto::Error::AckPayloadExceedsMtu(..)
+      ))
+    ),
+    "expected AckPayloadExceedsMtu for a 1 MiB ack payload, got {res:?}",
   );
 
   // A reasonable payload on the SAME running node is still accepted.
