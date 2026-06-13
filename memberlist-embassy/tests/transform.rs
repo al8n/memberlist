@@ -26,6 +26,7 @@ use memberlist_embassy::{
   EncryptionOptions, EndpointOptions, Keyring, LabelError, Memberlist, Options, Runner, SecretKey,
   TransformOptions, now,
 };
+use memberlist_proto::{SeedableRng, SmallRng};
 use smol_str::SmolStr;
 
 use support::paired_device::{PairedDevice, pair};
@@ -149,22 +150,24 @@ fn encrypted_gossip_round_trips() {
 
   let enc = shared_key();
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc.clone()),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     clock,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     udp_b,
     tcp_b,
     clock,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -225,22 +228,24 @@ fn checksummed_gossip_round_trips() {
 
   let checksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default().with_checksum(checksum),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     clock,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default().with_checksum(checksum),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     udp_b,
     tcp_b,
     clock,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -311,12 +316,11 @@ fn gossip_label_isolates_clusters() {
       .with_label(Some(b"alpha".to_vec()))
       .expect("valid label");
     let clock = now();
-    let (ml_alpha, run_alpha) = Memberlist::new::<POOL>(
+    let (ml_alpha, run_alpha) = Memberlist::new_with_rng::<POOL>(
       Options::new(),
       transform_alpha,
       // Short probe timers so failure detection completes within 2 000ms.
       EndpointOptions::new(SmolStr::new("alpha"), addr(1, 7946))
-        .with_rng_seed(1)
         .with_probe_interval(StdDuration::from_millis(100))
         .with_probe_timeout(StdDuration::from_millis(50))
         .with_suspicion_mult(2)
@@ -325,13 +329,13 @@ fn gossip_label_isolates_clusters() {
       udp_alpha,
       tcp_alpha,
       clock,
+      SmallRng::seed_from_u64(1),
     )
     .expect("build alpha node");
-    let (ml_plain, run_plain) = Memberlist::new::<POOL>(
+    let (ml_plain, run_plain) = Memberlist::new_with_rng::<POOL>(
       Options::new(),
       TransformOptions::default(),
       EndpointOptions::new(SmolStr::new("plain"), addr(2, 7946))
-        .with_rng_seed(2)
         .with_probe_interval(StdDuration::from_millis(100))
         .with_probe_timeout(StdDuration::from_millis(50))
         .with_suspicion_mult(2)
@@ -340,6 +344,7 @@ fn gossip_label_isolates_clusters() {
       udp_plain,
       tcp_plain,
       clock,
+      SmallRng::seed_from_u64(2),
     )
     .expect("build plain node");
 
@@ -385,22 +390,24 @@ fn gossip_label_isolates_clusters() {
       .expect("valid label");
 
     let clock = now();
-    let (ml_a2, run_a2) = Memberlist::new::<POOL>(
+    let (ml_a2, run_a2) = Memberlist::new_with_rng::<POOL>(
       Options::new(),
       transform_a2,
-      EndpointOptions::new(SmolStr::new("a2"), addr(3, 7946)).with_rng_seed(3),
+      EndpointOptions::new(SmolStr::new("a2"), addr(3, 7946)),
       udp_a,
       tcp_a,
       clock,
+      SmallRng::seed_from_u64(3),
     )
     .expect("build a2 node");
-    let (ml_b2, run_b2) = Memberlist::new::<POOL>(
+    let (ml_b2, run_b2) = Memberlist::new_with_rng::<POOL>(
       Options::new(),
       transform_b2,
-      EndpointOptions::new(SmolStr::new("b2"), addr(4, 7946)).with_rng_seed(4),
+      EndpointOptions::new(SmolStr::new("b2"), addr(4, 7946)),
       udp_b,
       tcp_b,
       clock,
+      SmallRng::seed_from_u64(4),
     )
     .expect("build b2 node");
 
@@ -478,23 +485,25 @@ fn runtime_set_encryption_rotates_key() {
   let (udp_c, tcp_c) = build_sockets(stack_c, &mut bufs_c);
 
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc1),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     clock,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_c, run_c) = Memberlist::new::<POOL>(
+  let (ml_c, run_c) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     // C starts with key2 — incompatible with A's key1.
     TransformOptions::default().with_encryption(enc2),
-    EndpointOptions::new(SmolStr::new("c"), addr(3, 7946)).with_rng_seed(3),
+    EndpointOptions::new(SmolStr::new("c"), addr(3, 7946)),
     udp_c,
     tcp_c,
     clock,
+    SmallRng::seed_from_u64(3),
   )
   .expect("build node c");
 

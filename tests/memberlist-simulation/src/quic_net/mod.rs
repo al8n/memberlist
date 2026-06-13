@@ -38,6 +38,7 @@ use memberlist_proto::{
   UnreliableTransport, framing, message_from_any, message_to_any,
   typed::{Ack, Alive, Message, Node, Suspect},
 };
+use rand::{SeedableRng, rngs::SmallRng};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig};
@@ -351,39 +352,35 @@ impl QuicCluster {
       .with_probe_interval(probe_interval)
       .with_probe_timeout(probe_timeout)
       .with_suspicion_mult(4)
-      .with_retransmit_mult(4)
-      .with_rng_seed(addr.port() as u64);
+      .with_retransmit_mult(4);
     if let Some(t) = self.stream_timeout {
       cfg = cfg.with_stream_timeout(t);
     }
     let now = self.clock.now();
-    let mut ep = Endpoint::new_at(cfg, now);
+    let mut ep = Endpoint::new_at(
+      cfg,
+      now,
+      SmallRng::seed_from_u64(crate::rng_seed_from_addr(&addr)),
+    );
     ep.start_scheduling(now);
     let qc = sim_quic_config(self.shrink_window);
     // Deterministic conformance harness: seed quinn's connection-ID /
-    // path-challenge RNG from the node's port (distinct per node, fixed
+    // path-challenge RNG from the node's full address (distinct per node, fixed
     // across runs) so the QUIC transport — and therefore the composed
     // membership behaviour/timing — is bit-for-bit reproducible. (Temporal
     // determinism is the virtual clock; this removes the only remaining OS
     // entropy. Production uses `QuicEndpoint::new` → `None`.)
-    let mut seed = [0u8; 32];
-    seed[..2].copy_from_slice(&addr.port().to_le_bytes());
-    // `QuicEndpoint` exposes the deterministic `rng_seed` seam and the
-    // compression seam on two separate constructors. The standard conformance
-    // suite (compression disabled) takes the seeded constructor so the QUIC
-    // transport stays bit-for-bit reproducible. A `*_compressed` constructor
-    // takes `with_compression`, whose membership behaviour is identical — the
-    // virtual clock is the temporal-determinism anchor; the connection-ID /
-    // path-challenge RNG does not affect SWIM convergence. Encryption is then
-    // threaded fluently regardless of the base constructor; the QUIC bridge
-    // always force-disables reliable-path encryption inside, so the field is
-    // wired here to match the `TcpCluster`/`TlsCluster` shape but only
-    // influences the gossip codec.
-    let node = if self.compression.algorithm().is_some() {
-      QuicEndpoint::with_compression(ep, qc, self.compression)
-    } else {
-      QuicEndpoint::with_quinn_rng_seed(ep, qc, Some(seed))
-    };
+    let seed = crate::quinn_seed_from_addr(&addr);
+    // ALWAYS take the deterministically-seeded quinn constructor — compressed or
+    // not — so every QUIC node's connection-ID / path-challenge RNG is fixed
+    // from its full address and the transport stays bit-for-bit reproducible.
+    // Compression rides on top via the setter (a no-op when disabled) instead of
+    // the separate `with_compression` constructor, which would seed quinn from
+    // OS entropy and leave compressed runs non-reproducible. Encryption is
+    // threaded fluently; the QUIC bridge always force-disables reliable-path
+    // encryption inside, so the field only influences the gossip codec.
+    let mut node = QuicEndpoint::with_quinn_rng_seed(ep, qc, Some(seed));
+    node.set_compression_options(self.compression);
     self
       .nodes
       .insert(addr, node.with_encryption(self.encryption.clone()));

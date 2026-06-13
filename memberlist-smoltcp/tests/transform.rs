@@ -36,7 +36,6 @@ fn addr(ip: u8, port: u16) -> SocketAddr {
 /// read its peer's datagrams therefore demotes that peer to Dead within ~550 ms.
 fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
   EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-    .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(100))
     .with_probe_timeout(Duration::from_millis(50))
     .with_suspicion_mult(2)

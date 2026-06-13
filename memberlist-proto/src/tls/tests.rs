@@ -226,7 +226,7 @@ fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead(
   };
 
   let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7304)).with_gossip_mtu(1200);
-  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_ep);
   let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
   let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
   let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
@@ -276,7 +276,7 @@ fn tls_endpoint_gossip_mtu_is_propagated_from_config() {
   };
 
   let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7305)).with_gossip_mtu(1200);
-  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_ep);
   let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
   let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
     StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());

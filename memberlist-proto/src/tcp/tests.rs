@@ -1923,7 +1923,7 @@ fn set_checksum_options_rejects_unbuilt_algorithm() {
 #[test]
 fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
   let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
-  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_ep);
   let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
   let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
     StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
@@ -1953,7 +1953,7 @@ fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
 fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
   use crate::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
   let cfg_ep = EndpointOptions::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
-  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_ep);
   let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
   let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
   let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =

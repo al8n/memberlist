@@ -19,7 +19,10 @@ fn every_init_error_variant_displays_and_reports_its_source() {
       }),
       false,
     ),
-    (memberlist_proto::EndpointInitError::Entropy.into(), true),
+    (
+      memberlist_proto::EndpointInitError::AwarenessMultiplierZero.into(),
+      true,
+    ),
     (memberlist_proto::EncryptionError::AuthFailed.into(), true),
     (memberlist_proto::ChecksumError::Mismatch.into(), true),
   ];

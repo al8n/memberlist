@@ -74,13 +74,15 @@ pub trait Transport: Sized + 'static {
   fn advertise_address(&self) -> &SocketAddr;
 
   /// Run the I/O event loop. Consumes `self` (sockets and listener move
-  /// into the loop) and the `TransportRuntime<Self, D>` bundle (channels,
-  /// snapshot, delegate, tuning knobs); the body builds the machine
-  /// endpoint from `self`'s stored config. Returns when shutdown is
-  /// requested.
-  fn run<D>(self, runtime: TransportRuntime<Self, D>) -> impl Future<Output = ()>
+  /// into the loop), the `TransportRuntime<Self, D>` bundle (channels,
+  /// snapshot, delegate, tuning knobs), and the gossip RNG `gossip_rng` the node
+  /// constructor drew or was handed; the body builds the machine endpoint from
+  /// `self`'s stored config, seeding it with `gossip_rng`. Returns when shutdown
+  /// is requested.
+  fn run<D, G>(self, runtime: TransportRuntime<Self, D>, gossip_rng: G) -> impl Future<Output = ()>
   where
-    D: Delegate<Id = Self::Id, Address = SocketAddr>;
+    D: Delegate<Id = Self::Id, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static;
 }
 
 #[cfg(test)]

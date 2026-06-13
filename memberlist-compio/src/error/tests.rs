@@ -1,5 +1,4 @@
 use super::*;
-use std::error::Error as _;
 
 #[test]
 fn join_all_failed_accessors_and_display() {

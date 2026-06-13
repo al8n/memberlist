@@ -48,7 +48,6 @@ fn unroutable() -> SocketAddr {
 /// budget.
 fn fast_ep(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
   EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-    .with_rng_seed(ip as u64)
     .with_probe_interval(Duration::from_millis(20))
     .with_probe_timeout(Duration::from_millis(10))
     .with_gossip_interval(Duration::from_millis(20))
@@ -74,7 +73,7 @@ fn non_routable_advertise_addr_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   // Advertise 0.0.0.0:7946 — unspecified, not a routable destination.
-  let ep_cfg = EndpointOptions::new(SmolStr::new("a"), unroutable()).with_rng_seed(1);
+  let ep_cfg = EndpointOptions::new(SmolStr::new("a"), unroutable());
   let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
@@ -102,7 +101,7 @@ fn routable_advertise_addr_constructs() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut dev,
     now,
   );
@@ -122,7 +121,7 @@ fn injected_non_routable_peer_is_dropped() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut dev,
     now,
   );
@@ -151,7 +150,7 @@ fn injected_routable_peer_is_admitted() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut dev,
     now,
   );
@@ -181,7 +180,7 @@ fn non_routable_seed_is_not_dialed() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut dev,
     now,
   );

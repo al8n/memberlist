@@ -21,6 +21,7 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{EndpointOptions, Memberlist, Options, Runner, TransformOptions, now};
+use memberlist_proto::{SeedableRng, SmallRng};
 use smol_str::SmolStr;
 
 use support::paired_device::{PairedDevice, pair};
@@ -130,17 +131,17 @@ fn node<'a>(
   seed: u64,
 ) -> (Memberlist<SmolStr>, Runner<'a, SmolStr, POOL>) {
   let (udp, tcp) = build_sockets(stack, bufs);
-  Memberlist::new::<POOL>(
+  Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new(id), addr(last, 7946))
-      .with_rng_seed(seed)
       // Short stream timeout: a dead dial fails (and its slot is reaped) quickly so
       // the churn cycles within the test budget.
       .with_stream_timeout(core::time::Duration::from_millis(300)),
     udp,
     tcp,
     now(),
+    SmallRng::seed_from_u64(seed),
   )
   .expect("build node")
 }

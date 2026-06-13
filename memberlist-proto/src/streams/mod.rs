@@ -71,6 +71,7 @@ pub use labeled::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 // `Intake` is part of the `StreamTransport` surface a record-layer impl
 // returns; re-exported alongside the trait though the coordinator itself
 // drives it only through the bridge.
+use rand::{Rng, rngs::SmallRng};
 pub use transport::{Intake, StreamTransport};
 
 use crate::{FxHashMap, Instant};
@@ -212,11 +213,11 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 /// [`Self::peer_to_socket`] closure to derive a transport `SocketAddr` for a
 /// membership `A`.
 // Storage-shape bound: `cfg: R::Options` requires `R: StreamTransport` for the
-// field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A>`
+// field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A, G>`
 // carries no I/A bounds at the struct level — those bounds appear only on the impl
 // blocks whose methods call `R::dial_context::<A>` and read the closures.
-pub struct StreamEndpoint<I, A, R: StreamTransport> {
-  ep: Endpoint<I, A>,
+pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
+  ep: Endpoint<I, A, G>,
   cfg: R::Options,
   /// Per-peer SNI provider for the TLS reliable path. Returns `None` for
   /// transports that do not require SNI (plain TCP) or for peers whose
@@ -422,8 +423,9 @@ pub fn encrypt_gossip_datagram(
 // well-formedness bag — no method-side additions, so the heavier
 // `I: Debug + Display + Send + Sync + 'static` constraint carried by the
 // impl blocks below is NOT required to call any of these.
-impl<I, A, R> StreamEndpoint<I, A, R>
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
+  G: Rng,
   I: crate::Id + crate::Data + crate::CheapClone,
   A: crate::Data
     + crate::CheapClone
@@ -438,7 +440,7 @@ where
 {
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
   #[inline(always)]
-  pub fn endpoint_ref(&self) -> &Endpoint<I, A> {
+  pub fn endpoint_ref(&self) -> &Endpoint<I, A, G> {
     &self.ep
   }
 
@@ -694,8 +696,9 @@ where
 // `handle_alive`, `handle_suspect`, `requeue_event`, `start_probe`,
 // `leave`), drive `StreamConns` / `StreamBridge` ops (whose impls require
 // the full bag), or run the internal bridge-pump / mint / reap helpers.
-impl<I, A, R> StreamEndpoint<I, A, R>
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
+  G: Rng,
   I: crate::Id
     + crate::Data
     + crate::CheapClone
@@ -731,7 +734,7 @@ where
   /// with a non-`SocketAddr` membership address supply a deployment-aware
   /// resolver.
   pub fn new(
-    ep: Endpoint<I, A>,
+    ep: Endpoint<I, A, G>,
     cfg: R::Options,
     sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
     peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
@@ -783,7 +786,7 @@ where
   /// disabled.
   #[must_use]
   pub fn with_compression(
-    ep: Endpoint<I, A>,
+    ep: Endpoint<I, A, G>,
     cfg: R::Options,
     sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
     peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
@@ -1386,7 +1389,7 @@ where
   /// `service_dials` + `flush_outbound` the coordinator wrapper runs, or
   /// retiring a dial intent directly with `Endpoint::dial_failed`.
   #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A> {
+  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A, G> {
     &mut self.ep
   }
 
@@ -1912,8 +1915,9 @@ where
 // `SocketAddr` via the stored `peer_to_socket` closure, derive a per-dial
 // record-layer context via `R::dial_context::<A>`, or transitively reach
 // either through the coordinator tick (`run_tick` → `service_dials`).
-impl<I, A, R> StreamEndpoint<I, A, R>
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
+  G: Rng,
   I: crate::Id
     + crate::Data
     + crate::CheapClone

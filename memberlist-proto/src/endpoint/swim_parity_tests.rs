@@ -39,7 +39,6 @@ fn cfg() -> EndpointOptions<SmolStr, SocketAddr> {
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   )
-  .with_rng_seed(0xdeadbeef)
 }
 
 fn node(id: &str, port: u16) -> Node<SmolStr, SocketAddr> {
@@ -90,7 +89,7 @@ fn drained_alive_incarnations(e: &mut Endpoint<SmolStr, SocketAddr>, id: &SmolSt
 /// and enqueues exactly one gossip broadcast.
 #[test]
 fn alive_node_new_node() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // Drain the construction-time events for the local node first.
   while e.poll_event().is_some() {}
 
@@ -127,7 +126,7 @@ fn alive_node_new_node() {
 /// state-change, and emits no event.
 #[test]
 fn alive_node_idempotent() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   e.process_alive(alive_of(&test, 1), false, Instant::now());
@@ -161,7 +160,7 @@ fn alive_node_idempotent() {
 /// and emits `NodeUpdated`.
 #[test]
 fn alive_node_change_meta() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let meta1 = Meta::try_from(Bytes::from_static(b"val1")).unwrap();
@@ -197,7 +196,7 @@ fn alive_node_change_meta() {
 /// single self-`Alive` is broadcast to defend the local node.
 #[test]
 fn alive_node_refute() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
 
   let local = Node::new(e.local_id_ref().cheap_clone(), *e.advertise_ref());
@@ -247,7 +246,7 @@ fn alive_node_refute() {
 #[test]
 fn alive_node_conflict() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_dead_node_reclaim_time(Duration::from_millis(10)));
+    Endpoint::new_seeded(cfg().with_dead_node_reclaim_time(Duration::from_millis(10)));
   while e.poll_event().is_some() {}
 
   let id = SmolStr::new("test");
@@ -339,7 +338,7 @@ fn alive_node_conflict() {
 /// gossip broadcast.
 #[test]
 fn alive_node_suspect_node() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -424,7 +423,7 @@ fn drained_suspect_incarnations(e: &mut Endpoint<SmolStr, SocketAddr>, id: &Smol
 /// and enqueues a `Dead` gossip broadcast.
 #[test]
 fn dead_node() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -463,7 +462,7 @@ fn dead_node() {
 /// event, and enqueues no broadcast.
 #[test]
 fn dead_node_double() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -509,7 +508,7 @@ fn dead_node_double() {
 /// at a lower incarnation arrives, with no event and no broadcast.
 #[test]
 fn dead_node_old_dead() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -544,7 +543,7 @@ fn dead_node_old_dead() {
 #[test]
 fn dead_node_left() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_dead_node_reclaim_time(Duration::from_millis(10)));
+    Endpoint::new_seeded(cfg().with_dead_node_reclaim_time(Duration::from_millis(10)));
   let id = SmolStr::new("test");
   let node1 = Node::new(id.cheap_clone(), "127.0.0.1:8000".parse().unwrap());
 
@@ -603,7 +602,7 @@ fn dead_node_left() {
 /// broadcast a fresh self-`Alive` past the accusation, and ding our health.
 #[test]
 fn dead_node_refute() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
 
   let local = Node::new(e.local_id_ref().cheap_clone(), *e.advertise_ref());
@@ -643,7 +642,7 @@ fn dead_node_refute() {
 /// higher incarnation to revive a `Dead` node, so it stays `Dead`.
 #[test]
 fn dead_node_alive_replay() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -669,7 +668,7 @@ fn dead_node_alive_replay() {
 /// a `Dead`.
 #[test]
 fn suspect_node() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::from_millis(1))
       .with_suspicion_mult(1)
@@ -729,7 +728,7 @@ fn suspect_node() {
 /// confirming source).
 #[test]
 fn suspect_node_double_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let test = node("test", 8000);
 
   let t0 = Instant::now();
@@ -767,7 +766,7 @@ fn suspect_node_double_suspect() {
 /// fresh self-`Alive`, and ding our health.
 #[test]
 fn suspect_node_refute() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
 
   let local = Node::new(e.local_id_ref().cheap_clone(), *e.advertise_ref());
@@ -893,7 +892,7 @@ fn escalate_to_indirect(e: &mut Endpoint<SmolStr, SocketAddr>, at: Instant) -> V
 /// test below pins explicitly.
 #[test]
 fn probe_node_responsive_peer_stays_alive() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(1))
       .with_probe_interval(Duration::from_millis(1000)),
@@ -930,7 +929,7 @@ fn probe_node_responsive_peer_stays_alive() {
 /// actually pinged (their seqno advanced).
 #[test]
 fn probe_node_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(1))
       .with_probe_interval(Duration::from_millis(10))
@@ -992,7 +991,7 @@ fn probe_node_suspect() {
 /// it fits the MTU, which it does for these short ids).
 #[test]
 fn probe_node_buddy() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(1))
       .with_probe_interval(Duration::from_millis(10)),
@@ -1126,7 +1125,7 @@ fn probe_node_dogpile() {
   ];
 
   for c in CASES {
-    let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+    let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
       cfg()
         .with_probe_timeout(Duration::from_millis(1))
         .with_probe_interval(Duration::from_millis(100))
@@ -1197,7 +1196,7 @@ fn probe_node_dogpile() {
 /// failure detail (no successful probe) means it does not improve either.
 #[test]
 fn probe_node_awareness_degraded() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200))
@@ -1260,7 +1259,7 @@ fn probe_node_awareness_degraded() {
 /// good probe), and the peer stays Alive.
 #[test]
 fn probe_node_awareness_improved() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200)),
@@ -1299,7 +1298,7 @@ fn probe_node_awareness_improved() {
 /// `expected_nacks - 0 > 0`, so the score rises to 1.
 #[test]
 fn probe_node_awareness_missed_nack() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200))
@@ -1422,7 +1421,7 @@ fn gossiped_alive_ids(e: &mut Endpoint<SmolStr, SocketAddr>, now: Instant) -> Ve
 /// (local + both peers) to the selected targets.
 #[test]
 fn gossip_disseminates_membership() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::ZERO)
       .with_push_pull_interval(Duration::ZERO)
@@ -1467,7 +1466,7 @@ fn gossip_disseminates_membership() {
 #[test]
 fn gossip_to_dead_within_window_then_stops() {
   let window = Duration::from_millis(100);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::ZERO)
       .with_push_pull_interval(Duration::ZERO)
@@ -1540,7 +1539,7 @@ fn gossip_to_dead_within_window_then_stops() {
 ///   n4 Alive@2  ⇒ a brand-new peer is admitted Alive and emits `NodeJoined`.
 #[test]
 fn merge_state_folds_remote_batch() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let n1 = Node::new(SmolStr::new("n1"), "127.0.0.1:8000".parse().unwrap());
   let n2 = Node::new(SmolStr::new("n2"), "127.0.0.2:8000".parse().unwrap());
   let n3 = Node::new(SmolStr::new("n3"), "127.0.0.3:8000".parse().unwrap());
@@ -1605,7 +1604,7 @@ fn merge_state_folds_remote_batch() {
 /// hands back the local-view response the driver would encode.
 #[test]
 fn push_pull_merges_request_and_replies_with_local_view() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // The receiver already knows one peer of its own.
   let mine = node("mine", 8010);
   let t0 = Instant::now();
@@ -1685,7 +1684,7 @@ fn push_pull_merges_request_and_replies_with_local_view() {
 fn reset_nodes_reaps_only_past_the_window() {
   let window = Duration::from_millis(100);
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_gossip_to_the_dead_time(window));
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(window));
   let n1 = node("n1", 8001);
   let n2 = node("n2", 8002);
   let n3 = node("n3", 8003);

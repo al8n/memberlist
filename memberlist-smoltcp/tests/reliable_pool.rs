@@ -60,7 +60,6 @@ fn min_pool_seed_accepts_repeated_inbound() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946))
-      .with_rng_seed(1)
       .with_push_pull_interval(Duration::from_millis(50)),
     &mut da,
     now,
@@ -75,7 +74,6 @@ fn min_pool_seed_accepts_repeated_inbound() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_push_pull_interval(Duration::from_millis(50)),
     &mut db,
     now,
@@ -158,7 +156,7 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut da,
     now,
   );
@@ -172,7 +170,6 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(1000)),
     &mut db,
     now,
@@ -267,7 +264,7 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut da,
     now,
   );
@@ -278,7 +275,6 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
     &mut db,
     now,
@@ -431,7 +427,7 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut da,
     now,
   );
@@ -440,7 +436,6 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
     &mut db,
     now,
@@ -605,7 +600,6 @@ fn delayed_reply_after_half_close_still_completes() {
 
   let quiet = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
       .with_push_pull_interval(NEVER)
@@ -790,7 +784,6 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("n"), addr(1, 7946))
-      .with_rng_seed(1)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS))
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
@@ -808,7 +801,6 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("p"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600)),
@@ -954,7 +946,6 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
 
   let quiet = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
       .with_push_pull_interval(NEVER)
@@ -1067,7 +1058,6 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
 
   let quiet = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(ip as u64)
       .with_gossip_interval(NEVER)
       .with_probe_interval(NEVER)
       .with_push_pull_interval(NEVER)
@@ -1216,7 +1206,6 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-      .with_rng_seed(2)
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS))
       .with_gossip_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
@@ -1231,7 +1220,6 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // only sync out of `b` likewise), keeping the contended-socket scenario exact.
   let seed_cfg = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(ip as u64)
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600))

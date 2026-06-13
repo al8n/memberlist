@@ -36,9 +36,10 @@ impl Transport for MockTransport {
     unimplemented!()
   }
 
-  async fn run<D>(self, _runtime: TransportRuntime<Self, D>)
+  async fn run<D, G>(self, _runtime: TransportRuntime<Self, D>, _gossip_rng: G)
   where
     D: Delegate<Id = Self::Id, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     unimplemented!()
   }

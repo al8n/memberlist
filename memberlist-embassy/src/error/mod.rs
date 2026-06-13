@@ -49,6 +49,11 @@ pub enum InitError {
   /// close-timeout, an unusable encryption keyring, or a machine-endpoint init
   /// failure (including an entropy draw failure).
   Engine(memberlist_embedded::InitError),
+  /// The platform entropy source ([`getrandom`]) failed while seeding the default
+  /// gossip RNG in [`Memberlist::new`](crate::Memberlist::new). Use
+  /// [`Memberlist::new_with_rng`](crate::Memberlist::new_with_rng) to supply your
+  /// own RNG and avoid the platform entropy draw entirely.
+  Entropy,
 }
 
 /// Payload for [`InitError::SocketTimeoutOutOfRange`]: the configured socket timeout,
@@ -90,6 +95,7 @@ impl fmt::Display for InitError {
         s.socket_timeout, s.tick_hz, s.close_timeout, s.stream_timeout, s.max
       ),
       InitError::Engine(e) => write!(f, "{e}"),
+      InitError::Entropy => f.write_str("entropy source failed while seeding the gossip RNG"),
     }
   }
 }

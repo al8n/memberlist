@@ -43,10 +43,53 @@
 use memberlist_proto::typed::State;
 use memberlist_simulation::quic_net::QuicCluster;
 use smol_str::SmolStr;
-use std::time::Duration;
+use std::{
+  net::{IpAddr, SocketAddr},
+  time::Duration,
+};
 
 fn id(s: &str) -> SmolStr {
   SmolStr::new(s)
+}
+
+/// FNV-1a hash of the full advertise address (IP octets then port), so two
+/// nodes on the same memberlist port but distinct IPs get distinct gossip
+/// streams. Mirrors `memberlist_simulation`'s crate-private seed helper, which
+/// is not reachable from this integration test.
+fn rng_seed_from_addr(addr: &SocketAddr) -> u64 {
+  const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+  let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+  let mut fold = |bytes: &[u8]| {
+    for &b in bytes {
+      acc ^= u64::from(b);
+      acc = acc.wrapping_mul(FNV_PRIME);
+    }
+  };
+  match addr.ip() {
+    IpAddr::V4(v4) => fold(&v4.octets()),
+    IpAddr::V6(v6) => fold(&v6.octets()),
+  }
+  fold(&addr.port().to_le_bytes());
+  acc
+}
+
+/// A deterministic 32-byte quinn RNG seed derived from the full advertise
+/// address (IP octets then port), so the QUIC transport stays reproducible yet
+/// distinct for same-port/distinct-IP nodes.
+fn quinn_seed_from_addr(addr: &SocketAddr) -> [u8; 32] {
+  let mut seed = [0u8; 32];
+  let n = match addr.ip() {
+    IpAddr::V4(v4) => {
+      seed[..4].copy_from_slice(&v4.octets());
+      4
+    }
+    IpAddr::V6(v6) => {
+      seed[..16].copy_from_slice(&v6.octets());
+      16
+    }
+  };
+  seed[n..n + 2].copy_from_slice(&addr.port().to_le_bytes());
+  seed
 }
 
 #[test]
@@ -2052,8 +2095,8 @@ mod per_peer_server_name {
   };
 
   use memberlist_proto::{
-    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions,
-    UnreliableTransport, typed::State,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions, SeedableRng,
+    SmallRng, UnreliableTransport, typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
@@ -2195,12 +2238,14 @@ mod per_peer_server_name {
       .with_probe_interval(Duration::from_millis(1000))
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
-      .with_retransmit_mult(4)
-      .with_rng_seed(addr.port() as u64);
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(ep_cfg, now);
+      .with_retransmit_mult(4);
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(
+      ep_cfg,
+      now,
+      SmallRng::seed_from_u64(super::rng_seed_from_addr(&addr)),
+    );
     ep.start_scheduling(now);
-    let mut seed = [0u8; 32];
-    seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+    let seed = super::quinn_seed_from_addr(&addr);
     QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, cfg, Some(seed))
   }
 
@@ -2416,8 +2461,8 @@ mod mtls_cluster_auth {
   use std::{net::SocketAddr, sync::Arc, time::Duration};
 
   use memberlist_proto::{
-    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions,
-    UnreliableTransport, typed::State,
+    Endpoint, EndpointOptions, Instant, PushPullKind, QuicEndpoint, QuicOptions, SeedableRng,
+    SmallRng, UnreliableTransport, typed::State,
   };
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;
@@ -2600,12 +2645,14 @@ mod mtls_cluster_auth {
     let ep_cfg = EndpointOptions::new(SmolStr::new(id), addr)
       .with_probe_interval(Duration::from_millis(1000))
       .with_probe_timeout(Duration::from_millis(500))
-      .with_suspicion_mult(4)
-      .with_rng_seed(addr.port() as u64);
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(ep_cfg, now);
+      .with_suspicion_mult(4);
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(
+      ep_cfg,
+      now,
+      SmallRng::seed_from_u64(super::rng_seed_from_addr(&addr)),
+    );
     ep.start_scheduling(now);
-    let mut seed = [0u8; 32];
-    seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+    let seed = super::quinn_seed_from_addr(&addr);
     QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, cfg, Some(seed))
   }
 

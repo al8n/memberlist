@@ -15,6 +15,7 @@ use std::{
   time::Duration,
 };
 
+use crate::QuicEndpoint;
 use agnostic::{
   Runtime,
   net::{Net, UdpSocket},
@@ -22,7 +23,7 @@ use agnostic::{
 use bytes::Bytes;
 use flume::Sender;
 use memberlist_proto::{
-  DatagramSendOutcome, Instant, PingId, QuicEndpoint, UnreliableTransport,
+  DatagramSendOutcome, Instant, PingId, UnreliableTransport,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
@@ -89,8 +90,8 @@ struct PendingUserSend {
 
 /// The single-owner QUIC driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
-pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
-  endpoint: QuicEndpoint<I>,
+pub(crate) struct QuicDriver<I: NodeId, R: Runtime, G: rand::Rng = rand::rngs::StdRng> {
+  endpoint: QuicEndpoint<I, G>,
   /// The shared UDP socket carrying QUIC packets (and gossip on the UDP-fallback
   /// path). Wrapped in `Option` so the shutdown branch can drop it (releasing the
   /// bound port) BEFORE acking the shutdown caller; it is `Some` for the whole
@@ -150,10 +151,10 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   cidr_policy: CidrFilter,
 }
 
-impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
+impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
-    endpoint: QuicEndpoint<I>,
+    endpoint: QuicEndpoint<I, G>,
     socket: <R::Net as Net>::UdpSocket,
     shared: Arc<Shared<I>>,
     recv_batch: usize,
@@ -848,7 +849,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
   }
 }
 
-impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
+impl<I: NodeId, R: Runtime, G: rand::Rng + Unpin> Future for QuicDriver<I, R, G> {
   type Output = ();
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {

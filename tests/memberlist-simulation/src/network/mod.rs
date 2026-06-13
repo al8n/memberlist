@@ -152,7 +152,11 @@ impl Network {
     now: Instant,
   ) -> SocketAddr {
     let addr = *cfg.advertise_addr_ref();
-    let mut ep = Endpoint::new_at(cfg, now);
+    let mut ep = Endpoint::new_at(
+      cfg,
+      now,
+      SmallRng::seed_from_u64(crate::rng_seed_from_addr(&addr)),
+    );
     ep.start_scheduling(now);
     self.endpoints.insert(addr, ep);
     addr

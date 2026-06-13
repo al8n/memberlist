@@ -40,6 +40,7 @@ use embassy_futures::{
 };
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
+use memberlist_proto::Rng;
 
 use crate::{
   gossip_io::EmbassyGossip,
@@ -54,14 +55,16 @@ use crate::{
 /// the `N` reliable-plane TCP sockets and their per-slot mailboxes + command
 /// wakes, and the driver-side free-list.
 ///
-/// `I` is the node id type; `N` is the TCP socket pool size. Built by
+/// `I` is the node id type; `N` is the TCP socket pool size; `R` is the gossip
+/// RNG (defaulting to [`SmallRng`](memberlist_proto::SmallRng)). Built by
 /// [`Memberlist::new`](crate::Memberlist::new), which hands back the paired
 /// [`Memberlist`](crate::Memberlist) handle.
-pub struct Runner<'a, I, const N: usize>
+pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng>
 where
   I: memberlist_proto::Id,
+  R: Rng,
 {
-  pub(crate) shared: Rc<Shared<I>>,
+  pub(crate) shared: Rc<Shared<I, R>>,
   pub(crate) udp: UdpSocket<'a>,
   pub(crate) tcp: [TcpSocket<'a>; N],
   pub(crate) mailboxes: [RefCell<Mailbox>; N],
@@ -73,7 +76,7 @@ where
   pub(crate) free: Vec<SlotId>,
 }
 
-impl<I, const N: usize> Runner<'_, I, N>
+impl<I, const N: usize, R: Rng> Runner<'_, I, N, R>
 where
   I: memberlist_proto::Id,
 {
@@ -132,8 +135,8 @@ where
 
 /// The engine-pump half of [`Runner::run`]: re-pump on each wake and resolve
 /// parked handle ops from the drained events.
-async fn pump_loop<I>(
-  shared: &Shared<I>,
+async fn pump_loop<I, R: Rng>(
+  shared: &Shared<I, R>,
   udp: &UdpSocket<'_>,
   mailboxes: &[RefCell<Mailbox>],
   cmd_wakes: &[SlotWake],

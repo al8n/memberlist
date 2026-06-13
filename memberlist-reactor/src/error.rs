@@ -128,6 +128,13 @@ pub enum Error {
   #[error(transparent)]
   Io(#[from] std::io::Error),
 
+  /// The operating system entropy source failed while seeding the gossip RNG.
+  /// On a std target this is an unrecoverable platform fault and essentially
+  /// never occurs; it is surfaced rather than panicked because the backend
+  /// constructors that seed the machine already return a `Result`.
+  #[error("OS entropy source failed while seeding the gossip RNG")]
+  Entropy(#[source] std::io::Error),
+
   /// An encryption keyring was rejected (a key's algorithm backend is
   /// missing), so the node refuses to start rather than run plaintext on an
   /// encrypted-cluster configuration.

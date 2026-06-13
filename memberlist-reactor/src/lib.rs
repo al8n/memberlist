@@ -36,6 +36,36 @@ mod snapshot;
 mod stream_driver;
 mod transform;
 
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+use rand::{
+  SeedableRng,
+  rngs::{StdRng, SysRng},
+};
+
+/// The driver's machine endpoints stay generic over the gossip RNG `G`, exactly
+/// like proto, so a caller can inject their own via the `*_with_rng`
+/// constructors. `G` defaults to [`StdRng`] (a ChaCha CSPRNG) — the RNG the
+/// plain `tcp`/`tls`/`quic` constructors seed from the OS — so the common
+/// 3-parameter spellings stay terse and secure by default.
+#[cfg(any(feature = "tcp", feature = "tls"))]
+pub(crate) type StreamEndpoint<I, A, R, G = StdRng> =
+  memberlist_proto::streams::StreamEndpoint<I, A, R, G>;
+#[cfg(feature = "quic")]
+pub(crate) type QuicEndpoint<I, G = StdRng> = memberlist_proto::QuicEndpoint<I, G>;
+
+/// A fresh `StdRng` seeded directly from the operating system entropy source
+/// ([`SysRng`], i.e. `getrandom`) — never from a thread-local generator, so a
+/// process that forks after building a node cannot inherit a parent's RNG state
+/// and derive the same gossip schedule. This is the default RNG the plain
+/// `tcp`/`tls`/`quic` constructors seed; a caller wanting a different RNG uses
+/// the `*_with_rng` constructors instead. The backend constructors return a
+/// `Result`, so an OS entropy failure is surfaced as [`Error::Entropy`] rather
+/// than panicking.
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+pub(crate) fn gossip_rng() -> Result<StdRng, crate::Error> {
+  StdRng::try_from_rng(&mut SysRng).map_err(|e| crate::Error::Entropy(std::io::Error::other(e)))
+}
+
 pub use error::Error;
 pub use memberlist_proto::LabelError;
 pub use options::{Channel, DriverOptions, MemberlistOptions, Options};

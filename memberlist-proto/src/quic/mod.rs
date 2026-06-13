@@ -19,6 +19,7 @@ pub use transport_mode::{DatagramSendOutcome, UnreliableTransport};
 
 use crate::Instant;
 use core::net::SocketAddr;
+use rand::{Rng, rngs::SmallRng};
 use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
@@ -122,8 +123,8 @@ struct PendingDial {
 /// than carrying a per-coordinator conversion layer over a generic `A`. A
 /// driver whose user-facing membership address differs from the wire socket
 /// translates at the driver boundary (e.g. in `Memberlist<I, A, R>::join`).
-pub struct QuicEndpoint<I> {
-  ep: Endpoint<I, SocketAddr>,
+pub struct QuicEndpoint<I, R = SmallRng> {
+  ep: Endpoint<I, SocketAddr, R>,
   quinn: QuinnEndpoint,
   cfg: QuicOptions,
   /// Cross-transport compression configuration. A disabled `CompressionOptions`
@@ -321,8 +322,9 @@ pub struct QuicEndpoint<I> {
 // well-formedness bag — no method-side additions, so the heavier
 // `I: Debug + Display + Send + Sync + 'static` constraints carried by
 // the impl blocks below are NOT required to call any of these.
-impl<I> QuicEndpoint<I>
+impl<I, R> QuicEndpoint<I, R>
 where
+  R: Rng,
   I: crate::Id + crate::Data + crate::CheapClone,
 {
   /// Build the coordinator. The quinn endpoint is created with the bundled
@@ -331,7 +333,7 @@ where
   ///
   /// Signature (quinn-proto 0.11.14): `Endpoint::new(Arc<EndpointOptions>,
   /// Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)`.
-  pub fn new(ep: Endpoint<I, SocketAddr>, cfg: QuicOptions) -> Self {
+  pub fn new(ep: Endpoint<I, SocketAddr, R>, cfg: QuicOptions) -> Self {
     Self::with_quinn_rng_seed(ep, cfg, None)
   }
 
@@ -347,7 +349,7 @@ where
   /// identical to [`new`](Self::new).
   #[must_use]
   pub fn with_quinn_rng_seed(
-    ep: Endpoint<I, SocketAddr>,
+    ep: Endpoint<I, SocketAddr, R>,
     cfg: QuicOptions,
     rng_seed: Option<[u8; 32]>,
   ) -> Self {
@@ -392,7 +394,7 @@ where
   /// disabled.
   #[must_use]
   pub fn with_compression(
-    ep: Endpoint<I, SocketAddr>,
+    ep: Endpoint<I, SocketAddr, R>,
     cfg: QuicOptions,
     compression: crate::CompressionOptions,
   ) -> Self {
@@ -590,7 +592,7 @@ where
 
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
   #[inline(always)]
-  pub fn endpoint_ref(&self) -> &Endpoint<I, SocketAddr> {
+  pub fn endpoint_ref(&self) -> &Endpoint<I, SocketAddr, R> {
     &self.ep
   }
 
@@ -623,7 +625,7 @@ where
   /// inner endpoint invariant that no caller can drain `DialRequested`
   /// out from under `service_dials`.
   #[cfg(test)]
-  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, SocketAddr> {
+  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, SocketAddr, R> {
     &mut self.ep
   }
 
@@ -835,8 +837,9 @@ where
 // `handle_suspect`, `requeue_event`, `start_probe`, `leave`), drive
 // `Bridge` ops (whose impls require the full bag), or run the internal
 // bridge-pump / reap helpers.
-impl<I> QuicEndpoint<I>
+impl<I, R> QuicEndpoint<I, R>
 where
+  R: Rng,
   I: crate::Id
     + crate::Data
     + crate::CheapClone
@@ -1645,8 +1648,9 @@ where
 // `service_dials` / `service_quinn`, `flush_outbound` ->
 // `service_quinn`, the `start_*` wrappers and the `handle_udp` /
 // `handle_timeout` driver entrypoints).
-impl<I> QuicEndpoint<I>
+impl<I, R> QuicEndpoint<I, R>
 where
+  R: Rng,
   I: crate::Id
     + crate::Data
     + crate::CheapClone

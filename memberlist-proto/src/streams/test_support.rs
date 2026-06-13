@@ -53,7 +53,7 @@ pub(crate) fn test_sni_provider<A: 'static>() -> Box<dyn Fn(&A) -> Option<String
 /// `n-<port>`.
 #[allow(dead_code)]
 pub(crate) fn endpoint(port: u16) -> Endpoint<SmolStr, SocketAddr> {
-  Endpoint::new(EndpointOptions::new(
+  Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new(format!("n-{port}")),
     addr(port),
   ))

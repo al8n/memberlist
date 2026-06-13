@@ -29,6 +29,7 @@ use compio::{
 use core::task::{Context, Poll, Waker};
 use flume::{Receiver, Sender};
 
+use crate::StreamEndpoint;
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 use memberlist_proto::{
   Instant,
@@ -37,7 +38,7 @@ use memberlist_proto::{
     parse_messages,
   },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
-  streams::{StreamAction, StreamEndpoint, StreamTransport},
+  streams::{StreamAction, StreamTransport},
   typed::{NodeState, State},
 };
 
@@ -406,7 +407,7 @@ const GOSSIP_RECV_BUF_MAX: usize = 65507;
 /// past-due peek recv buffer to that value so a configured
 /// `with_gossip_mtu` above the historical 16 KiB default is not
 /// silently truncated by the kernel.
-fn gossip_recv_buf_len<I, A, R>(endpoint: &StreamEndpoint<I, A, R>) -> usize
+fn gossip_recv_buf_len<I, A, R, G>(endpoint: &StreamEndpoint<I, A, R, G>) -> usize
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -426,6 +427,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   endpoint
     .gossip_mtu()
@@ -493,8 +495,8 @@ where
 /// per-transport `Transport::run` body (TCP / TLS) is the only caller and
 /// reads cleaner with positional args.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn stream_driver_loop<I, A, R, D>(
-  mut endpoint: StreamEndpoint<I, A, R>,
+pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
+  mut endpoint: StreamEndpoint<I, A, R, G>,
   gossip_socket: UdpSocket,
   listener: TcpListener,
   commands: Receiver<Command<I>>,
@@ -537,6 +539,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng + Unpin,
 {
   let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
   let (bridge_inbound_tx, bridge_inbound_rx) =
@@ -610,7 +613,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // once at loop entry — gossip_mtu is fixed for the endpoint
   // lifetime, so re-computing per iter would just allocate the same
   // value.
-  let recv_buf_len = gossip_recv_buf_len::<I, A, R>(&endpoint);
+  let recv_buf_len = gossip_recv_buf_len::<I, A, R, G>(&endpoint);
 
   // Observation-channel payload byte backstop. The `Bounded(n)` count cap
   // bounds the NUMBER of queued events, but one `UserPacket` /
@@ -625,7 +628,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     crate::Channel::Unbounded => None,
   };
 
-  refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+  refresh_snapshot::<I, A, R, G>(&endpoint, &snapshot);
   // Track the published snapshot version so the per-iteration republishes below
   // rebuild only on an actual membership/health change.
   let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
@@ -680,7 +683,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       while accepted_n < driver_opts.iter_drain_cap().max(1) {
         match accept_fut.as_mut().poll(&mut accept_cx) {
           Poll::Ready(accepted) => {
-            if handle_accepted::<I, A, R>(
+            if handle_accepted::<I, A, R, G>(
               accepted,
               &mut endpoint,
               &mut bridges,
@@ -717,7 +720,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           if is_shutdown {
             exit = true;
           }
-          dispatch_command::<I, A, R>(
+          dispatch_command::<I, A, R, G>(
             &mut endpoint,
             &mut bridges,
             &bridge_ready_tx,
@@ -768,7 +771,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     while drained < driver_opts.iter_drain_cap() {
       match bridge_inbound_rx.try_recv() {
         Ok(inbound) => {
-          dispatch_bridge_inbound::<I, A, R>(&mut endpoint, inbound);
+          dispatch_bridge_inbound::<I, A, R, G>(&mut endpoint, inbound);
           drained += 1;
           dirty = true;
         }
@@ -779,7 +782,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     while drained < driver_opts.iter_drain_cap() {
       match bridge_ready_rx.try_recv() {
         Ok(ready) => {
-          handle_bridge_ready::<I, A, R>(
+          handle_bridge_ready::<I, A, R, G>(
             &mut endpoint,
             &mut bridges,
             &bridge_inbound_tx,
@@ -810,16 +813,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       // drained and keeps the two exit paths identical in shape.
       let mut drained_any = false;
       loop {
-        let did_actions = drain_actions::<I, A, R>(
+        let did_actions = drain_actions::<I, A, R, G>(
           &mut endpoint,
           &mut bridges,
           &bridge_ready_tx,
           stream_opts,
           &cidr_policy,
         );
-        let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
+        let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
-          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
+          drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -837,13 +840,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if drained_any {
-        refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
+        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
       }
       // Publish the counters unconditionally before exit: a load-shed (e.g. a
       // rejected accept at the max_inbound_streams cap) can bump them on a path
       // that produced no drainable work, so gating on `drained_any` would drop
       // the final increment from the metrics a caller inspects after shutdown.
-      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
+      refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
       break;
     }
 
@@ -919,7 +922,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             && !cidr_blocks(&cidr_policy, src.ip())
           {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
+            dispatch_gossip::<I, A, R, G>(&mut endpoint, src, &buf[..n], now, label.clone());
             dirty = true;
           }
         }
@@ -932,7 +935,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       // Apply the deadline-firing protocol: drain bridge completions
       // (no cap), re-poll the deadline, fire handle_timeout iff still
       // past. See `fire_timeout_with_drain` for the full rationale.
-      if fire_timeout_with_drain::<I, A, R>(
+      if fire_timeout_with_drain::<I, A, R, G>(
         &mut endpoint,
         &mut bridges,
         &bridge_inbound_tx,
@@ -945,16 +948,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
 
       loop {
-        let did_actions = drain_actions::<I, A, R>(
+        let did_actions = drain_actions::<I, A, R, G>(
           &mut endpoint,
           &mut bridges,
           &bridge_ready_tx,
           stream_opts,
           &cidr_policy,
         );
-        let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
+        let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
-          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
+          drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -971,8 +974,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
-        refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
-        refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
+        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
+        refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
       }
       if exit {
         break;
@@ -987,16 +990,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     // arm fires.
     if dirty {
       loop {
-        let did_actions = drain_actions::<I, A, R>(
+        let did_actions = drain_actions::<I, A, R, G>(
           &mut endpoint,
           &mut bridges,
           &bridge_ready_tx,
           stream_opts,
           &cidr_policy,
         );
-        let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
+        let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
-          drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
+          drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
         let did_events = drain_events(
           &mut endpoint,
           &obs_tx,
@@ -1012,8 +1015,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
       reap_pending_joins(&mut pending.joins, Instant::now()).await;
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
-      refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
-      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
+      refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
+      refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
       dirty = false;
     }
 
@@ -1071,7 +1074,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           Ok((_n, src)) if cidr_blocks(&cidr_policy, src.ip()) => {}
           Ok((n, src)) => {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, label.clone());
+            dispatch_gossip::<I, A, R, G>(&mut endpoint, src, &buf[..n], now, label.clone());
             dirty = true;
           }
           Err(_) => {
@@ -1092,7 +1095,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         // queued. The shared `fire_timeout_with_drain` helper drains
         // every already-arrived completion (no cap), re-polls the
         // deadline, and fires `handle_timeout` only if still past.
-        if fire_timeout_with_drain::<I, A, R>(
+        if fire_timeout_with_drain::<I, A, R, G>(
           &mut endpoint,
           &mut bridges,
           &bridge_inbound_tx,
@@ -1109,7 +1112,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         // are normally serviced by the iter-top drain; this arm wakes the loop
         // for one that arrives mid-await. The resolved future is re-armed at the
         // loop top.
-        if handle_accepted::<I, A, R>(
+        if handle_accepted::<I, A, R, G>(
           accepted,
           &mut endpoint,
           &mut bridges,
@@ -1129,7 +1132,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             // the machine — any deadline computed off it would be off by
             // the time the arm sat in `select!`.
             let now = Instant::now();
-            dispatch_command::<I, A, R>(
+            dispatch_command::<I, A, R, G>(
               &mut endpoint,
               &mut bridges,
               &bridge_ready_tx,
@@ -1152,7 +1155,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
       ready = ready_fut => {
         if let Ok(ready) = ready {
-          handle_bridge_ready::<I, A, R>(
+          handle_bridge_ready::<I, A, R, G>(
             &mut endpoint,
             &mut bridges,
             &bridge_inbound_tx,
@@ -1170,7 +1173,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       }
       bi = bridge_in_fut => {
         if let Ok(inbound) = bi {
-          dispatch_bridge_inbound::<I, A, R>(&mut endpoint, inbound);
+          dispatch_bridge_inbound::<I, A, R, G>(&mut endpoint, inbound);
           dirty = true;
         }
         // Ignoring Err: the bridge inbound channel's producers are the
@@ -1208,16 +1211,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     // at the moment the result lands), and Shutdown / Close just signal
     // the per-bridge channel.
     loop {
-      let did_actions = drain_actions::<I, A, R>(
+      let did_actions = drain_actions::<I, A, R, G>(
         &mut endpoint,
         &mut bridges,
         &bridge_ready_tx,
         stream_opts,
         &cidr_policy,
       );
-      let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
+      let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
       let did_transmits =
-        drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket, label.clone()).await;
+        drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
       let did_events = drain_events(
         &mut endpoint,
         &obs_tx,
@@ -1235,8 +1238,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     reap_pending_leave(&mut pending.leave, Instant::now()).await;
 
     if dirty {
-      refresh_snapshot_if_changed::<I, A, R>(&endpoint, &snapshot, &mut last_snapshot_version);
-      refresh_metrics_if_changed::<I, A, R>(&endpoint, &metrics, &mut last_metrics);
+      refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
+      refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
     }
 
     if exit {
@@ -1383,8 +1386,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
 // piece of mutable state the function reads or threads through; the
 // pending command bookkeeping is already bundled into `PendingCommands`.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_command<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+async fn dispatch_command<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
@@ -1414,6 +1417,7 @@ async fn dispatch_command<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   match cmd {
     Command::Join(JoinCmd { addrs, kind, reply }) => {
@@ -1863,8 +1867,10 @@ async fn dispatch_command<I, A, R>(
 /// `Eof` and `Error` here only feed the coordinator's EOF anchor; the
 /// bridge entry stays so the response (queued by the same `handle_
 /// transport_data(eof=true)` call) can reach the still-alive bridge.
-fn dispatch_bridge_inbound<I, A, R>(endpoint: &mut StreamEndpoint<I, A, R>, inbound: BridgeInbound)
-where
+fn dispatch_bridge_inbound<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
+  inbound: BridgeInbound,
+) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
@@ -1883,6 +1889,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   // Each inbound carries its own `received_at` — the wall-clock
   // instant the bridge observed the bytes / EOF / error on the
@@ -1940,8 +1947,8 @@ where
 /// → optionally split compound) because `memberlist-proto` has no
 /// codec dependency by design. After this function returns the gossip
 /// is fully applied to the coordinator's membership FSM.
-fn dispatch_gossip<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+fn dispatch_gossip<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   src: SocketAddr,
   datagram: &[u8],
   now: Instant,
@@ -1966,6 +1973,7 @@ fn dispatch_gossip<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   endpoint.handle_gossip(src.into(), datagram, now);
 
@@ -2173,8 +2181,8 @@ fn process_one_action(
 /// Drain every [`StreamAction`] the coordinator has queued, dispatching each on
 /// the driver's per-bridge handle table. Returns `true` iff any action was
 /// processed.
-fn drain_actions<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+fn drain_actions<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
@@ -2199,6 +2207,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let mut progress = false;
   while let Some(action) = endpoint.poll_action() {
@@ -2230,8 +2239,8 @@ where
 /// already retired the exchange) the bytes are dropped — the matching
 /// `Shutdown` / `Close` then surfaces on the next `poll_action` call
 /// and the no-op arm reaps the (already-absent) bridge entry.
-fn drain_transport_transmits<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+fn drain_transport_transmits<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &HashMap<ExchangeId, BridgeHandle>,
 ) -> bool
 where
@@ -2253,6 +2262,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let mut progress = false;
   while let Some((eid, _peer, bytes)) = endpoint.poll_transport_transmit() {
@@ -2282,8 +2292,8 @@ where
 /// `encode_outgoing` / `encode_outgoing_compound` stamp the cluster label
 /// (if any) before `compress_gossip` → `encrypt_gossip` → send, matching the
 /// inbound path in `dispatch_gossip` and the reactor driver's gossip egress.
-async fn drain_transmits<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+async fn drain_transmits<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   gossip_socket: &UdpSocket,
   label: Option<Bytes>,
 ) -> bool
@@ -2306,6 +2316,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let encode_opts = EncodeOptions::new(label);
   let mut progress = false;
@@ -2372,8 +2383,8 @@ where
 /// `ExchangeCompleted` can arrive on a follow-up input the driver must
 /// still service — a hook blocking the loop would delay the parked
 /// join/leave reply that depends on it. See [`observation_task`].
-async fn drain_events<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+async fn drain_events<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   obs_tx: &Sender<Event<I, A>>,
   observation_dropped: &std::sync::atomic::AtomicU64,
   obs_payload_bytes: &std::sync::atomic::AtomicU64,
@@ -2399,6 +2410,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let mut drained = false;
 
@@ -2797,8 +2809,8 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 /// Returns `true` iff any work was applied (a queued completion was
 /// dispatched OR `handle_timeout` fired).
 #[allow(clippy::too_many_arguments)]
-fn fire_timeout_with_drain<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+fn fire_timeout_with_drain<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   bridge_inbound_rx: &Receiver<BridgeInbound>,
@@ -2825,14 +2837,15 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let mut dirty = false;
   while let Ok(inbound) = bridge_inbound_rx.try_recv() {
-    dispatch_bridge_inbound::<I, A, R>(endpoint, inbound);
+    dispatch_bridge_inbound::<I, A, R, G>(endpoint, inbound);
     dirty = true;
   }
   while let Ok(ready) = bridge_ready_rx.try_recv() {
-    handle_bridge_ready::<I, A, R>(
+    handle_bridge_ready::<I, A, R, G>(
       endpoint,
       bridges,
       bridge_inbound_tx,
@@ -2863,8 +2876,8 @@ where
 /// `Bytes`, which shares the underlying buffer). The local node entry is
 /// taken directly from the membership map so it carries the real meta,
 /// incarnation, and protocol versions.
-fn refresh_snapshot<I, A, R>(
-  endpoint: &StreamEndpoint<I, A, R>,
+fn refresh_snapshot<I, A, R, G>(
+  endpoint: &StreamEndpoint<I, A, R, G>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
 ) where
   I: memberlist_proto::Id
@@ -2885,6 +2898,7 @@ fn refresh_snapshot<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let ep = endpoint.endpoint_ref();
   // Build a snapshot-local NodeState for each member with the FSM-tracked
@@ -2920,8 +2934,8 @@ fn refresh_snapshot<I, A, R>(
 /// snapshot version changed since `*last_version` — the rebuild clones every
 /// `NodeState`, so skipping it on a dirty iteration that did not actually change
 /// membership/health is the largest steady-state saving.
-fn refresh_snapshot_if_changed<I, A, R>(
-  endpoint: &StreamEndpoint<I, A, R>,
+fn refresh_snapshot_if_changed<I, A, R, G>(
+  endpoint: &StreamEndpoint<I, A, R, G>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
   last_version: &mut u64,
 ) where
@@ -2943,19 +2957,20 @@ fn refresh_snapshot_if_changed<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let v = endpoint.endpoint_ref().snapshot_version();
   if v != *last_version {
     *last_version = v;
-    refresh_snapshot::<I, A, R>(endpoint, snapshot);
+    refresh_snapshot::<I, A, R, G>(endpoint, snapshot);
   }
 }
 
 /// Republish the machine's load-shedding counters into `metrics` if they changed
 /// since `last` (a cheap `Copy` compare; the `ArcSwap` store allocates only on a
 /// real change, which is rare).
-fn refresh_metrics_if_changed<I, A, R>(
-  endpoint: &StreamEndpoint<I, A, R>,
+fn refresh_metrics_if_changed<I, A, R, G>(
+  endpoint: &StreamEndpoint<I, A, R, G>,
   metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   last: &mut memberlist_proto::metrics::Metrics,
 ) where
@@ -2977,6 +2992,7 @@ fn refresh_metrics_if_changed<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   let m = endpoint.endpoint_ref().metrics();
   if m != *last {
@@ -2988,8 +3004,8 @@ fn refresh_metrics_if_changed<I, A, R>(
 /// Route one [`BridgeReady`] message — either a freshly-accepted inbound
 /// connection or the result of an outbound dial — into the coordinator,
 /// spawning a per-bridge byte-mover on success.
-fn handle_bridge_ready<I, A, R>(
-  endpoint: &mut StreamEndpoint<I, A, R>,
+fn handle_bridge_ready<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   ready: BridgeReady,
@@ -3014,6 +3030,7 @@ fn handle_bridge_ready<I, A, R>(
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   match ready {
     BridgeReady::OutboundOk(OutboundOkReady {
@@ -3082,9 +3099,9 @@ fn handle_bridge_ready<I, A, R>(
 /// Returns `true` iff a bridge was spawned. Shared by the iter-top accept drain
 /// and the select's accept arm so both paths stay byte-identical.
 #[allow(clippy::too_many_arguments)]
-fn handle_accepted<I, A, R>(
+fn handle_accepted<I, A, R, G>(
   accepted: io::Result<(TcpStream, SocketAddr)>,
-  endpoint: &mut StreamEndpoint<I, A, R>,
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   cidr_policy: &crate::transport::runtime::CidrFilter,
@@ -3110,6 +3127,7 @@ where
     + Sync
     + 'static,
   R: StreamTransport,
+  G: rand::Rng,
 {
   match accepted {
     // CIDR: reject a reliable connection from a blocked peer at the boundary

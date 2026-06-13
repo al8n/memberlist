@@ -15,8 +15,22 @@ use smoltcp::{
 /// Build an [`InterfaceOptions`] for the harness's `Medium::Ip` devices:
 /// `HardwareAddress::Ip` plus the node's `/24` address. Keeps the construction
 /// call sites tidy now that `Memberlist::new` takes a full interface config.
+///
+/// The interface RNG seed is derived deterministically from the node's IP. The
+/// driver seeds the gossip RNG from this same seed, so a harness node's whole
+/// stack — smoltcp ports/ISNs and gossip target selection — is reproducible
+/// across runs without each test pinning a seed by hand.
 pub fn ip_iface(ip: IpAddr) -> InterfaceOptions {
-  InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(IpCidr::new(ip.into(), 24))
+  let seed = match ip {
+    IpAddr::V4(v4) => u32::from(v4) as u64,
+    IpAddr::V6(v6) => {
+      let o = v6.octets();
+      u64::from_be_bytes([o[8], o[9], o[10], o[11], o[12], o[13], o[14], o[15]])
+    }
+  };
+  InterfaceOptions::new(HardwareAddress::Ip)
+    .with_ip_addr(IpCidr::new(ip.into(), 24))
+    .with_random_seed(seed)
 }
 
 type Wire = Rc<RefCell<VecDeque<Vec<u8>>>>;

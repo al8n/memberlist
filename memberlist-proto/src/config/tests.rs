@@ -73,8 +73,7 @@ fn every_builder_round_trips_through_its_accessor() {
     .with_push_pull_interval(Duration::from_secs(45))
     .with_retransmit_mult(6)
     .with_protocol_version(ProtocolVersion::V1)
-    .with_delegate_version(DelegateVersion::V1)
-    .with_rng_seed(0xABCD);
+    .with_delegate_version(DelegateVersion::V1);
 
   assert_eq!(opts.local_id_ref(), &local);
   assert_eq!(opts.advertise_addr_ref(), &advertise);
@@ -100,39 +99,4 @@ fn every_builder_round_trips_through_its_accessor() {
   assert_eq!(opts.retransmit_mult(), 6);
   assert_eq!(opts.protocol_version(), ProtocolVersion::V1);
   assert_eq!(opts.delegate_version(), DelegateVersion::V1);
-  assert_eq!(opts.rng_seed(), Some(0xABCD));
-}
-
-#[test]
-fn rng_seed_setter_family_round_trips() {
-  let mut opts = EndpointOptions::<(), ()>::new((), ());
-  assert_eq!(opts.rng_seed(), None);
-  opts.set_rng_seed(11);
-  assert_eq!(opts.rng_seed(), Some(11));
-  opts.update_rng_seed(Some(22));
-  assert_eq!(opts.rng_seed(), Some(22));
-  opts.update_rng_seed(None);
-  assert_eq!(opts.rng_seed(), None);
-  opts.set_rng_seed(33);
-  opts.clear_rng_seed();
-  assert_eq!(opts.rng_seed(), None);
-
-  assert_eq!(
-    EndpointOptions::<(), ()>::new((), ())
-      .maybe_rng_seed(Some(44))
-      .rng_seed(),
-    Some(44)
-  );
-  assert_eq!(
-    EndpointOptions::<(), ()>::new((), ())
-      .maybe_rng_seed(None)
-      .rng_seed(),
-    None
-  );
-  assert_eq!(
-    EndpointOptions::<(), ()>::new((), ())
-      .with_rng_seed(55)
-      .rng_seed(),
-    Some(55)
-  );
 }

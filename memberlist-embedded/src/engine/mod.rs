@@ -21,7 +21,7 @@ use std::{boxed::Box, collections::VecDeque};
 
 use memberlist_proto::{
   AliveDelegate, Endpoint, EndpointOptions, Instant, LabelOptions, MergeDelegate, Node,
-  PushPullKind, RawRecords, StreamId,
+  PushPullKind, RawRecords, Rng, SmallRng, StreamId,
   event::{PingId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, NodeState, State},
@@ -117,12 +117,15 @@ where
 ///
 /// `I` is the node identifier type (e.g. `SmolStr`); `A` is pinned to
 /// `core::net::SocketAddr`. `C` is the driver's opaque connection handle
-/// ([`StreamIo::Conn`]).
-pub struct Engine<I, C>
+/// ([`StreamIo::Conn`]). `R` is the gossip RNG the driver injects at
+/// construction (defaulting to [`SmallRng`]); the driver owns seeding it from
+/// its entropy source, keeping the core free of any entropy acquisition.
+pub struct Engine<I, C, R = SmallRng>
 where
   I: memberlist_proto::Id,
+  R: Rng,
 {
-  endpoint: StreamEndpoint<I, SocketAddr, RawRecords>,
+  endpoint: StreamEndpoint<I, SocketAddr, RawRecords, R>,
   /// Sizing / port configuration; retained for the reliable-plane paths.
   cfg: Options,
   /// Pooled connection handles and the exchange-to-handle map for the reliable
@@ -171,31 +174,32 @@ where
   cidr_policy: CidrFilter,
 }
 
-impl<I, C> Engine<I, C>
+impl<I, C, R> Engine<I, C, R>
 where
   I: memberlist_proto::Id,
   C: Copy + Eq + core::hash::Hash,
+  R: Rng,
 {
-  /// Construct an engine, panicking on a misconfiguration or entropy failure.
+  /// Construct an engine, panicking on a misconfiguration.
   ///
   /// This is the convenience wrapper over [`try_new_at`](Self::try_new_at); it
   /// has the same parameters and behaviour but unwraps the result. Use it only
-  /// when the configuration is a static constant known to be valid and the build
-  /// targets a host whose entropy source cannot fail.
+  /// when the configuration is a static constant known to be valid.
   ///
   /// # Panics
   ///
   /// Panics if [`try_new_at`](Self::try_new_at) returns an [`InitError`] — e.g.
   /// on a zero/over-ceiling gossip MTU, a non-routable or port-mismatched
-  /// advertise address, an entropy failure, or a machine-endpoint init failure.
+  /// advertise address, or a machine-endpoint init failure.
   pub fn new_at(
     cfg: Options,
     transform: TransformOptions,
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
+    rng: R,
   ) -> Self {
-    Self::try_new_at(cfg, transform, ep_cfg, now)
-      .expect("Engine::new_at: invalid configuration or entropy failure; use try_new_at to handle")
+    Self::try_new_at(cfg, transform, ep_cfg, now, rng)
+      .expect("Engine::new_at: invalid configuration; use try_new_at to handle")
   }
 
   /// Fallibly construct an engine.
@@ -214,6 +218,8 @@ where
   /// - `ep_cfg`: machine identity (`id`, `advertise`, timing knobs, …).
   /// - `now`: the driver's clock reading at construction (passed to the
   ///   `Endpoint` so timers start from a consistent origin).
+  /// - `rng`: the gossip RNG, already seeded by the driver from its entropy
+  ///   source. The core performs no entropy acquisition of its own.
   ///
   /// # Errors
   ///
@@ -236,6 +242,7 @@ where
     transform: TransformOptions,
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
+    rng: R,
   ) -> Result<Self, InitError> {
     // Reject a zero port up front. A link layer's bind/listen rejects port 0 and
     // no peer can dial it; the reliable plane's listen and ephemeral-port dialing
@@ -324,12 +331,13 @@ where
 
     // Wire up the machine's stream endpoint. `peer_to_socket` is identity because
     // `A = SocketAddr`; `sni_provider` returns `None` (no TLS / no SNI).
-    // `try_new_at` (not `new_at`) so a machine entropy failure becomes
-    // `InitError::Endpoint` rather than a panic. The reliable-plane label, the
-    // cross-transport compression/encryption, and the gossip-plane checksum all
-    // come from `transform`; with a default `TransformOptions` they are disabled,
+    // `try_new_at` (not `new_at`) so a machine init failure becomes
+    // `InitError::Endpoint` rather than a panic. The driver-injected `rng` seeds
+    // the machine's gossip RNG. The reliable-plane label, the cross-transport
+    // compression/encryption, and the gossip-plane checksum all come from
+    // `transform`; with a default `TransformOptions` they are disabled,
     // reproducing the plain no-label endpoint.
-    let mut ep = Endpoint::try_new_at(ep_cfg, now).map_err(InitError::Endpoint)?;
+    let mut ep = Endpoint::try_new_at(ep_cfg, now, rng).map_err(InitError::Endpoint)?;
     // The CIDR policy gates the alive delegate (composed just below) and the
     // transport-boundary recv/accept guards (stored on the engine). Cloned out of
     // `cfg` because `cfg` is moved into the engine below.

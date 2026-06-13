@@ -6,24 +6,27 @@ use std::{
   sync::{Arc, atomic::AtomicU64},
 };
 
+#[cfg(feature = "quic")]
+use crate::QuicEndpoint;
+#[cfg(any(feature = "tcp", feature = "tls"))]
+use crate::StreamEndpoint;
 use agnostic::{
   Runtime,
   net::{Net, UdpSocket},
 };
-#[cfg(any(feature = "tcp", feature = "tls"))]
-use memberlist_proto::LabelOptions;
+#[cfg(feature = "quic")]
+use memberlist_proto::QuicOptions;
 #[cfg(feature = "tcp")]
 use memberlist_proto::RawRecords;
-#[cfg(any(feature = "tcp", feature = "tls"))]
-use memberlist_proto::streams::{StreamEndpoint, StreamTransport};
 use memberlist_proto::{
   AliveDelegate, ChecksumOptions, CompressionOptions, EncryptionOptions, Endpoint, EndpointOptions,
   Instant, MergeDelegate, Node, event::Event, typed::NodeState,
 };
+#[cfg(any(feature = "tcp", feature = "tls"))]
+use memberlist_proto::{LabelOptions, streams::StreamTransport};
 #[cfg(feature = "tls")]
 use memberlist_proto::{Labeled, TlsOptions, TlsRecords};
-#[cfg(feature = "quic")]
-use memberlist_proto::{QuicEndpoint, QuicOptions};
+use rand::rngs::StdRng;
 
 #[cfg(feature = "quic")]
 use crate::quic_driver::QuicDriver;
@@ -122,7 +125,9 @@ impl<I> Drop for Memberlist<I> {
 }
 
 impl<I: NodeId> Memberlist<I> {
-  /// Builds a QUIC-backed node and spawns its driver on the runtime `R`.
+  /// Builds a QUIC-backed node and spawns its driver on the runtime `R`, seeding
+  /// the gossip RNG from the OS (a `StdRng`). Use
+  /// [`quic_with_rng`](Self::quic_with_rng) to inject a different RNG.
   ///
   /// The advertise address is resolved once via `resolver`, then the socket is
   /// bound and the [`QuicEndpoint`] driven; the resolver is not retained.
@@ -139,6 +144,37 @@ impl<I: NodeId> Memberlist<I> {
     R: Runtime,
     Res: AddressResolver,
     D: Delegate<Id = I, Address = SocketAddr>,
+  {
+    Self::quic_with_rng::<R, Res, D, StdRng>(
+      resolver,
+      local_id,
+      advertise,
+      options,
+      delegate,
+      quic_config,
+      crate::gossip_rng()?,
+    )
+    .await
+  }
+
+  /// Like [`quic`](Self::quic) but with a caller-supplied gossip RNG `G`,
+  /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
+  /// The machine's gossip schedule is reproducible iff `rng` is.
+  #[cfg(feature = "quic")]
+  pub async fn quic_with_rng<R, Res, D, G>(
+    resolver: &Res,
+    local_id: I,
+    advertise: MaybeResolved<Res::Address>,
+    options: Options<I>,
+    delegate: D,
+    quic_config: QuicOptions,
+    rng: G,
+  ) -> Result<Self, Error>
+  where
+    R: Runtime,
+    Res: AddressResolver,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     let advertise_socket = resolve_one(resolver, advertise).await?;
     let socket = <R::Net as Net>::UdpSocket::bind(advertise_socket)
@@ -165,7 +201,7 @@ impl<I: NodeId> Memberlist<I> {
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
-    let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
+    let mut ep = Endpoint::new(cfg, rng);
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -220,7 +256,7 @@ impl<I: NodeId> Memberlist<I> {
       obs_payload_bytes.clone(),
     ));
 
-    let driver = QuicDriver::<I, R>::new(
+    let driver = QuicDriver::<I, R, G>::new(
       endpoint,
       socket,
       shared.clone(),
@@ -255,12 +291,41 @@ impl<I: NodeId> Memberlist<I> {
     Res: AddressResolver,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
-    Self::build_stream_backend::<R, Res, D, RawRecords>(
+    Self::tcp_with_rng::<R, Res, D, StdRng>(
       resolver,
       local_id,
       advertise,
       options,
       delegate,
+      crate::gossip_rng()?,
+    )
+    .await
+  }
+
+  /// Like [`tcp`](Self::tcp) but with a caller-supplied gossip RNG `G`,
+  /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
+  #[cfg(feature = "tcp")]
+  pub async fn tcp_with_rng<R, Res, D, G>(
+    resolver: &Res,
+    local_id: I,
+    advertise: MaybeResolved<Res::Address>,
+    options: Options<I>,
+    delegate: D,
+    rng: G,
+  ) -> Result<Self, Error>
+  where
+    R: Runtime,
+    Res: AddressResolver,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static,
+  {
+    Self::build_stream_backend::<R, Res, D, RawRecords, G>(
+      resolver,
+      local_id,
+      advertise,
+      options,
+      delegate,
+      rng,
       |ep, ml_opts| {
         // The single configured label feeds both the reliable-plane label
         // exchange (so peers verify they belong to the same cluster on every
@@ -307,12 +372,47 @@ impl<I: NodeId> Memberlist<I> {
     D: Delegate<Id = I, Address = SocketAddr>,
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
   {
-    Self::build_stream_backend::<R, Res, D, Labeled<TlsRecords>>(
+    Self::tls_with_rng::<R, Res, D, F, StdRng>(
       resolver,
       local_id,
       advertise,
       options,
       delegate,
+      tls_options,
+      sni_provider,
+      crate::gossip_rng()?,
+    )
+    .await
+  }
+
+  /// Like [`tls`](Self::tls) but with a caller-supplied gossip RNG `G`,
+  /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
+  #[cfg(feature = "tls")]
+  #[allow(clippy::too_many_arguments)]
+  pub async fn tls_with_rng<R, Res, D, F, G>(
+    resolver: &Res,
+    local_id: I,
+    advertise: MaybeResolved<Res::Address>,
+    options: Options<I>,
+    delegate: D,
+    tls_options: TlsOptions,
+    sni_provider: F,
+    rng: G,
+  ) -> Result<Self, Error>
+  where
+    R: Runtime,
+    Res: AddressResolver,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
+    G: rand::Rng + Send + Unpin + 'static,
+  {
+    Self::build_stream_backend::<R, Res, D, Labeled<TlsRecords>, G>(
+      resolver,
+      local_id,
+      advertise,
+      options,
+      delegate,
+      rng,
       move |ep, ml_opts| {
         // The reliable transport is the cluster-label decorator over the TLS
         // record layer: the configured cluster label rides as the first
@@ -346,16 +446,17 @@ impl<I: NodeId> Memberlist<I> {
   /// decoded `MemberlistOptions` so it can configure the record-layer-specific
   /// label, compression, and encryption on the `StreamEndpoint` it returns.
   #[cfg(any(feature = "tcp", feature = "tls"))]
-  async fn build_stream_backend<R, Res, D, T>(
+  async fn build_stream_backend<R, Res, D, T, G>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
     options: Options<I>,
     delegate: D,
+    rng: G,
     make_endpoint: impl FnOnce(
-      Endpoint<I, SocketAddr>,
+      Endpoint<I, SocketAddr, G>,
       &MemberlistOptions,
-    ) -> StreamEndpoint<I, SocketAddr, T>,
+    ) -> StreamEndpoint<I, SocketAddr, T, G>,
   ) -> Result<Self, Error>
   where
     R: Runtime,
@@ -363,6 +464,7 @@ impl<I: NodeId> Memberlist<I> {
     D: Delegate<Id = I, Address = SocketAddr>,
     T: StreamTransport + Send + Unpin + 'static,
     T::Options: Send + Unpin,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     let advertise_socket = resolve_one(resolver, advertise).await?;
     // Bind the TCP listener first to claim an OS-assigned free port, then bind
@@ -434,7 +536,7 @@ impl<I: NodeId> Memberlist<I> {
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
-    let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
+    let mut ep = Endpoint::new(cfg, rng);
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -495,7 +597,7 @@ impl<I: NodeId> Memberlist<I> {
       shared.clone(),
     ));
 
-    let driver = StreamDriver::<I, R, T>::new(
+    let driver = StreamDriver::<I, R, T, G>::new(
       endpoint,
       socket,
       shared.clone(),

@@ -104,15 +104,6 @@ impl SizeExceeded {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EndpointInitError {
-  /// The config carried no RNG seed and the platform entropy source failed
-  /// while seeding the gossip RNG. Recoverable: the driver can retry, or
-  /// supply a seed via
-  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed)
-  /// (e.g. from a hardware RNG) to avoid platform entropy entirely. On no_std
-  /// targets this reflects an integrator-provided getrandom backend that
-  /// errored or was not yet ready.
-  #[error("entropy source failed while seeding the gossip RNG")]
-  Entropy,
   /// `EndpointOptions::initial_meta` is larger than the configured
   /// `meta_max_size`, so the local Alive broadcast would carry a meta that
   /// peers reject. Fix the builder configuration: shrink `initial_meta` or

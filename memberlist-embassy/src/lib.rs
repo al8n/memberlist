@@ -11,20 +11,16 @@
 //! # Building for bare metal
 //!
 //! Turn the default `std` feature off and the `alloc` feature on, against a
-//! bare-metal target. The gossip RNG seed is drawn from
-//! [`getrandom`](https://docs.rs/getrandom) when no explicit seed is configured,
-//! so a bare-metal target must register a `getrandom` backend (e.g. a hardware
-//! RNG); supply one, or build with the custom-backend cfg and provide the
-//! symbol in the final binary:
+//! bare-metal target. [`Memberlist::new`] seeds the gossip RNG from the platform
+//! [`getrandom`] backend (a bare-metal target must register one — e.g. a hardware
+//! RNG); [`Memberlist::new_with_rng`] instead takes a caller-seeded [`SmallRng`]
+//! (or any [`Rng`](memberlist_proto::Rng)) so the driver acquires no entropy of
+//! its own — seed it from the same authority that seeds the embassy-net stack.
 //!
 //! ```sh
-//! RUSTFLAGS='--cfg getrandom_backend="custom"' \
-//!   cargo build -p memberlist-embassy --no-default-features --features alloc \
+//! cargo build -p memberlist-embassy --no-default-features --features alloc \
 //!   --target thumbv7em-none-eabihf
 //! ```
-//!
-//! Configuring an explicit RNG seed via `EndpointOptions` avoids the entropy
-//! draw entirely.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -77,6 +73,10 @@ pub use memberlist_embedded::{
   },
 };
 pub use memberlist_proto::{EncryptionError, EndpointOptions, Instant, Node, event};
+// The gossip RNG that [`Memberlist::new_with_rng`] takes by value (and that
+// [`Memberlist::new`] seeds for you), re-exported so a caller can name and seed it
+// without taking its own `memberlist-proto` dependency.
+pub use memberlist_proto::{Rng, SeedableRng, SmallRng};
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]

@@ -139,8 +139,8 @@ impl<I, A> MemberlistSnapshot<I, A> {
 /// the membership map so it carries the real meta, incarnation, and protocol
 /// versions.
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-pub(crate) fn snapshot_of<I: crate::NodeId>(
-  ep: &memberlist_proto::Endpoint<I, SocketAddr>,
+pub(crate) fn snapshot_of<I: crate::NodeId, R: rand::Rng>(
+  ep: &memberlist_proto::Endpoint<I, SocketAddr, R>,
 ) -> MemberlistSnapshot<I, SocketAddr> {
   let mut alive_count = 0usize;
   let members: Vec<Arc<NodeState<I, SocketAddr>>> = ep

@@ -40,7 +40,7 @@ fn bridge_reliable_max_tracks_configured_max_stream_frame_size() {
   let custom_max = 17 * 1024 * 1024;
   let cfg =
     EndpointOptions::new(SmolStr::new("n"), addr(7300)).with_max_stream_frame_size(custom_max);
-  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
     ep,
     LabelOptions::new_in(Some(b"cluster-x".to_vec()), ()),

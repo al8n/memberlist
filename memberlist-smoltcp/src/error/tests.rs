@@ -42,7 +42,7 @@ fn all_variants() -> Vec<InitError> {
     InitError::NonUnicastRouteGateway(sample_route()),
     InitError::RouteFamilyMismatch(sample_route()),
     InitError::Entropy,
-    InitError::Endpoint(EndpointInitError::Entropy),
+    InitError::Endpoint(EndpointInitError::AwarenessMultiplierZero),
     InitError::Encryption(memberlist_proto::EncryptionError::AuthFailed),
     InitError::Checksum(memberlist_proto::ChecksumError::Mismatch),
     InitError::GossipMtuTooLarge(GossipMtuTooLarge {
@@ -96,10 +96,10 @@ fn medium_mismatch_payload_display() {
 
 #[test]
 fn from_endpoint_init_error() {
-  let err: InitError = EndpointInitError::Entropy.into();
+  let err: InitError = EndpointInitError::AwarenessMultiplierZero.into();
   assert!(matches!(
     err,
-    InitError::Endpoint(EndpointInitError::Entropy)
+    InitError::Endpoint(EndpointInitError::AwarenessMultiplierZero)
   ));
 }
 
@@ -138,7 +138,7 @@ fn from_embedded_maps_each_mode() {
     InitError::NonRoutableAdvertiseAddr(_)
   ));
   assert!(matches!(
-    InitError::from_embedded(E::Endpoint(EndpointInitError::Entropy)),
+    InitError::from_embedded(E::Endpoint(EndpointInitError::AwarenessMultiplierZero)),
     InitError::Endpoint(_)
   ));
   assert!(matches!(
@@ -173,7 +173,7 @@ fn source_chains_only_for_wrapping_variants() {
   use std::error::Error as _;
 
   assert!(
-    InitError::Endpoint(EndpointInitError::Entropy)
+    InitError::Endpoint(EndpointInitError::AwarenessMultiplierZero)
       .source()
       .is_some()
   );

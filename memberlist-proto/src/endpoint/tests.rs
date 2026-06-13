@@ -7,7 +7,6 @@ fn cfg() -> EndpointOptions<SmolStr, SocketAddr> {
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   )
-  .with_rng_seed(0xdeadbeef)
 }
 
 /// Test helper: process an Alive with no [`AliveDelegate`] installed (every
@@ -42,7 +41,7 @@ fn process_alive_auto<I, A>(
 
 #[test]
 fn new_endpoint_inserts_local_at_incarnation_1() {
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.local_id_ref(), &SmolStr::new("local"));
   assert_eq!(e.num_members(), 1);
   let local = e.member(&SmolStr::new("local")).expect("local present");
@@ -52,20 +51,20 @@ fn new_endpoint_inserts_local_at_incarnation_1() {
 
 #[test]
 fn new_endpoint_is_not_leaving_or_left() {
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(!e.is_left());
   assert!(!e.is_leaving());
 }
 
 #[test]
 fn new_endpoint_health_score_is_zero() {
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.health_score(), 0);
 }
 
 #[test]
 fn health_score_reflects_awareness() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.health_score(), 0usize);
   e.degrade_health(3);
   assert_eq!(e.health_score(), 3usize);
@@ -81,7 +80,7 @@ fn new_at_stamps_local_member_at_driver_clock() {
   // not own and carries a local `state_change` in the driver's own future,
   // where later `duration_since` could saturate or panic.
   let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), t0);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
   assert_eq!(
     e.node_state_change(&SmolStr::new("local")),
     Some(t0),
@@ -98,7 +97,7 @@ fn try_new_at_with_seed_is_infallible() {
   // A seeded config never touches platform entropy, so the fallible
   // constructor always succeeds — the fully Sans-I/O / deterministic path.
   let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
-  let e = Endpoint::<SmolStr, SocketAddr>::try_new_at(cfg(), t0)
+  let e = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(cfg(), t0)
     .expect("seeded construction never fails");
   assert_eq!(e.num_members(), 1);
 }
@@ -110,7 +109,7 @@ fn scheduler_deadlines_saturate_at_extreme_now() {
   // arithmetic saturates instead.
   let near_max =
     Instant::from_origin(core::time::Duration::MAX - core::time::Duration::from_secs(1));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), near_max);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), near_max);
   e.start_scheduling(near_max);
   e.handle_timeout(near_max);
 }
@@ -137,7 +136,7 @@ fn alive(node_id: &str, port: u16, inc: u32) -> Alive<SmolStr, SocketAddr> {
 
 #[test]
 fn alive_inserts_new_node_with_join_event() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // Drain the initial events from `new()` first.
   while e.poll_event().is_some() {}
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
@@ -154,7 +153,7 @@ fn alive_inserts_new_node_with_join_event() {
 
 #[test]
 fn alive_existing_with_old_incarnation_is_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 5), false, Instant::now());
   while e.poll_event().is_some() {}
   // Older incarnation: ignored.
@@ -170,7 +169,7 @@ fn alive_existing_with_old_incarnation_is_ignored() {
 
 #[test]
 fn alive_self_with_higher_incarnation_refutes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   // Someone is claiming to be us at incarnation 5; refute by bumping past.
   process_alive_auto(&mut e, alive("local", 7000, 5), false, Instant::now());
@@ -192,7 +191,7 @@ fn alive_self_with_higher_incarnation_refutes() {
 /// u32::MAX guard.
 #[test]
 fn incarnation_wraps_at_u32_max() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   // A peer accuses us at u32::MAX. refute(): next_incarnation 1→2, then
   // skip_incarnation_past(MAX) ⇒ MAX.wrapping_add(1) == 0 (NOT MAX, which
@@ -213,7 +212,7 @@ fn incarnation_wraps_at_u32_max() {
 
 #[test]
 fn alive_address_change_alive_node_emits_conflict() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   // Same id, different port → conflict.
@@ -243,7 +242,7 @@ fn dead(target: &str, from: &str, inc: u32) -> Dead<SmolStr> {
 
 #[test]
 fn suspect_alive_node_starts_timer() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   e.process_suspect(suspect("bob", "carol", 1), Instant::now());
@@ -254,7 +253,7 @@ fn suspect_alive_node_starts_timer() {
 
 #[test]
 fn suspect_self_refutes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let starting_inc = e
     .members
     .get(&SmolStr::new("local"))
@@ -269,7 +268,7 @@ fn suspect_self_refutes() {
 
 #[test]
 fn suspect_old_incarnation_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 5), false, Instant::now());
   e.process_suspect(suspect("bob", "carol", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
@@ -279,7 +278,7 @@ fn suspect_old_incarnation_ignored() {
 
 #[test]
 fn dead_alive_node_marks_dead_and_emits_left() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   e.process_dead(dead("bob", "carol", 1), Instant::now());
@@ -299,7 +298,7 @@ fn reset_nodes_with_now_before_state_change_does_not_panic() {
   // `reset_nodes` call). The elapsed-since-state_change must saturate to zero
   // rather than panic, and the member must not be reclaimed yet.
   let t_late = Instant::from_origin(core::time::Duration::from_secs(100));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), t_late);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t_late);
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t_late);
   while e.poll_event().is_some() {}
   e.process_dead(dead("bob", "carol", 1), t_late);
@@ -322,7 +321,7 @@ fn reset_nodes_with_now_before_state_change_does_not_panic() {
 
 #[test]
 fn dead_self_when_not_leaving_refutes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let starting_inc = e
     .members
     .get(&SmolStr::new("local"))
@@ -337,7 +336,7 @@ fn dead_self_when_not_leaving_refutes() {
 
 #[test]
 fn dead_self_marked_message_treats_as_left() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   // node==from convention: bob is announcing his own departure.
@@ -362,7 +361,7 @@ fn pns(node_id: &str, port: u16, inc: u32, st: State) -> PushNodeState<SmolStr, 
 
 #[test]
 fn merge_alive_inserts_as_alive() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let remote = vec![
     pns("bob", 7001, 1, State::Alive),
     pns("carol", 7002, 1, State::Alive),
@@ -378,7 +377,7 @@ fn merge_alive_inserts_as_alive() {
 
 #[test]
 fn merge_dead_treats_as_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   // Remote thinks bob is dead — we suspect rather than mark dead.
   e.merge_state(&[pns("bob", 7001, 2, State::Dead)], Instant::now());
@@ -392,7 +391,7 @@ fn merge_remote_left_marks_dead_not_left() {
   // (reclaim-protected), NOT State::Left (immediately address-reclaimable).
   // State::Left is reserved for the genuine self-leave sentinel where the
   // accuser == the node itself.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   e.merge_state(&[pns("bob", 7001, 2, State::Left)], Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
@@ -401,7 +400,7 @@ fn merge_remote_left_marks_dead_not_left() {
 
 #[test]
 fn handle_timeout_fires_expired_suspicion() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::from_millis(10))
       .with_suspicion_mult(1)
@@ -422,14 +421,14 @@ fn handle_timeout_fires_expired_suspicion() {
 
 #[test]
 fn poll_timeout_returns_none_with_no_timers() {
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(e.poll_timeout().is_none());
 }
 
 #[test]
 fn poll_timeout_returns_min_across_suspicion_probe_and_forward() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   while e.poll_event().is_some() {}
@@ -465,7 +464,7 @@ fn push_pull_scale_above_threshold() {
 
 #[test]
 fn update_meta_emits_node_updated_and_increments_incarnation() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let inc_before = e
     .members
@@ -491,7 +490,7 @@ fn update_meta_at_limit_is_accepted() {
   // Meta::MAX_SIZE == META_MAX_SIZE == 512, so a meta at the limit should
   // be accepted. Since Meta enforces the bound at construction, we verify
   // the boundary value here.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let at_limit = Meta::try_from(Bytes::from(vec![0u8; META_MAX_SIZE])).unwrap();
   let r = e.update_meta(at_limit);
   assert!(r.is_ok(), "meta at the limit should be accepted");
@@ -501,7 +500,7 @@ fn update_meta_at_limit_is_accepted() {
 fn leave_with_no_live_peers_emits_left_cluster_immediately() {
   // No live peers ⇒ nothing to flush ⇒ legacy `if any_alive` gate is
   // false ⇒ leave completes immediately (LeftCluster synchronous).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   e.leave(Instant::now()).expect("ok");
   assert!(e.is_left());
@@ -518,7 +517,7 @@ fn leave_with_no_live_peers_emits_left_cluster_immediately() {
 /// the queued dead-self.
 #[test]
 fn leave_defers_left_cluster_until_dead_self_drained() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
@@ -566,7 +565,7 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
 /// absent — no live peers), never a stale Ack.
 #[test]
 fn leave_no_live_peers_drops_stale_transmit_and_completes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   // Queue an unrelated packet (Ack reply) WITHOUT adding any member.
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
@@ -599,7 +598,7 @@ fn leave_no_live_peers_drops_stale_transmit_and_completes() {
 /// re-triggers it.
 #[test]
 fn leave_left_cluster_boundary_is_exactly_the_dead_self() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
@@ -652,7 +651,7 @@ fn leave_left_cluster_boundary_is_exactly_the_dead_self() {
 fn leave_is_idempotent() {
   // A repeated leave is a harmless no-op, not an error: once already
   // left/shutdown, `leave()` is idempotent and must not re-broadcast.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.leave(Instant::now()).expect("first leave ok");
   assert!(e.is_left());
   // Repeated leave: Ok, idempotent, and must not re-fan-out the dead-self.
@@ -667,7 +666,7 @@ fn leave_is_idempotent() {
 
 #[test]
 fn user_data_emits_user_packet_event() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
   e.handle_user_data(from, Bytes::from_static(b"hello"), Reliability::Unreliable);
@@ -684,7 +683,7 @@ fn user_data_emits_user_packet_event() {
 
 #[test]
 fn broadcast_queue_grows_on_alive_and_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let initial_len = e.broadcast_queue_len();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   assert!(e.broadcast_queue_len() > initial_len);
@@ -702,7 +701,7 @@ impl crate::delegate::AliveDelegate<SmolStr, SocketAddr> for RejectAllAlive {
 
 #[test]
 fn alive_delegate_reject_drops_the_message() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.set_alive_delegate(RejectAllAlive);
   // Drain the bootstrap event(s).
   while e.poll_event().is_some() {}
@@ -715,7 +714,7 @@ fn alive_delegate_reject_drops_the_message() {
 
 #[test]
 fn alive_no_delegate_applies_the_message() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   // No AliveDelegate installed → admitted synchronously.
   e.process_alive(alive("bob", 7001, 1), false, Instant::now());
@@ -750,7 +749,7 @@ fn merge_delegate_vetoes_join_push_pull() {
 
   use crate::event::PushPullRequestReceived;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
     seen: Mutex::new(Vec::new()),
@@ -796,7 +795,7 @@ fn merge_delegate_vetoes_outbound_push_pull_reply() {
 
   use crate::event::PushPullReplyReceived;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
     seen: Mutex::new(Vec::new()),
@@ -841,7 +840,7 @@ fn merge_delegate_vetoes_refresh_push_pull() {
 
   use crate::event::PushPullRequestReceived;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
     seen: Mutex::new(Vec::new()),
@@ -882,7 +881,7 @@ impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for ArcMerge {
 
 #[test]
 fn set_ack_payload_round_trips() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(e.ack_payload().is_empty());
   e.set_ack_payload(Bytes::from_static(b"hello"))
     .expect("5-byte ack payload fits the gossip budget");
@@ -897,7 +896,7 @@ fn set_ack_payload_round_trips() {
 /// frames to > 1400 with certainty.
 #[test]
 fn set_ack_payload_oversized_is_rejected() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let budget = cfg().gossip_mtu();
   let res = e.set_ack_payload(Bytes::from(vec![0xab_u8; 4096]));
   match res {
@@ -924,7 +923,7 @@ fn set_ack_payload_oversized_is_rejected() {
 
 #[test]
 fn disable_and_enable_reliable_ping_round_trips() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let bob = SmolStr::new("bob");
   assert!(e.is_reliable_ping_enabled(&bob));
   e.disable_reliable_ping(bob.cheap_clone());
@@ -937,7 +936,7 @@ fn disable_and_enable_reliable_ping_round_trips() {
 
 #[test]
 fn suspect_with_existing_timer_confirm_pulls_deadline_in() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::from_millis(10))
       .with_suspicion_mult(4)
@@ -961,7 +960,7 @@ fn suspect_with_existing_timer_confirm_pulls_deadline_in() {
 #[test]
 fn alive_address_change_dead_node_reclaim_adopts_new_address() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_dead_node_reclaim_time(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_dead_node_reclaim_time(Duration::from_millis(50)));
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   // Mark bob dead.
@@ -979,7 +978,7 @@ fn alive_address_change_dead_node_reclaim_adopts_new_address() {
 
 #[test]
 fn dead_double_message_is_idempotent() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   e.process_dead(dead("bob", "carol", 1), t0);
@@ -1011,7 +1010,7 @@ fn dead_double_message_is_idempotent() {
 
 #[test]
 fn process_alive_stamps_state_change_with_supplied_now() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   let receive_time = Instant::now();
   // Admission is synchronous: state_change must be the `now` handed to
@@ -1027,7 +1026,7 @@ fn process_alive_stamps_state_change_with_supplied_now() {
 
 #[test]
 fn set_local_state_snapshot_round_trips() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(e.local_state_snapshot().is_empty());
   e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v1"))
     .expect("a tiny snapshot fits the frame budget");
@@ -1046,7 +1045,7 @@ fn set_local_state_snapshot_rejects_oversized() {
   // reject it (NOT store it) and leave the prior snapshot in place.
   let small_cap = crate::endpoint::LOCAL_STATE_FRAME_BUDGET + 4096;
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_max_stream_frame_size(small_cap));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(small_cap));
   // Budget after the reserve is ~4096; an 8 KiB snapshot's framed PushPull is
   // well over it.
   let oversized = Bytes::from(vec![0u8; 8192]);
@@ -1068,7 +1067,7 @@ fn set_local_state_snapshot_rejects_oversized() {
 
 #[test]
 fn queue_user_broadcast_appends_fifo() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.user_broadcast_queue_len(), 0);
   e.queue_user_broadcast(Bytes::from_static(b"hello"))
     .unwrap();
@@ -1079,7 +1078,7 @@ fn queue_user_broadcast_appends_fifo() {
 
 #[test]
 fn drain_user_broadcasts_respects_limit() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.queue_user_broadcast(Bytes::from_static(b"aaaa")).unwrap();
   e.queue_user_broadcast(Bytes::from_static(b"bbbb")).unwrap();
   e.queue_user_broadcast(Bytes::from_static(b"cccc")).unwrap();
@@ -1096,7 +1095,7 @@ fn drain_user_broadcasts_respects_limit() {
 
 #[test]
 fn drain_user_broadcasts_zero_limit_returns_empty() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.queue_user_broadcast(Bytes::from_static(b"data")).unwrap();
   let drained = e.drain_user_broadcasts(0);
   assert!(drained.is_empty());
@@ -1130,7 +1129,7 @@ fn ping_to(
 
 #[test]
 fn handle_ping_for_local_replies_with_ack() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
   let p = ping_to("local", 7000, "alice", 8001, 42);
   e.handle_ping(from, p, Instant::now());
@@ -1150,7 +1149,7 @@ fn handle_ping_for_local_replies_with_ack() {
 
 #[test]
 fn handle_ping_for_other_node_is_dropped() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
   let p = ping_to("alice", 8001, "bob", 8002, 5);
   e.handle_ping(from, p, Instant::now());
@@ -1162,7 +1161,7 @@ fn handle_ping_for_other_node_is_dropped() {
 
 #[test]
 fn handle_ping_uses_current_ack_payload() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.set_ack_payload(Bytes::from_static(b"app-data"))
     .expect("8-byte ack payload fits the gossip budget");
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
@@ -1184,14 +1183,14 @@ fn handle_ping_uses_current_ack_payload() {
 
 #[test]
 fn start_probe_returns_false_when_only_local() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(!e.start_probe(Instant::now()), "no eligible target");
   assert!(e.poll_transmit().is_none());
 }
 
 #[test]
 fn start_probe_emits_ping_to_alive_peer() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -1216,7 +1215,7 @@ fn start_probe_emits_ping_to_alive_peer() {
 
 #[test]
 fn start_probe_skips_dead_peers() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   e.process_dead(dead("bob", "carol", 1), Instant::now());
   while e.poll_event().is_some() {}
@@ -1226,7 +1225,7 @@ fn start_probe_skips_dead_peers() {
 
 #[test]
 fn start_probe_round_robins_across_alive_peers() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -1249,7 +1248,7 @@ fn start_probe_round_robins_across_alive_peers() {
 
 #[test]
 fn handle_ack_completes_direct_probe_and_ticks_awareness() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   // Apply some awareness so the -1 is observable.
   e.awareness.record_failure(2);
@@ -1288,7 +1287,7 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   let pt = Duration::from_millis(50);
   // 4-node cluster: a timer-driven escalation WOULD fan out to indirect
   // peers — proving the outcome must not depend on packet-vs-timer order.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -1386,7 +1385,7 @@ fn detection_late_direct_ack_in_awaiting_indirect_emits_ping_completed() {
   let pt = Duration::from_millis(50);
   // 4-node cluster so the direct-timeout escalation has real indirect peers
   // to fan out to — the probe genuinely enters `AwaitingIndirect`.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -1482,7 +1481,7 @@ fn detection_late_direct_ack_in_awaiting_indirect_emits_ping_completed() {
 
 #[test]
 fn handle_ack_for_unknown_seq_is_noop() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   e.handle_ack(from, Ack::new(99999), Instant::now());
   assert!(e.poll_transmit().is_none());
@@ -1498,7 +1497,7 @@ fn handle_ack_for_unknown_seq_is_noop() {
 #[test]
 fn app_ping_ack_after_probe_timeout_does_not_complete() {
   let pt = Duration::from_millis(50);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -1632,7 +1631,7 @@ fn indirect_probe_at(
 
 #[test]
 fn handle_nack_counts_distinct_indirect_responders() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let p2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7102);
@@ -1655,7 +1654,7 @@ fn handle_nack_counts_distinct_indirect_responders() {
 
 #[test]
 fn handle_nack_dedupes_repeated_nack_from_same_responder() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let p2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7102);
@@ -1679,7 +1678,7 @@ fn handle_nack_dedupes_repeated_nack_from_same_responder() {
 
 #[test]
 fn handle_nack_rejects_nack_from_unsolicited_peer() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let off_path = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7999);
@@ -1703,7 +1702,7 @@ fn handle_nack_rejects_nack_from_unsolicited_peer() {
 
 #[test]
 fn handle_nack_rejects_late_nack_after_failure_deadline() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let t0 = Instant::now();
@@ -1730,7 +1729,7 @@ fn nack_flood_from_one_peer_does_not_suppress_awareness_penalty() {
   // under-answered: severity = expected(2) - seen(1) = 1. The OLD code
   // would have seen = 5 → 2.saturating_sub(5) = 0 → NO awareness penalty,
   // i.e. a single misbehaving/duplicating peer could mask a real failure.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let p2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7102);
@@ -1789,7 +1788,7 @@ fn ind_ping(
 
 #[test]
 fn handle_indirect_ping_forwards_to_target() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // The transport source MUST match the embedded requester address.
   // `ind_ping` builds the source at 127.0.0.1:<source_port>.
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
@@ -1812,7 +1811,7 @@ fn handle_indirect_ping_forwards_to_target() {
 
 #[test]
 fn handle_indirect_ping_followed_by_target_ack_relays_ack() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // Transport source must match the embedded requester address.
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   let ind = ind_ping("bob", 7001, "carol", 7002, 42);
@@ -1856,7 +1855,7 @@ fn handle_indirect_ping_followed_by_target_ack_relays_ack() {
 #[test]
 fn forged_indirect_ping_source_is_rejected() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   let t0 = Instant::now();
 
   // Attacker sends from its own address but claims source = carol@7002.
@@ -1897,7 +1896,7 @@ fn forged_indirect_ping_source_is_rejected() {
 #[test]
 fn probe_direct_timeout_fans_out_to_indirect() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -1943,7 +1942,7 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
   // probe_interval (80ms) is deliberately NOT 2*probe_timeout (100ms) so
   // the test pins the awareness-scaled probe_interval as the cumulative
   // deadline, not a probe_timeout coincidence.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80)),
@@ -2015,7 +2014,7 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
 #[test]
 fn late_handle_timeout_does_not_extend_probe_window() {
   let pt = Duration::from_millis(50);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -2082,7 +2081,7 @@ fn late_handle_timeout_does_not_extend_probe_window() {
 fn probe_indirect_timeout_marks_target_suspect() {
   // Cumulative failure deadline = sent + scaled probe_interval (80ms here,
   // != 2*probe_timeout). Direct sub-window = probe_timeout (50ms).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80))
@@ -2139,7 +2138,7 @@ fn probe_indirect_timeout_marks_target_suspect() {
 #[test]
 fn indirect_forward_timeout_emits_nack() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2175,7 +2174,7 @@ fn indirect_forward_timeout_emits_nack() {
 #[test]
 fn forward_timeout_nack_reaches_requester_absent_from_membership() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   // "carol" (the requester) is deliberately NOT added to members.
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2210,7 +2209,7 @@ fn forward_timeout_nack_reaches_requester_absent_from_membership() {
 #[test]
 fn forward_timeout_nack_ignores_stale_membership_address() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   // "carol" is in members but at a STALE address (port 9999).
   process_alive_auto(&mut e, alive("carol", 9999, 1), false, Instant::now());
   while e.poll_event().is_some() {}
@@ -2248,7 +2247,7 @@ fn forward_timeout_nack_ignores_stale_membership_address() {
 #[test]
 fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2304,7 +2303,7 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
 #[test]
 fn forward_ack_before_deadline_still_relays() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   let carol = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   let bob = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
@@ -2344,7 +2343,7 @@ fn forward_ack_before_deadline_still_relays() {
 
 #[test]
 fn ping_emits_ping_and_records_app_ping_state() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2374,7 +2373,7 @@ fn ping_emits_ping_and_records_app_ping_state() {
 
 #[test]
 fn ping_completes_on_ack_with_pingcompleted_event() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2420,7 +2419,7 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
 #[test]
 fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   // Four-node cluster: indirect peers (carol, dave) DO exist — a
   // detection probe would fan out to them; an app ping must not.
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
@@ -2496,7 +2495,7 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
 fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
   // Cumulative deadline = sent + scaled probe_interval (80ms, decoupled
   // from 2*probe_timeout=100ms).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80)),
@@ -2574,7 +2573,7 @@ fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
 fn reliable_fallback_bounded_by_probe_deadline_and_cleaned_on_failure() {
   // probe_interval (80ms) != 2*probe_timeout (100ms): the fallback must be
   // bounded by the scaled probe_interval, not a probe_timeout multiple.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80)),
@@ -2629,7 +2628,7 @@ fn reliable_fallback_bounded_by_probe_deadline_and_cleaned_on_failure() {
 
 #[test]
 fn probe_failure_with_no_nacks_received_bumps_awareness_by_expected() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80))
@@ -2669,7 +2668,7 @@ fn probe_failure_with_no_nacks_received_bumps_awareness_by_expected() {
 
 #[test]
 fn probe_with_suspect_target_piggybacks_suspect_message() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   // Mark bob as Suspect.
@@ -2756,7 +2755,7 @@ fn stream_scaffolding_construction_smoke() {
 
 #[test]
 fn stream_id_allocator_increments() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let id1 = e.allocate_stream_id();
   let id2 = e.allocate_stream_id();
   assert_eq!(id2.as_u64(), id1.as_u64() + 1);
@@ -2767,7 +2766,7 @@ fn start_push_pull_emits_dial_requested_and_dial_succeeded_returns_stream() {
   use Event;
   use PushPullKind;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2804,7 +2803,7 @@ fn start_push_pull_emits_dial_requested_and_dial_succeeded_returns_stream() {
 fn dial_failed_removes_intent() {
   use crate::{error::StreamError, event::PushPullKind};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let id = e.start_push_pull(peer, PushPullKind::Refresh, t0);
@@ -2818,7 +2817,7 @@ fn dial_failed_removes_intent() {
 fn accept_stream_returns_inbound_stream() {
   use crate::stream::StreamPhase;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   let now = Instant::now();
   let s = e.accept_stream(from, now).expect("node is running");
@@ -2835,7 +2834,7 @@ fn outbound_push_pull_decode_and_merge() {
   use State;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2899,7 +2898,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
   use StreamCommand;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("local-node", 7000, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -2944,11 +2943,16 @@ fn inbound_push_pull_decode_and_response_bytes() {
       // local_states is already in wire-format PushNodeState (with the
       // local node's tracked incarnation), so we hand it straight to the
       // encoder.
-      let encoded = Endpoint::encode_push_pull_response(&local_states, user_data, false);
+      let encoded =
+        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       assert!(!encoded.is_empty(), "encoded response must be non-empty");
       assert_eq!(encoded[0], 8u8, "first byte must be PUSH_PULL_MESSAGE_TAG");
 
-      Endpoint::stream_load_response(&mut stream, encoded, t0 + Duration::from_secs(5));
+      Endpoint::<SmolStr, SocketAddr>::stream_load_response(
+        &mut stream,
+        encoded,
+        t0 + Duration::from_secs(5),
+      );
       let mut out = Vec::new();
       let n = stream.poll_transmit(t0, &mut out).expect("bytes");
       assert!(n > 0);
@@ -2962,7 +2966,7 @@ fn post_leave_inbound_alive_is_not_admitted() {
   // The graceful-leave drain must not grow membership. An inbound Alive — from
   // gossip or routed in from a push/pull merge — is dropped once the node has
   // left, so no new peer is admitted while draining.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   e.leave(t0).expect("leave ok");
@@ -2980,7 +2984,7 @@ fn post_leave_inbound_alive_is_not_admitted() {
 #[test]
 fn post_leave_data_setters_reject_with_not_running() {
   use bytes::Bytes;
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   e.leave(t0).expect("leave ok");
   assert!(e.is_left());
@@ -3006,7 +3010,7 @@ fn post_leave_push_pull_reply_does_not_merge() {
   use State;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("alice", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
@@ -3057,7 +3061,7 @@ fn post_leave_push_pull_request_closes_without_replying() {
   use StreamCommand;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
 
@@ -3105,7 +3109,7 @@ fn post_leave_push_pull_request_closes_without_replying() {
 fn post_leave_pending_push_pull_dial_is_refused() {
   use crate::event::PushPullKind;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3127,7 +3131,7 @@ fn post_leave_detection_probe_does_not_fan_out() {
   use core::time::Duration;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, t0);
@@ -3163,7 +3167,7 @@ fn post_leave_detection_probe_does_not_fan_out() {
 
 #[test]
 fn post_leave_remote_suspect_and_dead_are_inert() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("p1", 7001, 1), false, t0);
   process_alive_auto(&mut e, alive("p2", 7002, 1), false, t0);
@@ -3203,7 +3207,7 @@ fn post_leave_remote_suspect_and_dead_are_inert() {
 fn post_leave_inbound_ping_emits_no_ack() {
   use Ping;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   e.leave(t0).expect("leave ok");
@@ -3234,7 +3238,7 @@ fn post_leave_inbound_ping_emits_no_ack() {
 fn post_leave_directed_io_rejects() {
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   e.leave(t0).expect("leave ok");
   assert!(e.is_left());
@@ -3263,7 +3267,7 @@ fn post_leave_poll_timeout_is_none_so_no_spin() {
   use core::time::Duration;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
@@ -3290,7 +3294,7 @@ fn post_leave_initiators_are_inert() {
   use crate::event::PushPullKind;
   use core::time::Duration;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   while e.poll_event().is_some() {}
@@ -3325,7 +3329,7 @@ fn post_leave_reliable_user_data_is_not_delivered() {
   use crate::event::UserDataReceived;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   e.leave(t0).expect("leave ok");
@@ -3350,7 +3354,7 @@ fn post_leave_reliable_user_data_is_not_delivered() {
 fn post_leave_no_stale_dial_requested_event() {
   use crate::event::PushPullKind;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3371,7 +3375,7 @@ fn post_leave_no_stale_dial_requested_event() {
 fn post_leave_requeue_event_drops_dial_requested() {
   use crate::event::PushPullKind;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3397,7 +3401,7 @@ fn post_leave_requeue_event_drops_dial_requested() {
 
 #[test]
 fn post_leave_accept_stream_returns_none() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3423,7 +3427,7 @@ fn post_leave_accept_stream_returns_none() {
 fn start_reliable_ping_emits_dial_requested() {
   use Event;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer_id = SmolStr::new("bob");
   let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
@@ -3459,7 +3463,7 @@ fn start_reliable_ping_emits_dial_requested() {
 /// without failing the (still racing) probe.
 #[test]
 fn dial_succeeded_after_deadline_emits_no_stream() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   while e.poll_event().is_some() {}
@@ -3510,7 +3514,7 @@ fn dial_succeeded_after_deadline_emits_no_stream() {
 fn tiny_probe_interval_suspects_at_failure_deadline_not_direct() {
   // probe_interval(20ms) < probe_timeout(50ms): failure_deadline (t0+20ms)
   // < direct_deadline (t0+50ms).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(20)),
@@ -3573,7 +3577,7 @@ fn inbound_reliable_ping_encodes_ack() {
   use Node;
   use Ping;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut stream = e.accept_stream(peer, t0).expect("node is running");
@@ -3611,7 +3615,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   use PushPull;
   use State;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
 
   // ── Outbound: dial → drain request ⇒ OutboundAwaitingResponse ──────────
@@ -3682,7 +3686,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
 fn outbound_reliable_ping_rejects_wrong_ack_seq() {
   use Ack;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let id = e.start_reliable_ping(SmolStr::new("peer"), peer, 42, t0 + Duration::from_secs(5));
@@ -3710,7 +3714,7 @@ fn inbound_reliable_ping_rejects_wrong_target() {
   use Node;
   use Ping;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -3742,7 +3746,8 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
   use Node;
   use Ping;
   let cap = 1024usize;
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
 
@@ -3820,7 +3825,7 @@ fn over_u32_frame_length_rejected_even_with_huge_cap() {
   // Cap well above u32::MAX so a cap-only check would not catch a ~2^32
   // declared length — the u32 wire limit must be enforced independently.
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_max_stream_frame_size(usize::MAX));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(usize::MAX));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -3854,7 +3859,8 @@ fn handle_data_bounds_input_buf_before_append() {
 
   // (a) Oversize declared frame + a large body in ONE handle_data call.
   // tag=8 + varint(4096) + 4096 body bytes, all delivered together.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -3873,7 +3879,8 @@ fn handle_data_bounds_input_buf_before_append() {
 
   // (b) A valid small frame followed by a large trailing blob in the SAME
   // call. The append-time bound rejects before buffering the trailing.
-  let mut e2: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
+  let mut e2: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
   let mut s2 = e2.accept_stream(peer, t0).expect("node is running");
   let ping = Ping::new(
     1,
@@ -3900,7 +3907,8 @@ fn handle_data_bounds_input_buf_before_append() {
   );
 
   // Sanity: a within-cap delivery still works.
-  let mut e3: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(cap));
+  let mut e3: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
   let mut s3 = e3.accept_stream(peer, t0).expect("node is running");
   let ping3 = Ping::new(
     2,
@@ -3933,7 +3941,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
   use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_stream_timeout(Duration::from_millis(100)));
+    Endpoint::new_seeded(cfg().with_stream_timeout(Duration::from_millis(100)));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let req =
@@ -3991,7 +3999,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
 #[test]
 fn detection_failure_deadline_is_scaled_probe_interval() {
   // Decoupled: probe_interval(70ms) != 2*probe_timeout(100ms).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(70)),
@@ -4040,7 +4048,7 @@ fn reliable_ping_ack_drives_probe_success() {
 
   use crate::event::ReliablePingAcked;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4094,7 +4102,7 @@ fn start_user_message_encodes_user_data() {
   use Event;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let id = e
@@ -4135,7 +4143,7 @@ fn inbound_user_data_emits_user_packet_event() {
   use Reliability;
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut stream = e.accept_stream(peer, t0).expect("node is running");
@@ -4173,7 +4181,7 @@ fn inbound_user_data_emits_user_packet_event() {
 fn stream_timeout_transitions_to_failed() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut stream = e.accept_stream(peer, t0).expect("node is running");
@@ -4215,7 +4223,7 @@ fn timed_out_stream_never_transmits_queued_bytes() {
   };
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_stream_timeout(Duration::from_millis(100)));
+    Endpoint::new_seeded(cfg().with_stream_timeout(Duration::from_millis(100)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4271,7 +4279,8 @@ fn timed_out_stream_never_transmits_queued_bytes() {
 fn fatal_frame_error_terminalizes_stream_fsm() {
   use crate::event::StreamEvent;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_stream_frame_size(1024));
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(1024));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -4317,7 +4326,7 @@ fn fatal_frame_error_terminalizes_stream_fsm() {
 fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
   use crate::error::StreamError;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4381,7 +4390,7 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
 #[test]
 fn forged_probe_ack_from_wrong_source_is_rejected() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4420,7 +4429,7 @@ fn forged_probe_ack_from_wrong_source_is_rejected() {
 #[test]
 fn indirect_relayed_ack_is_accepted_only_from_a_chosen_peer() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_probe_timeout(Duration::from_millis(50)));
+    Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
   process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
@@ -4470,7 +4479,7 @@ fn forged_forward_ack_does_not_relay() {
   use IndirectPing;
   use Node;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   let requester = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7100);
   let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7200);
@@ -4540,7 +4549,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   use crate::{error::StreamError, event::PushPullKind};
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_stream_timeout(Duration::from_millis(100)));
+    Endpoint::new_seeded(cfg().with_stream_timeout(Duration::from_millis(100)));
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4598,7 +4607,7 @@ fn eof_before_response_fails_peer_closed() {
     stream::StreamPhase,
   };
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4645,7 +4654,7 @@ fn eof_before_response_fails_peer_closed() {
 fn eof_with_incomplete_buffered_frame_fails_peer_closed() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -4673,7 +4682,7 @@ fn eof_with_incomplete_buffered_frame_fails_peer_closed() {
 fn eof_on_terminal_stream_is_a_noop() {
   use crate::stream::StreamPhase;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -4704,7 +4713,7 @@ fn eof_on_terminal_stream_is_a_noop() {
 fn eof_in_outbound_sending_request_push_pull_is_premature() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let id = e.start_push_pull(peer, PushPullKind::Refresh, t0);
@@ -4735,7 +4744,7 @@ fn eof_in_outbound_sending_request_push_pull_is_premature() {
 fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   // Need a probe sequence first — start_reliable_ping is keyed on the
@@ -4768,7 +4777,7 @@ fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
 fn eof_in_outbound_sending_request_user_message_is_ok() {
   use crate::stream::StreamPhase;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let id = e
@@ -4812,7 +4821,7 @@ fn build_push_pull_request_bytes() -> Vec<u8> {
 fn eof_in_inbound_sending_response_empty_buf_is_ok() {
   use crate::stream::StreamPhase;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -4850,7 +4859,7 @@ fn trailing_bytes_after_outbound_done_fails_decode() {
   };
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -4902,7 +4911,7 @@ fn late_failure_emits_only_failed_lifecycle_not_closed() {
   // the FSM emits ONLY `Failed`, never `Closed`.
   use crate::{error::StreamError, event::StreamEvent, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -4953,7 +4962,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   };
   use bytes::Bytes;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -5009,7 +5018,7 @@ fn done_phase_empty_eof_is_still_a_noop() {
   // a successful exchange (companion to the Done+data fail-Decode case).
   use crate::stream::StreamPhase;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -5048,7 +5057,7 @@ fn dispatched_frame_endpoint_events_discarded_on_late_failure() {
   // output buffers.
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -5098,7 +5107,7 @@ fn single_delivery_request_plus_second_frame_fails_decode() {
   // the violation BEFORE the endpoint side-effects fire.
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -5126,7 +5135,7 @@ fn single_delivery_request_plus_second_frame_fails_decode() {
 fn second_frame_in_inbound_sending_response_fails_unexpected() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -5161,7 +5170,7 @@ fn second_frame_in_inbound_sending_response_fails_unexpected() {
 fn eof_in_inbound_sending_response_partial_trailing_fails() {
   use crate::{error::StreamError, stream::StreamPhase};
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -5212,7 +5221,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // ── Set up A: knows alice (self) + bob ────────────────────────────────
   let cfg_a = EndpointOptions::<SmolStr, SocketAddr>::new(SmolStr::new("alice"), make_addr(7000));
-  let mut a: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_a);
+  let mut a: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_a);
   // Drain new() startup events.
   while a.poll_event().is_some() {}
   while a.poll_transmit().is_some() {}
@@ -5224,7 +5233,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // ── Set up B: knows charlie (self) ────────────────────────────────────
   let cfg_b = EndpointOptions::<SmolStr, SocketAddr>::new(SmolStr::new("charlie"), make_addr(7002));
-  let mut b: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_b);
+  let mut b: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_b);
   while b.poll_event().is_some() {}
   while b.poll_transmit().is_some() {}
 
@@ -5282,7 +5291,7 @@ fn end_to_end_push_pull_membership_convergence() {
   let encoded_b = match cmd_b {
     StreamCommand::SendPushPullResponse(resp) => {
       let (local_states, user_data) = resp.into_parts();
-      Endpoint::encode_push_pull_response(&local_states, user_data, false)
+      Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false)
     }
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
   };
@@ -5292,7 +5301,11 @@ fn end_to_end_push_pull_membership_convergence() {
     "response must start with PUSH_PULL_MESSAGE_TAG"
   );
 
-  Endpoint::stream_load_response(&mut stream_b, encoded_b, t0 + Duration::from_secs(5));
+  Endpoint::<SmolStr, SocketAddr>::stream_load_response(
+    &mut stream_b,
+    encoded_b,
+    t0 + Duration::from_secs(5),
+  );
 
   // Drain B's response bytes (simulating the driver sending them to A).
   let mut b_response = Vec::new();
@@ -5357,9 +5370,8 @@ fn start_scheduling_sets_finite_deadlines() {
   let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
-  )
-  .with_rng_seed(42);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  );
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   // Before start_scheduling: no scheduler deadlines → poll_timeout None.
   assert!(e.poll_timeout().is_none());
@@ -5382,7 +5394,7 @@ fn start_scheduling_no_op_when_leaving() {
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   );
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.leave(t0).unwrap();
   e.start_scheduling(t0 + Duration::from_secs(1));
@@ -5401,9 +5413,8 @@ fn probe_scheduler_fires_when_deadline_elapses() {
   )
   .with_probe_interval(Duration::from_millis(100))
   .with_gossip_interval(Duration::ZERO)
-  .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(0);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
 
   // Add a live peer so start_probe has a target.
   let t0 = Instant::now();
@@ -5453,7 +5464,7 @@ fn probe_scheduler_does_not_fire_after_leave() {
   .with_probe_interval(Duration::from_millis(50))
   .with_gossip_interval(Duration::ZERO)
   .with_push_pull_interval(Duration::ZERO);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.next_probe = Some(t0);
   e.leave(t0).unwrap();
@@ -5476,7 +5487,7 @@ fn zero_interval_disables_scheduler() {
   )
   .with_gossip_interval(Duration::ZERO)
   .with_push_pull_interval(Duration::ZERO);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   e.start_scheduling(Instant::now());
   // gossip and push/pull should remain None; probe should be set.
   assert!(
@@ -5505,9 +5516,8 @@ fn gossip_scheduler_emits_transmits_to_peers() {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(2)
-  .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(1);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
 
   let t0 = Instant::now();
 
@@ -5597,7 +5607,7 @@ fn gossip_scheduler_skips_emit_when_no_broadcasts() {
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(3)
   .with_push_pull_interval(Duration::ZERO);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.next_gossip = Some(t0);
   e.handle_timeout(t0);
@@ -5624,9 +5634,8 @@ fn pushpull_scheduler_emits_dial_requested() {
   )
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::ZERO)
-  .with_push_pull_interval(Duration::from_secs(30))
-  .with_rng_seed(7);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  .with_push_pull_interval(Duration::from_secs(30));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
 
   let t0 = Instant::now();
 
@@ -5675,7 +5684,7 @@ fn pushpull_scheduler_no_op_with_no_peers() {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::ZERO)
   .with_push_pull_interval(Duration::from_secs(30));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.next_pushpull = Some(t0);
   e.handle_timeout(t0);
@@ -5701,7 +5710,7 @@ fn leave_clears_scheduler_fields() {
   .with_probe_interval(Duration::from_millis(100))
   .with_gossip_interval(Duration::from_millis(50))
   .with_push_pull_interval(Duration::from_secs(30));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.start_scheduling(t0);
   assert!(e.next_probe.is_some());
@@ -5732,7 +5741,7 @@ fn poll_timeout_returns_none_after_leave_with_no_other_timers() {
   .with_probe_interval(Duration::from_millis(100))
   .with_gossip_interval(Duration::from_millis(50))
   .with_push_pull_interval(Duration::from_secs(30));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   e.start_scheduling(t0);
   e.leave(t0).unwrap();
@@ -5755,7 +5764,7 @@ fn handle_timeout_no_op_scheduler_after_leave() {
   .with_probe_interval(Duration::from_millis(50))
   .with_gossip_interval(Duration::from_millis(50))
   .with_push_pull_interval(Duration::from_secs(30));
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   // Manually set deadlines in the past and then leave.
   e.next_probe = Some(t0);
@@ -5788,7 +5797,7 @@ fn handle_packet_dispatches_ping_to_ack() {
   use Node;
   use Ping;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from: SocketAddr = "127.0.0.1:7001".parse().unwrap();
   let local: SocketAddr = "127.0.0.1:7000".parse().unwrap();
   let local_id = SmolStr::new("local");
@@ -5815,7 +5824,7 @@ fn handle_packet_ignores_push_pull() {
   use Message;
   use PushPull;
 
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from: SocketAddr = "127.0.0.1:7001".parse().unwrap();
   let pp = PushPull::new(false, core::iter::empty());
   e.handle_packet(from, Message::PushPull(pp), Instant::now());
@@ -5830,7 +5839,7 @@ fn handle_packet_ignores_push_pull() {
 /// as Alive — doing so resurrects it on the peer via `merge_state`.
 #[test]
 fn push_pull_serializes_live_liveness_not_frozen_alive() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   // Suspect updates LocalNodeState only; the embedded NodeState stays Alive.
   e.process_suspect(suspect("bob", "carol", 1), Instant::now());
@@ -5869,7 +5878,7 @@ fn push_pull_serializes_live_liveness_not_frozen_alive() {
 /// it stops being drained once `lifecycle == Left`.
 #[test]
 fn leave_emits_dead_self_via_poll_transmit() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_transmit().is_some() {}
   while e.poll_event().is_some() {}
@@ -5905,7 +5914,7 @@ fn leave_emits_dead_self_via_poll_transmit() {
 /// must NOT hijack the node id (it conflicts).
 #[test]
 fn merge_remote_left_marks_dead_and_blocks_reclaim() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
 
   e.merge_state(&[pns("bob", 7001, 2, State::Left)], Instant::now());
@@ -5934,7 +5943,7 @@ fn merge_remote_left_marks_dead_and_blocks_reclaim() {
 /// resurrects the left node.
 #[test]
 fn update_meta_after_leave_returns_not_running() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   e.leave(Instant::now()).expect("leave ok");
   while e.poll_transmit().is_some() {}
@@ -5958,7 +5967,7 @@ fn update_meta_after_leave_returns_not_running() {
 /// suppresses self-handling for both Leaving and Left, not just Leaving.
 #[test]
 fn self_alive_after_left_is_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   e.leave(Instant::now()).expect("leave ok");
   while e.poll_transmit().is_some() {}
@@ -5981,7 +5990,7 @@ fn self_alive_after_left_is_ignored() {
 /// (refute is a no-op once not Running).
 #[test]
 fn suspect_about_self_after_left_does_not_resurrect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   e.leave(Instant::now()).expect("leave ok");
   while e.poll_transmit().is_some() {}
@@ -6000,7 +6009,7 @@ fn suspect_about_self_after_left_does_not_resurrect() {
 /// triggered when the probe index wraps a full round-robin pass.
 #[test]
 fn probe_cycle_prunes_long_dead_nodes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_interval(Duration::from_millis(10))
       .with_gossip_to_the_dead_time(Duration::from_millis(1)),
@@ -6029,7 +6038,7 @@ fn probe_cycle_prunes_long_dead_nodes() {
 /// dead node hear the accusation and refute before GC.
 #[test]
 fn gossip_targets_recently_dead_peer_within_window() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   e.process_dead(dead("bob", "carol", 2), t0); // bob Dead, state_change = t0
@@ -6066,7 +6075,7 @@ fn gossip_targets_recently_dead_peer_within_window() {
 /// emitted) — broadcasts are fetched per selected target.
 #[test]
 fn gossip_skips_aged_dead_and_preserves_queue_when_no_targets() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
   e.process_dead(dead("bob", "carol", 2), t0); // bob Dead at t0
@@ -6111,7 +6120,7 @@ fn gossip_skips_aged_dead_and_preserves_queue_when_no_targets() {
 /// A Dead arriving right after an (admitted) Alive must win — no resurrection.
 #[test]
 fn alive_then_dead_marks_dead() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   e.process_alive(alive("bob", 7001, 1), false, t0);
   assert!(
@@ -6145,9 +6154,8 @@ fn gossip_harness_one_target() -> (Endpoint<SmolStr, SocketAddr>, Instant) {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(1)
-  .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(1);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   // One Alive peer so a gossip target exists.
   process_alive_auto(&mut e, alive("alice", 7947, 1), false, t0);
@@ -6287,7 +6295,7 @@ fn gossip_two_plus_broadcasts_emit_one_compound_per_target() {
 /// (d) probe of an Alive peer (no buddy) ⇒ Transmit::Packet(Ping).
 #[test]
 fn probe_without_buddy_emits_packet() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
@@ -6315,7 +6323,7 @@ fn probe_without_buddy_emits_packet() {
 ///     messages == [Ping, Suspect] in THAT order (ping first).
 #[test]
 fn probe_with_buddy_suspect_emits_one_compound_ping_then_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   // Single peer so the round-robin probe target is deterministically bob.
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
@@ -6374,7 +6382,7 @@ fn probe_with_buddy_suspect_emits_one_compound_ping_then_suspect() {
 /// rather than one oversize.
 #[test]
 fn probe_buddy_compound_over_mtu_splits_into_two_packets() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   // 900-byte id: lone Ping ≈ lone Suspect ≈ ~930 B (<= 1400 each), but
   // their compound ≈ ~1.8 KB (> 1400). Comfortable margins both sides.
@@ -6802,7 +6810,7 @@ fn gossip_near_mtu_membership_outranks_user_broadcast() {
 /// Same, for Suspect.
 #[test]
 fn alive_then_suspect_marks_suspect() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   e.process_alive(alive("bob", 7001, 1), false, t0);
   e.process_suspect(suspect("bob", "carol", 2), t0);
@@ -6839,7 +6847,7 @@ fn endpoint_config_gossip_mtu_defaults_to_1400() {
 
 #[test]
 fn app_ping_returns_token_carried_on_completion() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
@@ -6882,7 +6890,7 @@ fn app_ping_returns_token_carried_on_completion() {
 #[test]
 fn app_ping_timeout_emits_ping_failed_with_token() {
   let pt = Duration::from_millis(50);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
   let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
@@ -6914,7 +6922,7 @@ fn app_ping_timeout_emits_ping_failed_with_token() {
 
 #[test]
 fn send_user_packet_enqueues_one_transmit() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   e.send_user_packet(dest, bytes::Bytes::from_static(b"hi"))
     .unwrap();
@@ -6930,7 +6938,7 @@ fn send_user_packet_enqueues_one_transmit() {
 
 #[test]
 fn send_user_packet_rejects_oversize() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   // A payload larger than gossip_mtu is always oversize after framing.
   let huge = bytes::Bytes::from(vec![0u8; e.gossip_mtu() + 1]);
@@ -6940,7 +6948,7 @@ fn send_user_packet_rejects_oversize() {
 
 #[test]
 fn send_user_packets_compounds_when_multiple() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   e.send_user_packets(
     dest,
@@ -6970,7 +6978,7 @@ fn send_user_packets_compounds_when_multiple() {
 /// must reject the call and leave the transmit queue empty.
 #[test]
 fn send_user_packets_rejects_compound_oversize() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let mtu = e.gossip_mtu();
   // Each individual payload just over half the MTU — two of them will
   // overflow after compound tag + count-prefix + two part-prefixes are added.
@@ -6989,7 +6997,7 @@ fn send_user_packets_rejects_compound_oversize() {
   );
 }
 
-/// `with_gossip_mtu` propagates through to `Endpoint::gossip_mtu()`, which is
+/// `with_gossip_mtu` propagates through to `Endpoint::<SmolStr, SocketAddr>::gossip_mtu()`, which is
 /// what the composed stream-transport coordinators read for the FSM's
 /// plaintext gossip budget. A non-default configured value must reach the
 /// inner endpoint without being clamped or overridden by the legacy
@@ -7002,11 +7010,11 @@ fn endpoint_config_gossip_mtu_is_propagated_to_endpoint() {
   )
   .with_gossip_mtu(1200);
   assert_eq!(c.gossip_mtu(), 1200);
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(c);
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(c);
   assert_eq!(
     e.gossip_mtu(),
     1200,
-    "Endpoint::gossip_mtu() must return the configured value (not the \
+    "Endpoint::<SmolStr, SocketAddr>::gossip_mtu() must return the configured value (not the \
      hard-coded legacy 1400) so composed coordinators read the operator's \
      budget",
   );
@@ -7014,7 +7022,7 @@ fn endpoint_config_gossip_mtu_is_propagated_to_endpoint() {
 
 #[test]
 fn advertise_ref_returns_configured_address() {
-  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(
     e.advertise_ref(),
     &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000)
@@ -7023,7 +7031,7 @@ fn advertise_ref_returns_configured_address() {
 
 #[test]
 fn node_incarnation_tracks_known_member_and_is_none_for_unknown() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(
     e.node_incarnation(&SmolStr::new("peer")).is_none(),
     "unknown peer has no incarnation"
@@ -7039,7 +7047,7 @@ fn node_incarnation_tracks_known_member_and_is_none_for_unknown() {
 
 #[test]
 fn requeue_event_pushes_to_the_back_of_the_pending_buffer() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // Generate one real event (a join), drain it, then re-enqueue it: it must
   // come back out of poll_event unchanged (FIFO push_back).
   process_alive_auto(&mut e, alive("peer", 7100, 1), false, Instant::now());
@@ -7055,7 +7063,7 @@ fn requeue_event_pushes_to_the_back_of_the_pending_buffer() {
 
 #[test]
 fn ack_payload_bytes_mirrors_ack_payload_slice() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // Default is empty.
   assert!(e.ack_payload().is_empty());
   assert!(e.ack_payload_bytes().is_empty());
@@ -7067,7 +7075,7 @@ fn ack_payload_bytes_mirrors_ack_payload_slice() {
 
 #[test]
 fn local_state_snapshot_bytes_mirrors_slice() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(e.local_state_snapshot().is_empty());
   assert!(e.local_state_snapshot_bytes().is_empty());
   e.set_local_state_snapshot(Bytes::from_static(b"snap"))
@@ -7079,7 +7087,7 @@ fn local_state_snapshot_bytes_mirrors_slice() {
 #[test]
 fn age_member_rolls_state_change_back_and_is_noop_for_unknown() {
   let now = Instant::now();
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), now);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), now);
   process_alive_auto(&mut e, alive("peer", 7100, 1), false, now);
   let before = e
     .node_state_change(&SmolStr::new("peer"))
@@ -7102,7 +7110,7 @@ fn age_member_rolls_state_change_back_and_is_noop_for_unknown() {
 
 #[test]
 fn lifecycle_accessor_reports_running_then_left() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.lifecycle(), Lifecycle::Running);
   // No live peers ⇒ leave completes immediately to Left.
   e.leave(Instant::now()).expect("leave ok");
@@ -7111,7 +7119,7 @@ fn lifecycle_accessor_reports_running_then_left() {
 
 #[test]
 fn members_iterator_yields_every_known_member() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let ids: std::collections::BTreeSet<SmolStr> =
     e.members().map(|m| m.id_ref().cheap_clone()).collect();
@@ -7130,13 +7138,14 @@ fn try_new_seedless_on_std_succeeds() {
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   );
-  let e = Endpoint::<SmolStr, SocketAddr>::try_new(seedless).expect("seedless std construction");
+  let e =
+    Endpoint::<SmolStr, SocketAddr>::try_new_seeded(seedless).expect("seedless std construction");
   assert_eq!(e.num_members(), 1);
 }
 
 #[test]
 fn drain_broadcasts_returns_queued_messages() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // `new()` enqueues the local Alive; queue another via an inbound alive.
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   let drained = e.drain_broadcasts();
@@ -7152,7 +7161,7 @@ fn handle_packet_dispatches_each_message_variant() {
   // probe message through it so every match arm is exercised. The exact
   // side effects are covered by the per-handler tests; here we only assert
   // the dispatch does not panic and membership reacts where expected.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   e.handle_packet(from, Message::Alive(alive("bob", 7001, 1)), now);
@@ -7186,7 +7195,7 @@ fn self_alive_with_strictly_lower_incarnation_is_ignored() {
   // An inbound Alive for the local id whose incarnation is strictly below
   // our own is dropped (the self-specific strict-less-than guard), with no
   // refute and no broadcast.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let before = e.local_incarnation();
   assert!(before >= 1);
   // local started at incarnation 1; send a self-Alive at incarnation 0.
@@ -7203,7 +7212,7 @@ fn dead_then_higher_alive_revives_with_node_joined_event() {
   // A peer marked Dead, then a higher-incarnation Alive, transitions back to
   // Alive and emits NodeJoined (the `old_state == Dead` revival arm), and the
   // member's liveness reflects Alive again.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
   e.process_dead(dead("bob", "carol", 2), now);
@@ -7221,7 +7230,7 @@ fn dead_then_higher_alive_revives_with_node_joined_event() {
 fn alive_with_changed_meta_emits_node_updated() {
   // A higher-incarnation Alive for a still-Alive peer that changes its meta
   // emits NodeUpdated (the `old_meta != new_meta` arm).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
   while e.poll_event().is_some() {}
@@ -7240,7 +7249,7 @@ fn refute_is_suppressed_once_leaving() {
   // self-Alive would normally refute (bumping our incarnation and broadcasting
   // a higher-incarnation Alive), but refute must short-circuit once leaving so
   // it cannot resurrect the leaving node.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   // A live peer so leave() goes Leaving (not immediately Left).
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
@@ -7262,7 +7271,7 @@ fn self_suspect_with_high_incarnation_refutes_past_accusation() {
   // A self-Suspect whose accused incarnation is at/above ours forces refute to
   // skip its incarnation PAST the accusation (the `skip_incarnation_past`
   // branch), so the refuting Alive out-ranks the accusation.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let accused = e.local_incarnation() + 10;
   e.process_suspect(suspect("local", "bob", accused), now);
@@ -7277,7 +7286,7 @@ fn self_suspect_with_high_incarnation_refutes_past_accusation() {
 
 #[test]
 fn suspect_for_unknown_node_is_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let n = e.num_members();
   e.process_suspect(suspect("ghost", "bob", 1), Instant::now());
   assert_eq!(e.num_members(), n, "an unknown-node Suspect is a no-op");
@@ -7285,7 +7294,7 @@ fn suspect_for_unknown_node_is_ignored() {
 
 #[test]
 fn dead_for_unknown_node_is_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let n = e.num_members();
   e.process_dead(dead("ghost", "bob", 1), Instant::now());
   assert_eq!(e.num_members(), n, "an unknown-node Dead is a no-op");
@@ -7293,7 +7302,7 @@ fn dead_for_unknown_node_is_ignored() {
 
 #[test]
 fn dead_with_older_incarnation_is_ignored() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   process_alive_auto(&mut e, alive("bob", 7001, 5), false, now);
   // Dead at incarnation 3 < bob's 5 ⇒ ignored; bob stays Alive.
@@ -7306,7 +7315,7 @@ fn second_suspect_from_distinct_source_rebroadcasts_on_confirmation() {
   // A peer already Suspect, then a Suspect from a DIFFERENT source confirms the
   // suspicion (incrementing its confirmation count), which re-broadcasts the
   // Suspect (the `Confirmation::Accepted` arm).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg().with_suspicion_mult(4), // k > 0 so confirmations are tracked
   );
   let now = Instant::now();
@@ -7339,7 +7348,7 @@ fn second_suspect_from_distinct_source_rebroadcasts_on_confirmation() {
 fn merge_skips_unknown_remote_state() {
   // A PushNodeState carrying an Unknown wire state is silently skipped by
   // merge_state (the `State::Unknown(_)` arm), leaving membership unchanged.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let n = e.num_members();
   let remote = vec![pns("weird", 7009, 1, State::Unknown(99))];
   e.merge_state(&remote, Instant::now());
@@ -7351,7 +7360,7 @@ fn merge_skips_unknown_remote_state() {
 #[test]
 fn handle_nack_for_untracked_seq_is_noop() {
   // A Nack for a sequence with no pending probe is dropped silently.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   // Must not panic / must be a clean no-op.
   e.handle_nack(from, Nack::new(424242), Instant::now());
@@ -7365,7 +7374,7 @@ fn probe_fan_out_with_reliable_disabled_and_no_indirect_suspects_immediately() {
   // target: when the direct ping times out, fan-out has nothing to try and
   // suspects the target immediately (the `expected_nacks == 0 &&
   // reliable_stream_id.is_none()` terminate arm).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(80)),
@@ -7397,7 +7406,7 @@ fn reset_nodes_keeps_live_members_and_reaps_only_expired_dead() {
   // (the `state != Dead && state != Left` filter arm), while a long-expired
   // Dead member is reaped.
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(cfg().with_gossip_to_the_dead_time(Duration::from_millis(10)));
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(Duration::from_millis(10)));
   let now = Instant::now();
   process_alive_auto(&mut e, alive("live", 7001, 1), false, now);
   process_alive_auto(&mut e, alive("gone", 7002, 1), false, now);
@@ -7416,7 +7425,7 @@ fn reset_nodes_keeps_live_members_and_reaps_only_expired_dead() {
 
 #[test]
 fn send_user_packets_empty_slice_is_ok_noop() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   e.send_user_packets(to, &[]).expect("empty slice is Ok");
   assert!(
@@ -7429,7 +7438,7 @@ fn send_user_packets_empty_slice_is_ok_noop() {
 fn update_meta_rejects_oversized_meta() {
   // A meta larger than the configured cap is rejected with MetaExceedsCap and
   // not applied.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_meta_max_size(4));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_meta_max_size(4));
   let big = Meta::try_from(&b"way-too-long"[..]).unwrap();
   let err = e
     .update_meta(big)
@@ -7446,7 +7455,7 @@ fn update_meta_rejects_oversized_meta() {
 fn push_pull_reply_with_user_data_emits_remote_state_received() {
   use crate::event::PushPullKind;
   use bytes::Bytes;
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let states = vec![pns("carol", 7003, 1, State::Alive)];
@@ -7473,7 +7482,7 @@ fn push_pull_reply_with_user_data_emits_remote_state_received() {
 fn push_pull_request_with_user_data_emits_remote_state_received_and_response() {
   use crate::event::PushPullKind;
   use bytes::Bytes;
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let states = vec![pns("carol", 7003, 1, State::Alive)];
@@ -7503,7 +7512,7 @@ fn reliable_ping_failed_event_retires_fallback_without_failing_probe() {
   // route a ReliablePingFailed back through handle_stream_event: the fallback
   // is retired but the probe keeps running (failure is decided only by the
   // cumulative deadline).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
       .with_probe_interval(Duration::from_millis(200)),
@@ -7552,7 +7561,7 @@ fn reliable_ping_failed_event_retires_fallback_without_failing_probe() {
 #[test]
 fn dial_failed_for_unknown_stream_is_noop() {
   // dial_failed for a StreamId with no pending intent is a clean no-op.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.dial_failed(
     StreamId::from_raw(999),
     crate::error::StreamError::PeerClosed,
@@ -7565,7 +7574,7 @@ fn ping_untracked_node_synthesizes_target_state() {
   // Pinging a node not in membership synthesizes a minimal Alive NodeState so a
   // later PingCompleted can still carry the target (the `None` arm of the
   // member lookup). A direct Ack then completes it.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7099);
   let node = Node::new(SmolStr::new("stranger"), target_addr);
@@ -7602,9 +7611,8 @@ fn gossip_scheduler_skips_left_members_as_candidates() {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(2)
-  .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(1);
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("gone", 7947, 1), false, t0);
   // Mark "gone" as Left (self-marked dead sentinel: node == from).
@@ -7629,7 +7637,7 @@ fn try_new_at_rejects_meta_larger_than_meta_max_size() {
   let meta = Meta::try_from(Bytes::from(vec![0u8; 64])).expect("within wire ceiling");
   let c = cfg().with_initial_meta(meta).with_meta_max_size(10);
   let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
-  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at(c, t0);
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
   assert!(
     matches!(res, Err(crate::error::EndpointInitError::MetaTooLarge(_))),
     "initial_meta over meta_max_size must be rejected"
@@ -7640,7 +7648,7 @@ fn try_new_at_rejects_meta_larger_than_meta_max_size() {
 fn try_new_at_rejects_zero_awareness_multiplier() {
   let c = cfg().with_awareness_max_multiplier(0);
   let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
-  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at(c, t0);
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
   assert!(
     matches!(
       res,
@@ -7653,7 +7661,7 @@ fn try_new_at_rejects_zero_awareness_multiplier() {
 #[test]
 fn max_members_rejects_new_id_at_cap() {
   // Cap total membership at 2 (local + one peer).
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(2)));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_max_members(Some(2)));
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
   assert_eq!(e.num_members(), 2, "first peer admitted (local + peer-1)");
@@ -7666,7 +7674,7 @@ fn max_members_rejects_new_id_at_cap() {
 
 #[test]
 fn max_members_none_admits_unlimited() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
   process_alive_auto(&mut e, alive("peer-2", 7002, 1), false, t0);
@@ -7676,7 +7684,7 @@ fn max_members_none_admits_unlimited() {
 #[test]
 fn metrics_count_membership_load_shed() {
   // Cap at 2 (local + one peer); the over-cap admission is shed and counted.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(2)));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_max_members(Some(2)));
   let t0 = Instant::now();
   assert_eq!(
     e.metrics().members_rejected,
@@ -7706,7 +7714,7 @@ fn unknown_alive_with_zero_incarnation_admits_visibly_and_bumps() {
   // Dead placeholder that is invisible to snapshot readers yet still consumes a
   // max_members slot, which would let zero-incarnation Alives silently fill the
   // cap and reject later legitimate members.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_max_members(Some(3)));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_max_members(Some(3)));
   let t0 = Instant::now();
   let v0 = e.snapshot_version();
 
@@ -7730,7 +7738,7 @@ fn unknown_alive_with_zero_incarnation_admits_visibly_and_bumps() {
 
 #[test]
 fn snapshot_version_bumps_on_membership_and_health_changes() {
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   let v0 = e.snapshot_version();
 
@@ -7761,7 +7769,7 @@ fn snapshot_version_bumps_on_incarnation_only_alive_update() {
   // and address emits NO event (not a resurrection, not a meta change), but the
   // member's incarnation — and, for a Suspect->Alive refutation, its FSM state —
   // changes, so the published snapshot must still be republished.
-  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("peer-1", 7001, 1), false, t0);
   let v1 = e.snapshot_version();

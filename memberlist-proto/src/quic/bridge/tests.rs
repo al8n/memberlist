@@ -21,7 +21,7 @@ use crate::{config::EndpointOptions, event::Event};
 /// the bridge to `RecvClosed`, the drain runs and the event surfaces.
 #[test]
 fn drain_payload_only_defers_until_recv_fin_observed() {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -111,7 +111,7 @@ fn drain_payload_only_defers_until_recv_fin_observed() {
 /// path.
 #[test]
 fn pre_fin_transport_failure_discards_queued_payload_events() {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -285,7 +285,7 @@ fn quic_reliable_unit_disabled_is_byte_identical() {
 fn build_test_quic_bridge_with_encryption(
   encryption: crate::EncryptionOptions,
 ) -> Bridge<SmolStr, SocketAddr> {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -328,7 +328,7 @@ fn quic_bridge_reliable_skips_encryption_unconditionally() {
 // ── Label mechanism helpers ────────────────────────────────────────────────
 
 fn make_labeled_dialer(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -351,7 +351,7 @@ fn make_labeled_dialer(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
 }
 
 fn make_labeled_acceptor(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -374,7 +374,7 @@ fn make_labeled_acceptor(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
 }
 
 fn make_labeled_acceptor_skip(label: bytes::Bytes) -> Bridge<SmolStr, SocketAddr> {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -528,7 +528,7 @@ fn labeled_bridge_skip_accepts_unlabeled_inbound() {
 /// is never invoked.
 #[test]
 fn unlabeled_bridge_twelve_byte_first_unit_passes_through() {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -645,7 +645,7 @@ fn acceptor_holds_outbound_label_until_inbound_validates() {
 /// the `pump_*`/`retire_halves` paths that look up `conns.get_mut(self.ch)`
 /// short-circuit — these tests drive phase + drain logic in isolation.
 fn make_plain_bridge() -> Bridge<SmolStr, SocketAddr> {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -787,7 +787,7 @@ fn drain_then_reap_notice_selection_covers_every_failure_reason() {
     BridgeFailure::EncryptionPolicyChanged,
   ];
   for reason in reasons {
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
       SmolStr::new("self"),
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
@@ -811,7 +811,7 @@ fn drain_then_reap_notice_selection_covers_every_failure_reason() {
 /// no queued payload events.
 #[test]
 fn drain_then_reap_clean_bothclosed_emits_stream_closed() {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -852,7 +852,7 @@ fn inbound_join_bridge_with_rejecting_endpoint() -> (
   Bridge<SmolStr, SocketAddr>,
   Instant,
 ) {
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointOptions::new(
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(EndpointOptions::new(
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
@@ -1311,7 +1311,7 @@ impl RawQuicPair {
 }
 
 fn make_server_endpoint() -> Endpoint<SmolStr, SocketAddr> {
-  Endpoint::new(EndpointOptions::new(SmolStr::new("server"), SERVER_ADDR))
+  Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("server"), SERVER_ADDR))
 }
 
 /// `pump_in` over a live quinn stream: an over-ceiling `unit_len` (a forged

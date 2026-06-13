@@ -27,8 +27,8 @@ fn test_config() -> QuicOptions {
 }
 
 fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
-  let cfg = EndpointOptions::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let cfg = EndpointOptions::new(SmolStr::new(id), addr);
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   ep.start_scheduling(now);
   let qc = test_config();
   let mut seed = [0u8; 32];
@@ -42,8 +42,8 @@ fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolS
 /// advertise the datagram extension: its connections report
 /// `datagrams().max_size() == None` and no peer can deliver datagrams to it.
 fn make_endpoint_udp(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
-  let cfg = EndpointOptions::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let cfg = EndpointOptions::new(SmolStr::new(id), addr);
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   ep.start_scheduling(now);
   let qc = test_config_with_mode(UnreliableTransport::Udp);
   let mut seed = [0u8; 32];
@@ -640,8 +640,8 @@ fn requeued_dial_request_under_strict_poll_anchors_last_now() {
   // (1) Build a bare Endpoint. Call start_push_pull on it BEFORE
   // wrapping — this is the legitimate Endpoint usage that produces a
   // DialRequested in the inner queue before `QuicEndpoint` wraps it.
-  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr).with_rng_seed(a_addr.port() as u64);
-  let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr);
+  let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   bare_ep.start_scheduling(t0);
   // Ignoring StreamId return: tests assert on observable side
   // effects (poll_transmit/poll_event), not the handle itself.
@@ -2404,8 +2404,8 @@ fn build_test_quic_endpoint_with_compression(
 ) -> QuicEndpoint<SmolStr> {
   let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
   let now = Instant::now();
-  let cfg = EndpointOptions::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let cfg = EndpointOptions::new(SmolStr::new("test"), addr);
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   ep.start_scheduling(now);
   let qc = test_config();
   QuicEndpoint::<SmolStr>::with_compression(ep, qc, compression)
@@ -2498,8 +2498,8 @@ fn build_test_quic_endpoint_with_encryption(
 ) -> QuicEndpoint<SmolStr> {
   let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
   let now = Instant::now();
-  let cfg = EndpointOptions::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
-  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+  let cfg = EndpointOptions::new(SmolStr::new("test"), addr);
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   ep.start_scheduling(now);
   let qc = test_config();
   QuicEndpoint::<SmolStr>::new(ep, qc).with_encryption(encryption)

@@ -38,15 +38,15 @@ use memberlist_proto::{
   },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
   streams::{
-    ExchangeId, StreamAction, StreamEndpoint, StreamTransport, checksum_gossip_datagram,
-    compress_gossip_datagram, encrypt_gossip_datagram,
+    ExchangeId, StreamAction, StreamTransport, checksum_gossip_datagram, compress_gossip_datagram,
+    encrypt_gossip_datagram,
   },
   typed::Message,
   unwrap_transforms_with_encryption,
 };
 
 use crate::{
-  NodeId,
+  NodeId, StreamEndpoint,
   cidr::{CidrFilter, cidr_blocks},
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
@@ -276,8 +276,8 @@ fn transform_egress<I: NodeId>(
 }
 
 /// Build the transform context from the endpoint's current options.
-fn build_transform<I: NodeId, T: StreamTransport>(
-  endpoint: &StreamEndpoint<I, SocketAddr, T>,
+fn build_transform<I: NodeId, T: StreamTransport, G: rand::Rng>(
+  endpoint: &StreamEndpoint<I, SocketAddr, T, G>,
   label: &Option<Bytes>,
 ) -> Arc<TransformCtx> {
   Arc::new(TransformCtx {
@@ -291,8 +291,13 @@ fn build_transform<I: NodeId, T: StreamTransport>(
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
-pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
-  endpoint: StreamEndpoint<I, SocketAddr, T>,
+pub(crate) struct StreamDriver<
+  I: NodeId,
+  R: Runtime,
+  T: StreamTransport,
+  G: rand::Rng = rand::rngs::StdRng,
+> {
+  endpoint: StreamEndpoint<I, SocketAddr, T, G>,
   /// Unreliable gossip datagrams (the reliable exchanges run over TCP bridges).
   /// Wrapped in `Option` so the shutdown branch can drop it (releasing the bound
   /// UDP port) BEFORE acking the shutdown caller; it is `Some` for the whole
@@ -396,10 +401,10 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   last_metrics: memberlist_proto::metrics::Metrics,
 }
 
-impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
+impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R, T, G> {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
-    endpoint: StreamEndpoint<I, SocketAddr, T>,
+    endpoint: StreamEndpoint<I, SocketAddr, T, G>,
     socket: <R::Net as Net>::UdpSocket,
     shared: Arc<Shared<I>>,
     recv_batch: usize,
@@ -1207,7 +1212,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   }
 }
 
-impl<I: NodeId, R: Runtime, T: StreamTransport> Future for StreamDriver<I, R, T>
+impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng + Unpin> Future
+  for StreamDriver<I, R, T, G>
 where
   T: Unpin,
   T::Options: Unpin,

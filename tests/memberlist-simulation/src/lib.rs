@@ -19,6 +19,8 @@
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
 
+use core::net::{IpAddr, SocketAddr};
+
 pub mod checker;
 pub mod clock;
 pub mod cluster;
@@ -51,3 +53,44 @@ pub use memberlist_proto::{
   EndpointOptions, Event, NodeConflict, PingCompleted, Reliability, UserPacket,
   typed::{Alive, Dead, Message, Meta, Node, PushNodeState, State, Suspect},
 };
+
+/// FNV-1a hash of the full advertise address (IP octets then port). The
+/// simulation seeds a node's gossip RNG from its whole `SocketAddr` rather than
+/// just its port, so two nodes on the same memberlist port but distinct IPs (the
+/// normal production shape) get distinct gossip streams.
+pub(crate) fn rng_seed_from_addr(addr: &SocketAddr) -> u64 {
+  const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+  let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+  let mut fold = |bytes: &[u8]| {
+    for &b in bytes {
+      acc ^= u64::from(b);
+      acc = acc.wrapping_mul(FNV_PRIME);
+    }
+  };
+  match addr.ip() {
+    IpAddr::V4(v4) => fold(&v4.octets()),
+    IpAddr::V6(v6) => fold(&v6.octets()),
+  }
+  fold(&addr.port().to_le_bytes());
+  acc
+}
+
+/// A deterministic 32-byte quinn RNG seed derived from the full advertise
+/// address (IP octets then port), so the QUIC conformance harness stays
+/// bit-for-bit reproducible yet distinct for same-port/distinct-IP nodes.
+#[cfg(feature = "__quic-harness")]
+pub(crate) fn quinn_seed_from_addr(addr: &SocketAddr) -> [u8; 32] {
+  let mut seed = [0u8; 32];
+  let n = match addr.ip() {
+    IpAddr::V4(v4) => {
+      seed[..4].copy_from_slice(&v4.octets());
+      4
+    }
+    IpAddr::V6(v6) => {
+      seed[..16].copy_from_slice(&v6.octets());
+      16
+    }
+  };
+  seed[n..n + 2].copy_from_slice(&addr.port().to_le_bytes());
+  seed
+}

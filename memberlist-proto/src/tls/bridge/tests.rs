@@ -112,7 +112,7 @@ fn promote_installs_stream_and_enters_established() {
   complete_handshake(&mut client, &mut server, now);
 
   let mut ep: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let stream = ep.accept_stream(addr(7001), now).expect("node is running");
   let want_deadline = stream
     .poll_timeout()
@@ -153,7 +153,7 @@ fn frame_round_trips_then_clean_close_reaps() {
 
   // Outbound client: a one-way reliable user message.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
   let payload = Bytes::from_static(b"hello-tls");
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -165,7 +165,7 @@ fn frame_round_trips_then_clean_close_reaps() {
 
   // Inbound server: accept the exchange.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7100), now)
     .expect("node is running");
@@ -241,7 +241,7 @@ fn coalesced_large_frame_decodes_without_panic() {
   // far exceeds the 16 KiB received-plaintext limit but is well under the
   // 64 MiB max_stream_frame_size — a VALID large frame.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7400)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7400)));
   let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -253,7 +253,7 @@ fn coalesced_large_frame_decodes_without_panic() {
 
   // Inbound server: accept the exchange.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7400), now)
     .expect("node is running");
@@ -372,7 +372,7 @@ fn coalesced_handshake_final_plus_large_frame_pre_promotion_reassembles() {
   // message, then pump it so the client's `Finished` + the >16 KiB app frame
   // are produced together.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7500)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7500)));
   let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -414,7 +414,7 @@ fn coalesced_handshake_final_plus_large_frame_pre_promotion_reassembles() {
   // SAME tick. The retained pre-promotion ciphertext tail must replay into the
   // freshly-promoted `Stream` so the WHOLE frame reassembles.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7500), now)
     .expect("node is running");
@@ -518,7 +518,7 @@ fn coalesced_handshake_final_plus_small_frame_and_close_notify_pre_promotion_dra
   // the dialer's `close_notify` (a one-way message half-closes once its
   // request is sent) are produced together.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
   let payload = Bytes::from_static(b"small-coalesced-first-frame");
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -572,7 +572,7 @@ fn coalesced_handshake_final_plus_small_frame_and_close_notify_pre_promotion_dra
   // plaintext into the just-promoted `Stream` and fire the recv-half close
   // anchor (`peer_has_closed()`), or the small frame never reaches the FSM.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7600), now)
     .expect("node is running");
@@ -667,7 +667,7 @@ fn handshake_failure_tears_down_with_no_stream_and_no_endpoint_events() {
   // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
   // reaps a failed-handshake bridge without an FSM lifecycle notice).
   let mut ep: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   server.drain_then_reap(&mut ep, now);
   assert!(
     ep.poll_event().is_none(),
@@ -690,7 +690,7 @@ fn truncation_read_zero_mid_frame_fails_peer_closed() {
   // request is pumped, the inner FSM is `OutboundAwaitingResponse` — a
   // premature peer close is `PeerClosed`.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
   let sid = ep_c.start_reliable_ping(
     SmolStr::new("srv"),
     addr(7000),
@@ -787,7 +787,7 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   // `drain_then_reap` on a no-`Stream` bridge is a clean no-op — no FSM
   // lifecycle notice is owed for a handshake that never minted a `Stream`.
   let mut ep: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
   client.drain_then_reap(&mut ep, deadline);
   assert!(
     ep.poll_event().is_none(),
@@ -880,7 +880,7 @@ fn retained_tail_then_second_read_via_handle_transport_data_reassembles() {
   // Mint + pump the client with a large one-way user message so its `Finished`
   // flight + the >16 KiB app frame are produced together.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7560)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7560)));
   let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -916,7 +916,7 @@ fn retained_tail_then_second_read_via_handle_transport_data_reassembles() {
   // ciphertext via handle_transport_data while the retained tail is still
   // present, so the established intake combines tail + new read.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7560), now)
     .expect("node is running");

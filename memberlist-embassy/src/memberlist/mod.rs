@@ -18,7 +18,7 @@ use memberlist_embedded::{
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{
-  EndpointOptions, Instant, Node,
+  EndpointOptions, Instant, Node, Rng, SeedableRng, SmallRng,
   event::{Event, PingId, StreamId},
   typed::NodeState,
 };
@@ -111,15 +111,18 @@ fn checked_socket_timeout(
 /// the executor's tasks.
 ///
 /// `I` is the node identifier type (e.g. `smol_str::SmolStr`); the address type
-/// is pinned to [`SocketAddr`].
-pub struct Memberlist<I>
+/// is pinned to [`SocketAddr`]. `R` is the gossip RNG (defaulting to
+/// [`SmallRng`]); [`new`](Self::new) seeds it from the platform entropy source,
+/// while [`new_with_rng`](Self::new_with_rng) accepts a caller-supplied one.
+pub struct Memberlist<I, R = SmallRng>
 where
   I: memberlist_proto::Id,
+  R: Rng,
 {
-  shared: Rc<Shared<I>>,
+  shared: Rc<Shared<I, R>>,
 }
 
-impl<I> Clone for Memberlist<I>
+impl<I, R: Rng> Clone for Memberlist<I, R>
 where
   I: memberlist_proto::Id,
 {
@@ -130,7 +133,7 @@ where
   }
 }
 
-impl<I> Memberlist<I>
+impl<I> Memberlist<I, SmallRng>
 where
   I: memberlist_proto::Id,
 {
@@ -149,6 +152,9 @@ where
   /// `select` it against an operation), and the embassy-net stack `Runner`
   /// separately, before any handle op can make progress.
   ///
+  /// Seeds the gossip RNG from the platform [`getrandom`] backend; use
+  /// [`new_with_rng`](Self::new_with_rng) to inject your own.
+  ///
   /// # Errors
   ///
   /// - [`InitError::TcpPoolTooSmall`] — `N < 2` (a listener plus one dial/accept
@@ -165,7 +171,9 @@ where
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
   ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
-  ///   machine-endpoint / entropy failure).
+  ///   machine-endpoint init failure).
+  /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
+  ///   seeding the default gossip RNG.
   ///
   /// # Panics
   ///
@@ -177,10 +185,75 @@ where
     cfg: Options,
     transform: TransformOptions,
     ep_cfg: EndpointOptions<I, SocketAddr>,
+    udp_socket: UdpSocket<'a>,
+    tcp_sockets: [TcpSocket<'a>; N],
+    now: Instant,
+  ) -> Result<(Self, Runner<'a, I, N, SmallRng>), InitError> {
+    // Draw a fresh 64-bit seed from the platform entropy backend for the default
+    // gossip RNG. The driver acquires entropy only on this convenience path; the
+    // explicitly-seeded `new_with_rng` never touches `getrandom`.
+    let mut seed = [0u8; 8];
+    getrandom::fill(&mut seed).map_err(|_| InitError::Entropy)?;
+    Self::new_with_rng(
+      cfg,
+      transform,
+      ep_cfg,
+      udp_socket,
+      tcp_sockets,
+      now,
+      SmallRng::seed_from_u64(u64::from_le_bytes(seed)),
+    )
+  }
+}
+
+impl<I, R: Rng> Memberlist<I, R>
+where
+  I: memberlist_proto::Id,
+{
+  /// Like [`new`](Self::new) but with a caller-supplied gossip RNG, returning the
+  /// handle and the [`Runner`] to drive.
+  ///
+  /// Identical to [`new`](Self::new) in every respect except the gossip RNG:
+  /// instead of seeding a [`SmallRng`] from the platform entropy backend, the
+  /// engine's gossip schedule is driven by `rng` exactly as supplied. The caller
+  /// owns seeding `rng` from its entropy source (the same authority that seeds the
+  /// embassy-net stack); the driver performs no entropy acquisition of its own on
+  /// this path.
+  ///
+  /// # Errors
+  ///
+  /// - [`InitError::TcpPoolTooSmall`] — `N < 2` (a listener plus one dial/accept
+  ///   socket is the functional minimum).
+  /// - [`InitError::ZeroBridgeRing`] — a zero
+  ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
+  ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
+  /// - [`InitError::SocketTimeoutOutOfRange`] —
+  ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
+  ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
+  ///   at least one microsecond and strictly greater than both `close_timeout` and the
+  ///   machine's `stream_timeout`, or it is larger than the sane maximum it can be safely
+  ///   installed at.
+  /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
+  ///   port / close-timeout, a non-routable or port-mismatched advertise address,
+  ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
+  ///   machine-endpoint init failure).
+  ///
+  /// # Panics
+  ///
+  /// Panics if binding the supplied `udp_socket` to `cfg.port` fails — which, with
+  /// a non-zero port (the engine rejects port 0 before this) and a fresh socket,
+  /// embassy-net does not do. Bind the socket yourself before calling if you need
+  /// to handle a bind error.
+  #[allow(clippy::too_many_arguments)]
+  pub fn new_with_rng<'a, const N: usize>(
+    cfg: Options,
+    transform: TransformOptions,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
     mut udp_socket: UdpSocket<'a>,
     tcp_sockets: [TcpSocket<'a>; N],
     now: Instant,
-  ) -> Result<(Self, Runner<'a, I, N>), InitError> {
+    rng: R,
+  ) -> Result<(Self, Runner<'a, I, N, R>), InitError> {
     // Validate the driver-side pool sizing before touching the engine.
     if N < 2 {
       return Err(InitError::TcpPoolTooSmall(N));
@@ -224,9 +297,11 @@ where
       .expect("binding the gossip UDP socket to the configured port failed");
 
     // Build the transport-agnostic engine from the port / close-timeout config.
-    // `try_new_at` (not `new_at`) so a machine entropy failure, an unusable
-    // encryption keyring, or a non-routable / port-mismatched advertise address
-    // becomes a typed `InitError::Engine` rather than a panic.
+    // `try_new_at` (not `new_at`) so an unusable encryption keyring or a
+    // non-routable / port-mismatched advertise address becomes a typed
+    // `InitError::Engine` rather than a panic. The caller-supplied `rng` seeds
+    // the machine's gossip RNG: the integrator owns entropy here, exactly as it
+    // owns the embassy-net stack's seed.
     let engine_cfg = EngineConfig::new()
       .with_port(cfg.port)
       .with_close_timeout(cfg.close_timeout);
@@ -237,8 +312,8 @@ where
       Some(policy) => engine_cfg.with_cidr_policy(policy),
       None => engine_cfg,
     };
-    let mut engine: Engine<I, SlotId> =
-      Engine::try_new_at(engine_cfg, transform, ep_cfg, now).map_err(InitError::from)?;
+    let mut engine: Engine<I, SlotId, R> =
+      Engine::try_new_at(engine_cfg, transform, ep_cfg, now, rng).map_err(InitError::from)?;
 
     // Seed the engine's reliable-plane pool with every slot id, then dedicate slot
     // 0 to the listener. The engine owns this pool (it reaches it directly, not

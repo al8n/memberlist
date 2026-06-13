@@ -1113,9 +1113,9 @@ where
   /// loaded only inside the `SendPushPullResponse`/`Close` handling here, so
   /// skipping a tick silently drops the reply and leaves the peer with a
   /// half-applied merge.
-  pub(crate) fn drain_then_reap(
+  pub(crate) fn drain_then_reap<G: rand::Rng>(
     &mut self,
-    ep: &mut Endpoint<I, A>,
+    ep: &mut Endpoint<I, A, G>,
     conns: &mut ConnTable,
     now: Instant,
   ) {
@@ -1230,9 +1230,9 @@ where
   /// inbound exchange is never produced and the peer is left with a
   /// half-applied merge (split-brain) — the exact failure the D1 module
   /// contract warns about. Mirrors [`Bridge::drain_then_reap`] minus step (3).
-  pub(crate) fn drain_payload_only(
+  pub(crate) fn drain_payload_only<G: rand::Rng>(
     &mut self,
-    ep: &mut Endpoint<I, A>,
+    ep: &mut Endpoint<I, A, G>,
     conns: &mut ConnTable,
     now: Instant,
   ) {

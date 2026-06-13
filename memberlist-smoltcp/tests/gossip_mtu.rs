@@ -58,9 +58,8 @@ fn oversized_gossip_datagram_is_received() {
 
   // Gossip frequently so the broadcast rides out quickly; the large gossip MTU
   // is the knob under test.
-  let mk = |id: &str, ip: u8, seed: u64| {
+  let mk = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(seed)
       .with_gossip_mtu(GOSSIP_MTU)
       .with_gossip_interval(Duration::from_millis(20))
   };
@@ -69,7 +68,7 @@ fn oversized_gossip_datagram_is_received() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    mk("a", 1, 1),
+    mk("a", 1),
     &mut da,
     now,
   );
@@ -77,7 +76,7 @@ fn oversized_gossip_datagram_is_received() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    mk("b", 2, 2),
+    mk("b", 2),
     &mut db,
     now,
   );
@@ -163,9 +162,8 @@ fn oversized_gossip_datagram_is_sent() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mk = |id: &str, ip: u8, seed: u64| {
+  let mk = |id: &str, ip: u8| {
     EndpointOptions::new(SmolStr::new(id), addr(ip, 7946))
-      .with_rng_seed(seed)
       .with_gossip_mtu(GOSSIP_MTU)
       .with_gossip_interval(Duration::from_millis(20))
   };
@@ -176,7 +174,7 @@ fn oversized_gossip_datagram_is_sent() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    mk("a", 1, 1),
+    mk("a", 1),
     &mut da,
     now,
   );
@@ -184,7 +182,7 @@ fn oversized_gossip_datagram_is_sent() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    mk("b", 2, 2),
+    mk("b", 2),
     &mut db,
     now,
   );

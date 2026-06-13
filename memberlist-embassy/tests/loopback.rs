@@ -30,7 +30,7 @@ use futures::executor::block_on;
 use memberlist_embassy::{
   EndpointOptions, InitError, Memberlist, Node, Options, Runner, TransformOptions, now,
 };
-use memberlist_proto::event::Event;
+use memberlist_proto::{SeedableRng, SmallRng, event::Event};
 use smol_str::SmolStr;
 
 use support::paired_device::{PairedDevice, pair};
@@ -192,22 +192,24 @@ fn two_node_join_converges() {
   let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
 
   let now = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     now,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     udp_b,
     tcp_b,
     now,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -260,22 +262,24 @@ fn send_reliable_round_trips() {
   let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
 
   let now = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     now,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     udp_b,
     tcp_b,
     now,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -350,22 +354,24 @@ fn ping_succeeds() {
   let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
 
   let now = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp_a,
     tcp_a,
     now,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     udp_b,
     tcp_b,
     now,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -406,13 +412,14 @@ fn rejects_socket_timeout_not_exceeding_engine_deadlines() {
     let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
     let mut bufs = NodeBufs::new();
     let (udp, tcp) = build_sockets(stack, &mut bufs);
-    let r = Memberlist::new::<POOL>(
+    let r = Memberlist::new_with_rng::<POOL>(
       Options::new().with_socket_timeout(core::time::Duration::from_secs(5)),
       TransformOptions::default(),
-      EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+      EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
       udp,
       tcp,
       now(),
+      SmallRng::seed_from_u64(1),
     );
     assert!(
       matches!(r.map(|_| ()), Err(InitError::SocketTimeoutOutOfRange(_))),
@@ -427,15 +434,15 @@ fn rejects_socket_timeout_not_exceeding_engine_deadlines() {
     let (stack, _net) = build_stack(dev, &mut res, 2, 0x3333_4444);
     let mut bufs = NodeBufs::new();
     let (udp, tcp) = build_sockets(stack, &mut bufs);
-    let r = Memberlist::new::<POOL>(
+    let r = Memberlist::new_with_rng::<POOL>(
       Options::new().with_socket_timeout(core::time::Duration::from_secs(12)),
       TransformOptions::default(),
       EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
-        .with_rng_seed(2)
         .with_stream_timeout(core::time::Duration::from_secs(20)),
       udp,
       tcp,
       now(),
+      SmallRng::seed_from_u64(2),
     );
     assert!(
       matches!(r.map(|_| ()), Err(InitError::SocketTimeoutOutOfRange(_))),
@@ -458,13 +465,14 @@ fn rejects_huge_socket_timeout() {
   let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
   let mut bufs = NodeBufs::new();
   let (udp, tcp) = build_sockets(stack, &mut bufs);
-  let r = Memberlist::new::<POOL>(
+  let r = Memberlist::new_with_rng::<POOL>(
     Options::new().with_socket_timeout(core::time::Duration::from_secs(u64::MAX)),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     udp,
     tcp,
     now(),
+    SmallRng::seed_from_u64(1),
   );
   assert!(
     matches!(r.map(|_| ()), Err(InitError::SocketTimeoutOutOfRange(_))),
@@ -488,17 +496,17 @@ fn rejects_socket_timeout_that_floors_onto_a_deadline() {
   let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
   let mut bufs = NodeBufs::new();
   let (udp, tcp) = build_sockets(stack, &mut bufs);
-  let r = Memberlist::new::<POOL>(
+  let r = Memberlist::new_with_rng::<POOL>(
     Options::new()
       .with_close_timeout(close)
       .with_socket_timeout(socket),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946))
-      .with_rng_seed(1)
       .with_stream_timeout(core::time::Duration::from_secs(1)),
     udp,
     tcp,
     now(),
+    SmallRng::seed_from_u64(1),
   );
   assert!(
     matches!(r.map(|_| ()), Err(InitError::SocketTimeoutOutOfRange(_))),

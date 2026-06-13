@@ -1,14 +1,12 @@
 use std::{net::SocketAddr, time::Duration};
 
+use crate::StreamEndpoint;
 use compio::{
   io::{AsyncReadExt, AsyncWriteExt},
   net::{TcpListener, TcpStream},
 };
 use memberlist_proto::{
-  Instant, RawRecords,
-  config::EndpointOptions,
-  endpoint::Endpoint,
-  streams::{LabelOptions, StreamEndpoint},
+  Instant, RawRecords, config::EndpointOptions, endpoint::Endpoint, streams::LabelOptions,
 };
 use smol_str::SmolStr;
 
@@ -26,7 +24,7 @@ fn fresh_eid() -> ExchangeId {
     SmolStr::new("bridge-test"),
     "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
   );
-  let ep = Endpoint::new(cfg);
+  let ep = Endpoint::new(cfg, crate::gossip_rng().expect("test: OS entropy"));
   let mut endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
     ep,
     LabelOptions::new_in(None, ()),

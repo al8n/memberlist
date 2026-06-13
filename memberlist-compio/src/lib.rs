@@ -44,6 +44,42 @@ mod quic;
 #[cfg(feature = "quic")]
 mod quic_driver;
 
+use rand::{
+  SeedableRng,
+  rngs::{StdRng, SysRng},
+};
+
+/// The driver's machine endpoints stay generic over the gossip RNG `G`, exactly
+/// like proto, so a caller can inject their own via the `*_with_rng`
+/// constructors. `G` defaults to [`StdRng`] (a ChaCha CSPRNG) — the RNG the
+/// plain constructors seed from the OS — so the common shorter spellings stay
+/// terse and secure by default.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+pub(crate) type StreamEndpoint<I, A, R, G = StdRng> =
+  memberlist_proto::streams::StreamEndpoint<I, A, R, G>;
+#[cfg(feature = "quic")]
+pub(crate) type QuicEndpoint<I, G = StdRng> = memberlist_proto::QuicEndpoint<I, G>;
+
+/// A fresh `StdRng` seeded directly from the operating system entropy source
+/// ([`SysRng`], i.e. `getrandom`) — never from a thread-local generator, so a
+/// process that forks after building a node cannot inherit a parent's RNG state
+/// and derive the same gossip schedule. This is the default RNG the plain
+/// constructors seed; `*_with_rng` callers supply their own instead.
+///
+/// Drawn in `Memberlist::new` (which returns a `Result`) BEFORE the driver task
+/// is spawned, then passed into `Transport::run` and used to build the machine
+/// `Endpoint`. An OS entropy failure is therefore surfaced as
+/// [`MemberlistError::Entropy`] rather than panicking in the spawned task after
+/// the handle was already returned.
+pub(crate) fn gossip_rng() -> crate::Result<StdRng> {
+  StdRng::try_from_rng(&mut SysRng)
+    .map_err(|e| crate::MemberlistError::Entropy(std::io::Error::other(e)))
+}
+
 pub use address::Address;
 pub use delegate::{
   AliveDelegate, ConflictDelegate, Delegate, EventDelegate, MergeDelegate, NodeDelegate,

@@ -319,7 +319,6 @@ impl Cluster {
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
-      .with_rng_seed(addr.port() as u64)
   }
 
   // ── Crash / restart ───────────────────────────────────────────────────────

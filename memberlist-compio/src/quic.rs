@@ -21,9 +21,10 @@
 
 use std::net::SocketAddr;
 
+use crate::QuicEndpoint;
 use compio::net::UdpSocket;
 use hostaddr::HostAddr;
-use memberlist_proto::{QuicEndpoint, config::EndpointOptions, endpoint::Endpoint};
+use memberlist_proto::{config::EndpointOptions, endpoint::Endpoint};
 use smol_str::SmolStr;
 
 use crate::{
@@ -233,9 +234,10 @@ where
     &self.advertise_socket
   }
 
-  async fn run<D>(self, runtime: TransportRuntime<Self, D>)
+  async fn run<D, G>(self, runtime: TransportRuntime<Self, D>, gossip_rng: G)
   where
     D: Delegate<Id = Self::Id, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     // `Memberlist::new` is generic over `T` and cannot build the
     // QUIC endpoint (it needs the quinn-proto config bundle); build it
@@ -249,7 +251,7 @@ where
     // loop starts; each `None` leaves the `Endpoint` at its admit-all
     // default. `BoxedAlive`/`BoxedMerge` forward the boxed dyn so it
     // satisfies the setters' `impl AliveDelegate`/`impl MergeDelegate` bound.
-    let mut ep = Endpoint::new(cfg);
+    let mut ep = Endpoint::new(cfg, gossip_rng);
     if let Some(ad) = runtime.alive_delegate {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -282,7 +284,7 @@ where
     // (`validate_checksum_options`) before this driver task spawned, so its
     // backend is built in and this store cannot fail.
     let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
-    crate::quic_driver::quic_driver_loop::<Self::Id, D>(
+    crate::quic_driver::quic_driver_loop::<Self::Id, D, G>(
       endpoint,
       self.gossip_socket,
       runtime.commands_rx,

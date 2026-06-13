@@ -59,6 +59,7 @@ use crate::{
   resolver::{AdvertiseAddrResolver, Resolver},
   transport::{Transport, TransportRuntime},
 };
+use rand::rngs::StdRng;
 
 /// Cheaply clonable handle to a running memberlist driver.
 ///
@@ -204,6 +205,31 @@ where
   where
     RES: Resolver<Address = T::Address>,
     AR: AdvertiseAddrResolver,
+  {
+    Self::new_with_rng::<RES, AR, StdRng>(
+      options,
+      delegate,
+      resolver,
+      advertise_resolver,
+      crate::gossip_rng()?,
+    )
+    .await
+  }
+
+  /// Like [`new`](Self::new) but with a caller-supplied gossip RNG `G`, mirroring
+  /// [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it. The
+  /// machine's gossip schedule is reproducible iff `rng` is.
+  pub async fn new_with_rng<RES, AR, G>(
+    options: Options<T>,
+    delegate: D,
+    resolver: &RES,
+    advertise_resolver: &AR,
+    rng: G,
+  ) -> Result<Self>
+  where
+    RES: Resolver<Address = T::Address>,
+    AR: AdvertiseAddrResolver,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     #[cfg(feature = "cidr")]
     let cidr_policy = options.cidr_policy().cloned();
@@ -400,7 +426,7 @@ where
     // that lost the flag race (see `shutdown`).
     let (shutdown_done_tx, shutdown_done_rx) = flume::bounded::<()>(1);
     let driver_handle = compio::runtime::spawn(async move {
-      transport.run(runtime).await;
+      transport.run(runtime, rng).await;
       drop(shutdown_done_tx);
     });
 

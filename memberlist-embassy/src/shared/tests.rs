@@ -2,7 +2,7 @@ use super::{Shared, advertise_address, is_joined};
 use crate::{error::OpError, stream_io::SlotId};
 use core::{net::SocketAddr, time::Duration};
 use memberlist_embedded::{Engine, Options as EngineConfig, TransformOptions};
-use memberlist_proto::{EndpointOptions, Instant, event::Event};
+use memberlist_proto::{EndpointOptions, Instant, SeedableRng, SmallRng, event::Event};
 use smol_str::SmolStr;
 
 fn sa(last: u8) -> SocketAddr {
@@ -15,8 +15,9 @@ fn shared_node(id: &str, last: u8) -> Shared<SmolStr> {
   let engine: Engine<SmolStr, SlotId> = Engine::new_at(
     EngineConfig::new().with_port(7946),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new(id), sa(last)).with_rng_seed(7),
+    EndpointOptions::new(SmolStr::new(id), sa(last)),
     now,
+    SmallRng::seed_from_u64(7),
   );
   Shared::new(engine)
 }
@@ -32,8 +33,9 @@ fn out_of_order_reliable_completions_resolve_their_own_waiter() {
   let engine: Engine<SmolStr, SlotId> = Engine::new_at(
     EngineConfig::new().with_port(7946),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("t"), sa(1)).with_rng_seed(7),
+    EndpointOptions::new(SmolStr::new("t"), sa(1)),
     now,
+    SmallRng::seed_from_u64(7),
   );
   let shared: Shared<SmolStr> = Shared::new(engine);
 

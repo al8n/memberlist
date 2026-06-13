@@ -26,13 +26,14 @@ use std::{
   },
 };
 
+use crate::QuicEndpoint;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_proto::{
-  DatagramSendOutcome, Instant, Node, QuicEndpoint, UnreliableTransport,
+  DatagramSendOutcome, Instant, Node, UnreliableTransport,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
@@ -178,8 +179,8 @@ struct PendingUserSend {
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
-struct QuicDriverState<I> {
-  endpoint: QuicEndpoint<I>,
+struct QuicDriverState<I, G: rand::Rng = rand::rngs::StdRng> {
+  endpoint: QuicEndpoint<I, G>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
   /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
@@ -266,7 +267,7 @@ struct QuicDriverState<I> {
 /// configured `with_gossip_mtu` above the historical 16 KiB default is
 /// not silently truncated by the kernel. Mirrors the stream driver's
 /// `gossip_recv_buf_len`.
-fn gossip_recv_buf_len<I>(endpoint: &QuicEndpoint<I>) -> usize
+fn gossip_recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -276,6 +277,7 @@ where
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   endpoint
     .gossip_mtu()
@@ -291,8 +293,8 @@ where
 /// All mutations on the endpoint happen here; reads happen lock-free
 /// via the published [`MemberlistSnapshot`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn quic_driver_loop<I, D>(
-  endpoint: QuicEndpoint<I>,
+pub(crate) async fn quic_driver_loop<I, D, G>(
+  endpoint: QuicEndpoint<I, G>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, SocketAddr>>,
@@ -315,6 +317,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
     + Send
     + Sync
     + 'static,
+  G: rand::Rng + Unpin,
 {
   // Spawn the per-driver observation task. It owns the user `Delegate`
   // and the `EventStream` sender and runs OFF this driver task: the
@@ -396,7 +399,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   // IP-layer UDP maximum. The coordinator's `gossip_mtu` is set at
   // construction time and never reconfigured at runtime, so a single
   // value computed up-front is correct.
-  let recv_buf_len = gossip_recv_buf_len::<I>(&state.endpoint);
+  let recv_buf_len = gossip_recv_buf_len::<I, G>(&state.endpoint);
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
@@ -408,7 +411,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
   // Publish the initial snapshot at loop entry so the first observable
   // state is available before any input arrives (mirror-symmetric with
   // the stream driver's loop-entry `refresh_snapshot`).
-  refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
+  refresh_snapshot::<I, G>(&state.endpoint, &state.snapshot);
 
   let mut exit = false;
   // Tracks whether the previous iteration's inputs (cmd-fairness
@@ -434,7 +437,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
           let now = Instant::now();
           let is_shutdown = matches!(c, Command::Shutdown(_));
           let leave_timeout = state.driver_opts.leave_timeout();
-          dispatch_command::<I>(
+          dispatch_command::<I, G>(
             &mut state.endpoint,
             &mut state.shutdown_reply,
             &mut state.pending_joins,
@@ -472,13 +475,17 @@ pub(crate) async fn quic_driver_loop<I, D>(
       // observe a probe-timeout failure instead of an intentional leave.
       // `drain_actions` iterates to fixed point internally. Mirrors the
       // stream driver's exit drain (`memberlist-compio/src/driver.rs`).
-      if drain_actions::<I>(&mut state).await {
-        refresh_snapshot_if_changed::<I>(
+      if drain_actions::<I, G>(&mut state).await {
+        refresh_snapshot_if_changed::<I, G>(
           &state.endpoint,
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
-        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
+        refresh_metrics_if_changed::<I, G>(
+          &state.endpoint,
+          &state.metrics,
+          &mut state.last_metrics,
+        );
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -496,13 +503,17 @@ pub(crate) async fn quic_driver_loop<I, D>(
     // the select. Mirrors the stream driver's pre-select dirty drain
     // (`memberlist-compio/src/driver.rs:688`).
     if dirty {
-      if drain_actions::<I>(&mut state).await {
-        refresh_snapshot_if_changed::<I>(
+      if drain_actions::<I, G>(&mut state).await {
+        refresh_snapshot_if_changed::<I, G>(
           &state.endpoint,
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
-        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
+        refresh_metrics_if_changed::<I, G>(
+          &state.endpoint,
+          &state.metrics,
+          &mut state.last_metrics,
+        );
       }
       // Reap any pending-join waiter whose `pending` set was emptied
       // by the drain (a push/pull ExchangeCompleted reduction) or
@@ -550,13 +561,17 @@ pub(crate) async fn quic_driver_loop<I, D>(
     if let Some(t) = past_due_t
       && setup_now >= t
     {
-      if fire_timeout_with_drain::<I>(&mut state, recv_buf_len).await {
-        refresh_snapshot_if_changed::<I>(
+      if fire_timeout_with_drain::<I, G>(&mut state, recv_buf_len).await {
+        refresh_snapshot_if_changed::<I, G>(
           &state.endpoint,
           &state.snapshot,
           &mut state.last_snapshot_version,
         );
-        refresh_metrics_if_changed::<I>(&state.endpoint, &state.metrics, &mut state.last_metrics);
+        refresh_metrics_if_changed::<I, G>(
+          &state.endpoint,
+          &state.metrics,
+          &mut state.last_metrics,
+        );
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
@@ -679,7 +694,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
             let now = Instant::now();
             let is_shutdown = matches!(c, Command::Shutdown(_));
             let leave_timeout = state.driver_opts.leave_timeout();
-            dispatch_command::<I>(
+            dispatch_command::<I, G>(
               &mut state.endpoint,
               &mut state.shutdown_reply,
               &mut state.pending_joins,
@@ -919,8 +934,8 @@ async fn observation_task<I, D>(
 /// and the per-iteration `reap_pending_joins` replies on completion or
 /// deadline expiry.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_command<I>(
-  endpoint: &mut QuicEndpoint<I>,
+async fn dispatch_command<I, G>(
+  endpoint: &mut QuicEndpoint<I, G>,
   shutdown_reply: &mut Option<futures_channel::oneshot::Sender<Result<()>>>,
   pending_joins: &mut HashMap<u64, PendingJoin>,
   next_pending_join_id: &mut u64,
@@ -940,6 +955,7 @@ async fn dispatch_command<I>(
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   match cmd {
     Command::Join(JoinCmd { addrs, kind, reply }) => {
@@ -1353,7 +1369,10 @@ async fn dispatch_command<I>(
 /// Returns `true` iff any work was applied (the peek consumed a
 /// datagram, `handle_timeout` fired, OR `drain_actions` made
 /// progress), so the caller knows to republish the snapshot.
-async fn fire_timeout_with_drain<I>(state: &mut QuicDriverState<I>, recv_buf_len: usize) -> bool
+async fn fire_timeout_with_drain<I, G>(
+  state: &mut QuicDriverState<I, G>,
+  recv_buf_len: usize,
+) -> bool
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -1363,6 +1382,7 @@ where
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   let mut dirty = false;
 
@@ -1412,7 +1432,7 @@ where
     dirty = true;
   }
 
-  if drain_actions::<I>(state).await {
+  if drain_actions::<I, G>(state).await {
     dirty = true;
   }
   dirty
@@ -1452,7 +1472,7 @@ where
 /// shared UDP socket. `poll_transmit` carries raw QUIC datagrams
 /// (handshake, acks, application stream data); those are sent on the
 /// same socket without codec wrap.
-async fn drain_actions<I>(state: &mut QuicDriverState<I>) -> bool
+async fn drain_actions<I, G>(state: &mut QuicDriverState<I, G>) -> bool
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -1462,6 +1482,7 @@ where
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   let mut any_progress = false;
   let decode_opts = DecodeOptions::new(state.label.clone());
@@ -1922,8 +1943,8 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 /// `Bytes`, which shares the underlying buffer). The local node entry is
 /// taken directly from the membership map so it carries the real meta,
 /// incarnation, and protocol versions.
-fn refresh_snapshot<I>(
-  endpoint: &QuicEndpoint<I>,
+fn refresh_snapshot<I, G>(
+  endpoint: &QuicEndpoint<I, G>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
 ) where
   I: memberlist_proto::Id
@@ -1934,16 +1955,17 @@ fn refresh_snapshot<I>(
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   let ep = endpoint.endpoint_ref();
-  refresh_snapshot_inner::<I>(ep, snapshot);
+  refresh_snapshot_inner::<I, _>(ep, snapshot);
 }
 
 /// As [`refresh_snapshot`], but rebuilds + stores only when the endpoint's
 /// snapshot version changed since `*last_version` (the rebuild clones every
 /// NodeState).
-fn refresh_snapshot_if_changed<I>(
-  endpoint: &QuicEndpoint<I>,
+fn refresh_snapshot_if_changed<I, G>(
+  endpoint: &QuicEndpoint<I, G>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   last_version: &mut u64,
 ) where
@@ -1955,19 +1977,20 @@ fn refresh_snapshot_if_changed<I>(
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   let ep = endpoint.endpoint_ref();
   let v = ep.snapshot_version();
   if v != *last_version {
     *last_version = v;
-    refresh_snapshot_inner::<I>(ep, snapshot);
+    refresh_snapshot_inner::<I, _>(ep, snapshot);
   }
 }
 
 /// Republish the machine's load-shedding counters if they changed (publish-on-
 /// change; a cheap `Copy` compare, allocating only on a real change).
-fn refresh_metrics_if_changed<I>(
-  endpoint: &QuicEndpoint<I>,
+fn refresh_metrics_if_changed<I, G>(
+  endpoint: &QuicEndpoint<I, G>,
   metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   last: &mut memberlist_proto::metrics::Metrics,
 ) where
@@ -1979,6 +2002,7 @@ fn refresh_metrics_if_changed<I>(
     + Send
     + Sync
     + 'static,
+  G: rand::Rng,
 {
   let m = endpoint.metrics();
   if m != *last {
@@ -1987,8 +2011,8 @@ fn refresh_metrics_if_changed<I>(
   }
 }
 
-fn refresh_snapshot_inner<I>(
-  ep: &memberlist_proto::Endpoint<I, SocketAddr>,
+fn refresh_snapshot_inner<I, R: rand::Rng>(
+  ep: &memberlist_proto::Endpoint<I, SocketAddr, R>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
 ) where
   I: memberlist_proto::Id

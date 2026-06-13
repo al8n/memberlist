@@ -133,7 +133,7 @@ fn frame_round_trips_then_fin_close_reaps() {
 
   // Outbound client: a one-way reliable user message.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7100)));
   let payload = Bytes::from_static(b"hello-tcp");
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -145,7 +145,7 @@ fn frame_round_trips_then_fin_close_reaps() {
 
   // Inbound server: accept the exchange.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7100), now)
     .expect("node is running");
@@ -263,7 +263,7 @@ fn label_mismatch_tears_down_with_no_stream_and_no_endpoint_events() {
   // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
   // reaps a failed-label bridge without an FSM lifecycle notice).
   let mut ep: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   server.drain_then_reap(&mut ep, now);
   assert!(
     ep.poll_event().is_none(),
@@ -294,7 +294,7 @@ fn dialer_bridge_rejects_mismatched_inbound_response_label() {
     TEST_RELIABLE_MAX,
   );
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
   let sid = ep_c.start_reliable_ping(
     SmolStr::new("srv"),
     addr(7000),
@@ -417,7 +417,7 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   // `drain_then_reap` on a no-`Stream` bridge is a clean no-op — no FSM
   // lifecycle notice is owed for a label exchange that never minted a `Stream`.
   let mut ep: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   server.drain_then_reap(&mut ep, deadline);
   assert!(
     ep.poll_event().is_none(),
@@ -445,7 +445,7 @@ fn coalesced_label_plus_small_frame_pre_promotion_drains() {
   // are produced together (a one-way message half-closes once its request is
   // sent, so the client also owes its FIN).
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
   let payload = Bytes::from_static(b"small-coalesced-first-frame");
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -491,7 +491,7 @@ fn coalesced_label_plus_small_frame_pre_promotion_drains() {
   // plaintext into the just-promoted `Stream`, or the small frame never
   // reaches the FSM.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7600)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7600)));
   let s_stream = ep_s
     .accept_stream(addr(7600), now)
     .expect("node is running");
@@ -569,7 +569,7 @@ fn coalesced_label_plus_small_frame_with_eof_pre_promotion_terminalizes() {
   // client's outbound buffer carries `[label||frame]` and the client owes
   // its FIN.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7700)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7700)));
   let payload = Bytes::from_static(b"coalesced-with-eof");
   let sid = ep_c
     .start_user_message(addr(7000), payload.clone(), now)
@@ -615,7 +615,7 @@ fn coalesced_label_plus_small_frame_with_eof_pre_promotion_terminalizes() {
   // bridge converges to `BothClosed` without waiting for any later
   // transport read.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7700)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7700)));
   let s_stream = ep_s
     .accept_stream(addr(7700), now)
     .expect("node is running");
@@ -676,7 +676,7 @@ fn truncation_read_zero_mid_frame_fails_peer_closed() {
   // request is pumped, the inner FSM is `OutboundAwaitingResponse` — a
   // premature peer close is `PeerClosed`.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7200)));
   let sid = ep_c.start_reliable_ping(
     SmolStr::new("srv"),
     addr(7000),
@@ -854,7 +854,7 @@ fn push_pull_request_response_round_trips_then_reaps() {
   // non-empty membership view (and so `start_push_pull` produces a real
   // DialRequested for `dial_succeeded`).
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7600)));
   let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
   let c_stream = ep_c
     .dial_succeeded(sid, now)
@@ -863,7 +863,7 @@ fn push_pull_request_response_round_trips_then_reaps() {
 
   // Acceptor side.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7600), now)
     .expect("node is running");
@@ -951,7 +951,7 @@ fn inbound_push_pull_admission_rejected_fails_bridge() {
   // Dialer initiates a JOIN push/pull (the merge delegate only fires on
   // join, never refresh).
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7610)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7610)));
   let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
   let c_stream = ep_c
     .dial_succeeded(sid, now)
@@ -960,7 +960,7 @@ fn inbound_push_pull_admission_rejected_fails_bridge() {
 
   // Acceptor with a rejecting merge delegate.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   ep_s.set_merge_delegate(RejectAll);
   let s_stream = ep_s
     .accept_stream(addr(7610), now)
@@ -1019,7 +1019,7 @@ fn drain_then_reap_loads_push_pull_response() {
 
   // Dialer produces a real push/pull request frame.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7620)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7620)));
   let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
   let c_stream = ep_c
     .dial_succeeded(sid, now)
@@ -1031,7 +1031,7 @@ fn drain_then_reap_loads_push_pull_response() {
   // ciphertext (NO FIN). The FSM dispatches `PushPullRequestReceived` and is
   // left in `InboundSendingResponse` with the event queued.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7620), now)
     .expect("node is running");
@@ -1083,7 +1083,7 @@ fn promoted_inbound(
   let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
   complete_label_exchange(&mut client, &mut server, now);
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(port)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(port)));
   let s_stream = ep_s
     .accept_stream(addr(port + 1), now)
     .expect("node is running");
@@ -1211,7 +1211,7 @@ fn poll_timeout_folds_in_tighter_inner_stream_deadline() {
   // snapshots +30s as its bridge deadline, but the inner stream still carries
   // its tighter timer.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7730)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7730)));
   let s_stream = ep_s
     .accept_stream(addr(7731), now)
     .expect("node is running");
@@ -1240,14 +1240,14 @@ fn second_half_close_observations_are_idempotent_at_both_closed() {
 
   // One-way user message both promoted, driven to BothClosed.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7740)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7740)));
   let sid = ep_c
     .start_user_message(addr(7000), Bytes::from_static(b"x"), now)
     .expect("issued while running");
   let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
   client.promote(c_stream);
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   let s_stream = ep_s
     .accept_stream(addr(7740), now)
     .expect("node is running");
@@ -1310,7 +1310,7 @@ fn pump_out_on_phase_failed_non_fsm_failed_bridge_is_idempotent() {
   // Timeout: the FSM itself is NOT failed (it is `Done`/awaiting), only the
   // bridge phase is `Failed(Timeout)`.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7750)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7750)));
   let sid = ep_c
     .start_user_message(addr(7000), Bytes::from_static(b"hi"), now)
     .expect("issued while running");
@@ -1363,7 +1363,7 @@ fn drain_then_reap_timeout_failed_bridge_routes_errored_notice() {
   let (mut client, _server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
   // The dialer is never handshaking; promote an outbound user message.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7760)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7760)));
   let sid = ep_c
     .start_user_message(addr(7000), Bytes::from_static(b"hi"), now)
     .expect("issued while running");
@@ -1458,7 +1458,7 @@ fn drain_then_reap_close_arm_rejects_inbound_merge() {
 
   // Dialer produces a JOIN push/pull request.
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("cli"), addr(7780)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7780)));
   let sid = ep_c.start_push_pull(addr(7000), PushPullKind::Join, now);
   let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
   client.promote(c_stream);
@@ -1469,7 +1469,7 @@ fn drain_then_reap_close_arm_rejects_inbound_merge() {
   // reap directly — bypassing `drain_payload_only` — so the reap's Close arm
   // performs the rejection.
   let mut ep_s: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
   ep_s.set_merge_delegate(RejectAll);
   let s_stream = ep_s
     .accept_stream(addr(7780), now)

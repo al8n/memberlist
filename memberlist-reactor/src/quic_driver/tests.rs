@@ -123,10 +123,13 @@ async fn build_driver(
   let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
     .await
     .expect("bind gossip socket");
-  let ep = Endpoint::new(EndpointOptions::new(
-    SmolStr::new("qdrv"),
-    "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-  ));
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("qdrv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
   let mut endpoint = QuicEndpoint::new(ep, self_trusted_quic());
   endpoint.start_scheduling(Instant::now());
   let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));

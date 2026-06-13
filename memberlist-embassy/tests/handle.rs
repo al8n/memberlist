@@ -26,7 +26,7 @@ use memberlist_embassy::{
   CompressionOptions, EndpointOptions, Memberlist, Options, Runner, TransformOptions, event::Event,
   now,
 };
-use memberlist_proto::typed::State;
+use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
 
 use support::paired_device::{PairedDevice, pair};
@@ -109,13 +109,14 @@ fn node<'a>(
   seed: u64,
 ) -> (Memberlist<SmolStr>, Runner<'a, SmolStr, POOL>) {
   let (udp, tcp) = build_sockets(stack, bufs);
-  Memberlist::new::<POOL>(
+  Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new(id), addr(last, 7946)).with_rng_seed(seed),
+    EndpointOptions::new(SmolStr::new(id), addr(last, 7946)),
     udp,
     tcp,
     now(),
+    SmallRng::seed_from_u64(seed),
   )
   .expect("build node")
 }

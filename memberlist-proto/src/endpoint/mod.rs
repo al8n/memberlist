@@ -14,7 +14,7 @@ use crate::{
   },
 };
 use bytes::Bytes;
-use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::IteratorRandom};
+use rand::{Rng, RngExt, rngs::SmallRng, seq::IteratorRandom};
 
 use crate::{
   AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
@@ -171,9 +171,9 @@ struct IndirectForward<A> {
 /// never corrupts); delivery promptness/ordering is the driver's lever on
 /// *quality* (failure-detection latency, transient-suspect window), not a
 /// correctness dependency. The machine never compensates for the driver.
-pub struct Endpoint<I, A> {
+pub struct Endpoint<I, A, R = SmallRng> {
   cfg: EndpointOptions<I, A>,
-  rng: SmallRng,
+  rng: R,
 
   // Membership state.
   members: Members<I, A>,
@@ -266,8 +266,9 @@ pub struct Endpoint<I, A> {
 // well-formedness bag — no method-side additions, so the heavier
 // `Debug + Display + Send + Sync + 'static` constraints `I` carries on the
 // methods below are NOT required to call any of these.
-impl<I, A> Endpoint<I, A>
+impl<I, A, R> Endpoint<I, A, R>
 where
+  R: Rng,
   I: Id + Data + CheapClone,
   A: CheapClone
     + Data
@@ -369,8 +370,9 @@ where
 // The full SWIM bag — every method that constructs/encodes wire types,
 // mutates membership, or routes broadcasts. Bounds match what the downstream
 // wrapper types (`Members`, `MemberlistBroadcast`, `wire::encode`) demand.
-impl<I, A> Endpoint<I, A>
+impl<I, A, R> Endpoint<I, A, R>
 where
+  R: Rng,
   I: Id + Data + CheapClone + core::fmt::Debug + core::fmt::Display + Send + Sync + 'static,
   A: CheapClone
     + Data
@@ -388,16 +390,17 @@ where
   /// clock itself, so a virtual- or embedded-clock driver stays internally
   /// consistent.
   ///
-  /// This is the entropy-fallible primary constructor. When the config carries
-  /// an explicit RNG seed (via
-  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed))
-  /// it never touches platform entropy and never fails — the natural choice for
-  /// a fully Sans-I/O or deterministic driver. Without a seed it draws the
-  /// gossip RNG seed from the platform entropy source and returns
-  /// [`EndpointInitError::Entropy`] if that source fails (e.g. an
-  /// integrator-provided getrandom backend that is not ready on a no_std
-  /// target). See [`Endpoint::new_at`] for the panicking convenience.
-  pub fn try_new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Result<Self, EndpointInitError> {
+  /// The gossip RNG `rng` (peer selection, timing jitter — not key material) is
+  /// injected by the driver, which owns entropy: a std driver seeds it from the
+  /// OS, an embedded driver from a hardware RNG or a fixed seed. The machine
+  /// never draws platform entropy itself. Fallible only for the operator-time
+  /// config guards below (an oversized initial meta or a zero awareness
+  /// multiplier); see [`Endpoint::new_at`] for the panicking convenience.
+  pub fn try_new_at(
+    cfg: EndpointOptions<I, A>,
+    now: Instant,
+    rng: R,
+  ) -> Result<Self, EndpointInitError> {
     // Operator-time misconfiguration guards (release-mode, fallible): the
     // local Alive broadcast would otherwise carry a meta peers reject, or the
     // awareness tracker would be unconstructable. Reject at construction rather
@@ -413,20 +416,6 @@ where
     if cfg.awareness_max_multiplier() == 0 {
       return Err(EndpointInitError::AwarenessMultiplierZero);
     }
-    let rng = match cfg.rng_seed() {
-      Some(seed) => SmallRng::seed_from_u64(seed),
-      None => {
-        // No explicit seed: pull 8 bytes from the platform entropy source.
-        // On std that is the OS RNG; on no_std targets the integrator
-        // registers a getrandom backend (e.g. an embassy/embedded hardware
-        // RNG). This is gossip jitter/selection entropy, not key material.
-        // Surface a failure as a recoverable init error rather than aborting:
-        // an embedded entropy backend can be transiently not-ready.
-        let mut seed = [0u8; 8];
-        getrandom::fill(&mut seed).map_err(|_| EndpointInitError::Entropy)?;
-        SmallRng::seed_from_u64(u64::from_le_bytes(seed))
-      }
-    };
     let local_node = Node::new(
       cfg.local_id_ref().cheap_clone(),
       cfg.advertise_addr_ref().cheap_clone(),
@@ -492,18 +481,15 @@ where
   }
 
   /// Construct a new endpoint at the driver-supplied `now`, panicking if the
-  /// seedless entropy draw fails. Convenience over [`Endpoint::try_new_at`] for
-  /// drivers on a platform whose entropy source does not fail (every std
-  /// target; a no_std target with an always-ready RNG backend) or that supply
-  /// an explicit seed.
+  /// configuration is invalid. Convenience over [`Endpoint::try_new_at`] for
+  /// drivers whose configuration is a static constant known to be valid.
   ///
   /// # Panics
-  /// When the config carries no RNG seed and the platform entropy source
-  /// fails. Use [`Endpoint::try_new_at`], or supply a seed via
-  /// [`EndpointOptions::with_rng_seed`](crate::config::EndpointOptions::with_rng_seed),
-  /// to handle that case without panicking.
-  pub fn new_at(cfg: EndpointOptions<I, A>, now: Instant) -> Self {
-    Self::try_new_at(cfg, now).expect("endpoint construction failed (entropy or invalid options)")
+  /// When the configuration is rejected (e.g. `initial_meta` exceeds
+  /// `meta_max_size`). Use [`Endpoint::try_new_at`] to handle that case without
+  /// panicking.
+  pub fn new_at(cfg: EndpointOptions<I, A>, now: Instant, rng: R) -> Self {
+    Self::try_new_at(cfg, now, rng).expect("endpoint construction failed (invalid options)")
   }
 
   /// Fallibly construct a new endpoint, stamping the local node at the current
@@ -511,8 +497,8 @@ where
   /// virtual- or embedded-clock drivers use `try_new_at` with their own `now`
   /// so the machine never reads a clock the driver does not own.
   #[cfg(feature = "std")]
-  pub fn try_new(cfg: EndpointOptions<I, A>) -> Result<Self, EndpointInitError> {
-    Self::try_new_at(cfg, Instant::now())
+  pub fn try_new(cfg: EndpointOptions<I, A>, rng: R) -> Result<Self, EndpointInitError> {
+    Self::try_new_at(cfg, Instant::now(), rng)
   }
 
   /// Construct a new endpoint, stamping the local node at the current std
@@ -524,8 +510,8 @@ where
   /// Panics on a seedless config when the platform entropy source is
   /// unavailable — see [`Endpoint::try_new`].
   #[cfg(feature = "std")]
-  pub fn new(cfg: EndpointOptions<I, A>) -> Self {
-    Self::new_at(cfg, Instant::now())
+  pub fn new(cfg: EndpointOptions<I, A>, rng: R) -> Self {
+    Self::new_at(cfg, Instant::now(), rng)
   }
 
   /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
@@ -668,7 +654,7 @@ where
   }
 
   #[allow(dead_code)]
-  pub(crate) fn rng_mut(&mut self) -> &mut SmallRng {
+  pub(crate) fn rng_mut(&mut self) -> &mut R {
     &mut self.rng
   }
 
@@ -3684,7 +3670,7 @@ where
 }
 
 /// Pick up to `k` items uniformly at random from `pool` using `rng`.
-fn pick_random<T: Clone>(pool: &[T], k: usize, rng: &mut SmallRng) -> Vec<T> {
+fn pick_random<T: Clone, R: Rng>(pool: &[T], k: usize, rng: &mut R) -> Vec<T> {
   pool
     .iter()
     .sample(rng, k)
@@ -3715,13 +3701,64 @@ pub(crate) fn push_pull_scale(interval: Duration, n: usize) -> Duration {
 /// Used to stagger the first scheduler tick to avoid thundering-herd
 /// at cluster formation time.
 ///
-/// Uses the Endpoint's `SmallRng` (passed in) so the result is
-/// deterministic when the config seed is set (useful in tests).
-fn random_stagger(interval: Duration, rng: &mut SmallRng) -> Duration {
+/// Uses the Endpoint's injected gossip RNG (passed in), so the result is
+/// deterministic for a seeded RNG (useful in tests).
+fn random_stagger<R: Rng>(interval: Duration, rng: &mut R) -> Duration {
   use rand::RngExt;
   let nanos = interval.as_nanos() as u64;
   if nanos == 0 {
     return Duration::ZERO;
   }
   Duration::from_nanos(rng.random_range(0..nanos))
+}
+
+/// A fresh, deterministically-stepped gossip `SmallRng` for tests, so the test
+/// suite can construct an endpoint without threading an RNG. Distinct per call
+/// (a golden-ratio-stepped counter seed) so sibling endpoints in one test never
+/// share a sequence.
+#[cfg(test)]
+fn test_seeded_rng() -> SmallRng {
+  use core::sync::atomic::{AtomicU64, Ordering};
+
+  use rand::SeedableRng;
+  static COUNTER: AtomicU64 = AtomicU64::new(0xA5A5_A5A5_A5A5_A5A5);
+  SmallRng::seed_from_u64(COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed))
+}
+
+/// Test-only seeded constructors mirroring the real ones but supplying
+/// [`test_seeded_rng`], so the test suite need not thread a gossip RNG.
+#[cfg(test)]
+impl<I, A> Endpoint<I, A, SmallRng>
+where
+  I: Id + Data + CheapClone + core::fmt::Debug + core::fmt::Display + Send + Sync + 'static,
+  A: CheapClone
+    + Data
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  #[cfg(feature = "std")]
+  pub(crate) fn new_seeded(cfg: EndpointOptions<I, A>) -> Self {
+    Self::new(cfg, test_seeded_rng())
+  }
+
+  pub(crate) fn new_at_seeded(cfg: EndpointOptions<I, A>, now: Instant) -> Self {
+    Self::new_at(cfg, now, test_seeded_rng())
+  }
+
+  #[cfg(feature = "std")]
+  pub(crate) fn try_new_seeded(cfg: EndpointOptions<I, A>) -> Result<Self, EndpointInitError> {
+    Self::try_new(cfg, test_seeded_rng())
+  }
+
+  pub(crate) fn try_new_at_seeded(
+    cfg: EndpointOptions<I, A>,
+    now: Instant,
+  ) -> Result<Self, EndpointInitError> {
+    Self::try_new_at(cfg, now, test_seeded_rng())
+  }
 }

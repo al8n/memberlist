@@ -101,7 +101,7 @@ fn builds_a_usable_config_bundle() {
     UnreliableTransport::Datagram,
   );
   // Prove the bundle is usable: quinn_proto::Endpoint::new must not panic.
-  // Signature: Endpoint::new(Arc<EndpointOptions>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
+  // Signature: Endpoint::new_seeded(Arc<EndpointOptions>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
   let _server_ep =
     quinn_proto::Endpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, None);
   let _client_ep = quinn_proto::Endpoint::new(cfg.endpoint_arc(), None, true, None);

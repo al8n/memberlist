@@ -195,6 +195,9 @@ pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{EndpointInitError, Error, SizeExceeded, StreamError};
+// The RNG vocabulary backing the `Endpoint<I, A, R>` type parameter (defaulting
+// to `SmallRng`), re-exported so a driver can name the trait bound, seed a
+// `SmallRng`, and inject it without taking its own direct `rand` dependency.
 pub use event::{
   CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
   PingCompleted, PingFailed, PingId, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,
@@ -205,6 +208,7 @@ pub use event::{
 #[cfg(feature = "cidr")]
 pub use ipnet::{AddrParseError, IpNet};
 pub use members::{LocalNodeState, Member, Members};
+pub use rand::{Rng, SeedableRng, rngs::SmallRng};
 pub use stream::{PushPullSnapshot, Stream};
 pub use suspicion::{Confirmation, Suspicion};
 pub use time::Instant;

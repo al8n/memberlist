@@ -23,12 +23,12 @@
 
 use std::net::SocketAddr;
 
+use crate::StreamEndpoint;
 use bytes::Bytes;
 use compio::net::{TcpListener, UdpSocket};
 use hostaddr::HostAddr;
 use memberlist_proto::{
   LabelOptions, Labeled, TlsOptions, TlsRecords, config::EndpointOptions, endpoint::Endpoint,
-  streams::StreamEndpoint,
 };
 use smol_str::SmolStr;
 
@@ -324,9 +324,10 @@ where
     &self.advertise_socket
   }
 
-  async fn run<D>(self, runtime: TransportRuntime<Self, D>)
+  async fn run<D, G>(self, runtime: TransportRuntime<Self, D>, gossip_rng: G)
   where
     D: Delegate<Id = Self::Id, Address = SocketAddr>,
+    G: rand::Rng + Send + Unpin + 'static,
   {
     // `Memberlist::new` is generic over `T` and cannot build the
     // record-layer-specific endpoint; build it here from `self`'s
@@ -340,7 +341,7 @@ where
     // loop starts; each `None` leaves the `Endpoint` at its admit-all
     // default. `BoxedAlive`/`BoxedMerge` forward the boxed dyn so it
     // satisfies the setters' `impl AliveDelegate`/`impl MergeDelegate` bound.
-    let mut ep = Endpoint::new(cfg);
+    let mut ep = Endpoint::new(cfg, gossip_rng);
     if let Some(ad) = runtime.alive_delegate {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -382,7 +383,7 @@ where
       .map(Bytes::copy_from_slice);
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
-    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, Labeled<TlsRecords>, D>(
+    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, Labeled<TlsRecords>, D, G>(
       endpoint,
       self.gossip_socket,
       self.tcp_listener,

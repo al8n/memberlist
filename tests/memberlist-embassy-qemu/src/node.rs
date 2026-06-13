@@ -22,7 +22,9 @@ use embassy_net::{
   udp::{PacketMetadata, UdpSocket},
 };
 use embassy_time::{Duration, Timer};
-use memberlist_embassy::{EndpointOptions, Memberlist, Options, Runner, TransformOptions, now};
+use memberlist_embassy::{
+  EndpointOptions, Memberlist, Options, Runner, SeedableRng, SmallRng, TransformOptions, now,
+};
 use semihosting::println;
 use smol_str::SmolStr;
 use static_cell::StaticCell;
@@ -153,22 +155,24 @@ pub async fn main_task(spawner: Spawner) -> ! {
   let (udp_b, tcp_b) = build_sockets(stack_b, BUFS_B.init(NodeBufs::new()));
 
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)),
     udp_a,
     tcp_a,
     clock,
+    SmallRng::seed_from_u64(1),
   )
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
     Options::new(),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)),
     udp_b,
     tcp_b,
     clock,
+    SmallRng::seed_from_u64(2),
   )
   .expect("build node b");
 
@@ -181,7 +185,9 @@ pub async fn main_task(spawner: Spawner) -> ! {
 
   // B joins A as a seed; then wait for BOTH views to reach two members (A learns B
   // from the inbound push/pull a tick after the exchange), bounded by a deadline.
-  ml_b.join(&[addr(1, PORT)]).await;
+  // Ignoring Err: a failed seed join surfaces as the convergence loop below timing
+  // out, which the test already treats as the failure signal.
+  let _ = ml_b.join(&[addr(1, PORT)]).await;
   println!("join issued; waiting for convergence");
 
   let mut waited = Duration::from_secs(0);

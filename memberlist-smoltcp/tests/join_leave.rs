@@ -55,7 +55,7 @@ fn join_from_seed_then_clean_leave() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)).with_rng_seed(1),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
     &mut da,
     now,
   );
@@ -63,7 +63,7 @@ fn join_from_seed_then_clean_leave() {
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
-    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)).with_rng_seed(2),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
     &mut db,
     now,
   );

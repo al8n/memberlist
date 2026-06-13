@@ -324,11 +324,11 @@ impl InitError {
       E::Encryption(inner) => InitError::Encryption(inner),
       E::Checksum(inner) => InitError::Checksum(inner),
       // `memberlist_embedded::InitError` is `#[non_exhaustive]`, so a wildcard is
-      // required even though every variant it defines today is handled above. A
-      // future engine-only failure mode reaching here surfaces as a generic endpoint
-      // init failure (the sole `EndpointInitError` variant) and would warrant its own
+      // required even though every variant it defines today is handled above and
+      // this arm is unreachable. A future engine-only failure mode reaching here
+      // surfaces as a generic endpoint-init failure and would warrant its own
       // driver variant when added.
-      _ => InitError::Endpoint(EndpointInitError::Entropy),
+      _ => InitError::Endpoint(EndpointInitError::AwarenessMultiplierZero),
     }
   }
 }

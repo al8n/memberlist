@@ -39,6 +39,7 @@ getifs = ["dep:getifs", "dep:iprfc"]
 
 [dependencies]
 memberlist-proto = { workspace = true, features = ["std"] }
+rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
 hostaddr = { workspace = true, features = ["std", "smol_str"] }
 smol_str = { workspace = true }
 # Both backends select compio-driver's "fusion" driver on Linux: io_uring

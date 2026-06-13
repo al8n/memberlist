@@ -149,7 +149,6 @@ pub struct EndpointOptions<I, A> {
   retransmit_mult: u32,
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
-  rng_seed: Option<u64>,
   initial_incarnation: u32,
 }
 
@@ -184,7 +183,6 @@ impl<I, A> EndpointOptions<I, A> {
       retransmit_mult: 4,
       protocol_version: ProtocolVersion::V1,
       delegate_version: DelegateVersion::V1,
-      rng_seed: None,
       initial_incarnation: 1,
     }
   }
@@ -412,47 +410,6 @@ impl<I, A> EndpointOptions<I, A> {
     self
   }
 
-  /// Setter: enable the deterministic RNG seed in place.
-  #[inline(always)]
-  pub const fn set_rng_seed(&mut self, seed: u64) -> &mut Self {
-    self.rng_seed = Some(seed);
-    self
-  }
-
-  /// Builder: set the RNG seed (consuming). Fixes the seed for deterministic
-  /// replay. Use [`maybe_rng_seed`](Self::maybe_rng_seed) to assign the raw
-  /// `Option<u64>` (including `None` for OS entropy).
-  #[must_use]
-  #[inline(always)]
-  pub const fn with_rng_seed(mut self, seed: u64) -> Self {
-    self.rng_seed = Some(seed);
-    self
-  }
-
-  /// Setter: assign the raw `Option<u64>` RNG seed in place.
-  /// `None` reverts to OS entropy; `Some(seed)` fixes the seed.
-  #[inline(always)]
-  pub const fn update_rng_seed(&mut self, seed: Option<u64>) -> &mut Self {
-    self.rng_seed = seed;
-    self
-  }
-
-  /// Builder: assign the raw `Option<u64>` RNG seed (consuming, alias for
-  /// when the raw-wrapper intent is clearest).
-  #[must_use]
-  #[inline(always)]
-  pub const fn maybe_rng_seed(mut self, seed: Option<u64>) -> Self {
-    self.rng_seed = seed;
-    self
-  }
-
-  /// Setter: clear the RNG seed (revert to OS entropy) in place.
-  #[inline(always)]
-  pub const fn clear_rng_seed(&mut self) -> &mut Self {
-    self.rng_seed = None;
-    self
-  }
-
   /// Builder: set the local node's initial incarnation (default 1). A driver
   /// that restarts a crashed node uses this to supersede the incarnation peers
   /// still hold, ensuring the restarted node's Alive wins over any stale Dead
@@ -662,12 +619,6 @@ impl<I, A> EndpointOptions<I, A> {
   #[inline(always)]
   pub const fn delegate_version(&self) -> DelegateVersion {
     self.delegate_version
-  }
-
-  /// Optional deterministic RNG seed.
-  #[inline(always)]
-  pub const fn rng_seed(&self) -> Option<u64> {
-    self.rng_seed
   }
 }
 

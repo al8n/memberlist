@@ -255,6 +255,14 @@ pub enum MemberlistError {
   #[error(transparent)]
   Io(#[from] io::Error),
 
+  /// The operating system entropy source failed while seeding the gossip RNG.
+  /// On a std target this is an unrecoverable platform fault and essentially
+  /// never occurs; it is drawn in the node constructor (which returns this
+  /// `Result`) before the driver task is spawned, so a failure is surfaced here
+  /// rather than panicking in the spawned task.
+  #[error("OS entropy source failed while seeding the gossip RNG")]
+  Entropy(#[source] io::Error),
+
   /// Encryption codec error from memberlist-wire.
   #[error(transparent)]
   Encryption(#[from] memberlist_proto::EncryptionError),

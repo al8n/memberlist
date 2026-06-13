@@ -1,12 +1,18 @@
 //! Memberlist handle: construction, accessors, and the caller-owned poll loop.
 
-use core::{cell::RefCell, net::SocketAddr};
+use core::{
+  cell::RefCell,
+  net::{IpAddr, SocketAddr},
+};
 
 use memberlist_embedded::{
   AliveDelegate, ControlError, Engine, MergeDelegate,
   transform::{CompressionOptions, EncryptionOptions},
 };
-use memberlist_proto::{EndpointOptions, Instant, Node, StreamId, event::PingId, typed::NodeState};
+use memberlist_proto::{
+  EndpointOptions, Instant, Node, Rng, SeedableRng, SmallRng, StreamId, event::PingId,
+  typed::NodeState,
+};
 use smoltcp::{
   iface::{Config as IfConfig, Interface, SocketHandle, SocketSet},
   phy::Device,
@@ -67,6 +73,41 @@ pub(crate) fn endpoint_is_routable(addr: &SocketAddr) -> bool {
   to_endpoint(*addr).addr.is_unicast() && addr.port() != 0
 }
 
+/// Derive the gossip RNG seed for *pinned* (deterministic) mode by FNV-1a
+/// hashing a canonical buffer — a domain tag, the interface seed, then the full
+/// advertise address (IP octets, then port). Folding the interface seed THROUGH
+/// the hash (rather than a trailing XOR) keeps the gossip seed distinct from the
+/// interface RNG and makes it per-node unique: distinct advertise addresses hash
+/// distinctly, so two nodes that pin the same interface seed still get divergent
+/// gossip schedules (a 64-bit hash, so distinctness is overwhelmingly likely
+/// rather than guaranteed for the whole IPv6+port space — adequate for the
+/// realistic cluster sizes smoltcp targets).
+///
+/// Pinned mode is for REPRODUCIBILITY (deterministic tests / replayable
+/// deployments), NOT secrecy: the gossip seed is a pure function of the
+/// interface seed and the public advertise address, so an observer who learns
+/// the interface seed can recompute it. Unpredictability is the property of
+/// *entropy* mode, where the gossip seed is an independent system-entropy draw.
+fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
+  const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+  const GOSSIP_DOMAIN: u64 = 0x9E37_79B9_7F4A_7C15;
+  let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+  let mut fold = |bytes: &[u8]| {
+    for &byte in bytes {
+      acc ^= u64::from(byte);
+      acc = acc.wrapping_mul(FNV_PRIME);
+    }
+  };
+  fold(&GOSSIP_DOMAIN.to_le_bytes());
+  fold(&interface_seed.to_le_bytes());
+  match advertise.ip() {
+    IpAddr::V4(v4) => fold(&v4.octets()),
+    IpAddr::V6(v6) => fold(&v6.octets()),
+  }
+  fold(&advertise.port().to_le_bytes());
+  acc
+}
+
 /// Derive the medium a [`HardwareAddress`] selects, or `None` for a medium this
 /// driver does not support.
 ///
@@ -101,10 +142,13 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 ///
 /// `I` is the node identifier type (e.g. `SmolStr`). `D` is the smoltcp
 /// [`Device`] (e.g. `smoltcp::phy::Loopback` for tests, an ethernet driver in
-/// production). `A` is pinned to `core::net::SocketAddr`.
-pub struct Memberlist<I, D: Device>
+/// production). `A` is pinned to `core::net::SocketAddr`. `R` is the gossip RNG
+/// (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from the interface
+/// seed, while [`with_rng`](Self::with_rng) accepts a caller-supplied one.
+pub struct Memberlist<I, D: Device, R = SmallRng>
 where
   I: memberlist_proto::Id,
+  R: Rng,
 {
   iface: Interface,
   /// The seed handed to smoltcp's interface RNG at construction (TCP ISN /
@@ -121,14 +165,14 @@ where
   /// pipeline, and the join-seed queue. The driver owns only the smoltcp sockets;
   /// the engine owns everything protocol-shaped and is driven each `poll` over a
   /// view of those sockets.
-  engine: Engine<I, SocketHandle>,
+  engine: Engine<I, SocketHandle, R>,
   // `D` is not stored — it is passed in at construction time and then to
   // each `poll` call. `PhantomData` is required so the struct is generic
   // over `D` without actually holding it.
   _device: core::marker::PhantomData<D>,
 }
 
-impl<I, D: Device> Memberlist<I, D>
+impl<I, D: Device> Memberlist<I, D, SmallRng>
 where
   I: memberlist_proto::Id,
 {
@@ -365,9 +409,405 @@ where
       return Err(InitError::ZeroCloseTimeout);
     }
 
-    // 5. Resolve the interface RNG seed: pinned value, or a fresh system-entropy
-    //    draw. A nonzero seed is what keeps smoltcp's TCP ISN and ephemeral port
-    //    selection from repeating across reboots.
+    // 5. Resolve the interface RNG seed and a separate gossip RNG seed. The
+    //    interface seed drives smoltcp's TCP ISN and ephemeral port selection (a
+    //    nonzero value keeps those from repeating across reboots). The gossip
+    //    seed is always kept distinct from it, but the two modes differ:
+    //    - entropy mode (no pinned seed, the production default) draws an
+    //      INDEPENDENT system-entropy seed for gossip, so the gossip schedule is
+    //      uncorrelated with the interface RNG and cannot be inferred from the
+    //      TCP stack;
+    //    - pinned mode derives the gossip seed deterministically from the pinned
+    //      interface seed and the node's advertise address (reproducible, and
+    //      per-node distinct so two nodes never share a schedule) — see
+    //      `gossip_seed_from`; this mode is for replayability, not secrecy.
+    let (random_seed, gossip_seed) = match iface.random_seed {
+      Some(s) => (s, gossip_seed_from(s, ep_cfg.advertise_addr_ref())),
+      None => {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).map_err(|_| InitError::Entropy)?;
+        (
+          u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+          u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
+        )
+      }
+    };
+
+    // 6. Build the interface. The medium is validated (step 1) and the seed is
+    //    set, so `Interface::new` cannot panic on the medium assertion. It stores
+    //    the hardware address without re-checking it, but steps 1–2 already
+    //    rejected any non-unicast Ethernet MAC, so the stored address is a valid
+    //    unicast L2 identity (the `Ip` variant carries no L2 address).
+    let mut ic = IfConfig::new(iface.hardware_addr);
+    ic.random_seed = random_seed;
+    let mut iface_obj = Interface::new(ic, device, to_smoltcp_instant(now));
+
+    // 7. Apply the configured IP addresses. Every address was validated unicast or
+    //    unspecified in step 4, so `update_ip_addrs`'s internal `check_ip_addrs`
+    //    cannot panic. smoltcp's address store is a bounded `heapless::Vec`; a push
+    //    past `IFACE_MAX_ADDR_COUNT` returns the item. Capture that overflow out of
+    //    the closure and surface it rather than silently dropping addresses.
+    let mut overflow = false;
+    iface_obj.update_ip_addrs(|addrs| {
+      for cidr in &iface.ip_addrs {
+        if addrs.push(*cidr).is_err() {
+          overflow = true;
+          break;
+        }
+      }
+    });
+    if overflow {
+      return Err(InitError::TooManyIpAddresses);
+    }
+
+    // 8. Apply the configured routes. smoltcp's route table is likewise bounded;
+    //    `push` past `IFACE_MAX_ROUTE_COUNT` returns the route.
+    let mut route_overflow = false;
+    iface_obj.routes_mut().update(|table| {
+      for route in &iface.routes {
+        if table.push(*route).is_err() {
+          route_overflow = true;
+          break;
+        }
+      }
+    });
+    if route_overflow {
+      return Err(InitError::TooManyRoutes);
+    }
+
+    let iface = iface_obj;
+
+    // Allocate a gossip UDP socket with per-packet metadata rings and a flat
+    // payload arena.  `SocketSet::new(Vec::new())` creates an alloc-backed,
+    // growable socket storage — smoltcp accepts any `Into<ManagedSlice>`.
+    let mut sockets = SocketSet::new(std::vec::Vec::new());
+
+    // Floor each UDP payload arena at "configured datagram slots × max on-wire
+    // datagram". The machine caps an outbound gossip datagram's PLAINTEXT at
+    // `gossip_mtu`; the on-wire datagram can exceed that by up to
+    // `ENCRYPTED_WRAPPER_OVERHEAD` when encryption is enabled. smoltcp's
+    // `udp::Socket::send_slice` fails (and silently drops, since gossip is
+    // best-effort) when the payload arena cannot hold the datagram, so an arena
+    // smaller than `udp_*_packets * max_datagram` could reject in-budget gossip
+    // the machine legitimately emitted. Flooring here keeps the arenas in
+    // lockstep with the configured gossip MTU — raising `gossip_mtu`
+    // auto-scales them — while still honoring a larger explicitly-configured
+    // arena. The metadata slot counts (`udp_*_packets`) stay as configured.
+    // `gossip_mtu` is bounded above (see the ceiling check), so this addition
+    // cannot overflow. The `packets * max_datagram` products still can on a
+    // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
+    // `checked_mul` and reject an overflowing arena rather than wrapping to an
+    // undersized one.
+    let max_datagram = ep_cfg.gossip_mtu()
+      + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+      + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
+      cfg
+        .udp_rx_packets
+        .checked_mul(max_datagram)
+        .ok_or(InitError::UdpArenaTooLarge)?,
+    );
+    let udp_tx_arena = cfg.udp_tx_payload_bytes.max(
+      cfg
+        .udp_tx_packets
+        .checked_mul(max_datagram)
+        .ok_or(InitError::UdpArenaTooLarge)?,
+    );
+
+    let udp_rx = udp::PacketBuffer::new(
+      vec![udp::PacketMetadata::EMPTY; cfg.udp_rx_packets],
+      vec![0u8; udp_rx_arena],
+    );
+    let udp_tx = udp::PacketBuffer::new(
+      vec![udp::PacketMetadata::EMPTY; cfg.udp_tx_packets],
+      vec![0u8; udp_tx_arena],
+    );
+    let mut udp_sock = udp::Socket::new(udp_rx, udp_tx);
+    // Bind the gossip UDP socket. `bind` fails only on port 0 (rejected above) or
+    // an already-open socket (this one is fresh), so it never errors in practice;
+    // propagate rather than `expect` so no panic can escape this fallible
+    // constructor even if that invariant ever changes.
+    udp_sock.bind(cfg.port).map_err(|_| InitError::ZeroPort)?;
+    let udp = sockets.add(udp_sock);
+
+    // Reject a non-routable advertise address BEFORE the not-local check below. A
+    // node must advertise an address its peers can route a reply to; an
+    // unspecified/multicast/broadcast IP or port 0 would be gossiped cluster-wide
+    // and then be useless to every peer that selected it as an egress destination
+    // (smoltcp's socket layer rejects it as `Unaddressable` / its route lookup
+    // asserts unicast). The engine re-checks this (its `try_new_at` rejects a
+    // non-routable advertise), but the driver's `has_ip_addr` not-local check below
+    // runs before the engine is built and would otherwise mask the unspecified
+    // address as `AdvertiseAddrNotLocal` (`0.0.0.0` is never an assigned address).
+    // Screen on the same `is_unicast` predicate here so a non-routable advertise is
+    // the precise `NonRoutableAdvertiseAddr` regardless of the interface's
+    // addresses.
+    if !endpoint_is_routable(ep_cfg.advertise_addr_ref()) {
+      return Err(InitError::NonRoutableAdvertiseAddr(
+        *ep_cfg.advertise_addr_ref(),
+      ));
+    }
+
+    // The advertised IP must be one the interface actually holds. smoltcp's
+    // ingress drops any packet whose destination is not an assigned address, so
+    // a node advertising an IP the interface lacks is unreachable on both planes
+    // — peers gossip and dial an address its own interface discards. Check with
+    // smoltcp's own `has_ip_addr`, the exact predicate that gates ingress in
+    // `process_ipv4` / `process_ipv6`. (This and the routable screen above are the
+    // advertise-address checks that need the interface in scope; the port-match
+    // check lives in the engine.)
+    let advertised_ip = to_endpoint(*ep_cfg.advertise_addr_ref()).addr;
+    if !iface.has_ip_addr(advertised_ip) {
+      return Err(InitError::AdvertiseAddrNotLocal(
+        *ep_cfg.advertise_addr_ref(),
+      ));
+    }
+
+    // Build the engine from the driver's port / timeout config. The `Options`
+    // name collision: the driver's `crate::Options` carries link-layer sizing
+    // (socket buffers, UDP arenas, `tcp_pool_size`) that stays on the driver,
+    // while `memberlist_embedded::Options` carries only the port and close timeout
+    // the engine reads directly. `try_new_at` (not `new_at`) so a machine entropy
+    // failure, an unusable encryption keyring, or a non-routable / port-mismatched
+    // advertise address becomes a typed `InitError` rather than a panic. The
+    // engine installs the routable-address admission filter and the
+    // compression/encryption/label transforms internally.
+    let embedded_cfg = memberlist_embedded::Options::new()
+      .with_port(cfg.port)
+      .with_close_timeout(cfg.close_timeout);
+    // Forward the CIDR policy into the engine, which enforces it at the gossip
+    // source (recv), the reliable accept, and membership admission.
+    #[cfg(feature = "cidr")]
+    let embedded_cfg = match cfg.cidr_policy.clone() {
+      Some(policy) => embedded_cfg.with_cidr_policy(policy),
+      None => embedded_cfg,
+    };
+    // Seed the machine's gossip RNG from the domain-separated `gossip_seed`
+    // (step 5), never the raw interface seed. The core performs no entropy
+    // acquisition of its own.
+    let mut engine = Engine::try_new_at(
+      embedded_cfg,
+      transform,
+      ep_cfg,
+      now,
+      SmallRng::seed_from_u64(gossip_seed),
+    )
+    .map_err(InitError::from_embedded)?;
+
+    // Allocate pooled TCP sockets for the reliable plane and register their
+    // handles with the engine's reliable plane (the pool authority). Each socket
+    // gets independent rx/tx ring buffers sized by the config. One socket is
+    // immediately moved into listen state and installed as the engine's listener;
+    // the rest stay free for outbound dials and accepted inbound connections.
+    for _ in 0..cfg.tcp_pool_size {
+      let rx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_rx_bytes]);
+      let tx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_tx_bytes]);
+      engine
+        .plane_mut()
+        .pool
+        .push(sockets.add(tcp::Socket::new(rx, tx)));
+    }
+    // Dedicate one pooled socket to listening for inbound reliable connections.
+    if let Some(h) = engine.plane_mut().pool.take() {
+      // `listen` fails only on port 0 (rejected above) or an already-open
+      // socket (this one is fresh); propagate rather than `expect` so no panic
+      // can escape this fallible constructor even if that invariant changes.
+      sockets
+        .get_mut::<tcp::Socket>(h)
+        .listen(cfg.port)
+        .map_err(|_| InitError::ZeroPort)?;
+      engine.set_listener(h);
+    }
+
+    Ok(Self {
+      iface,
+      iface_random_seed: random_seed,
+      sockets,
+      udp,
+      engine,
+      _device: core::marker::PhantomData,
+    })
+  }
+}
+
+impl<I, D: Device, R: Rng> Memberlist<I, D, R>
+where
+  I: memberlist_proto::Id,
+{
+  /// Like [`new`](Self::new) but with a caller-supplied gossip RNG; the caller
+  /// owns seeding it.
+  ///
+  /// Identical to [`try_new`](Self::try_new) in every respect except the gossip
+  /// RNG: instead of deriving a [`SmallRng`] seed from the interface seed, the
+  /// engine's gossip schedule is driven by `rng` exactly as supplied. The
+  /// separate [`InterfaceOptions::random_seed`](crate::InterfaceOptions) still
+  /// seeds smoltcp's own TCP stack RNG (ISN / ephemeral port selection) here as
+  /// in [`new`](Self::new); only the gossip RNG differs.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`InitError`] on the same conditions as [`try_new`](Self::try_new)
+  /// (an unsupported or mismatched medium, a non-unicast hardware or IP address,
+  /// a missing/over-capacity IP address or route, an interface entropy failure,
+  /// an unusable encryption keyring, or a machine-endpoint init failure).
+  pub fn with_rng(
+    cfg: Options,
+    iface: InterfaceOptions,
+    transform: TransformOptions,
+    ep_cfg: EndpointOptions<I, SocketAddr>,
+    device: &mut D,
+    now: Instant,
+    rng: R,
+  ) -> Result<Self, InitError> {
+    // 1. Validate the medium up front: smoltcp's `Interface::new` asserts the
+    //    hardware address's medium equals the device's, and a mismatch panics
+    //    deep inside it. Derive the configured medium ourselves (smoltcp's
+    //    `HardwareAddress::medium` is `pub(crate)`); a hardware address whose
+    //    medium this driver does not support (Ieee802154) yields `None` and is
+    //    rejected here rather than reaching an `unreachable!()`. A medium that is
+    //    supported but differs from the device's is a `MediumMismatch`.
+    let expected =
+      hardware_address_medium(&iface.hardware_addr).ok_or(InitError::UnsupportedMedium)?;
+    let actual = device.capabilities().medium;
+    if expected != actual {
+      return Err(InitError::MediumMismatch(MediumMismatch {
+        expected,
+        actual,
+      }));
+    }
+
+    // 2. Validate the Ethernet hardware address is unicast. smoltcp's
+    //    `Interface::new` stores the configured hardware address WITHOUT calling
+    //    `check_hardware_addr` (that runs only on the `set_hardware_addr` path the
+    //    driver never uses), so a broadcast/multicast MAC would not panic but
+    //    would install an invalid L2 source/acceptance identity. Match the
+    //    `Ethernet` variant directly and test the inner MAC with
+    //    `EthernetAddress::is_unicast` (`!(is_broadcast() || is_multicast())`) —
+    //    NOT `HardwareAddress::is_unicast`, which is `unreachable!()` for the `Ip`
+    //    variant and would itself panic. The `Ip` variant has no L2 address and
+    //    is always acceptable.
+    if let HardwareAddress::Ethernet(mac) = &iface.hardware_addr {
+      if !mac.is_unicast() {
+        return Err(InitError::NonUnicastHardwareAddress(iface.hardware_addr));
+      }
+    }
+
+    // 3. An interface with no address silently drops every packet, so reject it.
+    if iface.ip_addrs.is_empty() {
+      return Err(InitError::MissingIpAddress);
+    }
+
+    // 4. Validate every configured IP address is acceptable to smoltcp. Its
+    //    `update_ip_addrs` calls `check_ip_addrs`, which `panic!`s on any address
+    //    that is neither unicast nor unspecified. Mirror that EXACT condition here
+    //    (permitting the unspecified address, which smoltcp itself permits) so a
+    //    multicast/broadcast CIDR is a typed error instead of a panic. Done before
+    //    `update_ip_addrs` (step 7) so the capacity-overflow check there still runs
+    //    afterward over already-unicast-validated addresses.
+    for cidr in &iface.ip_addrs {
+      if !cidr.address().is_unicast() && !cidr.address().is_unspecified() {
+        return Err(InitError::NonUnicastIpAddress(*cidr));
+      }
+    }
+
+    // Validate every configured route's gateway. smoltcp resolves an off-link
+    // next hop through its neighbor cache on Ethernet egress, and that lookup
+    // asserts the protocol address is unicast (a release `assert!`); a route
+    // whose `via_router` family differs from its prefix can never resolve a next
+    // hop. Both would surface only at first egress — a panic / dead route on an
+    // already-constructed node — so reject a malformed route here as a typed
+    // construction error instead.
+    for route in &iface.routes {
+      if !route.via_router.is_unicast() {
+        return Err(InitError::NonUnicastRouteGateway(*route));
+      }
+      if route.cidr.address().version() != route.via_router.version() {
+        return Err(InitError::RouteFamilyMismatch(*route));
+      }
+    }
+
+    // Reject a zero port up front. smoltcp's `udp::Socket::bind` and
+    // `tcp::Socket::listen` reject port 0 (`Unaddressable`); the bind/listen
+    // calls below would otherwise panic inside this fallible constructor on a
+    // runtime-supplied zero port. (The engine also rejects a zero port, but the
+    // driver binds its sockets before constructing the engine, so screen here
+    // first.) Validate before allocating any sockets.
+    if cfg.port == 0 {
+      return Err(InitError::ZeroPort);
+    }
+
+    // Reject a gossip MTU whose on-wire datagram cannot fit a UDP packet. The
+    // UDP arenas are sized from `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` (the
+    // largest on-wire datagram the machine can emit); an over-ceiling `gossip_mtu`
+    // would overflow that addition — a panic in a checked build, a wrap to an
+    // undersized arena in release that then silently truncates in-budget gossip.
+    // Bounding it here makes every downstream
+    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
+    // and mirrors the async drivers' reject-not-clamp doctrine. (The engine
+    // re-validates it too; the driver needs it before sizing the UDP arenas.) Done
+    // before any UDP allocation.
+    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
+      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
+      return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
+        gossip_mtu: ep_cfg.gossip_mtu(),
+        ceiling: gossip_mtu_ceiling,
+      }));
+    }
+
+    // Reject a sub-2 TCP pool. Construction dedicates one pooled socket to the
+    // listener and uses the rest for dials/accepts: 0 sockets is no listener and
+    // no reliable plane at all, and 1 leaves the listener holding the only socket
+    // with none free to dial — so the node could never dial a seed to join. The
+    // functional minimum is a listener plus one dial/accept socket. Checked
+    // before allocating the pool below.
+    if cfg.tcp_pool_size < 2 {
+      return Err(InitError::TcpPoolTooSmall);
+    }
+
+    // Reject a zero-length TCP socket buffer. smoltcp's `RingBuffer::new` does
+    // not panic on empty storage — it builds a permanently-empty ring — so a
+    // 0-byte rx (or tx) buffer would yield a socket that can never receive (or
+    // send): a silently-dead reliable plane rather than a construction error.
+    // Checked before allocating the per-socket rings below.
+    if cfg.tcp_socket_rx_bytes == 0 || cfg.tcp_socket_tx_bytes == 0 {
+      return Err(InitError::ZeroTcpSocketBuffer);
+    }
+
+    // Reject a TCP receive buffer over smoltcp's 1 GiB cap. smoltcp's
+    // `tcp::Socket::new` `panic!`s when the receive-buffer capacity exceeds
+    // `TCP_RX_BUFFER_MAX` (`> 1 << 30`); a larger `tcp_socket_rx_bytes` would
+    // panic inside this fallible constructor. The transmit buffer has no such
+    // limit, so it is not capped. Checked before allocating the rings below.
+    if cfg.tcp_socket_rx_bytes > TCP_RX_BUFFER_MAX {
+      return Err(InitError::TcpRxBufferTooLarge);
+    }
+
+    // Reject zero UDP packet-metadata slots. The gossip `udp::PacketBuffer` is
+    // built with `udp_*_packets` metadata slots; zero slots is a ring that can
+    // never enqueue or dequeue a datagram, so gossip could never be received (or
+    // sent): a silently-dead gossip plane. Checked before allocating the UDP
+    // packet buffers below.
+    if cfg.udp_rx_packets == 0 || cfg.udp_tx_packets == 0 {
+      return Err(InitError::ZeroUdpPackets);
+    }
+
+    // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
+    // graceful-close drain: a connection still `Closing` past `now +
+    // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
+    // graceful close is force-aborted immediately — the drain never runs and an
+    // in-flight push/pull response is truncated. (The engine also rejects it; the
+    // driver screens it here with the rest of its pure-`Options` checks.)
+    if cfg.close_timeout.is_zero() {
+      return Err(InitError::ZeroCloseTimeout);
+    }
+
+    // Resolve the interface RNG seed only. The interface seed drives smoltcp's
+    // TCP ISN and ephemeral port selection (a nonzero value keeps those from
+    // repeating across reboots). Unlike `try_new`, no gossip seed is derived: the
+    // caller-supplied `rng` IS the gossip RNG, so this constructor never calls
+    // `gossip_seed_from`.
     let random_seed = match iface.random_seed {
       Some(s) => s,
       None => {
@@ -526,8 +966,11 @@ where
       Some(policy) => embedded_cfg.with_cidr_policy(policy),
       None => embedded_cfg,
     };
-    let mut engine =
-      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now).map_err(InitError::from_embedded)?;
+    // The caller owns the gossip RNG: hand `rng` straight to the engine without
+    // deriving a seed (the `gossip_seed_from` path is `try_new`'s alone). The
+    // core performs no entropy acquisition of its own.
+    let mut engine = Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng)
+      .map_err(InitError::from_embedded)?;
 
     // Allocate pooled TCP sockets for the reliable plane and register their
     // handles with the engine's reliable plane (the pool authority). Each socket

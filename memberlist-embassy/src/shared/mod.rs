@@ -17,7 +17,10 @@ use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use memberlist_embedded::Engine;
-use memberlist_proto::event::{Event, PingId, StreamId};
+use memberlist_proto::{
+  Rng, SmallRng,
+  event::{Event, PingId, StreamId},
+};
 
 use crate::{error::OpError, stream_io::SlotId};
 
@@ -58,14 +61,16 @@ pub(crate) struct Waiters {
 
 /// The state both the handle and the run loop reach.
 ///
-/// Shared via [`Rc`] (single-core cooperative). `I` is the node id type.
-pub(crate) struct Shared<I>
+/// Shared via [`Rc`] (single-core cooperative). `I` is the node id type; `R` is
+/// the gossip RNG (defaulting to [`SmallRng`]).
+pub(crate) struct Shared<I, R = SmallRng>
 where
   I: memberlist_proto::Id,
+  R: Rng,
 {
   /// The transport-agnostic driving core (SWIM machine, reliable-plane state +
   /// pool, gossip codec, join-seed queue), behind interior mutability.
-  pub(crate) engine: RefCell<Engine<I, SlotId>>,
+  pub(crate) engine: RefCell<Engine<I, SlotId, R>>,
   /// The pump loop's single wake. Producers: the handle (when it enqueues
   /// `join` / `leave` / `ping` / `send*` work) AND every worker (when it advances
   /// its mailbox — inbound bytes, drained outbound, a FIN/reset). Sole consumer:
@@ -96,12 +101,12 @@ where
 /// observation channel) rather than growing memory without bound.
 const APP_EVENTS_CAP: usize = 1024;
 
-impl<I> Shared<I>
+impl<I, R: Rng> Shared<I, R>
 where
   I: memberlist_proto::Id,
 {
   /// Wrap a constructed engine as shared state with empty signals/waiters.
-  pub(crate) fn new(engine: Engine<I, SlotId>) -> Self {
+  pub(crate) fn new(engine: Engine<I, SlotId, R>) -> Self {
     Self {
       engine: RefCell::new(engine),
       pump_wake: Signal::new(),
@@ -242,7 +247,7 @@ where
 /// learned at least one peer. Kept here so the handle and any future caller share
 /// one definition of "joined".
 #[inline]
-pub(crate) fn is_joined<I>(shared: &Shared<I>) -> bool
+pub(crate) fn is_joined<I, R: Rng>(shared: &Shared<I, R>) -> bool
 where
   I: memberlist_proto::Id,
 {
@@ -251,7 +256,7 @@ where
 
 /// The local advertised address — used by the handle's convenience forwards.
 #[inline]
-pub(crate) fn advertise_address<I>(shared: &Shared<I>) -> SocketAddr
+pub(crate) fn advertise_address<I, R: Rng>(shared: &Shared<I, R>) -> SocketAddr
 where
   I: memberlist_proto::Id,
 {

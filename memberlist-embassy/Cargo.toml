@@ -70,6 +70,7 @@ embassy-time = { workspace = true }
 embassy-sync = { workspace = true }
 embassy-futures = { workspace = true }
 bytes = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 # A time driver so `embassy_time::Instant::now()` works in the unit tests (the

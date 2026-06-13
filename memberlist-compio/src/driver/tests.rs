@@ -3,13 +3,14 @@ use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
+use crate::StreamEndpoint;
 use bytes::Bytes;
 use memberlist_proto::{
   Instant, RawRecords,
   config::EndpointOptions,
   endpoint::Endpoint,
   event::{PushPullKind, StreamId},
-  streams::{ExchangeId, LabelOptions, StreamAction, StreamEndpoint},
+  streams::{ExchangeId, LabelOptions, StreamAction},
 };
 use smol_str::SmolStr;
 
@@ -25,10 +26,13 @@ fn addr(port: u16) -> SocketAddr {
 }
 
 fn test_endpoint() -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
-  let ep = Endpoint::new(EndpointOptions::new(
-    SmolStr::new("capture-test"),
-    "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-  ));
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("capture-test"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
   StreamEndpoint::new(
     ep,
     LabelOptions::new_in(Some(b"capture-test".to_vec()), ()),
@@ -146,7 +150,7 @@ async fn dispatch_gossip_drops_malformed_datagram() {
     &b"\xff\xfe\xfd\xfc not a frame"[..],
     &[0x01u8; 64][..],
   ] {
-    dispatch_gossip::<SmolStr, SocketAddr, RawRecords>(
+    dispatch_gossip::<SmolStr, SocketAddr, RawRecords, _>(
       &mut endpoint,
       src,
       datagram,
@@ -169,7 +173,7 @@ async fn dispatch_gossip_drops_malformed_datagram() {
 async fn gossip_recv_buf_len_tracks_mtu_and_clamps_at_ceiling() {
   // Default MTU endpoint: buffer is mtu + overhead, strictly below the ceiling.
   let small = test_endpoint();
-  let small_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords>(&small);
+  let small_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords, _>(&small);
   assert_eq!(
     small_len,
     small.gossip_mtu()
@@ -190,6 +194,7 @@ async fn gossip_recv_buf_len_tracks_mtu_and_clamps_at_ceiling() {
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     )
     .with_gossip_mtu(GOSSIP_RECV_BUF_MAX),
+    crate::gossip_rng().expect("test: OS entropy"),
   );
   let big: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
     ep,
@@ -197,7 +202,7 @@ async fn gossip_recv_buf_len_tracks_mtu_and_clamps_at_ceiling() {
     Box::new(|_| None),
     Box::new(|a: &SocketAddr| *a),
   );
-  let big_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords>(&big);
+  let big_len = gossip_recv_buf_len::<SmolStr, SocketAddr, RawRecords, _>(&big);
   assert_eq!(
     big_len, GOSSIP_RECV_BUF_MAX,
     "a near-ceiling gossip_mtu clamps the recv buffer at GOSSIP_RECV_BUF_MAX",
@@ -214,7 +219,7 @@ async fn drain_helpers_report_no_progress_when_idle() {
   let (ready_tx, _ready_rx) = flume::unbounded::<BridgeReady>();
 
   assert!(
-    !drain_actions::<SmolStr, SocketAddr, RawRecords>(
+    !drain_actions::<SmolStr, SocketAddr, RawRecords, _>(
       &mut endpoint,
       &mut bridges,
       &ready_tx,
@@ -224,7 +229,7 @@ async fn drain_helpers_report_no_progress_when_idle() {
     "an idle endpoint queues no actions",
   );
   assert!(
-    !drain_transport_transmits::<SmolStr, SocketAddr, RawRecords>(&mut endpoint, &bridges),
+    !drain_transport_transmits::<SmolStr, SocketAddr, RawRecords, _>(&mut endpoint, &bridges),
     "an idle endpoint queues no transport transmits",
   );
 }

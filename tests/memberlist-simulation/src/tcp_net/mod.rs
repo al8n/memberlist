@@ -47,6 +47,7 @@ use memberlist_proto::{
   streams::{ExchangeId, LabelOptions, StreamAction, StreamEndpoint},
   typed::{Alive, Message, Node, Suspect},
 };
+use rand::{SeedableRng, rngs::SmallRng};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
@@ -198,10 +199,13 @@ impl TcpCluster {
       .with_probe_interval(probe_interval)
       .with_probe_timeout(probe_timeout)
       .with_suspicion_mult(4)
-      .with_retransmit_mult(4)
-      .with_rng_seed(addr.port() as u64);
+      .with_retransmit_mult(4);
     let now = self.clock.now();
-    let mut ep = Endpoint::new_at(cfg, now);
+    let mut ep = Endpoint::new_at(
+      cfg,
+      now,
+      SmallRng::seed_from_u64(crate::rng_seed_from_addr(&addr)),
+    );
     ep.start_scheduling(now);
     let configured_label = if self.unlabeled_hosts.contains(&addr) {
       None

@@ -5,8 +5,16 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::{CompressionOptions, EncryptionOptions, Keyring, SecretKey};
+use memberlist_proto::{
+  CompressionOptions, EncryptionOptions, Keyring, SecretKey, SeedableRng, SmallRng,
+};
 use smol_str::SmolStr;
+
+/// A fixed-seed gossip RNG for the engine constructors. These are single-node
+/// state tests; a deterministic seed keeps them reproducible.
+fn test_rng() -> SmallRng {
+  SmallRng::seed_from_u64(42)
+}
 
 struct NoGossip;
 
@@ -44,15 +52,17 @@ impl GossipIo for CaptureGossip {
 
 /// Drive `engine` until it emits at least one outbound gossip datagram (or the
 /// budget of pumps elapses), returning the captured datagrams. A peer is
-/// injected first so gossip has a destination.
+/// injected first so gossip has a destination. Only the checksum wire-shape
+/// tests consume it, so it shares their feature gate.
+#[cfg(feature = "checksum-crc32")]
 fn capture_gossip(transform: TransformOptions) -> std::vec::Vec<std::vec::Vec<u8>> {
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
-  let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now).expect("valid configuration");
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let mut engine =
+    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("valid configuration");
   engine.start(now);
   // A peer to gossip TO, so `pump` emits at least one outbound gossip datagram.
   engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
@@ -163,10 +173,9 @@ fn make_engine() -> Engine<SmolStr, u32> {
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now)
+  Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
     .expect("valid configuration must construct without error")
 }
 
@@ -240,11 +249,11 @@ fn cidr_policy_gates_membership_admission_by_advertised_address() {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10))
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
+      .expect("construct");
   engine.start(now);
 
   // Routable but outside 10.0.0.0/8 — rejected by the policy.
@@ -285,11 +294,11 @@ fn set_alive_delegate_preserves_the_cidr_policy() {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10))
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
+      .expect("construct");
   // An accept-all delegate installed AFTER the policy must not loosen it.
   engine.set_alive_delegate(AcceptAll);
   engine.start(now);
@@ -329,11 +338,11 @@ fn cidr_blocked_send_reliable_fails_not_succeeds() {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10))
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
+      .expect("construct");
 
   // Seed a reliable slot for the dial plus a listener slot, so the Connect drives
   // a real dial this tick rather than deferring to PendingDial.
@@ -386,10 +395,10 @@ fn rejected_inbound_accept_returns_its_slot_to_the_pool() {
   // A zero inbound-stream ceiling refuses every passive-open admission while the
   // node stays running, so `check_listener` always takes the `None` arm.
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
-    .with_rng_seed(42)
     .with_max_inbound_streams(Some(0));
   let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
+      .expect("construct");
 
   // Two free reliable slots plus a listener on a third: capacity is three.
   engine.plane_mut().pool.push(10);
@@ -424,11 +433,11 @@ fn cidr_blocked_unreliable_send_emits_no_datagram() {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10))
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946)).with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now).expect("construct");
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
+      .expect("construct");
   engine.start(now);
   let mut stream = NoStream::with_pool(0);
 
@@ -722,8 +731,7 @@ fn try_new_at_rejects_unsupported_checksum_algorithm() {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("bad-checksum"), node_addr(7946))
-      .with_rng_seed(42);
+    memberlist_proto::EndpointOptions::new(SmolStr::new("bad-checksum"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
 
   // Murmur3 is absent in this build. The selection is accepted by
@@ -732,7 +740,7 @@ fn try_new_at_rejects_unsupported_checksum_algorithm() {
   let transform = TransformOptions::default()
     .with_checksum(ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3));
 
-  let err = Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now)
+  let err = Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now, test_rng())
     .map(|_| ())
     .expect_err("unsupported checksum algorithm must be rejected at construction");
   assert!(
@@ -750,13 +758,12 @@ fn try_new_at_accepts_disabled_checksum() {
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
-  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("no-checksum"), node_addr(7946))
-    .with_rng_seed(42);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("no-checksum"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let transform = TransformOptions::default().with_checksum(ChecksumOptions::new());
 
   assert!(
-    Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now).is_ok(),
+    Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now, test_rng()).is_ok(),
     "a disabled checksum policy must always construct"
   );
 }
@@ -817,13 +824,13 @@ fn gossip_carries_and_checks_the_configured_label() {
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("alpha"), node_addr(7946)).with_rng_seed(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("alpha"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let transform = TransformOptions::new()
     .with_label(Some(b"alpha".to_vec()))
     .expect("valid label");
-  let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now).expect("valid config");
+  let mut engine =
+    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("valid config");
   engine.start(now);
 
   // ── Ingress: unlabeled datagram must be dropped. ─────────────────────────
