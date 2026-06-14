@@ -20,8 +20,9 @@ use std::{
 };
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, Options,
-  QuicMemberlist, QuicOptions, QuicTransportOptions, Resolver, SocketAddrResolver, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, MergeDelegate,
+  Options, QuicOptions, QuicTransport, QuicTransportOptions, Resolver, SocketAddrResolver,
+  VoidDelegate,
 };
 use memberlist_proto::{
   UnreliableTransport,
@@ -99,16 +100,16 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// Build a `Memberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
 /// The concrete bound address is read back from
-/// [`QuicMemberlist::advertise_address`] after construction, so no test
+/// [`Memberlist::advertise_address`] after construction, so no test
 /// hard-codes a port — a hard-coded port would collide with a sibling test
 /// binding the same value on another libtest thread in this binary.
 ///
 /// The membership-input address type is `SocketAddr`, so the construction
 /// resolver is the identity `SocketAddrResolver` (never invoked for a resolved
 /// advertise).
-async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
   make_quic_with(id, qcfg, MemberlistOptions::new()).await
 }
 
@@ -118,15 +119,15 @@ async fn make_quic_with(
   id: &str,
   qcfg: QuicOptions,
   mopts: MemberlistOptions,
-) -> QuicMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   )
   .with_memberlist(mopts);
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -258,8 +259,8 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
   let qcfg = support::self_trusted_quic_config();
   // This joiner resolves `String` service keys via `EmptyResolver`, so its
   // membership-input address type is `String` (not the default `HostAddr`).
-  let joiner: QuicMemberlist<SmolStr, String> = QuicMemberlist::<SmolStr, String>::new(
-    Options::new(
+  let joiner: Memberlist<SmolStr, String> = Memberlist::new(
+    Options::<QuicTransport<SmolStr, String>>::new(
       QuicTransportOptions::<SmolStr, String>::new()
         .with_local_id(SmolStr::new("joiner"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
@@ -455,14 +456,14 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   // 1 MiB plaintext gossip_mtu — far above the 65467-byte ceiling. A
   // near-MTU gossip packet built at this size would always exceed the
   // 65507-byte UDP datagram limit and be silently dropped.
-  let opts = Options::new(
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("reject"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(support::self_trusted_quic_config()),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1 << 20));
-  let res = QuicMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -485,14 +486,14 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   }
 
   // Just under the ceiling (65466 < 65467) must construct successfully.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("accept"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(support::self_trusted_quic_config()),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(65507 - 30 - 10 - 1));
-  let m = QuicMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -1007,8 +1008,8 @@ async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
   let seed = make_quic("rr-seed", qcfg_seed).await;
 
   // The joiner installs a reject-all admission `MergeDelegate` via `Options`.
-  let joiner: QuicMemberlist<SmolStr, SocketAddr> = QuicMemberlist::<SmolStr, SocketAddr>::new(
-    Options::new(
+  let joiner: Memberlist<SmolStr, SocketAddr> = Memberlist::new(
+    Options::<QuicTransport<SmolStr, SocketAddr>>::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("rr-joiner"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))

@@ -11,9 +11,8 @@ use std::{
 /// Stream of memberlist events. Constructed via
 /// [`Memberlist::events`](crate::Memberlist::events).
 ///
-/// Generic over the wire id / address types `<I, A>`; pinned aliases
-/// like [`TcpMemberlist`](crate::TcpMemberlist) instantiate this as
-/// `EventStream<SmolStr, SocketAddr>` through the
+/// Generic over the wire id / address types `<I, A>`; the
+/// [`Memberlist`](crate::Memberlist) handle instantiates this through its
 /// [`Memberlist::events`](crate::Memberlist::events) signature.
 ///
 /// **Concurrency model:** flume MPMC — multiple `events()` calls each

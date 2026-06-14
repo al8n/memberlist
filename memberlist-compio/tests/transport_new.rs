@@ -16,9 +16,9 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  Address, FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
-  OsResolver, SocketAddrResolver, StreamTransportOptions, TcpMemberlist, TcpTransportOptions,
-  VoidDelegate,
+  Address, FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions,
+  Options, OsResolver, SocketAddrResolver, StreamTransportOptions, TcpTransport,
+  TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -36,17 +36,17 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
   predicate()
 }
 
-/// Build a `TcpMemberlist` whose membership-input address type is
+/// Build a `Memberlist` whose membership-input address type is
 /// `SocketAddr` (seeds are concrete sockets). The advertise address is
 /// already-`Resolved`, so the `SocketAddrResolver` is never invoked at
 /// construction.
-async fn make_tcp_socket(id: &str, advertise: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_tcp_socket(id: &str, advertise: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(advertise)),
   );
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -56,17 +56,17 @@ async fn make_tcp_socket(id: &str, advertise: SocketAddr) -> TcpMemberlist<SmolS
   .expect("construct tcp memberlist (resolved advertise)")
 }
 
-/// Build a `TcpMemberlist` whose membership-input address type is the
+/// Build a `Memberlist` whose membership-input address type is the
 /// crate's `HostAddr`-backed [`Address`] (seeds + advertise are hostnames
 /// resolved by [`OsResolver`]). The advertise address is handed in
 /// `Unresolved`, exercising the resolve-then-pick path at construction.
-async fn make_tcp_hostaddr(id: &str, advertise: Address) -> TcpMemberlist {
-  let opts = Options::new(
+async fn make_tcp_hostaddr(id: &str, advertise: Address) -> Memberlist<SmolStr, Address> {
+  let opts = Options::<TcpTransport<SmolStr, Address>>::new(
     TcpTransportOptions::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Unresolved(advertise)),
   );
-  TcpMemberlist::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &OsResolver,
@@ -203,13 +203,13 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   // 1 MiB plaintext gossip_mtu — far above the 65467-byte ceiling. A
   // near-MTU gossip packet built at this size would always exceed the
   // 65507-byte UDP datagram limit and be silently dropped.
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("reject"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1 << 20));
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -232,13 +232,13 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
   }
 
   // Just under the ceiling (65466 < 65467) must construct successfully.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("accept"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(65507 - 30 - 10 - 1));
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -259,13 +259,13 @@ async fn transport_new_rejects_impossible_gossip_mtu() {
 async fn transport_new_rejects_too_small_gossip_mtu() {
   // 1 byte cannot frame even an Ack; far below the mandatory-control-packet
   // floor.
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tiny"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1));
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -285,13 +285,13 @@ async fn transport_new_rejects_too_small_gossip_mtu() {
   // id and the default `meta_max_size` (512), the largest mandatory control
   // packet is the self-Alive at the meta cap (~559 bytes), so 1024 clears the
   // floor (and the fixed 512 fast pre-check) comfortably.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("min-ok"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(1024));
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -316,13 +316,13 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
   // unsendable. The SAME gossip_mtu easily holds a small id's ~559-byte
   // worst-case Alive, so the rejection is driven purely by the id size.
   let huge_id = SmolStr::new("a".repeat(2000));
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(huge_id)
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -343,13 +343,13 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
   }
 
   // A normal small id at the SAME gossip_mtu constructs successfully.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("small-id"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -373,13 +373,13 @@ async fn gossip_mtu_rejected_for_oversized_local_id() {
 #[compio::test]
 async fn transport_new_rejects_oversized_initial_local_state() {
   let oversized = Bytes::from(vec![0u8; 64 * 1024 * 1024]);
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("big-state"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_initial_local_state(oversized));
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -393,13 +393,13 @@ async fn transport_new_rejects_oversized_initial_local_state() {
   }
 
   // A reasonable snapshot constructs successfully.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("ok-state"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_memberlist(MemberlistOptions::new().with_initial_local_state(Bytes::from_static(b"hello")));
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -420,13 +420,13 @@ async fn transport_new_rejects_oversized_initial_local_state() {
 /// and TLS backends; this exercises it on TCP.
 #[compio::test]
 async fn transport_new_rejects_zero_close_timeout() {
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-close"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::ZERO)),
   );
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -447,13 +447,13 @@ async fn transport_new_rejects_zero_close_timeout() {
   }
 
   // A nonzero close_timeout (here the explicit default) must construct.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-close"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::from_secs(10))),
   );
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -474,12 +474,12 @@ async fn transport_new_rejects_zero_close_timeout() {
 /// concrete value) constructs successfully.
 #[compio::test]
 async fn transport_new_rejects_unspecified_advertise() {
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("wildcard"))
       .with_advertise_addr(MaybeResolved::Resolved("0.0.0.0:0".parse().unwrap())),
   );
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -501,12 +501,12 @@ async fn transport_new_rejects_unspecified_advertise() {
 
   // A concrete loopback advertise (ephemeral port → concrete OS port) is a
   // usable unicast contact and must construct.
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("concrete"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
-  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

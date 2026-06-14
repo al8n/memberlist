@@ -14,7 +14,7 @@ mod support;
 use std::{net::SocketAddr, time::Duration};
 
 use memberlist_compio::{
-  CidrPolicy, FirstAddrResolver, MaybeResolved, Options, QuicMemberlist, QuicOptions,
+  CidrPolicy, FirstAddrResolver, MaybeResolved, Memberlist, Options, QuicOptions, QuicTransport,
   QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
@@ -36,14 +36,14 @@ fn two_node_quic_configs() -> (QuicOptions, QuicOptions) {
   (qcfg_a, qcfg_b)
 }
 
-/// Build a `QuicMemberlist` on an OS-allocated loopback port, optionally with a
+/// Build a `Memberlist` on an OS-allocated loopback port, optionally with a
 /// driver-level CIDR policy that filters the gossip / QUIC datagram source.
 async fn make_quic(
   id: &str,
   qcfg: QuicOptions,
   policy: Option<CidrPolicy>,
-) -> QuicMemberlist<SmolStr, SocketAddr> {
-  let mut opts = Options::new(
+) -> Memberlist<SmolStr, SocketAddr> {
+  let mut opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
@@ -52,7 +52,7 @@ async fn make_quic(
   if let Some(policy) = policy {
     opts = opts.with_cidr_policy(policy);
   }
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

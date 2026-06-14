@@ -11,8 +11,8 @@ use std::{
 };
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistOptions, Options, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistOptions, Options, SocketAddrResolver,
+  TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -20,17 +20,17 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
+async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
   let ml_opts = MemberlistOptions::new()
     .with_label(Some(b"queries-test".to_vec()))
     .expect("valid label");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(ml_opts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

@@ -1,6 +1,6 @@
 //! The compio TCP driver run through the driver-agnostic test suite.
 //!
-//! [`CompioTcp`] adapts the compio `TcpMemberlist` handle to
+//! [`CompioTcp`] adapts the compio `Memberlist` handle to
 //! [`memberlist_test_suite::TestCluster`]; each `#[compio::test]` below
 //! instantiates one suite scenario over it. The same scenario bodies run on
 //! every driver and transport — this file is the compio/TCP cell.
@@ -21,8 +21,8 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, Options, SocketAddrResolver,
+  TcpTransport, TcpTransportOptions,
 };
 use memberlist_test_suite::{
   Captures, NodeConfig, PingObservation, RejectMerge, TestCluster, VetoForeignAlive, scenarios,
@@ -37,7 +37,7 @@ use suite::CapturingDelegate;
 /// admission-predicate flags are present only when their predicate was wired.
 struct CompioTcp {
   id: SmolStr,
-  handle: TcpMemberlist<SmolStr, SocketAddr, CapturingDelegate>,
+  handle: Memberlist<SmolStr, SocketAddr>,
   captures: Captures,
   merge_invoked: Option<Arc<AtomicBool>>,
   alive_count: Option<Arc<AtomicUsize>>,
@@ -54,7 +54,7 @@ impl TestCluster for CompioTcp {
     let bind = cfg
       .advertise_addr
       .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-    let mut opts = Options::new(
+    let mut opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(cfg.id.clone())
         .with_advertise_addr(MaybeResolved::Resolved(bind)),
@@ -76,14 +76,9 @@ impl TestCluster for CompioTcp {
 
     let delegate = CapturingDelegate::default();
     let captures = delegate.captures.clone();
-    let handle = TcpMemberlist::<SmolStr, SocketAddr, CapturingDelegate>::new(
-      opts,
-      delegate,
-      &SocketAddrResolver,
-      &FirstAddrResolver,
-    )
-    .await
-    .expect("construct compio tcp node");
+    let handle = Memberlist::new(opts, delegate, &SocketAddrResolver, &FirstAddrResolver)
+      .await
+      .expect("construct compio tcp node");
 
     if let Some(payload) = cfg.ack_payload {
       handle

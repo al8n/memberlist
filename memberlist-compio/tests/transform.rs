@@ -9,17 +9,14 @@
 use std::{net::SocketAddr, time::Duration};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistOptions, Options, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistOptions, Options, SocketAddrResolver,
+  TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
 /// Build a TCP node with the given `MemberlistOptions`.
-async fn make_with_opts(
-  id: &str,
-  ml_opts: MemberlistOptions,
-) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_with_opts(id: &str, ml_opts: MemberlistOptions) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(
@@ -27,7 +24,7 @@ async fn make_with_opts(
       )),
   )
   .with_memberlist(ml_opts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -38,8 +35,8 @@ async fn make_with_opts(
 }
 
 async fn wait_converged(
-  a: &TcpMemberlist<SmolStr, SocketAddr>,
-  b: &TcpMemberlist<SmolStr, SocketAddr>,
+  a: &Memberlist<SmolStr, SocketAddr>,
+  b: &Memberlist<SmolStr, SocketAddr>,
   want: usize,
   deadline: Duration,
 ) -> bool {

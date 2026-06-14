@@ -4,8 +4,7 @@
 //! TCP listener — quinn-proto multiplexes streams over the single UDP
 //! socket. The machine-layer `QuicEndpoint<I>` is built inside
 //! [`QuicTransport::run`] from the stored [`QuicOptions`]. Construct via
-//! [`Memberlist::new`](crate::Memberlist::new); [`QuicMemberlist`] is the
-//! pinned-alias convenience shape.
+//! [`Memberlist::new`](crate::Memberlist::new).
 //!
 //! ## TLS server name
 //!
@@ -28,9 +27,8 @@ use memberlist_proto::{config::EndpointOptions, endpoint::Endpoint};
 use smol_str::SmolStr;
 
 use crate::{
-  AdvertiseAddrResolver, Delegate, Memberlist, MemberlistError, Resolver, Result, Transport,
-  TransportRuntime,
-  delegate::{BoxedAlive, BoxedMerge, VoidDelegate},
+  AdvertiseAddrResolver, Delegate, MemberlistError, Resolver, Result, Transport, TransportRuntime,
+  delegate::{BoxedAlive, BoxedMerge},
   maybe_resolved::MaybeResolved,
 };
 
@@ -46,11 +44,6 @@ pub struct Quic;
 /// QUIC config bundle handed to [`QuicTransport`]. Re-exported from
 /// `memberlist-proto` so callers don't need a direct dep.
 pub use memberlist_proto::QuicOptions;
-
-/// QUIC-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
-/// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`.
-pub type QuicMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, SocketAddr>> =
-  Memberlist<QuicTransport<I, A>, D>;
 
 /// Per-backend QUIC-specific transport options.
 ///

@@ -19,7 +19,7 @@ use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  MemberlistError, NodeDelegate, Options, PingDelegate, QuicMemberlist, QuicOptions, QuicTransport,
+  MemberlistError, NodeDelegate, Options, PingDelegate, QuicOptions, QuicTransport,
   QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
@@ -30,16 +30,16 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// Build a `Memberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
 /// The concrete bound address is read back from
-/// [`QuicMemberlist::advertise_address`] after construction, so no test
+/// [`Memberlist::advertise_address`] after construction, so no test
 /// hard-codes a port — a hard-coded port would collide with a sibling test
 /// binding the same value on another libtest thread in this binary.
 ///
 /// The membership-input address type is `SocketAddr`, so the construction
 /// resolver is the identity `SocketAddrResolver` (never invoked for a resolved
 /// advertise).
-async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
+async fn make_quic(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
   make_quic_at(id, loopback_addr(0), qcfg).await
 }
 
@@ -49,14 +49,14 @@ async fn make_quic_at(
   id: &str,
   addr: SocketAddr,
   qcfg: QuicOptions,
-) -> QuicMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_quic_config(qcfg),
   );
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -726,14 +726,14 @@ async fn quic_slow_observation_delegate_does_not_delay_leave_flush() {
 
   // Node A carries the slow-leave observation delegate; built inline like
   // `make_quic` but with `SlowLeaveDelegate` in place of `VoidDelegate`.
-  let a: Memberlist<QuicTransport<SmolStr, SocketAddr>, SlowLeaveDelegate> = {
-    let opts = Options::new(
+  let a: Memberlist<SmolStr, SocketAddr> = {
+    let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowleave-a"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_a),
     );
-    Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowLeaveDelegate>::new(
+    Memberlist::new(
       opts,
       SlowLeaveDelegate,
       &SocketAddrResolver,
@@ -946,14 +946,14 @@ async fn quic_slow_observation_delegate_does_not_delay_join_completion() {
 
   // Node J carries the slow-join observation delegate; built inline like
   // `make_quic` but with `SlowJoinDelegate` in place of `VoidDelegate`.
-  let joiner: Memberlist<QuicTransport<SmolStr, SocketAddr>, SlowJoinDelegate> = {
-    let opts = Options::new(
+  let joiner: Memberlist<SmolStr, SocketAddr> = {
+    let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowjoin-j"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_joiner),
     );
-    Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
+    Memberlist::new(
       opts,
       SlowJoinDelegate,
       &SocketAddrResolver,
@@ -1160,14 +1160,14 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
   // `make_quic` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
   let slept = Arc::new(AtomicBool::new(false));
   let user_msgs: Arc<Mutex<Vec<Bytes>>> = Arc::new(Mutex::new(Vec::new()));
-  let b: Memberlist<QuicTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate> = {
-    let opts = Options::new(
+  let b: Memberlist<SmolStr, SocketAddr> = {
+    let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowuser-b"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
         .with_quic_config(qcfg_b),
     );
-    Memberlist::<QuicTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
+    Memberlist::new(
       opts,
       SlowUserMsgDelegate {
         slept: slept.clone(),

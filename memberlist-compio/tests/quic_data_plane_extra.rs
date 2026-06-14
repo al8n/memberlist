@@ -20,8 +20,8 @@ use std::{
 use bytes::Bytes;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  NodeDelegate, Options, PingDelegate, QuicMemberlist, QuicOptions, QuicTransport,
-  QuicTransportOptions, SocketAddrResolver, VoidDelegate,
+  NodeDelegate, Options, PingDelegate, QuicOptions, QuicTransport, QuicTransportOptions,
+  SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::Node;
 use rustls::RootCertStore;
@@ -53,14 +53,14 @@ fn trio_configs() -> (QuicOptions, QuicOptions, QuicOptions) {
   (a, b, c)
 }
 
-async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_quic(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   );
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -141,11 +141,11 @@ impl Delegate for RecordingDelegate {
   type Address = SocketAddr;
 }
 
-type RecordingMemberlist = Memberlist<QuicTransport<SmolStr, SocketAddr>, RecordingDelegate>;
+type RecordingMemberlist = Memberlist<SmolStr, SocketAddr>;
 
 async fn make_recording_quic(id: &str, qcfg: QuicOptions) -> (RecordingMemberlist, Arc<Sink>) {
   let sink = Arc::new(Sink::default());
-  let opts = Options::new(
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))

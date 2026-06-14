@@ -13,8 +13,8 @@ use std::{
 };
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
-  SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
+  SocketAddrResolver, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions, EncryptionOptions, Keyring, SecretKey};
 use smol_str::SmolStr;
@@ -34,19 +34,19 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
   predicate()
 }
 
-/// Build a `TcpMemberlist` with the given `MemberlistOptions`.
+/// Build a `Memberlist` with the given `MemberlistOptions`.
 async fn make_tcp(
   id: &str,
   addr: SocketAddr,
   mopts: MemberlistOptions,
-) -> Result<TcpMemberlist<SmolStr, SocketAddr>, MemberlistError> {
-  let opts = Options::new(
+) -> Result<Memberlist<SmolStr, SocketAddr>, MemberlistError> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(mopts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

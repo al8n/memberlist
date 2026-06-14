@@ -18,8 +18,8 @@ use std::{
 use bytes::Bytes;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  NodeDelegate, Options, PingDelegate, SocketAddrResolver, TlsMemberlist, TlsTransport,
-  TlsTransportOptions, VoidDelegate,
+  NodeDelegate, Options, PingDelegate, SocketAddrResolver, TlsTransport, TlsTransportOptions,
+  VoidDelegate,
 };
 use memberlist_proto::{Node, TlsOptions};
 use smol_str::SmolStr;
@@ -100,14 +100,14 @@ fn smoke_tls_options() -> TlsOptions {
   TlsOptions::new(server_cfg, client_cfg)
 }
 
-async fn make_tls(id: &str, addr: SocketAddr) -> TlsMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_tls(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_tls_options(smoke_tls_options()),
   );
-  TlsMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -180,11 +180,11 @@ impl Delegate for RecordingDelegate {
   type Address = SocketAddr;
 }
 
-type RecordingMemberlist = Memberlist<TlsTransport<SmolStr, SocketAddr>, RecordingDelegate>;
+type RecordingMemberlist = Memberlist<SmolStr, SocketAddr>;
 
 async fn make_recording_tls(id: &str, addr: SocketAddr) -> (RecordingMemberlist, Arc<Sink>) {
   let sink = Arc::new(Sink::default());
-  let opts = Options::new(
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))

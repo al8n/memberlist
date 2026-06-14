@@ -267,8 +267,8 @@ impl Default for DriverOptions {
 
 /// Stream-transport-specific tuning knobs.
 ///
-/// Apply to the [`TcpMemberlist`](crate::TcpMemberlist) /
-/// [`TlsMemberlist`](crate::TlsMemberlist) drivers.
+/// Apply to the stream-backed (TCP / TLS) [`Memberlist`](crate::Memberlist)
+/// drivers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamTransportOptions {
   dial_timeout: Duration,

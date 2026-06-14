@@ -17,8 +17,8 @@ use std::{
 use bytes::Bytes;
 use memberlist_compio::{
   ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  MemberlistOptions, NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpMemberlist,
-  TcpTransport, TcpTransportOptions, VoidDelegate,
+  MemberlistOptions, NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpTransport,
+  TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::Node;
 use smol_str::SmolStr;
@@ -29,17 +29,17 @@ fn loopback_addr(port: u16) -> SocketAddr {
 
 const LABEL: &[u8] = b"dp-extra";
 
-async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
+async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
   let ml_opts = MemberlistOptions::new()
     .with_label(Some(LABEL.to_vec()))
     .expect("valid label");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(ml_opts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -124,14 +124,14 @@ impl Delegate for RecordingDelegate {
   type Address = SocketAddr;
 }
 
-type RecordingMemberlist = Memberlist<TcpTransport<SmolStr, SocketAddr>, RecordingDelegate>;
+type RecordingMemberlist = Memberlist<SmolStr, SocketAddr>;
 
 async fn make_recording_tcp(id: &str, addr: SocketAddr) -> (RecordingMemberlist, Arc<Sink>) {
   let sink = Arc::new(Sink::default());
   let ml_opts = MemberlistOptions::new()
     .with_label(Some(LABEL.to_vec()))
     .expect("valid label");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),

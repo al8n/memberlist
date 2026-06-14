@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use memberlist_compio::{
   ConflictDelegate, Delegate, DriverOptions, EventDelegate, FirstAddrResolver, MaybeResolved,
   Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, StreamTransportOptions,
-  TcpMemberlist, TcpTransport, TcpTransportOptions, VoidDelegate,
+  TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -27,17 +27,17 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-/// Build an unlabeled `TcpMemberlist` advertising `addr`. The driver-layer
+/// Build an unlabeled `Memberlist` advertising `addr`. The driver-layer
 /// membership address is `SocketAddr`, so every seed handed to `join`
 /// arrives as a `MaybeResolved::Resolved` and the construction resolver is
 /// the identity `SocketAddrResolver` (never invoked for a resolved advertise).
-async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   );
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -1009,13 +1009,13 @@ impl Delegate for SlowJoinDelegate {
 async fn slow_observation_delegate_does_not_delay_join_completion() {
   // Node J carries the slow-join observation delegate; built inline like
   // `make_tcp` but with `SlowJoinDelegate` in place of `VoidDelegate`.
-  let joiner: Memberlist<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate> = {
-    let opts = Options::new(
+  let joiner: Memberlist<SmolStr, SocketAddr> = {
+    let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowjoin-j"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
     );
-    Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
+    Memberlist::new(
       opts,
       SlowJoinDelegate,
       &SocketAddrResolver,
@@ -1211,13 +1211,13 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
   // `make_tcp` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
   let slept = Arc::new(AtomicBool::new(false));
   let user_msgs: Arc<Mutex<Vec<Bytes>>> = Arc::new(Mutex::new(Vec::new()));
-  let b: Memberlist<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate> = {
-    let opts = Options::new(
+  let b: Memberlist<SmolStr, SocketAddr> = {
+    let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
       TcpTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(SmolStr::new("slowuser-b"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
     );
-    Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
+    Memberlist::new(
       opts,
       SlowUserMsgDelegate {
         slept: slept.clone(),
@@ -1549,13 +1549,13 @@ async fn join_after_leave_is_rejected() {
 async fn zero_bridge_recv_buf_len_is_rejected() {
   let addr = reserve_addr().await;
 
-  let bad = Options::new(
+  let bad = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-recv-buf"))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(0)),
   );
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     bad,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -1581,13 +1581,13 @@ async fn zero_bridge_recv_buf_len_is_rejected() {
 
   // A nonzero value on the SAME address still constructs Ok: the rejection is
   // specific to the degenerate zero, not a blanket failure.
-  let good = Options::new(
+  let good = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-recv-buf"))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(4096)),
   );
-  let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let ok = Memberlist::new(
     good,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -1610,13 +1610,13 @@ async fn zero_bridge_recv_buf_len_is_rejected() {
 async fn zero_idle_wake_interval_is_rejected() {
   let addr = reserve_addr().await;
 
-  let bad = Options::new(
+  let bad = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("zero-idle-wake"))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::ZERO));
-  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     bad,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -1641,13 +1641,13 @@ async fn zero_idle_wake_interval_is_rejected() {
   }
 
   // A nonzero value on the SAME address still constructs Ok.
-  let good = Options::new(
+  let good = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("nonzero-idle-wake"))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::from_secs(30)));
-  let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let ok = Memberlist::new(
     good,
     VoidDelegate::default(),
     &SocketAddrResolver,

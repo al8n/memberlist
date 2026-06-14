@@ -5,8 +5,7 @@
 //! `StreamEndpoint<I, SocketAddr, Labeled<TlsRecords>>` is built inside
 //! [`TlsTransport::run`] from the stored `TlsTransportOptions` (cert/key
 //! bundle + SNI provider). Construct via
-//! [`Memberlist::new`](crate::Memberlist::new); [`TlsMemberlist`] is the
-//! pinned-alias convenience shape.
+//! [`Memberlist::new`](crate::Memberlist::new).
 //!
 //! ## Server name
 //!
@@ -33,16 +32,11 @@ use memberlist_proto::{
 use smol_str::SmolStr;
 
 use crate::{
-  AdvertiseAddrResolver, Delegate, Memberlist, MemberlistError, Resolver, Result,
-  StreamTransportOptions, Transport, TransportRuntime,
-  delegate::{BoxedAlive, BoxedMerge, VoidDelegate},
+  AdvertiseAddrResolver, Delegate, MemberlistError, Resolver, Result, StreamTransportOptions,
+  Transport, TransportRuntime,
+  delegate::{BoxedAlive, BoxedMerge},
   maybe_resolved::MaybeResolved,
 };
-
-/// TLS-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
-/// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`.
-pub type TlsMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, SocketAddr>> =
-  Memberlist<TlsTransport<I, A>, D>;
 
 /// Boxed SNI provider closure: maps a peer's `SocketAddr` to the expected TLS
 /// server name string used for certificate verification. Returns `None` to

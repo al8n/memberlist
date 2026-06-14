@@ -3,11 +3,10 @@
 //! [`TcpTransport`] owns the bound UDP gossip socket and TCP reliable
 //! listener; [`Memberlist::new`](crate::Memberlist::new) constructs the
 //! transport, builds the initial snapshot, and spawns the driver task on
-//! the compio runtime. [`TcpMemberlist`] is the pinned-alias convenience
-//! shape (`I = SmolStr`, `A = SocketAddr`, default [`VoidDelegate`]); the
-//! machine endpoint is built inside [`TcpTransport::run`] from the stored
-//! [`LabelOptions<()>`](memberlist_proto::streams::LabelOptions). The returned handle is cheaply clonable and shares the
-//! same driver task with every clone.
+//! the compio runtime. The machine endpoint is built inside
+//! [`TcpTransport::run`] from the stored
+//! [`LabelOptions<()>`](memberlist_proto::streams::LabelOptions). The returned
+//! handle is cheaply clonable and shares the same driver task with every clone.
 
 #![cfg(feature = "tcp")]
 
@@ -21,18 +20,11 @@ use memberlist_proto::{LabelOptions, RawRecords, config::EndpointOptions, endpoi
 use smol_str::SmolStr;
 
 use crate::{
-  AdvertiseAddrResolver, Delegate, Memberlist, MemberlistError, Resolver, Result,
-  StreamTransportOptions, Transport, TransportRuntime,
-  delegate::{BoxedAlive, BoxedMerge, VoidDelegate},
+  AdvertiseAddrResolver, Delegate, MemberlistError, Resolver, Result, StreamTransportOptions,
+  Transport, TransportRuntime,
+  delegate::{BoxedAlive, BoxedMerge},
   maybe_resolved::MaybeResolved,
 };
-
-/// TCP-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
-/// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`. Custom-typed
-/// callers parametrise `Memberlist<TcpTransport<MyId, MyAddr>, MyDelegate>`
-/// directly.
-pub type TcpMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, SocketAddr>> =
-  Memberlist<TcpTransport<I, A>, D>;
 
 /// Per-backend TCP-specific transport options.
 ///

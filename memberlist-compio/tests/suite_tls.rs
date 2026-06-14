@@ -1,6 +1,6 @@
 //! The compio TLS driver run through the driver-agnostic test suite.
 //!
-//! [`CompioTls`] adapts the compio `TlsMemberlist` handle to
+//! [`CompioTls`] adapts the compio `Memberlist` handle to
 //! [`memberlist_test_suite::TestCluster`]. The same scenario bodies that run on
 //! every driver and transport run here over the TLS-backed reliable plane — the
 //! capturing delegate, meta, label, and failure-detection scenarios included.
@@ -23,8 +23,8 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver, TlsMemberlist,
-  TlsTransportOptions,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, Options, SocketAddrResolver,
+  TlsTransport, TlsTransportOptions,
 };
 use memberlist_test_suite::{
   Captures, NodeConfig, PingObservation, RejectMerge, TestCluster, VetoForeignAlive, scenarios,
@@ -36,7 +36,7 @@ use suite::CapturingDelegate;
 /// A compio TLS node adapted to [`TestCluster`].
 struct CompioTls {
   id: SmolStr,
-  handle: TlsMemberlist<SmolStr, SocketAddr, CapturingDelegate>,
+  handle: Memberlist<SmolStr, SocketAddr>,
   captures: Captures,
   merge_invoked: Option<Arc<AtomicBool>>,
   alive_count: Option<Arc<AtomicUsize>>,
@@ -50,7 +50,7 @@ impl TestCluster for CompioTls {
     let bind = cfg
       .advertise_addr
       .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-    let mut opts = Options::new(
+    let mut opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
       TlsTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(cfg.id.clone())
         .with_advertise_addr(MaybeResolved::Resolved(bind))
@@ -73,14 +73,9 @@ impl TestCluster for CompioTls {
 
     let delegate = CapturingDelegate::default();
     let captures = delegate.captures.clone();
-    let handle = TlsMemberlist::<SmolStr, SocketAddr, CapturingDelegate>::new(
-      opts,
-      delegate,
-      &SocketAddrResolver,
-      &FirstAddrResolver,
-    )
-    .await
-    .expect("construct compio tls node");
+    let handle = Memberlist::new(opts, delegate, &SocketAddrResolver, &FirstAddrResolver)
+      .await
+      .expect("construct compio tls node");
 
     if let Some(payload) = cfg.ack_payload {
       handle

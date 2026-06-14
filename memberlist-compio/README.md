@@ -39,20 +39,20 @@ Run inside a `compio` runtime (the driver is `!Send`, thread-per-core):
 ```rust,ignore
 use core::net::SocketAddr;
 use memberlist_compio::{
-    FirstAddrResolver, MaybeResolved, Options, SocketAddrResolver, TcpMemberlist,
-    TcpTransportOptions, VoidDelegate,
+    FirstAddrResolver, MaybeResolved, Memberlist, Options, SocketAddrResolver,
+    TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let advertise: SocketAddr = "127.0.0.1:7946".parse()?;
 
-    let opts = Options::new(
+    let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
         TcpTransportOptions::<SmolStr, SocketAddr>::new()
             .with_local_id(SmolStr::new("node-a"))
             .with_advertise_addr(MaybeResolved::Resolved(advertise)),
     );
-    let node = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    let node = Memberlist::new(
         opts,
         VoidDelegate::default(),
         &SocketAddrResolver,

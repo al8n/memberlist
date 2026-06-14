@@ -3,7 +3,7 @@
 //!
 //! The handle exposes a CQRS API:
 //! - **Reads** (`snapshot`, `local_node`, `alive_count`, `member_count`) are
-//!   served lock-free from an `ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>`
+//!   served lock-free from an `ArcSwap<MemberlistSnapshot<I, SocketAddr>>`
 //!   the driver republishes after every state-affecting tick.
 //! - **Writes** (`join`, `leave`, `update_node_metadata`,
 //!   `queue_user_broadcast`, `set_local_state`, `set_ack_payload`,
@@ -16,18 +16,13 @@
 //!   fresh [`EventStream`] for every call (flume MPMC — see
 //!   [`crate::events`] for the round-robin caveat).
 //!
-//! `Memberlist<T, D>` is generic over the [`Transport`] backend and the
-//! [`Delegate`] hook bundle. The wire id type is `T::Id` and the driver-layer
-//! address is always `SocketAddr`, so the snapshot
-//! ([`MemberlistSnapshot<T::Id, SocketAddr>`]) and events channel
-//! ([`EventStream<T::Id, SocketAddr>`]) propagate those through. The pinned
-//! aliases [`TcpMemberlist`](crate::TcpMemberlist) /
-//! [`TlsMemberlist`](crate::TlsMemberlist) /
-//! [`QuicMemberlist`](crate::QuicMemberlist) fix the backend and a default
-//! [`VoidDelegate`](crate::delegate::VoidDelegate).
+//! The handle is `Memberlist<I, A>`, parameterized by the wire id `I` and the
+//! transport's unresolved address `A`. The [`Transport`] backend and
+//! [`Delegate`] hook bundle are fn-level generics on the constructors, selected
+//! by the [`Options<T>`](crate::Options) argument to [`Memberlist::new`].
 
+use core::marker::PhantomData;
 use std::{
-  marker::PhantomData,
   net::SocketAddr,
   sync::{
     Arc,
@@ -71,33 +66,28 @@ use rand::rngs::StdRng;
 /// loop; the [`JoinHandle`] held inside the last `Arc` cancels the task on
 /// drop, which is a no-op if the loop already exited cleanly).
 ///
-/// `Memberlist<T, D>` is generic over the [`Transport`] backend and the
-/// [`Delegate`] hook bundle — the snapshot and events channel both propagate
-/// `<T::Id, SocketAddr>` through to their public types
-/// ([`MemberlistSnapshot<T::Id, SocketAddr>`] and
-/// [`EventStream<T::Id, SocketAddr>`]). Most users want
-/// [`TcpMemberlist`](crate::TcpMemberlist) /
-/// [`TlsMemberlist`](crate::TlsMemberlist) /
-/// [`QuicMemberlist`](crate::QuicMemberlist), the pinned aliases that fix
-/// the backend and a default [`VoidDelegate`](crate::delegate::VoidDelegate).
-pub struct Memberlist<T, D>
-where
-  T: Transport,
-  D: Delegate<Id = T::Id, Address = SocketAddr>,
-{
+/// `Memberlist<I, A>` carries the wire id type `I` and the transport's
+/// unresolved address type `A`. `I` flows into the snapshot and events channel,
+/// which carry `<I, SocketAddr>` to their public types
+/// ([`MemberlistSnapshot<I, SocketAddr>`] and [`EventStream<I, SocketAddr>`]) —
+/// the driver-layer address is always `SocketAddr`. `A` is held in no field; it
+/// ties [`Memberlist::join`]'s seeds to the transport's address domain. The
+/// [`Transport`] backend and [`Delegate`] hook bundle are fn-level generics on
+/// the constructors only, since both move into the spawned driver task.
+pub struct Memberlist<I, A> {
   /// Command channel into the driver task — every write API sends one
-  /// command and awaits the one-shot reply. The `T::Id` type parameter
-  /// propagates from `Command<I>` — only `Command::Ping` carries a full
+  /// command and awaits the one-shot reply. The id type `I` propagates from
+  /// `Command<I>` — only `Command::Ping` carries a full
   /// `Node<I, SocketAddr>`.
-  commands: Sender<Command<T::Id>>,
+  commands: Sender<Command<I>>,
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   /// The machine's load-shedding counters, read lock-free via `metrics()`.
   metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
-  events_rx: Receiver<Event<T::Id, SocketAddr>>,
+  events_rx: Receiver<Event<I, SocketAddr>>,
   /// Driver-task handle. Wrapped in `Arc` so clones share ownership;
   /// dropping the last `Arc` drops the inner [`JoinHandle`], which
   /// cancels the task. After [`Memberlist::shutdown`] the task has
@@ -137,17 +127,12 @@ where
   /// reads on the handle hot-path. Caching one scalar instead of the full
   /// options struct keeps the handle free of a transport-options generic.
   cached_join_deadline: Duration,
-  /// Phantom over the transport backend.
-  _t: PhantomData<fn(T)>,
-  /// Phantom over the delegate bundle.
-  _d: PhantomData<fn(D)>,
+  /// Ties the handle to the transport's unresolved address type. Not held in
+  /// any field — `join` enforces seeds resolve in this address domain.
+  _a: PhantomData<fn(A)>,
 }
 
-impl<T, D> Clone for Memberlist<T, D>
-where
-  T: Transport,
-  D: Delegate<Id = T::Id, Address = SocketAddr>,
-{
+impl<I, A> Clone for Memberlist<I, A> {
   fn clone(&self) -> Self {
     Self {
       commands: self.commands.clone(),
@@ -160,17 +145,14 @@ where
       events_dropped: self.events_dropped.clone(),
       observation_dropped: self.observation_dropped.clone(),
       cached_join_deadline: self.cached_join_deadline,
-      _t: PhantomData,
-      _d: PhantomData,
+      _a: PhantomData,
     }
   }
 }
 
-impl<T, D> Memberlist<T, D>
+impl<I, A> Memberlist<I, A>
 where
-  T: Transport,
-  T::Id: CheapClone + memberlist_proto::Data,
-  D: Delegate<Id = T::Id, Address = SocketAddr>,
+  I: CheapClone + memberlist_proto::Data + 'static,
 {
   /// Construct a memberlist, bind the transport's sockets, build the
   /// initial snapshot, and spawn the driver task on the current compio
@@ -196,17 +178,19 @@ where
   /// (binding the UDP gossip socket / TCP reliable listener / quinn
   /// endpoint, most commonly `EADDRINUSE` on a port collision; or a
   /// required option such as `local_id` / `advertise_addr` was not set).
-  pub async fn new<RES, AR>(
+  pub async fn new<T, D, RES, AR>(
     options: Options<T>,
     delegate: D,
     resolver: &RES,
     advertise_resolver: &AR,
   ) -> Result<Self>
   where
-    RES: Resolver<Address = T::Address>,
+    T: Transport<Id = I, Address = A>,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    RES: Resolver<Address = A>,
     AR: AdvertiseAddrResolver,
   {
-    Self::new_with_rng::<RES, AR, StdRng>(
+    Self::new_with_rng::<T, D, RES, AR, StdRng>(
       options,
       delegate,
       resolver,
@@ -219,7 +203,7 @@ where
   /// Like [`new`](Self::new) but with a caller-supplied gossip RNG `G`, mirroring
   /// [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it. The
   /// machine's gossip schedule is reproducible iff `rng` is.
-  pub async fn new_with_rng<RES, AR, G>(
+  pub async fn new_with_rng<T, D, RES, AR, G>(
     options: Options<T>,
     delegate: D,
     resolver: &RES,
@@ -227,7 +211,9 @@ where
     rng: G,
   ) -> Result<Self>
   where
-    RES: Resolver<Address = T::Address>,
+    T: Transport<Id = I, Address = A>,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    RES: Resolver<Address = A>,
     AR: AdvertiseAddrResolver,
     G: rand::Rng + Send + Unpin + 'static,
   {
@@ -441,18 +427,17 @@ where
       events_dropped,
       observation_dropped,
       cached_join_deadline,
-      _t: PhantomData,
-      _d: PhantomData,
+      _a: PhantomData,
     })
   }
 
   /// The local node, taken from the latest published snapshot.
   ///
-  /// Cheap clone via [`CheapClone`] on both `T::Id` and `SocketAddr` — for
-  /// the pinned aliases (`SmolStr` + `SocketAddr`) this is `Arc`-bump and
+  /// Cheap clone via [`CheapClone`] on both `I` and `SocketAddr` — for
+  /// the common id type (`SmolStr` + `SocketAddr`) this is `Arc`-bump and
   /// scalar copy respectively.
   #[inline]
-  pub fn local_node(&self) -> Node<T::Id, SocketAddr> {
+  pub fn local_node(&self) -> Node<I, SocketAddr> {
     let snap = self.snapshot.load();
     let ns = snap.local_ref();
     Node::new(ns.id_ref().cheap_clone(), ns.address_ref().cheap_clone())
@@ -460,23 +445,19 @@ where
 
   /// The local node's id.
   #[inline]
-  pub fn local_id(&self) -> T::Id {
+  pub fn local_id(&self) -> I {
     self.snapshot.load().local_ref().id_ref().cheap_clone()
   }
 }
 
-impl<T, D> Memberlist<T, D>
-where
-  T: Transport,
-  D: Delegate<Id = T::Id, Address = SocketAddr>,
-{
+impl<I, A> Memberlist<I, A> {
   /// Lock-free snapshot of the cluster's current observable state.
   ///
   /// Returns a strong [`Arc`] pointing at the immutable snapshot the
   /// driver last published. Subsequent driver mutations do not affect the
   /// returned `Arc` — call again to observe a fresh snapshot.
   #[inline]
-  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<T::Id, SocketAddr>> {
+  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, SocketAddr>> {
     self.snapshot.load_full()
   }
 
@@ -509,19 +490,16 @@ where
 
   /// The local node's full state from the latest published snapshot.
   #[inline]
-  pub fn local_state(&self) -> Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>> {
+  pub fn local_state(&self) -> Arc<memberlist_proto::typed::NodeState<I, SocketAddr>> {
     self.snapshot.load().local_ref().clone()
   }
 
   /// Look up a member by id in the latest published snapshot.
   /// Returns `None` if the id is not known.
   #[inline]
-  pub fn by_id(
-    &self,
-    id: &T::Id,
-  ) -> Option<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>>
+  pub fn by_id(&self, id: &I) -> Option<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>>
   where
-    T::Id: PartialEq,
+    I: PartialEq,
   {
     self.snapshot.load().by_id(id).cloned()
   }
@@ -529,7 +507,7 @@ where
   /// All members currently in the alive state, from the latest published
   /// snapshot.
   #[inline]
-  pub fn online_members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+  pub fn online_members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
     self.snapshot.load().online_members().cloned().collect()
   }
 
@@ -542,7 +520,7 @@ where
   /// All known members (alive + suspect + dead/left) from the latest
   /// published snapshot. Mirrors the legacy `Memberlist::members` name.
   #[inline]
-  pub fn members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+  pub fn members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
     self.snapshot.load().members().to_vec()
   }
 
@@ -557,8 +535,8 @@ where
   #[inline]
   pub fn members_by(
     &self,
-    pred: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> bool,
-  ) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+    pred: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> bool,
+  ) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
     self.snapshot.load().members_by(pred).cloned().collect()
   }
 
@@ -566,7 +544,7 @@ where
   #[inline]
   pub fn num_members_by(
     &self,
-    pred: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> bool,
+    pred: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> bool,
   ) -> usize {
     self.snapshot.load().num_members_by(pred)
   }
@@ -575,7 +553,7 @@ where
   #[inline]
   pub fn members_map_by<O>(
     &self,
-    f: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> Option<O>,
+    f: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> Option<O>,
   ) -> Vec<O> {
     self.snapshot.load().members_map_by(f)
   }
@@ -590,7 +568,7 @@ where
   /// actual contact.
   ///
   /// Each seed is a [`MaybeResolved`] — either an already-resolved
-  /// `SocketAddr` (used directly) or an unresolved `T::Address` (resolved
+  /// `SocketAddr` (used directly) or an unresolved `RES::Address` (resolved
   /// via the supplied `resolver`). Each resolved address becomes one
   /// outbound push/pull exchange. The call resolves either when every
   /// dispatched exchange has terminated OR when the per-call deadline
@@ -640,10 +618,10 @@ where
   pub async fn join<RES>(
     &self,
     resolver: &RES,
-    seeds: &[MaybeResolved<T::Address, SocketAddr>],
+    seeds: &[MaybeResolved<A, SocketAddr>],
   ) -> Result<usize>
   where
-    RES: Resolver<Address = T::Address>,
+    RES: Resolver<Address = A>,
   {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -698,10 +676,10 @@ where
   pub async fn dispatch_join<RES>(
     &self,
     resolver: &RES,
-    seeds: &[MaybeResolved<T::Address, SocketAddr>],
+    seeds: &[MaybeResolved<A, SocketAddr>],
   ) -> Result<usize>
   where
-    RES: Resolver<Address = T::Address>,
+    RES: Resolver<Address = A>,
   {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -959,7 +937,7 @@ where
   /// missed and the subscriber should reconcile state from the lock-free
   /// snapshot ([`Self::snapshot`] / [`Self::alive_count`] / [`Self::member_count`]).
   #[inline]
-  pub fn events(&self) -> EventStream<T::Id, SocketAddr> {
+  pub fn events(&self) -> EventStream<I, SocketAddr> {
     EventStream::new(self.events_rx.clone())
   }
 
@@ -1012,7 +990,7 @@ where
   ///
   /// Requires the node to be running. Returns `Err(NotRunning)` after
   /// `leave()` and `Err(Shutdown)` after `shutdown()`.
-  pub async fn ping(&self, node: Node<T::Id, SocketAddr>) -> Result<Duration> {
+  pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
@@ -1169,10 +1147,10 @@ mod transport_api_tests {
   };
 
   /// Build a TCP memberlist bound to an ephemeral loopback port.
-  async fn spawn_node(id: &str) -> Memberlist<TcpTransport, VoidDelegate<SmolStr, SocketAddr>> {
+  async fn spawn_node(id: &str) -> Memberlist<SmolStr, crate::Address> {
     let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse loopback");
     Memberlist::new(
-      Options::new(
+      Options::<TcpTransport<SmolStr, crate::Address>>::new(
         TcpTransportOptions::new()
           .with_local_id(SmolStr::new(id))
           .with_advertise_addr(MaybeResolved::Resolved(bind)),
@@ -1195,8 +1173,8 @@ mod transport_api_tests {
     n1.shutdown().await.expect("shutdown");
   }
 
-  /// The gate: two `Memberlist<TcpTransport, VoidDelegate>` nodes join
-  /// end-to-end over real TCP, with `n2.join` contacting `n1`.
+  /// The gate: two TCP-backed [`Memberlist`] nodes join end-to-end over real
+  /// TCP, with `n2.join` contacting `n1`.
   #[compio::test]
   async fn tcp_two_node_join_via_new() {
     let n1 = spawn_node("n1").await;

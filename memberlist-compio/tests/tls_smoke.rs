@@ -1,4 +1,4 @@
-//! Smoke tests for TlsMemberlist — construct, snapshot, shutdown.
+//! Smoke tests for Memberlist — construct, snapshot, shutdown.
 //!
 //! Exercises the single-node lifecycle over the TLS-backed transport: bind the
 //! UDP gossip socket with a caller-built `TlsOptions`, verify the initial
@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
-  SocketAddrResolver, StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
+  SocketAddrResolver, StreamTransportOptions, TlsTransport, TlsTransportOptions, VoidDelegate,
 };
 use memberlist_proto::TlsOptions;
 use smol_str::SmolStr;
@@ -32,21 +32,21 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-/// Build a `TlsMemberlist` advertising `addr` with a fresh self-signed
+/// Build a `Memberlist` advertising `addr` with a fresh self-signed
 /// `TlsOptions`. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
 async fn make_tls(
   id: &str,
   addr: SocketAddr,
-) -> Result<TlsMemberlist<SmolStr, SocketAddr>, MemberlistError> {
-  let opts = Options::new(
+) -> Result<Memberlist<SmolStr, SocketAddr>, MemberlistError> {
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_tls_options(smoke_tls_options()),
   );
-  TlsMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -61,18 +61,18 @@ async fn make_tls_labeled(
   id: &str,
   addr: SocketAddr,
   label: &[u8],
-) -> Result<TlsMemberlist<SmolStr, SocketAddr>, MemberlistError> {
+) -> Result<Memberlist<SmolStr, SocketAddr>, MemberlistError> {
   let mopts = MemberlistOptions::new()
     .with_label(Some(label.to_vec()))
     .expect("valid label bytes");
-  let opts = Options::new(
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_tls_options(smoke_tls_options()),
   )
   .with_memberlist(mopts);
-  TlsMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -275,14 +275,14 @@ async fn double_bind_returns_io_error() {
 /// `InvalidOption("close_timeout", _)`; a nonzero `close_timeout` constructs.
 #[compio::test]
 async fn tls_construct_rejects_zero_close_timeout() {
-  let opts = Options::new(
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-zero-close"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_tls_options(smoke_tls_options())
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::ZERO)),
   );
-  let res = TlsMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -304,14 +304,14 @@ async fn tls_construct_rejects_zero_close_timeout() {
 
   // A nonzero close_timeout constructs (the gossip socket binds an ephemeral
   // loopback port).
-  let ok_opts = Options::new(
+  let ok_opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-nonzero-close"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_tls_options(smoke_tls_options())
       .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::from_secs(10))),
   );
-  let m = TlsMemberlist::<SmolStr, SocketAddr>::new(
+  let m = Memberlist::new(
     ok_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -401,7 +401,7 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
   // Sender's SNI provider: Some on the first dial, None on every later dial.
   let sni_calls = Arc::new(AtomicUsize::new(0));
   let sni_calls_for_closure = sni_calls.clone();
-  let sender_opts = Options::new(
+  let sender_opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-pcf-sender"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
@@ -416,7 +416,7 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
         }
       })),
   );
-  let sender = TlsMemberlist::<SmolStr, SocketAddr>::new(
+  let sender = Memberlist::new(
     sender_opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -469,14 +469,14 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
 async fn tls_join_all_pre_connect_failure_reports_full_seed_count() {
   // SNI provider always `None` → every TLS dial fails at `dial_context`, before
   // any `Connect`, so no exchange is created and `exchange_ids` stays empty.
-  let opts = Options::new(
+  let opts = Options::<TlsTransport<SmolStr, SocketAddr>>::new(
     TlsTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("tls-nosni-joiner"))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_tls_options(smoke_tls_options())
       .with_sni_provider(Box::new(|_addr: &SocketAddr| None)),
   );
-  let joiner = TlsMemberlist::<SmolStr, SocketAddr>::new(
+  let joiner = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

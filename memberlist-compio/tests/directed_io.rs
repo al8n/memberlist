@@ -14,9 +14,9 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, MemberlistError,
-  MemberlistOptions, NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions, VoidDelegate,
+  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
+  MemberlistError, MemberlistOptions, NodeDelegate, Options, PingDelegate, SocketAddrResolver,
+  TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{
   Node,
@@ -28,17 +28,17 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
+async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
   let ml_opts = MemberlistOptions::new()
     .with_label(Some(b"directed-io-test".to_vec()))
     .expect("valid label");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(ml_opts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -63,10 +63,7 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
 
 /// A `Memberlist` handle backed by a delegate that records received user
 /// messages, used for unreliable and reliable directed-send round-trip assertions.
-type RecordingMemberlist = memberlist_compio::Memberlist<
-  memberlist_compio::TcpTransport<SmolStr, SocketAddr>,
-  RecordingDelegate,
->;
+type RecordingMemberlist = memberlist_compio::Memberlist<SmolStr, SocketAddr>;
 
 /// Shared record of bytes delivered via `notify_user_msg`.
 type Messages = Arc<Mutex<Vec<Vec<u8>>>>;
@@ -114,7 +111,7 @@ async fn make_recording_tcp(id: &str, addr: SocketAddr) -> (RecordingMemberlist,
   let ml_opts = MemberlistOptions::new()
     .with_label(Some(b"directed-io-test".to_vec()))
     .expect("valid label");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
@@ -454,14 +451,14 @@ async fn local_state_carries_initial_meta_immediately_after_new() {
     .with_label(Some(b"directed-io-test".to_vec()))
     .expect("valid label")
     .with_initial_meta(meta);
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("meta-node"))
       // OS-assigned port via :0.
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
   )
   .with_memberlist(ml_opts);
-  let node = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let node = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

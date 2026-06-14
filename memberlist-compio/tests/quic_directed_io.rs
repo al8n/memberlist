@@ -18,16 +18,16 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, MemberlistError,
-  NodeDelegate, Options, PingDelegate, QuicMemberlist, QuicOptions, QuicTransportOptions,
-  SocketAddrResolver, VoidDelegate,
+  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
+  MemberlistError, NodeDelegate, Options, PingDelegate, QuicOptions, QuicTransport,
+  QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{Node, typed::NodeState};
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
-type QuicNode = QuicMemberlist<SmolStr, SocketAddr>;
-type RecordingQuicNode = QuicMemberlist<SmolStr, SocketAddr, RecordingDelegate>;
+type QuicNode = Memberlist<SmolStr, SocketAddr>;
+type RecordingQuicNode = Memberlist<SmolStr, SocketAddr>;
 type Messages = Arc<Mutex<Vec<Vec<u8>>>>;
 
 struct RecordingDelegate {
@@ -82,13 +82,13 @@ fn two_node_configs() -> (QuicOptions, QuicOptions) {
 }
 
 async fn make_quic(id: &str, addr: SocketAddr, qcfg: QuicOptions) -> QuicNode {
-  let opts = Options::new(
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_quic_config(qcfg),
   );
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -104,7 +104,7 @@ async fn make_recording_quic(
   qcfg: QuicOptions,
 ) -> (RecordingQuicNode, Messages) {
   let msgs: Messages = Arc::new(Mutex::new(Vec::new()));
-  let opts = Options::new(
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))

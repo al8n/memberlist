@@ -12,8 +12,8 @@ use std::{
 };
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, Resolver,
-  SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
+  Resolver, SocketAddrResolver, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::typed::Meta;
 use smol_str::SmolStr;
@@ -36,10 +36,10 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-/// Build a labelled `TcpMemberlist` advertising `addr`. The driver-layer
+/// Build a labelled `Memberlist` advertising `addr`. The driver-layer
 /// membership address is `SocketAddr`, so every seed handed to `join`
 /// arrives as a `MaybeResolved::Resolved`.
-async fn make_tcp(id: &str, addr: SocketAddr, label: &[u8]) -> TcpMemberlist<SmolStr, SocketAddr> {
+async fn make_tcp(id: &str, addr: SocketAddr, label: &[u8]) -> Memberlist<SmolStr, SocketAddr> {
   make_tcp_with(id, addr, label, MemberlistOptions::new()).await
 }
 
@@ -50,17 +50,17 @@ async fn make_tcp_with(
   addr: SocketAddr,
   label: &[u8],
   mopts: MemberlistOptions,
-) -> TcpMemberlist<SmolStr, SocketAddr> {
+) -> Memberlist<SmolStr, SocketAddr> {
   let mopts = mopts
     .with_label(Some(label.to_vec()))
     .expect("valid label bytes");
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(mopts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -202,8 +202,8 @@ async fn join_with_blackhole_surfaces_join_all_failed() {
 async fn join_with_empty_resolution_surfaces_join_all_failed() {
   // This joiner resolves `String` service keys via `EmptyResolver`, so its
   // membership-input address type is `String` (not the default `HostAddr`).
-  let joiner: TcpMemberlist<SmolStr, String> = TcpMemberlist::<SmolStr, String>::new(
-    Options::new(
+  let joiner: Memberlist<SmolStr, String> = Memberlist::new(
+    Options::<TcpTransport<SmolStr, String>>::new(
       TcpTransportOptions::<SmolStr, String>::new()
         .with_local_id(SmolStr::new("joiner"))
         .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),

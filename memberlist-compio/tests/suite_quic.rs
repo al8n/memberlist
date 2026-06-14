@@ -1,6 +1,6 @@
 //! The compio QUIC driver run through the driver-agnostic test suite.
 //!
-//! [`CompioQuic`] adapts the compio `QuicMemberlist` handle to
+//! [`CompioQuic`] adapts the compio `Memberlist` handle to
 //! [`memberlist_test_suite::TestCluster`]. Every node shares one self-signed CA
 //! (QUIC verifies the server chain, unlike the accept-any TLS smoke verifier),
 //! and the same scenario bodies run here over QUIC's reliable streams and
@@ -24,8 +24,8 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, QuicMemberlist, QuicTransportOptions,
-  SocketAddrResolver,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, Options, QuicTransport,
+  QuicTransportOptions, SocketAddrResolver,
 };
 use memberlist_test_suite::{
   Captures, NodeConfig, PingObservation, RejectMerge, TestCluster, VetoForeignAlive, scenarios,
@@ -37,7 +37,7 @@ use suite::CapturingDelegate;
 /// A compio QUIC node adapted to [`TestCluster`].
 struct CompioQuic {
   id: SmolStr,
-  handle: QuicMemberlist<SmolStr, SocketAddr, CapturingDelegate>,
+  handle: Memberlist<SmolStr, SocketAddr>,
   captures: Captures,
   merge_invoked: Option<Arc<AtomicBool>>,
   alive_count: Option<Arc<AtomicUsize>>,
@@ -51,7 +51,7 @@ impl TestCluster for CompioQuic {
     let bind = cfg
       .advertise_addr
       .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-    let mut opts = Options::new(
+    let mut opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
       QuicTransportOptions::<SmolStr, SocketAddr>::new()
         .with_local_id(cfg.id.clone())
         .with_advertise_addr(MaybeResolved::Resolved(bind))
@@ -74,14 +74,9 @@ impl TestCluster for CompioQuic {
 
     let delegate = CapturingDelegate::default();
     let captures = delegate.captures.clone();
-    let handle = QuicMemberlist::<SmolStr, SocketAddr, CapturingDelegate>::new(
-      opts,
-      delegate,
-      &SocketAddrResolver,
-      &FirstAddrResolver,
-    )
-    .await
-    .expect("construct compio quic node");
+    let handle = Memberlist::new(opts, delegate, &SocketAddrResolver, &FirstAddrResolver)
+      .await
+      .expect("construct compio quic node");
 
     if let Some(payload) = cfg.ack_payload {
       handle

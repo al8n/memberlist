@@ -8,8 +8,8 @@ mod support;
 use std::{net::SocketAddr, time::Duration};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, QuicMemberlist,
-  QuicOptions, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
+  QuicOptions, QuicTransport, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -18,19 +18,19 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `QuicMemberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
+/// Build a `Memberlist` on an OS-allocated loopback port (`127.0.0.1:0`).
 /// The concrete bound address is read back from `advertise_address()` after
 /// construction. The membership-input address type is `SocketAddr`, so the
 /// construction resolver is the identity `SocketAddrResolver` (never invoked
 /// for a resolved advertise).
-async fn make_quic(id: &str, qcfg: QuicOptions) -> QuicMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_quic(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(qcfg),
   );
-  QuicMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -160,14 +160,14 @@ async fn quic_gossip_mtu_rejected_for_oversized_local_id() {
   // The worst-case Ping for a 2000-byte id frames to ~4 KiB, far above this
   // 2000-byte gossip_mtu; the same budget easily holds a small id's worst case.
   let huge_id = SmolStr::new("a".repeat(2000));
-  let opts = Options::new(
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
     QuicTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(huge_id)
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
       .with_quic_config(support::self_trusted_quic_config()),
   )
   .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
-  let res = QuicMemberlist::<SmolStr, SocketAddr>::new(
+  let res = Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

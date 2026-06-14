@@ -112,13 +112,13 @@ pub use snapshot::MemberlistSnapshot;
 pub use transport::{Transport, TransportRuntime};
 
 #[cfg(feature = "tcp")]
-pub use tcp::{TcpMemberlist, TcpTransport, TcpTransportOptions};
+pub use tcp::{TcpTransport, TcpTransportOptions};
 
 #[cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs"))]
-pub use tls::{SniProvider, TlsMemberlist, TlsTransport, TlsTransportOptions};
+pub use tls::{SniProvider, TlsTransport, TlsTransportOptions};
 
 #[cfg(feature = "quic")]
-pub use quic::{Quic, QuicMemberlist, QuicOptions, QuicTransport, QuicTransportOptions};
+pub use quic::{Quic, QuicOptions, QuicTransport, QuicTransportOptions};
 
 #[cfg(feature = "dns")]
 pub use resolver::{DEFAULT_DNS_TIMEOUT, DnsResolver};

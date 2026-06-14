@@ -10,12 +10,9 @@ use memberlist_proto::typed::NodeState;
 /// each mutation that affects the observable state.
 ///
 /// Generic over the wire id / address types `<I, A>`, mirroring the
-/// underlying [`NodeState<I, A>`]. The pinned aliases
-/// [`TcpMemberlist`](crate::TcpMemberlist) /
-/// [`TlsMemberlist`](crate::TlsMemberlist) /
-/// [`QuicMemberlist`](crate::QuicMemberlist) all instantiate this as
-/// `MemberlistSnapshot<SmolStr, SocketAddr>`; power users that
-/// construct [`Memberlist`](crate::Memberlist) directly pick their own.
+/// underlying [`NodeState<I, A>`]. The [`Memberlist`](crate::Memberlist)
+/// handle instantiates this as `MemberlistSnapshot<I, SocketAddr>` for the
+/// id type its backend carries.
 #[derive(Debug, Clone)]
 pub struct MemberlistSnapshot<I, A> {
   members: Vec<Arc<NodeState<I, A>>>,

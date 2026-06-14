@@ -23,7 +23,7 @@ use std::{
 
 use memberlist_compio::{
   AliveDelegate, ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved,
-  NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpMemberlist, TcpTransport,
+  Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, TcpTransport,
   TcpTransportOptions,
 };
 use memberlist_proto::typed::NodeState;
@@ -77,19 +77,18 @@ impl Delegate for RecordingDelegate {
   type Address = SocketAddr;
 }
 
-/// A `TcpMemberlist` carrying a [`RecordingDelegate`] instead of the default
+/// A `Memberlist` carrying a [`RecordingDelegate`] instead of the default
 /// `VoidDelegate`.
-type RecordingMemberlist =
-  memberlist_compio::Memberlist<TcpTransport<SmolStr, SocketAddr>, RecordingDelegate>;
+type RecordingMemberlist = memberlist_compio::Memberlist<SmolStr, SocketAddr>;
 
 /// Build a plain `VoidDelegate`-backed seed bound to `127.0.0.1:0`.
-async fn make_seed(id: &str) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_seed(id: &str) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     memberlist_compio::VoidDelegate::default(),
     &SocketAddrResolver,
@@ -102,7 +101,7 @@ async fn make_seed(id: &str) -> TcpMemberlist<SmolStr, SocketAddr> {
 /// Build a joiner whose [`RecordingDelegate`] records peer joins into
 /// `joins`.
 async fn make_recording_joiner(id: &str, joins: Joins) -> RecordingMemberlist {
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
@@ -186,8 +185,8 @@ impl AliveDelegate<SmolStr, SocketAddr> for RejectAlive {
 /// Build a joiner whose `Options` installs a [`RejectAlive`] admission
 /// predicate keyed on `reject_id`; observation stays the default
 /// `VoidDelegate`.
-async fn make_rejecting_joiner(id: &str, reject_id: &str) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_rejecting_joiner(id: &str, reject_id: &str) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
@@ -195,7 +194,7 @@ async fn make_rejecting_joiner(id: &str, reject_id: &str) -> TcpMemberlist<SmolS
   .with_alive_delegate(RejectAlive {
     reject_id: SmolStr::new(reject_id),
   });
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     memberlist_compio::VoidDelegate::default(),
     &SocketAddrResolver,

@@ -1,4 +1,4 @@
-//! Smoke tests for TcpMemberlist — construct, snapshot, shutdown.
+//! Smoke tests for Memberlist — construct, snapshot, shutdown.
 //!
 //! Exercises the single-node lifecycle: bind the UDP gossip socket, publish
 //! the initial snapshot, verify the observable counts, and clean up. No peer
@@ -9,8 +9,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
-  SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
+  SocketAddrResolver, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -18,7 +18,7 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
-/// Build a `TcpMemberlist` advertising `addr` with the given cluster label.
+/// Build a `Memberlist` advertising `addr` with the given cluster label.
 ///
 /// The membership-input address type is `SocketAddr`, so the construction
 /// resolver is the identity `SocketAddrResolver` — never actually invoked
@@ -27,15 +27,15 @@ async fn make_tcp(
   id: &str,
   addr: SocketAddr,
   label: Option<Vec<u8>>,
-) -> Result<TcpMemberlist<SmolStr, SocketAddr>, MemberlistError> {
+) -> Result<Memberlist<SmolStr, SocketAddr>, MemberlistError> {
   let ml_opts = MemberlistOptions::new().with_label(label)?;
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
   .with_memberlist(ml_opts);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,

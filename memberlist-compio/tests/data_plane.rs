@@ -34,8 +34,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use memberlist_compio::{
   Channel, ConflictDelegate, Delegate, DriverOptions, EventDelegate, FirstAddrResolver,
-  MaybeResolved, MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate, Options,
-  PingDelegate, SocketAddrResolver, TcpMemberlist, TcpTransport, TcpTransportOptions,
+  MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate,
+  Options, PingDelegate, SocketAddrResolver, TcpTransport, TcpTransportOptions,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -116,8 +116,7 @@ impl Delegate for RecordingDelegate {
 }
 
 /// A `Memberlist` carrying a [`RecordingDelegate`].
-type RecordingMemberlist =
-  memberlist_compio::Memberlist<TcpTransport<SmolStr, SocketAddr>, RecordingDelegate>;
+type RecordingMemberlist = memberlist_compio::Memberlist<SmolStr, SocketAddr>;
 
 /// Machine [`MergeDelegate`] that rejects every join merge (`Send + Sync`),
 /// installed via `Options::with_merge_delegate`.
@@ -130,13 +129,13 @@ impl MergeDelegate<SmolStr, SocketAddr> for RejectMerge {
 }
 
 /// Build a plain `VoidDelegate`-backed seed bound to `127.0.0.1:0`.
-async fn make_seed(id: &str) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_seed(id: &str) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   );
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     memberlist_compio::VoidDelegate::default(),
     &SocketAddrResolver,
@@ -153,7 +152,7 @@ async fn make_recording_node(
   merges: Records,
   updates: UpdateRecords,
 ) -> RecordingMemberlist {
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
@@ -176,7 +175,7 @@ async fn make_rejecting_recording_node(
   merges: Records,
   updates: UpdateRecords,
 ) -> RecordingMemberlist {
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
@@ -673,8 +672,7 @@ impl Delegate for StallingDelegate {
   type Address = SocketAddr;
 }
 
-type StallingMemberlist =
-  memberlist_compio::Memberlist<TcpTransport<SmolStr, SocketAddr>, StallingDelegate>;
+type StallingMemberlist = memberlist_compio::Memberlist<SmolStr, SocketAddr>;
 
 /// Regression for the bounded observation channel (the safe default): with the
 /// observation task permanently stalled in `notify_user_msg`, a flood of
@@ -690,7 +688,7 @@ async fn bounded_observation_channel_drops_and_counts_under_stalled_delegate() {
 
   // Small bounded observation channel + a delegate that stalls forever on the
   // first user message.
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("bc-node"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
@@ -778,13 +776,13 @@ async fn bounded_observation_channel_does_not_drop_valid_burst_for_fast_delegate
   // A no-op (fast) node with a SMALL bounded observation channel joins. Its
   // join push/pull reply carries the seed's 4 members, so 4 `NodeJoined`
   // events surface in a single drain — more than the channel capacity of 2.
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("burst-node"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
   .with_driver(DriverOptions::new().with_observation_channel(Channel::Bounded(2)));
-  let node = TcpMemberlist::<SmolStr, SocketAddr>::new(
+  let node = Memberlist::new(
     opts,
     memberlist_compio::VoidDelegate::default(),
     &SocketAddrResolver,
@@ -852,7 +850,7 @@ async fn bounded_observation_channel_caps_payload_bytes_not_count() {
     seeds.push(s);
   }
 
-  let opts = Options::new(
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new("pb-node"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),

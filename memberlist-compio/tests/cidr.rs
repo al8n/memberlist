@@ -9,8 +9,8 @@
 use std::{net::SocketAddr, time::Duration};
 
 use memberlist_compio::{
-  CidrPolicy, FirstAddrResolver, MaybeResolved, Options, SocketAddrResolver, TcpMemberlist,
-  TcpTransportOptions, VoidDelegate,
+  CidrPolicy, FirstAddrResolver, MaybeResolved, Memberlist, Options, SocketAddrResolver,
+  TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -18,10 +18,10 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-/// Build a `TcpMemberlist` on an OS-allocated loopback port, optionally with a
+/// Build a `Memberlist` on an OS-allocated loopback port, optionally with a
 /// CIDR admission policy installed as the alive delegate.
-async fn make_tcp(id: &str, policy: Option<CidrPolicy>) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let mut opts = Options::new(
+async fn make_tcp(id: &str, policy: Option<CidrPolicy>) -> Memberlist<SmolStr, SocketAddr> {
+  let mut opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
@@ -29,7 +29,7 @@ async fn make_tcp(id: &str, policy: Option<CidrPolicy>) -> TcpMemberlist<SmolStr
   if let Some(policy) = policy {
     opts = opts.with_alive_delegate(policy);
   }
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
@@ -39,17 +39,17 @@ async fn make_tcp(id: &str, policy: Option<CidrPolicy>) -> TcpMemberlist<SmolStr
   .expect("construct tcp memberlist")
 }
 
-/// Build a `TcpMemberlist` with a driver-level [`with_cidr_policy`] — the policy
+/// Build a `Memberlist` with a driver-level [`with_cidr_policy`] — the policy
 /// filters the gossip source and stream peer at the transport boundary AND the
 /// advertised address at membership admission, all from this one setting.
-async fn make_tcp_cidr(id: &str, policy: CidrPolicy) -> TcpMemberlist<SmolStr, SocketAddr> {
-  let opts = Options::new(
+async fn make_tcp_cidr(id: &str, policy: CidrPolicy) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0))),
   )
   .with_cidr_policy(policy);
-  TcpMemberlist::<SmolStr, SocketAddr>::new(
+  Memberlist::new(
     opts,
     VoidDelegate::default(),
     &SocketAddrResolver,
