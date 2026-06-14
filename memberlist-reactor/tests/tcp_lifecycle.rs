@@ -18,8 +18,8 @@ use memberlist_reactor::{
 };
 use smol_str::SmolStr;
 
-async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr> {
-  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -33,8 +33,8 @@ async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr> {
 /// Brings up `a` + `b`, joins `b` to `a`, and waits for both to see two
 /// members. Returns the pair and `a`'s advertised address.
 async fn converged_pair() -> (
-  Memberlist<SmolStr, SocketAddr>,
-  Memberlist<SmolStr, SocketAddr>,
+  Memberlist<SmolStr, SocketAddr, TokioRuntime>,
+  Memberlist<SmolStr, SocketAddr, TokioRuntime>,
   SocketAddr,
 ) {
   let a = make("life-a").await;

@@ -31,12 +31,12 @@ async fn make_quic(
   id: &str,
   qcfg: QuicOptions,
   policy: Option<CidrPolicy>,
-) -> Memberlist<SmolStr, SocketAddr> {
+) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
   let mut opts = Options::<SmolStr>::new();
   if let Some(policy) = policy {
     opts = opts.with_cidr_policy(policy);
   }
-  Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
+  Memberlist::<SmolStr, _, TokioRuntime>::quic(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

@@ -24,8 +24,8 @@ use memberlist_reactor::{
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
-async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
-  Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
+async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::quic(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -49,8 +49,8 @@ fn shared_quic_pair() -> (QuicOptions, QuicOptions) {
 
 /// Brings up a converged QUIC pair and returns `(a, b, a_addr)`.
 async fn converged_pair() -> (
-  Memberlist<SmolStr, SocketAddr>,
-  Memberlist<SmolStr, SocketAddr>,
+  Memberlist<SmolStr, SocketAddr, TokioRuntime>,
+  Memberlist<SmolStr, SocketAddr, TokioRuntime>,
   SocketAddr,
 ) {
   let (qcfg_a, qcfg_b) = shared_quic_pair();

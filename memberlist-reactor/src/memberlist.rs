@@ -102,31 +102,37 @@ fn apply_memberlist_options<I, A>(
 /// the last handle is dropped (or [`shutdown`](Memberlist::shutdown) is called).
 /// Membership reads are lock-free via the published [`MemberlistSnapshot`].
 ///
-/// `Memberlist<I, A>` carries the wire id type `I` and the resolver's unresolved
-/// address type `A`. `I` flows into the snapshot and events channel, which carry
-/// `<I, SocketAddr>` to their public types — the membership address is always
-/// `SocketAddr`. `A` is held in no field; it ties [`Memberlist::join`]'s seeds to
-/// the address domain the node was built with.
-pub struct Memberlist<I, A> {
+/// `Memberlist<I, A, R>` carries the wire id type `I`, the resolver's unresolved
+/// address type `A`, and the agnostic runtime `R` its driver was spawned on. `I`
+/// flows into the snapshot and events channel, which carry `<I, SocketAddr>` to
+/// their public types — the membership address is always `SocketAddr`. `A` is
+/// held in no field; it ties [`Memberlist::join`]'s seeds to the address domain
+/// the node was built with. `R` is likewise held in no field; it brands the
+/// handle so a tokio-backed node is a distinct type from a smol-backed one.
+pub struct Memberlist<I, A, R> {
   shared: Arc<Shared<I>>,
   events_rx: flume::Receiver<Event<I, SocketAddr>>,
   /// Ties the handle to the resolver's unresolved address type. Not held in
   /// any field — `join` enforces seeds resolve in this address domain.
   _a: PhantomData<fn(A)>,
+  /// Brands the handle with the agnostic runtime its driver was spawned on.
+  /// Not held in any field — the driver task is spawned detached.
+  _r: PhantomData<fn(R)>,
 }
 
-impl<I, A> Clone for Memberlist<I, A> {
+impl<I, A, R> Clone for Memberlist<I, A, R> {
   fn clone(&self) -> Self {
     self.shared.handle_cloned();
     Self {
       shared: self.shared.clone(),
       events_rx: self.events_rx.clone(),
       _a: PhantomData,
+      _r: PhantomData,
     }
   }
 }
 
-impl<I, A> Drop for Memberlist<I, A> {
+impl<I, A, R> Drop for Memberlist<I, A, R> {
   fn drop(&mut self) {
     if self.shared.handle_dropped() {
       self.shared.begin_shutdown();
@@ -135,7 +141,7 @@ impl<I, A> Drop for Memberlist<I, A> {
   }
 }
 
-impl<I: NodeId, A> Memberlist<I, A> {
+impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// Builds a QUIC-backed node and spawns its driver on the runtime `R`, seeding
   /// the gossip RNG from the OS (a `StdRng`). Use
   /// [`quic_with_rng`](Self::quic_with_rng) to inject a different RNG.
@@ -143,7 +149,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// The advertise address is resolved once via `resolver`, then the socket is
   /// bound and the [`QuicEndpoint`] driven; the resolver is not retained.
   #[cfg(feature = "quic")]
-  pub async fn quic<R, Res, D>(
+  pub async fn quic<Res, D>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -156,7 +162,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
     Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
-    Self::quic_with_rng::<R, Res, D, StdRng>(
+    Self::quic_with_rng::<Res, D, StdRng>(
       resolver,
       local_id,
       advertise,
@@ -172,7 +178,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   /// The machine's gossip schedule is reproducible iff `rng` is.
   #[cfg(feature = "quic")]
-  pub async fn quic_with_rng<R, Res, D, G>(
+  pub async fn quic_with_rng<Res, D, G>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -285,6 +291,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
       shared,
       events_rx,
       _a: PhantomData,
+      _r: PhantomData,
     })
   }
 
@@ -294,7 +301,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// socket and a TCP listener are bound on it and the [`StreamEndpoint`] driven;
   /// the resolver is not retained.
   #[cfg(feature = "tcp")]
-  pub async fn tcp<R, Res, D>(
+  pub async fn tcp<Res, D>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -306,7 +313,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
     Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
-    Self::tcp_with_rng::<R, Res, D, StdRng>(
+    Self::tcp_with_rng::<Res, D, StdRng>(
       resolver,
       local_id,
       advertise,
@@ -320,7 +327,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// Like [`tcp`](Self::tcp) but with a caller-supplied gossip RNG `G`,
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   #[cfg(feature = "tcp")]
-  pub async fn tcp_with_rng<R, Res, D, G>(
+  pub async fn tcp_with_rng<Res, D, G>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -334,7 +341,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
     D: Delegate<Id = I, Address = SocketAddr>,
     G: rand::Rng + Send + Unpin + 'static,
   {
-    Self::build_stream_backend::<R, Res, D, RawRecords, G>(
+    Self::build_stream_backend::<Res, D, RawRecords, G>(
       resolver,
       local_id,
       advertise,
@@ -372,7 +379,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// `sni_provider` maps each peer to the server name its certificate is verified
   /// against — a TLS dial requires one, and returning `None` skips that peer.
   #[cfg(feature = "tls")]
-  pub async fn tls<R, Res, D, F>(
+  pub async fn tls<Res, D, F>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -387,7 +394,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
     D: Delegate<Id = I, Address = SocketAddr>,
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
   {
-    Self::tls_with_rng::<R, Res, D, F, StdRng>(
+    Self::tls_with_rng::<Res, D, F, StdRng>(
       resolver,
       local_id,
       advertise,
@@ -404,7 +411,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   #[cfg(feature = "tls")]
   #[allow(clippy::too_many_arguments)]
-  pub async fn tls_with_rng<R, Res, D, F, G>(
+  pub async fn tls_with_rng<Res, D, F, G>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -421,7 +428,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
     G: rand::Rng + Send + Unpin + 'static,
   {
-    Self::build_stream_backend::<R, Res, D, Labeled<TlsRecords>, G>(
+    Self::build_stream_backend::<Res, D, Labeled<TlsRecords>, G>(
       resolver,
       local_id,
       advertise,
@@ -461,7 +468,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
   /// decoded `MemberlistOptions` so it can configure the record-layer-specific
   /// label, compression, and encryption on the `StreamEndpoint` it returns.
   #[cfg(any(feature = "tcp", feature = "tls"))]
-  async fn build_stream_backend<R, Res, D, T, G>(
+  async fn build_stream_backend<Res, D, T, G>(
     resolver: &Res,
     local_id: I,
     advertise: MaybeResolved<Res::Address>,
@@ -634,6 +641,7 @@ impl<I: NodeId, A> Memberlist<I, A> {
       shared,
       events_rx,
       _a: PhantomData,
+      _r: PhantomData,
     })
   }
 

@@ -27,7 +27,7 @@ use smol_str::SmolStr;
 /// Builds a QUIC node advertising an OS-picked loopback port. The constructor
 /// reads the bound address back, so the node advertises its real port and a
 /// peer can dial it via `local().addr_ref()`.
-async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
+async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
   make_with_opts(id, qcfg, MemberlistOptions::new()).await
 }
 
@@ -36,8 +36,8 @@ async fn make_with_opts(
   id: &str,
   qcfg: QuicOptions,
   ml_opts: MemberlistOptions,
-) -> Memberlist<SmolStr, SocketAddr> {
-  Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
+) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::quic(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -129,7 +129,7 @@ async fn delegate_and_event_stream_observe_join() {
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
   let joins = Arc::new(AtomicUsize::new(0));
-  let a = Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
+  let a = Memberlist::<SmolStr, _, TokioRuntime>::quic(
     &SocketAddrResolver,
     SmolStr::new("a"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -262,7 +262,7 @@ async fn join_to_unreachable_quic_seed_returns_err_not_hang() {
 async fn wildcard_advertise_is_rejected() {
   // Binding the wildcard 0.0.0.0:0 would advertise an unspecified contact peers
   // cannot dial; construction must reject it rather than join as unreachable.
-  let res = Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
+  let res = Memberlist::<SmolStr, _, TokioRuntime>::quic(
     &SocketAddrResolver,
     SmolStr::new("node"),
     MaybeResolved::Resolved("0.0.0.0:0".parse::<SocketAddr>().unwrap()),

@@ -9,6 +9,11 @@ use core::net::SocketAddr;
 /// The runtime these constructors bind.
 pub type Runtime = agnostic::tokio::TokioRuntime;
 
+/// A tokio-backed memberlist handle — [`memberlist_reactor::Memberlist`] with its
+/// runtime pinned to tokio, so callers never name `R`. The unpinned
+/// three-parameter handle stays available as [`crate::reactor::Memberlist`].
+pub type Memberlist<I, A> = memberlist_reactor::Memberlist<I, A, Runtime>;
+
 /// Build a QUIC-backed node on tokio. See [`memberlist_reactor::Memberlist::quic`].
 #[cfg(feature = "quic")]
 pub async fn quic<I, Res, D>(
@@ -24,7 +29,7 @@ where
   Res: AddressResolver,
   D: Delegate<Id = I, Address = SocketAddr>,
 {
-  Memberlist::<I, Res::Address>::quic::<Runtime, Res, D>(
+  Memberlist::<I, Res::Address>::quic::<Res, D>(
     resolver,
     local_id,
     advertise,
@@ -49,10 +54,8 @@ where
   Res: AddressResolver,
   D: Delegate<Id = I, Address = SocketAddr>,
 {
-  Memberlist::<I, Res::Address>::tcp::<Runtime, Res, D>(
-    resolver, local_id, advertise, options, delegate,
-  )
-  .await
+  Memberlist::<I, Res::Address>::tcp::<Res, D>(resolver, local_id, advertise, options, delegate)
+    .await
 }
 
 /// Build a TLS-backed node on tokio. See [`memberlist_reactor::Memberlist::tls`].
@@ -72,7 +75,7 @@ where
   D: Delegate<Id = I, Address = SocketAddr>,
   F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
 {
-  Memberlist::<I, Res::Address>::tls::<Runtime, Res, D, F>(
+  Memberlist::<I, Res::Address>::tls::<Res, D, F>(
     resolver,
     local_id,
     advertise,

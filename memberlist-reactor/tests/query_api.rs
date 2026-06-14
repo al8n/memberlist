@@ -11,8 +11,8 @@ use agnostic::tokio::TokioRuntime;
 use memberlist_reactor::{MaybeResolved, Memberlist, Options, SocketAddrResolver, VoidDelegate};
 use smol_str::SmolStr;
 
-async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr> {
-  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

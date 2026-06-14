@@ -24,8 +24,8 @@ use smol_str::SmolStr;
 /// Builds a TCP node advertising an OS-picked loopback port. The constructor
 /// reads the bound address back, so the node advertises its real port and a peer
 /// can dial it via `local().addr_ref()`.
-async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr> {
-  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -101,7 +101,7 @@ impl Delegate for RecordingDelegate {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delegate_and_event_stream_observe_join() {
   let joins = Arc::new(AtomicUsize::new(0));
-  let a = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let a = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new("a"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -190,7 +190,7 @@ async fn repeated_shutdown_is_idempotent() {
 async fn wildcard_advertise_is_rejected() {
   // Binding the wildcard 0.0.0.0:0 would advertise an unspecified contact peers
   // cannot dial; construction must reject it rather than join as unreachable.
-  let res = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let res = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new("node"),
     MaybeResolved::Resolved("0.0.0.0:0".parse::<SocketAddr>().unwrap()),
@@ -207,7 +207,7 @@ async fn zero_close_timeout_is_rejected() {
   // A zero close_timeout makes each post-Close graceful-drain write fire its
   // backstop immediately, so a graceful close RSTs its queued push/pull response
   // bytes instead of draining them; construction must reject it fail-fast.
-  let res = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let res = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new("zero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -221,7 +221,7 @@ async fn zero_close_timeout_is_rejected() {
   );
 
   // A nonzero close_timeout constructs.
-  let ok = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let ok = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new("nonzero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -356,7 +356,7 @@ async fn unresolved_advertise_is_resolved_at_bootstrap() {
     }
   }
 
-  let m = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let m = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &FixedResolver,
     SmolStr::new("unres-adv"),
     MaybeResolved::Unresolved("my-host"),
@@ -393,7 +393,7 @@ async fn unresolved_advertise_empty_resolution_fails() {
     }
   }
 
-  let res = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let res = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &EmptyResolver,
     SmolStr::new("no-adv"),
     MaybeResolved::Unresolved("nowhere"),
@@ -505,7 +505,7 @@ async fn peer_leave_is_observed_via_event_stream_and_membership() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delegate_panic_does_not_wedge_observation_task() {
   let left = Arc::new(AtomicBool::new(false));
-  let a = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+  let a = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
     &SocketAddrResolver,
     SmolStr::new("a"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
