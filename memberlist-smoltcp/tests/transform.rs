@@ -22,7 +22,7 @@ use core::{
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
   CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, LabelError, Memberlist,
-  Options, SecretKey, TransformOptions,
+  Options, SecretKey, SocketAddrResolver, TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -64,19 +64,21 @@ fn encrypted_gossip_round_trips() {
   let now: Instant = clock.now();
 
   let enc = shared_encryption();
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(enc.clone()),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev_a,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default().with_encryption(enc),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut dev_b,
     now,
   );
@@ -122,20 +124,22 @@ fn encrypted_node_rejects_plaintext_gossip() {
   let mut clock = harness::Clock::new();
   let now: Instant = clock.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(shared_encryption()),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev_a,
     now,
   );
   // B is plaintext: no keyring, no compression, no label.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut dev_b,
     now,
   );
@@ -195,20 +199,22 @@ fn gossip_label_isolates_clusters() {
     .with_label(Some(b"alpha".to_vec()))
     .expect("valid label");
 
-  let mut alpha: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut alpha: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     transform_alpha,
     mk("alpha", 1),
+    &SocketAddrResolver,
     &mut dev_alpha,
     now,
   );
   // Plaintext node: no label, so alpha rejects its gossip and probes.
-  let mut plain: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut plain: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("plain", 2),
+    &SocketAddrResolver,
     &mut dev_plain,
     now,
   );
@@ -246,19 +252,21 @@ fn gossip_label_isolates_clusters() {
     .with_label(Some(b"alpha".to_vec()))
     .expect("valid label");
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     transform_a,
     mk("a", 3),
+    &SocketAddrResolver,
     &mut dev_a,
     now2,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4))),
     transform_b,
     mk("b", 4),
+    &SocketAddrResolver,
     &mut dev_b,
     now2,
   );
@@ -316,19 +324,21 @@ fn runtime_set_encryption_rotates_key() {
   let mut clock = harness::Clock::new();
   let now: Instant = clock.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_encryption(key1.clone()),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev_a,
     now,
   );
-  let mut c: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut c: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     TransformOptions::default().with_encryption(key2.clone()),
     mk("c", 3),
+    &SocketAddrResolver,
     &mut dev_c,
     now,
   );
@@ -362,20 +372,22 @@ fn runtime_set_encryption_rotates_key() {
   let mut clock2 = harness::Clock::new();
   let now2: Instant = clock2.now();
 
-  let mut a2: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a2: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
     TransformOptions::default().with_encryption(key1.clone()),
     mk("a2", 5),
+    &SocketAddrResolver,
     &mut dev_a2,
     now2,
   );
-  let mut d: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut d: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6))),
     // D starts with key2 …
     TransformOptions::default().with_encryption(key2.clone()),
     mk("d", 6),
+    &SocketAddrResolver,
     &mut dev_d,
     now2,
   );
@@ -420,19 +432,21 @@ fn compressed_gossip_round_trips() {
 
   // `CompressionOptions` is `Copy`, so both nodes take the same value directly.
   let comp = CompressionOptions::new().with_algorithm(CompressAlgorithm::Lz4);
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default().with_compression(comp),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev_a,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default().with_compression(comp),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut dev_b,
     now,
   );

@@ -951,8 +951,10 @@ where
   /// schedulers stop and the machine merges no remote state, so the runtime
   /// operations that gate on this reject with `NotRunning` rather than queue or
   /// store a change no peer would observe. The core data-state setters gate
-  /// inside the machine itself.
-  fn ensure_running(&self) -> Result<(), memberlist_proto::Error> {
+  /// inside the machine itself. Public so a caller-poll driver can reject an
+  /// operation (e.g. a `join` that would otherwise resolve seeds) before doing
+  /// work a left node would only discard.
+  pub fn ensure_running(&self) -> Result<(), memberlist_proto::Error> {
     if self.endpoint.is_running() {
       Ok(())
     } else {

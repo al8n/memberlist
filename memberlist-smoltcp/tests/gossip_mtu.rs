@@ -18,7 +18,7 @@ use core::{
 
 use bytes::Bytes;
 use memberlist_proto::{EndpointOptions, Event};
-use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
+use memberlist_smoltcp::{Memberlist, Options, SocketAddrResolver, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -64,19 +64,21 @@ fn oversized_gossip_datagram_is_received() {
       .with_gossip_interval(Duration::from_millis(20))
   };
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -170,19 +172,21 @@ fn oversized_gossip_datagram_is_sent() {
 
   // Both nodes use the DEFAULT Options (default UDP arenas) so the scaling floor,
   // not an explicitly enlarged arena, is what makes the send fit.
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut db,
     now,
   );

@@ -13,7 +13,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
   EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceOptions, IpCidr, Medium,
-  Memberlist, Options, Route, TransformOptions,
+  Memberlist, Options, Route, SocketAddrResolver, TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -36,11 +36,12 @@ fn medium_mismatch_is_a_clean_error_not_a_panic() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ethernet);
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -64,11 +65,12 @@ fn missing_ip_address_is_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ip); // no with_ip_addr
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -88,20 +90,22 @@ fn random_seed_defaults_to_nonzero_entropy_and_is_pinnable() {
   // Default (None): entropy-drawn. Build twice; the seeds must be nonzero and
   // (on a real entropy host) differ between constructions.
   let mut dev1 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let a: Memberlist<SmolStr, _> = Memberlist::new(
+  let a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev1,
     now,
   );
   let mut dev2 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let b: Memberlist<SmolStr, _> = Memberlist::new(
+  let b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(2)),
     TransformOptions::default(),
     ep("b", 2),
+    &SocketAddrResolver,
     &mut dev2,
     now,
   );
@@ -115,13 +119,14 @@ fn random_seed_defaults_to_nonzero_entropy_and_is_pinnable() {
 
   // Pinned: stored verbatim.
   let mut dev3 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let c: Memberlist<SmolStr, _> = Memberlist::new(
+  let c: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip)
       .with_ip_addr(ip_cidr(3))
       .with_random_seed(0x1234),
     TransformOptions::default(),
     ep("c", 3),
+    &SocketAddrResolver,
     &mut dev3,
     now,
   );
@@ -138,11 +143,12 @@ fn ethernet_medium_device_constructs() {
     0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
   ])))
   .with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -159,11 +165,12 @@ fn ip_medium_happy_path_constructs() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1));
-  let m: Memberlist<SmolStr, _> = Memberlist::try_new(
+  let m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   )
@@ -182,11 +189,12 @@ fn multicast_ip_address_is_rejected_not_panicked() {
   // 224.0.0.1/4 is multicast: not unicast and not unspecified.
   let multicast = IpCidr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)).into(), 4);
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(multicast);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -205,11 +213,12 @@ fn broadcast_ip_address_is_rejected() {
   // 255.255.255.255/32 is the limited broadcast address.
   let broadcast = IpCidr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)).into(), 32);
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(broadcast);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -231,11 +240,12 @@ fn unspecified_ip_address_is_permitted() {
   let iface = InterfaceOptions::new(HardwareAddress::Ip)
     .with_ip_addr(unspecified)
     .with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -256,11 +266,12 @@ fn broadcast_mac_is_rejected() {
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ethernet(EthernetAddress::BROADCAST))
     .with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -278,11 +289,12 @@ fn zero_port_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new().with_port(0),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -311,11 +323,12 @@ fn non_unicast_route_gateway_rejected() {
   let iface = InterfaceOptions::new(HardwareAddress::Ip)
     .with_ip_addr(ip_cidr(1))
     .with_route(route);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -342,11 +355,12 @@ fn route_family_mismatch_rejected() {
   let iface = InterfaceOptions::new(HardwareAddress::Ip)
     .with_ip_addr(ip_cidr(1))
     .with_route(route);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -368,11 +382,12 @@ fn advertise_port_mismatch_rejected() {
     SmolStr::new("a"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8000),
   );
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep_cfg,
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -395,11 +410,12 @@ fn advertise_ipv4_not_local_rejected() {
     SmolStr::new("a"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946),
   );
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep_cfg,
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -423,11 +439,12 @@ fn advertise_ipv6_not_local_rejected() {
     SmolStr::new("a"),
     SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)), 7946),
   );
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep_cfg,
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -451,11 +468,12 @@ fn advertise_ip_matching_a_configured_interface_addr_constructs() {
     SmolStr::new("a"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946),
   );
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep_cfg,
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -474,11 +492,12 @@ fn gossip_mtu_usize_max_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1));
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     iface,
     TransformOptions::default(),
     ep("a", 1).with_gossip_mtu(usize::MAX),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -497,11 +516,12 @@ fn gossip_mtu_ceiling_boundary() {
 
   // Discover the exact ceiling from an over-ceiling rejection.
   let mut dev0 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1).with_gossip_mtu(usize::MAX),
+    &SocketAddrResolver,
     &mut dev0,
     clock.now(),
   );
@@ -512,11 +532,12 @@ fn gossip_mtu_ceiling_boundary() {
 
   // ceiling + 1 is rejected.
   let mut dev1 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let over: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let over: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1).with_gossip_mtu(ceiling + 1),
+    &SocketAddrResolver,
     &mut dev1,
     clock.now(),
   );
@@ -527,11 +548,12 @@ fn gossip_mtu_ceiling_boundary() {
 
   // ceiling exactly constructs.
   let mut dev2 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let at: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let at: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1).with_gossip_mtu(ceiling),
+    &SocketAddrResolver,
     &mut dev2,
     clock.now(),
   );
@@ -547,11 +569,12 @@ fn oversized_udp_arena_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.udp_rx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -571,11 +594,12 @@ fn tcp_pool_size_below_two_rejected() {
     let now: Instant = harness::Clock::new().now();
     let mut cfg = Options::new();
     cfg.tcp_pool_size = bad;
-    let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+    let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
       cfg,
       InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
       TransformOptions::default(),
       ep("a", 1),
+      &SocketAddrResolver,
       &mut dev,
       now,
     );
@@ -590,11 +614,12 @@ fn tcp_pool_size_below_two_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.tcp_pool_size = 2;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -610,11 +635,12 @@ fn zero_tcp_socket_rx_bytes_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.tcp_socket_rx_bytes = 0;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -632,11 +658,12 @@ fn zero_tcp_socket_tx_bytes_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.tcp_socket_tx_bytes = 0;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -661,11 +688,12 @@ fn tcp_rx_buffer_above_1gib_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.tcp_socket_rx_bytes = (1 << 30) + 1;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -676,11 +704,12 @@ fn tcp_rx_buffer_above_1gib_rejected() {
 
   // A normal (default) rx buffer is well under the cap and constructs.
   let mut dev2 = smoltcp::phy::Loopback::new(Medium::Ip);
-  let ok: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let ok: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev2,
     harness::Clock::new().now(),
   );
@@ -695,11 +724,12 @@ fn zero_udp_rx_packets_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.udp_rx_packets = 0;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -717,11 +747,12 @@ fn zero_udp_tx_packets_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   cfg.udp_tx_packets = 0;
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -739,11 +770,12 @@ fn zero_close_timeout_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let cfg = Options::new().with_close_timeout(core::time::Duration::ZERO);
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
     TransformOptions::default(),
     ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );

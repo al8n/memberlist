@@ -5,7 +5,7 @@ use core::{
   time::Duration,
 };
 use memberlist_proto::{EndpointOptions, Instant};
-use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
+use memberlist_smoltcp::{Memberlist, Options, SocketAddrResolver, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -69,19 +69,21 @@ fn two_nodes_gossip_and_detect_failure() {
   let mut clock = harness::Clock::new();
   let now: Instant = clock.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev_a,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut dev_b,
     now,
   );

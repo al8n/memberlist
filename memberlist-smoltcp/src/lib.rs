@@ -44,15 +44,16 @@ extern crate std;
 compile_error!("memberlist-smoltcp requires the `std` or `alloc` feature");
 
 pub use config::Options;
-pub use error::{GossipMtuTooLarge, InitError, MediumMismatch};
+pub use error::{GossipMtuTooLarge, InitError, JoinError, MediumMismatch};
 pub use interface::{
   EthernetAddress, HardwareAddress, InterfaceOptions, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
   Medium, Route,
 };
 pub use memberlist::Memberlist;
+pub use resolver::{Resolver, SocketAddrResolver};
 // Re-export types that appear in public `Memberlist` method signatures so
 // callers do not need to depend on `memberlist-proto` directly.
-pub use memberlist_embedded::{AliveDelegate, ControlError, MergeDelegate};
+pub use memberlist_embedded::{AliveDelegate, ControlError, MaybeResolved, MergeDelegate};
 pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeState};
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]
@@ -71,4 +72,5 @@ mod error;
 mod gossip_io;
 mod interface;
 mod memberlist;
+mod resolver;
 mod stream_io;

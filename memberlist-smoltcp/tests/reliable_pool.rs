@@ -16,7 +16,9 @@ use core::{
 };
 
 use memberlist_proto::EndpointOptions;
-use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
+use memberlist_smoltcp::{
+  MaybeResolved, Memberlist, Options, SocketAddrResolver, TransformOptions,
+};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -55,12 +57,13 @@ fn min_pool_seed_accepts_repeated_inbound() {
   // the listener-loss bug breaks — each accept consumes the listener, which must
   // be replenished/re-established as sockets free. A short push/pull interval is
   // harmless here and keeps A's scheduler from interfering.
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946))
       .with_push_pull_interval(Duration::from_millis(50)),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
@@ -69,17 +72,22 @@ fn min_pool_seed_accepts_repeated_inbound() {
   // Joiner B with the default pool (a listener plus dial sockets). Its short
   // push/pull interval makes it re-dial A repeatedly after the initial join, so
   // A must accept a SECOND (and further) inbound connection.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_push_pull_interval(Duration::from_millis(50)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
   b.start(now);
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   // Drive both until A has accepted at least two inbound connections (the first
   // join plus at least one periodic push/pull re-dial). Without listener
@@ -152,11 +160,12 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
   let now = clk.now();
 
   // Real seed A on the wire (10.0.0.1). It accepts B's eventual push/pull.
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
@@ -165,12 +174,13 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
   // Joiner B with two pooled sockets: one becomes B's listener, leaving exactly
   // ONE dial socket. A short `stream_timeout` makes the dead dial elapse quickly
   // so the freed socket cycles to the viable seed within the virtual-time budget.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_stream_timeout(Duration::from_millis(1000)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -182,7 +192,8 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
   // address avoids putting SYN-retransmit noise on the shared paired-device wire
   // that would compete with A's real push/pull frames.)
   let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9)), 7946);
-  b.join(&[dead]).expect("join from a running node");
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(dead)])
+    .expect("join from a running node");
 
   let mut joined = false;
   for i in 0..BUDGET {
@@ -193,7 +204,11 @@ fn pool_exhaustion_defers_dial_to_viable_later_seed() {
     // outlives the dead seed's socket-free event, leaving budget to complete the
     // push/pull once the freed socket finally backs the deferred dial.
     if i == 95 {
-      b.join(&[addr(1, 7946)]).expect("join from a running node");
+      b.join(
+        &SocketAddrResolver,
+        &[MaybeResolved::Resolved(addr(1, 7946))],
+      )
+      .expect("join from a running node");
     }
     let _ = a.poll(clk.now(), &mut da);
     let _ = b.poll(clk.now(), &mut db);
@@ -260,22 +275,24 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
   // B uses the default pool plus a LARGE close timeout and a short stream timeout.
   // Record the pristine free count so we can assert it recovers to exactly that.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -291,7 +308,11 @@ fn failed_exchange_aborts_and_reclaims_socket_at_stream_timeout() {
   // and will never ACK or reply to — the FIN. B's socket is therefore wedged in
   // FinWait with a vanished peer, the exchange still mapped (the bridge awaits the
   // reply that never comes), and a socket held out of the pool.
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
   let mut froze_at = None;
   for _ in 0..BUDGET {
     // Poll A then B every iteration until B half-closes; A is never polled again
@@ -423,20 +444,22 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_close_timeout(Duration::from_millis(CLOSE_TIMEOUT_MS)),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946))
       .with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -453,7 +476,11 @@ fn failed_exchange_abort_honored_when_driven_by_returned_deadline() {
   // has vanished mid-exchange. B's bridge keeps the half-closed exchange mapped
   // and then FAILS at `stream_timeout`. Record the virtual instant of the freeze;
   // the abort deadline is that instant plus `stream_timeout` plus a small slack.
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
   let mut froze_at = None;
   for _ in 0..BUDGET {
     // Poll A then B every iteration until B half-closes; A is never polled again
@@ -609,19 +636,21 @@ fn delayed_reply_after_half_close_still_completes() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     quiet("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -629,7 +658,11 @@ fn delayed_reply_after_half_close_still_completes() {
   b.start(now);
 
   let free_at_construction = b.pool_free_count();
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   let mut a_paused_for = 0u32;
   let mut withheld_reply = false;
@@ -779,7 +812,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // `n` is the contended node: pool size 2 (listener + one dial socket). Its own
   // periodic schedulers are disabled so the only sockets in play are the listener,
   // the dead dials, and the inbound from `p` — keeping the contended poll exact.
-  let mut n: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut n: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
@@ -788,6 +821,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600)),
+    &SocketAddrResolver,
     &mut dn,
     now,
   );
@@ -796,7 +830,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // `p` is a real peer on the wire. Its periodic schedulers are disabled so it
   // dials `n` only when explicitly told to (the timed `join`s below), making each
   // inbound on `n` a deliberate, placeable event.
-  let mut p: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut p: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
@@ -804,6 +838,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
       .with_push_pull_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600)),
+    &SocketAddrResolver,
     &mut dp,
     now,
   );
@@ -815,7 +850,8 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   let d2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)), 7946);
 
   // Event 1: `d1` takes the lone dial socket immediately.
-  n.join(&[d1]).expect("join from a running node");
+  n.join(&SocketAddrResolver, &[MaybeResolved::Resolved(d1)])
+    .expect("join from a running node");
 
   // Drive the race. The contended poll is the one where `p`'s inbound is accepted
   // (`accepted_inbound_count` first reaches 1): the accept consumes the listener
@@ -830,11 +866,16 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   for i in 0..BUDGET {
     // Event 2: the staggered second dead dial becomes a waiting `PendingDial`.
     if i == D2_JOIN_TICK {
-      n.join(&[d2]).expect("join from a running node");
+      n.join(&SocketAddrResolver, &[MaybeResolved::Resolved(d2)])
+        .expect("join from a running node");
     }
     // Event 3: `p`'s single inbound, timed to settle as `d1`'s socket frees.
     if i == P_JOIN_TICK {
-      p.join(&[addr(1, 7946)]).expect("join from a running node");
+      p.join(
+        &SocketAddrResolver,
+        &[MaybeResolved::Resolved(addr(1, 7946))],
+      )
+      .expect("join from a running node");
     }
 
     let _ = n.poll(clk.now(), &mut dn);
@@ -868,7 +909,11 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // accepted. `p` dials `n` a second time; `n`'s accept count must climb past the
   // accept it had at the contended poll. On the buggy order the listener is gone
   // for good here, so this never happens.
-  p.join(&[addr(1, 7946)]).expect("join from a running node");
+  p.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
   let mut accepted_again = false;
   for _ in 0..BUDGET {
     let _ = n.poll(clk.now(), &mut dn);
@@ -960,11 +1005,12 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   // setter). A larger rx ring keeps A able to read B's inbound request in one go.
   let mut a_cfg = Options::new();
   a_cfg.tcp_socket_tx_bytes = A_TX_RING;
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     a_cfg,
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     quiet("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
@@ -990,18 +1036,23 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
 
   // Joiner B: default sockets, schedulers disabled, short stream timeout. It
   // starts as a lone member and must learn A's whole snapshot from the one reply.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
   b.start(now);
   assert_eq!(b.num_members(), 1, "B starts as a lone member");
 
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   // Drive both until B has learned the FULL snapshot: itself + A + every injected
   // peer. A truncated reply decodes to nothing, so B would stay at 1.
@@ -1070,11 +1121,12 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
   let mut a_cfg = Options::new();
   a_cfg.tcp_socket_tx_bytes = A_TX_RING;
   a_cfg.close_timeout = Duration::from_millis(CLOSE_TIMEOUT_MS);
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     a_cfg,
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     quiet("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
@@ -1089,16 +1141,21 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
   let a_members_before = a.num_members();
   assert_eq!(a_members_before, 1 + INJECTED_PEERS);
 
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     quiet("b", 2).with_stream_timeout(Duration::from_millis(STREAM_TIMEOUT_MS)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
   b.start(now);
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   let expected = 1 + a_members_before;
   let mut converged = false;
@@ -1201,7 +1258,7 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // Hub joiner `b`: pool size 2 (listener + ONE dial socket). Its own periodic
   // schedulers are disabled so the only channel that can sync a seed into `b` is
   // `b`'s direct join push/pull to that seed.
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new().with_tcp_pool_size(2),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
@@ -1210,6 +1267,7 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
       .with_gossip_interval(Duration::from_secs(3600))
       .with_probe_interval(Duration::from_secs(3600))
       .with_push_pull_interval(Duration::from_secs(3600)),
+    &SocketAddrResolver,
     &mut dn,
     now,
   );
@@ -1224,20 +1282,22 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
       .with_probe_interval(Duration::from_secs(3600))
       .with_gossip_interval(Duration::from_secs(3600))
   };
-  let mut a1: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a1: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     seed_cfg("a1", 1),
+    &SocketAddrResolver,
     &mut d1,
     now,
   );
   a1.start(now);
-  let mut a2: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a2: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
     TransformOptions::default(),
     seed_cfg("a2", 3),
+    &SocketAddrResolver,
     &mut d2,
     now,
   );
@@ -1247,8 +1307,14 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   // claims the lone dial socket (`Dialing`); the second finds the pool empty and
   // defers to `PendingDial`. Whichever exchange frees its socket first must then
   // back the still-waiting second dial.
-  b.join(&[addr(1, 7946), addr(3, 7946)])
-    .expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[
+      MaybeResolved::Resolved(addr(1, 7946)),
+      MaybeResolved::Resolved(addr(3, 7946)),
+    ],
+  )
+  .expect("join from a running node");
 
   // Witness that the second exchange was genuinely deferred at least once: the
   // single dial socket cannot back both at the join tick.

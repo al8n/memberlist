@@ -19,7 +19,9 @@ use core::{
 
 use bytes::Bytes;
 use memberlist_proto::{EndpointOptions, Node, event::Event};
-use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
+use memberlist_smoltcp::{
+  MaybeResolved, Memberlist, Options, SocketAddrResolver, TransformOptions,
+};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -36,7 +38,7 @@ fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
 }
 
 type NodeAndDev = (
-  Memberlist<SmolStr, harness::PairedDevice>,
+  Memberlist<SmolStr, SocketAddr, harness::PairedDevice>,
   harness::PairedDevice,
 );
 type TwoNodes = (NodeAndDev, NodeAndDev, harness::Clock);
@@ -56,25 +58,31 @@ fn converge_two_nodes() -> TwoNodes {
   // compete with the ongoing probe/push-pull exchanges for sockets.
   let cfg = Options::new().with_tcp_pool_size(8);
 
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     cfg.clone(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     cfg,
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     mk("b", 2),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
   a.start(now);
   b.start(now);
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   for _ in 0..BUDGET {
     let _ = a.poll(clk.now(), &mut da);
@@ -101,11 +109,12 @@ fn local_id_returns_local_node_id() {
   let (mut dev, _) = harness::link(1500);
   let clk = harness::Clock::new();
   let now = clk.now();
-  let mut node: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut node: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -119,11 +128,12 @@ fn advertise_address_returns_constructed_addr() {
   let (mut dev, _) = harness::link(1500);
   let clk = harness::Clock::new();
   let now = clk.now();
-  let mut node: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut node: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -138,11 +148,12 @@ fn local_state_is_alive() {
   let (mut dev, _) = harness::link(1500);
   let clk = harness::Clock::new();
   let now = clk.now();
-  let mut node: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut node: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -158,11 +169,12 @@ fn health_score_zero_on_fresh_node() {
   let (mut dev, _) = harness::link(1500);
   let clk = harness::Clock::new();
   let now = clk.now();
-  let mut node: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut node: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     mk("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );

@@ -14,7 +14,9 @@ mod harness;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use memberlist_proto::{EndpointOptions, Event};
-use memberlist_smoltcp::{Memberlist, Options, TransformOptions};
+use memberlist_smoltcp::{
+  MaybeResolved, Memberlist, Options, SocketAddrResolver, TransformOptions,
+};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -51,19 +53,21 @@ fn join_from_seed_then_clean_leave() {
 
   // Node A is the seed; node B is the joiner. Distinct rng seeds keep their
   // probe/gossip staggers independent.
-  let mut a: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut a: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut da,
     now,
   );
-  let mut b: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut b: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
+    &SocketAddrResolver,
     &mut db,
     now,
   );
@@ -72,7 +76,11 @@ fn join_from_seed_then_clean_leave() {
   b.start(now);
 
   // B joins via A as a seed: a REAL push/pull over TCP (no inject_alive).
-  b.join(&[addr(1, 7946)]).expect("join from a running node");
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(addr(1, 7946))],
+  )
+  .expect("join from a running node");
 
   // Drive both until both see 2 members (join push/pull synced state), bounded.
   let mut joined = false;

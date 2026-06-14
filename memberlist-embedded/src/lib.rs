@@ -54,6 +54,7 @@ pub mod engine;
 pub mod error;
 pub mod gossip_io;
 pub mod reliable;
+pub mod resolver;
 pub mod stream_io;
 pub mod transform;
 
@@ -70,6 +71,7 @@ pub use memberlist_proto::{AliveDelegate, MergeDelegate};
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
+pub use resolver::MaybeResolved;
 pub use stream_io::{StreamIo, StreamIoError};
 pub use transform::{
   ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,

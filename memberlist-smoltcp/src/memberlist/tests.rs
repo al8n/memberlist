@@ -65,11 +65,12 @@ fn new_node_is_sole_member() {
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
-  let m: Memberlist<SmolStr, _> = Memberlist::new(
+  let m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     cfg,
     ip_iface(),
     TransformOptions::default(),
     ep_cfg,
+    &crate::SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -81,11 +82,12 @@ fn poll_emits_initial_gossip_and_a_deadline() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
-  let mut m: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     crate::Options::new(),
     ip_iface(),
     TransformOptions::default(),
     ep_cfg,
+    &crate::SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -130,4 +132,120 @@ fn endpoint_is_routable_matches_smoltcp_unicast() {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
     0
   )));
+}
+
+// Resolvers exercising the `join` resolution boundary. `Address = SocketAddr`
+// matches a node built with the [`SocketAddrResolver`](crate::SocketAddrResolver).
+
+/// Must never be invoked — the lifecycle guard rejects a left node's `join`
+/// before any seed is resolved.
+struct UnreachableResolver;
+
+impl crate::Resolver for UnreachableResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  fn resolve(
+    &self,
+    _address: &SocketAddr,
+  ) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
+    unreachable!("a left node must not resolve seeds");
+    #[allow(unreachable_code)]
+    Ok(core::iter::empty::<SocketAddr>())
+  }
+}
+
+/// Resolves every address to no candidates.
+struct EmptyResolver;
+
+impl crate::Resolver for EmptyResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  fn resolve(
+    &self,
+    _address: &SocketAddr,
+  ) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
+    Ok(core::iter::empty())
+  }
+}
+
+/// Resolves every address to an unbounded stream of the same wire address; the
+/// per-seed cap must bound it.
+struct InfiniteResolver;
+
+impl crate::Resolver for InfiniteResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  fn resolve(&self, address: &SocketAddr) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
+    Ok(core::iter::repeat(*address))
+  }
+}
+
+fn started_node(
+  dev: &mut smoltcp::phy::Loopback,
+  now: memberlist_proto::Instant,
+) -> Memberlist<SmolStr, SocketAddr, smoltcp::phy::Loopback> {
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
+    crate::Options::new(),
+    ip_iface(),
+    TransformOptions::default(),
+    ep_cfg,
+    &crate::SocketAddrResolver,
+    dev,
+    now,
+  );
+  m.start(now);
+  m
+}
+
+#[test]
+fn join_after_leave_rejects_without_resolving() {
+  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut m = started_node(&mut dev, now);
+  m.leave(now).expect("leave a running node");
+
+  // A left node rejects join immediately — and the resolver is never called
+  // (`UnreachableResolver` would panic otherwise).
+  let err = m
+    .join(
+      &UnreachableResolver,
+      &[crate::MaybeResolved::Unresolved(addr(7947))],
+    )
+    .expect_err("a left node rejects join");
+  assert!(
+    err.is_control(),
+    "expected Control(NotRunning), got {err:?}"
+  );
+}
+
+#[test]
+fn join_with_all_seeds_unresolvable_is_no_addresses() {
+  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut m = started_node(&mut dev, now);
+
+  // A non-empty seed set that resolves to nothing is a discovery failure.
+  let err = m
+    .join(
+      &EmptyResolver,
+      &[crate::MaybeResolved::Unresolved(addr(7947))],
+    )
+    .expect_err("all-empty resolution fails");
+  assert!(err.is_no_addresses(), "expected NoAddresses, got {err:?}");
+}
+
+#[test]
+fn join_bounds_a_runaway_resolver() {
+  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut m = started_node(&mut dev, now);
+
+  // The per-seed cap bounds the unbounded resolver iterator, so join returns
+  // instead of allocating without end.
+  m.join(
+    &InfiniteResolver,
+    &[crate::MaybeResolved::Unresolved(addr(7947))],
+  )
+  .expect("capped resolution joins");
 }

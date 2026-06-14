@@ -107,6 +107,16 @@ pub enum InitError {
   /// seed was pinned via
   /// [`InterfaceOptions::with_random_seed`](crate::InterfaceOptions::with_random_seed)).
   Entropy,
+  /// The address resolver failed while resolving the advertise address.
+  ///
+  /// The resolver's error type is generic, so it is boxed to preserve the
+  /// `source()` chain; a caller that knows its concrete resolver can downcast.
+  /// No `Send`/`Sync` bound — the smoltcp [`Resolver`](crate::Resolver) is
+  /// single-threaded by design, so its error need not cross threads.
+  Resolve(std::boxed::Box<dyn core::error::Error + 'static>),
+  /// The address resolver succeeded but yielded no address for the advertise
+  /// address, so the node would have nothing to advertise.
+  NoAddresses,
   /// The SWIM machine endpoint failed to initialize.
   Endpoint(EndpointInitError),
   /// The configured encryption keyring cannot be used by this build.
@@ -274,6 +284,8 @@ impl fmt::Display for InitError {
         route.cidr, route.via_router
       ),
       InitError::Entropy => f.write_str("system entropy source failed while drawing a random seed"),
+      InitError::Resolve(e) => write!(f, "advertise address resolution failed: {e}"),
+      InitError::NoAddresses => f.write_str("advertise address resolution returned no addresses"),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
       InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
@@ -358,7 +370,76 @@ impl std::error::Error for InitError {
       InitError::Endpoint(e) => Some(e),
       InitError::Encryption(e) => Some(e),
       InitError::Checksum(e) => Some(e),
+      InitError::Resolve(e) => Some(e.as_ref()),
       _ => None,
+    }
+  }
+}
+
+/// Why a [`Memberlist::join`](crate::Memberlist::join) failed.
+///
+/// A join first resolves each seed through the supplied resolver, then records
+/// the intent with the engine; either step can fail.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum JoinError {
+  /// The address resolver failed while resolving a seed.
+  ///
+  /// The resolver's error type is generic, so it is boxed to preserve the
+  /// `source()` chain; a caller that knows its concrete resolver can downcast.
+  /// No `Send`/`Sync` bound — the smoltcp [`Resolver`](crate::Resolver) is
+  /// single-threaded by design, so its error need not cross threads.
+  Resolve(std::boxed::Box<dyn core::error::Error + 'static>),
+  /// The engine rejected the join (e.g. the node has already left).
+  Control(memberlist_proto::Error),
+  /// A non-empty seed set resolved to no wire address — a discovery failure
+  /// rather than a successful no-op join.
+  NoAddresses,
+}
+
+impl JoinError {
+  /// Whether this is a resolver failure.
+  #[inline]
+  pub const fn is_resolve(&self) -> bool {
+    matches!(self, JoinError::Resolve(_))
+  }
+
+  /// Whether this is an engine-control failure.
+  #[inline]
+  pub const fn is_control(&self) -> bool {
+    matches!(self, JoinError::Control(_))
+  }
+
+  /// Whether a non-empty seed set resolved to no wire address.
+  #[inline]
+  pub const fn is_no_addresses(&self) -> bool {
+    matches!(self, JoinError::NoAddresses)
+  }
+}
+
+impl fmt::Display for JoinError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      JoinError::Resolve(e) => write!(f, "seed address resolution failed: {e}"),
+      JoinError::Control(e) => write!(f, "join was rejected: {e}"),
+      JoinError::NoAddresses => write!(f, "no wire address resolved for any seed"),
+    }
+  }
+}
+
+impl From<memberlist_proto::Error> for JoinError {
+  fn from(e: memberlist_proto::Error) -> Self {
+    JoinError::Control(e)
+  }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for JoinError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    match self {
+      JoinError::Resolve(e) => Some(e.as_ref()),
+      JoinError::Control(e) => Some(e),
+      JoinError::NoAddresses => None,
     }
   }
 }

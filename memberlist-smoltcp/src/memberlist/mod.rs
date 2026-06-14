@@ -6,7 +6,7 @@ use core::{
 };
 
 use memberlist_embedded::{
-  AliveDelegate, ControlError, Engine, MergeDelegate,
+  AliveDelegate, ControlError, Engine, MaybeResolved, MergeDelegate,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{
@@ -20,7 +20,7 @@ use smoltcp::{
 };
 
 use crate::{
-  InitError, InterfaceOptions, Options, TransformOptions,
+  InitError, InterfaceOptions, JoinError, Options, Resolver, TransformOptions,
   addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_instant},
   error::{GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
@@ -140,12 +140,15 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 /// just-ticked sockets — so all protocol work lives in the shared engine and this
 /// driver supplies only the link layer.
 ///
-/// `I` is the node identifier type (e.g. `SmolStr`). `D` is the smoltcp
-/// [`Device`] (e.g. `smoltcp::phy::Loopback` for tests, an ethernet driver in
-/// production). `A` is pinned to `core::net::SocketAddr`. `R` is the gossip RNG
-/// (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from the interface
-/// seed, while [`with_rng`](Self::with_rng) accepts a caller-supplied one.
-pub struct Memberlist<I, D: Device, R = SmallRng>
+/// `I` is the node identifier type (e.g. `SmolStr`). `A` is the resolver's
+/// unresolved address type — the advertise address is resolved to a wire
+/// `SocketAddr` at construction and the seeds at [`join`](Self::join), so the
+/// engine only ever sees `SocketAddr`. `D` is the smoltcp [`Device`] (e.g.
+/// `smoltcp::phy::Loopback` for tests, an ethernet driver in production). `R` is
+/// the gossip RNG (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from
+/// the interface seed, while [`with_rng`](Self::with_rng) accepts a
+/// caller-supplied one.
+pub struct Memberlist<I, A, D: Device, R = SmallRng>
 where
   I: memberlist_proto::Id,
   R: Rng,
@@ -170,9 +173,14 @@ where
   // each `poll` call. `PhantomData` is required so the struct is generic
   // over `D` without actually holding it.
   _device: core::marker::PhantomData<D>,
+  // Ties the handle to the resolver's unresolved address type. Not held in any
+  // field — `join` and construction resolve addresses in this domain before the
+  // engine, which only sees `SocketAddr`, ever observes them. `fn(A)` keeps the
+  // marker contravariant in `A` and free of drop/auto-trait obligations.
+  _a: core::marker::PhantomData<fn(A)>,
 }
 
-impl<I, D: Device> Memberlist<I, D, SmallRng>
+impl<I, A, D: Device> Memberlist<I, A, D, SmallRng>
 where
   I: memberlist_proto::Id,
 {
@@ -187,18 +195,22 @@ where
   ///
   /// Panics if [`try_new`](Self::try_new) returns an [`InitError`] — e.g. on an
   /// unsupported or mismatched medium, a non-unicast hardware or IP address, a
-  /// missing/over-capacity IP address or route, an entropy failure, or a
-  /// machine-endpoint init failure. Call [`try_new`](Self::try_new) to handle
-  /// those.
-  pub fn new(
+  /// missing/over-capacity IP address or route, an advertise-resolution failure,
+  /// an entropy failure, or a machine-endpoint init failure. Call
+  /// [`try_new`](Self::try_new) to handle those.
+  pub fn new<Res>(
     cfg: Options,
     iface: InterfaceOptions,
     transform: TransformOptions,
-    ep_cfg: EndpointOptions<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, A>,
+    resolver: &Res,
     device: &mut D,
     now: Instant,
-  ) -> Self {
-    Self::try_new(cfg, iface, transform, ep_cfg, device, now).expect(
+  ) -> Self
+  where
+    Res: Resolver<Address = A>,
+  {
+    Self::try_new(cfg, iface, transform, ep_cfg, resolver, device, now).expect(
       "Memberlist::new: invalid interface configuration or entropy failure; use try_new to handle",
     )
   }
@@ -222,7 +234,12 @@ where
   ///   encryption, plus the reliable-plane (TCP) cluster label. A configured
   ///   encryption keyring is probed by the engine (see Errors); the default is
   ///   fully disabled and unlabelled.
-  /// - `ep_cfg`: machine identity (`id`, `advertise`, timing knobs, …).
+  /// - `ep_cfg`: machine identity (`id`, `advertise`, timing knobs, …). The
+  ///   advertise address is in the resolver's address domain `A`; it is resolved
+  ///   to a single wire `SocketAddr` here before the engine is built.
+  /// - `resolver`: resolves the advertise address into a wire `SocketAddr`.
+  ///   Callers already holding a `SocketAddr` use
+  ///   [`SocketAddrResolver`](crate::SocketAddrResolver).
   /// - `device`: the smoltcp [`Device`] the interface is bound to. Its medium
   ///   must match the one implied by `iface.hardware_addr`.
   /// - `now`: the driver's clock reading at construction (passed to the
@@ -252,19 +269,38 @@ where
   ///   addresses or routes than smoltcp's interface can hold.
   /// - [`InitError::Entropy`] — `iface.random_seed` was `None` and the system
   ///   entropy source failed.
+  /// - [`InitError::Resolve`] — the resolver failed on the advertise address.
+  /// - [`InitError::NoAddresses`] — the resolver returned no address for the
+  ///   advertise address.
   /// - [`InitError::Endpoint`] — the machine endpoint failed to initialize.
   /// - [`InitError::Encryption`] — `transform.encryption` carries a keyring with
   ///   a key whose AEAD backend was not compiled into this binary (probed by the
   ///   engine by encrypting an empty frame with each key), so encrypted gossip
   ///   would otherwise be silently dropped at runtime.
-  pub fn try_new(
+  pub fn try_new<Res>(
     cfg: Options,
     iface: InterfaceOptions,
     transform: TransformOptions,
-    ep_cfg: EndpointOptions<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, A>,
+    resolver: &Res,
     device: &mut D,
     now: Instant,
-  ) -> Result<Self, InitError> {
+  ) -> Result<Self, InitError>
+  where
+    Res: Resolver<Address = A>,
+  {
+    // Resolve the advertise address into a single wire `SocketAddr` before any
+    // other work, then re-type `ep_cfg` to `EndpointOptions<I, SocketAddr>` so
+    // the rest of construction — and the engine — only ever sees the resolved
+    // address. The first resolved candidate is taken; a resolver returning no
+    // address is `NoAddresses`. From here on the advertise address is concrete.
+    let resolved_advertise = resolver
+      .resolve(ep_cfg.advertise_addr_ref())
+      .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .next()
+      .ok_or(InitError::NoAddresses)?;
+    let ep_cfg = ep_cfg.map_advertise(|_| resolved_advertise);
+
     // 1. Validate the medium up front: smoltcp's `Interface::new` asserts the
     //    hardware address's medium equals the device's, and a mismatch panics
     //    deep inside it. Derive the configured medium ourselves (smoltcp's
@@ -626,11 +662,12 @@ where
       udp,
       engine,
       _device: core::marker::PhantomData,
+      _a: core::marker::PhantomData,
     })
   }
 }
 
-impl<I, D: Device, R: Rng> Memberlist<I, D, R>
+impl<I, A, D: Device, R: Rng> Memberlist<I, A, D, R>
 where
   I: memberlist_proto::Id,
 {
@@ -648,17 +685,34 @@ where
   ///
   /// Returns [`InitError`] on the same conditions as [`try_new`](Self::try_new)
   /// (an unsupported or mismatched medium, a non-unicast hardware or IP address,
-  /// a missing/over-capacity IP address or route, an interface entropy failure,
-  /// an unusable encryption keyring, or a machine-endpoint init failure).
-  pub fn with_rng(
+  /// a missing/over-capacity IP address or route, an advertise-resolution
+  /// failure, an interface entropy failure, an unusable encryption keyring, or a
+  /// machine-endpoint init failure).
+  #[allow(clippy::too_many_arguments)]
+  pub fn with_rng<Res>(
     cfg: Options,
     iface: InterfaceOptions,
     transform: TransformOptions,
-    ep_cfg: EndpointOptions<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, A>,
+    resolver: &Res,
     device: &mut D,
     now: Instant,
     rng: R,
-  ) -> Result<Self, InitError> {
+  ) -> Result<Self, InitError>
+  where
+    Res: Resolver<Address = A>,
+  {
+    // Resolve the advertise address into a single wire `SocketAddr` before any
+    // other work, then re-type `ep_cfg` to `EndpointOptions<I, SocketAddr>` so
+    // the rest of construction — and the engine — only ever sees the resolved
+    // address. See [`try_new`](Self::try_new).
+    let resolved_advertise = resolver
+      .resolve(ep_cfg.advertise_addr_ref())
+      .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .next()
+      .ok_or(InitError::NoAddresses)?;
+    let ep_cfg = ep_cfg.map_advertise(|_| resolved_advertise);
+
     // 1. Validate the medium up front: smoltcp's `Interface::new` asserts the
     //    hardware address's medium equals the device's, and a mismatch panics
     //    deep inside it. Derive the configured medium ourselves (smoltcp's
@@ -1004,6 +1058,7 @@ where
       udp,
       engine,
       _device: core::marker::PhantomData,
+      _a: core::marker::PhantomData,
     })
   }
 
@@ -1414,15 +1469,60 @@ where
 
   /// Record intent to join the cluster via these seed addresses.
   ///
+  /// Each seed is first resolved through `resolver`: a
+  /// [`MaybeResolved::Resolved`] address is used verbatim, while a
+  /// [`MaybeResolved::Unresolved`] address is expanded into every wire
+  /// `SocketAddr` the resolver yields. Callers already holding wire addresses
+  /// use [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
+  /// [`MaybeResolved::Resolved`].
+  ///
   /// Returns immediately; the poll loop initiates a push/pull state exchange
-  /// to each seed on the next tick. The caller should watch `is_joined()` or
-  /// drain `poll_event()` for `Event::PushPullReplyReceived` / membership
-  /// changes, and enforce its own join deadline — this method performs no I/O
-  /// and imposes no timeout. A non-routable seed (unspecified/multicast/broadcast
-  /// IP or port 0) is dropped by the engine: it could only produce a doomed dial.
-  /// Returns `NotRunning` after `leave()`: a left node initiates no new join.
-  pub fn join(&mut self, seeds: &[SocketAddr]) -> Result<(), memberlist_proto::Error> {
-    self.engine.join(seeds)
+  /// to each resolved seed on the next tick. The caller should watch
+  /// `is_joined()` or drain `poll_event()` for `Event::PushPullReplyReceived` /
+  /// membership changes, and enforce its own join deadline — this method performs
+  /// no I/O and imposes no timeout. A non-routable seed
+  /// (unspecified/multicast/broadcast IP or port 0) is dropped by the engine: it
+  /// could only produce a doomed dial.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`JoinError::Control`] (`NotRunning`) after `leave()` — a left node
+  /// initiates no new join, and the resolver is not invoked. Otherwise returns
+  /// [`JoinError::Resolve`] if the resolver fails on a seed, or
+  /// [`JoinError::NoAddresses`] if a non-empty seed set resolves to no address.
+  pub fn join<Res>(&mut self, resolver: &Res, seeds: &[MaybeResolved<A>]) -> Result<(), JoinError>
+  where
+    Res: Resolver<Address = A>,
+  {
+    // Reject a left node before invoking the resolver or allocating: a stopped
+    // node initiates no new join, so it must do no resolution work first.
+    self.engine.ensure_running().map_err(JoinError::Control)?;
+
+    // Bound per-seed resolution so a runaway resolver iterator cannot exhaust
+    // memory on a constrained target — a seed needs only a few candidate wire
+    // addresses to bootstrap a join.
+    const MAX_RESOLVED_ADDRS_PER_SEED: usize = 8;
+
+    let mut resolved = std::vec::Vec::with_capacity(seeds.len());
+    for seed in seeds {
+      match seed {
+        MaybeResolved::Resolved(s) => resolved.push(*s),
+        MaybeResolved::Unresolved(a) => resolved.extend(
+          resolver
+            .resolve(a)
+            .map_err(|e| JoinError::Resolve(std::boxed::Box::new(e)))?
+            .take(MAX_RESOLVED_ADDRS_PER_SEED),
+        ),
+      }
+    }
+
+    // A non-empty seed set that resolves to no wire address is a discovery
+    // failure, not a successful no-op join.
+    if !seeds.is_empty() && resolved.is_empty() {
+      return Err(JoinError::NoAddresses);
+    }
+
+    self.engine.join(&resolved).map_err(JoinError::Control)
   }
 
   /// Queue an application user-data payload for piggyback gossip to peers.

@@ -445,6 +445,43 @@ impl<I, A> EndpointOptions<I, A> {
     self.initial_incarnation
   }
 
+  /// Maps the advertise-address type while keeping every other field. The driver
+  /// layer uses this to turn an unresolved advertise address into the resolved
+  /// `SocketAddr` the engine consumes.
+  #[must_use]
+  pub fn map_advertise<B>(self, f: impl FnOnce(A) -> B) -> EndpointOptions<I, B> {
+    EndpointOptions {
+      advertise_addr: f(self.advertise_addr),
+      local_id: self.local_id,
+      initial_meta: self.initial_meta,
+      initial_local_state: self.initial_local_state,
+      suspicion_mult: self.suspicion_mult,
+      suspicion_max_timeout_mult: self.suspicion_max_timeout_mult,
+      probe_interval: self.probe_interval,
+      gossip_to_the_dead_time: self.gossip_to_the_dead_time,
+      dead_node_reclaim_time: self.dead_node_reclaim_time,
+      awareness_max_multiplier: self.awareness_max_multiplier,
+      indirect_checks: self.indirect_checks,
+      max_indirect_forwards: self.max_indirect_forwards,
+      max_members: self.max_members,
+      ack_payload_to_members_only: self.ack_payload_to_members_only,
+      max_inbound_streams: self.max_inbound_streams,
+      probe_timeout: self.probe_timeout,
+      stream_timeout: self.stream_timeout,
+      max_stream_frame_size: self.max_stream_frame_size,
+      gossip_mtu: self.gossip_mtu,
+      gossip_interval: self.gossip_interval,
+      gossip_nodes: self.gossip_nodes,
+      meta_max_size: self.meta_max_size,
+      accept_handshake_deadline: self.accept_handshake_deadline,
+      push_pull_interval: self.push_pull_interval,
+      retransmit_mult: self.retransmit_mult,
+      protocol_version: self.protocol_version,
+      delegate_version: self.delegate_version,
+      initial_incarnation: self.initial_incarnation,
+    }
+  }
+
   /// The local node's id.
   #[inline(always)]
   pub const fn local_id_ref(&self) -> &I {

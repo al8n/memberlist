@@ -28,8 +28,8 @@ use core::{
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  EthernetAddress, HardwareAddress, InitError, InterfaceOptions, IpCidr, Memberlist, Options,
-  TransformOptions,
+  EthernetAddress, HardwareAddress, InitError, InterfaceOptions, IpCidr, MaybeResolved, Memberlist,
+  Options, SocketAddrResolver, TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -74,11 +74,12 @@ fn non_routable_advertise_addr_rejected() {
   let now: Instant = harness::Clock::new().now();
   // Advertise 0.0.0.0:7946 — unspecified, not a routable destination.
   let ep_cfg = EndpointOptions::new(SmolStr::new("a"), unroutable());
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     ep_cfg,
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -97,11 +98,12 @@ fn non_routable_advertise_addr_rejected() {
 fn routable_advertise_addr_constructs() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
-  let res: Result<Memberlist<SmolStr, _>, _> = Memberlist::try_new(
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -117,11 +119,12 @@ fn routable_advertise_addr_constructs() {
 fn injected_non_routable_peer_is_dropped() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
-  let mut m: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -146,11 +149,12 @@ fn injected_non_routable_peer_is_dropped() {
 fn injected_routable_peer_is_admitted() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now: Instant = harness::Clock::new().now();
-  let mut m: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -176,11 +180,12 @@ fn non_routable_seed_is_not_dialed() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let mut clk = harness::Clock::new();
   let now = clk.now();
-  let mut m: Memberlist<SmolStr, _> = Memberlist::new(
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     Options::new(),
     harness::ip_iface(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     &mut dev,
     now,
   );
@@ -194,7 +199,8 @@ fn non_routable_seed_is_not_dialed() {
   // A multicast seed — non-routable, but accepted by smoltcp's `connect`, so a
   // queued dial WOULD take a socket.
   let mcast = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 7946);
-  m.join(&[mcast]).expect("join from a running node");
+  m.join(&SocketAddrResolver, &[MaybeResolved::Resolved(mcast)])
+    .expect("join from a running node");
 
   // Drive a few ticks; a queued seed would be drained into a Connect/dial on the
   // first of these. No panic on any.
@@ -255,11 +261,12 @@ fn unroutable_alive_is_filtered_and_ethernet_poll_stays_clean() {
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
-  let mut m: Memberlist<SmolStr, _> = Memberlist::try_new(
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::try_new(
     Options::new(),
     eth_iface(1, 0x01),
     TransformOptions::default(),
     fast_ep("a", 1),
+    &SocketAddrResolver,
     &mut dev,
     now,
   )
