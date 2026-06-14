@@ -15,8 +15,8 @@ use memberlist_reactor::{
 use smol_str::SmolStr;
 
 /// Build a TCP node with the given `MemberlistOptions`.
-async fn make_with_opts(id: &str, ml_opts: MemberlistOptions) -> Memberlist<SmolStr> {
-  Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+async fn make_with_opts(id: &str, ml_opts: MemberlistOptions) -> Memberlist<SmolStr, SocketAddr> {
+  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -236,7 +236,7 @@ mod checksum {
     let bad = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
     let ml_opts = MemberlistOptions::new().with_checksum(bad);
 
-    let result = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    let result = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
       &SocketAddrResolver,
       SmolStr::new("bad-checksum"),
       MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -443,7 +443,7 @@ mod encryption {
     let enc_opts = EncryptionOptions::new().with_keyring(keyring);
     let ml_opts = MemberlistOptions::new().with_encryption(enc_opts);
 
-    let m = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    let m = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
       &SocketAddrResolver,
       SmolStr::new("enc-valid"),
       MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -529,7 +529,7 @@ async fn gossip_mtu_above_ceiling_is_rejected() {
   let over = gossip_mtu_ceiling() + 1;
   let ml_opts = MemberlistOptions::new().with_gossip_mtu(over);
 
-  let result = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  let result = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new("mtu-over"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

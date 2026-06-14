@@ -18,13 +18,13 @@ pub async fn quic<I, Res, D>(
   options: Options<I>,
   delegate: D,
   quic_config: QuicOptions,
-) -> Result<Memberlist<I>, Error>
+) -> Result<Memberlist<I, Res::Address>, Error>
 where
   I: NodeId,
   Res: AddressResolver,
   D: Delegate<Id = I, Address = SocketAddr>,
 {
-  Memberlist::<I>::quic::<Runtime, Res, D>(
+  Memberlist::<I, Res::Address>::quic::<Runtime, Res, D>(
     resolver,
     local_id,
     advertise,
@@ -43,13 +43,16 @@ pub async fn tcp<I, Res, D>(
   advertise: MaybeResolved<Res::Address>,
   options: Options<I>,
   delegate: D,
-) -> Result<Memberlist<I>, Error>
+) -> Result<Memberlist<I, Res::Address>, Error>
 where
   I: NodeId,
   Res: AddressResolver,
   D: Delegate<Id = I, Address = SocketAddr>,
 {
-  Memberlist::<I>::tcp::<Runtime, Res, D>(resolver, local_id, advertise, options, delegate).await
+  Memberlist::<I, Res::Address>::tcp::<Runtime, Res, D>(
+    resolver, local_id, advertise, options, delegate,
+  )
+  .await
 }
 
 /// Build a TLS-backed node on tokio. See [`memberlist_reactor::Memberlist::tls`].
@@ -62,14 +65,14 @@ pub async fn tls<I, Res, D, F>(
   delegate: D,
   tls_options: TlsOptions,
   sni_provider: F,
-) -> Result<Memberlist<I>, Error>
+) -> Result<Memberlist<I, Res::Address>, Error>
 where
   I: NodeId,
   Res: AddressResolver,
   D: Delegate<Id = I, Address = SocketAddr>,
   F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
 {
-  Memberlist::<I>::tls::<Runtime, Res, D, F>(
+  Memberlist::<I, Res::Address>::tls::<Runtime, Res, D, F>(
     resolver,
     local_id,
     advertise,

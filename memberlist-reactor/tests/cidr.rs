@@ -22,12 +22,12 @@ use smol_str::SmolStr;
 
 /// Build a reactor TCP node on an OS-allocated loopback port, optionally with a
 /// CIDR admission policy installed as the alive delegate.
-async fn make(id: &str, policy: Option<CidrPolicy>) -> Memberlist<SmolStr> {
+async fn make(id: &str, policy: Option<CidrPolicy>) -> Memberlist<SmolStr, SocketAddr> {
   let mut opts = Options::<SmolStr>::new();
   if let Some(policy) = policy {
     opts = opts.with_alive_delegate(policy);
   }
-  Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -41,9 +41,9 @@ async fn make(id: &str, policy: Option<CidrPolicy>) -> Memberlist<SmolStr> {
 /// Build a reactor TCP node with a driver-level [`with_cidr_policy`] — the policy
 /// filters the gossip source and reliable peer at the transport boundary AND the
 /// advertised address at membership admission, all from this one setting.
-async fn make_cidr(id: &str, policy: CidrPolicy) -> Memberlist<SmolStr> {
+async fn make_cidr(id: &str, policy: CidrPolicy) -> Memberlist<SmolStr, SocketAddr> {
   let opts = Options::<SmolStr>::new().with_cidr_policy(policy);
-  Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

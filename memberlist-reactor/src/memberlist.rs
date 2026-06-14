@@ -1,6 +1,7 @@
 //! The uniform [`Memberlist`] handle and the QUIC, TCP, and TLS backend
 //! constructors.
 
+use core::marker::PhantomData;
 use std::{
   net::SocketAddr,
   sync::{Arc, atomic::AtomicU64},
@@ -100,22 +101,32 @@ fn apply_memberlist_options<I, A>(
 /// Cheap to clone; every clone shares the one backend driver, which runs until
 /// the last handle is dropped (or [`shutdown`](Memberlist::shutdown) is called).
 /// Membership reads are lock-free via the published [`MemberlistSnapshot`].
-pub struct Memberlist<I> {
+///
+/// `Memberlist<I, A>` carries the wire id type `I` and the resolver's unresolved
+/// address type `A`. `I` flows into the snapshot and events channel, which carry
+/// `<I, SocketAddr>` to their public types — the membership address is always
+/// `SocketAddr`. `A` is held in no field; it ties [`Memberlist::join`]'s seeds to
+/// the address domain the node was built with.
+pub struct Memberlist<I, A> {
   shared: Arc<Shared<I>>,
   events_rx: flume::Receiver<Event<I, SocketAddr>>,
+  /// Ties the handle to the resolver's unresolved address type. Not held in
+  /// any field — `join` enforces seeds resolve in this address domain.
+  _a: PhantomData<fn(A)>,
 }
 
-impl<I> Clone for Memberlist<I> {
+impl<I, A> Clone for Memberlist<I, A> {
   fn clone(&self) -> Self {
     self.shared.handle_cloned();
     Self {
       shared: self.shared.clone(),
       events_rx: self.events_rx.clone(),
+      _a: PhantomData,
     }
   }
 }
 
-impl<I> Drop for Memberlist<I> {
+impl<I, A> Drop for Memberlist<I, A> {
   fn drop(&mut self) {
     if self.shared.handle_dropped() {
       self.shared.begin_shutdown();
@@ -124,7 +135,7 @@ impl<I> Drop for Memberlist<I> {
   }
 }
 
-impl<I: NodeId> Memberlist<I> {
+impl<I: NodeId, A> Memberlist<I, A> {
   /// Builds a QUIC-backed node and spawns its driver on the runtime `R`, seeding
   /// the gossip RNG from the OS (a `StdRng`). Use
   /// [`quic_with_rng`](Self::quic_with_rng) to inject a different RNG.
@@ -142,7 +153,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
     Self::quic_with_rng::<R, Res, D, StdRng>(
@@ -172,7 +183,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
     G: rand::Rng + Send + Unpin + 'static,
   {
@@ -270,7 +281,11 @@ impl<I: NodeId> Memberlist<I> {
     );
     R::spawn_detach(driver);
 
-    Ok(Self { shared, events_rx })
+    Ok(Self {
+      shared,
+      events_rx,
+      _a: PhantomData,
+    })
   }
 
   /// Builds a TCP-backed node and spawns its driver on the runtime `R`.
@@ -288,7 +303,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
     Self::tcp_with_rng::<R, Res, D, StdRng>(
@@ -315,7 +330,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
     G: rand::Rng + Send + Unpin + 'static,
   {
@@ -368,7 +383,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
   {
@@ -401,7 +416,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
     F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
     G: rand::Rng + Send + Unpin + 'static,
@@ -460,7 +475,7 @@ impl<I: NodeId> Memberlist<I> {
   ) -> Result<Self, Error>
   where
     R: Runtime,
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
     D: Delegate<Id = I, Address = SocketAddr>,
     T: StreamTransport + Send + Unpin + 'static,
     T::Options: Send + Unpin,
@@ -615,7 +630,11 @@ impl<I: NodeId> Memberlist<I> {
     );
     R::spawn_detach(driver);
 
-    Ok(Self { shared, events_rx })
+    Ok(Self {
+      shared,
+      events_rx,
+      _a: PhantomData,
+    })
   }
 
   /// The latest membership snapshot, read lock-free.
@@ -776,7 +795,7 @@ impl<I: NodeId> Memberlist<I> {
     seeds: &[MaybeResolved<Res::Address>],
   ) -> Result<usize, Error>
   where
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
   {
     self.join_inner(resolver, seeds, true).await
   }
@@ -789,7 +808,7 @@ impl<I: NodeId> Memberlist<I> {
     seeds: &[MaybeResolved<Res::Address>],
   ) -> Result<usize, Error>
   where
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
   {
     self.join_inner(resolver, seeds, false).await
   }
@@ -801,7 +820,7 @@ impl<I: NodeId> Memberlist<I> {
     wait: bool,
   ) -> Result<usize, Error>
   where
-    Res: AddressResolver,
+    Res: AddressResolver<Address = A>,
   {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);

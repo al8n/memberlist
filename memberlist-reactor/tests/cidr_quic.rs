@@ -27,12 +27,16 @@ fn loopback_addr(port: u16) -> SocketAddr {
 
 /// Build a reactor QUIC node on an OS-allocated loopback port, optionally with a
 /// driver-level CIDR policy.
-async fn make_quic(id: &str, qcfg: QuicOptions, policy: Option<CidrPolicy>) -> Memberlist<SmolStr> {
+async fn make_quic(
+  id: &str,
+  qcfg: QuicOptions,
+  policy: Option<CidrPolicy>,
+) -> Memberlist<SmolStr, SocketAddr> {
   let mut opts = Options::<SmolStr>::new();
   if let Some(policy) = policy {
     opts = opts.with_cidr_policy(policy);
   }
-  Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
+  Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

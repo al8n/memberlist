@@ -34,8 +34,8 @@ fn shared_quic_pair() -> (QuicOptions, QuicOptions) {
   (a, b)
 }
 
-async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr> {
-  Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
+async fn make(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
+  Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -73,9 +73,12 @@ impl Delegate for RecordingDelegate {
   }
 }
 
-async fn make_recording(id: &str, qcfg: QuicOptions) -> (Memberlist<SmolStr>, Messages) {
+async fn make_recording(
+  id: &str,
+  qcfg: QuicOptions,
+) -> (Memberlist<SmolStr, SocketAddr>, Messages) {
   let (delegate, msgs) = RecordingDelegate::new();
-  let node = Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
+  let node = Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -131,9 +134,12 @@ impl Delegate for ControlDelegate {
   }
 }
 
-async fn make_control(id: &str, qcfg: QuicOptions) -> (Memberlist<SmolStr>, ControlCaptures) {
+async fn make_control(
+  id: &str,
+  qcfg: QuicOptions,
+) -> (Memberlist<SmolStr, SocketAddr>, ControlCaptures) {
   let c = ControlCaptures::default();
-  let node = Memberlist::<SmolStr>::quic::<TokioRuntime, _, _>(
+  let node = Memberlist::<SmolStr, _>::quic::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

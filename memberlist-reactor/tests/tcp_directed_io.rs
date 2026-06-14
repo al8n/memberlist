@@ -25,8 +25,8 @@ use smol_str::SmolStr;
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Builds a TCP node with OS-assigned loopback port and VoidDelegate.
-async fn make(id: &str) -> Memberlist<SmolStr> {
-  Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr> {
+  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -64,9 +64,9 @@ impl Delegate for RecordingDelegate {
   }
 }
 
-async fn make_recording(id: &str) -> (Memberlist<SmolStr>, Messages) {
+async fn make_recording(id: &str) -> (Memberlist<SmolStr, SocketAddr>, Messages) {
   let (delegate, msgs) = RecordingDelegate::new();
-  let node = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  let node = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -190,9 +190,9 @@ impl Delegate for ControlDelegate {
   }
 }
 
-async fn make_control(id: &str) -> (Memberlist<SmolStr>, ControlCaptures) {
+async fn make_control(id: &str) -> (Memberlist<SmolStr, SocketAddr>, ControlCaptures) {
   let c = ControlCaptures::default();
-  let node = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  let node = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -668,9 +668,21 @@ async fn join_resolves_unresolved_seed_via_resolver() {
   }
 
   let a = make("unres-a").await;
-  let b = make("unres-b").await;
   let a_addr = *a.local().addr_ref();
   let resolver = FixedResolver(a_addr);
+
+  // Build the joiner in the resolver's `&'static str` address domain so its
+  // `join` seeds resolve through `FixedResolver`. The advertise address is
+  // already a wire `SocketAddr`, so construction needs no resolution.
+  let b = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+    &resolver,
+    SmolStr::new("unres-b"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("bind tcp memberlist");
 
   let n = tokio::time::timeout(
     Duration::from_secs(8),
@@ -718,7 +730,17 @@ async fn join_resolver_yields_nothing_is_join_failed() {
     }
   }
 
-  let b = make("empty-res-b").await;
+  // Build the joiner in the resolver's `&'static str` address domain so its
+  // `join` seeds resolve through `EmptyResolver`.
+  let b = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+    &EmptyResolver,
+    SmolStr::new("empty-res-b"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("bind tcp memberlist");
   let res = tokio::time::timeout(
     Duration::from_secs(8),
     b.join(&EmptyResolver, &[MaybeResolved::Unresolved("nothing")]),
@@ -755,7 +777,17 @@ async fn join_resolver_error_propagates() {
     }
   }
 
-  let b = make("res-err-b").await;
+  // Build the joiner in the resolver's `&'static str` address domain so its
+  // `join` seeds resolve through `FailingResolver`.
+  let b = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
+    &FailingResolver,
+    SmolStr::new("res-err-b"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("bind tcp memberlist");
   let res = tokio::time::timeout(
     Duration::from_secs(8),
     b.join(&FailingResolver, &[MaybeResolved::Unresolved("bad")]),
@@ -777,7 +809,7 @@ async fn join_resolver_error_propagates() {
 async fn local_state_carries_initial_meta_immediately_after_new() {
   let meta_bytes = Bytes::from_static(b"role=db,zone=eu");
   let meta = Meta::try_from(meta_bytes.clone()).expect("meta within cap");
-  let node = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+  let node = Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new("meta-node"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

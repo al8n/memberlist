@@ -27,8 +27,8 @@ use smol_str::SmolStr;
 /// Builds a TLS node advertising an OS-picked loopback port, verifying peers
 /// against the cert behind `tls` and presenting `localhost` as the SNI (matching
 /// the test cert's SAN).
-async fn make(id: &str, tls: TlsOptions) -> Memberlist<SmolStr> {
-  Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+async fn make(id: &str, tls: TlsOptions) -> Memberlist<SmolStr, SocketAddr> {
+  Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -45,8 +45,8 @@ async fn make(id: &str, tls: TlsOptions) -> Memberlist<SmolStr> {
 /// label restricts which peers may complete the reliable push/pull exchange;
 /// nodes with a different label are rejected at the stream layer even when the
 /// TLS certificate is mutually trusted.
-async fn make_labeled(id: &str, tls: TlsOptions, label: &[u8]) -> Memberlist<SmolStr> {
-  Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+async fn make_labeled(id: &str, tls: TlsOptions, label: &[u8]) -> Memberlist<SmolStr, SocketAddr> {
+  Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -144,7 +144,7 @@ async fn zero_close_timeout_is_rejected() {
   // The TLS backend funnels through the same stream constructor as TCP, so a
   // zero close_timeout (which RSTs a graceful close's queued push/pull bytes
   // instead of draining them) must be rejected fail-fast here too.
-  let res = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+  let res = Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new("tls-zero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -160,7 +160,7 @@ async fn zero_close_timeout_is_rejected() {
   );
 
   // A nonzero close_timeout constructs over TLS.
-  let ok = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+  let ok = Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new("tls-nonzero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -181,7 +181,7 @@ async fn join_without_sni_fails_bounded() {
   // The sni_provider always returns None, so every TLS dial fails at dial setup,
   // before a Connect. join() must resolve with an error within the budget rather
   // than wait forever for an exchange that was never created.
-  let b = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+  let b = Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new("b"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -234,7 +234,7 @@ async fn send_many_reliable_partial_pre_connect_failure_reports_err() {
   // Sender's SNI resolver: Some on the first dial, None on every later dial.
   let sni_calls = Arc::new(AtomicUsize::new(0));
   let sni_calls_for_closure = sni_calls.clone();
-  let sender = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+  let sender = Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new("tls-pcf-sender"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
@@ -308,7 +308,7 @@ async fn tls_send_reliable_delivers_to_delegate() {
   let tls_sender = support::build_tls_options(cert, key, roots);
 
   let msgs: Messages = Arc::new(Mutex::new(Vec::new()));
-  let seed = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+  let seed = Memberlist::<SmolStr, _>::tls::<TokioRuntime, _, _, _>(
     &SocketAddrResolver,
     SmolStr::new("tls-rel-seed"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),

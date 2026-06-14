@@ -36,7 +36,7 @@ use suite::CapturingDelegate;
 /// A reactor QUIC node over the agnostic runtime `R`, adapted to [`TestCluster`].
 struct ReactorQuic<R: Runtime> {
   id: SmolStr,
-  handle: Memberlist<SmolStr>,
+  handle: Memberlist<SmolStr, SocketAddr>,
   captures: Captures,
   merge_invoked: Option<Arc<AtomicBool>>,
   alive_count: Option<Arc<AtomicUsize>>,
@@ -68,7 +68,7 @@ impl<R: Runtime> TestCluster for ReactorQuic<R> {
       alive_count = Some(count);
     }
 
-    let handle = Memberlist::<SmolStr>::quic::<R, _, _>(
+    let handle = Memberlist::<SmolStr, _>::quic::<R, _, _>(
       &SocketAddrResolver,
       cfg.id.clone(),
       MaybeResolved::Resolved(bind),

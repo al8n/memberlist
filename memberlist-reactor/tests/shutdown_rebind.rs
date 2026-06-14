@@ -21,8 +21,8 @@ use smol_str::SmolStr;
 async fn spawn(
   id: &str,
   bind: SocketAddr,
-) -> Result<Memberlist<SmolStr>, memberlist_reactor::Error> {
-  Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+) -> Result<Memberlist<SmolStr, SocketAddr>, memberlist_reactor::Error> {
+  Memberlist::<SmolStr, _>::tcp::<TokioRuntime, _, _>(
     &SocketAddrResolver,
     SmolStr::new(id),
     MaybeResolved::Resolved(bind),
