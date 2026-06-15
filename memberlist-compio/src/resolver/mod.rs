@@ -15,8 +15,10 @@ pub use advertise::{
   Ipv6PreferringResolver,
 };
 #[cfg(feature = "dns")]
+#[cfg_attr(docsrs, doc(cfg(feature = "dns")))]
 pub use dns::{DEFAULT_DNS_TIMEOUT, DnsResolver};
 #[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 pub use getifs::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use os::OsResolver;
 pub use socket_addr::SocketAddrResolver;

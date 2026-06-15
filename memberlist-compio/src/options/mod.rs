@@ -1103,6 +1103,7 @@ impl<T: Transport> Options<T> {
   /// whose advertised address is blocked is ignored (composed with any
   /// [`with_alive_delegate`](Self::with_alive_delegate)).
   #[cfg(feature = "cidr")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
   #[must_use]
   #[inline]
   pub fn with_cidr_policy(mut self, policy: memberlist_proto::CidrPolicy) -> Self {

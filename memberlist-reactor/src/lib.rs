@@ -82,14 +82,18 @@ pub use events::EventStream;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist::Memberlist;
 #[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use memberlist_proto::QuicOptions;
 #[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::event::Event;
 #[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 pub use memberlist_proto::streams::LabelOptions;
 #[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::{

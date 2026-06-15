@@ -99,6 +99,7 @@ pub use events::EventStream;
 pub use maybe_resolved::MaybeResolved;
 pub use memberlist::Memberlist;
 #[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use memberlist_proto::{
   ChecksumAlgorithm, ChecksumOptions, Node, typed::NodeState as MemberlistNodeState,
@@ -112,15 +113,18 @@ pub use snapshot::MemberlistSnapshot;
 pub use transport::{Transport, TransportRuntime};
 
 #[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 pub use tcp::{TcpTransport, TcpTransportOptions};
 
 #[cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs"))]
 pub use tls::{SniProvider, TlsTransport, TlsTransportOptions};
 
 #[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use quic::{Quic, QuicOptions, QuicTransport, QuicTransportOptions};
 
 #[cfg(feature = "dns")]
+#[cfg_attr(docsrs, doc(cfg(feature = "dns")))]
 pub use resolver::{DEFAULT_DNS_TIMEOUT, DnsResolver};
 #[cfg(feature = "getifs")]
 #[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
