@@ -99,7 +99,7 @@ peekable = { workspace = true, features = ["future"] }
 
 # encryption
 generic-array = { version = "1", optional = true, features = ["compat-0_14"] }
-aead = { version = "0.5", features = ["bytes", "std"], optional = true }
+aead = { version = "0.6", features = ["bytes", "std"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.22", default-features = false, optional = true }
 cbc = { version = "0.2", optional = true }
