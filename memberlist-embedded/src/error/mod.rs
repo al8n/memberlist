@@ -150,6 +150,7 @@ impl From<memberlist_proto::ChecksumError> for InitError {
 }
 
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
@@ -197,6 +198,7 @@ impl From<memberlist_proto::EncryptionError> for ControlError {
 }
 
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for ControlError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {

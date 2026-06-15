@@ -16,6 +16,7 @@ pub type Memberlist<I, A> = memberlist_reactor::Memberlist<I, A, Runtime>;
 
 /// Build a QUIC-backed node on smol. See [`memberlist_reactor::Memberlist::quic`].
 #[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub async fn quic<I, Res, D>(
   resolver: &Res,
   local_id: I,
@@ -42,6 +43,7 @@ where
 
 /// Build a TCP-backed node on smol. See [`memberlist_reactor::Memberlist::tcp`].
 #[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 pub async fn tcp<I, Res, D>(
   resolver: &Res,
   local_id: I,
@@ -60,6 +62,7 @@ where
 
 /// Build a TLS-backed node on smol. See [`memberlist_reactor::Memberlist::tls`].
 #[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub async fn tls<I, Res, D, F>(
   resolver: &Res,
   local_id: I,

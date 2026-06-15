@@ -95,6 +95,7 @@ pub struct LocalAddrResolver {
 }
 
 #[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 impl LocalAddrResolver {
   /// A resolver for the given scope.
   pub const fn new(scope: LocalAddrScope) -> Self {
@@ -118,6 +119,7 @@ impl LocalAddrResolver {
 }
 
 #[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 impl Default for LocalAddrResolver {
   fn default() -> Self {
     Self::private()
@@ -125,6 +127,7 @@ impl Default for LocalAddrResolver {
 }
 
 #[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 impl AddressResolver for LocalAddrResolver {
   type Address = SocketAddr;
   type Error = std::io::Error;
@@ -204,6 +207,7 @@ fn local_socket_addrs(
 // memberlist-compio's resolver/getifs.rs; keep the two in sync (the std drivers
 // carry self-contained getifs resolvers).
 #[cfg(feature = "getifs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 impl LocalAddrScope {
   /// Whether `ip` is an acceptable advertise candidate for this scope.
   fn accepts(self, ip: std::net::IpAddr) -> bool {

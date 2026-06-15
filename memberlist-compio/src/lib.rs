@@ -117,6 +117,10 @@ pub use transport::{Transport, TransportRuntime};
 pub use tcp::{TcpTransport, TcpTransportOptions};
 
 #[cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs")))
+)]
 pub use tls::{SniProvider, TlsTransport, TlsTransportOptions};
 
 #[cfg(feature = "quic")]

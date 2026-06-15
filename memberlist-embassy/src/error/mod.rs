@@ -164,6 +164,7 @@ impl From<memberlist_embedded::InitError> for InitError {
 }
 
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
@@ -251,6 +252,7 @@ impl fmt::Display for OpError {
 }
 
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for OpError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {

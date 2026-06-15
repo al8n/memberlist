@@ -76,10 +76,22 @@ pub use resolver::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use snapshot::MemberlistSnapshot;
 
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use delegate::{Delegate, VoidDelegate};
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use events::EventStream;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use memberlist::Memberlist;
 #[cfg(feature = "quic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
@@ -88,6 +100,10 @@ pub use memberlist_proto::QuicOptions;
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use memberlist_proto::event::Event;
 #[cfg(feature = "tcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
@@ -96,11 +112,19 @@ pub use memberlist_proto::streams::LabelOptions;
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use memberlist_proto::{
   ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
   Keyring, SecretKey,
 };
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
+)]
 pub use memberlist_proto::{Node, typed::NodeState};
 
 /// The node-identity bound shared across the driver and handle — everything the

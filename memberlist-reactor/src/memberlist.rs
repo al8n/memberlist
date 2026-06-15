@@ -149,6 +149,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// The advertise address is resolved once via `resolver`, then the socket is
   /// bound and the [`QuicEndpoint`] driven; the resolver is not retained.
   #[cfg(feature = "quic")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
   pub async fn quic<Res, D>(
     resolver: &Res,
     local_id: I,
@@ -178,6 +179,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   /// The machine's gossip schedule is reproducible iff `rng` is.
   #[cfg(feature = "quic")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
   pub async fn quic_with_rng<Res, D, G>(
     resolver: &Res,
     local_id: I,
@@ -301,6 +303,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// socket and a TCP listener are bound on it and the [`StreamEndpoint`] driven;
   /// the resolver is not retained.
   #[cfg(feature = "tcp")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
   pub async fn tcp<Res, D>(
     resolver: &Res,
     local_id: I,
@@ -327,6 +330,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// Like [`tcp`](Self::tcp) but with a caller-supplied gossip RNG `G`,
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   #[cfg(feature = "tcp")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
   pub async fn tcp_with_rng<Res, D, G>(
     resolver: &Res,
     local_id: I,
@@ -379,6 +383,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// `sni_provider` maps each peer to the server name its certificate is verified
   /// against — a TLS dial requires one, and returning `None` skips that peer.
   #[cfg(feature = "tls")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
   pub async fn tls<Res, D, F>(
     resolver: &Res,
     local_id: I,
@@ -410,6 +415,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// Like [`tls`](Self::tls) but with a caller-supplied gossip RNG `G`,
   /// mirroring [`Endpoint::new`]'s `rng` parameter — the caller owns seeding it.
   #[cfg(feature = "tls")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
   #[allow(clippy::too_many_arguments)]
   pub async fn tls_with_rng<Res, D, F, G>(
     resolver: &Res,
