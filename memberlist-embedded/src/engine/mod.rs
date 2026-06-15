@@ -66,6 +66,129 @@ fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
     .max(1500)
 }
 
+/// Validate every construction-time config field that does NOT depend on the
+/// resolved advertise address.
+///
+/// A caller-poll / async driver runs this BEFORE it resolves any address or
+/// binds any socket, so an invalid node fails deterministically — without
+/// running a resolver, allocating its receive scratch and socket pool, or
+/// panicking at a zero-port bind. The advertise-dependent checks (the
+/// non-routable advertise and the advertised-port mismatch) stay in
+/// [`Engine::try_new_at`], which has the resolved address in hand.
+///
+/// The checks, in order:
+///
+/// - [`InitError::ZeroPort`] — `cfg.port` is zero. A link layer rejects
+///   binding/listening on port 0 and no peer can dial it.
+/// - [`InitError::GossipMtuTooLarge`] — `gossip_mtu`'s on-wire datagram
+///   (`gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`)
+///   exceeds the 65507-byte UDP payload limit, so it could never be sent and the
+///   downstream arena arithmetic would overflow.
+/// - [`InitError::ZeroCloseTimeout`] — `cfg.close_timeout` is zero, which would
+///   force-abort every graceful reliable close immediately.
+/// - [`InitError::Encryption`] — `transform.encryption` carries a keyring with a
+///   key this build cannot use: an AEAD backend not compiled in, or a key whose
+///   cipher variant disagrees with its algorithm tag. The keyring is probed
+///   entropy-free (see `probe_encryption_keyring`); runtime nonce-entropy
+///   availability is a separate, per-send concern and is deliberately not gated
+///   here.
+///
+/// `gossip_mtu` is passed explicitly (rather than read from an `EndpointOptions`)
+/// so a driver can preflight while its `EndpointOptions` is still in the
+/// resolver's address domain — `EndpointOptions::gossip_mtu` is callable there.
+pub fn validate_runtime_config(
+  cfg: &Options,
+  transform: &TransformOptions,
+  gossip_mtu: usize,
+) -> Result<(), InitError> {
+  // Reject a zero port up front. A link layer's bind/listen rejects port 0 and
+  // no peer can dial it; the reliable plane's listen and ephemeral-port dialing
+  // both assume a non-zero bound port.
+  if cfg.port == 0 {
+    return Err(InitError::ZeroPort);
+  }
+
+  // Reject a gossip MTU whose on-wire datagram cannot fit a UDP packet. A driver
+  // sizes its gossip arenas and the receive scratch from
+  // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` (the
+  // largest on-wire datagram the machine can emit); an over-ceiling `gossip_mtu`
+  // would overflow that addition — a panic in a checked build, a wrap to an
+  // undersized arena in release that then silently truncates in-budget gossip.
+  // Bounding it here makes every downstream
+  // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
+  // and mirrors the async drivers' reject-not-clamp doctrine.
+  let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
+    - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
+    - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+  if gossip_mtu > gossip_mtu_ceiling {
+    return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
+      gossip_mtu,
+      ceiling: gossip_mtu_ceiling,
+    }));
+  }
+
+  // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
+  // graceful-close drain: a connection still `Closing` past `now +
+  // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
+  // graceful close is force-aborted immediately — the drain never runs and an
+  // in-flight push/pull response is truncated.
+  if cfg.close_timeout.is_zero() {
+    return Err(InitError::ZeroCloseTimeout);
+  }
+
+  // Validate the encryption keyring before any endpoint exists, so an unusable key
+  // is a typed construction error rather than a silent runtime drop of every
+  // encrypted gossip datagram. The probe is entropy-free and shared with the
+  // runtime rotation setter (`Engine::set_encryption_options`), so the two screens
+  // always agree on which keyrings are usable and neither couples its verdict to a
+  // transient entropy condition.
+  probe_encryption_keyring(&transform.encryption).map_err(InitError::Encryption)?;
+
+  // Validate the gossip checksum configuration too, for the same reason: an
+  // algorithm whose backend feature is absent is a typed construction error
+  // rather than a silent runtime drop of every gossip datagram. The probe is a
+  // trial `apply` of an empty payload; a disabled (no-algorithm) policy is always
+  // usable. Checksum is a gossip-plane concern only; reliable streams carry none.
+  transform.checksum.apply(&[]).map_err(InitError::Checksum)?;
+
+  Ok(())
+}
+
+/// Probe every key in an encryption policy's keyring for usability, drawing no
+/// entropy. A disabled (no-keyring) policy is always usable.
+///
+/// The probe is the pure [`encrypt`](memberlist_proto::encrypt) dispatch over an
+/// empty plaintext and a fixed all-zero nonce, run for the primary key then each
+/// secondary. It catches the two PERMANENT ways a keyring is unusable in this
+/// build: an algorithm whose AEAD backend was not compiled in
+/// ([`UnsupportedAlgorithm`](memberlist_proto::EncryptionError::UnsupportedAlgorithm))
+/// and a key whose cipher variant disagrees with its algorithm tag
+/// ([`KeyMismatch`](memberlist_proto::EncryptionError::KeyMismatch)). The probe
+/// ciphertext is discarded and never transmitted, so the fixed nonce's
+/// non-uniqueness is irrelevant.
+///
+/// It deliberately does NOT validate runtime nonce-entropy availability. A nonce is
+/// drawn per datagram by the frame encoder from the integrator's `getrandom`
+/// backend; if that backend is transiently unavailable, the affected send fails and
+/// the datagram is dropped — a per-send runtime concern, not a construction or
+/// rotation gate. Probing entropy here would (a) make the verdict non-deterministic
+/// and dependent on a transient condition, letting a config pass one screen and
+/// fail an identical later one, and (b) give a false guarantee, since entropy
+/// present now can vanish before any later send. Both construction
+/// ([`validate_runtime_config`]) and rotation ([`Engine::set_encryption_options`])
+/// share this one entropy-free probe so they cannot disagree on which keyrings are
+/// usable.
+fn probe_encryption_keyring(
+  encryption: &memberlist_proto::EncryptionOptions,
+) -> Result<(), memberlist_proto::EncryptionError> {
+  if let Some(keyring) = encryption.keyring() {
+    for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
+      memberlist_proto::encrypt(key.algorithm(), key, &[0u8; 12], b"", b"")?;
+    }
+  }
+  Ok(())
+}
+
 /// An [`AliveDelegate`] that admits a peer only when its advertised address is a
 /// routable destination ([`socket_addr_is_routable`]).
 ///
@@ -236,7 +359,14 @@ where
   ///   the bound `cfg.port`.
   /// - [`InitError::Endpoint`] — the machine endpoint failed to initialize.
   /// - [`InitError::Encryption`] — `transform.encryption` carries a keyring with
-  ///   a key whose AEAD backend was not compiled into this binary.
+  ///   a key this build cannot use (an AEAD backend not compiled in, or a key
+  ///   whose cipher variant disagrees with its algorithm tag). This validates only
+  ///   the keyring's permanent usability, entropy-free (see
+  ///   `probe_encryption_keyring`); it does NOT prove the per-send `getrandom`
+  ///   nonce source works. Encryption is cross-transport (gossip datagrams and the
+  ///   plaintext reliable plane), so on a target with a missing or failing nonce
+  ///   backend an encrypted node still constructs and then cannot encrypt outbound
+  ///   traffic — gossip datagrams and reliable exchanges alike fail at send time.
   pub fn try_new_at(
     cfg: Options,
     transform: TransformOptions,
@@ -244,40 +374,13 @@ where
     now: Instant,
     rng: R,
   ) -> Result<Self, InitError> {
-    // Reject a zero port up front. A link layer's bind/listen rejects port 0 and
-    // no peer can dial it; the reliable plane's listen and ephemeral-port dialing
-    // both assume a non-zero bound port.
-    if cfg.port == 0 {
-      return Err(InitError::ZeroPort);
-    }
-
-    // Reject a gossip MTU whose on-wire datagram cannot fit a UDP packet. A
-    // driver sizes its gossip arenas and the receive scratch from
-    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` (the
-    // largest on-wire datagram the machine can emit); an over-ceiling
-    // `gossip_mtu` would overflow that addition — a panic in a checked build, a
-    // wrap to an undersized arena in release that then silently truncates
-    // in-budget gossip. Bounding it here makes every downstream
-    // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
-    // and mirrors the async drivers' reject-not-clamp doctrine.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
-      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
-    if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
-      return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
-        gossip_mtu: ep_cfg.gossip_mtu(),
-        ceiling: gossip_mtu_ceiling,
-      }));
-    }
-
-    // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
-    // graceful-close drain: a connection still `Closing` past `now +
-    // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
-    // graceful close is force-aborted immediately — the drain never runs and an
-    // in-flight push/pull response is truncated.
-    if cfg.close_timeout.is_zero() {
-      return Err(InitError::ZeroCloseTimeout);
-    }
+    // Validate every advertise-independent config field (port, gossip-MTU
+    // ceiling, close timeout, and the encryption keyring) up front. Sharing this
+    // with `validate_runtime_config` keeps the deterministic checks in ONE place
+    // and lets a driver run the same screen BEFORE it resolves any address or
+    // binds any socket. The advertise-dependent checks (non-routable advertise,
+    // port mismatch) remain below, where the resolved address is in hand.
+    validate_runtime_config(&cfg, &transform, ep_cfg.gossip_mtu())?;
 
     // Size the inbound-gossip scratch from the configured gossip MTU BEFORE
     // `ep_cfg` is moved into `Endpoint::try_new_at`. The buffer must hold the
@@ -285,28 +388,6 @@ where
     // here keeps the driver's ingress in lockstep with the machine's egress bound
     // (see `gossip_recv_buf_size`).
     let gossip_recv = std::vec![0u8; gossip_recv_buf_size(ep_cfg.gossip_mtu())];
-
-    // Validate the encryption configuration before any endpoint exists, so an
-    // unusable keyring is a typed construction error rather than a silent runtime
-    // drop of every encrypted gossip datagram. Probe each configured key (primary
-    // then secondaries) by encrypting an empty frame: a key whose AEAD backend was
-    // not compiled into this binary fails here with
-    // `EncryptionError::UnsupportedAlgorithm`.
-    if let Some(keyring) = transform.encryption.keyring() {
-      for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
-        memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")
-          .map_err(InitError::Encryption)?;
-      }
-    }
-
-    // Validate the gossip checksum configuration before any endpoint exists, so
-    // an algorithm whose backend feature is absent is a typed construction error
-    // rather than a silent runtime drop of every gossip datagram. The probe is a
-    // trial `apply` of an empty payload: a configured-but-unbuilt algorithm fails
-    // here with a `ChecksumError`, while a disabled (no-algorithm) policy is
-    // always usable. Checksum is a gossip-plane concern only; reliable streams
-    // carry no checksum.
-    transform.checksum.apply(&[]).map_err(InitError::Checksum)?;
 
     // Reject a non-routable advertise address before the endpoint exists. A node
     // must advertise an address its peers can route a reply to; an
@@ -918,10 +999,12 @@ where
   /// Replace the gossip + reliable-plane encryption policy in place.
   ///
   /// Validates every key in the keyring before mutating state — an unusable key
-  /// (whose AEAD backend was not compiled into this binary) is rejected without
-  /// touching the live policy, so a node never starts dropping traffic
-  /// mid-rotation under a bad key. A valid update fans the new policy out to
-  /// every live reliable bridge immediately.
+  /// (an AEAD backend not compiled into this binary, or a key whose cipher variant
+  /// disagrees with its algorithm tag) is rejected without touching the live
+  /// policy, so a node never starts dropping traffic mid-rotation under a bad key.
+  /// The check is the same entropy-free `probe_encryption_keyring` construction
+  /// runs, so a keyring usable at construction stays usable across a rotation. A
+  /// valid update fans the new policy out to every live reliable bridge immediately.
   ///
   /// # Errors
   ///
@@ -938,11 +1021,10 @@ where
     if !self.endpoint.is_running() {
       return Err(crate::error::ControlError::NotRunning);
     }
-    if let Some(keyring) = opts.keyring() {
-      for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
-        memberlist_proto::encode_encrypted_frame(key.algorithm(), key, b"")?;
-      }
-    }
+    // The same entropy-free keyring probe construction uses, so a keyring usable at
+    // construction stays usable across a rotation and a bad one is rejected the same
+    // way at both — neither path couples its verdict to transient nonce entropy.
+    probe_encryption_keyring(&opts)?;
     self.endpoint.set_encryption_options(opts);
     Ok(())
   }

@@ -137,6 +137,8 @@ fn endpoint_is_routable_matches_smoltcp_unicast() {
 // Resolvers exercising the `join` resolution boundary. `Address = SocketAddr`
 // matches a node built with the [`SocketAddrResolver`](crate::SocketAddrResolver).
 
+use memberlist_embedded::ResolvedAddrs;
+
 /// Must never be invoked — the lifecycle guard rejects a left node's `join`
 /// before any seed is resolved.
 struct UnreachableResolver;
@@ -144,13 +146,8 @@ struct UnreachableResolver;
 impl crate::Resolver for UnreachableResolver {
   type Address = SocketAddr;
   type Error = core::convert::Infallible;
-  fn resolve(
-    &self,
-    _address: &SocketAddr,
-  ) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
+  fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
     unreachable!("a left node must not resolve seeds");
-    #[allow(unreachable_code)]
-    Ok(core::iter::empty::<SocketAddr>())
   }
 }
 
@@ -160,23 +157,37 @@ struct EmptyResolver;
 impl crate::Resolver for EmptyResolver {
   type Address = SocketAddr;
   type Error = core::convert::Infallible;
-  fn resolve(
-    &self,
-    _address: &SocketAddr,
-  ) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
-    Ok(core::iter::empty())
+  fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    Ok(ResolvedAddrs::new())
   }
 }
 
-/// Resolves every address to an unbounded stream of the same wire address; the
-/// per-seed cap must bound it.
-struct InfiniteResolver;
+/// Resolves every address to a FULL bounded result (the per-seed cap's worth of
+/// the same wire address). The `ResolvedAddrs` type bounds the count, so even a
+/// resolver that tries to emit "as many as possible" stays capped.
+struct FullResolver;
 
-impl crate::Resolver for InfiniteResolver {
+impl crate::Resolver for FullResolver {
   type Address = SocketAddr;
   type Error = core::convert::Infallible;
-  fn resolve(&self, address: &SocketAddr) -> Result<impl Iterator<Item = SocketAddr>, Self::Error> {
-    Ok(core::iter::repeat(*address))
+  fn resolve(&self, address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    let mut addrs = ResolvedAddrs::new();
+    // Fill to capacity; `push` past `MAX_RESOLVED_ADDRS_PER_SEED` returns the
+    // item, so the loop simply stops at the type's bound.
+    while addrs.push(*address).is_ok() {}
+    Ok(addrs)
+  }
+}
+
+/// Panics if `resolve` is ever called — used to prove a construction error fires
+/// BEFORE any address resolution.
+struct PanicOnResolve;
+
+impl crate::Resolver for PanicOnResolve {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    panic!("the config preflight must reject the node before any address is resolved");
   }
 }
 
@@ -236,16 +247,47 @@ fn join_with_all_seeds_unresolvable_is_no_addresses() {
 }
 
 #[test]
-fn join_bounds_a_runaway_resolver() {
+fn join_accepts_a_full_bounded_resolution() {
   let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
   let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
   let mut m = started_node(&mut dev, now);
 
-  // The per-seed cap bounds the unbounded resolver iterator, so join returns
-  // instead of allocating without end.
+  // A resolver that fills the bounded result to capacity still joins. The
+  // `ResolvedAddrs` type caps the count at `MAX_RESOLVED_ADDRS_PER_SEED`, so the
+  // driver never needs a post-hoc `.take`; a resolver simply cannot hand back an
+  // oversized result for the driver to allocate.
   m.join(
-    &InfiniteResolver,
+    &FullResolver,
     &[crate::MaybeResolved::Unresolved(addr(7947))],
   )
-  .expect("capped resolution joins");
+  .expect("a full bounded resolution joins");
+}
+
+#[test]
+fn invalid_config_is_rejected_before_resolution() {
+  use core::time::Duration;
+
+  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
+
+  // A zero close timeout is an advertise-independent misconfiguration. The
+  // construction preflight must reject it BEFORE the advertise address is
+  // resolved, so `PanicOnResolve` is never called. (`Memberlist` is not `Debug`,
+  // so match the result rather than `expect_err`.)
+  let cfg = crate::Options::new().with_close_timeout(Duration::ZERO);
+  let res = Memberlist::<SmolStr, SocketAddr, _>::try_new(
+    cfg,
+    ip_iface(),
+    TransformOptions::default(),
+    ep_cfg,
+    &PanicOnResolve,
+    &mut dev,
+    now,
+  );
+  match res {
+    Err(InitError::ZeroCloseTimeout) => {}
+    Err(other) => panic!("expected ZeroCloseTimeout from the preflight, got {other:?}"),
+    Ok(_) => panic!("a zero close timeout must be rejected at construction"),
+  }
 }

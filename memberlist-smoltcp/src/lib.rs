@@ -19,8 +19,22 @@
 //!   --target thumbv7em-none-eabihf
 //! ```
 //!
-//! Configuring an explicit RNG seed via `EndpointOptions` avoids the entropy
-//! draw entirely.
+//! Pinning the interface seed via
+//! [`InterfaceOptions::with_random_seed`](crate::InterfaceOptions::with_random_seed)
+//! avoids the construction-time `getrandom` draw entirely — the gossip RNG then
+//! derives from it. [`Memberlist::with_rng`] instead drives the gossip schedule from
+//! a caller-supplied RNG, but smoltcp's interface seed (its TCP-stack ISN and
+//! ephemeral-port RNG) still draws `getrandom` at construction unless that seed is
+//! also pinned.
+//!
+//! Neither covers encryption, which is cross-transport — applied to gossip datagrams
+//! and, on the bare-metal plaintext reliable plane, to stream frames. Every encrypted
+//! frame draws a fresh nonce from `getrandom` at send time. The construction-time
+//! keyring probe is entropy-free (it checks only that each key's AEAD backend is
+//! compiled in and its cipher variant matches its tag), so an encrypted node
+//! constructs on a target whose nonce backend is missing or failing and then cannot
+//! encrypt outbound traffic: gossip datagrams and reliable exchanges alike fail as
+//! they are sent. Register a working `getrandom` backend before enabling encryption.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -52,8 +66,13 @@ pub use interface::{
 pub use memberlist::Memberlist;
 pub use resolver::{Resolver, SocketAddrResolver};
 // Re-export types that appear in public `Memberlist` method signatures so
-// callers do not need to depend on `memberlist-proto` directly.
-pub use memberlist_embedded::{AliveDelegate, ControlError, MaybeResolved, MergeDelegate};
+// callers do not need to depend on `memberlist-proto` directly. `ResolvedAddrs`
+// and its bound are the return type a custom `Resolver` must produce, so they are
+// part of this crate's public resolver API.
+pub use memberlist_embedded::{
+  AliveDelegate, ControlError, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate,
+  ResolvedAddrs,
+};
 pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeState};
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]

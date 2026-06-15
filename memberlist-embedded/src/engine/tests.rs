@@ -27,11 +27,15 @@ impl GossipIo for NoGossip {
 }
 
 /// A [`GossipIo`] that records every outbound datagram so a test can inspect
-/// the actual on-wire bytes (e.g. the transform wrapper tag).
+/// the actual on-wire bytes (e.g. the transform wrapper tag). Only the checksum
+/// wire-shape and CIDR datagram-suppression tests consume it, so it shares their
+/// feature gates.
+#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
 struct CaptureGossip {
   sent: std::vec::Vec<std::vec::Vec<u8>>,
 }
 
+#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
 impl CaptureGossip {
   fn new() -> Self {
     Self {
@@ -40,6 +44,7 @@ impl CaptureGossip {
   }
 }
 
+#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
 impl GossipIo for CaptureGossip {
   fn recv(&mut self, _buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
     None
@@ -711,6 +716,51 @@ fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() 
     engine.num_members(),
     1,
     "engine remains functional after encryption update"
+  );
+}
+
+/// `validate_runtime_config` is deterministic for an encryption keyring: the
+/// usability probe draws no entropy, so the driver's pre-resolution screen and
+/// the engine's identical re-check inside `try_new_at` cannot disagree. Repeated
+/// calls return the same verdict, and whether that verdict is `Ok` depends only on
+/// whether the AES-GCM backend is compiled in — never on entropy availability.
+#[test]
+fn validate_runtime_config_for_encryption_is_deterministic() {
+  let key = SecretKey::Aes256([0x42; 32]);
+  let transform = TransformOptions::default()
+    .with_encryption(EncryptionOptions::new().with_keyring(Keyring::new(key)));
+  let cfg = Options::new()
+    .with_port(7946)
+    .with_close_timeout(Duration::from_secs(10));
+  let gossip_mtu =
+    memberlist_proto::EndpointOptions::new(SmolStr::new("enc"), node_addr(7946)).gossip_mtu();
+
+  // Identical verdict on every call: the probe draws no entropy, so nothing
+  // transient can flip it between the driver screen and the engine re-check.
+  let first = validate_runtime_config(&cfg, &transform, gossip_mtu).is_ok();
+  for _ in 0..4 {
+    assert_eq!(
+      validate_runtime_config(&cfg, &transform, gossip_mtu).is_ok(),
+      first,
+      "the encryption preflight must return the same verdict on every call"
+    );
+  }
+
+  // The verdict tracks ONLY backend availability. With AES-GCM compiled in the
+  // keyring is usable; without it the probe rejects with the specific
+  // `UnsupportedAlgorithm` — deterministically, never an entropy error.
+  let result = validate_runtime_config(&cfg, &transform, gossip_mtu);
+  #[cfg(feature = "encryption-aes-gcm")]
+  result.expect("a valid AES-256 keyring validates when the encryption-aes-gcm backend is present");
+  #[cfg(not(feature = "encryption-aes-gcm"))]
+  assert!(
+    matches!(
+      result,
+      Err(InitError::Encryption(
+        memberlist_proto::EncryptionError::UnsupportedAlgorithm(_)
+      ))
+    ),
+    "without the AES-GCM backend the probe must reject with UnsupportedAlgorithm, got {result:?}"
   );
 }
 

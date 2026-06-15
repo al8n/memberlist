@@ -62,6 +62,9 @@ memberlist-proto = { workspace = true, default-features = false, features = ["tc
 getrandom = { workspace = true }
 bytes = { workspace = true }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
+# The fixed-capacity, no-heap `ResolvedAddrs` resolver result. 0.9 to share the
+# single version smoltcp already pulls into the graph (no second heapless major).
+heapless = { version = "0.9", default-features = false }
 
 [dev-dependencies]
 smol_str = { workspace = true }

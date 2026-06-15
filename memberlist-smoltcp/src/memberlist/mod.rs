@@ -108,6 +108,29 @@ fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
   acc
 }
 
+/// Assemble the [`memberlist_embedded::Options`] the engine reads from the
+/// driver's [`crate::Options`].
+///
+/// The `Options` name collision: the driver's `crate::Options` carries
+/// link-layer sizing (socket buffers, UDP arenas, `tcp_pool_size`) that stays on
+/// the driver, while `memberlist_embedded::Options` carries only the port and
+/// close timeout (plus the CIDR policy) the engine reads directly. Built once,
+/// up front, so the same value drives both the construction preflight
+/// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
+fn embedded_options(cfg: &Options) -> memberlist_embedded::Options {
+  let opts = memberlist_embedded::Options::new()
+    .with_port(cfg.port)
+    .with_close_timeout(cfg.close_timeout);
+  // Forward the CIDR policy into the engine, which enforces it at the gossip
+  // source (recv), the reliable accept, and membership admission.
+  #[cfg(feature = "cidr")]
+  let opts = match cfg.cidr_policy.clone() {
+    Some(policy) => opts.with_cidr_policy(policy),
+    None => opts,
+  };
+  opts
+}
+
 /// Derive the medium a [`HardwareAddress`] selects, or `None` for a medium this
 /// driver does not support.
 ///
@@ -146,8 +169,8 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 /// engine only ever sees `SocketAddr`. `D` is the smoltcp [`Device`] (e.g.
 /// `smoltcp::phy::Loopback` for tests, an ethernet driver in production). `R` is
 /// the gossip RNG (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from
-/// the interface seed, while [`with_rng`](Self::with_rng) accepts a
-/// caller-supplied one.
+/// the pinned interface seed, or from an independent `getrandom` draw when none is
+/// pinned, while [`with_rng`](Self::with_rng) accepts a caller-supplied one.
 pub struct Memberlist<I, A, D: Device, R = SmallRng>
 where
   I: memberlist_proto::Id,
@@ -289,14 +312,26 @@ where
   where
     Res: Resolver<Address = A>,
   {
-    // Resolve the advertise address into a single wire `SocketAddr` before any
-    // other work, then re-type `ep_cfg` to `EndpointOptions<I, SocketAddr>` so
-    // the rest of construction — and the engine — only ever sees the resolved
-    // address. The first resolved candidate is taken; a resolver returning no
+    // Run the engine's advertise-independent config preflight BEFORE resolving
+    // the advertise address or touching the link layer. An invalid port, gossip
+    // MTU, close timeout, or encryption keyring fails here deterministically —
+    // without invoking the resolver, allocating, or binding a socket. The engine
+    // re-runs the same screen internally (and adds the advertise-dependent
+    // checks once it holds the resolved address), so this is purely a fail-fast
+    // boundary that does not change which configs are accepted.
+    let embedded_cfg = embedded_options(&cfg);
+    memberlist_embedded::validate_runtime_config(&embedded_cfg, &transform, ep_cfg.gossip_mtu())
+      .map_err(InitError::from_embedded)?;
+
+    // Resolve the advertise address into a single wire `SocketAddr`, then re-type
+    // `ep_cfg` to `EndpointOptions<I, SocketAddr>` so the rest of construction —
+    // and the engine — only ever sees the resolved address. The first resolved
+    // candidate of the bounded `ResolvedAddrs` is taken; a resolver returning no
     // address is `NoAddresses`. From here on the advertise address is concrete.
     let resolved_advertise = resolver
       .resolve(ep_cfg.advertise_addr_ref())
       .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .into_iter()
       .next()
       .ok_or(InitError::NoAddresses)?;
     let ep_cfg = ep_cfg.map_advertise(|_| resolved_advertise);
@@ -599,28 +634,16 @@ where
       ));
     }
 
-    // Build the engine from the driver's port / timeout config. The `Options`
-    // name collision: the driver's `crate::Options` carries link-layer sizing
-    // (socket buffers, UDP arenas, `tcp_pool_size`) that stays on the driver,
-    // while `memberlist_embedded::Options` carries only the port and close timeout
-    // the engine reads directly. `try_new_at` (not `new_at`) so a machine entropy
-    // failure, an unusable encryption keyring, or a non-routable / port-mismatched
-    // advertise address becomes a typed `InitError` rather than a panic. The
-    // engine installs the routable-address admission filter and the
-    // compression/encryption/label transforms internally.
-    let embedded_cfg = memberlist_embedded::Options::new()
-      .with_port(cfg.port)
-      .with_close_timeout(cfg.close_timeout);
-    // Forward the CIDR policy into the engine, which enforces it at the gossip
-    // source (recv), the reliable accept, and membership admission.
-    #[cfg(feature = "cidr")]
-    let embedded_cfg = match cfg.cidr_policy.clone() {
-      Some(policy) => embedded_cfg.with_cidr_policy(policy),
-      None => embedded_cfg,
-    };
-    // Seed the machine's gossip RNG from the domain-separated `gossip_seed`
-    // (step 5), never the raw interface seed. The core performs no entropy
-    // acquisition of its own.
+    // Build the engine from the `embedded_cfg` already assembled (and used for
+    // the preflight) at the top of construction. `try_new_at` (not `new_at`) so a
+    // machine entropy failure, an unusable encryption keyring, or a non-routable /
+    // port-mismatched advertise address becomes a typed `InitError` rather than a
+    // panic. The engine installs the routable-address admission filter and the
+    // compression/encryption/label transforms internally, and forwards the CIDR
+    // policy carried on `embedded_cfg` to the gossip source, the reliable accept,
+    // and membership admission. Seed the machine's gossip RNG from the
+    // domain-separated `gossip_seed` (step 5), never the raw interface seed; the
+    // core performs no entropy acquisition of its own.
     let mut engine = Engine::try_new_at(
       embedded_cfg,
       transform,
@@ -675,11 +698,15 @@ where
   /// owns seeding it.
   ///
   /// Identical to [`try_new`](Self::try_new) in every respect except the gossip
-  /// RNG: instead of deriving a [`SmallRng`] seed from the interface seed, the
-  /// engine's gossip schedule is driven by `rng` exactly as supplied. The
-  /// separate [`InterfaceOptions::random_seed`](crate::InterfaceOptions) still
-  /// seeds smoltcp's own TCP stack RNG (ISN / ephemeral port selection) here as
-  /// in [`new`](Self::new); only the gossip RNG differs.
+  /// RNG. `try_new` builds the gossip [`SmallRng`] itself — from a seed derived
+  /// from the interface seed when
+  /// [`InterfaceOptions::random_seed`](crate::InterfaceOptions) is pinned, or from
+  /// an independent `getrandom` draw when it is not — whereas `with_rng` drives the
+  /// gossip schedule from `rng` exactly as supplied and makes no gossip-seed draw.
+  /// The interface seed itself is unaffected: it still seeds smoltcp's own TCP-stack
+  /// RNG (ISN / ephemeral-port selection) here as in [`new`](Self::new), drawn from
+  /// `getrandom` at construction unless pinned. So `with_rng` removes only the
+  /// gossip-seed draw, never the interface-seed draw.
   ///
   /// # Errors
   ///
@@ -702,13 +729,23 @@ where
   where
     Res: Resolver<Address = A>,
   {
-    // Resolve the advertise address into a single wire `SocketAddr` before any
-    // other work, then re-type `ep_cfg` to `EndpointOptions<I, SocketAddr>` so
-    // the rest of construction — and the engine — only ever sees the resolved
-    // address. See [`try_new`](Self::try_new).
+    // Run the engine's advertise-independent config preflight BEFORE resolving
+    // the advertise address or touching the link layer, exactly as in
+    // [`try_new`](Self::try_new): an invalid port, gossip MTU, close timeout, or
+    // encryption keyring fails here without invoking the resolver, allocating, or
+    // binding a socket.
+    let embedded_cfg = embedded_options(&cfg);
+    memberlist_embedded::validate_runtime_config(&embedded_cfg, &transform, ep_cfg.gossip_mtu())
+      .map_err(InitError::from_embedded)?;
+
+    // Resolve the advertise address into a single wire `SocketAddr`, then re-type
+    // `ep_cfg` to `EndpointOptions<I, SocketAddr>` so the rest of construction —
+    // and the engine — only ever sees the resolved address. The first candidate
+    // of the bounded `ResolvedAddrs` is taken. See [`try_new`](Self::try_new).
     let resolved_advertise = resolver
       .resolve(ep_cfg.advertise_addr_ref())
       .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .into_iter()
       .next()
       .ok_or(InitError::NoAddresses)?;
     let ep_cfg = ep_cfg.map_advertise(|_| resolved_advertise);
@@ -1001,28 +1038,15 @@ where
       ));
     }
 
-    // Build the engine from the driver's port / timeout config. The `Options`
-    // name collision: the driver's `crate::Options` carries link-layer sizing
-    // (socket buffers, UDP arenas, `tcp_pool_size`) that stays on the driver,
-    // while `memberlist_embedded::Options` carries only the port and close timeout
-    // the engine reads directly. `try_new_at` (not `new_at`) so a machine entropy
-    // failure, an unusable encryption keyring, or a non-routable / port-mismatched
-    // advertise address becomes a typed `InitError` rather than a panic. The
-    // engine installs the routable-address admission filter and the
-    // compression/encryption/label transforms internally.
-    let embedded_cfg = memberlist_embedded::Options::new()
-      .with_port(cfg.port)
-      .with_close_timeout(cfg.close_timeout);
-    // Forward the CIDR policy into the engine, which enforces it at the gossip
-    // source (recv), the reliable accept, and membership admission.
-    #[cfg(feature = "cidr")]
-    let embedded_cfg = match cfg.cidr_policy.clone() {
-      Some(policy) => embedded_cfg.with_cidr_policy(policy),
-      None => embedded_cfg,
-    };
-    // The caller owns the gossip RNG: hand `rng` straight to the engine without
-    // deriving a seed (the `gossip_seed_from` path is `try_new`'s alone). The
-    // core performs no entropy acquisition of its own.
+    // Build the engine from the `embedded_cfg` already assembled (and used for
+    // the preflight) at the top of construction. `try_new_at` (not `new_at`) so a
+    // machine entropy failure, an unusable encryption keyring, or a non-routable /
+    // port-mismatched advertise address becomes a typed `InitError` rather than a
+    // panic. The engine installs the routable-address admission filter and the
+    // compression/encryption/label transforms internally, and forwards the CIDR
+    // policy carried on `embedded_cfg`. The caller owns the gossip RNG: hand `rng`
+    // straight to the engine without deriving a seed (the `gossip_seed_from` path
+    // is `try_new`'s alone); the core performs no entropy acquisition of its own.
     let mut engine = Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng)
       .map_err(InitError::from_embedded)?;
 
@@ -1471,9 +1495,13 @@ where
   ///
   /// Each seed is first resolved through `resolver`: a
   /// [`MaybeResolved::Resolved`] address is used verbatim, while a
-  /// [`MaybeResolved::Unresolved`] address is expanded into every wire
-  /// `SocketAddr` the resolver yields. Callers already holding wire addresses
-  /// use [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
+  /// [`MaybeResolved::Unresolved`] address is expanded into the wire
+  /// `SocketAddr`s the resolver yields — a bounded
+  /// [`ResolvedAddrs`](memberlist_embedded::ResolvedAddrs) capped at
+  /// [`MAX_RESOLVED_ADDRS_PER_SEED`](memberlist_embedded::MAX_RESOLVED_ADDRS_PER_SEED)
+  /// per seed by the resolver's return type, so a runaway resolver cannot
+  /// allocate without bound. Callers already holding wire addresses use
+  /// [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
   /// [`MaybeResolved::Resolved`].
   ///
   /// Returns immediately; the poll loop initiates a push/pull state exchange
@@ -1498,11 +1526,10 @@ where
     // node initiates no new join, so it must do no resolution work first.
     self.engine.ensure_running().map_err(JoinError::Control)?;
 
-    // Bound per-seed resolution so a runaway resolver iterator cannot exhaust
-    // memory on a constrained target — a seed needs only a few candidate wire
-    // addresses to bootstrap a join.
-    const MAX_RESOLVED_ADDRS_PER_SEED: usize = 8;
-
+    // Per-seed resolution is bounded by the resolver's `ResolvedAddrs` return
+    // type (capped at `MAX_RESOLVED_ADDRS_PER_SEED`), so a runaway resolver
+    // cannot exhaust memory on a constrained target and no post-hoc `.take` is
+    // needed — the cap is enforced by the type.
     let mut resolved = std::vec::Vec::with_capacity(seeds.len());
     for seed in seeds {
       match seed {
@@ -1510,8 +1537,7 @@ where
         MaybeResolved::Unresolved(a) => resolved.extend(
           resolver
             .resolve(a)
-            .map_err(|e| JoinError::Resolve(std::boxed::Box::new(e)))?
-            .take(MAX_RESOLVED_ADDRS_PER_SEED),
+            .map_err(|e| JoinError::Resolve(std::boxed::Box::new(e)))?,
         ),
       }
     }

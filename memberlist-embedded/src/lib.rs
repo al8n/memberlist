@@ -25,6 +25,16 @@
 //!   cargo build -p memberlist-embedded --no-default-features --features alloc \
 //!   --target thumbv7em-none-eabihf
 //! ```
+//!
+//! The same `getrandom` backend is drawn again at send time for every encrypted
+//! frame's nonce. Encryption is opt-in through the wire transforms and is
+//! cross-transport — applied to gossip datagrams and, on a plaintext reliable
+//! transport, to stream frames. The construction-time keyring probe is deliberately
+//! entropy-free — it validates only that each key's AEAD backend is compiled in and
+//! its cipher variant matches its algorithm tag — so an encrypted node constructs on
+//! a target whose nonce backend is missing or failing and then cannot encrypt
+//! outbound traffic: gossip datagrams and reliable exchanges alike fail as they are
+//! sent. Register a working `getrandom` backend before enabling encryption.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -60,7 +70,7 @@ pub mod transform;
 
 pub use addr::socket_addr_is_routable;
 pub use config::{DEFAULT_CLOSE_TIMEOUT, Options};
-pub use engine::Engine;
+pub use engine::{Engine, validate_runtime_config};
 pub use error::{ControlError, GossipMtuTooLarge, InitError};
 pub use gossip_io::GossipIo;
 // Admission predicates a caller can install via `Engine::set_alive_delegate` /
@@ -71,7 +81,7 @@ pub use memberlist_proto::{AliveDelegate, MergeDelegate};
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
-pub use resolver::MaybeResolved;
+pub use resolver::{MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, ResolvedAddrs};
 pub use stream_io::{StreamIo, StreamIoError};
 pub use transform::{
   ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,

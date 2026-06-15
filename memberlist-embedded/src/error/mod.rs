@@ -62,12 +62,21 @@ pub enum InitError {
   Endpoint(EndpointInitError),
   /// The configured encryption keyring cannot be used by this build.
   ///
-  /// Construction probes every configured key (primary then secondaries) by
-  /// encrypting an empty frame. A key whose AEAD backend was not compiled into
+  /// Construction and runtime rotation probe every configured key (primary then
+  /// secondaries) entropy-free. A key whose AEAD backend was not compiled into
   /// this binary surfaces here as
   /// [`EncryptionError::UnsupportedAlgorithm`](memberlist_proto::EncryptionError::UnsupportedAlgorithm),
-  /// turning what would otherwise be a silent runtime drop of every encrypted
-  /// gossip datagram into a typed construction error.
+  /// and a key whose cipher variant disagrees with its algorithm tag as
+  /// [`KeyMismatch`](memberlist_proto::EncryptionError::KeyMismatch), turning what
+  /// would otherwise be a silent runtime drop of every encrypted gossip datagram
+  /// into a typed construction error.
+  ///
+  /// The probe validates only this PERMANENT usability — it does not validate the
+  /// per-send nonce source. Encryption is cross-transport (gossip datagrams and the
+  /// plaintext reliable plane), and every encrypted frame draws a fresh nonce from
+  /// `getrandom` at send time, so on a target whose backend is missing or failing
+  /// the node still constructs and then cannot encrypt outbound traffic — gossip
+  /// datagrams and reliable exchanges alike fail as they are sent.
   Encryption(memberlist_proto::EncryptionError),
   /// The configured gossip checksum algorithm cannot be used by this build.
   ///
