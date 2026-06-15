@@ -20,7 +20,11 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
-use memberlist_embassy::{EndpointOptions, Memberlist, Options, Runner, TransformOptions, now};
+use memberlist_embassy::{
+  AddressResolver, EndpointOptions, InitError, MaybeResolved, Memberlist, Options, Runner,
+  SocketAddrResolver, TransformOptions, now,
+};
+use memberlist_embedded::ResolvedAddrs;
 use memberlist_proto::{SeedableRng, SmallRng};
 use smol_str::SmolStr;
 
@@ -129,20 +133,23 @@ fn node<'a>(
   id: &str,
   last: u8,
   seed: u64,
-) -> (Memberlist<SmolStr>, Runner<'a, SmolStr, POOL>) {
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
   let (udp, tcp) = build_sockets(stack, bufs);
-  Memberlist::new_with_rng::<POOL>(
+  // `SocketAddrResolver` resolves synchronously, so drive the now-async
+  // constructor to completion inline — this helper stays sync.
+  block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new(id), addr(last, 7946))
       // Short stream timeout: a dead dial fails (and its slot is reaped) quickly so
       // the churn cycles within the test budget.
       .with_stream_timeout(core::time::Duration::from_millis(300)),
+    &SocketAddrResolver,
     udp,
     tcp,
     now(),
     SmallRng::seed_from_u64(seed),
-  )
+  ))
   .expect("build node")
 }
 
@@ -161,8 +168,14 @@ async fn until(mut cond: impl FnMut() -> bool) {
 /// so `join` (which resolves only on convergence) is raced against a short timer
 /// and abandoned. The dial intent is still enqueued on the engine, so the churn
 /// happens regardless of whether this future resolves.
-async fn churn_join(ml: &Memberlist<SmolStr>, seeds: &[SocketAddr]) {
-  let _ = select(ml.join(seeds), Timer::after(Duration::from_millis(80))).await;
+async fn churn_join(ml: &Memberlist<SmolStr, SocketAddr>, seeds: &[SocketAddr]) {
+  let resolved: Vec<MaybeResolved<SocketAddr>> =
+    seeds.iter().map(|s| MaybeResolved::Resolved(*s)).collect();
+  let _ = select(
+    ml.join(&SocketAddrResolver, &resolved),
+    Timer::after(Duration::from_millis(80)),
+  )
+  .await;
 }
 
 /// After a slot is aborted (a dead dial fails) and recycled, it must NOT carry the
@@ -189,7 +202,10 @@ fn abort_reuse_does_not_carry_stale_state() {
     let op = async {
       // 1. Establish the cluster first so B is a known member.
       ml_b
-        .join(&[addr(1, 7946)])
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
         .await
         .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
@@ -312,7 +328,10 @@ fn silent_peer_does_not_wedge_the_pool() {
   block_on(async {
     let op = async {
       ml_b
-        .join(&[addr(1, 7946)])
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
         .await
         .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
@@ -379,5 +398,281 @@ fn peer_reset_is_not_reported_as_send_success() {
       "a reliable send whose connection never completed (reset / vanished peer) \
        must resolve as a FAILURE, not a false success: {result:?}"
     );
+  });
+}
+
+// Async resolvers exercising the `join` resolution boundary. `Address = SocketAddr`
+// matches a node built with the [`SocketAddrResolver`].
+
+/// Must never be invoked — the lifecycle guard rejects a left node's `join` before
+/// any seed is resolved.
+struct UnreachableResolver;
+
+impl AddressResolver for UnreachableResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  async fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    unreachable!("a left node must not resolve seeds");
+  }
+}
+
+/// Resolves every address to no candidates.
+struct EmptyResolver;
+
+impl AddressResolver for EmptyResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  async fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    Ok(ResolvedAddrs::new())
+  }
+}
+
+/// Resolves every address to a FULL bounded result (the per-seed cap's worth of
+/// the same wire address). The `ResolvedAddrs` type bounds the count, so even a
+/// resolver that tries to emit "as many as possible" stays capped.
+struct FullResolver;
+
+impl AddressResolver for FullResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  async fn resolve(&self, address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    let mut addrs = ResolvedAddrs::new();
+    // Fill to capacity; `push` past `MAX_RESOLVED_ADDRS_PER_SEED` returns the
+    // item, so the loop simply stops at the type's bound.
+    while addrs.push(*address).is_ok() {}
+    Ok(addrs)
+  }
+}
+
+/// Build one running single node over its own stack, returning the handle and the
+/// (unused) runner whose lifetime keeps the borrowed sockets alive.
+fn single_node<'a>(
+  stack: Stack<'a>,
+  bufs: &'a mut NodeBufs,
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
+  node(stack, bufs, "a", 1, 1)
+}
+
+#[test]
+fn join_after_leave_rejects_without_resolving() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  block_on(async {
+    ml.leave().expect("leave a running node");
+
+    // A left node rejects join immediately — and the resolver is never called
+    // (`UnreachableResolver` would panic otherwise).
+    let err = ml
+      .join(
+        &UnreachableResolver,
+        &[MaybeResolved::Unresolved(addr(2, 7946))],
+      )
+      .await
+      .expect_err("a left node rejects join");
+    assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
+  });
+}
+
+#[test]
+fn join_with_all_seeds_unresolvable_is_no_addresses() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  block_on(async {
+    // A non-empty seed set that resolves to nothing is a discovery failure.
+    let err = ml
+      .join(&EmptyResolver, &[MaybeResolved::Unresolved(addr(2, 7946))])
+      .await
+      .expect_err("all-empty resolution fails");
+    assert!(err.is_no_addresses(), "expected NoAddresses, got {err:?}");
+  });
+}
+
+#[test]
+fn join_accepts_a_full_bounded_resolution() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  block_on(async {
+    // A resolver that fills the bounded result to capacity is accepted: the
+    // `ResolvedAddrs` type caps the count, so the driver never needs a post-hoc
+    // truncation and a resolver simply cannot hand back an oversized batch. `join`
+    // completes its resolution and proceeds to park awaiting convergence (which
+    // never comes for an unreachable seed with no runner draining events). Race it
+    // against a short timer: the timer winning proves the bounded resolution
+    // finished and the join is parked, not hung in resolution.
+    let joined = select(
+      ml.join(&FullResolver, &[MaybeResolved::Unresolved(addr(2, 7946))]),
+      Timer::after(Duration::from_millis(200)),
+    )
+    .await;
+    assert!(
+      matches!(joined, Either::Second(())),
+      "the bounded join must reach its park (timer wins), not resolve: {joined:?}"
+    );
+    // The node never gained a bogus member from the bounded batch.
+    assert_eq!(ml.num_members(), 1, "no peer should have joined");
+  });
+}
+
+#[test]
+fn invalid_config_is_rejected_before_resolution() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (udp, tcp) = build_sockets(stack, &mut bufs);
+
+  // A zero close timeout is an advertise-independent ENGINE misconfiguration. The
+  // construction preflight (`validate_runtime_config`) must reject it BEFORE the
+  // advertise address is resolved, so `UnreachableResolver` is never called. The
+  // embassy `InitError` wraps the embedded one, so the engine fault surfaces as
+  // `InitError::Engine(..ZeroCloseTimeout)`. (The `Ok` side `(Memberlist, Runner)`
+  // is not `Debug`, so match the result rather than `expect_err`.)
+  let cfg = Options::new().with_close_timeout(core::time::Duration::ZERO);
+  let Err(err) = block_on(Memberlist::new_with_rng::<_, POOL>(
+    cfg,
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &UnreachableResolver,
+    udp,
+    tcp,
+    now(),
+    SmallRng::seed_from_u64(1),
+  )) else {
+    panic!("a zero close timeout must be rejected at construction");
+  };
+  assert!(
+    matches!(
+      err,
+      InitError::Engine(memberlist_embedded::InitError::ZeroCloseTimeout)
+    ),
+    "expected Engine(ZeroCloseTimeout) from the preflight, got {err:?}"
+  );
+}
+
+#[test]
+fn construct_with_invalid_config_does_not_resolve() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (udp, tcp) = build_sockets(stack, &mut bufs);
+
+  // A `socket_timeout` far beyond the sane maximum (one day) fails the deterministic
+  // range check, which now runs before the advertise resolver. `UnreachableResolver`
+  // panics if `resolve` is ever called, so a clean `SocketTimeoutOutOfRange` proves
+  // the config error is produced without resolving.
+  let cfg = Options::new().with_socket_timeout(core::time::Duration::from_secs(200_000));
+  // The `Ok` side `(Memberlist, Runner)` is not `Debug`, so match the result rather
+  // than `expect_err` (which would require it).
+  let Err(err) = block_on(Memberlist::new_with_rng::<_, POOL>(
+    cfg,
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &UnreachableResolver,
+    udp,
+    tcp,
+    now(),
+    SmallRng::seed_from_u64(1),
+  )) else {
+    panic!("an out-of-range socket_timeout must fail construction");
+  };
+  assert!(
+    err.is_socket_timeout_out_of_range(),
+    "expected SocketTimeoutOutOfRange, got {err:?}"
+  );
+}
+
+/// On its FIRST `resolve`, leaves the cluster via a captured handle clone and counts
+/// calls — proving `join`'s per-seed running re-check stops resolving subsequent
+/// seeds once the node has left mid-resolution.
+struct LeaveOnFirstResolver {
+  ml: Memberlist<SmolStr, SocketAddr>,
+  calls: core::cell::Cell<usize>,
+}
+
+impl AddressResolver for LeaveOnFirstResolver {
+  type Address = SocketAddr;
+  type Error = core::convert::Infallible;
+  async fn resolve(&self, address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
+    let n = self.calls.get();
+    self.calls.set(n + 1);
+    if n == 0 {
+      self.ml.leave().expect("leave mid-join");
+    }
+    let mut addrs = ResolvedAddrs::new();
+    // Ignoring Err: one push onto an empty cap-8 vec cannot overflow.
+    let _ = addrs.push(*address);
+    Ok(addrs)
+  }
+}
+
+#[test]
+fn join_stops_resolving_after_a_concurrent_leave() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  block_on(async {
+    let res = LeaveOnFirstResolver {
+      ml: ml.clone(),
+      calls: core::cell::Cell::new(0),
+    };
+    // Two unresolved seeds: the first resolve leaves the cluster, so the per-seed
+    // re-check must reject before the second seed is resolved.
+    let err = ml
+      .join(
+        &res,
+        &[
+          MaybeResolved::Unresolved(addr(2, 7946)),
+          MaybeResolved::Unresolved(addr(3, 7946)),
+        ],
+      )
+      .await
+      .expect_err("a leave mid-resolution rejects the join");
+    assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
+    assert_eq!(
+      res.calls.get(),
+      1,
+      "only the first seed should have resolved; the leave must skip the rest"
+    );
+  });
+}
+
+#[test]
+fn join_after_leave_with_a_peer_still_rejects() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  // A peer in membership makes `is_joined()` true, and `leave()` does not clear
+  // it. The running guard — not the is_joined fast path — must reject the
+  // post-leave join, or a joined-then-left node would report a bogus success.
+  ml.inject_alive(SmolStr::new("peer"), addr(2, 7946));
+  block_on(async {
+    ml.leave().expect("leave a running node");
+    let err = ml
+      .join(
+        &UnreachableResolver,
+        &[MaybeResolved::Unresolved(addr(3, 7946))],
+      )
+      .await
+      .expect_err("a left node rejects join even with peers");
+    assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
   });
 }

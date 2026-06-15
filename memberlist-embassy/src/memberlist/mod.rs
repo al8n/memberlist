@@ -7,14 +7,15 @@
 //! (`Rc<Shared>`); clone it freely (it is `Clone`) to issue commands and read
 //! membership from multiple places on the single executor.
 
-use core::{net::SocketAddr, time::Duration};
+use core::{marker::PhantomData, net::SocketAddr, time::Duration};
 
 use alloc::{rc::Rc, vec::Vec};
 
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
 use memberlist_embedded::{
-  AliveDelegate, ControlError, Engine, MergeDelegate, Options as EngineConfig, TransformOptions,
+  AliveDelegate, ControlError, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig,
+  TransformOptions,
   transform::{CompressionOptions, EncryptionOptions},
 };
 use memberlist_proto::{
@@ -27,6 +28,7 @@ use crate::{
   config::Options,
   error::{InitError, OpError, SocketTimeoutOutOfRange},
   mailbox::{Command, Mailbox},
+  resolver::AddressResolver,
   runner::Runner,
   shared::{self, Shared},
   stream_io::{SlotId, SlotWake},
@@ -101,6 +103,29 @@ fn checked_socket_timeout(
   (socket_us > close.as_micros() && socket_us > stream.as_micros()).then_some(socket_ticks)
 }
 
+/// Assemble the [`memberlist_embedded::Options`] the engine reads from the
+/// driver's [`crate::Options`].
+///
+/// The driver's `crate::Options` carries link-layer sizing (the bridge ring
+/// capacities, the per-socket timeout) that stays on the driver, while
+/// `memberlist_embedded::Options` carries only the port and close timeout (plus
+/// the CIDR policy) the engine reads directly. Built once, up front, so the same
+/// value drives both the construction preflight
+/// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
+fn embedded_options(cfg: &Options) -> EngineConfig {
+  let opts = EngineConfig::new()
+    .with_port(cfg.port)
+    .with_close_timeout(cfg.close_timeout);
+  // Forward the CIDR policy into the engine, which enforces it at the gossip
+  // source (recv), the reliable accept, and membership admission.
+  #[cfg(feature = "cidr")]
+  let opts = match cfg.cidr_policy.clone() {
+    Some(policy) => opts.with_cidr_policy(policy),
+    None => opts,
+  };
+  opts
+}
+
 /// A cloneable handle to an embassy-net memberlist node.
 ///
 /// Holds a shared reference to the node's [`Engine`](memberlist_embedded::Engine)
@@ -110,30 +135,38 @@ fn checked_socket_timeout(
 /// engine directly. Every method takes `&self`, so the handle is shared across
 /// the executor's tasks.
 ///
-/// `I` is the node identifier type (e.g. `smol_str::SmolStr`); the address type
-/// is pinned to [`SocketAddr`]. `R` is the gossip RNG (defaulting to
+/// `I` is the node identifier type (e.g. `smol_str::SmolStr`). `A` is the
+/// resolver's unresolved address type — the advertise address is resolved to a
+/// wire [`SocketAddr`] at construction and the seeds at [`join`](Self::join), so
+/// the engine only ever sees `SocketAddr`. `R` is the gossip RNG (defaulting to
 /// [`SmallRng`]); [`new`](Self::new) seeds it from the platform entropy source,
 /// while [`new_with_rng`](Self::new_with_rng) accepts a caller-supplied one.
-pub struct Memberlist<I, R = SmallRng>
+pub struct Memberlist<I, A, R = SmallRng>
 where
   I: memberlist_proto::Id,
   R: Rng,
 {
   shared: Rc<Shared<I, R>>,
+  // Ties the handle to the resolver's unresolved address type. Not held in any
+  // field of `Shared` — `join` and construction resolve addresses in this domain
+  // before the engine, which only sees `SocketAddr`, ever observes them. `fn(A)`
+  // keeps the marker contravariant in `A` and free of drop/auto-trait obligations.
+  _a: PhantomData<fn(A)>,
 }
 
-impl<I, R: Rng> Clone for Memberlist<I, R>
+impl<I, A, R: Rng> Clone for Memberlist<I, A, R>
 where
   I: memberlist_proto::Id,
 {
   fn clone(&self) -> Self {
     Self {
       shared: self.shared.clone(),
+      _a: PhantomData,
     }
   }
 }
 
-impl<I> Memberlist<I, SmallRng>
+impl<I, A> Memberlist<I, A, SmallRng>
 where
   I: memberlist_proto::Id,
 {
@@ -155,6 +188,11 @@ where
   /// Seeds the gossip RNG from the platform [`getrandom`] backend; use
   /// [`new_with_rng`](Self::new_with_rng) to inject your own.
   ///
+  /// The advertise address is in the resolver's address domain `A`; it is resolved
+  /// to a single wire `SocketAddr` (the first candidate) before the engine is built.
+  /// Callers already holding a `SocketAddr` use `A = SocketAddr` with
+  /// [`SocketAddrResolver`](crate::SocketAddrResolver).
+  ///
   /// # Errors
   ///
   /// - [`InitError::TcpPoolTooSmall`] — `N < 2` (a listener plus one dial/accept
@@ -168,6 +206,9 @@ where
   ///   at least one microsecond and strictly greater than both `close_timeout` and the
   ///   machine's `stream_timeout`, or it is larger than the sane maximum it can be safely
   ///   installed at.
+  /// - [`InitError::Resolve`] — the resolver failed on the advertise address.
+  /// - [`InitError::NoAddresses`] — the resolver returned no address for the
+  ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
   ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
@@ -178,17 +219,21 @@ where
   /// # Panics
   ///
   /// Panics if binding the supplied `udp_socket` to `cfg.port` fails — which, with
-  /// a non-zero port (the engine rejects port 0 before this) and a fresh socket,
+  /// a non-zero port (the config preflight rejects port 0 before this) and a fresh socket,
   /// embassy-net does not do. Bind the socket yourself before calling if you need
   /// to handle a bind error.
-  pub fn new<'a, const N: usize>(
+  pub async fn new<'a, Res, const N: usize>(
     cfg: Options,
     transform: TransformOptions,
-    ep_cfg: EndpointOptions<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, A>,
+    resolver: &Res,
     udp_socket: UdpSocket<'a>,
     tcp_sockets: [TcpSocket<'a>; N],
     now: Instant,
-  ) -> Result<(Self, Runner<'a, I, N, SmallRng>), InitError> {
+  ) -> Result<(Self, Runner<'a, I, N, SmallRng>), InitError>
+  where
+    Res: AddressResolver<Address = A>,
+  {
     // Draw a fresh 64-bit seed from the platform entropy backend for the default
     // gossip RNG. The driver acquires entropy only on this convenience path; the
     // explicitly-seeded `new_with_rng` never touches `getrandom`.
@@ -198,15 +243,17 @@ where
       cfg,
       transform,
       ep_cfg,
+      resolver,
       udp_socket,
       tcp_sockets,
       now,
       SmallRng::seed_from_u64(u64::from_le_bytes(seed)),
     )
+    .await
   }
 }
 
-impl<I, R: Rng> Memberlist<I, R>
+impl<I, A, R: Rng> Memberlist<I, A, R>
 where
   I: memberlist_proto::Id,
 {
@@ -220,6 +267,11 @@ where
   /// embassy-net stack); the driver performs no entropy acquisition of its own on
   /// this path.
   ///
+  /// The advertise address is in the resolver's address domain `A`; it is resolved
+  /// to a single wire `SocketAddr` (the first candidate) before the engine is built.
+  /// Callers already holding a `SocketAddr` use `A = SocketAddr` with
+  /// [`SocketAddrResolver`](crate::SocketAddrResolver).
+  ///
   /// # Errors
   ///
   /// - [`InitError::TcpPoolTooSmall`] — `N < 2` (a listener plus one dial/accept
@@ -233,6 +285,9 @@ where
   ///   at least one microsecond and strictly greater than both `close_timeout` and the
   ///   machine's `stream_timeout`, or it is larger than the sane maximum it can be safely
   ///   installed at.
+  /// - [`InitError::Resolve`] — the resolver failed on the advertise address.
+  /// - [`InitError::NoAddresses`] — the resolver returned no address for the
+  ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
   ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
@@ -241,19 +296,30 @@ where
   /// # Panics
   ///
   /// Panics if binding the supplied `udp_socket` to `cfg.port` fails — which, with
-  /// a non-zero port (the engine rejects port 0 before this) and a fresh socket,
+  /// a non-zero port (the config preflight rejects port 0 before this) and a fresh socket,
   /// embassy-net does not do. Bind the socket yourself before calling if you need
   /// to handle a bind error.
   #[allow(clippy::too_many_arguments)]
-  pub fn new_with_rng<'a, const N: usize>(
+  pub async fn new_with_rng<'a, Res, const N: usize>(
     cfg: Options,
     transform: TransformOptions,
-    ep_cfg: EndpointOptions<I, SocketAddr>,
+    ep_cfg: EndpointOptions<I, A>,
+    resolver: &Res,
     mut udp_socket: UdpSocket<'a>,
     tcp_sockets: [TcpSocket<'a>; N],
     now: Instant,
     rng: R,
-  ) -> Result<(Self, Runner<'a, I, N, R>), InitError> {
+  ) -> Result<(Self, Runner<'a, I, N, R>), InitError>
+  where
+    Res: AddressResolver<Address = A>,
+  {
+    // Run the deterministic local-config guards (pool sizing, bridge rings, the
+    // socket-timeout range) before resolving the advertise address, so an
+    // invalid node fails with its config error without ever invoking the resolver
+    // or allocating its result. These checks read only timing/sizing fields, which
+    // `map_advertise` below leaves untouched, so they hold on the still-`<I, A>`
+    // `ep_cfg`.
+
     // Validate the driver-side pool sizing before touching the engine.
     if N < 2 {
       return Err(InitError::TcpPoolTooSmall(N));
@@ -288,32 +354,52 @@ where
     ))?;
     let socket_timeout = embassy_time::Duration::from_ticks(socket_ticks);
 
-    // Bind the gossip socket to the node's port. With a non-zero port (the engine
-    // re-checks this) and a fresh socket, embassy-net's `bind` cannot fail; a
-    // misuse (already-bound socket or zero port slipping through) is a programming
-    // error, so surface it as a panic rather than a recoverable variant.
+    // Run the engine's advertise-independent config preflight BEFORE resolving the
+    // advertise address or binding the gossip socket. An invalid port, gossip MTU,
+    // close timeout, or encryption/checksum keyring fails here deterministically —
+    // without invoking the resolver, allocating, or binding a socket — so a zero
+    // port (which embassy-net would reject only at the bind below) returns the
+    // typed error instead. The engine re-runs the same screen internally (and adds
+    // the advertise-dependent checks once it holds the resolved address), so this
+    // is purely a fail-fast boundary that does not change which configs are
+    // accepted. `gossip_mtu()` reads a timing/sizing field `map_advertise` leaves
+    // untouched, so it holds on the still-`<I, A>` `ep_cfg`. The same `embedded_cfg`
+    // builds the engine below.
+    let embedded_cfg = embedded_options(&cfg);
+    memberlist_embedded::validate_runtime_config(&embedded_cfg, &transform, ep_cfg.gossip_mtu())
+      .map_err(InitError::from)?;
+
+    // With the config validated, resolve the advertise address into a single wire
+    // `SocketAddr`, then re-type `ep_cfg` to `EndpointOptions<I, SocketAddr>` so the
+    // rest of construction — and the engine — only ever sees the resolved address.
+    // The first candidate of the bounded `ResolvedAddrs` is taken; a resolver
+    // returning no address is `NoAddresses`. From here on the advertise address is
+    // concrete.
+    let resolved = resolver
+      .resolve(ep_cfg.advertise_addr_ref())
+      .await
+      .map_err(|e| InitError::Resolve(alloc::boxed::Box::new(e)))?
+      .into_iter()
+      .next()
+      .ok_or(InitError::NoAddresses)?;
+    let ep_cfg = ep_cfg.map_advertise(|_| resolved);
+
+    // Bind the gossip socket to the node's port. The preflight above already
+    // rejected port 0, so with a non-zero port and a fresh socket embassy-net's
+    // `bind` cannot fail; a misuse (already-bound socket) is a programming error,
+    // so surface it as a panic rather than a recoverable variant.
     udp_socket
       .bind(cfg.port)
       .expect("binding the gossip UDP socket to the configured port failed");
 
-    // Build the transport-agnostic engine from the port / close-timeout config.
-    // `try_new_at` (not `new_at`) so an unusable encryption keyring or a
-    // non-routable / port-mismatched advertise address becomes a typed
-    // `InitError::Engine` rather than a panic. The caller-supplied `rng` seeds
-    // the machine's gossip RNG: the integrator owns entropy here, exactly as it
-    // owns the embassy-net stack's seed.
-    let engine_cfg = EngineConfig::new()
-      .with_port(cfg.port)
-      .with_close_timeout(cfg.close_timeout);
-    // Forward the CIDR policy into the engine, which enforces it at the gossip
-    // source (recv), the reliable accept, and membership admission.
-    #[cfg(feature = "cidr")]
-    let engine_cfg = match cfg.cidr_policy.clone() {
-      Some(policy) => engine_cfg.with_cidr_policy(policy),
-      None => engine_cfg,
-    };
+    // Build the transport-agnostic engine from the `embedded_cfg` already assembled
+    // (and used for the preflight) above. `try_new_at` (not `new_at`) so an unusable
+    // encryption keyring or a non-routable / port-mismatched advertise address
+    // becomes a typed `InitError::Engine` rather than a panic. The caller-supplied
+    // `rng` seeds the machine's gossip RNG: the integrator owns entropy here,
+    // exactly as it owns the embassy-net stack's seed.
     let mut engine: Engine<I, SlotId, R> =
-      Engine::try_new_at(engine_cfg, transform, ep_cfg, now, rng).map_err(InitError::from)?;
+      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng).map_err(InitError::from)?;
 
     // Seed the engine's reliable-plane pool with every slot id, then dedicate slot
     // 0 to the listener. The engine owns this pool (it reaches it directly, not
@@ -367,7 +453,13 @@ where
       free: Vec::new(),
     };
 
-    Ok((Self { shared }, runner))
+    Ok((
+      Self {
+        shared,
+        _a: PhantomData,
+      },
+      runner,
+    ))
   }
 
   // ── Async operations ────────────────────────────────────────────────────────
@@ -379,22 +471,93 @@ where
   /// Record intent to join the cluster via these seed addresses, resolving once
   /// the node has learned at least one peer (a push/pull state exchange synced).
   ///
-  /// Enqueues a push/pull to each seed on the engine, then parks until
+  /// Each seed is first resolved through `resolver`: a
+  /// [`MaybeResolved::Resolved`] address is used verbatim, while a
+  /// [`MaybeResolved::Unresolved`] address is expanded into every wire
+  /// `SocketAddr` the resolver yields. The per-seed candidate count is bounded by
+  /// the resolver's [`ResolvedAddrs`](memberlist_embedded::ResolvedAddrs) result
+  /// type (no driver-side truncation). Callers already holding wire addresses use
+  /// `A = SocketAddr` with
+  /// [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
+  /// [`MaybeResolved::Resolved`].
+  ///
+  /// Enqueues a push/pull to each resolved seed on the engine, then parks until
   /// `is_joined()` (woken by the Runner on each membership change, with a short
   /// timer backstop so a missed wake never hangs). A non-routable seed is dropped
   /// by the engine. The caller owns the overall deadline (drive this under a
-  /// `select` with a timeout). Returns `Err(OpError::NotRunning)` if the node
-  /// has left: a left node initiates no new join.
-  pub async fn join(&self, seeds: &[SocketAddr]) -> Result<(), OpError> {
+  /// `select` with a timeout).
+  ///
+  /// # Errors
+  ///
+  /// Returns `Err(OpError::NotRunning)` after `leave()` — a left node initiates no
+  /// new join, and the resolver is not invoked. A `leave()` by another handle clone
+  /// concurrent with this call's seed resolution also yields `NotRunning`: the
+  /// running state is re-checked before each unresolved seed, so no seed past the
+  /// leave is resolved (a resolve already in flight when the leave lands completes,
+  /// but its result is discarded). Otherwise returns `Err(OpError::Resolve)` if the
+  /// resolver fails on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed
+  /// set resolves to no address.
+  pub async fn join<Res>(&self, resolver: &Res, seeds: &[MaybeResolved<A>]) -> Result<(), OpError>
+  where
+    Res: AddressResolver<Address = A>,
+  {
+    // Reject a left node before anything else. A node that joined and then left
+    // still has members, so the `is_joined` fast path below must not run first —
+    // it would mask the left state and report a bogus successful join.
+    self
+      .shared
+      .engine
+      .borrow()
+      .ensure_running()
+      .map_err(|_| OpError::NotRunning)?;
+
     // Fast path: already joined (e.g. a peer was injected, or a prior join).
     if shared::is_joined(&self.shared) {
       return Ok(());
     }
+
+    let mut resolved = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+      match seed {
+        MaybeResolved::Resolved(s) => resolved.push(*s),
+        MaybeResolved::Unresolved(a) => {
+          // Re-check the running state before each seed's resolve so a `leave()`
+          // by another handle clone while a prior seed was awaiting resolution
+          // stops the remaining seeds. A resolve already in flight when the leave
+          // lands still completes (its result is then unused); only seeds not yet
+          // started are skipped. The borrow is dropped before the await — never
+          // held across it.
+          self
+            .shared
+            .engine
+            .borrow()
+            .ensure_running()
+            .map_err(|_| OpError::NotRunning)?;
+          // The resolver returns a bounded `ResolvedAddrs` (the per-seed cap is
+          // enforced by the type), so the driver extends from it directly — no
+          // post-hoc truncation, and a resolver cannot hand back an oversized
+          // batch for the driver to allocate.
+          resolved.extend(
+            resolver
+              .resolve(a)
+              .await
+              .map_err(|e| OpError::Resolve(alloc::boxed::Box::new(e)))?,
+          );
+        }
+      }
+    }
+
+    // A non-empty seed set that resolves to no wire address is a discovery
+    // failure, not a successful no-op join.
+    if !seeds.is_empty() && resolved.is_empty() {
+      return Err(OpError::NoAddresses);
+    }
+
     self
       .shared
       .engine
       .borrow_mut()
-      .join(seeds)
+      .join(&resolved)
       .map_err(|_| OpError::NotRunning)?;
     self.shared.wake_pump();
 

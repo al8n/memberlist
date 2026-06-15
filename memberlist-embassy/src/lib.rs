@@ -21,6 +21,16 @@
 //! cargo build -p memberlist-embassy --no-default-features --features alloc \
 //!   --target thumbv7em-none-eabihf
 //! ```
+//!
+//! Neither constructor covers encryption, which is cross-transport — applied to
+//! gossip datagrams and, on embassy's plaintext reliable plane, to stream frames.
+//! Every encrypted frame draws a fresh nonce from [`getrandom`] at send time. The
+//! construction-time keyring probe is entropy-free (it checks only that each key's
+//! AEAD backend is compiled in and its cipher variant matches its tag), so an
+//! encrypted node constructs on a target whose nonce backend is missing or failing
+//! and then cannot encrypt outbound traffic: gossip datagrams and reliable
+//! exchanges alike fail as they are sent. Register a working [`getrandom`] backend
+//! before enabling encryption.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -51,6 +61,7 @@ mod error;
 mod gossip_io;
 mod mailbox;
 mod memberlist;
+mod resolver;
 mod runner;
 mod shared;
 mod stream_io;
@@ -61,12 +72,14 @@ pub use config::Options;
 pub use error::{InitError, OpError, SocketTimeoutOutOfRange};
 pub use gossip_io::EmbassyGossip;
 pub use memberlist::{Memberlist, NodeStateHandle};
+pub use resolver::{AddressResolver, SocketAddrResolver};
 pub use runner::Runner;
 pub use stream_io::{EmbassyStream, SlotId};
 pub use time::{EmbassyInstant, now};
 
 pub use memberlist_embedded::{
-  AliveDelegate, ControlError, MergeDelegate, TransformOptions,
+  AliveDelegate, ControlError, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate,
+  ResolvedAddrs, TransformOptions,
   transform::{
     ChecksumAlgorithm, ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring, LabelError,
     SecretKey,

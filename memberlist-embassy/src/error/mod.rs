@@ -49,11 +49,66 @@ pub enum InitError {
   /// close-timeout, an unusable encryption keyring, or a machine-endpoint init
   /// failure (including an entropy draw failure).
   Engine(memberlist_embedded::InitError),
+  /// The address resolver failed while resolving the advertise address.
+  ///
+  /// The resolver's error type is generic, so it is boxed to preserve the
+  /// `source()` chain; a caller that knows its concrete resolver can downcast.
+  /// No `Send`/`Sync` bound — the embassy [`AddressResolver`](crate::AddressResolver)
+  /// is single-threaded by design, so its error need not cross threads.
+  Resolve(alloc::boxed::Box<dyn core::error::Error + 'static>),
+  /// The address resolver succeeded but yielded no address for the advertise
+  /// address, so the node would have nothing to advertise.
+  NoAddresses,
   /// The platform entropy source ([`getrandom`]) failed while seeding the default
   /// gossip RNG in [`Memberlist::new`](crate::Memberlist::new). Use
   /// [`Memberlist::new_with_rng`](crate::Memberlist::new_with_rng) to supply your
   /// own RNG and avoid the platform entropy draw entirely.
   Entropy,
+}
+
+impl InitError {
+  /// Whether construction failed because the TCP socket pool had fewer than two
+  /// sockets.
+  #[inline]
+  pub const fn is_tcp_pool_too_small(&self) -> bool {
+    matches!(self, InitError::TcpPoolTooSmall(_))
+  }
+
+  /// Whether a configured bridge ring capacity was zero.
+  #[inline]
+  pub const fn is_zero_bridge_ring(&self) -> bool {
+    matches!(self, InitError::ZeroBridgeRing)
+  }
+
+  /// Whether the per-socket inactivity timeout was out of range.
+  #[inline]
+  pub const fn is_socket_timeout_out_of_range(&self) -> bool {
+    matches!(self, InitError::SocketTimeoutOutOfRange(_))
+  }
+
+  /// Whether the shared engine rejected the configuration.
+  #[inline]
+  pub const fn is_engine(&self) -> bool {
+    matches!(self, InitError::Engine(_))
+  }
+
+  /// Whether the resolver failed on the advertise address.
+  #[inline]
+  pub const fn is_resolve(&self) -> bool {
+    matches!(self, InitError::Resolve(_))
+  }
+
+  /// Whether the resolver yielded no address for the advertise address.
+  #[inline]
+  pub const fn is_no_addresses(&self) -> bool {
+    matches!(self, InitError::NoAddresses)
+  }
+
+  /// Whether the platform entropy source failed while seeding the gossip RNG.
+  #[inline]
+  pub const fn is_entropy(&self) -> bool {
+    matches!(self, InitError::Entropy)
+  }
 }
 
 /// Payload for [`InitError::SocketTimeoutOutOfRange`]: the configured socket timeout,
@@ -95,6 +150,8 @@ impl fmt::Display for InitError {
         s.socket_timeout, s.tick_hz, s.close_timeout, s.stream_timeout, s.max
       ),
       InitError::Engine(e) => write!(f, "{e}"),
+      InitError::Resolve(e) => write!(f, "advertise address resolution failed: {e}"),
+      InitError::NoAddresses => f.write_str("advertise address resolution returned no addresses"),
       InitError::Entropy => f.write_str("entropy source failed while seeding the gossip RNG"),
     }
   }
@@ -111,14 +168,20 @@ impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       InitError::Engine(e) => Some(e),
+      InitError::Resolve(e) => Some(e.as_ref()),
       _ => None,
     }
   }
 }
 
 /// Why an awaiting handle operation ([`Memberlist::ping`](crate::Memberlist::ping)
-/// / [`send_reliable`](crate::Memberlist::send_reliable)) did not succeed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// / [`send_reliable`](crate::Memberlist::send_reliable) /
+/// [`join`](crate::Memberlist::join)) did not succeed.
+///
+/// `Resolve` is `!Clone` / `!PartialEq` (it boxes the resolver's generic error),
+/// so this enum derives neither — match on the variant (or the `is_*`
+/// predicates) instead.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum OpError {
   /// The peer did not acknowledge a [`ping`](crate::Memberlist::ping) within the
@@ -130,6 +193,49 @@ pub enum OpError {
   /// The machine rejected the operation because the node is not in a running
   /// state (e.g. it has already left the cluster).
   NotRunning,
+  /// The address resolver failed while resolving a [`join`](crate::Memberlist::join)
+  /// seed.
+  ///
+  /// The resolver's error type is generic, so it is boxed to preserve the
+  /// `source()` chain; a caller that knows its concrete resolver can downcast.
+  /// No `Send`/`Sync` bound — the embassy [`AddressResolver`](crate::AddressResolver)
+  /// is single-threaded by design, so its error need not cross threads.
+  Resolve(alloc::boxed::Box<dyn core::error::Error + 'static>),
+  /// A non-empty [`join`](crate::Memberlist::join) seed set resolved to no wire
+  /// address — a discovery failure rather than a successful no-op join.
+  NoAddresses,
+}
+
+impl OpError {
+  /// Whether a ping timed out without an ack.
+  #[inline]
+  pub const fn is_ping_timeout(&self) -> bool {
+    matches!(self, OpError::PingTimeout)
+  }
+
+  /// Whether a reliable send terminated without success.
+  #[inline]
+  pub const fn is_send_failed(&self) -> bool {
+    matches!(self, OpError::SendFailed)
+  }
+
+  /// Whether the operation was rejected because the node is not running.
+  #[inline]
+  pub const fn is_not_running(&self) -> bool {
+    matches!(self, OpError::NotRunning)
+  }
+
+  /// Whether the resolver failed on a join seed.
+  #[inline]
+  pub const fn is_resolve(&self) -> bool {
+    matches!(self, OpError::Resolve(_))
+  }
+
+  /// Whether a non-empty join seed set resolved to no wire address.
+  #[inline]
+  pub const fn is_no_addresses(&self) -> bool {
+    matches!(self, OpError::NoAddresses)
+  }
 }
 
 impl fmt::Display for OpError {
@@ -138,12 +244,21 @@ impl fmt::Display for OpError {
       OpError::PingTimeout => f.write_str("ping timed out: no ack within the probe timeout"),
       OpError::SendFailed => f.write_str("reliable send failed"),
       OpError::NotRunning => f.write_str("node is not in a running state"),
+      OpError::Resolve(e) => write!(f, "seed address resolution failed: {e}"),
+      OpError::NoAddresses => f.write_str("no wire address resolved for any seed"),
     }
   }
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for OpError {}
+impl std::error::Error for OpError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    match self {
+      OpError::Resolve(e) => Some(e.as_ref()),
+      _ => None,
+    }
+  }
+}
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

@@ -23,8 +23,8 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  CompressionOptions, EndpointOptions, Memberlist, Options, Runner, TransformOptions, event::Event,
-  now,
+  CompressionOptions, EndpointOptions, MaybeResolved, Memberlist, Options, Runner,
+  SocketAddrResolver, TransformOptions, event::Event, now,
 };
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
@@ -107,17 +107,21 @@ fn node<'a>(
   id: &str,
   last: u8,
   seed: u64,
-) -> (Memberlist<SmolStr>, Runner<'a, SmolStr, POOL>) {
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
   let (udp, tcp) = build_sockets(stack, bufs);
-  Memberlist::new_with_rng::<POOL>(
+  // `SocketAddrResolver` resolves synchronously (it never suspends), so drive the
+  // now-async constructor to completion inline — this helper stays sync and its
+  // call sites (which run before the test's own `block_on`) are unchanged.
+  block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new(id), addr(last, 7946)),
+    &SocketAddrResolver,
     udp,
     tcp,
     now(),
     SmallRng::seed_from_u64(seed),
-  )
+  ))
   .expect("build node")
 }
 
@@ -350,7 +354,10 @@ fn join_then_query_then_leave_over_loopback() {
     let op = async {
       // 1. Converge to a 2-member cluster.
       ml_b
-        .join(&[addr(1, 7946)])
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
         .await
         .expect("join from a running node");
       until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;

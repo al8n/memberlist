@@ -23,7 +23,8 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use memberlist_embassy::{
-  EndpointOptions, Memberlist, Options, Runner, SeedableRng, SmallRng, TransformOptions, now,
+  EndpointOptions, MaybeResolved, Memberlist, Options, Runner, SeedableRng, SmallRng,
+  SocketAddrResolver, TransformOptions, now,
 };
 use semihosting::println;
 use smol_str::SmolStr;
@@ -155,25 +156,29 @@ pub async fn main_task(spawner: Spawner) -> ! {
   let (udp_b, tcp_b) = build_sockets(stack_b, BUFS_B.init(NodeBufs::new()));
 
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
+  let (ml_a, run_a) = Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)),
+    &SocketAddrResolver,
     udp_a,
     tcp_a,
     clock,
     SmallRng::seed_from_u64(1),
   )
+  .await
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
+  let (ml_b, run_b) = Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)),
+    &SocketAddrResolver,
     udp_b,
     tcp_b,
     clock,
     SmallRng::seed_from_u64(2),
   )
+  .await
   .expect("build node b");
 
   // Spawn the four run loops. `must_spawn`: each pool slot is used exactly once,
@@ -187,7 +192,12 @@ pub async fn main_task(spawner: Spawner) -> ! {
   // from the inbound push/pull a tick after the exchange), bounded by a deadline.
   // Ignoring Err: a failed seed join surfaces as the convergence loop below timing
   // out, which the test already treats as the failure signal.
-  let _ = ml_b.join(&[addr(1, PORT)]).await;
+  let _ = ml_b
+    .join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(addr(1, PORT))],
+    )
+    .await;
   println!("join issued; waiting for convergence");
 
   let mut waited = Duration::from_secs(0);

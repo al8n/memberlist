@@ -23,8 +23,8 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  EncryptionOptions, EndpointOptions, Keyring, LabelError, Memberlist, Options, Runner, SecretKey,
-  TransformOptions, now,
+  EncryptionOptions, EndpointOptions, Keyring, LabelError, MaybeResolved, Memberlist, Options,
+  Runner, SecretKey, SocketAddrResolver, TransformOptions, now,
 };
 use memberlist_proto::{SeedableRng, SmallRng};
 use smol_str::SmolStr;
@@ -150,32 +150,37 @@ fn encrypted_gossip_round_trips() {
 
   let enc = shared_key();
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc.clone()),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     udp_a,
     tcp_a,
     clock,
     SmallRng::seed_from_u64(1),
-  )
+  ))
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
+  let (ml_b, run_b) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
+    &SocketAddrResolver,
     udp_b,
     tcp_b,
     clock,
     SmallRng::seed_from_u64(2),
-  )
+  ))
   .expect("build node b");
 
   let start = StdInstant::now();
   block_on(async {
     let op = async {
       ml_b
-        .join(&[addr(1, 7946)])
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
         .await
         .expect("join from a running node");
       loop {
@@ -228,32 +233,37 @@ fn checksummed_gossip_round_trips() {
 
   let checksum = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default().with_checksum(checksum),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     udp_a,
     tcp_a,
     clock,
     SmallRng::seed_from_u64(1),
-  )
+  ))
   .expect("build node a");
-  let (ml_b, run_b) = Memberlist::new_with_rng::<POOL>(
+  let (ml_b, run_b) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default().with_checksum(checksum),
     EndpointOptions::new(SmolStr::new("b"), addr(2, 7946)),
+    &SocketAddrResolver,
     udp_b,
     tcp_b,
     clock,
     SmallRng::seed_from_u64(2),
-  )
+  ))
   .expect("build node b");
 
   let start = StdInstant::now();
   block_on(async {
     let op = async {
       ml_b
-        .join(&[addr(1, 7946)])
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
         .await
         .expect("join from a running node");
       loop {
@@ -316,7 +326,7 @@ fn gossip_label_isolates_clusters() {
       .with_label(Some(b"alpha".to_vec()))
       .expect("valid label");
     let clock = now();
-    let (ml_alpha, run_alpha) = Memberlist::new_with_rng::<POOL>(
+    let (ml_alpha, run_alpha) = block_on(Memberlist::new_with_rng::<_, POOL>(
       Options::new(),
       transform_alpha,
       // Short probe timers so failure detection completes within 2 000ms.
@@ -326,13 +336,14 @@ fn gossip_label_isolates_clusters() {
         .with_suspicion_mult(2)
         .with_suspicion_max_timeout_mult(2)
         .with_gossip_interval(StdDuration::from_millis(50)),
+      &SocketAddrResolver,
       udp_alpha,
       tcp_alpha,
       clock,
       SmallRng::seed_from_u64(1),
-    )
+    ))
     .expect("build alpha node");
-    let (ml_plain, run_plain) = Memberlist::new_with_rng::<POOL>(
+    let (ml_plain, run_plain) = block_on(Memberlist::new_with_rng::<_, POOL>(
       Options::new(),
       TransformOptions::default(),
       EndpointOptions::new(SmolStr::new("plain"), addr(2, 7946))
@@ -341,11 +352,12 @@ fn gossip_label_isolates_clusters() {
         .with_suspicion_mult(2)
         .with_suspicion_max_timeout_mult(2)
         .with_gossip_interval(StdDuration::from_millis(50)),
+      &SocketAddrResolver,
       udp_plain,
       tcp_plain,
       clock,
       SmallRng::seed_from_u64(2),
-    )
+    ))
     .expect("build plain node");
 
     // Pre-seed each node with the other via inject_alive, then run the infra.
@@ -390,32 +402,37 @@ fn gossip_label_isolates_clusters() {
       .expect("valid label");
 
     let clock = now();
-    let (ml_a2, run_a2) = Memberlist::new_with_rng::<POOL>(
+    let (ml_a2, run_a2) = block_on(Memberlist::new_with_rng::<_, POOL>(
       Options::new(),
       transform_a2,
       EndpointOptions::new(SmolStr::new("a2"), addr(3, 7946)),
+      &SocketAddrResolver,
       udp_a,
       tcp_a,
       clock,
       SmallRng::seed_from_u64(3),
-    )
+    ))
     .expect("build a2 node");
-    let (ml_b2, run_b2) = Memberlist::new_with_rng::<POOL>(
+    let (ml_b2, run_b2) = block_on(Memberlist::new_with_rng::<_, POOL>(
       Options::new(),
       transform_b2,
       EndpointOptions::new(SmolStr::new("b2"), addr(4, 7946)),
+      &SocketAddrResolver,
       udp_b,
       tcp_b,
       clock,
       SmallRng::seed_from_u64(4),
-    )
+    ))
     .expect("build b2 node");
 
     let start = StdInstant::now();
     block_on(async {
       let op = async {
         ml_b2
-          .join(&[addr(3, 7946)])
+          .join(
+            &SocketAddrResolver,
+            &[MaybeResolved::Resolved(addr(3, 7946))],
+          )
           .await
           .expect("join from a running node");
         loop {
@@ -485,26 +502,28 @@ fn runtime_set_encryption_rotates_key() {
   let (udp_c, tcp_c) = build_sockets(stack_c, &mut bufs_c);
 
   let clock = now();
-  let (ml_a, run_a) = Memberlist::new_with_rng::<POOL>(
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     TransformOptions::default().with_encryption(enc1),
     EndpointOptions::new(SmolStr::new("a"), addr(1, 7946)),
+    &SocketAddrResolver,
     udp_a,
     tcp_a,
     clock,
     SmallRng::seed_from_u64(1),
-  )
+  ))
   .expect("build node a");
-  let (ml_c, run_c) = Memberlist::new_with_rng::<POOL>(
+  let (ml_c, run_c) = block_on(Memberlist::new_with_rng::<_, POOL>(
     Options::new(),
     // C starts with key2 — incompatible with A's key1.
     TransformOptions::default().with_encryption(enc2),
     EndpointOptions::new(SmolStr::new("c"), addr(3, 7946)),
+    &SocketAddrResolver,
     udp_c,
     tcp_c,
     clock,
     SmallRng::seed_from_u64(3),
-  )
+  ))
   .expect("build node c");
 
   let start = StdInstant::now();
@@ -515,8 +534,8 @@ fn runtime_set_encryption_rotates_key() {
       // therefore never resolves (it waits for `is_joined()`). We race it
       // against a 1 s window: the timer fires, proving the key mismatch
       // prevents convergence.
-      let seed_a = [addr(1, 7946)];
-      let join_attempt = ml_c.join(&seed_a);
+      let seed_a = [MaybeResolved::Resolved(addr(1, 7946))];
+      let join_attempt = ml_c.join(&SocketAddrResolver, &seed_a);
       match select(join_attempt, Timer::after(Duration::from_millis(1000))).await {
         Either::First(_) => {
           // Join completed — that should not happen with mismatched keys.
@@ -546,8 +565,11 @@ fn runtime_set_encryption_rotates_key() {
         .expect("key rotation to key1 must succeed");
 
       // Phase 3: re-join after rotation — must converge.
-      let seed_a2 = [addr(1, 7946)];
-      ml_c.join(&seed_a2).await.expect("join from a running node");
+      let seed_a2 = [MaybeResolved::Resolved(addr(1, 7946))];
+      ml_c
+        .join(&SocketAddrResolver, &seed_a2)
+        .await
+        .expect("join from a running node");
       loop {
         if ml_a.num_members() == 2 && ml_c.num_members() == 2 {
           break;
