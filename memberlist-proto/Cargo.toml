@@ -48,6 +48,7 @@ std = [
   "smol_str/default",
   "thiserror/default",
   "rustc-hash/default",
+  "rand/default",
   "buffa/default",
   "cheap-clone/default",
   "triomphe/default",
@@ -61,7 +62,7 @@ std = [
   "crc32fast?/default",
   "ipnet?/default",
 ]
-alloc = ["cheap-clone/alloc", "varing/alloc"]
+alloc = ["cheap-clone/alloc", "varing/alloc", "rand/alloc"]
 tracing = ["dep:tracing"]
 
 # Composed QUIC + memberlist Sans-I/O coordinator. Crypto-backend-agnostic:
@@ -74,11 +75,11 @@ quic = ["std", "dep:quinn-proto", "dep:slab"]
 # quinn-proto crypto-backend pass-throughs.
 quic-ring = ["quic", "quinn-proto/ring"]
 quic-rustls = ["quic", "quinn-proto/rustls"]
-quic-rustls-ring = ["quic", "quinn-proto/rustls-ring"]
+quic-rustls-ring = ["quic", "quinn-proto/rustls-ring", "rustls?/ring"]
 quic-aws-lc-rs = ["quic", "quinn-proto/aws-lc-rs"]
 quic-aws-lc-rs-fips = ["quic", "quinn-proto/aws-lc-rs-fips"]
-quic-rustls-aws-lc-rs = ["quic", "quinn-proto/rustls-aws-lc-rs"]
-quic-rustls-aws-lc-rs-fips = ["quic", "quinn-proto/rustls-aws-lc-rs-fips"]
+quic-rustls-aws-lc-rs = ["quic", "quinn-proto/rustls-aws-lc-rs", "rustls?/aws_lc_rs"]
+quic-rustls-aws-lc-rs-fips = ["quic", "quinn-proto/rustls-aws-lc-rs-fips", "rustls?/aws_lc_rs"]
 
 # quinn-proto auxiliary pass-throughs.
 quic-bloom = ["quic", "quinn-proto/bloom"]
@@ -94,6 +95,9 @@ quic-platform-verifier = ["quic", "quinn-proto/platform-verifier"]
 # backend they choose. Enable a backend pass-through below (e.g.
 # `tls-rustls-ring`) to pull a provider into the dependency graph.
 tls = ["std", "dep:rustls", "dep:rustls-pki-types"]
+tls-rustls-ring = ["tls", "rustls/ring", "quinn-proto?/rustls-ring"]
+tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs", "quinn-proto?/rustls-aws-lc-rs"]
+tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips", "quinn-proto?/rustls-aws-lc-rs-fips"]
 
 # Composed plain-TCP + memberlist Sans-I/O coordinator. The label is a
 # one-time wire prefix at stream start (identical byte format to the frozen
@@ -142,11 +146,6 @@ chacha20-poly1305 = [
   "chacha20poly1305/alloc",
 ]
 
-# rustls crypto-backend pass-throughs.
-tls-rustls-ring = ["tls", "rustls/ring"]
-tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]
-tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips"]
-
 # CIDR peer-admission allow-list ([`CidrPolicy`]), usable as an `AliveDelegate`.
 # no_std+alloc: the policy holds a hashbrown set of `ipnet` networks (`ipnet` is
 # no_std-capable) and filters inbound alives by the peer's advertised IP. The
@@ -155,11 +154,11 @@ cidr = ["alloc", "dep:ipnet"]
 
 [dependencies]
 bytes.workspace = true
-indexmap = { version = "2", default-features = false }
-rand = { version = "0.10", default-features = false, features = ["alloc"] }
-getrandom = { workspace = true }
+indexmap.workspace = true
+rand.workspace = true
+getrandom.workspace = true
 rustc-hash = { version = "2", default-features = false }
-hashbrown = { version = "0.17", default-features = false }
+hashbrown.workspace = true
 libm = { version = "0.2", default-features = false }
 smallvec.workspace = true
 smol_str.workspace = true
@@ -187,9 +186,9 @@ derive_more = { workspace = true, features = [
   "unwrap",
   "try_unwrap",
 ] }
-paste = { workspace = true }
-triomphe = { workspace = true }
-varing = { workspace = true }
+paste.workspace = true
+triomphe.workspace = true
+varing.workspace = true
 
 # Checksum backends — opt-in (see the checksum-* features). All no_std-capable:
 # crc32fast defaults `std` on so it is pinned `default-features = false` (its

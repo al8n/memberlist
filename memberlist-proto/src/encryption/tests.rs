@@ -571,10 +571,7 @@ fn chacha20poly1305_trailing_junk_in_body_is_rejected() {
   assert!(matches!(err, EncryptionError::AuthFailed));
 }
 
-#[cfg(all(
-  feature = "aes-gcm",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn mixed_cipher_keyring_decrypts_chacha_with_chacha_secondary() {
   // Primary AES, secondary ChaCha20-Poly1305. A frame encrypted under the
@@ -817,10 +814,7 @@ fn keyring_insert_secondary_equal_to_primary_is_dropped() {
   );
 }
 
-#[cfg(all(
-  feature = "aes-gcm",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn decode_skips_secondary_whose_algorithm_does_not_match() {
   // Frame encrypted under an outside ChaCha key. Keyring: a ChaCha primary

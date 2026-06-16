@@ -60,10 +60,7 @@ use memberlist_proto::{
   typed::{Ack, Alive, Message, Meta, Nack, Node, Ping, PushNodeState, PushPull, State},
   unwrap_transforms_with_encryption,
 };
-#[cfg(any(
-  feature = "aes-gcm",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 use memberlist_proto::{Keyring, SecretKey};
 
 type I = smol_str::SmolStr;
@@ -428,10 +425,7 @@ fn compression_brotli_roundtrip() {
 
 /// A fixed-bytes keyring for `key`. Deterministic so a flake is a real bug, not
 /// entropy noise; the nonce is still random per frame inside the encoder.
-#[cfg(any(
-  feature = "aes-gcm",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 fn enc_opts(key: SecretKey) -> EncryptionOptions {
   EncryptionOptions::new().with_keyring(Keyring::new(key))
 }
@@ -498,10 +492,7 @@ fn compression_zstd_and_encryption_aes128_gcm_roundtrip() {
   );
 }
 
-#[cfg(all(
-  feature = "snappy",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(all(feature = "snappy", feature = "chacha20-poly1305"))]
 #[test]
 fn compression_snappy_and_encryption_chacha20_poly1305_roundtrip() {
   assert_both_planes(
@@ -510,10 +501,7 @@ fn compression_snappy_and_encryption_chacha20_poly1305_roundtrip() {
   );
 }
 
-#[cfg(all(
-  feature = "brotli",
-  feature = "chacha20-poly1305"
-))]
+#[cfg(all(feature = "brotli", feature = "chacha20-poly1305"))]
 #[test]
 fn compression_brotli_and_encryption_chacha20_poly1305_roundtrip() {
   assert_both_planes(
@@ -622,11 +610,7 @@ fn checksum_murmur3_and_encryption_chacha20_poly1305_roundtrip() {
 // compressed+checksummed+encrypted reliable unit. Runs only when a compression,
 // a checksum, and an encryption backend are all built in.
 
-#[cfg(all(
-  feature = "lz4",
-  feature = "crc32",
-  feature = "aes-gcm"
-))]
+#[cfg(all(feature = "lz4", feature = "crc32", feature = "aes-gcm"))]
 #[test]
 fn all_transforms_lz4_crc32_aes256_gcm_roundtrip() {
   let compression = compress_opts(CompressAlgorithm::Lz4);

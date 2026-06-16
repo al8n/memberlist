@@ -12,8 +12,8 @@ publish = false
 # and supplies the adapter + the per-transport instantiations.
 
 [dependencies]
-bytes = { workspace = true }
-smol_str = { workspace = true }
+bytes.workspace = true
+smol_str.workspace = true
 # For the transform-matrix knobs on `NodeConfig` (the algorithm enums + the
 # secret-key type). proto is the driver-agnostic type layer both drivers share;
 # naming a `CompressAlgorithm` variant needs no codec-backend feature. The

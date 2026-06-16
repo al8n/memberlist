@@ -1326,11 +1326,7 @@ where
   /// from `memberlist-wire`).
   ///
   /// [`EncryptionOptions`]: crate::EncryptionOptions
-  #[cfg(all(
-    test,
-    any(feature = "tls", feature = "tcp"),
-    feature = "aes-gcm"
-  ))]
+  #[cfg(all(test, any(feature = "tls", feature = "tcp"), feature = "aes-gcm"))]
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }

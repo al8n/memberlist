@@ -1,26 +1,38 @@
 use super::*;
 
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
 #[test]
 fn algorithm_tag_roundtrip() {
   for algo in [
     CompressAlgorithm::Lz4,
     CompressAlgorithm::Snappy,
-    CompressAlgorithm::Zstd,
+    CompressAlgorithm::Zstd(ZstdLevel::Eight),
     CompressAlgorithm::Brotli,
   ] {
     assert_eq!(CompressAlgorithm::from_tag(algo.tag()), algo);
   }
 }
 
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
 #[test]
 fn algorithm_tags_have_pinned_numeric_values() {
   // The numeric tags are a stable wire contract: a frame compressed by one
   // node must decode on a peer built with a different backend set, so the
   // tag numbering may never silently drift.
-  assert_eq!(CompressAlgorithm::Lz4.tag(), 1);
-  assert_eq!(CompressAlgorithm::Snappy.tag(), 2);
-  assert_eq!(CompressAlgorithm::Zstd.tag(), 3);
-  assert_eq!(CompressAlgorithm::Brotli.tag(), 4);
+  assert_eq!(CompressAlgorithm::Lz4.tag(), 23);
+  assert_eq!(CompressAlgorithm::Snappy.tag(), 24);
+  assert_eq!(CompressAlgorithm::Zstd(ZstdLevel::Eight).tag(), 8);
+  assert_eq!(CompressAlgorithm::Brotli.tag(), 25);
 }
 
 #[test]
@@ -60,8 +72,13 @@ fn snappy_roundtrip() {
 #[test]
 fn zstd_roundtrip() {
   let input = b"the quick brown fox jumps over the lazy dog".repeat(8);
-  let packed = compress(CompressAlgorithm::Zstd, &input).expect("zstd compress");
-  let back = decompress(CompressAlgorithm::Zstd, &packed, input.len()).expect("zstd decompress");
+  let packed = compress(CompressAlgorithm::Zstd(ZstdLevel::Eight), &input).expect("zstd compress");
+  let back = decompress(
+    CompressAlgorithm::Zstd(ZstdLevel::Eight),
+    &packed,
+    input.len(),
+  )
+  .expect("zstd decompress");
   assert_eq!(back, input);
 }
 
@@ -326,9 +343,14 @@ fn snappy_trailing_junk_in_body_is_rejected() {
 #[test]
 fn zstd_trailing_junk_in_body_is_rejected() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(8);
-  let mut body = compress(CompressAlgorithm::Zstd, &payload).expect("zstd compress");
+  let mut body =
+    compress(CompressAlgorithm::Zstd(ZstdLevel::Eight), &payload).expect("zstd compress");
   body.extend_from_slice(b"trailing-junk");
-  let frame = encode_compressed_frame(CompressAlgorithm::Zstd, payload.len(), &body);
+  let frame = encode_compressed_frame(
+    CompressAlgorithm::Zstd(ZstdLevel::Eight),
+    payload.len(),
+    &body,
+  );
   assert!(matches!(
     decode_compressed_frame(&frame, 1 << 20),
     Err(CompressionError::Backend(_))
@@ -411,10 +433,7 @@ fn reliable_unit_encrypted_then_compressed_roundtrip() {
   assert_eq!(consumed, unit.len());
 }
 
-#[cfg(all(
-  feature = "aes-gcm",
-  not(feature = "chacha20-poly1305")
-))]
+#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
 #[test]
 fn encode_reliable_unit_with_encryption_returns_err_on_unsupported_backend() {
   // A primary key whose backend was NOT built into this binary (here:
@@ -592,8 +611,11 @@ fn compression_options_in_place_setters() {
   opts.clear_algorithm();
   assert!(opts.algorithm().is_none());
   // update_algorithm assigns the raw Option in place.
-  opts.update_algorithm(Some(CompressAlgorithm::Zstd));
-  assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Zstd));
+  opts.update_algorithm(Some(CompressAlgorithm::Zstd(ZstdLevel::Eight)));
+  assert_eq!(
+    opts.algorithm(),
+    Some(CompressAlgorithm::Zstd(ZstdLevel::Eight))
+  );
   opts.update_algorithm(None);
   assert!(opts.algorithm().is_none());
 }
@@ -669,9 +691,13 @@ fn zstd_decompress_rejects_orig_len_larger_than_actual() {
   // zstd's bulk decompressor allocates exactly `orig_len`; an oversized
   // declaration leaves the produced length short and is rejected.
   let data = b"the quick brown fox".to_vec();
-  let packed = compress(CompressAlgorithm::Zstd, &data).expect("compress");
-  let err = decompress(CompressAlgorithm::Zstd, &packed, data.len() + 8)
-    .expect_err("oversized orig_len must be rejected");
+  let packed = compress(CompressAlgorithm::Zstd(ZstdLevel::Eight), &data).expect("compress");
+  let err = decompress(
+    CompressAlgorithm::Zstd(ZstdLevel::Eight),
+    &packed,
+    data.len() + 8,
+  )
+  .expect_err("oversized orig_len must be rejected");
   assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
 }
 

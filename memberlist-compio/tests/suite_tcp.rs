@@ -288,11 +288,7 @@ async fn tcp_user_data() {
 /// only when CI also enables the transform backends. TCP is representative — the
 /// transform stack sits above the transport, so it applies identically on TLS
 /// and QUIC.
-#[cfg(all(
-  feature = "lz4",
-  feature = "crc32",
-  feature = "aes-gcm"
-))]
+#[cfg(all(feature = "lz4", feature = "crc32", feature = "aes-gcm"))]
 mod transform_matrix {
   use memberlist_proto::{ChecksumAlgorithm, CompressAlgorithm, SecretKey};
 
