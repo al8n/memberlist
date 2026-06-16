@@ -50,18 +50,18 @@ getifs = ["dep:getifs", "dep:iprfc"]
 memberlist-proto = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
 agnostic = { workspace = true, features = ["net"] }
-agnostic-lite = { workspace = true }
+agnostic-lite.workspace = true
 hostaddr = { workspace = true, features = ["std", "smol_str"] }
-smol_str = { workspace = true }
-arc-swap = { workspace = true }
+smol_str.workspace = true
+arc-swap.workspace = true
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
-futures-channel = { workspace = true }
+futures-channel.workspace = true
 futures-util = { workspace = true, default-features = false, features = [
   "std",
   "async-await-macro",
 ] }
-thiserror = { workspace = true }
+thiserror.workspace = true
 tracing = { workspace = true, optional = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = [
   "std",
@@ -73,7 +73,7 @@ iprfc = { workspace = true, optional = true }
 [dev-dependencies]
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
 agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
-smol_str = { workspace = true }
+smol_str.workspace = true
 futures-util = { workspace = true, default-features = false, features = [
   "std",
   "async-await-macro",

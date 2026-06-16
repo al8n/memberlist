@@ -15,39 +15,148 @@
 //! a decode error, so a frame's compressed body can never drive an allocation
 //! larger than its declared `orig_len`.
 
+use std::{string::ToString, vec::Vec};
+
+use derive_more::IsVariant;
+
+use crate::framing::{
+  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
+};
+
+/// Compression level for zstd. The backend accepts levels 1–22; the default is 3
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
+#[repr(u8)]
+#[cfg(feature = "zstd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+pub enum ZstdLevel {
+  /// Level 1 — fastest, lowest ratio.
+  One = 1,
+  /// Level 2.
+  Two = 2,
+  /// Level 3 — the default.
+  #[default]
+  Three = 3,
+  /// Level 4.
+  Four = 4,
+  /// Level 5.
+  Five = 5,
+  /// Level 6.
+  Six = 6,
+  /// Level 7.
+  Seven = 7,
+  /// Level 8.
+  Eight = 8,
+  /// Level 9.
+  Nine = 9,
+  /// Level 10.
+  Ten = 10,
+  /// Level 11.
+  Eleven = 11,
+  /// Level 12.
+  Twelve = 12,
+  /// Level 13.
+  Thirteen = 13,
+  /// Level 14.
+  Fourteen = 14,
+  /// Level 15.
+  Fifteen = 15,
+  /// Level 16.
+  Sixteen = 16,
+  /// Level 17.
+  Seventeen = 17,
+  /// Level 18.
+  Eighteen = 18,
+  /// Level 19.
+  Nineteen = 19,
+  /// Level 20.
+  Twenty = 20,
+  /// Level 21.
+  TwentyOne = 21,
+  /// Level 22.
+  TwentyTwo = 22,
+}
+
+#[cfg(feature = "zstd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+const _: () = {
+  impl ZstdLevel {
+    const fn try_from_u8(value: u8) -> Option<Self> {
+      Some(match value {
+        1 => Self::One,
+        2 => Self::Two,
+        3 => Self::Three,
+        4 => Self::Four,
+        5 => Self::Five,
+        6 => Self::Six,
+        7 => Self::Seven,
+        8 => Self::Eight,
+        9 => Self::Nine,
+        10 => Self::Ten,
+        11 => Self::Eleven,
+        12 => Self::Twelve,
+        13 => Self::Thirteen,
+        14 => Self::Fourteen,
+        15 => Self::Fifteen,
+        16 => Self::Sixteen,
+        17 => Self::Seventeen,
+        18 => Self::Eighteen,
+        19 => Self::Nineteen,
+        20 => Self::Twenty,
+        21 => Self::TwentyOne,
+        22 => Self::TwentyTwo,
+        other => return None,
+      })
+    }
+  }
+};
+
 /// Identifies the compression backend a compressed frame
 /// was produced with. Each backend is opt-in behind its own feature; a node
 /// that decodes a tag it was not built with yields [`CompressAlgorithm::Unknown`]
 /// and fails the decode cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompressAlgorithm {
-  /// LZ4 — fast, low CPU. Feature `lz4`, backed by `lz4_flex`.
-  Lz4,
-  /// Snappy — fast. Feature `snappy`, backed by `snap`.
-  Snappy,
   /// Zstd — high ratio. Feature `zstd`, backed by `zstd`.
-  Zstd,
+  #[cfg(feature = "zstd")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+  Zstd(ZstdLevel),
+  /// LZ4 — fast, low CPU. Feature `lz4`, backed by `lz4_flex`.
+  #[cfg(feature = "lz4")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "lz4")))]
+  Lz4 = 23,
+  /// Snappy — fast. Feature `snappy`, backed by `snap`.
+  #[cfg(feature = "snappy")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "snappy")))]
+  Snappy = 24,
   /// Brotli — high ratio. Feature `brotli`, backed by `brotli`.
-  Brotli,
+  #[cfg(feature = "brotli")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "brotli")))]
+  Brotli = 25,
   /// An algorithm tag the local node was not built with.
   Unknown(u8),
 }
 
 /// Algorithm wire tags. Stable across builds — a node built with one backend
 /// must agree with a peer built with another on the tag numbering.
-const LZ4_TAG: u8 = 1;
-const SNAPPY_TAG: u8 = 2;
-const ZSTD_TAG: u8 = 3;
-const BROTLI_TAG: u8 = 4;
+#[cfg(feature = "lz4")]
+const LZ4_TAG: u8 = 23;
+#[cfg(feature = "snappy")]
+const SNAPPY_TAG: u8 = 24;
+#[cfg(feature = "brotli")]
+const BROTLI_TAG: u8 = 25;
 
 impl CompressAlgorithm {
   /// The one-byte wire tag for this algorithm.
   #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
+      #[cfg(feature = "lz4")]
       Self::Lz4 => LZ4_TAG,
+      #[cfg(feature = "snappy")]
       Self::Snappy => SNAPPY_TAG,
-      Self::Zstd => ZSTD_TAG,
+      #[cfg(feature = "zstd")]
+      Self::Zstd(level) => *level as u8,
+      #[cfg(feature = "brotli")]
       Self::Brotli => BROTLI_TAG,
       Self::Unknown(v) => *v,
     }
@@ -59,9 +168,14 @@ impl CompressAlgorithm {
   #[inline(always)]
   pub const fn from_tag(tag: u8) -> Self {
     match tag {
+      #[cfg(feature = "zstd")]
+      1..=22 => Self::Zstd(ZstdLevel::try_from_u8(tag).expect("valid zstd level tag")),
+      #[cfg(feature = "lz4")]
       LZ4_TAG => Self::Lz4,
+      #[cfg(feature = "snappy")]
       SNAPPY_TAG => Self::Snappy,
-      ZSTD_TAG => Self::Zstd,
+
+      #[cfg(feature = "brotli")]
       BROTLI_TAG => Self::Brotli,
       other => Self::Unknown(other),
     }
@@ -180,7 +294,7 @@ pub fn compress(algo: CompressAlgorithm, _input: &[u8]) -> Result<Vec<u8>, Compr
       .compress_vec(_input)
       .map_err(|e| CompressionError::Backend(e.to_string().into())),
     #[cfg(feature = "zstd")]
-    CompressAlgorithm::Zstd => zstd::stream::encode_all(_input, ZSTD_DEFAULT_LEVEL)
+    CompressAlgorithm::Zstd(level) => zstd::stream::encode_all(_input, level as i32)
       .map_err(|e| CompressionError::Backend(e.to_string().into())),
     #[cfg(feature = "brotli")]
     CompressAlgorithm::Brotli => {
@@ -243,7 +357,7 @@ pub fn decompress(
       Ok(out)
     }
     #[cfg(feature = "zstd")]
-    CompressAlgorithm::Zstd => {
+    CompressAlgorithm::Zstd(_) => {
       // `zstd::bulk::decompress` allocates exactly `_orig_len` bytes and
       // hard-caps the output there — a frame decompressing past `_orig_len`
       // fails (the underlying `ZSTD_decompressDCtx` rejects a too-small
@@ -439,16 +553,6 @@ impl CompressionOptions {
     }
   }
 }
-
-#[cfg(not(feature = "std"))]
-use std::vec::Vec;
-// `ToString` only feeds the backend error paths; lz4 is the only no_std backend.
-#[cfg(all(not(feature = "std"), feature = "lz4"))]
-use std::string::ToString;
-
-use crate::framing::{
-  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
-};
 
 /// The one-byte wrapper tag that prefixes every compressed frame
 /// ([`MessageTag::Compressed`]).

@@ -11,6 +11,10 @@
 //! itself is returned on the stack ([`ChecksumDigest`]) — the widest digest is
 //! eight bytes, so no heap allocation is needed.
 
+use std::vec::Vec;
+
+use crate::framing::{FrameError, MessageTag};
+
 /// Identifies the checksum backend a digest was produced with. Each backend is
 /// opt-in behind its own feature; a node that is handed a tag it was not built
 /// with yields [`ChecksumAlgorithm::Unknown`] and fails the operation cleanly.
@@ -18,28 +22,43 @@
 pub enum ChecksumAlgorithm {
   /// CRC32 (IEEE). Feature `crc32`, backed by `crc32fast`. 4-byte
   /// digest.
-  Crc32,
+  #[cfg(feature = "crc32")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "crc32")))]
+  Crc32 = 1,
   /// XXHash32. Feature `xxhash32`, backed by `xxhash-rust`. 4-byte
   /// digest.
-  XxHash32,
+  #[cfg(feature = "xxhash32")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash32")))]
+  XxHash32 = 2,
   /// XXHash64. Feature `xxhash64`, backed by `xxhash-rust`. 8-byte
   /// digest.
-  XxHash64,
+  #[cfg(feature = "xxhash64")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash64")))]
+  XxHash64 = 3,
   /// XXHash3 (64-bit). Feature `xxhash3`, backed by `xxhash-rust`.
   /// 8-byte digest.
-  XxHash3,
+  #[cfg(feature = "xxhash3")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash3")))]
+  XxHash3 = 4,
   /// Murmur3. Feature `murmur3`, backed by `hash32`. 4-byte digest.
-  Murmur3,
+  #[cfg(feature = "murmur3")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "murmur3")))]
+  Murmur3 = 5,
   /// An algorithm tag the local node was not built with.
   Unknown(u8),
 }
 
 /// Algorithm wire tags. Stable across builds — a node built with one backend
 /// must agree with a peer built with another on the tag numbering.
+#[cfg(feature = "crc32")]
 const CRC32_TAG: u8 = 1;
+#[cfg(feature = "xxhash32")]
 const XXHASH32_TAG: u8 = 2;
+#[cfg(feature = "xxhash64")]
 const XXHASH64_TAG: u8 = 3;
+#[cfg(feature = "xxhash3")]
 const XXHASH3_TAG: u8 = 4;
+#[cfg(feature = "murmur3")]
 const MURMUR3_TAG: u8 = 5;
 
 impl ChecksumAlgorithm {
@@ -47,10 +66,15 @@ impl ChecksumAlgorithm {
   #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => CRC32_TAG,
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => XXHASH32_TAG,
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => XXHASH64_TAG,
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => XXHASH3_TAG,
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => MURMUR3_TAG,
       Self::Unknown(v) => *v,
     }
@@ -62,10 +86,15 @@ impl ChecksumAlgorithm {
   #[inline(always)]
   pub const fn from_tag(tag: u8) -> Self {
     match tag {
+      #[cfg(feature = "crc32")]
       CRC32_TAG => Self::Crc32,
+      #[cfg(feature = "xxhash32")]
       XXHASH32_TAG => Self::XxHash32,
+      #[cfg(feature = "xxhash64")]
       XXHASH64_TAG => Self::XxHash64,
+      #[cfg(feature = "xxhash3")]
       XXHASH3_TAG => Self::XxHash3,
+      #[cfg(feature = "murmur3")]
       MURMUR3_TAG => Self::Murmur3,
       other => Self::Unknown(other),
     }
@@ -77,10 +106,15 @@ impl ChecksumAlgorithm {
   #[inline(always)]
   pub const fn digest_size(&self) -> usize {
     match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => 4,
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => 4,
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => 8,
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => 8,
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => 4,
       Self::Unknown(_) => 0,
     }
@@ -138,7 +172,7 @@ impl Default for ChecksumAlgorithm {
       feature = "murmur3"
     )))]
     {
-      Self::Unknown(CRC32_TAG)
+      Self::Unknown(0)
     }
   }
 }
@@ -209,10 +243,15 @@ pub enum ChecksumError {
 impl core::fmt::Display for ChecksumAlgorithm {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => f.write_str("crc32"),
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => f.write_str("xxhash32"),
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => f.write_str("xxhash64"),
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => f.write_str("xxhash3"),
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => f.write_str("murmur3"),
       Self::Unknown(v) => write!(f, "unknown({v})"),
     }
@@ -288,8 +327,6 @@ pub fn verify(
   }
 }
 
-// ── Wrapper-frame layout + options ───────────────────────────────────────────
-//
 // A checksumed payload is a tagged wrapper frame nesting just outside the
 // compression wrapper and inside the encryption wrapper:
 //
@@ -303,11 +340,6 @@ pub fn verify(
 // payload boundary from the tag alone. The digest is computed over `payload`
 // (the bytes that follow the digest), so a receiver recomputes it over the
 // remaining bytes and rejects a mismatch.
-
-#[cfg(not(feature = "std"))]
-use std::vec::Vec;
-
-use crate::framing::{FrameError, MessageTag};
 
 /// The one-byte wrapper tag that prefixes every checksumed frame
 /// ([`MessageTag::Checksumed`]).
@@ -496,11 +528,7 @@ impl ChecksumOptions {
 }
 
 /// Pack a 32-bit digest into the big-endian first four bytes of a stack digest.
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "murmur3"
-))]
+#[cfg(any(feature = "crc32", feature = "xxhash32", feature = "murmur3"))]
 #[inline(always)]
 fn pack32(v: u32) -> ChecksumDigest {
   let mut bytes = [0u8; 8];

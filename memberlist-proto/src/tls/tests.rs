@@ -128,10 +128,7 @@ fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
 /// with (here: ChaCha20-Poly1305 under an aes-gcm-only build) must
 /// surface as `Err`, NOT silently emit plaintext. Mirrors the TCP analogue
 /// in `tcp/mod.rs::stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend`.
-#[cfg(all(
-  feature = "aes-gcm",
-  not(feature = "chacha20-poly1305")
-))]
+#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
 #[test]
 fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
   use core::net::SocketAddr;

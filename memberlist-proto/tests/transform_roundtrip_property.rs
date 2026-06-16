@@ -7,11 +7,7 @@
 //! loop strips transform tags until it reaches a message tag — so the payload is
 //! a real `UserData` message carrying an arbitrary byte string.
 
-#![cfg(all(
-  feature = "lz4",
-  feature = "crc32",
-  feature = "aes-gcm",
-))]
+#![cfg(all(feature = "lz4", feature = "crc32", feature = "aes-gcm",))]
 
 use core::net::SocketAddr;
 

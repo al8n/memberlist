@@ -178,11 +178,48 @@ pub(crate) mod wire;
 
 // ── Wire types, codec, and framing ──────────────────────────────────────────
 pub mod bridge;
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
 pub mod checksum;
 pub mod codec;
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
 pub mod compression;
 pub mod convert;
 pub mod data;
+#[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20poly1305")))
+)]
 pub mod encryption;
 pub mod framing;
 pub mod id;
@@ -223,6 +260,23 @@ pub use time::Instant;
 
 pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use cheap_clone::CheapClone;
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
 pub use checksum::{
   CHECKSUMED_WRAPPER_OVERHEAD, ChecksumAlgorithm, ChecksumDigest, ChecksumError, ChecksumOptions,
   ChecksumOutcome, decode_checksummed_frame, digest, encode_checksummed_frame, verify,
@@ -231,6 +285,21 @@ pub use codec::{
   CodecError, DecodeOptions, EncodeOptions, TrailingData, TruncatedInput, decode_incoming,
   encode_outgoing, encode_outgoing_compound, parse_message, parse_messages,
 };
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
 pub use compression::{
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
   UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,
@@ -251,6 +320,11 @@ pub use data::{
   Data, DataRef, DuplicateFieldInfo, EncodeError, InsufficientBufferCapacity, MissingFieldInfo,
   UnknownTagInfo, UnknownWireTypeInfo,
 };
+#[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20poly1305")))
+)]
 pub use encryption::{
   ENCRYPTED_TAG, ENCRYPTED_WRAPPER_OVERHEAD, EncryptAlgorithm, EncryptionError, EncryptionOptions,
   Keyring, KeyringError, OversizeCiphertext, SecretKey, decode_encrypted_frame, decrypt,

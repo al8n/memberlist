@@ -41,7 +41,7 @@ getifs = ["dep:getifs", "dep:iprfc"]
 memberlist-proto = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
 hostaddr = { workspace = true, features = ["std", "smol_str"] }
-smol_str = { workspace = true }
+smol_str.workspace = true
 # Both backends select compio-driver's "fusion" driver on Linux: io_uring
 # preferred, with a transparent polling (epoll) fallback when io_uring is
 # unavailable. io_uring is the driver's native backend — its anti-starvation
@@ -58,15 +58,15 @@ compio = { workspace = true, features = [
   "io-uring",
   "polling",
 ] }
-arc-swap = { workspace = true }
+arc-swap.workspace = true
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
-futures-channel = { workspace = true }
+futures-channel.workspace = true
 futures-util = { workspace = true, default-features = false, features = [
   "std",
   "async-await-macro",
 ] }
-thiserror = { workspace = true }
+thiserror.workspace = true
 tracing = { workspace = true, optional = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = [
   "std",
@@ -81,7 +81,7 @@ rcgen = "0.14"
 ring = "0.17"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = "1"
-smol_str = { workspace = true }
+smol_str.workspace = true
 quinn-proto = { version = "0.11", features = ["rustls-ring"] }
 
 [[test]]

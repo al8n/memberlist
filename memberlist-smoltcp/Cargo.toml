@@ -72,14 +72,14 @@ smoltcp = { version = "0.13", default-features = false, features = [
   "socket-udp",
   "socket-tcp",
 ] }
-getrandom = { workspace = true }
-bytes = { workspace = true }
+getrandom.workspace = true
+bytes.workspace = true
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
 
 [dev-dependencies]
-smol_str = { workspace = true }
+smol_str.workspace = true
 # Enable the lz4 + AES-GCM backends for the transform round-trip tests
 # (`tests/transform.rs`). Declared on the dev build only so the library's own
 # build stays backend-free and the no_std/bare-metal compile checks exercise the

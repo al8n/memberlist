@@ -28,21 +28,26 @@
 //! yields no gain). The framing tag-driven unwrap loop strips `Encrypted`
 //! first, then `Compressed` (if present), then decodes the inner frame.
 
-#[cfg(not(feature = "std"))]
 use std::vec::Vec;
+
+use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 /// Identifies the AEAD backend an encrypted frame was produced with. Each
 /// backend is opt-in behind its own feature; a node that decodes a tag it was
 /// not built with yields [`EncryptAlgorithm::Unknown`] and fails the decode
 /// cleanly rather than panicking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
 pub enum EncryptAlgorithm {
   /// AES-GCM (96-bit nonce, 128-bit auth tag). The `SecretKey` variant
   /// (`Aes128` / `Aes192` / `Aes256`) picks the AES key length. Feature
   /// `aes-gcm`, backed by the `aes-gcm` crate.
+  #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   AesGcm,
   /// ChaCha20-Poly1305 (96-bit nonce, 128-bit auth tag, 256-bit key).
   /// Feature `chacha20-poly1305`, backed by the `chacha20poly1305` crate.
+  #[cfg(feature = "chacha20-poly1305")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "chacha20-poly1305")))]
   ChaCha20Poly1305,
   /// An algorithm tag the local node was not built with.
   Unknown(u8),
@@ -50,7 +55,9 @@ pub enum EncryptAlgorithm {
 
 /// Algorithm wire tags. Stable across builds — a node built with one backend
 /// must agree with a peer built with another on the tag numbering.
+#[cfg(feature = "aes-gcm")]
 const AES_GCM_TAG: u8 = 1;
+#[cfg(feature = "chacha20-poly1305")]
 const CHACHA20_POLY1305_TAG: u8 = 2;
 
 impl EncryptAlgorithm {
@@ -58,7 +65,9 @@ impl EncryptAlgorithm {
   #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
+      #[cfg(feature = "aes-gcm")]
       Self::AesGcm => AES_GCM_TAG,
+      #[cfg(feature = "chacha20-poly1305")]
       Self::ChaCha20Poly1305 => CHACHA20_POLY1305_TAG,
       Self::Unknown(v) => *v,
     }
@@ -70,7 +79,9 @@ impl EncryptAlgorithm {
   #[inline(always)]
   pub const fn from_tag(tag: u8) -> Self {
     match tag {
+      #[cfg(feature = "aes-gcm")]
       AES_GCM_TAG => Self::AesGcm,
+      #[cfg(feature = "chacha20-poly1305")]
       CHACHA20_POLY1305_TAG => Self::ChaCha20Poly1305,
       other => Self::Unknown(other),
     }
@@ -102,24 +113,39 @@ impl From<u8> for EncryptAlgorithm {
 /// any container that recursively derives `Debug`, like [`Keyring`] or
 /// [`EncryptionOptions`]) renders `SecretKey::<variant>(<redacted>)` instead
 /// of disclosing the raw key bytes.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, IsVariant, TryUnwrap, Unwrap)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
+#[non_exhaustive]
 pub enum SecretKey {
   /// AES-128-GCM (128-bit key).
+  #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   Aes128([u8; 16]),
   /// AES-192-GCM (192-bit key).
+  #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   Aes192([u8; 24]),
   /// AES-256-GCM (256-bit key).
+  #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   Aes256([u8; 32]),
   /// ChaCha20-Poly1305 (256-bit key).
+  #[cfg(feature = "chacha20-poly1305")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "chacha20-poly1305")))]
   ChaCha20Poly1305([u8; 32]),
 }
 
 impl core::fmt::Debug for SecretKey {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
+      #[cfg(feature = "aes-gcm")]
       Self::Aes128(_) => write!(f, "SecretKey::Aes128(<redacted>)"),
+      #[cfg(feature = "aes-gcm")]
       Self::Aes192(_) => write!(f, "SecretKey::Aes192(<redacted>)"),
+      #[cfg(feature = "aes-gcm")]
       Self::Aes256(_) => write!(f, "SecretKey::Aes256(<redacted>)"),
+      #[cfg(feature = "chacha20-poly1305")]
       Self::ChaCha20Poly1305(_) => write!(f, "SecretKey::ChaCha20Poly1305(<redacted>)"),
     }
   }
@@ -130,7 +156,9 @@ impl SecretKey {
   #[inline(always)]
   pub const fn algorithm(&self) -> EncryptAlgorithm {
     match self {
+      #[cfg(feature = "aes-gcm")]
       Self::Aes128(_) | Self::Aes192(_) | Self::Aes256(_) => EncryptAlgorithm::AesGcm,
+      #[cfg(feature = "chacha20-poly1305")]
       Self::ChaCha20Poly1305(_) => EncryptAlgorithm::ChaCha20Poly1305,
     }
   }
@@ -139,9 +167,13 @@ impl SecretKey {
   #[inline(always)]
   pub fn as_bytes(&self) -> &[u8] {
     match self {
+      #[cfg(feature = "aes-gcm")]
       Self::Aes128(k) => k.as_slice(),
+      #[cfg(feature = "aes-gcm")]
       Self::Aes192(k) => k.as_slice(),
+      #[cfg(feature = "aes-gcm")]
       Self::Aes256(k) => k.as_slice(),
+      #[cfg(feature = "chacha20-poly1305")]
       Self::ChaCha20Poly1305(k) => k.as_slice(),
     }
   }
@@ -153,6 +185,7 @@ impl SecretKey {
   /// fail at runtime (e.g. an embedded getrandom backend), build the key from
   /// explicit bytes via [`SecretKey::Aes128`] instead.
   #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   pub fn random_aes128() -> Self {
     let mut k = [0u8; 16];
     getrandom::fill(&mut k).expect("system entropy source unavailable");
@@ -166,6 +199,7 @@ impl SecretKey {
   /// fail at runtime (e.g. an embedded getrandom backend), build the key from
   /// explicit bytes via [`SecretKey::Aes192`] instead.
   #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   pub fn random_aes192() -> Self {
     let mut k = [0u8; 24];
     getrandom::fill(&mut k).expect("system entropy source unavailable");
@@ -179,6 +213,7 @@ impl SecretKey {
   /// fail at runtime (e.g. an embedded getrandom backend), build the key from
   /// explicit bytes via [`SecretKey::Aes256`] instead.
   #[cfg(feature = "aes-gcm")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "aes-gcm")))]
   pub fn random_aes256() -> Self {
     let mut k = [0u8; 32];
     getrandom::fill(&mut k).expect("system entropy source unavailable");
@@ -192,6 +227,7 @@ impl SecretKey {
   /// fail at runtime (e.g. an embedded getrandom backend), build the key from
   /// explicit bytes via [`SecretKey::ChaCha20Poly1305`] instead.
   #[cfg(feature = "chacha20-poly1305")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "chacha20-poly1305")))]
   pub fn random_chacha20poly1305() -> Self {
     let mut k = [0u8; 32];
     getrandom::fill(&mut k).expect("system entropy source unavailable");
@@ -285,17 +321,16 @@ pub enum EncryptionError {
 /// This is the always-on precheck called at the top of `encrypt` and
 /// `decrypt` before the feature-gated `match algo` dispatch.
 const fn key_matches_algorithm(algo: EncryptAlgorithm, key: &SecretKey) -> bool {
-  matches!(
-    (algo, key),
-    (EncryptAlgorithm::AesGcm, SecretKey::Aes128(_))
-      | (EncryptAlgorithm::AesGcm, SecretKey::Aes192(_))
-      | (EncryptAlgorithm::AesGcm, SecretKey::Aes256(_))
-      | (
-        EncryptAlgorithm::ChaCha20Poly1305,
-        SecretKey::ChaCha20Poly1305(_)
-      )
-      | (EncryptAlgorithm::Unknown(_), _)
-  )
+  match algo {
+    #[cfg(feature = "aes-gcm")]
+    EncryptAlgorithm::AesGcm => matches!(
+      key,
+      SecretKey::Aes128(_) | SecretKey::Aes192(_) | SecretKey::Aes256(_)
+    ),
+    #[cfg(feature = "chacha20-poly1305")]
+    EncryptAlgorithm::ChaCha20Poly1305 => matches!(key, SecretKey::ChaCha20Poly1305(_)),
+    EncryptAlgorithm::Unknown(_) => true,
+  }
 }
 
 /// Encrypt `plaintext` with `algo` and `key` using `nonce` and `aad`. A pure
@@ -745,10 +780,7 @@ pub fn encode_encrypted_frame(
   key: &SecretKey,
   plaintext: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  #[cfg(any(
-    feature = "aes-gcm",
-    feature = "chacha20-poly1305"
-  ))]
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
   let nonce: [u8; NONCE_LEN] = {
     let mut n = [0u8; NONCE_LEN];
     // Recoverable on this fallible path: a failing entropy source surfaces an
@@ -756,10 +788,7 @@ pub fn encode_encrypted_frame(
     getrandom::fill(&mut n).map_err(|_| EncryptionError::Entropy)?;
     n
   };
-  #[cfg(not(any(
-    feature = "aes-gcm",
-    feature = "chacha20-poly1305"
-  )))]
+  #[cfg(not(any(feature = "aes-gcm", feature = "chacha20-poly1305")))]
   let nonce: [u8; NONCE_LEN] = {
     // No backend is built in; the encrypt call below will surface
     // UnsupportedAlgorithm before we ever look at `nonce`.

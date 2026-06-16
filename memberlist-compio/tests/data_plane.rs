@@ -568,10 +568,7 @@ async fn set_encryption_options_rejects_unsupported_algorithm() {
 /// `chacha20-poly1305`) makes AES the SUPPORTED algorithm and
 /// ChaCha20-Poly1305 the UNSUPPORTED one, so an AES primary + ChaCha secondary
 /// isolates exactly the "primary ok, secondary bad" gap.
-#[cfg(all(
-  feature = "aes-gcm",
-  not(feature = "chacha20-poly1305")
-))]
+#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
 #[compio::test]
 async fn encryption_rejected_for_unsupported_secondary_key() {
   use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};

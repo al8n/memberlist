@@ -61,8 +61,8 @@ chacha20-poly1305 = ["memberlist-proto/chacha20-poly1305"]
 memberlist-proto = { workspace = true, default-features = false, features = [
   "tcp",
 ] }
-getrandom = { workspace = true }
-bytes = { workspace = true }
+getrandom.workspace = true
+bytes.workspace = true
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
@@ -71,4 +71,4 @@ hashbrown = { version = "0.17", default-features = false, features = [
 heapless = { version = "0.9", default-features = false }
 
 [dev-dependencies]
-smol_str = { workspace = true }
+smol_str.workspace = true

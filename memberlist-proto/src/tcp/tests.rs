@@ -2048,10 +2048,7 @@ fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
   );
 }
 
-#[cfg(all(
-  feature = "aes-gcm",
-  not(feature = "chacha20-poly1305")
-))]
+#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
 #[test]
 fn stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
   // A keyring whose primary requires a backend the binary was not built
