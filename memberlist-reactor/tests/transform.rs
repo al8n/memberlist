@@ -117,7 +117,7 @@ async fn gossip_label_isolates_clusters() {
   let _ = alpha2.shutdown().await;
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 mod compression {
   use super::*;
   use memberlist_proto::CompressAlgorithm;
@@ -172,7 +172,7 @@ mod compression {
   }
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 mod checksum {
   use super::*;
   use memberlist_reactor::{ChecksumAlgorithm, ChecksumOptions};
@@ -227,13 +227,13 @@ mod checksum {
   /// builder accepts the algorithm, but every later `checksum_gossip` would fail
   /// and the driver would drop the datagram — silently disabling ALL gossip.
   /// Mirrors the encryption `valid_keyring_constructs` guard; runs only when
-  /// `checksum-murmur3` is absent so the Murmur3 backend is genuinely missing.
-  #[cfg(not(feature = "checksum-murmur3"))]
+  /// `murmur3` is absent so the Murmur3 backend is genuinely missing.
+  #[cfg(not(feature = "murmur3"))]
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn construction_rejects_unsupported_checksum_algorithm() {
     use memberlist_reactor::Error;
 
-    // Murmur3 is absent in this build (the harness enables only checksum-crc32).
+    // Murmur3 is absent in this build (the harness enables only crc32).
     // The selection is accepted by `with_checksum`, but the trial `apply` probe
     // inside validate_checksum returns `ChecksumError::Disabled`.
     let bad = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
@@ -254,7 +254,7 @@ mod checksum {
   }
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 mod encryption {
   use super::*;
   use memberlist_reactor::{EncryptionOptions, Keyring, SecretKey};
@@ -433,12 +433,12 @@ mod encryption {
   /// Construction with an invalid keyring (algorithm not compiled in) is
   /// rejected at construction time rather than silently discarding datagrams.
   ///
-  /// This test requires the `encryption-chacha20-poly1305` feature to NOT be
+  /// This test requires the `chacha20-poly1305` feature to NOT be
   /// built, so that tag 2 is `Unknown`. We emulate that by directly verifying
   /// the `Error::Encryption` path fires when validate_encryption rejects the key.
   ///
   /// For now: verify that an AES-256 key on a node built with
-  /// `encryption-aes-gcm` constructs cleanly (the positive-control check).
+  /// `aes-gcm` constructs cleanly (the positive-control check).
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn valid_keyring_constructs() {
     let key = SecretKey::Aes256([0x11u8; 32]);

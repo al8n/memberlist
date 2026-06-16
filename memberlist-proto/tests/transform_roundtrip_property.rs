@@ -8,9 +8,9 @@
 //! a real `UserData` message carrying an arbitrary byte string.
 
 #![cfg(all(
-  feature = "compression-lz4",
-  feature = "checksum-crc32",
-  feature = "encryption-aes-gcm",
+  feature = "lz4",
+  feature = "crc32",
+  feature = "aes-gcm",
 ))]
 
 use core::net::SocketAddr;

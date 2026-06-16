@@ -114,13 +114,13 @@ extern crate alloc as std;
 #[cfg(feature = "std")]
 extern crate std;
 
-// The protocol state is intrinsically heap-backed (Vec/Box/String/maps), so a
-// build with neither capability tier is unsupported. Fail with a clear message
-// instead of a cascade of "cannot find type `Vec`" errors.
-#[cfg(not(any(feature = "std", feature = "alloc")))]
-compile_error!(
-  "memberlist-proto requires the `std` or `alloc` feature (the protocol state needs a heap allocator)"
-);
+// // The protocol state is intrinsically heap-backed (Vec/Box/String/maps), so a
+// // build with neither capability tier is unsupported. Fail with a clear message
+// // instead of a cascade of "cannot find type `Vec`" errors.
+// #[cfg(not(any(feature = "std", feature = "alloc")))]
+// compile_error!(
+//   "memberlist-proto requires the `std` or `alloc` feature (the protocol state needs a heap allocator)"
+// );
 
 #[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 mod bridge_phase;
@@ -128,16 +128,19 @@ mod bridge_phase;
 #[cfg(feature = "quic")]
 mod quic;
 #[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use quic::{DatagramSendOutcome, QuicEndpoint, QuicOptions, UnreliableTransport};
 
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use tls::{TlsOptions, TlsRecords};
 
 #[cfg(feature = "tcp")]
 mod tcp;
 #[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 pub use tcp::RawRecords;
 
 // The cluster-label record-layer decorator and its options bundle are shared
@@ -146,15 +149,18 @@ pub use tcp::RawRecords;
 // transport is built. `LabelOptionsError` rides alongside for the fallible
 // label-validating constructors.
 #[cfg(any(feature = "tls", feature = "tcp"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "tls", feature = "tcp"))))]
 pub use streams::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 
 #[cfg(any(feature = "tls", feature = "tcp"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "tls", feature = "tcp"))))]
 pub mod streams;
 
 pub mod ack;
 pub mod awareness;
 pub mod broadcast;
 #[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub mod cidr;
 pub mod config;
 pub mod delegate;
@@ -190,6 +196,7 @@ pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
 pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
 #[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use cidr::{CidrAnd, CidrPolicy};
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
@@ -206,6 +213,7 @@ pub use event::{
   UserPacket,
 };
 #[cfg(feature = "cidr")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use ipnet::{AddrParseError, IpNet};
 pub use members::{LocalNodeState, Member, Members};
 pub use rand::{Rng, SeedableRng, rngs::SmallRng};

@@ -37,7 +37,7 @@ fn unrecognized_tag_is_unknown() {
   assert_eq!(CompressAlgorithm::Unknown(200).tag(), 200);
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn lz4_roundtrip() {
   let input = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -46,7 +46,7 @@ fn lz4_roundtrip() {
   assert_eq!(back, input);
 }
 
-#[cfg(feature = "compression-snappy")]
+#[cfg(feature = "snappy")]
 #[test]
 fn snappy_roundtrip() {
   let input = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -56,7 +56,7 @@ fn snappy_roundtrip() {
   assert_eq!(back, input);
 }
 
-#[cfg(feature = "compression-zstd")]
+#[cfg(feature = "zstd")]
 #[test]
 fn zstd_roundtrip() {
   let input = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -65,7 +65,7 @@ fn zstd_roundtrip() {
   assert_eq!(back, input);
 }
 
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 #[test]
 fn brotli_roundtrip() {
   let input = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -95,7 +95,7 @@ fn below_threshold_payload_is_left_plain() {
   assert!(matches!(outcome, Ok(CompressionOutcome::Plain)));
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn incompressible_above_threshold_payload_is_left_plain() {
   // Hard-to-shrink bytes: even above threshold the fallback keeps them plain
@@ -116,7 +116,7 @@ fn incompressible_above_threshold_payload_is_left_plain() {
   }
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compressible_above_threshold_payload_is_compressed() {
   let input = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec();
@@ -132,7 +132,7 @@ fn compressible_above_threshold_payload_is_compressed() {
   }
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compressed_frame_has_tag_algo_origlen_header() {
   let input = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec();
@@ -144,7 +144,7 @@ fn compressed_frame_has_tag_algo_origlen_header() {
   assert!(frame.len() > packed.len());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compressed_frame_roundtrips_through_decode() {
   let input = b"the quick brown fox".repeat(16);
@@ -170,7 +170,7 @@ fn oversize_orig_len_is_rejected_before_allocation() {
   ));
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn lying_small_orig_len_rejects_without_allocating_from_body() {
   // A frame whose wrapper `orig_len` is far SMALLER than the body's true
@@ -210,7 +210,7 @@ fn compression_options_default_is_disabled() {
   assert!(matches!(outcome, CompressionOutcome::Plain));
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compression_options_builders_select_algorithm_and_threshold() {
   let opts = CompressionOptions::new()
@@ -276,7 +276,7 @@ fn reliable_unit_len_over_ceiling_is_rejected_before_waiting() {
   assert!(take_reliable_unit(&buf, 1024).is_err());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn reliable_unit_compressed_roundtrips() {
   let opts = CompressionOptions::new()
@@ -293,7 +293,7 @@ fn reliable_unit_compressed_roundtrips() {
   assert_eq!(consumed, unit.len());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn lz4_trailing_junk_in_body_is_rejected() {
   // A compressed body shaped `[valid lz4 block][trailing junk]` is not one
@@ -309,7 +309,7 @@ fn lz4_trailing_junk_in_body_is_rejected() {
   ));
 }
 
-#[cfg(feature = "compression-snappy")]
+#[cfg(feature = "snappy")]
 #[test]
 fn snappy_trailing_junk_in_body_is_rejected() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -322,7 +322,7 @@ fn snappy_trailing_junk_in_body_is_rejected() {
   ));
 }
 
-#[cfg(feature = "compression-zstd")]
+#[cfg(feature = "zstd")]
 #[test]
 fn zstd_trailing_junk_in_body_is_rejected() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -335,7 +335,7 @@ fn zstd_trailing_junk_in_body_is_rejected() {
   ));
 }
 
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 #[test]
 fn brotli_trailing_junk_in_body_is_rejected() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(8);
@@ -348,7 +348,7 @@ fn brotli_trailing_junk_in_body_is_rejected() {
   ));
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn reliable_unit_corrupt_inner_wrapper_is_rejected() {
   let opts = CompressionOptions::new()
@@ -395,7 +395,7 @@ fn reliable_unit_encryption_disabled_compression_disabled_is_unchanged() {
   assert_eq!(legacy, new, "disabled-encryption path is byte-identical");
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn reliable_unit_encrypted_then_compressed_roundtrip() {
   use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
@@ -412,8 +412,8 @@ fn reliable_unit_encrypted_then_compressed_roundtrip() {
 }
 
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  not(feature = "encryption-chacha20-poly1305")
+  feature = "aes-gcm",
+  not(feature = "chacha20-poly1305")
 ))]
 #[test]
 fn encode_reliable_unit_with_encryption_returns_err_on_unsupported_backend() {
@@ -434,7 +434,7 @@ fn encode_reliable_unit_with_encryption_returns_err_on_unsupported_backend() {
   );
 }
 
-#[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "lz4", feature = "aes-gcm"))]
 #[test]
 fn reliable_unit_compressed_then_encrypted_byte_order_is_outer_encrypted() {
   use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
@@ -458,7 +458,7 @@ fn reliable_unit_compressed_then_encrypted_byte_order_is_outer_encrypted() {
   assert_eq!(back, framed);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_reliable_unit_at_max_orig_len_roundtrips() {
   // Reliable-path bomb-guard slack. A plaintext at exactly `max_orig_len`
@@ -489,7 +489,7 @@ fn encrypted_reliable_unit_at_max_orig_len_roundtrips() {
   }
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_reliable_unit_one_byte_past_envelope_max_is_rejected() {
   // Symmetric guard: a `unit_len` exceeding `max_orig_len +
@@ -638,7 +638,7 @@ fn take_reliable_unit_with_encryption_rejects_corrupt_leading_varint() {
   assert!(take_reliable_unit_with_encryption(&buf, &EncryptionOptions::new(), 1 << 20).is_err());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn lz4_decompress_rejects_orig_len_larger_than_actual() {
   // A valid LZ4 block decoded against an `orig_len` larger than the true
@@ -651,7 +651,7 @@ fn lz4_decompress_rejects_orig_len_larger_than_actual() {
   assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
 }
 
-#[cfg(feature = "compression-snappy")]
+#[cfg(feature = "snappy")]
 #[test]
 fn snappy_decompress_rejects_orig_len_mismatch() {
   // Snappy embeds its own length, so an `orig_len` that disagrees with the
@@ -663,7 +663,7 @@ fn snappy_decompress_rejects_orig_len_mismatch() {
   assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
 }
 
-#[cfg(feature = "compression-zstd")]
+#[cfg(feature = "zstd")]
 #[test]
 fn zstd_decompress_rejects_orig_len_larger_than_actual() {
   // zstd's bulk decompressor allocates exactly `orig_len`; an oversized
@@ -675,7 +675,7 @@ fn zstd_decompress_rejects_orig_len_larger_than_actual() {
   assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
 }
 
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 #[test]
 fn brotli_decompress_rejects_orig_len_larger_than_actual() {
   // The brotli stream EOFs at its true length; an oversized `orig_len`
@@ -687,7 +687,7 @@ fn brotli_decompress_rejects_orig_len_larger_than_actual() {
   assert!(matches!(err, CompressionError::Backend(_)), "got {err:?}");
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn encode_reliable_unit_falls_back_to_plain_when_wrapper_would_inflate() {
   // An input that compresses by fewer bytes than the `[Compressed]` wrapper
@@ -731,7 +731,7 @@ fn encode_reliable_unit_falls_back_to_plain_when_wrapper_would_inflate() {
   assert_eq!(consumed, unit.len());
 }
 
-#[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "lz4", feature = "aes-gcm"))]
 #[test]
 fn encode_reliable_unit_with_encryption_falls_back_to_plain_compression() {
   // Same don't-expand fallback on the encryption-aware path: compression

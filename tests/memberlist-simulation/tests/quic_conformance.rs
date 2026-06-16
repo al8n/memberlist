@@ -2878,7 +2878,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 //    reliable-wire wrapper-skip test below pins that no `[Encrypted[..]]`
 //    wrapper appears on the reliable path.
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_quic_reaches_alive_both_sides() {
   use memberlist_proto::SecretKey;
@@ -2901,7 +2901,7 @@ fn encrypted_two_node_join_over_quic_reaches_alive_both_sides() {
   );
 }
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_join_over_quic_matches_unencrypted_membership_outcome() {
   use memberlist_proto::SecretKey;
@@ -2933,7 +2933,7 @@ fn encrypted_join_over_quic_matches_unencrypted_membership_outcome() {
   );
 }
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_quic_reliable_wire_carries_no_encrypted_wrapper() {
   // The QUIC reliable wire bytes (the quinn UDP datagrams the harness routes
@@ -2969,7 +2969,7 @@ fn encrypted_quic_reliable_wire_carries_no_encrypted_wrapper() {
 
 // ── Compound stack: compression + encryption together must not disturb SWIM.
 
-#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[cfg(all(feature = "__sim-aes-gcm", feature = "lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_quic_matches_unencrypted_uncompressed_membership_outcome() {
   use memberlist_proto::{CompressAlgorithm, SecretKey};

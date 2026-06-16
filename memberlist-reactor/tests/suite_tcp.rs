@@ -386,9 +386,9 @@ fn tcp_user_data_smol() {
 /// activate only when CI also enables the transform backends. TCP under tokio is
 /// representative — the transform stack sits above the transport and runtime.
 #[cfg(all(
-  feature = "compression-lz4",
-  feature = "checksum-crc32",
-  feature = "encryption-aes-gcm"
+  feature = "lz4",
+  feature = "crc32",
+  feature = "aes-gcm"
 ))]
 mod transform_matrix {
   use memberlist_proto::{ChecksumAlgorithm, CompressAlgorithm, SecretKey};

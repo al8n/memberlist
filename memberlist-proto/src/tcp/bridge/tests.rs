@@ -716,7 +716,7 @@ fn truncation_read_zero_mid_frame_fails_peer_closed() {
   assert!(!server.is_handshaking());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn stream_reliable_unit_accumulation_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit};
@@ -735,7 +735,7 @@ fn stream_reliable_unit_accumulation_roundtrips() {
   assert!(accum.is_empty(), "the whole unit was consumed");
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn stream_reliable_unit_split_across_two_reads_buffers_then_completes() {
   // REGRESSION TEST for the split-wrapper bug: a byte stream does not
@@ -787,7 +787,7 @@ fn stream_reliable_unit_disabled_is_byte_identical() {
   assert_eq!(consumed, unit.len());
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn stream_reliable_unit_encrypted_roundtrip() {
   use crate::{
@@ -804,7 +804,7 @@ fn stream_reliable_unit_encrypted_roundtrip() {
   assert_eq!(back, framed);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn stream_bridge_reliable_skips_encryption_when_is_secure() {
   // RawRecords is plain TCP — it never claims confidentiality, so the
@@ -815,7 +815,7 @@ fn stream_bridge_reliable_skips_encryption_when_is_secure() {
   assert!(!RawRecords::is_secure(), "RawRecords is plain TCP");
 }
 
-#[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "lz4", feature = "aes-gcm"))]
 #[test]
 fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
   use crate::{

@@ -30,12 +30,12 @@ impl GossipIo for NoGossip {
 /// the actual on-wire bytes (e.g. the transform wrapper tag). Only the checksum
 /// wire-shape and CIDR datagram-suppression tests consume it, so it shares their
 /// feature gates.
-#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
+#[cfg(any(feature = "crc32", feature = "cidr"))]
 struct CaptureGossip {
   sent: std::vec::Vec<std::vec::Vec<u8>>,
 }
 
-#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
+#[cfg(any(feature = "crc32", feature = "cidr"))]
 impl CaptureGossip {
   fn new() -> Self {
     Self {
@@ -44,7 +44,7 @@ impl CaptureGossip {
   }
 }
 
-#[cfg(any(feature = "checksum-crc32", feature = "cidr"))]
+#[cfg(any(feature = "crc32", feature = "cidr"))]
 impl GossipIo for CaptureGossip {
   fn recv(&mut self, _buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
     None
@@ -59,7 +59,7 @@ impl GossipIo for CaptureGossip {
 /// budget of pumps elapses), returning the captured datagrams. A peer is
 /// injected first so gossip has a destination. Only the checksum wire-shape
 /// tests consume it, so it shares their feature gate.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 fn capture_gossip(transform: TransformOptions) -> std::vec::Vec<std::vec::Vec<u8>> {
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let cfg = Options::new()
@@ -590,7 +590,7 @@ fn admission_delegate_install_after_leave_is_inert() {
 /// label configured, the checksum wrapper is the OUTERMOST frame, so an
 /// outbound gossip datagram begins with this tag exactly when checksum is
 /// applied on the send path.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 const CHECKSUMED_TAG: u8 = 15;
 
 /// With checksum enabled, every outbound gossip datagram carries the
@@ -598,7 +598,7 @@ const CHECKSUMED_TAG: u8 = 15;
 /// `checksum_gossip` (a wire-shape assertion, not mere convergence: an
 /// unwrapped datagram would still be accepted by a peer, so convergence alone
 /// cannot detect a send path that skips the checksum wrap).
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn enabled_checksum_stamps_the_checksumed_tag_on_outbound_gossip() {
   use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
@@ -625,7 +625,7 @@ fn enabled_checksum_stamps_the_checksumed_tag_on_outbound_gossip() {
 /// With checksum disabled (the default), no outbound gossip datagram carries
 /// the `Checksumed` wrapper tag — confirming the wrap is opt-in and the
 /// positive test above is discriminating rather than vacuous.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn disabled_checksum_leaves_no_checksumed_tag_on_outbound_gossip() {
   let sent = capture_gossip(TransformOptions::default());
@@ -655,16 +655,16 @@ fn set_encryption_options_disabled_is_always_ok() {
 /// compiled into this build, leaving the prior policy intact so the engine
 /// continues to pump without disruption.
 ///
-/// This test runs only when `encryption-aes-gcm` is absent; with the backend
+/// This test runs only when `aes-gcm` is absent; with the backend
 /// present the AES-256 key is valid and the test is logically inverted (the
 /// round-trip smoke test below covers that path).
-#[cfg(not(feature = "encryption-aes-gcm"))]
+#[cfg(not(feature = "aes-gcm"))]
 #[test]
 fn set_encryption_options_rejects_unsupported_keyring_and_engine_still_pumps() {
   let mut engine = make_engine();
   let now = Instant::from_origin(Duration::from_secs(86_400));
 
-  // AES-256 key whose algorithm backend (`encryption-aes-gcm`) is absent in
+  // AES-256 key whose algorithm backend (`aes-gcm`) is absent in
   // this build; the probe inside `set_encryption_options` must reject it.
   let bad_key = SecretKey::Aes256([0x5a; 32]);
   let bad_opts = EncryptionOptions::new().with_keyring(Keyring::new(bad_key));
@@ -694,9 +694,9 @@ fn set_encryption_options_rejects_unsupported_keyring_and_engine_still_pumps() {
 }
 
 /// `set_encryption_options` with a valid AES-256 keyring succeeds when the
-/// `encryption-aes-gcm` backend is compiled in, and the engine pumps normally
+/// `aes-gcm` backend is compiled in, and the engine pumps normally
 /// afterward.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() {
   let mut engine = make_engine();
@@ -706,7 +706,7 @@ fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() 
   let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
   engine
     .set_encryption_options(opts)
-    .expect("valid AES-256 keyring must be accepted when encryption-aes-gcm is compiled in");
+    .expect("valid AES-256 keyring must be accepted when aes-gcm is compiled in");
 
   engine.start(now);
   let mut gossip = NoGossip;
@@ -750,9 +750,9 @@ fn validate_runtime_config_for_encryption_is_deterministic() {
   // keyring is usable; without it the probe rejects with the specific
   // `UnsupportedAlgorithm` — deterministically, never an entropy error.
   let result = validate_runtime_config(&cfg, &transform, gossip_mtu);
-  #[cfg(feature = "encryption-aes-gcm")]
-  result.expect("a valid AES-256 keyring validates when the encryption-aes-gcm backend is present");
-  #[cfg(not(feature = "encryption-aes-gcm"))]
+  #[cfg(feature = "aes-gcm")]
+  result.expect("a valid AES-256 keyring validates when the aes-gcm backend is present");
+  #[cfg(not(feature = "aes-gcm"))]
   assert!(
     matches!(
       result,
@@ -770,9 +770,9 @@ fn validate_runtime_config_for_encryption_is_deterministic() {
 /// would fail and the driver would drop the datagram — silently disabling ALL
 /// gossip. This is the construction-time analogue of the encryption keyring
 /// rejection (the embedded engine has no runtime checksum setter); it runs only
-/// when `checksum-murmur3` is absent so the Murmur3 backend is genuinely
+/// when `murmur3` is absent so the Murmur3 backend is genuinely
 /// missing.
-#[cfg(not(feature = "checksum-murmur3"))]
+#[cfg(not(feature = "murmur3"))]
 #[test]
 fn try_new_at_rejects_unsupported_checksum_algorithm() {
   use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};

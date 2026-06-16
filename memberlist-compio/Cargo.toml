@@ -21,17 +21,17 @@ tls-rustls-aws-lc-rs = ["memberlist-proto/tls-rustls-aws-lc-rs"]
 quic = ["memberlist-proto/quic"]
 quic-rustls-ring = ["quic", "memberlist-proto/quic-rustls-ring"]
 quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs"]
-compression-lz4 = ["memberlist-proto/compression-lz4"]
-compression-snappy = ["memberlist-proto/compression-snappy"]
-compression-zstd = ["memberlist-proto/compression-zstd"]
-compression-brotli = ["memberlist-proto/compression-brotli"]
-checksum-crc32 = ["memberlist-proto/checksum-crc32"]
-checksum-xxhash32 = ["memberlist-proto/checksum-xxhash32"]
-checksum-xxhash64 = ["memberlist-proto/checksum-xxhash64"]
-checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3"]
-checksum-murmur3 = ["memberlist-proto/checksum-murmur3"]
-encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+lz4 = ["memberlist-proto/lz4"]
+snappy = ["memberlist-proto/snappy"]
+zstd = ["memberlist-proto/zstd"]
+brotli = ["memberlist-proto/brotli"]
+crc32 = ["memberlist-proto/crc32"]
+xxhash32 = ["memberlist-proto/xxhash32"]
+xxhash64 = ["memberlist-proto/xxhash64"]
+xxhash3 = ["memberlist-proto/xxhash3"]
+murmur3 = ["memberlist-proto/murmur3"]
+aes-gcm = ["memberlist-proto/aes-gcm"]
+chacha20-poly1305 = ["memberlist-proto/chacha20-poly1305"]
 cidr = ["memberlist-proto/cidr"]
 dns = ["dep:hickory-proto", "dep:resolv-conf"]
 # Auto-detect the advertise address from the host's own interfaces (via `getifs`).
@@ -50,15 +50,27 @@ smol_str = { workspace = true }
 # (stripping the default io-uring), so a backend feature is required or
 # compio-driver compiles its stub PAL and panics at runtime on Linux. Off-Linux,
 # `polling` (kqueue) is the only backend and `io-uring` is inert.
-compio = { workspace = true, features = ["net", "runtime", "macros", "time", "io-uring", "polling"] }
+compio = { workspace = true, features = [
+  "net",
+  "runtime",
+  "macros",
+  "time",
+  "io-uring",
+  "polling",
+] }
 arc-swap = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
 futures-channel = { workspace = true }
-futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+futures-util = { workspace = true, default-features = false, features = [
+  "std",
+  "async-await-macro",
+] }
 thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
-hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
+hickory-proto = { workspace = true, optional = true, default-features = false, features = [
+  "std",
+] }
 resolv-conf = { workspace = true, optional = true }
 getifs = { workspace = true, optional = true }
 iprfc = { workspace = true, optional = true }
@@ -122,7 +134,7 @@ required-features = ["quic-rustls-ring"]
 
 [[test]]
 name = "initial_transform"
-required-features = ["tcp", "encryption-aes-gcm"]
+required-features = ["tcp", "aes-gcm"]
 
 [[test]]
 name = "transform"

@@ -1413,7 +1413,7 @@ where
   /// [`Self::set_encryption_options`] fanned the new options out to every
   /// in-flight bridge (rather than just `self.encryption`, which would leave
   /// a peer's pre-update reliable exchange accepting plaintext on the bridge).
-  #[cfg(all(test, feature = "tcp", feature = "encryption-aes-gcm"))]
+  #[cfg(all(test, feature = "tcp", feature = "aes-gcm"))]
   pub(crate) fn bridge_encryption_enabled(&mut self, id: ExchangeId) -> Option<bool> {
     self
       .conns
@@ -1429,7 +1429,7 @@ where
   /// under the new policy.
   ///
   /// [`bridge_phase::BridgePhase::Failed`]: crate::bridge_phase::BridgePhase::Failed
-  #[cfg(all(test, feature = "tcp", feature = "encryption-aes-gcm"))]
+  #[cfg(all(test, feature = "tcp", feature = "aes-gcm"))]
   pub(crate) fn bridge_is_failed(&mut self, id: ExchangeId) -> Option<bool> {
     self.conns.get_mut(id).map(|b| b.is_failed())
   }

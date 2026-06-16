@@ -33,31 +33,33 @@ cidr = ["alloc", "memberlist-proto/cidr", "memberlist-embedded/cidr"]
 # lz4 is no_std+alloc, so it floors on `alloc`; snappy/zstd/brotli are std-only
 # (mirroring the machine, so the tier is never silently under-selected on a
 # no_std build), so they floor on `std`.
-compression-lz4 = ["alloc", "memberlist-embedded/compression-lz4"]
-compression-snappy = ["std", "memberlist-embedded/compression-snappy"]
-compression-zstd = ["std", "memberlist-embedded/compression-zstd"]
-compression-brotli = ["std", "memberlist-embedded/compression-brotli"]
+lz4 = ["alloc", "memberlist-embedded/lz4"]
+snappy = ["std", "memberlist-embedded/snappy"]
+zstd = ["std", "memberlist-embedded/zstd"]
+brotli = ["std", "memberlist-embedded/brotli"]
 
 # Gossip-plane (unreliable) checksum backends. Applied only to outbound gossip
 # datagrams; the reliable-plane bridge carries no checksum (it relies on the
 # stream transport's integrity). All backends are no_std+alloc, so each floors
-# on `alloc` (like compression-lz4) — enabling one alone is a valid build.
-checksum-crc32 = ["alloc", "memberlist-embedded/checksum-crc32"]
-checksum-xxhash32 = ["alloc", "memberlist-embedded/checksum-xxhash32"]
-checksum-xxhash64 = ["alloc", "memberlist-embedded/checksum-xxhash64"]
-checksum-xxhash3 = ["alloc", "memberlist-embedded/checksum-xxhash3"]
-checksum-murmur3 = ["alloc", "memberlist-embedded/checksum-murmur3"]
+# on `alloc` (like lz4) — enabling one alone is a valid build.
+crc32 = ["alloc", "memberlist-embedded/crc32"]
+xxhash32 = ["alloc", "memberlist-embedded/xxhash32"]
+xxhash64 = ["alloc", "memberlist-embedded/xxhash64"]
+xxhash3 = ["alloc", "memberlist-embedded/xxhash3"]
+murmur3 = ["alloc", "memberlist-embedded/murmur3"]
 
 # Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
 # matching machine backend so a `TransformOptions` carrying a `Keyring` for that
 # cipher can actually encrypt; without the backend `encrypt_gossip` returns
 # `EncryptionError::UnsupportedAlgorithm`. Both AEAD backends are no_std+alloc,
 # so each floors on `alloc` to stay a valid standalone build.
-encryption-aes-gcm = ["alloc", "memberlist-embedded/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["alloc", "memberlist-embedded/encryption-chacha20-poly1305"]
+aes-gcm = ["alloc", "memberlist-embedded/aes-gcm"]
+chacha20-poly1305 = ["alloc", "memberlist-embedded/chacha20-poly1305"]
 
 [dependencies]
-memberlist-proto = { workspace = true, default-features = false, features = ["tcp"] }
+memberlist-proto = { workspace = true, default-features = false, features = [
+  "tcp",
+] }
 memberlist-embedded = { workspace = true, default-features = false }
 embassy-net = { workspace = true, features = [
   "udp",
@@ -84,8 +86,14 @@ smol_str = { workspace = true, features = ["std"] }
 # AES-256-GCM backend for the transform end-to-end tests (encryption round-trip
 # and key-rotation). Declared on the dev build only so the library's own build
 # stays backend-free and bare-metal compile checks exercise the disabled path.
-memberlist-proto = { workspace = true, default-features = false, features = ["tcp", "encryption-aes-gcm"] }
-memberlist-embedded = { workspace = true, default-features = false, features = ["std", "encryption-aes-gcm"] }
+memberlist-proto = { workspace = true, default-features = false, features = [
+  "tcp",
+  "aes-gcm",
+] }
+memberlist-embedded = { workspace = true, default-features = false, features = [
+  "std",
+  "aes-gcm",
+] }
 
 [lints]
 workspace = true

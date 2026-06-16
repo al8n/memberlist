@@ -56,6 +56,6 @@ pub(crate) fn encryption_err(e: EncryptionError) -> Error {
 #[cfg(all(
   test,
   any(feature = "quic", feature = "tcp", feature = "tls"),
-  feature = "encryption-aes-gcm"
+  feature = "aes-gcm"
 ))]
 mod tests;

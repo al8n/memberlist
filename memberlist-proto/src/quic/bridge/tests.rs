@@ -218,7 +218,7 @@ fn bridge_module_compiles() {
   }
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn quic_reliable_unit_accumulation_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit};
@@ -236,7 +236,7 @@ fn quic_reliable_unit_accumulation_roundtrips() {
   assert!(accum.is_empty());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn quic_reliable_unit_split_across_two_chunks_buffers_then_completes() {
   // A reliable unit may arrive split across two `chunks.next` yields. The
@@ -281,7 +281,7 @@ fn quic_reliable_unit_disabled_is_byte_identical() {
   assert_eq!(consumed, unit.len());
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 fn build_test_quic_bridge_with_encryption(
   encryption: crate::EncryptionOptions,
 ) -> Bridge<SmolStr, SocketAddr> {
@@ -313,7 +313,7 @@ fn build_test_quic_bridge_with_encryption(
 /// therefore carry no `Encrypted` wrapper — quinn already provides
 /// confidentiality, and double-encrypting on the reliable path costs CPU
 /// and bandwidth without adding security.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn quic_bridge_reliable_skips_encryption_unconditionally() {
   use crate::{EncryptionOptions, Keyring, SecretKey};

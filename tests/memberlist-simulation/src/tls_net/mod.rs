@@ -264,7 +264,7 @@ pub struct TlsCluster {
   /// skips reliable-path encryption when `R::is_secure() == true`). Only
   /// compiled under the encryption-conformance feature — the standard suite
   /// stays byte-unchanged.
-  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  #[cfg(feature = "__sim-aes-gcm")]
   observed_reliable_wire_bytes: Vec<Vec<u8>>,
 }
 
@@ -291,7 +291,7 @@ impl TlsCluster {
       mtls_responder: None,
       compression: memberlist_proto::CompressionOptions::new(),
       encryption: memberlist_proto::EncryptionOptions::new(),
-      #[cfg(feature = "__sim-encryption-aes-gcm")]
+      #[cfg(feature = "__sim-aes-gcm")]
       observed_reliable_wire_bytes: Vec::new(),
     }
   }
@@ -844,8 +844,8 @@ impl TlsCluster {
   /// [`memberlist_proto::ENCRYPTED_TAG`] — the TLS bridge skips reliable-path
   /// encryption (`TlsRecords::is_secure() == true`), so the wire never carries
   /// an `[Encrypted[..]]` wrapper. Only compiled under the
-  /// `__sim-encryption-aes-gcm` feature.
-  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  /// `__sim-aes-gcm` feature.
+  #[cfg(feature = "__sim-aes-gcm")]
   pub fn observed_reliable_wire_bytes(&self) -> &[Vec<u8>] {
     &self.observed_reliable_wire_bytes
   }
@@ -1249,7 +1249,7 @@ impl TlsCluster {
     // byte), never `ENCRYPTED_TAG` — the bridge's `R::is_secure() == true`
     // selector forces reliable-path encryption off, so the plaintext units
     // the bridge writes never carry an `Encrypted` wrapper either.
-    #[cfg(feature = "__sim-encryption-aes-gcm")]
+    #[cfg(feature = "__sim-aes-gcm")]
     self.observed_reliable_wire_bytes.push(bytes.to_vec());
     let pipe = self
       .pipes

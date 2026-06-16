@@ -101,7 +101,7 @@ fn keyring_debug_redacts_through_secret_key() {
   assert!(!s.contains("205"), "raw byte leak through Keyring");
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn random_aes_constructors_produce_keys_of_the_right_length() {
   assert_eq!(SecretKey::random_aes128().as_bytes().len(), 16);
@@ -114,7 +114,7 @@ fn random_aes_constructors_produce_keys_of_the_right_length() {
   );
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn random_chacha20poly1305_constructor_produces_key_of_the_right_length() {
   let key = SecretKey::random_chacha20poly1305();
@@ -155,7 +155,7 @@ fn oversize_ciphertext_accessors_round_trip() {
   assert_eq!(o.max(), 1024);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_aes128_roundtrip() {
   let key = SecretKey::Aes128([1u8; 16]);
@@ -172,7 +172,7 @@ fn aes_gcm_aes128_roundtrip() {
   assert_eq!(pt, plaintext);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_aes192_roundtrip() {
   let key = SecretKey::Aes192([3u8; 24]);
@@ -184,7 +184,7 @@ fn aes_gcm_aes192_roundtrip() {
   assert_eq!(pt, plaintext);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_aes256_roundtrip() {
   let key = SecretKey::Aes256([5u8; 32]);
@@ -196,7 +196,7 @@ fn aes_gcm_aes256_roundtrip() {
   assert_eq!(pt, plaintext);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_wrong_key_fails_auth() {
   let k1 = SecretKey::Aes256([0xAA; 32]);
@@ -208,7 +208,7 @@ fn aes_gcm_wrong_key_fails_auth() {
   assert!(matches!(err, EncryptionError::AuthFailed));
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_aad_mismatch_fails_auth() {
   let key = SecretKey::Aes256([0xCC; 32]);
@@ -227,7 +227,7 @@ fn aes_gcm_aad_mismatch_fails_auth() {
   assert!(matches!(err, EncryptionError::AuthFailed));
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn chacha20poly1305_roundtrip() {
   let key = SecretKey::ChaCha20Poly1305([0x42; 32]);
@@ -251,7 +251,7 @@ fn chacha20poly1305_roundtrip() {
   assert_eq!(pt, plaintext);
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn chacha20poly1305_wrong_key_fails_auth() {
   let k1 = SecretKey::ChaCha20Poly1305([0xAA; 32]);
@@ -469,7 +469,7 @@ fn encryption_options_set_and_clear_keyring() {
   assert!(!opts.is_enabled());
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_frame_roundtrip_aes_gcm() {
   let key = SecretKey::Aes256([0x42; 32]);
@@ -495,7 +495,7 @@ fn encrypted_frame_roundtrip_aes_gcm() {
   assert_eq!(back, plaintext);
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn encrypted_frame_roundtrip_chacha20poly1305() {
   let key = SecretKey::ChaCha20Poly1305([0x9A; 32]);
@@ -509,7 +509,7 @@ fn encrypted_frame_roundtrip_chacha20poly1305() {
   assert_eq!(back, plaintext);
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn oversize_ciphertext_is_rejected_before_allocation() {
   // A hand-built frame: Encrypted tag, AES-GCM tag, 12-byte nonce, then a
@@ -546,7 +546,7 @@ fn encrypted_frame_unknown_algorithm_fails_decode() {
   assert!(matches!(err, EncryptionError::UnsupportedAlgorithm(222)));
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_trailing_junk_in_body_is_rejected() {
   let key = SecretKey::Aes256([0x55; 32]);
@@ -559,7 +559,7 @@ fn aes_gcm_trailing_junk_in_body_is_rejected() {
   assert!(matches!(err, EncryptionError::AuthFailed));
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn chacha20poly1305_trailing_junk_in_body_is_rejected() {
   let key = SecretKey::ChaCha20Poly1305([0x77; 32]);
@@ -572,8 +572,8 @@ fn chacha20poly1305_trailing_junk_in_body_is_rejected() {
 }
 
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  feature = "encryption-chacha20-poly1305"
+  feature = "aes-gcm",
+  feature = "chacha20-poly1305"
 ))]
 #[test]
 fn mixed_cipher_keyring_decrypts_chacha_with_chacha_secondary() {
@@ -595,7 +595,7 @@ fn mixed_cipher_keyring_decrypts_chacha_with_chacha_secondary() {
   assert_eq!(back, b"protected by the secondary");
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn decode_with_no_matching_key_errs() {
   // A frame encrypted under an outside key; the keyring carries two AES
@@ -625,7 +625,7 @@ fn encrypted_wrapper_overhead_constant_is_correct() {
   );
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_gossip_at_mtu_minus_overhead_roundtrips_and_at_mtu_does_too() {
   // A plaintext payload sized `MTU - overhead` and a plaintext payload
@@ -646,7 +646,7 @@ fn encrypted_gossip_at_mtu_minus_overhead_roundtrips_and_at_mtu_does_too() {
   }
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_one_byte_past_plaintext_max_is_rejected() {
   // Symmetric guard for the new bound: a plaintext sized `max + 1` must
@@ -787,7 +787,7 @@ fn decrypt_rejects_key_variant_algorithm_mismatch() {
   assert!(matches!(err, EncryptionError::KeyMismatch));
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn aes_gcm_aes128_and_aes192_decrypt_fail_auth_on_corrupt_ciphertext() {
   // The AES-128 and AES-192 decrypt arms (distinct from the AES-256 arm the
@@ -818,8 +818,8 @@ fn keyring_insert_secondary_equal_to_primary_is_dropped() {
 }
 
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  feature = "encryption-chacha20-poly1305"
+  feature = "aes-gcm",
+  feature = "chacha20-poly1305"
 ))]
 #[test]
 fn decode_skips_secondary_whose_algorithm_does_not_match() {

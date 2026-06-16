@@ -1310,11 +1310,11 @@ where
   /// assert that a bridge handed an ENABLED keyring still ends up with a
   /// disabled `EncryptionOptions` — quinn already provides
   /// confidentiality, so the reliable path skips its inner Encrypted
-  /// wrapper. Gated on `encryption-aes-gcm` (the asserting test builds a
+  /// wrapper. Gated on `aes-gcm` (the asserting test builds a
   /// `Keyring`/`SecretKey` from `memberlist-wire`).
   ///
   /// [`EncryptionOptions`]: crate::EncryptionOptions
-  #[cfg(all(test, feature = "encryption-aes-gcm"))]
+  #[cfg(all(test, feature = "aes-gcm"))]
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }

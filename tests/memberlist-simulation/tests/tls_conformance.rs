@@ -618,7 +618,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 //    test below pins that no `[Encrypted[..]]` wrapper appears on the
 //    reliable wire.
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_tls_reaches_alive_both_sides() {
   use memberlist_proto::SecretKey;
@@ -641,7 +641,7 @@ fn encrypted_two_node_join_over_tls_reaches_alive_both_sides() {
   );
 }
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_join_over_tls_matches_unencrypted_membership_outcome() {
   use memberlist_proto::SecretKey;
@@ -673,7 +673,7 @@ fn encrypted_join_over_tls_matches_unencrypted_membership_outcome() {
   );
 }
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
   // The TLS reliable wire bytes (the bytes the harness routes through the
@@ -707,7 +707,7 @@ fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
 
 // ── Compound stack: compression + encryption together must not disturb SWIM.
 
-#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[cfg(all(feature = "__sim-aes-gcm", feature = "lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_tls_matches_unencrypted_uncompressed_membership_outcome() {
   use memberlist_proto::{CompressAlgorithm, SecretKey};

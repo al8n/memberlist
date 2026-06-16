@@ -2398,7 +2398,7 @@ fn fsm_deadline_during_outbound_await_reaps_atomically_retired() {
   }
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 fn build_test_quic_endpoint_with_compression(
   compression: crate::CompressionOptions,
 ) -> QuicEndpoint<SmolStr> {
@@ -2411,7 +2411,7 @@ fn build_test_quic_endpoint_with_compression(
   QuicEndpoint::<SmolStr>::with_compression(ep, qc, compression)
 }
 
-#[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4"))]
 #[test]
 fn quic_endpoint_gossip_compression_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -2430,7 +2430,7 @@ fn quic_endpoint_gossip_compression_roundtrips() {
   assert_eq!(back, datagram);
 }
 
-#[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4"))]
 #[test]
 fn quic_endpoint_over_mtu_compressed_gossip_is_rejected() {
   // A wrapper whose orig_len exceeds the gossip MTU cannot be produced by
@@ -2451,7 +2451,7 @@ fn quic_endpoint_over_mtu_compressed_gossip_is_rejected() {
   );
 }
 
-#[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4"))]
 #[test]
 fn quic_endpoint_compressed_gossip_never_inflates() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -2492,7 +2492,7 @@ fn quic_endpoint_compressed_gossip_never_inflates() {
   }
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 fn build_test_quic_endpoint_with_encryption(
   encryption: crate::EncryptionOptions,
 ) -> QuicEndpoint<SmolStr> {
@@ -2505,7 +2505,7 @@ fn build_test_quic_endpoint_with_encryption(
   QuicEndpoint::<SmolStr>::new(ep, qc).with_encryption(encryption)
 }
 
-#[cfg(all(test, feature = "quic", feature = "encryption-aes-gcm"))]
+#[cfg(all(test, feature = "quic", feature = "aes-gcm"))]
 #[test]
 fn quic_endpoint_gossip_encryption_roundtrip() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2736,7 +2736,7 @@ fn udp_mode_does_not_advertise_datagram_support() {
 /// through `unwrap_transforms_with_encryption`, which applies the
 /// strict-mode entry check before any wrapper decoding, so cluster
 /// authentication holds without depending on driver discipline.
-#[cfg(all(test, feature = "quic", feature = "encryption-aes-gcm"))]
+#[cfg(all(test, feature = "quic", feature = "aes-gcm"))]
 #[test]
 fn quic_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
   use crate::{EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame};
@@ -2948,7 +2948,7 @@ fn leave_initiates_then_is_idempotent() {
 /// `set_compression_options` replaces the policy in place and is reflected by
 /// the `compression()` accessor; `compress_gossip` then applies the new
 /// policy on the next datagram.
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn set_compression_options_updates_policy_in_place() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -3012,7 +3012,7 @@ fn gossip_transforms_are_identity_when_encryption_disabled() {
 /// the buffered gossip ingress). A DIFFERENT policy takes the clear path —
 /// the buffered raw gossip datagram is dropped so it cannot be decrypted
 /// under the new policy.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_noop_reapply_vs_policy_change_clears_ingress() {
   use crate::{EncryptionOptions, Keyring, SecretKey};

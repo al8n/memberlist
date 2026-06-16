@@ -16,13 +16,13 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-memberlist-proto    = { workspace = true, default-features = false }
-memberlist-reactor  = { workspace = true, optional = true }
-memberlist-compio   = { workspace = true, optional = true }
-memberlist-smoltcp  = { workspace = true, optional = true }
-memberlist-embassy  = { workspace = true, optional = true }
+memberlist-proto = { workspace = true, default-features = false }
+memberlist-reactor = { workspace = true, optional = true }
+memberlist-compio = { workspace = true, optional = true }
+memberlist-smoltcp = { workspace = true, optional = true }
+memberlist-embassy = { workspace = true, optional = true }
 memberlist-embedded = { workspace = true, optional = true }
-agnostic            = { workspace = true, optional = true }
+agnostic = { workspace = true, optional = true }
 
 [dev-dependencies]
 rcgen = "0.14"
@@ -43,13 +43,18 @@ alloc = ["memberlist-proto/alloc"]
 std = ["alloc", "memberlist-proto/std"]
 
 # driver selection
-reactor  = ["dep:memberlist-reactor", "std"]
-tokio    = ["reactor", "dep:agnostic", "agnostic/tokio", "memberlist-reactor/tokio"]
-smol     = ["reactor", "dep:agnostic", "agnostic/smol",  "memberlist-reactor/smol"]
-compio   = ["dep:memberlist-compio", "std"]
+reactor = ["dep:memberlist-reactor", "std"]
+tokio = [
+  "reactor",
+  "dep:agnostic",
+  "agnostic/tokio",
+  "memberlist-reactor/tokio",
+]
+smol = ["reactor", "dep:agnostic", "agnostic/smol", "memberlist-reactor/smol"]
+compio = ["dep:memberlist-compio", "std"]
 # bare-metal / no_std drivers: `alloc` tier (they never pull `std` here)
-smoltcp  = ["dep:memberlist-smoltcp",  "alloc", "memberlist-smoltcp/alloc"]
-embassy  = ["dep:memberlist-embassy",  "alloc", "memberlist-embassy/alloc"]
+smoltcp = ["dep:memberlist-smoltcp", "alloc", "memberlist-smoltcp/alloc"]
+embassy = ["dep:memberlist-embassy", "alloc", "memberlist-embassy/alloc"]
 embedded = ["dep:memberlist-embedded", "alloc", "memberlist-embedded/alloc"]
 
 # transports (kept prefix) — only drivers that DEFINE the feature.
@@ -60,37 +65,150 @@ embedded = ["dep:memberlist-embedded", "alloc", "memberlist-embedded/alloc"]
 # `quic-rustls-ring` (or the `-aws-lc-rs` variants) — which turn on `tls` / `quic`
 # transitively. The checksum (`crc32`, `xxhash*`, `murmur3`) and compression
 # (`lz4`, `snappy`, `zstd`, `brotli`) features below are each self-contained.
-tcp = ["memberlist-proto/tcp", "memberlist-reactor?/tcp", "memberlist-compio?/tcp"]
+tcp = [
+  "memberlist-proto/tcp",
+  "memberlist-reactor?/tcp",
+  "memberlist-compio?/tcp",
+]
 tls = ["memberlist-proto/tls", "memberlist-reactor?/tls"]
-tls-rustls-ring      = ["tls", "memberlist-proto/tls-rustls-ring",      "memberlist-reactor?/tls-rustls-ring",      "memberlist-compio?/tls-rustls-ring"]
-tls-rustls-aws-lc-rs = ["tls", "memberlist-proto/tls-rustls-aws-lc-rs", "memberlist-reactor?/tls-rustls-aws-lc-rs", "memberlist-compio?/tls-rustls-aws-lc-rs"]
-quic = ["memberlist-proto/quic", "memberlist-reactor?/quic", "memberlist-compio?/quic"]
-quic-rustls-ring      = ["quic", "memberlist-proto/quic-rustls-ring",      "memberlist-reactor?/quic-rustls-ring",      "memberlist-compio?/quic-rustls-ring"]
-quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs", "memberlist-reactor?/quic-rustls-aws-lc-rs", "memberlist-compio?/quic-rustls-aws-lc-rs"]
+tls-rustls-ring = [
+  "tls",
+  "memberlist-proto/tls-rustls-ring",
+  "memberlist-reactor?/tls-rustls-ring",
+  "memberlist-compio?/tls-rustls-ring",
+]
+tls-rustls-aws-lc-rs = [
+  "tls",
+  "memberlist-proto/tls-rustls-aws-lc-rs",
+  "memberlist-reactor?/tls-rustls-aws-lc-rs",
+  "memberlist-compio?/tls-rustls-aws-lc-rs",
+]
+quic = [
+  "memberlist-proto/quic",
+  "memberlist-reactor?/quic",
+  "memberlist-compio?/quic",
+]
+quic-rustls-ring = [
+  "quic",
+  "memberlist-proto/quic-rustls-ring",
+  "memberlist-reactor?/quic-rustls-ring",
+  "memberlist-compio?/quic-rustls-ring",
+]
+quic-rustls-aws-lc-rs = [
+  "quic",
+  "memberlist-proto/quic-rustls-aws-lc-rs",
+  "memberlist-reactor?/quic-rustls-aws-lc-rs",
+  "memberlist-compio?/quic-rustls-aws-lc-rs",
+]
 
 # compression (DE-prefixed) — every driver + proto define these
-lz4    = ["memberlist-proto/compression-lz4",    "memberlist-reactor?/compression-lz4",    "memberlist-compio?/compression-lz4",    "memberlist-smoltcp?/compression-lz4",    "memberlist-embassy?/compression-lz4",    "memberlist-embedded?/compression-lz4"]
-snappy = ["memberlist-proto/compression-snappy", "memberlist-reactor?/compression-snappy", "memberlist-compio?/compression-snappy", "memberlist-smoltcp?/compression-snappy", "memberlist-embassy?/compression-snappy", "memberlist-embedded?/compression-snappy"]
-zstd   = ["memberlist-proto/compression-zstd",   "memberlist-reactor?/compression-zstd",   "memberlist-compio?/compression-zstd",   "memberlist-smoltcp?/compression-zstd",   "memberlist-embassy?/compression-zstd",   "memberlist-embedded?/compression-zstd"]
-brotli = ["memberlist-proto/compression-brotli", "memberlist-reactor?/compression-brotli", "memberlist-compio?/compression-brotli", "memberlist-smoltcp?/compression-brotli", "memberlist-embassy?/compression-brotli", "memberlist-embedded?/compression-brotli"]
+lz4 = [
+  "memberlist-proto/lz4",
+  "memberlist-reactor?/lz4",
+  "memberlist-compio?/lz4",
+  "memberlist-smoltcp?/lz4",
+  "memberlist-embassy?/lz4",
+  "memberlist-embedded?/lz4",
+]
+snappy = [
+  "memberlist-proto/snappy",
+  "memberlist-reactor?/snappy",
+  "memberlist-compio?/snappy",
+  "memberlist-smoltcp?/snappy",
+  "memberlist-embassy?/snappy",
+  "memberlist-embedded?/snappy",
+]
+zstd = [
+  "memberlist-proto/zstd",
+  "memberlist-reactor?/zstd",
+  "memberlist-compio?/zstd",
+  "memberlist-smoltcp?/zstd",
+  "memberlist-embassy?/zstd",
+  "memberlist-embedded?/zstd",
+]
+brotli = [
+  "memberlist-proto/brotli",
+  "memberlist-reactor?/brotli",
+  "memberlist-compio?/brotli",
+  "memberlist-smoltcp?/brotli",
+  "memberlist-embassy?/brotli",
+  "memberlist-embedded?/brotli",
+]
 
 # encryption (DE-prefixed) — every driver + proto define these
-aes-gcm           = ["memberlist-proto/encryption-aes-gcm",           "memberlist-reactor?/encryption-aes-gcm",           "memberlist-compio?/encryption-aes-gcm",           "memberlist-smoltcp?/encryption-aes-gcm",           "memberlist-embassy?/encryption-aes-gcm",           "memberlist-embedded?/encryption-aes-gcm"]
-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305", "memberlist-reactor?/encryption-chacha20-poly1305", "memberlist-compio?/encryption-chacha20-poly1305", "memberlist-smoltcp?/encryption-chacha20-poly1305", "memberlist-embassy?/encryption-chacha20-poly1305", "memberlist-embedded?/encryption-chacha20-poly1305"]
+aes-gcm = [
+  "memberlist-proto/aes-gcm",
+  "memberlist-reactor?/aes-gcm",
+  "memberlist-compio?/aes-gcm",
+  "memberlist-smoltcp?/aes-gcm",
+  "memberlist-embassy?/aes-gcm",
+  "memberlist-embedded?/aes-gcm",
+]
+chacha20-poly1305 = [
+  "memberlist-proto/chacha20-poly1305",
+  "memberlist-reactor?/chacha20-poly1305",
+  "memberlist-compio?/chacha20-poly1305",
+  "memberlist-smoltcp?/chacha20-poly1305",
+  "memberlist-embassy?/chacha20-poly1305",
+  "memberlist-embedded?/chacha20-poly1305",
+]
 
 # checksum (gossip-plane only; DE-prefixed) — every driver + proto define these
-crc32    = ["memberlist-proto/checksum-crc32",    "memberlist-reactor?/checksum-crc32",    "memberlist-compio?/checksum-crc32",    "memberlist-smoltcp?/checksum-crc32",    "memberlist-embassy?/checksum-crc32",    "memberlist-embedded?/checksum-crc32"]
-xxhash32 = ["memberlist-proto/checksum-xxhash32", "memberlist-reactor?/checksum-xxhash32", "memberlist-compio?/checksum-xxhash32", "memberlist-smoltcp?/checksum-xxhash32", "memberlist-embassy?/checksum-xxhash32", "memberlist-embedded?/checksum-xxhash32"]
-xxhash64 = ["memberlist-proto/checksum-xxhash64", "memberlist-reactor?/checksum-xxhash64", "memberlist-compio?/checksum-xxhash64", "memberlist-smoltcp?/checksum-xxhash64", "memberlist-embassy?/checksum-xxhash64", "memberlist-embedded?/checksum-xxhash64"]
-xxhash3  = ["memberlist-proto/checksum-xxhash3",  "memberlist-reactor?/checksum-xxhash3",  "memberlist-compio?/checksum-xxhash3",  "memberlist-smoltcp?/checksum-xxhash3",  "memberlist-embassy?/checksum-xxhash3",  "memberlist-embedded?/checksum-xxhash3"]
-murmur3  = ["memberlist-proto/checksum-murmur3",  "memberlist-reactor?/checksum-murmur3",  "memberlist-compio?/checksum-murmur3",  "memberlist-smoltcp?/checksum-murmur3",  "memberlist-embassy?/checksum-murmur3",  "memberlist-embedded?/checksum-murmur3"]
+crc32 = [
+  "memberlist-proto/crc32",
+  "memberlist-reactor?/crc32",
+  "memberlist-compio?/crc32",
+  "memberlist-smoltcp?/crc32",
+  "memberlist-embassy?/crc32",
+  "memberlist-embedded?/crc32",
+]
+xxhash32 = [
+  "memberlist-proto/xxhash32",
+  "memberlist-reactor?/xxhash32",
+  "memberlist-compio?/xxhash32",
+  "memberlist-smoltcp?/xxhash32",
+  "memberlist-embassy?/xxhash32",
+  "memberlist-embedded?/xxhash32",
+]
+xxhash64 = [
+  "memberlist-proto/xxhash64",
+  "memberlist-reactor?/xxhash64",
+  "memberlist-compio?/xxhash64",
+  "memberlist-smoltcp?/xxhash64",
+  "memberlist-embassy?/xxhash64",
+  "memberlist-embedded?/xxhash64",
+]
+xxhash3 = [
+  "memberlist-proto/xxhash3",
+  "memberlist-reactor?/xxhash3",
+  "memberlist-compio?/xxhash3",
+  "memberlist-smoltcp?/xxhash3",
+  "memberlist-embassy?/xxhash3",
+  "memberlist-embedded?/xxhash3",
+]
+murmur3 = [
+  "memberlist-proto/murmur3",
+  "memberlist-reactor?/murmur3",
+  "memberlist-compio?/murmur3",
+  "memberlist-smoltcp?/murmur3",
+  "memberlist-embassy?/murmur3",
+  "memberlist-embedded?/murmur3",
+]
 
 # CIDR peer-admission allow-list. std-only, so it forwards to the std drivers
 # (reactor / compio) but not the no_std ones (smoltcp / embassy / embedded).
-cidr = ["memberlist-proto/cidr", "memberlist-reactor?/cidr", "memberlist-compio?/cidr"]
+cidr = [
+  "memberlist-proto/cidr",
+  "memberlist-reactor?/cidr",
+  "memberlist-compio?/cidr",
+]
 
 # misc
-dns     = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
+dns = ["memberlist-reactor?/dns", "memberlist-compio?/dns"]
 # Auto-detect the advertise address from the host's own interfaces (std drivers only).
-getifs  = ["memberlist-reactor?/getifs", "memberlist-compio?/getifs"]
-tracing = ["memberlist-proto/tracing", "memberlist-reactor?/tracing", "memberlist-compio?/tracing"]
+getifs = ["memberlist-reactor?/getifs", "memberlist-compio?/getifs"]
+tracing = [
+  "memberlist-proto/tracing",
+  "memberlist-reactor?/tracing",
+  "memberlist-compio?/tracing",
+]

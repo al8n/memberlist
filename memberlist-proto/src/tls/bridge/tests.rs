@@ -969,7 +969,7 @@ fn retained_tail_then_second_read_via_handle_transport_data_reassembles() {
 /// field. The on-wire reliable bytes therefore carry no `Encrypted` wrapper
 /// — TLS already provides confidentiality, and double-encrypting on the
 /// reliable path costs CPU and bandwidth without adding security.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_bridge_reliable_skips_encryption_when_is_secure() {
   use crate::{EncryptionOptions, Keyring, SecretKey, streams::test_support::TEST_RELIABLE_MAX};

@@ -1322,14 +1322,14 @@ where
   /// assert that a runtime
   /// [`super::StreamEndpoint::set_encryption_options`] update reached every
   /// live bridge. Gated on the transport features (`tls` / `tcp`) and on
-  /// `encryption-aes-gcm` (the asserting tests build a `Keyring`/`SecretKey`
+  /// `aes-gcm` (the asserting tests build a `Keyring`/`SecretKey`
   /// from `memberlist-wire`).
   ///
   /// [`EncryptionOptions`]: crate::EncryptionOptions
   #[cfg(all(
     test,
     any(feature = "tls", feature = "tcp"),
-    feature = "encryption-aes-gcm"
+    feature = "aes-gcm"
   ))]
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption

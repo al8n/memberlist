@@ -592,7 +592,7 @@ fn validate_gossip_mtu_enforces_floor_and_ceiling() {
 // policy is always usable, and a keyring whose every key names an AEAD whose
 // backend is compiled into THIS build trial-encrypts cleanly. The
 // unsupported-algorithm REJECTION arm is unreachable in this feature set
-// (both `encryption-aes-gcm` and `encryption-chacha20-poly1305` are on, so
+// (both `aes-gcm` and `chacha20-poly1305` are on, so
 // every `SecretKey` variant has a present backend) — it would require a build
 // missing one AEAD feature, i.e. fault injection at the feature level.
 #[test]

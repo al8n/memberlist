@@ -128,7 +128,7 @@ async fn gossip_label_isolates_clusters() {
   let _ = alpha2.shutdown().await;
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 mod compression {
   use super::*;
   use memberlist_proto::{CompressAlgorithm, CompressionOptions};
@@ -174,7 +174,7 @@ mod compression {
   }
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 mod checksum {
   use super::*;
   use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};

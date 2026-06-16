@@ -63,9 +63,9 @@ Opt-in transforms apply on the unreliable gossip plane (none are enabled by defa
 
 | Kind | Features |
 |------|----------|
-| Checksum | `checksum-crc32`, `checksum-xxhash64`, `checksum-xxhash32`, `checksum-xxhash3`, `checksum-murmur3` |
-| Compression | `compression-lz4`, `compression-snappy`, `compression-zstd`, `compression-brotli` |
-| Encryption (AEAD) | `encryption-aes-gcm`, `encryption-chacha20-poly1305` |
+| Checksum | `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3` |
+| Compression | `lz4`, `snappy`, `zstd`, `brotli` |
+| Encryption (AEAD) | `aes-gcm`, `chacha20-poly1305` |
 
 `cidr` adds a `CidrPolicy` IP allow-list usable as an `AliveDelegate` for membership
 admission.

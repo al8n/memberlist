@@ -10,13 +10,13 @@
 //!
 //! Run:
 //!   cargo bench -p memberlist-proto --bench transform_pipeline \
-//!     --features std,compression-lz4,encryption-aes-gcm,encryption-chacha20-poly1305
+//!     --features std,lz4,aes-gcm,chacha20-poly1305
 
 #[cfg(all(
   feature = "std",
-  feature = "compression-lz4",
-  feature = "encryption-aes-gcm",
-  feature = "encryption-chacha20-poly1305"
+  feature = "lz4",
+  feature = "aes-gcm",
+  feature = "chacha20-poly1305"
 ))]
 mod bench {
   use core::net::SocketAddr;
@@ -267,19 +267,19 @@ mod bench {
 fn main() {
   #[cfg(all(
     feature = "std",
-    feature = "compression-lz4",
-    feature = "encryption-aes-gcm",
-    feature = "encryption-chacha20-poly1305"
+    feature = "lz4",
+    feature = "aes-gcm",
+    feature = "chacha20-poly1305"
   ))]
   bench::run();
   #[cfg(not(all(
     feature = "std",
-    feature = "compression-lz4",
-    feature = "encryption-aes-gcm",
-    feature = "encryption-chacha20-poly1305"
+    feature = "lz4",
+    feature = "aes-gcm",
+    feature = "chacha20-poly1305"
   )))]
   eprintln!(
     "transform_pipeline requires --features \
-     std,compression-lz4,encryption-aes-gcm,encryption-chacha20-poly1305"
+     std,lz4,aes-gcm,chacha20-poly1305"
   );
 }

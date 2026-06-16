@@ -5,7 +5,7 @@
 //! setter call required — and that a misconfigured keyring is caught at
 //! `Memberlist::new` rather than silently starting plaintext.
 
-#![cfg(all(feature = "tcp", feature = "encryption-aes-gcm"))]
+#![cfg(all(feature = "tcp", feature = "aes-gcm"))]
 
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -176,7 +176,7 @@ async fn construction_time_encryption_same_key_converges() {
 /// `Memberlist::new` must reject a keyring whose algorithm is unsupported in
 /// this build before any socket is bound. A disabled (no-keyring) policy is
 /// always accepted.
-#[cfg(not(feature = "encryption-chacha20-poly1305"))]
+#[cfg(not(feature = "chacha20-poly1305"))]
 #[compio::test]
 async fn construction_rejects_unsupported_keyring_algorithm() {
   // ChaCha20-Poly1305 is absent in this build (we only have aes-gcm). A
@@ -205,11 +205,11 @@ async fn construction_rejects_unsupported_keyring_algorithm() {
 /// builder accepts the algorithm, but every later `checksum_gossip` would fail
 /// and the driver would drop the datagram — silently disabling ALL gossip. A
 /// disabled (no-algorithm) policy is always accepted.
-#[cfg(not(feature = "checksum-murmur3"))]
+#[cfg(not(feature = "murmur3"))]
 #[compio::test]
 async fn construction_rejects_unsupported_checksum_algorithm() {
   // Murmur3 is absent in this build (the test harness enables only
-  // checksum-crc32). A Murmur3 selection is accepted by `with_checksum` but the
+  // crc32). A Murmur3 selection is accepted by `with_checksum` but the
   // trial `apply` probe inside validate_checksum_options returns
   // `ChecksumError::Disabled`.
   let bad_opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);

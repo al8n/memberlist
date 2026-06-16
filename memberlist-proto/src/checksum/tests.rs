@@ -49,7 +49,7 @@ fn digest_sizes_are_pinned() {
   assert_eq!(ChecksumAlgorithm::Unknown(9).digest_size(), 0);
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn crc32_digest_is_deterministic_and_sized() {
   let payload = b"the quick brown fox jumps over the lazy dog";
@@ -61,7 +61,7 @@ fn crc32_digest_is_deterministic_and_sized() {
   assert_eq!(a.as_bytes(), &crc32fast::hash(payload).to_be_bytes());
 }
 
-#[cfg(feature = "checksum-xxhash32")]
+#[cfg(feature = "xxhash32")]
 #[test]
 fn xxhash32_digest_is_deterministic_and_sized() {
   let payload = b"the quick brown fox jumps over the lazy dog";
@@ -75,7 +75,7 @@ fn xxhash32_digest_is_deterministic_and_sized() {
   );
 }
 
-#[cfg(feature = "checksum-xxhash64")]
+#[cfg(feature = "xxhash64")]
 #[test]
 fn xxhash64_digest_is_deterministic_and_sized() {
   let payload = b"the quick brown fox jumps over the lazy dog";
@@ -89,7 +89,7 @@ fn xxhash64_digest_is_deterministic_and_sized() {
   );
 }
 
-#[cfg(feature = "checksum-xxhash3")]
+#[cfg(feature = "xxhash3")]
 #[test]
 fn xxhash3_digest_is_deterministic_and_sized() {
   let payload = b"the quick brown fox jumps over the lazy dog";
@@ -103,7 +103,7 @@ fn xxhash3_digest_is_deterministic_and_sized() {
   );
 }
 
-#[cfg(feature = "checksum-murmur3")]
+#[cfg(feature = "murmur3")]
 #[test]
 fn murmur3_digest_is_deterministic_and_sized() {
   use core::hash::Hasher as _;
@@ -117,7 +117,7 @@ fn murmur3_digest_is_deterministic_and_sized() {
   assert_eq!(a.as_bytes(), &(hasher.finish() as u32).to_be_bytes());
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn verify_accepts_correct_digest_and_rejects_corruption() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(4);
@@ -155,18 +155,18 @@ fn unknown_algorithm_digest_and_verify_error() {
 
 #[test]
 fn default_is_the_first_built_in_backend() {
-  // With `checksum-crc32` enabled (the test build's verify feature set),
+  // With `crc32` enabled (the test build's verify feature set),
   // Default resolves to Crc32. The fallback chain mirrors the declaration
   // order otherwise; a no-backend build resolves to `Unknown(CRC32_TAG)`.
   let d = ChecksumAlgorithm::default();
-  #[cfg(feature = "checksum-crc32")]
+  #[cfg(feature = "crc32")]
   assert_eq!(d, ChecksumAlgorithm::Crc32);
   #[cfg(not(any(
-    feature = "checksum-crc32",
-    feature = "checksum-xxhash32",
-    feature = "checksum-xxhash64",
-    feature = "checksum-xxhash3",
-    feature = "checksum-murmur3"
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
   )))]
   assert_eq!(d, ChecksumAlgorithm::Unknown(CRC32_TAG));
   // Ignoring: with a checksum backend other than crc32 built (e.g. xxhash32
@@ -204,7 +204,7 @@ fn checksumed_tag_value_is_pinned() {
   assert_eq!(CHECKSUMED_TAG, crate::framing::MessageTag::Checksumed as u8);
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn checksummed_frame_has_tag_algo_digest_header_and_roundtrips() {
   let payload = b"the quick brown fox jumps over the lazy dog".repeat(4);
@@ -223,7 +223,7 @@ fn checksummed_frame_has_tag_algo_digest_header_and_roundtrips() {
   assert_eq!(back, &payload[..]);
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn decode_rejects_a_flipped_payload_byte_as_mismatch() {
   let payload = b"reliable frame payload bytes".repeat(3);
@@ -264,7 +264,7 @@ fn decode_rejects_a_non_checksum_leading_tag() {
   ));
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn decode_rejects_a_truncated_digest_as_mismatch() {
   // The header declares a 4-byte crc32 digest but only 2 digest bytes are
@@ -291,7 +291,7 @@ fn checksum_options_default_matches_new() {
   assert_eq!(ChecksumOptions::default(), ChecksumOptions::new());
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn checksum_options_builders_and_setters_select_algorithm() {
   let opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);

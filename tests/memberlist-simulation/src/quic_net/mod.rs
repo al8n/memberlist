@@ -307,7 +307,7 @@ pub struct QuicCluster {
   /// so no inner `[Encrypted[..]]` ever appears on the reliable path. Only
   /// compiled under the encryption-conformance feature — the standard suite
   /// stays byte-unchanged.
-  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  #[cfg(feature = "__sim-aes-gcm")]
   observed_reliable_wire_bytes: Vec<Vec<u8>>,
 }
 
@@ -334,7 +334,7 @@ impl QuicCluster {
       stream_timeout: None,
       compression: memberlist_proto::CompressionOptions::new(),
       encryption: memberlist_proto::EncryptionOptions::new(),
-      #[cfg(feature = "__sim-encryption-aes-gcm")]
+      #[cfg(feature = "__sim-aes-gcm")]
       observed_reliable_wire_bytes: Vec::new(),
     }
   }
@@ -1112,9 +1112,9 @@ impl QuicCluster {
   /// confidentiality), and a quinn UDP datagram's first byte has
   /// `b & 0xC0 != 0` (>= `0x40`) by the QUIC long/short-header bit pattern,
   /// disjoint from the memberlist tag space (`1..=15`) that contains
-  /// `ENCRYPTED_TAG`. Only compiled under the `__sim-encryption-aes-gcm`
+  /// `ENCRYPTED_TAG`. Only compiled under the `__sim-aes-gcm`
   /// feature.
-  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  #[cfg(feature = "__sim-aes-gcm")]
   pub fn observed_reliable_wire_bytes(&self) -> &[Vec<u8>] {
     &self.observed_reliable_wire_bytes
   }
@@ -1500,7 +1500,7 @@ impl QuicCluster {
         // either; quinn then encrypts them into datagrams whose first byte
         // has `b & 0xC0 != 0` (>= `0x40`), disjoint from the memberlist tag
         // space that contains `ENCRYPTED_TAG`.
-        #[cfg(feature = "__sim-encryption-aes-gcm")]
+        #[cfg(feature = "__sim-aes-gcm")]
         self.observed_reliable_wire_bytes.push(bytes.to_vec());
         if self.enqueue(*src, to, bytes, now) {
           any = true;
