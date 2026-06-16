@@ -825,7 +825,7 @@ pub(crate) fn validate_encryption_options(
 ///
 /// A checksum algorithm whose backend feature is not compiled in (e.g. a
 /// [`ChecksumAlgorithm::Murmur3`](memberlist_proto::ChecksumAlgorithm) selection
-/// in a build without the `checksum-murmur3` feature) is accepted by the options
+/// in a build without the `murmur3` feature) is accepted by the options
 /// builder, but every later `checksum_gossip` would return
 /// [`ChecksumError`](memberlist_proto::ChecksumError)
 /// ([`Disabled`](memberlist_proto::ChecksumError::Disabled) for a recognized-but-

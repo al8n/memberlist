@@ -24,20 +24,20 @@ tls-rustls-aws-lc-rs = ["tls", "memberlist-proto/tls-rustls-aws-lc-rs"]
 quic = ["memberlist-proto/quic"]
 quic-rustls-ring = ["quic", "memberlist-proto/quic-rustls-ring"]
 quic-rustls-aws-lc-rs = ["quic", "memberlist-proto/quic-rustls-aws-lc-rs"]
-compression-lz4 = ["memberlist-proto/compression-lz4"]
-compression-snappy = ["memberlist-proto/compression-snappy"]
-compression-zstd = ["memberlist-proto/compression-zstd"]
-compression-brotli = ["memberlist-proto/compression-brotli"]
+lz4 = ["memberlist-proto/lz4"]
+snappy = ["memberlist-proto/snappy"]
+zstd = ["memberlist-proto/zstd"]
+brotli = ["memberlist-proto/brotli"]
 # Gossip-plane (unreliable) checksum backends. Each forwards to the matching
 # memberlist-proto backend; checksumming applies to the gossip datagram path
 # only, not the reliable stream path (the transport provides integrity there).
-checksum-crc32 = ["memberlist-proto/checksum-crc32"]
-checksum-xxhash32 = ["memberlist-proto/checksum-xxhash32"]
-checksum-xxhash64 = ["memberlist-proto/checksum-xxhash64"]
-checksum-xxhash3 = ["memberlist-proto/checksum-xxhash3"]
-checksum-murmur3 = ["memberlist-proto/checksum-murmur3"]
-encryption-aes-gcm = ["memberlist-proto/encryption-aes-gcm"]
-encryption-chacha20-poly1305 = ["memberlist-proto/encryption-chacha20-poly1305"]
+crc32 = ["memberlist-proto/crc32"]
+xxhash32 = ["memberlist-proto/xxhash32"]
+xxhash64 = ["memberlist-proto/xxhash64"]
+xxhash3 = ["memberlist-proto/xxhash3"]
+murmur3 = ["memberlist-proto/murmur3"]
+aes-gcm = ["memberlist-proto/aes-gcm"]
+chacha20-poly1305 = ["memberlist-proto/chacha20-poly1305"]
 cidr = ["memberlist-proto/cidr"]
 # Runtime conveniences: pull in the concrete agnostic runtime impls.
 tokio = ["agnostic/tokio"]
@@ -57,10 +57,15 @@ arc-swap = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
 futures-channel = { workspace = true }
-futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+futures-util = { workspace = true, default-features = false, features = [
+  "std",
+  "async-await-macro",
+] }
 thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
-hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
+hickory-proto = { workspace = true, optional = true, default-features = false, features = [
+  "std",
+] }
 resolv-conf = { workspace = true, optional = true }
 getifs = { workspace = true, optional = true }
 iprfc = { workspace = true, optional = true }
@@ -69,7 +74,10 @@ iprfc = { workspace = true, optional = true }
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
 agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
 smol_str = { workspace = true }
-futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+futures-util = { workspace = true, default-features = false, features = [
+  "std",
+  "async-await-macro",
+] }
 # QUIC smoke-test fixtures (self-signed cert + quinn_proto configs). Dev-only:
 # production callers supply their own QuicOptions.
 rcgen = "0.14"

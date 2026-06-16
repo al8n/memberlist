@@ -70,19 +70,19 @@ impl CompressAlgorithm {
 
 /// Default zstd compression level — zstd's own default. Sender-side only;
 /// never on the wire.
-#[cfg(feature = "compression-zstd")]
+#[cfg(feature = "zstd")]
 const ZSTD_DEFAULT_LEVEL: i32 = 0;
 
 /// Default brotli quality — a balanced ratio/CPU choice. Sender-side only.
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 const BROTLI_DEFAULT_QUALITY: u32 = 6;
 
 /// Brotli window bits used for both compression and decompression.
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 const BROTLI_WINDOW_BITS: u32 = 22;
 
 /// Brotli streaming buffer size.
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 const BROTLI_BUFFER_SIZE: usize = 4096;
 
 /// Payload for [`CompressionError::UnitLenExceedsMax`].
@@ -171,18 +171,18 @@ impl OversizeOriginal {
 /// feature is not built in.
 pub fn compress(algo: CompressAlgorithm, _input: &[u8]) -> Result<Vec<u8>, CompressionError> {
   match algo {
-    #[cfg(feature = "compression-lz4")]
+    #[cfg(feature = "lz4")]
     // Raw LZ4 block with no embedded size prefix — the wrapper frame already
     // carries `orig_len`, which is the single decompression size authority.
     CompressAlgorithm::Lz4 => Ok(lz4_flex::compress(_input)),
-    #[cfg(feature = "compression-snappy")]
+    #[cfg(feature = "snappy")]
     CompressAlgorithm::Snappy => snap::raw::Encoder::new()
       .compress_vec(_input)
       .map_err(|e| CompressionError::Backend(e.to_string().into())),
-    #[cfg(feature = "compression-zstd")]
+    #[cfg(feature = "zstd")]
     CompressAlgorithm::Zstd => zstd::stream::encode_all(_input, ZSTD_DEFAULT_LEVEL)
       .map_err(|e| CompressionError::Backend(e.to_string().into())),
-    #[cfg(feature = "compression-brotli")]
+    #[cfg(feature = "brotli")]
     CompressAlgorithm::Brotli => {
       use std::io::Write;
       let mut out = Vec::new();
@@ -217,7 +217,7 @@ pub fn decompress(
   _orig_len: usize,
 ) -> Result<Vec<u8>, CompressionError> {
   match algo {
-    #[cfg(feature = "compression-lz4")]
+    #[cfg(feature = "lz4")]
     CompressAlgorithm::Lz4 => {
       let mut out = vec![0u8; _orig_len];
       let n = lz4_flex::decompress_into(_input, &mut out)
@@ -229,7 +229,7 @@ pub fn decompress(
       }
       Ok(out)
     }
-    #[cfg(feature = "compression-snappy")]
+    #[cfg(feature = "snappy")]
     CompressAlgorithm::Snappy => {
       let mut out = vec![0u8; _orig_len];
       let n = snap::raw::Decoder::new()
@@ -242,7 +242,7 @@ pub fn decompress(
       }
       Ok(out)
     }
-    #[cfg(feature = "compression-zstd")]
+    #[cfg(feature = "zstd")]
     CompressAlgorithm::Zstd => {
       // `zstd::bulk::decompress` allocates exactly `_orig_len` bytes and
       // hard-caps the output there — a frame decompressing past `_orig_len`
@@ -257,7 +257,7 @@ pub fn decompress(
       }
       Ok(out)
     }
-    #[cfg(feature = "compression-brotli")]
+    #[cfg(feature = "brotli")]
     CompressAlgorithm::Brotli => {
       use std::io::Read;
       let mut decoder = brotli::Decompressor::new(_input, BROTLI_BUFFER_SIZE);
@@ -443,7 +443,7 @@ impl CompressionOptions {
 #[cfg(not(feature = "std"))]
 use std::vec::Vec;
 // `ToString` only feeds the backend error paths; lz4 is the only no_std backend.
-#[cfg(all(not(feature = "std"), feature = "compression-lz4"))]
+#[cfg(all(not(feature = "std"), feature = "lz4"))]
 use std::string::ToString;
 
 use crate::framing::{

@@ -524,7 +524,7 @@ async fn post_join_metadata_update_disseminates() {
 /// build AES is unsupported and the reconfiguration must surface
 /// `MemberlistError::Encryption`. A disabled (no-keyring) policy is always
 /// usable and must ack `Ok`.
-#[cfg(not(feature = "encryption-aes-gcm"))]
+#[cfg(not(feature = "aes-gcm"))]
 #[compio::test]
 async fn set_encryption_options_rejects_unsupported_algorithm() {
   use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
@@ -564,13 +564,13 @@ async fn set_encryption_options_rejects_unsupported_algorithm() {
 /// and ChaCha20-Poly1305 is NOT — hence the cfg gate): a pure `--features tcp`
 /// build compiles in NO AEAD backend, so every real key is unsupported and the
 /// primary-only probe already rejects, which cannot discriminate whether
-/// secondaries are checked. Building `encryption-aes-gcm` (without
-/// `encryption-chacha20-poly1305`) makes AES the SUPPORTED algorithm and
+/// secondaries are checked. Building `aes-gcm` (without
+/// `chacha20-poly1305`) makes AES the SUPPORTED algorithm and
 /// ChaCha20-Poly1305 the UNSUPPORTED one, so an AES primary + ChaCha secondary
 /// isolates exactly the "primary ok, secondary bad" gap.
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  not(feature = "encryption-chacha20-poly1305")
+  feature = "aes-gcm",
+  not(feature = "chacha20-poly1305")
 ))]
 #[compio::test]
 async fn encryption_rejected_for_unsupported_secondary_key() {

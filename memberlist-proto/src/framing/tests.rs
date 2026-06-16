@@ -254,7 +254,7 @@ fn compound_overhead_constants_are_upper_bounds() {
   assert_eq!(COMPOUND_MAX_PART_PREFIX_LEN, 5);
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn unwrap_loop_strips_compression_off_a_plain_frame() {
   use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
@@ -267,7 +267,7 @@ fn unwrap_loop_strips_compression_off_a_plain_frame() {
   assert_eq!(msg, sample_ping());
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn unwrap_loop_strips_compression_off_a_compound_frame() {
   use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
@@ -340,7 +340,7 @@ fn framing_checksumed_tag_value_is_pinned() {
   );
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn unwrap_loop_verifies_and_strips_a_checksum_wrapper() {
   use crate::checksum::{ChecksumAlgorithm, encode_checksummed_frame};
@@ -353,7 +353,7 @@ fn unwrap_loop_verifies_and_strips_a_checksum_wrapper() {
   assert_eq!(msg, sample_ping());
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn unwrap_loop_rejects_a_corrupted_checksum_payload() {
   use crate::checksum::{ChecksumAlgorithm, encode_checksummed_frame};
@@ -370,7 +370,7 @@ fn unwrap_loop_rejects_a_corrupted_checksum_payload() {
   ));
 }
 
-#[cfg(all(feature = "checksum-crc32", feature = "compression-lz4"))]
+#[cfg(all(feature = "crc32", feature = "lz4"))]
 #[test]
 fn unwrap_loop_strips_checksum_then_compression_in_stack_order() {
   // The wire stack is `[Checksumed[[Compressed][frame]]]` (inner→outer:
@@ -432,7 +432,7 @@ fn encrypted_mode_rejects_unencrypted_plaintext_frame_at_outer_layer() {
   assert!(matches!(err, FrameError::Empty));
 }
 
-#[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "lz4", feature = "aes-gcm"))]
 #[test]
 fn unwrap_loop_strips_encrypted_then_compressed() {
   use crate::{

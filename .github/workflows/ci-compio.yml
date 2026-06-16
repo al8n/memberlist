@@ -32,7 +32,7 @@ env:
   # cell and the gated transform matrix run. Both AEAD backends are on so the
   # encryption-validation usability probe sees a present backend for every
   # SecretKey variant (it trial-encrypts AES and ChaCha20-Poly1305 keys).
-  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,encryption-chacha20-poly1305,cidr"
+  FEATURES: "tcp,tls-rustls-ring,quic-rustls-ring,lz4,crc32,aes-gcm,chacha20-poly1305,cidr"
 
 jobs:
   test:

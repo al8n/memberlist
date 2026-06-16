@@ -35,7 +35,7 @@ jobs:
       run:
         shell: bash
     env:
-      FEATURES: "std,tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,compression-snappy,compression-zstd,compression-brotli,checksum-crc32,checksum-xxhash32,checksum-xxhash64,checksum-xxhash3,checksum-murmur3,encryption-aes-gcm,encryption-chacha20-poly1305,cidr"
+      FEATURES: "std,tcp,tls-rustls-ring,quic-rustls-ring,lz4,snappy,zstd,brotli,crc32,xxhash32,xxhash64,xxhash3,murmur3,aes-gcm,chacha20-poly1305,cidr"
     strategy:
       fail-fast: false
       matrix:
@@ -111,4 +111,4 @@ jobs:
       # seed sweep, the legacy ports). The long VOPR campaign is #[ignore]d and
       # runs in vopr.yml, so it is not selected here.
       - name: Test
-        run: cargo test -p memberlist-simulation --features __sim-encryption-aes-gcm
+        run: cargo test -p memberlist-simulation --features __sim-aes-gcm

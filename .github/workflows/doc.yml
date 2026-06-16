@@ -39,17 +39,17 @@ jobs:
       - name: Doc memberlist-proto
         run: >
           cargo doc -p memberlist-proto --no-deps
-          --features std,tracing,tcp,cidr,tls-rustls-ring,quic-rustls-ring,compression-lz4,compression-snappy,compression-zstd,compression-brotli,checksum-crc32,checksum-xxhash32,checksum-xxhash64,checksum-xxhash3,checksum-murmur3,encryption-aes-gcm,encryption-chacha20-poly1305
+          --features std,tracing,tcp,cidr,tls-rustls-ring,quic-rustls-ring,lz4,snappy,zstd,brotli,crc32,xxhash32,xxhash64,xxhash3,murmur3,aes-gcm,chacha20-poly1305
 
       - name: Doc memberlist-reactor
         run: >
           cargo doc -p memberlist-reactor --no-deps
-          --features tokio,tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr
+          --features tokio,tcp,tls-rustls-ring,quic-rustls-ring,lz4,crc32,aes-gcm,cidr
 
       - name: Doc memberlist-compio
         run: >
           cargo doc -p memberlist-compio --no-deps
-          --features tcp,tls-rustls-ring,quic-rustls-ring,compression-lz4,checksum-crc32,encryption-aes-gcm,cidr
+          --features tcp,tls-rustls-ring,quic-rustls-ring,lz4,crc32,aes-gcm,cidr
 
       - name: Doc memberlist (umbrella)
         run: cargo doc -p memberlist --no-deps --features tokio,tcp,quic-rustls-ring

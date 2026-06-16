@@ -212,10 +212,10 @@ fn encrypted_gossip_round_trips() {
 /// assertion. Checksum is a gossip-plane transform only; the reliable stream
 /// path carries no checksum.
 ///
-/// Gated on `checksum-crc32`: constructing with `Crc32` while its backend is
+/// Gated on `crc32`: constructing with `Crc32` while its backend is
 /// absent now fails fast at `Engine::try_new_at`, so the test must enable the
 /// backend it exercises.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn checksummed_gossip_round_trips() {
   use memberlist_embassy::{ChecksumAlgorithm, ChecksumOptions};

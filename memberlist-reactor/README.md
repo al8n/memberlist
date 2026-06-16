@@ -74,9 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `tcp` | plain TCP reliable streams + UDP gossip |
 | `tls` + `tls-rustls-ring` / `tls-rustls-aws-lc-rs` | TLS-over-TCP via `rustls` |
 | `quic` + `quic-rustls-ring` / `quic-rustls-aws-lc-rs` | QUIC reliable streams + datagrams |
-| `compression-lz4` / `-snappy` / `-zstd` / `-brotli` | gossip-plane compression |
-| `encryption-aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
-| `checksum-crc32` / `-xxhash64` / … | gossip-plane checksum |
+| `lz4` / `-snappy` / `-zstd` / `-brotli` | gossip-plane compression |
+| `aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
+| `crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
 | `getifs` | auto-detect the advertise address from the host's interfaces (`LocalAddrResolver`) |
 | `tracing` | forward structured `tracing` spans/events from the driver and `memberlist-proto` |

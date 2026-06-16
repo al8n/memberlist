@@ -1805,7 +1805,7 @@ fn failed_dial_no_label_leak_no_connect_emitted() {
   );
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn stream_endpoint_gossip_compression_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1826,7 +1826,7 @@ fn stream_endpoint_gossip_compression_roundtrips() {
   assert_eq!(back, datagram);
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1849,7 +1849,7 @@ fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
   );
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn stream_endpoint_compressed_gossip_never_inflates() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1897,9 +1897,9 @@ fn stream_endpoint_compressed_gossip_never_inflates() {
 /// `checksum_gossip` fail and the codec-owning driver silently drop all
 /// gossip. (`with_checksum` builders that bypassed this were removed; the
 /// validated setter is the only way to install a checksum policy.) Runs only
-/// when `checksum-murmur3` is absent, so `Murmur3`'s backend is genuinely
+/// when `murmur3` is absent, so `Murmur3`'s backend is genuinely
 /// missing.
-#[cfg(not(feature = "checksum-murmur3"))]
+#[cfg(not(feature = "murmur3"))]
 #[test]
 fn set_checksum_options_rejects_unbuilt_algorithm() {
   use crate::{ChecksumAlgorithm, ChecksumError, ChecksumOptions};
@@ -1948,7 +1948,7 @@ fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
 /// Mutation gate: if a future change forgets to size buffers for the
 /// wrapper-overhead slack (or, conversely, lets the configured budget be
 /// silently overshot by more than the wrapper), this test catches it.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
   use crate::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
@@ -1983,7 +1983,7 @@ fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
   assert_eq!(back, plaintext, "roundtrip preserves the plaintext bytes");
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn stream_endpoint_gossip_encryption_roundtrip() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2026,7 +2026,7 @@ fn stream_endpoint_gossip_encryption_disabled_is_byte_identical() {
 /// through `unwrap_transforms_with_encryption`, which applies the
 /// strict-mode entry check before any wrapper decoding, so cluster
 /// authentication holds without depending on driver discipline.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
   use crate::{EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame};
@@ -2049,8 +2049,8 @@ fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
 }
 
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  not(feature = "encryption-chacha20-poly1305")
+  feature = "aes-gcm",
+  not(feature = "chacha20-poly1305")
 ))]
 #[test]
 fn stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
@@ -2095,7 +2095,7 @@ fn raw_records_is_secure_returns_false() {
 /// bridge is constructed under the disabled policy), then calls
 /// `set_encryption_options(enabled)` and asserts the live bridge's
 /// effective encryption is now ENABLED.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_propagates_to_live_bridges() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2149,7 +2149,7 @@ fn set_encryption_options_propagates_to_live_bridges() {
 /// tick even if that tick only feeds an UNRELATED exchange — the dirty-scoped
 /// pump would otherwise skip the failed bridge yet still clear the reap latch,
 /// stranding the terminal exchange until an idle sweep.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn policy_failed_bridge_reaped_by_an_unrelated_tick() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2194,7 +2194,7 @@ fn policy_failed_bridge_reaped_by_an_unrelated_tick() {
 ///
 /// Mirror of `set_encryption_options_propagates_to_live_bridges` but uses
 /// `coord = coord.with_encryption(opts)` to exercise the builder path.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn with_encryption_builder_propagates_to_live_bridges() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2263,7 +2263,7 @@ fn with_encryption_builder_propagates_to_live_bridges() {
 /// pre-update plaintext surface from `poll_transport_transmit` after
 /// `set_encryption_options` — the failure transition + outbound purge is
 /// load-bearing for the policy-change contract.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2369,7 +2369,7 @@ fn set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records() 
 /// behavior MUST apply to the builder path as well. Mirrors
 /// [`set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records`]
 /// but uses `coord = coord.with_encryption(opts)`.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn with_encryption_drops_queued_plaintext_when_enabling_on_raw_records() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2449,7 +2449,7 @@ fn with_encryption_drops_queued_plaintext_when_enabling_on_raw_records() {
 /// Mutation gate: removing `purge_pending_connect_for(id)` from
 /// `set_encryption_options` makes the natural drain loop observe the
 /// stale `Connect` before the `Abort`.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_purges_pending_connect_for_failed_bridge() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2525,7 +2525,7 @@ fn set_encryption_options_purges_pending_connect_for_failed_bridge() {
 /// on the reapply — the bridge transitions to `Failed`, the queued
 /// plaintext is purged, and an `Abort` is enqueued (the same outputs the
 /// real policy-change tests assert when transitioning DISABLED → ENABLED).
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_is_noop_when_reapplying_same_policy() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2630,7 +2630,7 @@ fn set_encryption_options_is_noop_when_reapplying_same_policy() {
 /// `None` between the policy change and the bridge's exchange deadline),
 /// so the bridge would linger until the deadline elapses — a user-visible
 /// stall on the driver-observable timer.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_wakes_immediately_to_reap_failed_bridge() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2739,7 +2739,7 @@ fn set_encryption_options_wakes_immediately_to_reap_failed_bridge() {
 /// bridge is in `Failed`, so its own `poll_timeout` returns `None`; the
 /// inner endpoint has no timers; `last_now == None` voids the policy latch
 /// fold). The driver would never wake to reap the bridge.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_immediate_reap_works_after_inbound_accept_as_first_op() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2840,7 +2840,7 @@ fn set_encryption_options_immediate_reap_works_after_inbound_accept_as_first_op(
 /// `set_encryption_options` policy-change branch fails the final assertion
 /// — the orphaned bytes survive and a driver doing the natural drain loop
 /// would emit pre-update plaintext after the new policy publishes.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_purges_orphaned_transmit_from_reaped_bridges() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -2971,7 +2971,7 @@ fn set_encryption_options_purges_orphaned_transmit_from_reaped_bridges() {
 /// Mutation gate: removing `self.mem_ingress.clear()` from
 /// `set_encryption_options` makes `poll_memberlist_ingress` return the
 /// pre-policy-change buffered datagram.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn set_encryption_options_purges_buffered_gossip_on_policy_change() {
   use crate::{EncryptionOptions, Keyring, SecretKey};
@@ -3053,7 +3053,7 @@ fn set_encryption_options_purges_buffered_gossip_on_policy_change() {
 /// grow to 2 here AND surfaces an [`Event::NodeJoined`] for the synthetic
 /// peer — the [`crate::typed::PushNodeState`] reaches
 /// `merge_state` via the drain-then-reap path and is committed.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn policy_failed_bridge_rejects_ingress_before_reap() {
   use crate::{
@@ -3469,7 +3469,7 @@ fn handle_dial_failed_fails_bridge_and_aborts() {
 /// `set_compression_options` fans the new policy out to every live bridge's
 /// `set_compression` (non-security: no failure cascade, no purge). Dial an
 /// exchange first so there is a live bridge to receive the update.
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn set_compression_options_fans_out_to_live_bridges() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -3871,7 +3871,7 @@ fn poll_timeout_folds_multiple_deadline_sources_via_min() {
 /// shrink), which the receiver passes through unchanged. This exercises the
 /// `Compressed`-arm wrapper-vs-plain compare and the plain pass-through on the
 /// gossip compression path under realistic incompressible payloads.
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compress_gossip_incompressible_datagram_is_sent_plain_and_round_trips() {
   use crate::{CompressAlgorithm, CompressionOptions};

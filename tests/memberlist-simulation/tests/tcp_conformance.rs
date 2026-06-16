@@ -744,7 +744,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
 //    exchanges and gossip datagrams ride AEAD-encrypted frames. Encryption is
 //    a wire-codec transform: it must be transparent to SWIM membership.
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_two_node_join_over_tcp_reaches_alive_both_sides() {
   use memberlist_proto::SecretKey;
@@ -768,7 +768,7 @@ fn encrypted_two_node_join_over_tcp_reaches_alive_both_sides() {
   );
 }
 
-#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[cfg(feature = "__sim-aes-gcm")]
 #[test]
 fn encrypted_join_over_tcp_matches_unencrypted_membership_outcome() {
   use memberlist_proto::SecretKey;
@@ -805,7 +805,7 @@ fn encrypted_join_over_tcp_matches_unencrypted_membership_outcome() {
 //    The wire layout must be [Encrypted[[Compressed][frame]]] — encryption is
 //    the outer wrapper, compression is the inner wrapper.
 
-#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[cfg(all(feature = "__sim-aes-gcm", feature = "lz4"))]
 #[test]
 fn compressed_and_encrypted_join_over_tcp_matches_unencrypted_uncompressed_membership_outcome() {
   use memberlist_proto::{CompressAlgorithm, SecretKey};
@@ -829,7 +829,7 @@ fn compressed_and_encrypted_join_over_tcp_matches_unencrypted_uncompressed_membe
   assert_eq!(plain.sees_alive(b, &id("a")), both.sees_alive(b, &id("a")));
 }
 
-#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[cfg(all(feature = "__sim-aes-gcm", feature = "lz4"))]
 #[test]
 fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
   // Direct codec assertion: with both transforms enabled the unit's payload

@@ -37,18 +37,18 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 #[cfg(any(
-  feature = "checksum-crc32",
-  feature = "checksum-xxhash32",
-  feature = "checksum-xxhash64",
-  feature = "checksum-xxhash3",
-  feature = "checksum-murmur3"
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
 ))]
 use memberlist_proto::ChecksumAlgorithm;
 #[cfg(any(
-  feature = "compression-lz4",
-  feature = "compression-snappy",
-  feature = "compression-zstd",
-  feature = "compression-brotli"
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
 ))]
 use memberlist_proto::CompressAlgorithm;
 use memberlist_proto::{
@@ -61,8 +61,8 @@ use memberlist_proto::{
   unwrap_transforms_with_encryption,
 };
 #[cfg(any(
-  feature = "encryption-aes-gcm",
-  feature = "encryption-chacha20-poly1305"
+  feature = "aes-gcm",
+  feature = "chacha20-poly1305"
 ))]
 use memberlist_proto::{Keyring, SecretKey};
 
@@ -377,10 +377,10 @@ fn plain_and_label_roundtrip() {
 /// single-message datagram is offered to the backend (the don't-expand fallback
 /// still leaves an incompressible tiny frame plain, which the decoder accepts).
 #[cfg(any(
-  feature = "compression-lz4",
-  feature = "compression-snappy",
-  feature = "compression-zstd",
-  feature = "compression-brotli"
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
 ))]
 fn compress_opts(algo: CompressAlgorithm) -> CompressionOptions {
   CompressionOptions::new()
@@ -388,7 +388,7 @@ fn compress_opts(algo: CompressAlgorithm) -> CompressionOptions {
     .with_threshold(8)
 }
 
-#[cfg(feature = "compression-lz4")]
+#[cfg(feature = "lz4")]
 #[test]
 fn compression_lz4_roundtrip() {
   assert_both_planes(
@@ -397,7 +397,7 @@ fn compression_lz4_roundtrip() {
   );
 }
 
-#[cfg(feature = "compression-snappy")]
+#[cfg(feature = "snappy")]
 #[test]
 fn compression_snappy_roundtrip() {
   assert_both_planes(
@@ -406,7 +406,7 @@ fn compression_snappy_roundtrip() {
   );
 }
 
-#[cfg(feature = "compression-zstd")]
+#[cfg(feature = "zstd")]
 #[test]
 fn compression_zstd_roundtrip() {
   assert_both_planes(
@@ -415,7 +415,7 @@ fn compression_zstd_roundtrip() {
   );
 }
 
-#[cfg(feature = "compression-brotli")]
+#[cfg(feature = "brotli")]
 #[test]
 fn compression_brotli_roundtrip() {
   assert_both_planes(
@@ -429,14 +429,14 @@ fn compression_brotli_roundtrip() {
 /// A fixed-bytes keyring for `key`. Deterministic so a flake is a real bug, not
 /// entropy noise; the nonce is still random per frame inside the encoder.
 #[cfg(any(
-  feature = "encryption-aes-gcm",
-  feature = "encryption-chacha20-poly1305"
+  feature = "aes-gcm",
+  feature = "chacha20-poly1305"
 ))]
 fn enc_opts(key: SecretKey) -> EncryptionOptions {
   EncryptionOptions::new().with_keyring(Keyring::new(key))
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_aes128_gcm_roundtrip() {
   assert_both_planes(
@@ -445,7 +445,7 @@ fn encryption_aes128_gcm_roundtrip() {
   );
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_aes192_gcm_roundtrip() {
   assert_both_planes(
@@ -454,7 +454,7 @@ fn encryption_aes192_gcm_roundtrip() {
   );
 }
 
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_aes256_gcm_roundtrip() {
   assert_both_planes(
@@ -463,7 +463,7 @@ fn encryption_aes256_gcm_roundtrip() {
   );
 }
 
-#[cfg(feature = "encryption-chacha20-poly1305")]
+#[cfg(feature = "chacha20-poly1305")]
 #[test]
 fn encryption_chacha20_poly1305_roundtrip() {
   assert_both_planes(
@@ -480,7 +480,7 @@ fn encryption_chacha20_poly1305_roundtrip() {
 // (encrypt nests outside compress) implicitly: a decode that recovers the
 // message proves the inbound strip order matches the outbound wrap order.
 
-#[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "lz4", feature = "aes-gcm"))]
 #[test]
 fn compression_lz4_and_encryption_aes256_gcm_roundtrip() {
   assert_both_planes(
@@ -489,7 +489,7 @@ fn compression_lz4_and_encryption_aes256_gcm_roundtrip() {
   );
 }
 
-#[cfg(all(feature = "compression-zstd", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "zstd", feature = "aes-gcm"))]
 #[test]
 fn compression_zstd_and_encryption_aes128_gcm_roundtrip() {
   assert_both_planes(
@@ -499,8 +499,8 @@ fn compression_zstd_and_encryption_aes128_gcm_roundtrip() {
 }
 
 #[cfg(all(
-  feature = "compression-snappy",
-  feature = "encryption-chacha20-poly1305"
+  feature = "snappy",
+  feature = "chacha20-poly1305"
 ))]
 #[test]
 fn compression_snappy_and_encryption_chacha20_poly1305_roundtrip() {
@@ -511,8 +511,8 @@ fn compression_snappy_and_encryption_chacha20_poly1305_roundtrip() {
 }
 
 #[cfg(all(
-  feature = "compression-brotli",
-  feature = "encryption-chacha20-poly1305"
+  feature = "brotli",
+  feature = "chacha20-poly1305"
 ))]
 #[test]
 fn compression_brotli_and_encryption_chacha20_poly1305_roundtrip() {
@@ -531,17 +531,17 @@ fn compression_brotli_and_encryption_chacha20_poly1305_roundtrip() {
 /// Checksum options for `algo` (enabled). A `None` algorithm leaves the path
 /// identity; a `Some` algorithm wraps every payload in a `[Checksumed]` frame.
 #[cfg(any(
-  feature = "checksum-crc32",
-  feature = "checksum-xxhash32",
-  feature = "checksum-xxhash64",
-  feature = "checksum-xxhash3",
-  feature = "checksum-murmur3"
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
 ))]
 fn checksum_opts(algo: ChecksumAlgorithm) -> ChecksumOptions {
   ChecksumOptions::new().with_algorithm(algo)
 }
 
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn checksum_crc32_roundtrip() {
   assert_both_planes_with_checksum(
@@ -551,7 +551,7 @@ fn checksum_crc32_roundtrip() {
   );
 }
 
-#[cfg(feature = "checksum-xxhash64")]
+#[cfg(feature = "xxhash64")]
 #[test]
 fn checksum_xxhash64_roundtrip() {
   assert_both_planes_with_checksum(
@@ -561,7 +561,7 @@ fn checksum_xxhash64_roundtrip() {
   );
 }
 
-#[cfg(feature = "checksum-murmur3")]
+#[cfg(feature = "murmur3")]
 #[test]
 fn checksum_murmur3_roundtrip() {
   assert_both_planes_with_checksum(
@@ -573,7 +573,7 @@ fn checksum_murmur3_roundtrip() {
 
 // ─── checksum × compression ──────────────────────────────────────────────────
 
-#[cfg(all(feature = "checksum-crc32", feature = "compression-lz4"))]
+#[cfg(all(feature = "crc32", feature = "lz4"))]
 #[test]
 fn checksum_crc32_and_compression_lz4_roundtrip() {
   assert_both_planes_with_checksum(
@@ -583,7 +583,7 @@ fn checksum_crc32_and_compression_lz4_roundtrip() {
   );
 }
 
-#[cfg(all(feature = "checksum-xxhash64", feature = "compression-zstd"))]
+#[cfg(all(feature = "xxhash64", feature = "zstd"))]
 #[test]
 fn checksum_xxhash64_and_compression_zstd_roundtrip() {
   assert_both_planes_with_checksum(
@@ -595,7 +595,7 @@ fn checksum_xxhash64_and_compression_zstd_roundtrip() {
 
 // ─── checksum × encryption ───────────────────────────────────────────────────
 
-#[cfg(all(feature = "checksum-crc32", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "crc32", feature = "aes-gcm"))]
 #[test]
 fn checksum_crc32_and_encryption_aes256_gcm_roundtrip() {
   assert_both_planes_with_checksum(
@@ -605,7 +605,7 @@ fn checksum_crc32_and_encryption_aes256_gcm_roundtrip() {
   );
 }
 
-#[cfg(all(feature = "checksum-murmur3", feature = "encryption-chacha20-poly1305"))]
+#[cfg(all(feature = "murmur3", feature = "chacha20-poly1305"))]
 #[test]
 fn checksum_murmur3_and_encryption_chacha20_poly1305_roundtrip() {
   assert_both_planes_with_checksum(
@@ -623,9 +623,9 @@ fn checksum_murmur3_and_encryption_chacha20_poly1305_roundtrip() {
 // a checksum, and an encryption backend are all built in.
 
 #[cfg(all(
-  feature = "compression-lz4",
-  feature = "checksum-crc32",
-  feature = "encryption-aes-gcm"
+  feature = "lz4",
+  feature = "crc32",
+  feature = "aes-gcm"
 ))]
 #[test]
 fn all_transforms_lz4_crc32_aes256_gcm_roundtrip() {
@@ -655,7 +655,7 @@ fn all_transforms_lz4_crc32_aes256_gcm_roundtrip() {
 /// A single payload byte flipped under a `Checksumed` wrapper makes the
 /// recomputed digest disagree with the carried digest: the gossip-plane decode
 /// must REJECT with a checksum mismatch, not silently surface corrupt bytes.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn corrupted_checksummed_gossip_is_rejected() {
   let checksum = checksum_opts(ChecksumAlgorithm::Crc32);
@@ -703,7 +703,7 @@ fn corrupted_checksummed_gossip_is_rejected() {
 /// or a legitimate near-MTU datagram is silently rejected as oversize. This is
 /// the regression guard for the encrypted-plaintext bound under-accounting for
 /// the checksum layer.
-#[cfg(all(feature = "checksum-crc32", feature = "encryption-aes-gcm"))]
+#[cfg(all(feature = "crc32", feature = "aes-gcm"))]
 #[test]
 fn near_mtu_checksum_and_encryption_gossip_survives_the_bomb_guard() {
   let key = SecretKey::Aes256([0x33; 32]);
@@ -743,7 +743,7 @@ fn near_mtu_checksum_and_encryption_gossip_survives_the_bomb_guard() {
 /// An `Encrypted` frame whose decrypted plaintext is a bare (non-checksum) frame
 /// larger than `gossip_mtu` must be rejected: the decrypt slack covers a
 /// checksum wrapper, not an over-ceiling plain frame smuggled through it.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn over_mtu_encrypted_only_gossip_is_rejected() {
   let key = SecretKey::Aes256([0x44; 32]);
@@ -769,7 +769,7 @@ fn over_mtu_encrypted_only_gossip_is_rejected() {
 /// A `Checksumed` frame whose verified inner payload is a bare frame larger than
 /// `gossip_mtu` must be rejected after the wrapper is stripped — the checksum
 /// arm does not get to return an over-ceiling frame to the decoder.
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn over_mtu_checksum_only_gossip_is_rejected() {
   let msg: Message<I, A> = Message::UserData(Bytes::from(vec![0xCDu8; 1400]));
@@ -792,7 +792,7 @@ fn over_mtu_checksum_only_gossip_is_rejected() {
 /// non-canonical. Without the canonical-order guard, a peer could nest many
 /// publicly-forgeable checksum wrappers in one packet to force thousands of
 /// digest passes and buffer copies; the guard bounds the unwrap to O(1).
-#[cfg(feature = "checksum-crc32")]
+#[cfg(feature = "crc32")]
 #[test]
 fn nested_checksum_wrappers_are_rejected() {
   let msg: Message<I, A> = Message::UserData(Bytes::from_static(b"payload"));

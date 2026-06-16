@@ -13,13 +13,13 @@ bytes = "1"
 smol_str = "0.3"
 memberlist-proto = { path = "..", features = [
   "std",
-  "compression-lz4",
-  "compression-snappy",
-  "compression-zstd",
-  "compression-brotli",
-  "checksum-crc32",
-  "checksum-xxhash64",
-  "encryption-aes-gcm",
+  "lz4",
+  "snappy",
+  "zstd",
+  "brotli",
+  "crc32",
+  "xxhash64",
+  "aes-gcm",
 ] }
 
 # The untrusted-input parsers reached pre-authentication by a single inbound

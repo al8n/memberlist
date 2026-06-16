@@ -57,7 +57,7 @@ fn tls_endpoint_type_is_constructible_signature() {
 /// path skips its inner Encrypted wrapper (TLS already wraps it). The gossip
 /// datagram is exchanged on a separate socket and needs its own
 /// confidentiality envelope.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_gossip_encryption_roundtrip() {
   use core::net::SocketAddr;
@@ -129,8 +129,8 @@ fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
 /// surface as `Err`, NOT silently emit plaintext. Mirrors the TCP analogue
 /// in `tcp/mod.rs::stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend`.
 #[cfg(all(
-  feature = "encryption-aes-gcm",
-  not(feature = "encryption-chacha20-poly1305")
+  feature = "aes-gcm",
+  not(feature = "chacha20-poly1305")
 ))]
 #[test]
 fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
@@ -170,7 +170,7 @@ fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
 /// `handle_gossip` would bypass strict-mode entirely. `decrypt_gossip`
 /// routes through `unwrap_transforms_with_encryption`, which applies the
 /// strict-mode entry check before any wrapper decoding.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
   use core::net::SocketAddr;
@@ -206,7 +206,7 @@ fn tls_endpoint_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
 /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`. Operators on tight path-MTU
 /// networks size `gossip_mtu` accordingly; this test pins that the AEAD
 /// wrapper inflates the datagram by EXACTLY `ENCRYPTED_WRAPPER_OVERHEAD`.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
   use core::net::SocketAddr;
@@ -293,7 +293,7 @@ fn tls_endpoint_gossip_mtu_is_propagated_from_config() {
 /// queued under the old policy would otherwise survive across the flip and
 /// be surfaced by the next `poll_memberlist_ingress` under the new strict-
 /// mode regime it was never validated against.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_set_encryption_options_purges_buffered_gossip_on_policy_change() {
   use crate::Instant;
@@ -346,7 +346,7 @@ fn tls_endpoint_set_encryption_options_purges_buffered_gossip_on_policy_change()
 /// queued `mem_ingress` datagram survives, and the coordinator's reported
 /// options stay equal. The no-op guard is `PartialEq` on
 /// `EncryptionOptions` + `Keyring`.
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_set_encryption_options_is_noop_when_reapplying_same_policy() {
   use crate::Instant;
@@ -404,7 +404,7 @@ fn tls_endpoint_set_encryption_options_is_noop_when_reapplying_same_policy() {
 /// rather than failing it: TLS already provides confidentiality, so the
 /// reliable path never double-wraps. The bridge therefore survives the policy
 /// change (no `EncryptionPolicyChanged` cascade, unlike plain TCP).
-#[cfg(feature = "encryption-aes-gcm")]
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_set_encryption_options_keeps_live_bridge_via_is_secure() {
   use crate::Instant;
