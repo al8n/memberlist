@@ -1,3 +1,5 @@
+use derive_more::{Display, IsVariant};
+
 /// Which wire the QUIC unreliable path (gossip + probes) rides. Chosen at
 /// `QuicOptions` construction and the single source of truth for whether quinn's
 /// datagram extension is enabled.
@@ -14,7 +16,8 @@
 /// plain UDP. The mode is therefore both a pure-UDP opt-out and a mixed-mode
 /// interop guarantee — a `Datagram`-mode peer never emits a datagram a
 /// `Udp`-mode node would silently swallow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, IsVariant, Display)]
+#[display("{}", self.as_str())]
 pub enum UnreliableTransport {
   /// QUIC datagrams over the per-peer connection — encrypted + attested. The
   /// constructor sizes quinn's datagram buffers so the extension is advertised.
@@ -34,8 +37,20 @@ pub enum UnreliableTransport {
   Udp,
 }
 
+impl UnreliableTransport {
+  /// Returns a string representation of the transport mode.
+  #[inline(always)]
+  pub const fn as_str(&self) -> &str {
+    match self {
+      UnreliableTransport::Datagram => "datagram",
+      UnreliableTransport::Udp => "udp",
+    }
+  }
+}
+
 /// Result of offering one unreliable datagram to the connection pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IsVariant, Display)]
+#[display("{}", self.as_str())]
 pub enum DatagramSendOutcome {
   /// Accepted onto an established connection; it flows out via the normal
   /// `service_quinn` -> `poll_transmit` pump.
@@ -47,4 +62,16 @@ pub enum DatagramSendOutcome {
   /// The payload exceeds the connection's datagram `max_size`. The caller must
   /// fall back to UDP or split — never silently drop.
   TooLarge,
+}
+
+impl DatagramSendOutcome {
+  /// Returns a string representation of the outcome.
+  #[inline(always)]
+  pub const fn as_str(&self) -> &str {
+    match self {
+      DatagramSendOutcome::Queued => "queued",
+      DatagramSendOutcome::NotReady => "not_ready",
+      DatagramSendOutcome::TooLarge => "too_large",
+    }
+  }
 }
