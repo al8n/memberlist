@@ -34,7 +34,9 @@ use crate::Instant;
 use core::time::Duration;
 use std::sync::Arc;
 
-use crate::typed::NodeState;
+use crate::{event::StreamId, typed::NodeState};
+
+use smallvec::SmallVec;
 
 /// Source of a probe — distinguishes failure-detection probes (default) from
 /// application-level pings issued via `Endpoint::ping`.
@@ -101,14 +103,14 @@ pub(crate) struct AwaitingIndirect<A> {
   /// mark the indirect probe answered. The Nack's transport source address
   /// is the only responder identity available, so the allowlist is keyed
   /// by address, not id.
-  pub(crate) indirect_peers: smallvec::SmallVec<[A; 4]>,
+  pub(crate) indirect_peers: SmallVec<[A; 4]>,
   /// Distinct indirect peers (by source address) that have returned a
   /// Nack within the deadline. `len()` is the effective nack count; a
   /// duplicate or late (>= `failure_deadline`) Nack is ignored so it
   /// cannot inflate the count and suppress the Lifeguard health penalty
   /// (`probe_terminate_failure` computes severity from
   /// `expected_nacks - nacked_by.len()`).
-  pub(crate) nacked_by: smallvec::SmallVec<[A; 4]>,
+  pub(crate) nacked_by: SmallVec<[A; 4]>,
   /// The reliable-ping fallback stream opened **concurrently** with the
   /// indirect fan-out (mirrors memberlist-core spawning the TCP ping
   /// alongside the indirect pings, bounded by the same deadline).
@@ -116,7 +118,7 @@ pub(crate) struct AwaitingIndirect<A> {
   /// reliable dial/ping failure has retired it (the indirect path keeps
   /// racing the deadline regardless — a fallback failure does NOT fail
   /// the probe early, matching `fallback_tx.send(false)` upstream).
-  pub(crate) reliable_stream_id: Option<crate::event::StreamId>,
+  pub(crate) reliable_stream_id: Option<StreamId>,
   /// Cumulative deadline (after which we transition the target to Suspect).
   pub(crate) deadline: Instant,
 }

@@ -5,11 +5,7 @@
 //! stores `id`/`addr` as opaque `Bytes`. These functions are the single
 //! boundary where `I`/`A` are (de)serialised via the `Data` trait. The
 //! machine wire path calls `message_to_any` / `message_from_any`.
-
-#[cfg(not(feature = "std"))]
-use std::{string::ToString, vec::Vec};
-
-use std::borrow::Cow;
+use std::{borrow::Cow, string::ToString, vec::Vec};
 
 use buffa::MessageField as BuffaMessageField;
 use bytes::Bytes;

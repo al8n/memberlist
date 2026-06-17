@@ -1,8 +1,5 @@
 //! Broadcast trait and `BroadcastQueue` — the gossip retransmit queue.
-
-#[cfg(not(feature = "std"))]
-use std::vec::Vec;
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 use crate::FxHashMap;
 

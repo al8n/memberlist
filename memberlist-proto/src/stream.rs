@@ -21,27 +21,23 @@
 //! `MessageRef::decode`, `handle_data` peeks the varint length prefix to
 //! confirm the full frame is buffered. See `try_decode_frame`.
 
-use crate::Instant;
-use std::collections::VecDeque;
-#[cfg(not(feature = "std"))]
-use std::{string::ToString, vec::Vec};
+use std::{collections::VecDeque, string::ToString, vec::Vec};
 
-use crate::{Data, typed::PushNodeState};
 use bytes::{Bytes, BytesMut};
 
 use crate::{
+  Data, Instant,
   error::StreamError,
   event::{
     EndpointEvent, PushPullKind, PushPullReplyReceived, PushPullRequestReceived, ReliablePingAcked,
     StreamEvent, UserDataReceived,
   },
+  typed::PushNodeState,
 };
 
 /// Unique handle for a stream-oriented exchange.
 /// Re-exported from `event.rs`; used here to key the stream in `Endpoint`.
 pub use crate::event::StreamId;
-
-// ─────────────────────────────────────── public snapshot type ────────────────
 
 /// Decoded snapshot of a peer's push/pull message. Owned; emitted in
 /// `EndpointEvent::PushPullRequestReceived` or `EndpointEvent::PushPullReplyReceived`
@@ -95,8 +91,6 @@ impl<I, A> PushPullSnapshot<I, A> {
   }
 }
 
-// ─────────────────────────────────────── internal enums ──────────────────────
-
 /// What kind of outbound exchange a Stream is performing.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -134,7 +128,6 @@ pub(crate) enum InboundKind {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum StreamPhase {
-  // ── Outbound (we dialed) ──────────────────────────────────────────────────
   /// We have bytes in `output_buf`; driver is draining them via `poll_transmit`.
   /// Carries the kind of outbound exchange being performed.
   OutboundSendingRequest(OutboundKind),
@@ -142,22 +135,18 @@ pub(crate) enum StreamPhase {
   /// Waiting for the peer's response bytes. Carries the kind of outbound
   /// exchange being performed.
   OutboundAwaitingResponse(OutboundKind),
-  // ── Inbound (peer dialed us) ──────────────────────────────────────────────
   /// Connected; waiting for the peer to send the first message.
   InboundAwaitingFirstMessage,
   /// First message decoded. For PushPull: our response is in `output_buf`.
   /// For ReliablePing: our Ack is in `output_buf`. Carries the kind of
   /// inbound exchange being processed.
   InboundSendingResponse(InboundKind),
-  // ── Terminal ─────────────────────────────────────────────────────────────
   /// Exchange completed successfully.
   Done,
   /// Exchange failed. The error is delivered via `poll_endpoint_event` and
   /// `poll_event` once; after that the stream stays in Failed and is GCd.
   Failed(StreamError),
 }
-
-// ─────────────────────────────────────── Stream ──────────────────────────────
 
 /// Per-reliable-stream Sans-I/O state machine.
 ///
@@ -503,8 +492,6 @@ where
       }
     }
   }
-
-  // ─── internal helpers ──────────────────────────────────────────────────────
 
   fn enter_failed(&mut self, err: StreamError) {
     // A failed stream holds no pending bytes. Clearing `output_buf` makes
@@ -907,8 +894,6 @@ where
     Ok(())
   }
 }
-
-// ─────────────────────────────── helper fns ──────────────────────────────────
 
 /// Convert an owned `typed::PushPull` into an owned `PushPullSnapshot`.
 ///

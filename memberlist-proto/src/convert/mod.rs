@@ -29,7 +29,6 @@
 //! [`ConvertError`] carries enough context for diagnostics without
 //! leaking raw byte slices into the error type.
 
-#[cfg(not(feature = "std"))]
 use std::vec::Vec;
 
 use core::{
@@ -38,6 +37,7 @@ use core::{
 };
 
 use bytes::Bytes;
+use derive_more::{IsVariant, TryUnwrap, Unwrap};
 use smol_str::SmolStr;
 
 /// Payload for [`ConvertError::AddrLengthMismatch`].
@@ -91,7 +91,9 @@ impl core::fmt::Display for AddrLengthMismatchInfo {
 /// Errors surfaced when translating between [`Bytes`] wire fields and
 /// the corresponding application types.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, IsVariant, Unwrap, TryUnwrap)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
 pub enum ConvertError {
   /// An `id` field contained bytes that were not valid UTF-8.
   #[error("id is not valid UTF-8")]
@@ -120,8 +122,6 @@ const ADDR_V6_LEN: usize = 1 + 16 + 2;
 const VERSION_TAG_V4: u8 = 0;
 const VERSION_TAG_V6: u8 = 1;
 
-// ── id: SmolStr ↔ Bytes ──────────────────────────────────────────────
-
 /// Decode a UTF-8 node id from a wire `id` field.
 pub fn id_from_bytes(b: &Bytes) -> Result<SmolStr, ConvertError> {
   let s = str::from_utf8(b.as_ref()).map_err(|_| ConvertError::IdNotUtf8)?;
@@ -132,8 +132,6 @@ pub fn id_from_bytes(b: &Bytes) -> Result<SmolStr, ConvertError> {
 pub fn id_to_bytes(s: &SmolStr) -> Bytes {
   Bytes::copy_from_slice(s.as_bytes())
 }
-
-// ── addr: SocketAddr ↔ Bytes ─────────────────────────────────────────
 
 /// Decode a tagged-binary [`SocketAddr`] from a wire `addr` field.
 pub fn socket_addr_from_bytes(b: &Bytes) -> Result<SocketAddr, ConvertError> {

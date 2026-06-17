@@ -11,7 +11,6 @@
 //! composes them (the QUIC build already does).
 #![allow(dead_code)]
 
-#[cfg(not(feature = "std"))]
 use std::string::String;
 
 /// Transport lifecycle of one composed `(memberlist Stream, transport bidi)`

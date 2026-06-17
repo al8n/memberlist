@@ -8,8 +8,6 @@
 //! (`crate::compression`, `crate::checksum`, `crate::encryption`,
 //! `crate::framing`) and are composed by the per-transport coordinators, not
 //! here.
-
-#[cfg(not(feature = "std"))]
 use std::vec::Vec;
 
 use crate::{
@@ -25,9 +23,12 @@ use crate::{
 // path resolves for downstream crates; the constant itself lives in `crate::label`.
 pub use crate::label::MAX_LABEL_LEN;
 use bytes::Bytes;
+use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 /// Errors from the umbrella codec layer.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, IsVariant, Unwrap, TryUnwrap)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
 #[non_exhaustive]
 pub enum CodecError {
   /// Typed ↔ buffa bridge failure.
@@ -60,7 +61,7 @@ pub enum CodecError {
 
 /// The point at which inbound bytes ended before a complete label or inner
 /// frame could be read. Payload of [`CodecError::Truncated`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, IsVariant)]
 #[non_exhaustive]
 pub enum TruncatedInput {
   /// The input was empty — no bytes at all.
