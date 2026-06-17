@@ -68,22 +68,49 @@ pub(crate) mod transport;
 pub use action::{ConnectInfo, ExchangeRef, StreamAction};
 pub use conn::ExchangeId;
 pub use labeled::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
+pub use transport::{Intake, StreamTransport};
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
+use crate::checksum::{ChecksumError, ChecksumOptions, ChecksumOutcome};
+
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+use crate::encryption::{EncryptionError, EncryptionOptions, encode_encrypted_frame};
+
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+use crate::compression::{CompressionOptions, CompressionOutcome, encode_compressed_frame};
+
+use core::{net::SocketAddr, time::Duration};
+use std::{
+  boxed::Box,
+  collections::{BTreeSet, VecDeque},
+  string::String,
+  vec::Vec,
+};
+
+use bytes::Bytes;
+
 // `Intake` is part of the `StreamTransport` surface a record-layer impl
 // returns; re-exported alongside the trait though the coordinator itself
 // drives it only through the bridge.
 use rand::{Rng, rngs::SmallRng};
-pub use transport::{Intake, StreamTransport};
-
-use crate::{FxHashMap, Instant};
-use core::{net::SocketAddr, time::Duration};
-#[cfg(not(feature = "std"))]
-use std::{boxed::Box, string::String, vec::Vec};
-
-use bytes::Bytes;
 
 use crate::{
+  FxHashMap, Instant,
   endpoint::Endpoint,
-  event::{Event, ExchangeCompleted, ExchangeOutcome, PushPullKind, StreamId, Transmit},
+  event::{
+    Event, ExchangeCompleted, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit,
+  },
 };
 use bridge::StreamBridge;
 use conn::StreamConns;
@@ -240,13 +267,20 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// Cross-transport compression configuration. The coordinator is the single
   /// compress/decompress point on both the gossip and reliable paths; a
   /// disabled `CompressionOptions` makes both paths identity.
-  compression: crate::CompressionOptions,
+  #[cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  ))]
+  compression: CompressionOptions,
   /// Cross-transport encryption configuration. Applied across the unsecure
   /// paths (UDP gossip on every coordinator; the plain-TCP reliable path).
   /// On TLS the reliable path skips encryption (`R::is_secure() == true`);
   /// gossip is still encrypted (gossip is always plain UDP). A disabled
   /// configuration reduces all codec paths to identity.
-  encryption: crate::EncryptionOptions,
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  encryption: EncryptionOptions,
   /// Checksum configuration for the gossip (unreliable) plane. A checksum
   /// guards the connectionless UDP datagram path — the only path without
   /// transport-level integrity — so it is applied in [`Self::checksum_gossip`]
@@ -254,7 +288,14 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// transport's own end-to-end integrity (matching the original Go memberlist
   /// and the legacy port, where the CRC rides the UDP packet path only). A
   /// disabled `ChecksumOptions` makes the gossip path identity.
-  checksum: crate::ChecksumOptions,
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ))]
+  checksum: ChecksumOptions,
   /// In-flight reliable exchanges (one bridge each), keyed by [`ExchangeId`].
   /// Connection-per-exchange — no pool, slab, or drained-reap.
   conns: StreamConns<I, A, R>,
@@ -268,12 +309,12 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// prefix, then application bytes), tagged with the exchange handle + peer
   /// so the driver writes them on the right transport connection. Drained via
   /// [`Self::poll_transport_transmit`].
-  out_transmit: std::collections::VecDeque<(ExchangeId, SocketAddr, Bytes)>,
+  out_transmit: VecDeque<(ExchangeId, SocketAddr, Bytes)>,
   /// Outbound [`StreamAction::Connect`] directives, in producer order. Drained
   /// first by [`Self::poll_action`] so a fresh dial's connection always opens
   /// before any same-tick `Shutdown` / `Close` targets an existing bridge's
   /// connection.
-  pending_connects: std::collections::VecDeque<StreamAction>,
+  pending_connects: VecDeque<StreamAction>,
   /// Outbound [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
   /// [`StreamAction::Abort`] directives, in producer order. Drained by
   /// [`Self::poll_action`] only after [`Self::pending_connects`] is exhausted
@@ -281,14 +322,14 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// withholding a teardown behind its own transmit prevents a transport
   /// `shutdown(write)` from orphaning bytes the exchange still owes. Teardowns
   /// retain their producer order.
-  pending_teardowns: std::collections::VecDeque<StreamAction>,
+  pending_teardowns: VecDeque<StreamAction>,
   /// Raw inbound gossip datagrams. `memberlist-proto` has no umbrella
   /// `codec` dependency, so the coordinator cannot decode them in-crate and
   /// MUST NOT silently drop them (that would lose every UDP
   /// ping/ack/alive/suspect on the composed unit's public ingress). They are
   /// buffered here and surfaced via [`Self::poll_memberlist_ingress`] for the
   /// codec-owning layer to unwrap and feed back through [`Self::handle_packet`].
-  mem_ingress: std::collections::VecDeque<(A, Bytes)>,
+  mem_ingress: VecDeque<(A, Bytes)>,
   /// Private queue of pending dial intents. `memberlist::Endpoint::poll_event`
   /// emits `Event::DialRequested { id, peer, deadline }` for an external
   /// driver to dial — but in the composed design `StreamEndpoint` IS the
@@ -301,7 +342,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// pollers only ever observe application-visible events. Each entry carries
   /// an `attempted` bit so a freshly-sieved intent surfaces in
   /// [`Self::poll_timeout`] as an immediate-due wake — see [`PendingDial`].
-  dial_pending: std::collections::VecDeque<PendingDial<A>>,
+  dial_pending: VecDeque<PendingDial<A>>,
   /// Tags each outbound `StreamId` with the originating
   /// [`ExchangeKind`] so `service_dials` can stamp the resulting
   /// `ExchangeMeta` with the right kind, and `reap_bridge` can carry
@@ -314,7 +355,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// allocation inside `service_dials`. Strictly outbound-only —
   /// inbound (server-side) exchanges are not assigned a kind by the
   /// initiator and never appear in this table.
-  pending_outbound_kinds: FxHashMap<StreamId, crate::event::ExchangeKind>,
+  pending_outbound_kinds: FxHashMap<StreamId, ExchangeKind>,
   /// Most recent `now: Instant` injected by any `handle_*` / `start_*` wrapper.
   /// Used by [`Self::poll_timeout`] as the known-past anchor for the
   /// immediate-due wake of an unattempted `dial_pending` entry: the only way
@@ -348,19 +389,19 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// O(N^2). `handle_timeout` marks every bridge dirty, so the periodic path
   /// remains the catch-all for deadline reaping and back-pressure re-drive.
   /// Ordered by `ExchangeId` (creation order) for deterministic pump order.
-  dirty: std::collections::BTreeSet<ExchangeId>,
+  dirty: BTreeSet<ExchangeId>,
   /// The bridges `pump_bridges` actually serviced (and left alive) this tick.
   /// `collect_transmits` drains ONLY these for outbound bytes instead of every
   /// bridge — a bridge that was not pumped produced no new outbound. Reaped
   /// bridges collect their final bytes inline in `reap_bridge`, so they are not
   /// recorded here.
-  pumped: std::collections::BTreeSet<ExchangeId>,
+  pumped: BTreeSet<ExchangeId>,
   /// Bridges whose `ExchangeMeta::mint` is still `Some` — i.e. awaiting the
   /// label / handshake step to settle so their `Stream` can be minted.
   /// `service_handshake_completions` scans ONLY this set instead of every bridge;
   /// an id is added when its exchange is created (dial / accept) and removed when
   /// the mint is taken (or the bridge terminalizes before settling).
-  unminted: std::collections::BTreeSet<ExchangeId>,
+  unminted: BTreeSet<ExchangeId>,
 }
 
 /// Compress one outbound gossip datagram for the wire — the body of
@@ -368,10 +409,25 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
 /// off-thread (e.g. on a CPU worker pool) with a cloned [`crate::CompressionOptions`].
 /// The on-wire form is kept only if it shrinks the datagram, so compressed
 /// gossip can never inflate past the uncompressed datagram.
-pub fn compress_gossip_datagram(opts: &crate::CompressionOptions, datagram: &[u8]) -> Vec<u8> {
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub fn compress_gossip_datagram(opts: &CompressionOptions, datagram: &[u8]) -> Vec<u8> {
   match opts.apply(datagram) {
-    Ok(crate::CompressionOutcome::Compressed(packed)) => {
-      let wrapped = crate::encode_compressed_frame(
+    Ok(CompressionOutcome::Compressed(packed)) => {
+      let wrapped = encode_compressed_frame(
         opts
           .algorithm()
           .expect("a Compressed outcome implies an algorithm is set"),
@@ -390,52 +446,56 @@ pub fn compress_gossip_datagram(opts: &crate::CompressionOptions, datagram: &[u8
 
 /// Checksum one outbound gossip datagram — the body of
 /// [`StreamEndpoint::checksum_gossip`], factored out for off-thread use with a
-/// cloned [`crate::ChecksumOptions`].
+/// cloned [`ChecksumOptions`](crate::checksum::ChecksumOptions).
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
 pub fn checksum_gossip_datagram(
-  opts: &crate::ChecksumOptions,
+  opts: &ChecksumOptions,
   datagram: &[u8],
-) -> Result<Vec<u8>, crate::ChecksumError> {
+) -> Result<Vec<u8>, ChecksumError> {
   match opts.apply(datagram)? {
-    crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
-    crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+    ChecksumOutcome::Checksumed(framed) => Ok(framed),
+    ChecksumOutcome::Plain => Ok(datagram.to_vec()),
   }
 }
 
 /// Encrypt one outbound gossip datagram — the body of
 /// [`StreamEndpoint::encrypt_gossip`], factored out for off-thread use with a
-/// cloned [`crate::EncryptionOptions`].
+/// cloned [`EncryptionOptions`](crate::encryption::EncryptionOptions).
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
 pub fn encrypt_gossip_datagram(
-  opts: &crate::EncryptionOptions,
+  opts: &EncryptionOptions,
   datagram: &[u8],
-) -> Result<Vec<u8>, crate::EncryptionError> {
+) -> Result<Vec<u8>, EncryptionError> {
   let keyring = match opts.keyring() {
     Some(kr) => kr,
     None => return Ok(datagram.to_vec()),
   };
   let key = keyring.primary_ref();
-  crate::encode_encrypted_frame(key.algorithm(), key, datagram)
+  encode_encrypted_frame(key.algorithm(), key, datagram)
 }
 
-// Accessors whose bodies touch only non-generic fields (`compression`,
-// `encryption`, `out_transmit`, `pending_connects`, `pending_teardowns`,
-// `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
-// (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
-// well-formedness bag — no method-side additions, so the heavier
-// `I: Debug + Display + Send + Sync + 'static` constraint carried by the
-// impl blocks below is NOT required to call any of these.
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
-  G: Rng,
-  I: crate::Id + crate::Data + crate::CheapClone,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
 {
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
@@ -444,27 +504,19 @@ where
     &self.ep
   }
 
-  /// Resolve a peer's membership address to its transport `SocketAddr`,
-  /// using the coordinator's per-peer `peer_to_socket` closure supplied at
-  /// construction. The driver consults this when it holds a peer `A` (e.g.
-  /// the peer carried on an outbound `Transmit`) and needs the
-  /// `SocketAddr` to drive the underlying socket.
-  pub fn resolve_peer_socket(&self, peer: &A) -> SocketAddr {
-    (self.peer_to_socket)(peer)
-  }
-
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
   /// Sourced from [`crate::config::EndpointOptions::gossip_mtu`] (default
   /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
   /// exceed this by [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] when
   /// encryption is enabled.
-  pub fn gossip_mtu(&self) -> usize {
+  pub const fn gossip_mtu(&self) -> usize {
     self.ep.gossip_mtu()
   }
 
   /// The configured cross-transport compression options.
-  pub fn compression(&self) -> crate::CompressionOptions {
-    self.compression
+
+  pub const fn compression(&self) -> &CompressionOptions {
+    &self.compression
   }
 
   /// Compress one outbound gossip datagram for the wire. The codec-owning
@@ -476,8 +528,25 @@ where
   }
 
   /// The configured cross-transport checksum options.
-  pub fn checksum(&self) -> crate::ChecksumOptions {
-    self.checksum
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
+  pub const fn checksum(&self) -> &ChecksumOptions {
+    &self.checksum
   }
 
   /// Wrap one outbound gossip datagram in a checksum frame for the wire. The
@@ -489,12 +558,35 @@ where
   /// Returns `Err` when a checksum algorithm is configured but its backend was
   /// not built into this binary; the driver MUST drop the gossip rather than
   /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
-  pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
+  pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, ChecksumError> {
     checksum_gossip_datagram(&self.checksum, datagram)
   }
 
   /// The configured cross-transport encryption options.
-  pub fn encryption_options(&self) -> &crate::EncryptionOptions {
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
+  #[inline(always)]
+  pub const fn encryption_options(&self) -> &EncryptionOptions {
     &self.encryption
   }
 
@@ -513,8 +605,22 @@ where
   /// for a primary key whose backend was not built into this binary. The
   /// driver MUST drop the gossip in that case; emitting unencrypted bytes
   /// on an encrypted-cluster path would bypass authentication silently.
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn encrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::EncryptionError> {
     encrypt_gossip_datagram(&self.encryption, datagram)
+  }
+
+  /// Resolve a peer's membership address to its transport `SocketAddr`,
+  /// using the coordinator's per-peer `peer_to_socket` closure supplied at
+  /// construction. The driver consults this when it holds a peer `A` (e.g.
+  /// the peer carried on an outbound `Transmit`) and needs the
+  /// `SocketAddr` to drive the underlying socket.
+  pub fn resolve_peer_socket(&self, peer: &A) -> SocketAddr {
+    (self.peer_to_socket)(peer)
   }
 
   /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
@@ -534,6 +640,11 @@ where
   /// `[Encrypted[Checksumed[Compressed[frame]]]]`; this helper reverses all
   /// layers, so authentication and integrity never depend on integration
   /// discipline.
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
@@ -543,8 +654,12 @@ where
     // non-Encrypted-led datagram is returned unchanged when no keyring is
     // configured (the strict-mode entry check is gated on
     // `encryption.is_enabled()`).
-    crate::unwrap_transforms_with_encryption(datagram, self.ep.gossip_mtu(), &self.encryption)
-      .map(|cow| cow.into_owned())
+    crate::framing::unwrap_transforms_with_encryption(
+      datagram,
+      self.ep.gossip_mtu(),
+      &self.encryption,
+    )
+    .map(|cow| cow.into_owned())
   }
 
   /// Next outbound per-exchange bytes `(exchange, peer, bytes)`, if any.
@@ -620,35 +735,6 @@ where
     self.out_transmit.retain(|(eid, _, _)| *eid != exchange);
   }
 
-  /// Fully cancel a not-yet-opened exchange: drop its bridge, metadata, and any
-  /// queued outbound bytes. Used by `leave()` for an unopened outbound exchange
-  /// (its `Connect` never drained) and by the post-leave inbound mint guard for
-  /// an un-minted acceptor bridge — so a cancelled exchange leaves no live
-  /// bridge (no stream deadline, no record-layer buffer) and emits no bytes.
-  fn cancel_exchange(&mut self, id: ExchangeId) {
-    // Ignoring the removed bridge: a never-opened exchange owes the peer no
-    // clean-close bytes, and dropping it clears its record-layer state.
-    let _ = self.conns.remove(id);
-    // No `ExchangeCompleted` here. This path runs on leave, where a driver
-    // resolves a parked waiter via its own leave/shutdown drain with the clearer
-    // `Shutdown` signal; emitting a generic `Failed` would double-resolve it and
-    // mask that. The genuinely-stranding case (a dial that retired without a
-    // drain covering it) emits from the `dial_succeeded(None)` reap instead.
-    self.exchanges.remove(&id);
-    self.purge_transmit_for(id);
-    // Replace any teardown already queued for this id with an Abort, so the
-    // driver tears down a transport connection it may have already opened (the
-    // exchange's Connect could have been drained before leave). The driver
-    // no-ops the Abort if it never dialed; without it the connection / pool
-    // slot leaks and could keep post-leave reliable I/O alive at the driver.
-    self
-      .pending_teardowns
-      .retain(|a| teardown_exchange(a) != id);
-    self
-      .pending_teardowns
-      .push_back(StreamAction::Abort(ExchangeRef::new(id)));
-  }
-
   /// Drop any pending [`StreamAction::Connect`] still queued for `exchange`.
   /// Symmetric to [`Self::purge_transmit_for`], but for the action queue
   /// instead of the transmit queue.
@@ -688,6 +774,51 @@ where
   /// its socket reads on this so a flood cannot grow the buffer without bound.
   pub fn pending_memberlist_ingress(&self) -> usize {
     self.mem_ingress.len()
+  }
+}
+
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
+where
+  G: Rng,
+  I: crate::Id + crate::Data + crate::CheapClone,
+  A: crate::Data
+    + crate::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  R: StreamTransport,
+{
+  /// Fully cancel a not-yet-opened exchange: drop its bridge, metadata, and any
+  /// queued outbound bytes. Used by `leave()` for an unopened outbound exchange
+  /// (its `Connect` never drained) and by the post-leave inbound mint guard for
+  /// an un-minted acceptor bridge — so a cancelled exchange leaves no live
+  /// bridge (no stream deadline, no record-layer buffer) and emits no bytes.
+  fn cancel_exchange(&mut self, id: ExchangeId) {
+    // Ignoring the removed bridge: a never-opened exchange owes the peer no
+    // clean-close bytes, and dropping it clears its record-layer state.
+    let _ = self.conns.remove(id);
+    // No `ExchangeCompleted` here. This path runs on leave, where a driver
+    // resolves a parked waiter via its own leave/shutdown drain with the clearer
+    // `Shutdown` signal; emitting a generic `Failed` would double-resolve it and
+    // mask that. The genuinely-stranding case (a dial that retired without a
+    // drain covering it) emits from the `dial_succeeded(None)` reap instead.
+    self.exchanges.remove(&id);
+    self.purge_transmit_for(id);
+    // Replace any teardown already queued for this id with an Abort, so the
+    // driver tears down a transport connection it may have already opened (the
+    // exchange's Connect could have been drained before leave). The driver
+    // no-ops the Abort if it never dialed; without it the connection / pool
+    // slot leaks and could keep post-leave reliable I/O alive at the driver.
+    self
+      .pending_teardowns
+      .retain(|a| teardown_exchange(a) != id);
+    self
+      .pending_teardowns
+      .push_back(StreamAction::Abort(ExchangeRef::new(id)));
   }
 }
 
@@ -744,22 +875,36 @@ where
       cfg,
       sni_provider,
       peer_to_socket,
-      compression: crate::CompressionOptions::new(),
-      encryption: crate::EncryptionOptions::new(),
-      checksum: crate::ChecksumOptions::new(),
+      #[cfg(any(
+        feature = "lz4",
+        feature = "snappy",
+        feature = "zstd",
+        feature = "brotli"
+      ))]
+      compression: CompressionOptions::new(),
+      #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+      encryption: EncryptionOptions::new(),
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3"
+      ))]
+      checksum: ChecksumOptions::new(),
       conns: StreamConns::new(),
       exchanges: FxHashMap::default(),
-      out_transmit: std::collections::VecDeque::new(),
-      pending_connects: std::collections::VecDeque::new(),
-      pending_teardowns: std::collections::VecDeque::new(),
-      mem_ingress: std::collections::VecDeque::new(),
-      dial_pending: std::collections::VecDeque::new(),
+      out_transmit: VecDeque::new(),
+      pending_connects: VecDeque::new(),
+      pending_teardowns: VecDeque::new(),
+      mem_ingress: VecDeque::new(),
+      dial_pending: VecDeque::new(),
       pending_outbound_kinds: FxHashMap::default(),
       last_now: None,
       policy_reap_pending: false,
-      dirty: std::collections::BTreeSet::new(),
-      pumped: std::collections::BTreeSet::new(),
-      unminted: std::collections::BTreeSet::new(),
+      dirty: BTreeSet::new(),
+      pumped: BTreeSet::new(),
+      unminted: BTreeSet::new(),
     }
   }
 
@@ -784,13 +929,28 @@ where
   /// Build the coordinator with an explicit cross-transport compression
   /// configuration. [`Self::new`] is `with_compression` with compression
   /// disabled.
+  #[cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   pub fn with_compression(
     ep: Endpoint<I, A, G>,
     cfg: R::Options,
     sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
     peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
-    compression: crate::CompressionOptions,
+    compression: CompressionOptions,
   ) -> Self {
     let mut this = Self::new(ep, cfg, sni_provider, peer_to_socket);
     this.compression = compression;
@@ -806,6 +966,11 @@ where
   /// exchange under a default-disabled coordinator and then rebuilds via
   /// `coord = coord.with_encryption(opts)`, the live bridges receive the new
   /// policy too.
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   pub fn with_encryption(mut self, encryption: crate::EncryptionOptions) -> Self {
     self.set_encryption_options(encryption);
@@ -918,7 +1083,13 @@ where
   /// wake an idle endpoint with no other scheduled timer would leave the
   /// failed bridges sitting in [`Self::conns`] until some unrelated event
   /// next triggered a tick.
-  pub fn set_encryption_options(&mut self, encryption: crate::EncryptionOptions) {
+
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
+  pub fn set_encryption_options(&mut self, encryption: EncryptionOptions) {
     if self.encryption == encryption {
       // Defensive reassignment: the equality check is structural, so a
       // reapply of the same logical policy with a distinct allocation
@@ -1024,7 +1195,22 @@ where
   /// whatever policy was active at the producer's encode time. No
   /// bridge-failure cascade, no `out_transmit` / `mem_ingress` purge,
   /// no `policy_reap_pending` wake.
-  pub fn set_compression_options(&mut self, compression: crate::CompressionOptions) {
+  #[cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
+  pub fn set_compression_options(&mut self, compression: CompressionOptions) {
     self.compression = compression;
     for id in self.conns.ids() {
       let Some(bridge) = self.conns.get_mut(id) else {
@@ -1045,10 +1231,25 @@ where
   /// The new policy takes effect on the next datagram; checksum is non-security
   /// and the wire frame self-describes its algorithm via the checksum-tag
   /// prefix, so a peer always verifies under whatever policy produced the bytes.
-  pub fn set_checksum_options(
-    &mut self,
-    checksum: crate::ChecksumOptions,
-  ) -> Result<(), crate::ChecksumError> {
+
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
+  pub fn set_checksum_options(&mut self, checksum: ChecksumOptions) -> Result<(), ChecksumError> {
     // Validate the algorithm's backend is built into this binary BEFORE storing
     // it: an unusable policy is accepted by the options builder, but every
     // subsequent `checksum_gossip` would then fail and the codec-owning driver

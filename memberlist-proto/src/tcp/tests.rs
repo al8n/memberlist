@@ -1899,10 +1899,18 @@ fn stream_endpoint_compressed_gossip_never_inflates() {
 /// validated setter is the only way to install a checksum policy.) Runs only
 /// when `murmur3` is absent, so `Murmur3`'s backend is genuinely
 /// missing.
-#[cfg(not(feature = "murmur3"))]
+#[cfg(all(
+  not(feature = "murmur3"),
+  any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+  )
+))]
 #[test]
 fn set_checksum_options_rejects_unbuilt_algorithm() {
-  use crate::{ChecksumAlgorithm, ChecksumError, ChecksumOptions};
+  use crate::checksum::{ChecksumAlgorithm, ChecksumError, ChecksumOptions};
   let ep = endpoint(7180);
   let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
   let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn algorithm_tag_roundtrip() {
   for algo in [EncryptAlgorithm::AesGcm, EncryptAlgorithm::ChaCha20Poly1305] {
@@ -24,11 +25,13 @@ fn unrecognized_tag_is_unknown() {
 /// algorithm. The pinning is enforced as a unit test so a refactor that
 /// reorders the constants is caught at test time, not at deploy time.
 #[test]
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 fn algorithm_tags_have_pinned_numeric_values() {
   assert_eq!(EncryptAlgorithm::AesGcm.tag(), 1);
   assert_eq!(EncryptAlgorithm::ChaCha20Poly1305.tag(), 2);
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn secret_key_variants_imply_algorithm() {
   let aes128 = SecretKey::Aes128([0u8; 16]);
@@ -41,6 +44,7 @@ fn secret_key_variants_imply_algorithm() {
   assert_eq!(chacha.algorithm(), EncryptAlgorithm::ChaCha20Poly1305);
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn secret_key_as_bytes_returns_full_key() {
   let aes128 = SecretKey::Aes128([7u8; 16]);
@@ -59,6 +63,7 @@ fn secret_key_as_bytes_returns_full_key() {
 /// otherwise dump the symmetric key. The custom impl renders the variant
 /// name with a `<redacted>` placeholder; the byte-leak guard spot-checks
 /// both `0xXX` hex form and the array Debug's decimal form.
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn secret_key_debug_redacts_raw_bytes() {
   let aes128 = SecretKey::Aes128([0xAB; 16]);
@@ -89,6 +94,7 @@ fn secret_key_debug_redacts_raw_bytes() {
 /// derive `Debug` field-wise — `Keyring` (and therefore `EncryptionOptions`
 /// once it carries a `Keyring`) renders each `SecretKey` field via the
 /// redacted impl, so the raw key bytes never reach a log line.
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_debug_redacts_through_secret_key() {
   let kr = Keyring::with_secondaries(
@@ -271,6 +277,7 @@ fn chacha20poly1305_wrong_key_fails_auth() {
   assert!(matches!(err, EncryptionError::AuthFailed));
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn key_variant_must_match_algorithm() {
   // An AES key passed to the ChaCha algorithm path is a misuse caught by
@@ -287,6 +294,7 @@ fn key_variant_must_match_algorithm() {
   assert!(matches!(err, EncryptionError::KeyMismatch));
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn unknown_algorithm_fails_both_directions() {
   let algo = EncryptAlgorithm::Unknown(99);
@@ -301,16 +309,22 @@ fn unknown_algorithm_fails_both_directions() {
   ));
 }
 
+#[cfg(feature = "aes-gcm")]
 fn k_a() -> SecretKey {
   SecretKey::Aes128([0xAA; 16])
 }
+
+#[cfg(feature = "aes-gcm")]
 fn k_b() -> SecretKey {
   SecretKey::Aes256([0xBB; 32])
 }
+
+#[cfg(feature = "chacha20-poly1305")]
 fn k_c() -> SecretKey {
   SecretKey::ChaCha20Poly1305([0xCC; 32])
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_new_has_only_primary() {
   let kr = Keyring::new(k_a());
@@ -318,6 +332,7 @@ fn keyring_new_has_only_primary() {
   assert!(kr.secondaries().is_empty());
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_with_secondaries_seeds_them() {
   let kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
@@ -325,6 +340,7 @@ fn keyring_with_secondaries_seeds_them() {
   assert_eq!(kr.secondaries().len(), 2);
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_insert_secondary_grows_list() {
   let mut kr = Keyring::new(k_a());
@@ -333,6 +349,7 @@ fn keyring_insert_secondary_grows_list() {
   assert_eq!(kr.secondaries().len(), 2);
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_insert_secondary_is_no_op_if_already_present() {
   let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
@@ -340,6 +357,7 @@ fn keyring_insert_secondary_is_no_op_if_already_present() {
   assert_eq!(kr.secondaries().len(), 1, "duplicates are not added");
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_remove_secondary_drops_the_named_key() {
   let mut kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
@@ -352,6 +370,7 @@ fn keyring_remove_secondary_drops_the_named_key() {
   );
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_remove_primary_errors() {
   let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
@@ -361,6 +380,7 @@ fn keyring_remove_primary_errors() {
   assert!(matches!(err, KeyringError::IsPrimary));
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_remove_unknown_errors() {
   let mut kr = Keyring::new(k_a());
@@ -370,6 +390,7 @@ fn keyring_remove_unknown_errors() {
   assert!(matches!(err, KeyringError::NotInRing));
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_promote_swaps_primary_and_secondary() {
   let mut kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
@@ -389,6 +410,7 @@ fn keyring_promote_swaps_primary_and_secondary() {
   );
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_promote_primary_is_no_op_ok() {
   let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
@@ -398,6 +420,7 @@ fn keyring_promote_primary_is_no_op_ok() {
   assert_eq!(kr.secondaries().len(), 1);
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_promote_unknown_errors() {
   let mut kr = Keyring::new(k_a());
@@ -405,6 +428,7 @@ fn keyring_promote_unknown_errors() {
   assert!(matches!(err, KeyringError::NotInRing));
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_allows_mixed_ciphers() {
   let kr = Keyring::with_secondaries(k_a(), vec![k_c()]);
@@ -415,6 +439,7 @@ fn keyring_allows_mixed_ciphers() {
   );
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn keyring_insert_distinguishes_aes256_from_chacha20_with_same_bytes() {
   // SecretKey::Aes256 and SecretKey::ChaCha20Poly1305 both carry [u8; 32]; the
@@ -447,6 +472,7 @@ fn encryption_options_default_is_disabled() {
   assert!(EncryptionOptions::default().keyring().is_none());
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_options_with_keyring_enables() {
   let kr = Keyring::new(SecretKey::Aes128([0u8; 16]));
@@ -459,6 +485,7 @@ fn encryption_options_with_keyring_enables() {
   );
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_options_set_and_clear_keyring() {
   let mut opts = EncryptionOptions::new();
@@ -668,6 +695,7 @@ fn encrypted_one_byte_past_plaintext_max_is_rejected() {
   }
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn encrypt_algorithm_u8_conversions_roundtrip() {
   for algo in [
@@ -699,6 +727,7 @@ fn keyring_error_display_strings_are_nonempty() {
   assert!(!KeyringError::NotInRing.to_string().is_empty());
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encryption_options_update_and_maybe_keyring() {
   let kr = Keyring::new(SecretKey::Aes128([3u8; 16]));
@@ -718,6 +747,7 @@ fn encryption_options_update_and_maybe_keyring() {
   assert!(!disabled.is_enabled());
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn decode_encrypted_frame_rejects_malformed_headers() {
   let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes128([0u8; 16])));
@@ -739,6 +769,7 @@ fn decode_encrypted_frame_rejects_malformed_headers() {
   ));
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn decode_encrypted_frame_unknown_algo_beats_short_length() {
   // The algorithm-tag check runs BEFORE the full-header length bound, so an
@@ -752,6 +783,7 @@ fn decode_encrypted_frame_unknown_algo_beats_short_length() {
   ));
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn decode_encrypted_frame_with_disabled_encryption_is_no_matching_key() {
   // A well-formed-length encrypted frame but no keyring configured: the
@@ -767,6 +799,7 @@ fn decode_encrypted_frame_with_disabled_encryption_is_no_matching_key() {
   ));
 }
 
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn decrypt_rejects_key_variant_algorithm_mismatch() {
   // The variant/algorithm precheck guards the decrypt path too (symmetric
@@ -802,6 +835,7 @@ fn aes_gcm_aes128_and_aes192_decrypt_fail_auth_on_corrupt_ciphertext() {
   }
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn keyring_insert_secondary_equal_to_primary_is_dropped() {
   // Inserting a key byte-equal to the primary hits the primary-equality

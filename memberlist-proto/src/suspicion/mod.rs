@@ -1,5 +1,7 @@
 //! Lifeguard suspicion-timer state.
 
+use derive_more::{IsVariant, TryUnwrap, Unwrap};
+
 use crate::{FxHashSet, Instant};
 use core::time::Duration;
 
@@ -53,7 +55,9 @@ pub struct Suspicion<I> {
 }
 
 /// Result of `Suspicion::confirm`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IsVariant, Unwrap, TryUnwrap)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
 pub enum Confirmation {
   /// The confirmation was new; the deadline was advanced. Carries the
   /// freshly-pulled-in deadline.
@@ -63,48 +67,7 @@ pub enum Confirmation {
   Ignored,
 }
 
-impl<I: Eq + core::hash::Hash + CheapClone> Suspicion<I> {
-  /// Construct a new suspicion state. `from` is the original suspector and
-  /// is excluded from confirmations (so a peer's own suspicion can't count
-  /// as a confirmation if it bounces back via gossip). `now` is the current
-  /// time the caller observed when transitioning the node to Suspect.
-  ///
-  /// If `k == 0`, the timer is fixed at `min` (no confirmations expected).
-  /// Otherwise, the timer starts at `max` and accelerates toward `min` as
-  /// confirmations arrive.
-  pub fn new(from: I, k: u32, min: Duration, max: Duration, now: Instant) -> Self {
-    let mut confirmations = FxHashSet::default();
-    confirmations.insert(from);
-    let initial_timeout = if k < 1 { min } else { max };
-    Self {
-      k,
-      min,
-      max,
-      start: now,
-      deadline: now + initial_timeout,
-      confirmations,
-      n: 0,
-    }
-  }
-
-  /// Register a confirmation from `from`. Returns whether the deadline was
-  /// advanced. The caller (Endpoint) is responsible for re-arming any
-  /// external timer using the new deadline.
-  pub fn confirm(&mut self, from: &I, now: Instant) -> Confirmation {
-    if self.n >= self.k {
-      return Confirmation::Ignored;
-    }
-    if self.confirmations.contains(from) {
-      return Confirmation::Ignored;
-    }
-    self.confirmations.insert(from.cheap_clone());
-    self.n += 1;
-    let elapsed = now.saturating_duration_since(self.start);
-    let remaining = remaining_suspicion_time(self.n, self.k, elapsed, self.min, self.max);
-    self.deadline = now + remaining;
-    Confirmation::Accepted(self.deadline)
-  }
-
+impl<I> Suspicion<I> {
   /// The current absolute deadline at which this suspicion times out.
   #[inline(always)]
   pub const fn deadline(&self) -> Instant {
@@ -128,6 +91,51 @@ impl<I: Eq + core::hash::Hash + CheapClone> Suspicion<I> {
   #[inline(always)]
   pub const fn started_at(&self) -> Instant {
     self.start
+  }
+}
+
+impl<I: Eq + core::hash::Hash> Suspicion<I> {
+  /// Construct a new suspicion state. `from` is the original suspector and
+  /// is excluded from confirmations (so a peer's own suspicion can't count
+  /// as a confirmation if it bounces back via gossip). `now` is the current
+  /// time the caller observed when transitioning the node to Suspect.
+  ///
+  /// If `k == 0`, the timer is fixed at `min` (no confirmations expected).
+  /// Otherwise, the timer starts at `max` and accelerates toward `min` as
+  /// confirmations arrive.
+  pub fn new(from: I, k: u32, min: Duration, max: Duration, now: Instant) -> Self {
+    let mut confirmations = FxHashSet::default();
+    confirmations.insert(from);
+    let initial_timeout = if k < 1 { min } else { max };
+    Self {
+      k,
+      min,
+      max,
+      start: now,
+      deadline: now + initial_timeout,
+      confirmations,
+      n: 0,
+    }
+  }
+}
+
+impl<I: Eq + core::hash::Hash + CheapClone> Suspicion<I> {
+  /// Register a confirmation from `from`. Returns whether the deadline was
+  /// advanced. The caller (Endpoint) is responsible for re-arming any
+  /// external timer using the new deadline.
+  pub fn confirm(&mut self, from: &I, now: Instant) -> Confirmation {
+    if self.n >= self.k {
+      return Confirmation::Ignored;
+    }
+    if self.confirmations.contains(from) {
+      return Confirmation::Ignored;
+    }
+    self.confirmations.insert(from.cheap_clone());
+    self.n += 1;
+    let elapsed = now.saturating_duration_since(self.start);
+    let remaining = remaining_suspicion_time(self.n, self.k, elapsed, self.min, self.max);
+    self.deadline = now + remaining;
+    Confirmation::Accepted(self.deadline)
   }
 }
 
