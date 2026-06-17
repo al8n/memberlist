@@ -7,13 +7,8 @@
 //! buffa-generated concrete codec in [`crate::messages`] using the
 //! [`crate::data::Data`] trait for the `I`/`A` byte fields.
 
-// ─── re-exports ──────────────────────────────────────────────────────────────
-
 pub use crate::{CheapClone, Node};
 
-// ─── Meta ────────────────────────────────────────────────────────────────────
-
-#[cfg(not(feature = "std"))]
 use std::{string::String, vec::Vec};
 
 use core::str::FromStr;
@@ -216,8 +211,6 @@ impl TryFrom<BytesMut> for Meta {
   }
 }
 
-// ─── ProtocolVersion / DelegateVersion ───────────────────────────────────────
-
 /// Delegate version
 #[derive(
   Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
@@ -283,8 +276,6 @@ impl From<ProtocolVersion> for u8 {
     }
   }
 }
-
-// ─── State / NodeState ───────────────────────────────────────────────────────
 
 use std::borrow::Cow;
 
@@ -548,8 +539,6 @@ impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for NodeSt
   }
 }
 
-// ─── Alive<I,A> ──────────────────────────────────────────────────────────────
-
 /// Alive message
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Alive<I, A> {
@@ -696,8 +685,6 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
   }
 }
 
-// ─── Suspect<I> / Dead<I> ────────────────────────────────────────────────────
-
 macro_rules! bad_bail_typed {
   (
     $(#[$meta:meta])*
@@ -799,8 +786,6 @@ bad_bail_typed!(
   /// Dead message
   Dead
 );
-
-// ─── Ack / Nack ──────────────────────────────────────────────────────────────
 
 /// Ack response is sent for a ping
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -913,8 +898,6 @@ impl Nack {
     self
   }
 }
-
-// ─── Ping<I,A> / IndirectPing<I,A> ───────────────────────────────────────────
 
 macro_rules! bail_ping_typed {
   (
@@ -1042,8 +1025,6 @@ impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
   }
 }
 
-// ─── ErrorResponse ───────────────────────────────────────────────────────────
-
 use smol_str::SmolStr;
 
 /// Error response from the remote peer
@@ -1103,8 +1084,6 @@ impl From<SmolStr> for ErrorResponse {
     Self { message: msg }
   }
 }
-
-// ─── PushNodeState<I,A> ──────────────────────────────────────────────────────
 
 /// Push node state is the state push to the remote server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1309,8 +1288,6 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
   }
 }
 
-// ─── PushPull<I,A> ───────────────────────────────────────────────────────────
-
 use triomphe::Arc;
 
 /// Push pull message.
@@ -1452,8 +1429,6 @@ impl<I, A> PushPull<I, A> {
     (self.join, self.user_data, self.states)
   }
 }
-
-// ─── owned Message<I,A> enum ─────────────────────────────────────────────────
 
 /// Tag constants for the owned `Message` enum variants.
 pub mod message_tags {

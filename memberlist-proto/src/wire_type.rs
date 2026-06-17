@@ -4,10 +4,12 @@
 //! implementation in `memberlist-proto::utils` so that the `data` module can
 //! perform protobuf-like field encoding without depending on `memberlist-proto`.
 
+use derive_more::IsVariant;
+
 use crate::data::DecodeError;
 
 /// A wire type used in Protobuf-like encoding/decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum WireType {
