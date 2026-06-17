@@ -101,7 +101,7 @@ impl SizeExceeded {
 /// Error constructing an [`Endpoint`](crate::endpoint::Endpoint) via the
 /// fallible [`try_new`](crate::endpoint::Endpoint::try_new) /
 /// [`try_new_at`](crate::endpoint::Endpoint::try_new_at) constructors.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, derive_more::From)]
 #[non_exhaustive]
 pub enum EndpointInitError {
   /// `EndpointOptions::initial_meta` is larger than the configured
@@ -110,8 +110,8 @@ pub enum EndpointInitError {
   /// raise `with_meta_max_size`.
   #[error(
     "initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
-    .0.meta_len,
-    .0.max
+    .0.meta_len(),
+    .0.max()
   )]
   MetaTooLarge(MetaTooLarge),
   /// `with_awareness_max_multiplier` was set to 0. The Lifeguard awareness
@@ -126,9 +126,30 @@ pub enum EndpointInitError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetaTooLarge {
   /// The configured `initial_meta` length in bytes.
-  pub meta_len: usize,
+  meta_len: usize,
   /// The configured `meta_max_size` ceiling in bytes.
-  pub max: usize,
+  max: usize,
+}
+
+impl MetaTooLarge {
+  /// Build from the `initial_meta` length and the `meta_max_size` ceiling, both
+  /// in bytes.
+  #[inline(always)]
+  pub const fn new(meta_len: usize, max: usize) -> Self {
+    Self { meta_len, max }
+  }
+
+  /// The configured `initial_meta` length in bytes.
+  #[inline(always)]
+  pub const fn meta_len(&self) -> usize {
+    self.meta_len
+  }
+
+  /// The configured `meta_max_size` ceiling in bytes.
+  #[inline(always)]
+  pub const fn max(&self) -> usize {
+    self.max
+  }
 }
 
 /// Error from a per-stream reliable-exchange state machine.

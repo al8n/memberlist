@@ -24,13 +24,28 @@ use buffa::Message as _;
 use bytes::Bytes;
 use varing::encoded_u32_varint_len;
 
-use crate::{
-  checksum::ChecksumError,
-  compression::CompressionError,
-  encryption::EncryptionError,
-  messages::memberlist::v1::{
-    Ack, Alive, Dead, ErrorResponse, IndirectPing, Nack, Ping, PushPull, Suspect, UserData,
-  },
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+use crate::compression::CompressionError;
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
+use crate::checksum::ChecksumError;
+
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305",))]
+use crate::encryption::{EncryptionError, EncryptionOptions};
+
+use crate::messages::memberlist::v1::{
+  Ack, Alive, Dead, ErrorResponse, IndirectPing, Nack, Ping, PushPull, Suspect, UserData,
 };
 
 /// One-byte tag identifying which message variant follows. Matches the
@@ -224,16 +239,53 @@ pub enum FrameError {
   /// A compressed wrapper frame failed to decode (corrupt bytes, an unknown
   /// algorithm, or a declared length over the bomb-guard ceiling).
   #[error("compressed frame decode failed: {0}")]
+  #[cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   Compression(#[from] CompressionError),
   /// An encrypted wrapper frame failed to decode (corrupt bytes, an unknown
   /// algorithm, a declared length over the bomb-guard ceiling, or every
   /// variant-filtered key in the keyring failed AEAD auth).
   #[error("encrypted frame decode failed: {0}")]
+  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   Encryption(#[from] EncryptionError),
   /// A checksumed wrapper frame failed to verify (a recomputed digest did not
   /// match the carried digest, or the algorithm tag is unknown / its backend
   /// feature is not built in).
   #[error("checksumed frame decode failed: {0}")]
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   Checksum(#[from] ChecksumError),
   /// After every transform wrapper was stripped, the recovered gossip frame
   /// exceeds the plaintext ceiling. The decrypt step allows a checksum
@@ -571,10 +623,15 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
 /// guard for `Compressed` and the ciphertext-bomb guard for `Encrypted`); it
 /// is the UDP max-packet-size on the gossip path and the reliable
 /// max-frame-size on the reliable path.
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
 pub fn unwrap_transforms_with_encryption<'a>(
   buf: &'a [u8],
   max_orig_len: usize,
-  encryption: &crate::encryption::EncryptionOptions,
+  encryption: &EncryptionOptions,
 ) -> Result<std::borrow::Cow<'a, [u8]>, FrameError> {
   use std::borrow::Cow;
   // Strict mode: when encryption is configured, the OUTERMOST inbound frame

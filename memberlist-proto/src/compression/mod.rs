@@ -17,7 +17,7 @@
 
 use std::{string::ToString, vec::Vec};
 
-use derive_more::IsVariant;
+use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 use crate::framing::{
   FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
@@ -114,7 +114,9 @@ const _: () = {
 /// was produced with. Each backend is opt-in behind its own feature; a node
 /// that decodes a tag it was not built with yields [`CompressAlgorithm::Unknown`]
 /// and fails the decode cleanly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant, Unwrap, TryUnwrap)]
+#[repr(u8)]
+#[non_exhaustive]
 pub enum CompressAlgorithm {
   /// Zstd — high ratio. Feature `zstd`, backed by `zstd`.
   #[cfg(feature = "zstd")]

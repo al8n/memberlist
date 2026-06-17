@@ -320,10 +320,10 @@ pub use data::{
   Data, DataRef, DuplicateFieldInfo, EncodeError, InsufficientBufferCapacity, MissingFieldInfo,
   UnknownTagInfo, UnknownWireTypeInfo,
 };
-#[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[cfg_attr(
   docsrs,
-  doc(cfg(any(feature = "aes-gcm", feature = "chacha20poly1305")))
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
 )]
 pub use encryption::{
   ENCRYPTED_TAG, ENCRYPTED_WRAPPER_OVERHEAD, EncryptAlgorithm, EncryptionError, EncryptionOptions,

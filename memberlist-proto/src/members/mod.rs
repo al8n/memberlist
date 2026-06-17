@@ -1,17 +1,19 @@
 //! Cluster membership state.
 
-use crate::Instant;
+use core::hash::Hash;
 use std::sync::Arc;
 
 use crate::{
-  Id, Node,
+  Node,
   typed::{NodeState, State},
 };
+
+use cheap_clone::CheapClone;
 use indexmap::IndexMap;
 use rand::{Rng, RngExt};
 use smallvec::SmallVec;
 
-use crate::suspicion::Suspicion;
+use crate::{Instant, suspicion::Suspicion};
 
 /// Local extension of a peer's wire-protocol [`NodeState`]: adds the bookkeeping
 /// fields the gossip state machine mutates over time (incarnation, current
@@ -198,10 +200,7 @@ pub struct Members<I, A> {
   node_map: IndexMap<I, usize, rustc_hash::FxBuildHasher>,
 }
 
-impl<I, A> Members<I, A>
-where
-  I: Id,
-{
+impl<I, A> Members<I, A> {
   /// Construct an empty container. `local` is the local node's identity
   /// (id + advertise address); it is stored but NOT inserted into `nodes`.
   /// The local node is added like any other peer via `insert`.
@@ -231,6 +230,36 @@ where
     self.nodes.is_empty()
   }
 
+  /// Iterate over all members in vector order.
+  #[inline(always)]
+  pub fn iter(&self) -> impl Iterator<Item = &Member<I, A>> {
+    self.nodes.iter()
+  }
+
+  /// Mutable iterate over all members in vector order.
+  #[inline(always)]
+  pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Member<I, A>> {
+    self.nodes.iter_mut()
+  }
+}
+
+impl<I, A> Members<I, A>
+where
+  I: Eq,
+{
+  /// True iff at least one member other than the local node is not dead/left.
+  pub fn any_alive(&self) -> bool {
+    self
+      .nodes
+      .iter()
+      .any(|m| !m.state_ref().dead_or_left() && m.state_ref().id_ref() != self.local.id_ref())
+  }
+}
+
+impl<I, A> Members<I, A>
+where
+  I: Eq + Hash,
+{
   /// Whether the given id is tracked.
   #[inline(always)]
   pub fn contains(&self, id: &I) -> bool {
@@ -251,16 +280,48 @@ where
     self.nodes.get_mut(idx)
   }
 
-  /// Iterate over all members in vector order.
-  #[inline(always)]
-  pub fn iter(&self) -> impl Iterator<Item = &Member<I, A>> {
-    self.nodes.iter()
+  /// Remove the member with the given id, returning it if present.
+  /// O(n) because it preserves order of remaining members (uses `Vec::remove`).
+  pub fn remove(&mut self, id: &I) -> Option<Member<I, A>> {
+    let idx = self.node_map.shift_remove(id)?;
+    let m = self.nodes.remove(idx);
+    for (_, slot) in self.node_map.iter_mut() {
+      if *slot > idx {
+        *slot -= 1;
+      }
+    }
+    Some(m)
+  }
+}
+
+impl<I, A> Members<I, A>
+where
+  I: Eq + Hash + CheapClone,
+{
+  /// Shuffle the member list using Fisher-Yates with the supplied RNG,
+  /// keeping `node_map` consistent.
+  pub fn shuffle(&mut self, rng: &mut impl Rng) {
+    let n = self.nodes.len();
+    for i in (1..n).rev() {
+      let j = rng.random_range(0..=i);
+      if i != j {
+        let id_i = self.nodes[i].state_ref().id_ref().cheap_clone();
+        let id_j = self.nodes[j].state_ref().id_ref().cheap_clone();
+        self.nodes.swap(i, j);
+        *self.node_map.get_mut(&id_i).unwrap() = j;
+        *self.node_map.get_mut(&id_j).unwrap() = i;
+      }
+    }
   }
 
-  /// Mutable iterate over all members in vector order.
-  #[inline(always)]
-  pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Member<I, A>> {
-    self.nodes.iter_mut()
+  /// Insert a new member at a uniformly random position.
+  ///
+  /// Convenience wrapper around `insert_at_random_at` that picks the offset
+  /// using the supplied RNG. See `insert_at_random_at` for the full doc.
+  pub fn insert_at_random(&mut self, m: Member<I, A>, rng: &mut impl Rng) {
+    let n = self.nodes.len();
+    let target = if n == 0 { 0 } else { rng.random_range(0..=n) };
+    self.insert_at_random_at(m, target);
   }
 
   /// Insert a new member at the end. If a member with the same id already
@@ -276,16 +337,6 @@ where
     self.nodes.push(m);
     self.node_map.insert(id, idx);
     None
-  }
-
-  /// Insert a new member at a uniformly random position.
-  ///
-  /// Convenience wrapper around `insert_at_random_at` that picks the offset
-  /// using the supplied RNG. See `insert_at_random_at` for the full doc.
-  pub fn insert_at_random(&mut self, m: Member<I, A>, rng: &mut impl Rng) {
-    let n = self.nodes.len();
-    let target = if n == 0 { 0 } else { rng.random_range(0..=n) };
-    self.insert_at_random_at(m, target);
   }
 
   /// Insert a new member at the given position (Fisher-Yates style:
@@ -313,43 +364,6 @@ where
       *self.node_map.get_mut(&id).unwrap() = target;
       *self.node_map.get_mut(&displaced_id).unwrap() = n;
     }
-  }
-
-  /// Remove the member with the given id, returning it if present.
-  /// O(n) because it preserves order of remaining members (uses `Vec::remove`).
-  pub fn remove(&mut self, id: &I) -> Option<Member<I, A>> {
-    let idx = self.node_map.shift_remove(id)?;
-    let m = self.nodes.remove(idx);
-    for (_, slot) in self.node_map.iter_mut() {
-      if *slot > idx {
-        *slot -= 1;
-      }
-    }
-    Some(m)
-  }
-
-  /// Shuffle the member list using Fisher-Yates with the supplied RNG,
-  /// keeping `node_map` consistent.
-  pub fn shuffle(&mut self, rng: &mut impl Rng) {
-    let n = self.nodes.len();
-    for i in (1..n).rev() {
-      let j = rng.random_range(0..=i);
-      if i != j {
-        let id_i = self.nodes[i].state_ref().id_ref().cheap_clone();
-        let id_j = self.nodes[j].state_ref().id_ref().cheap_clone();
-        self.nodes.swap(i, j);
-        *self.node_map.get_mut(&id_i).unwrap() = j;
-        *self.node_map.get_mut(&id_j).unwrap() = i;
-      }
-    }
-  }
-
-  /// True iff at least one member other than the local node is not dead/left.
-  pub fn any_alive(&self) -> bool {
-    self
-      .nodes
-      .iter()
-      .any(|m| !m.state_ref().dead_or_left() && m.state_ref().id_ref() != self.local.id_ref())
   }
 }
 

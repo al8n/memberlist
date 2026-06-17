@@ -408,24 +408,28 @@ fn aes_gcm_encrypt(
   // `GenericArray::from_slice` constructor (`generic-array` 0.14 nudges toward 1.x).
   let mut buf = plaintext.to_vec();
   match key {
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes128(k) => {
       let cipher = Aes128Gcm::new(&(*k).into());
       cipher
         .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes192(k) => {
       let cipher = Aes192Gcm::new(&(*k).into());
       cipher
         .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes256(k) => {
       let cipher = Aes256Gcm::new(&(*k).into());
       cipher
         .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "chacha20-poly1305")]
     SecretKey::ChaCha20Poly1305(_) => {
       // Precheck in encrypt() guarantees this arm is never reached.
       unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()")

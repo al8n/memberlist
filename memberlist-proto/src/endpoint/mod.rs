@@ -2,9 +2,8 @@
 
 use crate::Instant;
 use core::{marker::PhantomData, time::Duration};
-#[cfg(not(feature = "std"))]
-use std::{boxed::Box, vec::Vec};
-use std::{collections::VecDeque, sync::Arc};
+
+use std::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 
 use crate::{
   CheapClone, Data, FxHashMap, FxHashSet, Id, Node,
@@ -14,6 +13,7 @@ use crate::{
   },
 };
 use bytes::Bytes;
+use derive_more::IsVariant;
 use rand::{Rng, RngExt, rngs::SmallRng, seq::IteratorRandom};
 
 use crate::{
@@ -22,7 +22,8 @@ use crate::{
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
   config::EndpointOptions,
-  error::EndpointInitError,
+  delegate::{AliveDelegate, MergeDelegate},
+  error::{EndpointInitError, Error, MetaTooLarge, SizeExceeded},
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
     PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse, Transmit,
@@ -41,7 +42,8 @@ mod swim_parity_tests;
 
 /// Endpoint lifecycle state. Mutually exclusive: an Endpoint is in exactly
 /// one of these states. Replaces the legacy twin booleans `leaving` + `left`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant, derive_more::Display)]
+#[display("{}", self.as_str())]
 pub enum Lifecycle {
   /// Normal operation. Probes, gossip, push/pull all proceed.
   Running,
@@ -50,6 +52,18 @@ pub enum Lifecycle {
   Leaving,
   /// The local node has completed leaving. Most operations are no-ops.
   Left,
+}
+
+impl Lifecycle {
+  /// String representation for diagnostics and debugging.
+  #[inline(always)]
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Running => "running",
+      Self::Leaving => "leaving",
+      Self::Left => "left",
+    }
+  }
 }
 
 /// Maximum size of node-meta payload that can be carried in an `Alive` message.
@@ -83,7 +97,7 @@ pub const LOCAL_STATE_FRAME_BUDGET: usize = 1024 * 1024;
 pub fn validate_local_state_snapshot<I, A>(
   snapshot: &Bytes,
   max_stream_frame_size: usize,
-) -> Result<(), crate::error::Error>
+) -> Result<(), Error>
 where
   I: Data,
   A: Data,
@@ -97,9 +111,10 @@ where
     .len();
   let budget = max_stream_frame_size.saturating_sub(LOCAL_STATE_FRAME_BUDGET);
   if encoded_len > budget {
-    return Err(crate::error::Error::LocalStateExceedsFrame(
-      crate::error::SizeExceeded::new(encoded_len, budget),
-    ));
+    return Err(Error::LocalStateExceedsFrame(SizeExceeded::new(
+      encoded_len,
+      budget,
+    )));
   }
   Ok(())
 }
@@ -235,8 +250,8 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // Synchronous admission delegates. Called INLINE while processing an
   // inbound Alive / join push-pull — no deferral, so there is no
   // decision-boundary gap for ordering/timing races. `None` = accept all.
-  alive_delegate: Option<Box<dyn crate::delegate::AliveDelegate<I, A>>>,
-  merge_delegate: Option<Box<dyn crate::delegate::MergeDelegate<I, A>>>,
+  alive_delegate: Option<Box<dyn AliveDelegate<I, A>>>,
+  merge_delegate: Option<Box<dyn MergeDelegate<I, A>>>,
 
   /// Monotonically-increasing counter for allocating `StreamId`s.
   next_stream_id: u64,
@@ -261,25 +276,7 @@ pub struct Endpoint<I, A, R = SmallRng> {
   next_pushpull: Option<Instant>,
 }
 
-// Accessors whose bodies only touch non-generic fields (`Awareness`,
-// `Lifecycle`, primitive config getters). Re-states only the struct's
-// well-formedness bag — no method-side additions, so the heavier
-// `Debug + Display + Send + Sync + 'static` constraints `I` carries on the
-// methods below are NOT required to call any of these.
-impl<I, A, R> Endpoint<I, A, R>
-where
-  R: Rng,
-  I: Id + Data + CheapClone,
-  A: CheapClone
-    + Data
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-{
+impl<I, A, R> Endpoint<I, A, R> {
   /// The local node's Lifeguard health score (`0` = fully healthy; higher is
   /// worse). Mirrors `memberlist-core`'s `health_score`.
   #[inline]
@@ -302,20 +299,23 @@ where
   }
 
   /// The current lifecycle state of this endpoint.
+  #[inline(always)]
   pub const fn lifecycle(&self) -> Lifecycle {
     self.lifecycle
   }
 
   /// Returns `true` if this endpoint is in normal operation (not leaving or left).
-  pub fn is_running(&self) -> bool {
-    matches!(self.lifecycle, Lifecycle::Running)
+  #[inline(always)]
+  pub const fn is_running(&self) -> bool {
+    self.lifecycle.is_running()
   }
 
   /// The single post-leave guard for the fallible runtime operations: `Ok`
   /// while running, `Err(NotRunning)` once leaving or left. Every config setter,
   /// data send, and reliable/ping initiator that returns a `Result` funnels its
   /// lifecycle check through here so the leave contract is named in one place.
-  fn ensure_running(&self) -> Result<(), crate::error::Error> {
+  #[inline(always)]
+  const fn ensure_running(&self) -> Result<(), crate::error::Error> {
     if self.is_running() {
       Ok(())
     } else {
@@ -325,13 +325,15 @@ where
 
   /// Whether the local node has finished leaving (after `leave()` and the
   /// dead-self broadcast has been emitted).
-  pub fn is_left(&self) -> bool {
-    matches!(self.lifecycle, Lifecycle::Left)
+  #[inline(always)]
+  pub const fn is_left(&self) -> bool {
+    self.lifecycle.is_left()
   }
 
   /// Whether the local node is in the process of leaving.
-  pub fn is_leaving(&self) -> bool {
-    matches!(self.lifecycle, Lifecycle::Leaving)
+  #[inline(always)]
+  pub const fn is_leaving(&self) -> bool {
+    self.lifecycle.is_leaving()
   }
 
   /// The configured maximum reliable stream frame size. The composed
@@ -339,6 +341,10 @@ where
   /// decompressed-payload ceiling so the limit always tracks
   /// `EndpointOptions::max_stream_frame_size` rather than a separate constant.
   #[cfg(any(feature = "tls", feature = "tcp", feature = "quic"))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "tls", feature = "tcp", feature = "quic")))
+  )]
   pub(crate) const fn max_stream_frame_size(&self) -> usize {
     self.cfg.max_stream_frame_size()
   }
@@ -351,7 +357,8 @@ where
   /// [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
   /// enabled — the ceiling bounds the FSM's plaintext budget, not the
   /// post-encryption wire size.
-  pub(crate) const fn gossip_mtu(&self) -> usize {
+  #[inline(always)]
+  pub const fn gossip_mtu(&self) -> usize {
     self.cfg.gossip_mtu()
   }
 
@@ -361,9 +368,143 @@ where
   /// [`EndpointOptions::with_accept_handshake_deadline`]. Gated on a
   /// feature config that compiles the `streams` module — under
   /// QUIC-only or default builds the accessor has no callers.
-  #[cfg_attr(not(any(feature = "tcp", feature = "tls")), allow(dead_code))]
-  pub(crate) const fn accept_handshake_deadline(&self) -> Duration {
+  #[inline(always)]
+  pub const fn accept_handshake_deadline(&self) -> Duration {
     self.cfg.accept_handshake_deadline()
+  }
+
+  pub(crate) fn emit_event(&mut self, ev: Event<I, A>) {
+    // Membership-content changes always flow through one of these three events
+    // (insert -> Joined, meta/addr/incarnation update -> Updated, dead/left ->
+    // Left), so bumping here covers them; the silent snapshot-relevant changes
+    // (Suspect transition, reset_nodes removal, health) bump explicitly.
+    if matches!(
+      ev,
+      Event::NodeJoined(_) | Event::NodeUpdated(_) | Event::NodeLeft(_)
+    ) {
+      self.bump_snapshot_version();
+    }
+    self.pending_events.push_back(ev);
+  }
+
+  /// Mark the membership/health snapshot dirty so a driver republishes it.
+  #[inline(always)]
+  pub(crate) const fn bump_snapshot_version(&mut self) {
+    self.snapshot_version = self.snapshot_version.wrapping_add(1);
+  }
+
+  /// A monotonically-changing version of the snapshot-relevant state
+  /// (membership + health). A driver caches the last value it published and
+  /// rebuilds its snapshot only when this differs. See [`Self::snapshot_version`
+  /// field docs](Endpoint).
+  #[inline(always)]
+  pub const fn snapshot_version(&self) -> u64 {
+    self.snapshot_version
+  }
+
+  /// A snapshot of the machine's cumulative operational counters (load shed at
+  /// the membership / ingress / amplification bounds). See [`crate::metrics`].
+  #[inline]
+  pub const fn metrics(&self) -> &crate::metrics::Metrics {
+    &self.metrics
+  }
+
+  /// Mutable access for the machine's own bound-shedding sites to bump a counter.
+  #[inline(always)]
+  pub const fn metrics_mut(&mut self) -> &mut crate::metrics::Metrics {
+    &mut self.metrics
+  }
+
+  /// increment + return the next incarnation.
+  ///
+  /// Wraps at `u32::MAX`. The u32 incarnation space is the wire protocol;
+  /// a `u32::MAX` accusation is unrefutable on wrap (it becomes 0, rejected
+  /// by peers as `0 < MAX`). Diverging with a saturating clamp or a widened
+  /// type would break wire compatibility.
+  pub(crate) fn next_incarnation(&mut self) -> u32 {
+    self.incarnation = self.incarnation.wrapping_add(1);
+    self.incarnation
+  }
+
+  /// advance the incarnation past `accused_inc` and return it. Wraps at
+  /// `u32::MAX` (same wire-format reasoning as [`next_incarnation`]).
+  pub(crate) fn skip_incarnation_past(&mut self, accused_inc: u32) -> u32 {
+    if self.incarnation <= accused_inc {
+      self.incarnation = accused_inc.wrapping_add(1);
+    }
+    self.incarnation
+  }
+
+  /// Returns the mutable access to the RNG.
+  #[inline(always)]
+  pub const fn rng_mut(&mut self) -> &mut R {
+    &mut self.rng
+  }
+
+  /// Allocate a fresh `StreamId` for a new reliable stream exchange.
+  pub(crate) fn allocate_stream_id(&mut self) -> StreamId {
+    let id = StreamId::from_raw(self.next_stream_id);
+    self.next_stream_id += 1;
+    id
+  }
+
+  /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
+  /// admission filter. Called inline for every inbound alive; `None` (the
+  /// default) admits all. The delegate must be pure/non-blocking — see the
+  /// [`delegate`](crate::delegate) module contract.
+  pub fn set_alive_delegate(&mut self, d: impl AliveDelegate<I, A>) {
+    self.alive_delegate = Some(Box::new(d));
+  }
+
+  /// Install the synchronous [`MergeDelegate`](crate::delegate::MergeDelegate)
+  /// filter, consulted for every push/pull (a join and an anti-entropy
+  /// refresh alike). `None` (the default) admits all.
+  pub fn set_merge_delegate(&mut self, d: impl MergeDelegate<I, A>) {
+    self.merge_delegate = Some(Box::new(d));
+  }
+
+  /// The local node's id.
+  #[inline(always)]
+  pub const fn local_id_ref(&self) -> &I {
+    self.cfg.local_id_ref()
+  }
+
+  /// The local node's advertise address.
+  #[inline(always)]
+  pub const fn advertise_ref(&self) -> &A {
+    self.cfg.advertise_addr_ref()
+  }
+}
+
+impl<I, A, R> Endpoint<I, A, R>
+where
+  I: Eq + core::hash::Hash,
+{
+  /// Iterate over all known members' wire-format `NodeState`.
+  pub fn members(&self) -> impl Iterator<Item = Arc<NodeState<I, A>>> + '_ {
+    self.members.iter().map(|m| m.state_ref().server_arc())
+  }
+
+  /// Look up a member by id.
+  pub fn member(&self, id: &I) -> Option<Arc<NodeState<I, A>>> {
+    self.members.get(id).map(|m| m.state_ref().server_arc())
+  }
+
+  /// Return the gossip-tracked liveness state for a member.
+  ///
+  /// Unlike [`member`](Self::member), which returns the wire-protocol
+  /// `NodeState` (whose `state` field is fixed at insertion), this method
+  /// returns the value maintained by the gossip state machine and reflects
+  /// Suspect / Dead transitions.
+  ///
+  /// Returns `None` if `id` is not known to this endpoint.
+  pub fn member_liveness(&self, id: &I) -> Option<State> {
+    self.members.get(id).map(|m| m.state_ref().state())
+  }
+
+  /// Number of tracked members.
+  pub fn num_members(&self) -> usize {
+    self.members.len()
   }
 }
 
@@ -373,7 +514,7 @@ where
 impl<I, A, R> Endpoint<I, A, R>
 where
   R: Rng,
-  I: Id + Data + CheapClone + core::fmt::Debug + core::fmt::Display + Send + Sync + 'static,
+  I: Id + Data,
   A: CheapClone
     + Data
     + Eq
@@ -406,12 +547,7 @@ where
     // awareness tracker would be unconstructable. Reject at construction rather
     // than panicking or silently shipping a mismatch.
     if cfg.initial_meta_ref().len() > cfg.meta_max_size() {
-      return Err(EndpointInitError::MetaTooLarge(
-        crate::error::MetaTooLarge {
-          meta_len: cfg.initial_meta_ref().len(),
-          max: cfg.meta_max_size(),
-        },
-      ));
+      return Err(MetaTooLarge::new(cfg.initial_meta_ref().len(), cfg.meta_max_size()).into());
     }
     if cfg.awareness_max_multiplier() == 0 {
       return Err(EndpointInitError::AwarenessMultiplierZero);
@@ -497,6 +633,7 @@ where
   /// virtual- or embedded-clock drivers use `try_new_at` with their own `now`
   /// so the machine never reads a clock the driver does not own.
   #[cfg(feature = "std")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
   pub fn try_new(cfg: EndpointOptions<I, A>, rng: R) -> Result<Self, EndpointInitError> {
     Self::try_new_at(cfg, Instant::now(), rng)
   }
@@ -510,62 +647,9 @@ where
   /// Panics on a seedless config when the platform entropy source is
   /// unavailable — see [`Endpoint::try_new`].
   #[cfg(feature = "std")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
   pub fn new(cfg: EndpointOptions<I, A>, rng: R) -> Self {
     Self::new_at(cfg, Instant::now(), rng)
-  }
-
-  /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
-  /// admission filter. Called inline for every inbound alive; `None` (the
-  /// default) admits all. The delegate must be pure/non-blocking — see the
-  /// [`delegate`](crate::delegate) module contract.
-  pub fn set_alive_delegate(&mut self, d: impl crate::delegate::AliveDelegate<I, A>) {
-    self.alive_delegate = Some(Box::new(d));
-  }
-
-  /// Install the synchronous [`MergeDelegate`](crate::delegate::MergeDelegate)
-  /// filter, consulted for every push/pull (a join and an anti-entropy
-  /// refresh alike). `None` (the default) admits all.
-  pub fn set_merge_delegate(&mut self, d: impl crate::delegate::MergeDelegate<I, A>) {
-    self.merge_delegate = Some(Box::new(d));
-  }
-
-  /// The local node's id.
-  #[inline(always)]
-  pub fn local_id_ref(&self) -> &I {
-    self.cfg.local_id_ref()
-  }
-
-  /// The local node's advertise address.
-  #[inline(always)]
-  pub fn advertise_ref(&self) -> &A {
-    self.cfg.advertise_addr_ref()
-  }
-
-  /// Iterate over all known members' wire-format `NodeState`.
-  pub fn members(&self) -> impl Iterator<Item = Arc<NodeState<I, A>>> + '_ {
-    self.members.iter().map(|m| m.state_ref().server_arc())
-  }
-
-  /// Look up a member by id.
-  pub fn member(&self, id: &I) -> Option<Arc<NodeState<I, A>>> {
-    self.members.get(id).map(|m| m.state_ref().server_arc())
-  }
-
-  /// Return the gossip-tracked liveness state for a member.
-  ///
-  /// Unlike [`member`](Self::member), which returns the wire-protocol
-  /// `NodeState` (whose `state` field is fixed at insertion), this method
-  /// returns the value maintained by the gossip state machine and reflects
-  /// Suspect / Dead transitions.
-  ///
-  /// Returns `None` if `id` is not known to this endpoint.
-  pub fn member_liveness(&self, id: &I) -> Option<State> {
-    self.members.get(id).map(|m| m.state_ref().state())
-  }
-
-  /// Number of tracked members.
-  pub fn num_members(&self) -> usize {
-    self.members.len()
   }
 
   pub(crate) fn broadcast_alive(&mut self, state: &LocalNodeState<I, A>) {
@@ -591,80 +675,6 @@ where
       .queue_broadcast(MemberlistBroadcast::new(node, msg));
   }
 
-  pub(crate) fn emit_event(&mut self, ev: Event<I, A>) {
-    // Membership-content changes always flow through one of these three events
-    // (insert -> Joined, meta/addr/incarnation update -> Updated, dead/left ->
-    // Left), so bumping here covers them; the silent snapshot-relevant changes
-    // (Suspect transition, reset_nodes removal, health) bump explicitly.
-    if matches!(
-      ev,
-      Event::NodeJoined(_) | Event::NodeUpdated(_) | Event::NodeLeft(_)
-    ) {
-      self.bump_snapshot_version();
-    }
-    self.pending_events.push_back(ev);
-  }
-
-  /// Mark the membership/health snapshot dirty so a driver republishes it.
-  #[inline(always)]
-  pub(crate) fn bump_snapshot_version(&mut self) {
-    self.snapshot_version = self.snapshot_version.wrapping_add(1);
-  }
-
-  /// A monotonically-changing version of the snapshot-relevant state
-  /// (membership + health). A driver caches the last value it published and
-  /// rebuilds its snapshot only when this differs. See [`Self::snapshot_version`
-  /// field docs](Endpoint).
-  #[inline(always)]
-  pub fn snapshot_version(&self) -> u64 {
-    self.snapshot_version
-  }
-
-  /// A snapshot of the machine's cumulative operational counters (load shed at
-  /// the membership / ingress / amplification bounds). See [`crate::metrics`].
-  #[inline]
-  pub fn metrics(&self) -> crate::metrics::Metrics {
-    self.metrics
-  }
-
-  /// Mutable access for the machine's own bound-shedding sites to bump a counter.
-  #[inline(always)]
-  pub(crate) fn metrics_mut(&mut self) -> &mut crate::metrics::Metrics {
-    &mut self.metrics
-  }
-
-  /// increment + return the next incarnation.
-  ///
-  /// Wraps at `u32::MAX`. The u32 incarnation space is the wire protocol;
-  /// a `u32::MAX` accusation is unrefutable on wrap (it becomes 0, rejected
-  /// by peers as `0 < MAX`). Diverging with a saturating clamp or a widened
-  /// type would break wire compatibility.
-  pub(crate) fn next_incarnation(&mut self) -> u32 {
-    self.incarnation = self.incarnation.wrapping_add(1);
-    self.incarnation
-  }
-
-  /// advance the incarnation past `accused_inc` and return it. Wraps at
-  /// `u32::MAX` (same wire-format reasoning as [`next_incarnation`]).
-  pub(crate) fn skip_incarnation_past(&mut self, accused_inc: u32) -> u32 {
-    if self.incarnation <= accused_inc {
-      self.incarnation = accused_inc.wrapping_add(1);
-    }
-    self.incarnation
-  }
-
-  #[allow(dead_code)]
-  pub(crate) fn rng_mut(&mut self) -> &mut R {
-    &mut self.rng
-  }
-
-  /// Allocate a fresh `StreamId` for a new reliable stream exchange.
-  pub(crate) fn allocate_stream_id(&mut self) -> StreamId {
-    let id = StreamId::from_raw(self.next_stream_id);
-    self.next_stream_id += 1;
-    id
-  }
-
   /// Process an incoming Alive announcement.
   ///
   /// The optional [`AliveDelegate`] admission filter is invoked **inline**;
@@ -686,7 +696,7 @@ where
     // and push/pull merges both route Alives through here, so this single gate
     // keeps membership admission inert for the entire drain while the dead-self
     // flush and in-flight stream closes proceed.
-    if self.lifecycle != Lifecycle::Running {
+    if !self.lifecycle.is_running() {
       return;
     }
 
@@ -719,8 +729,9 @@ where
     bootstrap: bool,
     now: Instant,
   ) {
-    let alive_id = alive.node_ref().id_ref().cheap_clone();
-    let alive_addr = alive.node_ref().addr_ref().cheap_clone();
+    let node_ref = alive.node_ref();
+    let alive_id = node_ref.id_ref().cheap_clone();
+    let alive_addr = node_ref.addr_ref().cheap_clone();
     let alive_incarnation = alive.incarnation();
     let alive_meta = alive.meta_ref().cheap_clone();
     let alive_protocol = alive.protocol_version();
@@ -742,7 +753,7 @@ where
           && now.saturating_duration_since(existing.state_ref().state_change())
             > self.cfg.dead_node_reclaim_time();
         let st = existing.state_ref().state();
-        if st == State::Left || (st == State::Dead && can_reclaim) {
+        if st.is_left() || (st.is_dead() && can_reclaim) {
           // Adopt the new address.
           updates_address = true;
         } else {
@@ -844,10 +855,11 @@ where
     let new_meta = new_server.meta_ref().cheap_clone();
     {
       let member = self.members.get_mut(&alive_id).expect("present");
-      member.state_mut().set_incarnation(alive_incarnation);
-      member.state_mut().set_server(new_server.clone());
-      if member.state_ref().state() != State::Alive {
-        member.state_mut().set_state(State::Alive, now);
+      let state_mut = member.state_mut();
+      state_mut.set_incarnation(alive_incarnation);
+      state_mut.set_server(new_server.clone());
+      if state_mut.state() != State::Alive {
+        state_mut.set_state(State::Alive, now);
       }
     }
 
@@ -866,7 +878,7 @@ where
       );
     }
 
-    if old_state == State::Dead || old_state == State::Left {
+    if old_state.is_dead() || old_state.is_left() {
       self.emit_event(Event::NodeJoined(new_server));
     } else if old_meta != new_meta {
       self.emit_event(Event::NodeUpdated(new_server));
@@ -890,7 +902,7 @@ where
     // No-op once leaving/left: refuting bumps our incarnation and
     // broadcasts a higher-incarnation Alive, which would resurrect a
     // node that has already left. Self-defense only applies while Running.
-    if self.lifecycle != Lifecycle::Running {
+    if !self.lifecycle.is_running() {
       return;
     }
     let mut new_inc = self.next_incarnation();
@@ -901,11 +913,15 @@ where
     self.bump_snapshot_version();
     if let Some(local) = self.members.get_mut(self.cfg.local_id_ref()) {
       local.state_mut().set_incarnation(new_inc);
-      let id = local.state_ref().id_ref().cheap_clone();
-      let addr = local.state_ref().address_ref().cheap_clone();
-      let meta = local.state_ref().server_ref().meta_ref().cheap_clone();
-      let pv = local.state_ref().server_ref().protocol_version();
-      let dv = local.state_ref().server_ref().delegate_version();
+
+      let local_state = local.state_ref();
+      let id = local_state.id_ref().cheap_clone();
+      let addr = local_state.address_ref().cheap_clone();
+
+      let local_server = local_state.server_ref();
+      let meta = local_server.meta_ref().cheap_clone();
+      let pv = local_server.protocol_version();
+      let dv = local_server.delegate_version();
       let alive = Alive::new(new_inc, Node::new(id.cheap_clone(), addr))
         .with_meta(meta)
         .with_protocol_version(pv)
@@ -982,7 +998,7 @@ where
         Some(s) => s.confirm(&from, now),
         None => crate::suspicion::Confirmation::Ignored,
       };
-      if matches!(confirmed, crate::suspicion::Confirmation::Accepted(_)) {
+      if confirmed.is_accepted() {
         self.broadcast_message(
           target.cheap_clone(),
           Message::Suspect(Suspect::new(inc, target, from)),
@@ -1013,8 +1029,9 @@ where
     let suspicion = crate::suspicion::Suspicion::new(from.cheap_clone(), k, min, max, now);
     let member = self.members.get_mut(&target).unwrap();
     member.set_suspicion(Some(suspicion));
-    member.state_mut().set_incarnation(inc);
-    member.state_mut().set_state(State::Suspect, now);
+    let member_state = member.state_mut();
+    member_state.set_incarnation(inc);
+    member_state.set_state(State::Suspect, now);
     // The Alive -> Suspect transition emits no membership event, so bump the
     // snapshot version explicitly.
     self.bump_snapshot_version();
@@ -1062,7 +1079,7 @@ where
     }
 
     if is_self {
-      if self.lifecycle != Lifecycle::Leaving {
+      if !self.lifecycle.is_leaving() {
         self.refute(inc);
         return;
       }
@@ -1091,28 +1108,34 @@ where
     // transition above drives leave to completion; an inbound or
     // expired-suspicion Dead about a peer must not mark it Dead/Left or emit
     // NodeLeft while we are draining.
-    if self.lifecycle != Lifecycle::Running {
+    if !self.lifecycle.is_running() {
       return;
     }
 
-    {
-      let m = self.members.get_mut(&target).unwrap();
+    if let Some(m) = self.members.get_mut(&target) {
       m.set_suspicion(None);
-      m.state_mut().set_incarnation(inc);
+      let current_state = m.state_mut();
+      current_state.set_incarnation(inc);
       let new_state = if self_marked {
         State::Left
       } else {
         State::Dead
       };
-      m.state_mut().set_state(new_state, now);
+      current_state.set_state(new_state, now);
     }
 
     self.broadcast_message(
       target.cheap_clone(),
       Message::Dead(Dead::new(inc, target.cheap_clone(), from)),
     );
-    let server = self.members.get(&target).unwrap().state_ref().server_arc();
-    self.emit_event(Event::NodeLeft(server));
+
+    if let Some(server) = self
+      .members
+      .get(&target)
+      .map(|m| m.state_ref().server_arc())
+    {
+      self.emit_event(Event::NodeLeft(server));
+    }
   }
 
   /// Merge a list of remote `PushNodeState` entries into local state.
@@ -1198,8 +1221,6 @@ where
       Some(d) => d.notify_merge(&Self::merge_peers_view(states)),
     }
   }
-
-  // ─────────────────────── Public typed handlers ───────────────────────────
 
   /// Driver feeds an incoming Alive message.
   pub(crate) fn handle_alive(&mut self, _from: A, alive: Alive<I, A>, at: Instant) {
@@ -2153,8 +2174,6 @@ where
       Message::PushPull(_) | Message::ErrorResponse(_) => {}
     }
   }
-
-  // ───────────────────────────── Outputs ───────────────────────────────────
 
   /// Drain the next application-facing event, or `None` if no event is queued.
   pub fn poll_event(&mut self) -> Option<Event<I, A>> {
