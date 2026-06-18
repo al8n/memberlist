@@ -101,9 +101,19 @@ pub use memberlist::Memberlist;
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
-pub use memberlist_proto::{
-  ChecksumAlgorithm, ChecksumOptions, Node, typed::NodeState as MemberlistNodeState,
-};
+#[cfg(checksum)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
+pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+pub use memberlist_proto::{Node, typed::NodeState as MemberlistNodeState};
 pub use options::{MemberlistOptions, Options, OptionsParts};
 pub use resolver::{
   AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,

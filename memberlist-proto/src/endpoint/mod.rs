@@ -2289,6 +2289,7 @@ where
   /// The configured full-exchange stream timeout. The stream coordinator uses it
   /// to bound an inbound push/pull RESPONSE window, so a large response on a slow
   /// link is not cut by a hardcoded deadline shorter than the request side's.
+  #[cfg(any(feature = "tls", feature = "tcp"))]
   #[inline(always)]
   pub(crate) fn stream_timeout(&self) -> Duration {
     self.cfg.stream_timeout()
@@ -2296,6 +2297,7 @@ where
 
   /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
   /// it to admission-gate inbound exchanges.
+  #[cfg(any(feature = "tls", feature = "tcp"))]
   #[inline(always)]
   pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
     self.cfg.max_inbound_streams()

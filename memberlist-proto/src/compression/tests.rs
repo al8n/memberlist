@@ -1,11 +1,6 @@
 use super::*;
 
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 #[test]
 fn algorithm_tag_roundtrip() {
   for algo in [
@@ -18,12 +13,7 @@ fn algorithm_tag_roundtrip() {
   }
 }
 
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 #[test]
 fn algorithm_tags_have_pinned_numeric_values() {
   // The numeric tags are a stable wire contract: a frame compressed by one

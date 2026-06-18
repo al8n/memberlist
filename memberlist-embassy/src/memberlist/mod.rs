@@ -14,10 +14,12 @@ use alloc::{rc::Rc, vec::Vec};
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
 use memberlist_embedded::{
-  AliveDelegate, ControlError, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig,
-  TransformOptions,
-  transform::{CompressionOptions, EncryptionOptions},
+  AliveDelegate, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig, TransformOptions,
 };
+#[cfg(compression)]
+use memberlist_embedded::transform::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_embedded::{ControlError, transform::EncryptionOptions};
 use memberlist_proto::{
   EndpointOptions, Instant, Node, Rng, SeedableRng, SmallRng,
   event::{Event, PingId, StreamId},
@@ -903,6 +905,16 @@ where
 
   /// Replace the gossip+stream compression policy at runtime. Returns
   /// `NotRunning` after [`leave`](Self::leave).
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[inline]
   pub fn set_compression_options(
     &self,
@@ -920,6 +932,11 @@ where
   /// Replace the gossip+stream encryption policy at runtime (key rotation). The
   /// keyring is validated before it is applied. Returns `NotRunning` after
   /// [`leave`](Self::leave) (gated before validation).
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[inline]
   pub fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), ControlError> {
     let r = self.shared.engine.borrow_mut().set_encryption_options(opts);

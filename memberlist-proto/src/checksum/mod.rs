@@ -19,6 +19,8 @@ use crate::framing::{FrameError, MessageTag};
 /// opt-in behind its own feature; a node that is handed a tag it was not built
 /// with yields [`ChecksumAlgorithm::Unknown`] and fails the operation cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
 pub enum ChecksumAlgorithm {
   /// CRC32 (IEEE). Feature `crc32`, backed by `crc32fast`. 4-byte
   /// digest.
@@ -164,13 +166,7 @@ impl Default for ChecksumAlgorithm {
     {
       Self::Murmur3
     }
-    #[cfg(not(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3"
-    )))]
+    #[cfg(not(checksum))]
     {
       Self::Unknown(0)
     }
@@ -191,13 +187,7 @@ impl ChecksumDigest {
   /// Construct a digest from the low `len` bytes of `bytes`. Only the
   /// `pack32` / `pack64` packers (each gated on a built-in backend) call this,
   /// so it is gated on at least one backend being present.
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   #[inline(always)]
   const fn new(bytes: [u8; 8], len: usize) -> Self {
     Self { bytes, len }
@@ -272,29 +262,21 @@ pub fn digest(algo: ChecksumAlgorithm, _payload: &[u8]) -> Result<ChecksumDigest
       let v = crc32fast::hash(_payload);
       Ok(pack32(v))
     }
-    #[cfg(not(feature = "crc32"))]
-    ChecksumAlgorithm::Crc32 => Err(ChecksumError::Disabled(algo)),
     #[cfg(feature = "xxhash32")]
     ChecksumAlgorithm::XxHash32 => {
       let v = xxhash_rust::xxh32::xxh32(_payload, 0);
       Ok(pack32(v))
     }
-    #[cfg(not(feature = "xxhash32"))]
-    ChecksumAlgorithm::XxHash32 => Err(ChecksumError::Disabled(algo)),
     #[cfg(feature = "xxhash64")]
     ChecksumAlgorithm::XxHash64 => {
       let v = xxhash_rust::xxh64::xxh64(_payload, 0);
       Ok(pack64(v))
     }
-    #[cfg(not(feature = "xxhash64"))]
-    ChecksumAlgorithm::XxHash64 => Err(ChecksumError::Disabled(algo)),
     #[cfg(feature = "xxhash3")]
     ChecksumAlgorithm::XxHash3 => {
       let v = xxhash_rust::xxh3::xxh3_64(_payload);
       Ok(pack64(v))
     }
-    #[cfg(not(feature = "xxhash3"))]
-    ChecksumAlgorithm::XxHash3 => Err(ChecksumError::Disabled(algo)),
     #[cfg(feature = "murmur3")]
     ChecksumAlgorithm::Murmur3 => {
       use core::hash::Hasher as _;
@@ -304,8 +286,6 @@ pub fn digest(algo: ChecksumAlgorithm, _payload: &[u8]) -> Result<ChecksumDigest
       // the 32-bit state into the `u64` return; the low 32 bits are the digest.
       Ok(pack32(hasher.finish() as u32))
     }
-    #[cfg(not(feature = "murmur3"))]
-    ChecksumAlgorithm::Murmur3 => Err(ChecksumError::Disabled(algo)),
     ChecksumAlgorithm::Unknown(tag) => Err(ChecksumError::UnknownAlgorithm(tag)),
   }
 }

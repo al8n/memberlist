@@ -84,6 +84,9 @@ where
     self.bridges.remove(&id)
   }
 
+  // Only the compression/encryption runtime setters (which re-key every live
+  // bridge) and a test accessor call this; with neither backend it is unused.
+  #[cfg_attr(not(any(compression, encryption)), allow(dead_code))]
   pub(crate) fn ids(&self) -> Vec<ExchangeId> {
     self.bridges.keys().copied().collect()
   }

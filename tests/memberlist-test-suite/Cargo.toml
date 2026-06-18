@@ -15,8 +15,22 @@ publish = false
 bytes.workspace = true
 smol_str.workspace = true
 # For the transform-matrix knobs on `NodeConfig` (the algorithm enums + the
-# secret-key type). proto is the driver-agnostic type layer both drivers share;
-# naming a `CompressAlgorithm` variant needs no codec-backend feature. The
-# workspace dep is `default-features = false`, so enable `std` for this
-# (std-only, dev) crate's own standalone build.
-memberlist-proto = { workspace = true, features = ["std"] }
+# secret-key type). proto is the driver-agnostic type layer both drivers share.
+# The transform algorithm enums and `SecretKey` variants are each gated behind
+# their backend feature, so this harness — which exposes the whole transform
+# matrix to the driver suites — enables every backend. The workspace dep is
+# `default-features = false`, so `std` is enabled explicitly too.
+memberlist-proto = { workspace = true, features = [
+  "std",
+  "lz4",
+  "snappy",
+  "zstd",
+  "brotli",
+  "aes-gcm",
+  "chacha20-poly1305",
+  "crc32",
+  "xxhash32",
+  "xxhash64",
+  "xxhash3",
+  "murmur3",
+] }

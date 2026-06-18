@@ -395,9 +395,13 @@ fn aes_gcm_encrypt(
   plaintext: &[u8],
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  use aead::{AeadInPlace, KeyInit};
+  // Import the AEAD traits from `aes-gcm`'s OWN re-export so they resolve to the
+  // exact `aead` version the cipher implements; the top-level `aead` dependency
+  // is a newer major whose `KeyInit`/`AeadInPlace` traits the cipher does not
+  // implement.
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
+    aead::{AeadInPlace, KeyInit},
     aes::{Aes192, cipher::consts::U12},
   };
 
@@ -445,9 +449,12 @@ fn aes_gcm_decrypt(
   ciphertext: &[u8],
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  use aead::{AeadInPlace, KeyInit};
+  // See `aes_gcm_encrypt`: import the AEAD traits from `aes-gcm`'s own re-export
+  // so they match the `aead` version the cipher implements (not the newer
+  // top-level `aead` dependency).
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
+    aead::{AeadInPlace, KeyInit},
     aes::{Aes192, cipher::consts::U12},
   };
 
@@ -457,24 +464,28 @@ fn aes_gcm_decrypt(
   // the deprecated `GenericArray::from_slice`.
   let mut buf = ciphertext.to_vec();
   match key {
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes128(k) => {
       let cipher = Aes128Gcm::new(&(*k).into());
       cipher
         .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes192(k) => {
       let cipher = Aes192Gcm::new(&(*k).into());
       cipher
         .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "aes-gcm")]
     SecretKey::Aes256(k) => {
       let cipher = Aes256Gcm::new(&(*k).into());
       cipher
         .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
+    #[cfg(feature = "chacha20-poly1305")]
     SecretKey::ChaCha20Poly1305(_) => {
       // Precheck in decrypt() guarantees this arm is never reached.
       unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()")
@@ -490,8 +501,12 @@ fn chacha20poly1305_encrypt(
   plaintext: &[u8],
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  use aead::{AeadInPlace, KeyInit};
-  use chacha20poly1305::ChaCha20Poly1305;
+  // Import the AEAD traits from `chacha20poly1305`'s own re-export so they
+  // resolve to the `aead` version the cipher implements (see `aes_gcm_encrypt`).
+  use chacha20poly1305::{
+    ChaCha20Poly1305,
+    aead::{AeadInPlace, KeyInit},
+  };
 
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
@@ -515,8 +530,12 @@ fn chacha20poly1305_decrypt(
   ciphertext: &[u8],
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  use aead::{AeadInPlace, KeyInit};
-  use chacha20poly1305::ChaCha20Poly1305;
+  // See `chacha20poly1305_encrypt`: import the AEAD traits from the cipher's own
+  // re-export so they match the `aead` version it implements.
+  use chacha20poly1305::{
+    ChaCha20Poly1305,
+    aead::{AeadInPlace, KeyInit},
+  };
 
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
@@ -784,7 +803,7 @@ pub fn encode_encrypted_frame(
   key: &SecretKey,
   plaintext: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   let nonce: [u8; NONCE_LEN] = {
     let mut n = [0u8; NONCE_LEN];
     // Recoverable on this fallible path: a failing entropy source surfaces an
@@ -792,7 +811,7 @@ pub fn encode_encrypted_frame(
     getrandom::fill(&mut n).map_err(|_| EncryptionError::Entropy)?;
     n
   };
-  #[cfg(not(any(feature = "aes-gcm", feature = "chacha20-poly1305")))]
+  #[cfg(not(encryption))]
   let nonce: [u8; NONCE_LEN] = {
     // No backend is built in; the encrypt call below will surface
     // UnsupportedAlgorithm before we ever look at `nonce`.
@@ -807,6 +826,26 @@ pub fn encode_encrypted_frame(
   out.extend_from_slice(&nonce);
   out.extend_from_slice(&ciphertext);
   Ok(out)
+}
+
+/// The encryption stage of a reliable unit: wrap `payload` in an `[Encrypted]`
+/// frame under the keyring's primary key, or pass it through unchanged when no
+/// keyring is configured. Factored out so the composed reliable-unit encode in
+/// the stream bridge (compression → encryption → length-delimit) shares one
+/// encrypt step. An [`EncryptionError`] (e.g. a primary key whose AEAD backend
+/// was not built into this binary) is fatal to the caller — emitting plaintext
+/// on an encrypted path would silently bypass authentication.
+pub(crate) fn encrypt_reliable_payload(
+  encryption: &EncryptionOptions,
+  payload: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+  match encryption.keyring() {
+    Some(keyring) => {
+      let key = keyring.primary_ref();
+      encode_encrypted_frame(key.algorithm(), key, payload)
+    }
+    None => Ok(payload.to_vec()),
+  }
 }
 
 /// Decode an encrypted wrapper frame back into the original plaintext.

@@ -50,7 +50,7 @@ use memberlist_proto::ChecksumAlgorithm;
   feature = "zstd",
   feature = "brotli"
 ))]
-use memberlist_proto::CompressAlgorithm;
+use memberlist_proto::{CompressAlgorithm, compression::ZstdLevel};
 use memberlist_proto::{
   ChecksumOptions, CompressionOptions, EncryptionOptions, decode_incoming,
   encode_checksummed_frame, encode_compressed_frame, encode_encrypted_frame, encode_outgoing,
@@ -407,7 +407,7 @@ fn compression_snappy_roundtrip() {
 #[test]
 fn compression_zstd_roundtrip() {
   assert_both_planes(
-    &compress_opts(CompressAlgorithm::Zstd),
+    &compress_opts(CompressAlgorithm::Zstd(ZstdLevel::default())),
     &EncryptionOptions::new(),
   );
 }
@@ -487,7 +487,7 @@ fn compression_lz4_and_encryption_aes256_gcm_roundtrip() {
 #[test]
 fn compression_zstd_and_encryption_aes128_gcm_roundtrip() {
   assert_both_planes(
-    &compress_opts(CompressAlgorithm::Zstd),
+    &compress_opts(CompressAlgorithm::Zstd(ZstdLevel::default())),
     &enc_opts(SecretKey::Aes128([0x66; 16])),
   );
 }
@@ -575,7 +575,7 @@ fn checksum_crc32_and_compression_lz4_roundtrip() {
 #[test]
 fn checksum_xxhash64_and_compression_zstd_roundtrip() {
   assert_both_planes_with_checksum(
-    &compress_opts(CompressAlgorithm::Zstd),
+    &compress_opts(CompressAlgorithm::Zstd(ZstdLevel::default())),
     &checksum_opts(ChecksumAlgorithm::XxHash64),
     &EncryptionOptions::new(),
   );

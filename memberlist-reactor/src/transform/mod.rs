@@ -1,10 +1,15 @@
 //! Construction-time transform validation helpers shared by the backend
 //! constructors and the runtime transform setters.
 
-#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-use memberlist_proto::{ChecksumOptions, EncryptionError, EncryptionOptions};
+#[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), checksum))]
+use memberlist_proto::ChecksumOptions;
+#[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), encryption))]
+use memberlist_proto::{EncryptionError, EncryptionOptions};
 
-#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg(all(
+  any(feature = "quic", feature = "tcp", feature = "tls"),
+  any(encryption, checksum)
+))]
 use crate::error::Error;
 
 /// Probe every key in `opts`'s keyring by encrypting an empty frame. A key
@@ -14,7 +19,7 @@ use crate::error::Error;
 ///
 /// Returns `Ok(())` when encryption is disabled (no keyring) or every key
 /// in the ring is usable.
-#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), encryption))]
 pub(crate) fn validate_encryption(opts: &EncryptionOptions) -> Result<(), Error> {
   if let Some(keyring) = opts.keyring() {
     for key in core::iter::once(keyring.primary_ref()).chain(keyring.secondaries()) {
@@ -36,7 +41,7 @@ pub(crate) fn validate_encryption(opts: &EncryptionOptions) -> Result<(), Error>
 ///
 /// Returns `Ok(())` when checksumming is disabled (no algorithm) — always usable
 /// (identity codec) — or the configured algorithm's backend is present.
-#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), checksum))]
 pub(crate) fn validate_checksum(opts: &ChecksumOptions) -> Result<(), Error> {
   opts.apply(&[]).map(|_| ()).map_err(Error::Checksum)
 }
@@ -47,7 +52,7 @@ pub(crate) fn validate_checksum(opts: &ChecksumOptions) -> Result<(), Error> {
 /// This is a free-standing helper used by the validation path above and by
 /// the inline encryption callers in the driver pumps — avoids a duplicate
 /// `map_err(Error::Encryption)` at each call site.
-#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+#[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), encryption))]
 #[allow(dead_code)]
 pub(crate) fn encryption_err(e: EncryptionError) -> Error {
   Error::Encryption(e)

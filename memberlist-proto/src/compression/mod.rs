@@ -104,7 +104,7 @@ const _: () = {
         20 => Self::Twenty,
         21 => Self::TwentyOne,
         22 => Self::TwentyTwo,
-        other => return None,
+        _ => return None,
       })
     }
   }
@@ -183,11 +183,6 @@ impl CompressAlgorithm {
     }
   }
 }
-
-/// Default zstd compression level — zstd's own default. Sender-side only;
-/// never on the wire.
-#[cfg(feature = "zstd")]
-const ZSTD_DEFAULT_LEVEL: i32 = 0;
 
 /// Default brotli quality — a balanced ratio/CPU choice. Sender-side only.
 #[cfg(feature = "brotli")]
@@ -628,7 +623,21 @@ pub fn decode_compressed_frame(
 /// so a unit's `unit_len` never exceeds the size of the bytes it carries and
 /// compression can never inflate a reliable unit.
 pub fn encode_reliable_unit(opts: &CompressionOptions, framed: &[u8]) -> Vec<u8> {
-  let payload = match opts.apply(framed) {
+  let payload = compress_reliable_payload(opts, framed);
+  let mut out = Vec::with_capacity(5 + payload.len());
+  encode_varint_u32(payload.len() as u32, &mut out);
+  out.extend_from_slice(&payload);
+  out
+}
+
+/// The compression stage of a reliable unit: apply `opts` to `framed` and return
+/// the payload bytes to length-delimit — a `[Compressed]` wrapper when it shrinks
+/// the frame, or the plain framed bytes otherwise. Factored out so the
+/// compression-only [`encode_reliable_unit`] and the composed reliable-unit
+/// encode in the stream bridge (compression → encryption → length-delimit) share
+/// one don't-expand-on-the-wire rule. Does NOT length-delimit.
+pub(crate) fn compress_reliable_payload(opts: &CompressionOptions, framed: &[u8]) -> Vec<u8> {
+  match opts.apply(framed) {
     Ok(CompressionOutcome::Compressed(packed)) => {
       let wrapped = encode_compressed_frame(
         opts
@@ -652,11 +661,7 @@ pub fn encode_reliable_unit(opts: &CompressionOptions, framed: &[u8]) -> Vec<u8>
     // uncompressed. The uncompressed payload is always valid and the receiver's
     // `unwrap_transforms` passes a non-wrapper buffer through.
     _ => framed.to_vec(),
-  };
-  let mut out = Vec::with_capacity(5 + payload.len());
-  encode_varint_u32(payload.len() as u32, &mut out);
-  out.extend_from_slice(&payload);
-  out
+  }
 }
 
 /// Try to take one complete reliable unit from the front of `buf`.
@@ -715,6 +720,7 @@ pub fn take_reliable_unit(
 /// whose backend was not built into this binary) is surfaced as `Err` so
 /// callers fail the exchange — emitting plaintext on an encrypted-cluster
 /// path would silently bypass authentication.
+#[cfg(encryption)]
 pub fn encode_reliable_unit_with_encryption(
   compression: &CompressionOptions,
   encryption: &crate::encryption::EncryptionOptions,
@@ -775,6 +781,7 @@ pub fn encode_reliable_unit_with_encryption(
 /// unreliable-plane concern — so that layer is never present on this path.
 /// The shared [`unwrap_transforms_with_encryption`] still recognizes it
 /// defensively, but a well-formed reliable unit will not exercise that arm.
+#[cfg(encryption)]
 pub fn take_reliable_unit_with_encryption(
   buf: &[u8],
   encryption: &crate::encryption::EncryptionOptions,

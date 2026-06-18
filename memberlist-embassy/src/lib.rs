@@ -77,15 +77,61 @@ pub use runner::Runner;
 pub use stream_io::{EmbassyStream, SlotId};
 pub use time::{EmbassyInstant, now};
 
+// Types re-exported from the shared `memberlist-embedded` core so the embassy
+// public API is self-contained. `TransformOptions`, `LabelError`, and the
+// resolver/delegate types always exist; the per-backend option/algorithm/key
+// types — and `ControlError`, the encryption key-rotation error — exist only
+// when their transform backend is built into this crate.
 pub use memberlist_embedded::{
-  AliveDelegate, ControlError, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate,
-  ResolvedAddrs, TransformOptions,
-  transform::{
-    ChecksumAlgorithm, ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring, LabelError,
-    SecretKey,
-  },
+  AliveDelegate, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate, ResolvedAddrs,
+  TransformOptions, transform::LabelError,
 };
-pub use memberlist_proto::{EncryptionError, EndpointOptions, Instant, Node, event};
+// `ControlError` is the encryption key-rotation error; it exists in the shared
+// core only when an encryption backend is built in.
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_embedded::ControlError;
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_embedded::transform::CompressionOptions;
+#[cfg(checksum)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
+pub use memberlist_embedded::transform::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_embedded::transform::{EncryptionOptions, Keyring, SecretKey};
+pub use memberlist_proto::{EndpointOptions, Instant, Node, event};
+// `EncryptionError` exists in `memberlist-proto` only when an encryption backend
+// is built in.
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_proto::EncryptionError;
 // The gossip RNG that [`Memberlist::new_with_rng`] takes by value (and that
 // [`Memberlist::new`] seeds for you), re-exported so a caller can name and seed it
 // without taking its own `memberlist-proto` dependency.

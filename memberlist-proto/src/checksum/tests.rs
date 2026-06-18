@@ -161,13 +161,7 @@ fn default_is_the_first_built_in_backend() {
   let d = ChecksumAlgorithm::default();
   #[cfg(feature = "crc32")]
   assert_eq!(d, ChecksumAlgorithm::Crc32);
-  #[cfg(not(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  )))]
+  #[cfg(not(checksum))]
   assert_eq!(d, ChecksumAlgorithm::Unknown(CRC32_TAG));
   // Ignoring: with a checksum backend other than crc32 built (e.g. xxhash32
   // only), neither cfg'd assertion above compiles, leaving `d` unused.

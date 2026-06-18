@@ -3,7 +3,13 @@
 
 use crate::error::Result;
 use bytes::Bytes;
-use memberlist_proto::{ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, Node};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
+use memberlist_proto::{Instant, Node};
 use std::{net::SocketAddr, time::Duration};
 
 /// Payload for [`JoinKind::WaitForCompletion`].
@@ -60,6 +66,7 @@ pub(crate) struct UpdateNodeMetadataCmd {
 }
 
 /// Payload for [`Command::SetCompressionOptions`].
+#[cfg(compression)]
 pub(crate) struct SetCompressionOptionsCmd {
   /// New compression configuration to apply in place.
   pub(crate) opts: CompressionOptions,
@@ -68,6 +75,7 @@ pub(crate) struct SetCompressionOptionsCmd {
 }
 
 /// Payload for [`Command::SetChecksumOptions`].
+#[cfg(checksum)]
 pub(crate) struct SetChecksumOptionsCmd {
   /// New gossip-plane checksum configuration to apply in place.
   pub(crate) opts: ChecksumOptions,
@@ -76,6 +84,7 @@ pub(crate) struct SetChecksumOptionsCmd {
 }
 
 /// Payload for [`Command::SetEncryptionOptions`].
+#[cfg(encryption)]
 pub(crate) struct SetEncryptionOptionsCmd {
   /// New encryption configuration to apply in place.
   pub(crate) opts: EncryptionOptions,
@@ -265,10 +274,13 @@ pub(crate) enum Command<I> {
   /// Update the local node's metadata.
   UpdateNodeMetadata(UpdateNodeMetadataCmd),
   /// Update the compression options (in-place reconfiguration).
+  #[cfg(compression)]
   SetCompressionOptions(SetCompressionOptionsCmd),
   /// Update the gossip-plane checksum options (in-place reconfiguration).
+  #[cfg(checksum)]
   SetChecksumOptions(SetChecksumOptionsCmd),
   /// Update the encryption options (in-place reconfiguration).
+  #[cfg(encryption)]
   SetEncryptionOptions(SetEncryptionOptionsCmd),
   /// Queue an application user-broadcast for cluster-wide gossip.
   QueueUserBroadcast(QueueUserBroadcastCmd),

@@ -129,11 +129,13 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   cfg: QuicOptions,
   /// Cross-transport compression configuration. A disabled `CompressionOptions`
   /// makes the gossip compress/decompress methods identity.
+  #[cfg(compression)]
   compression: crate::CompressionOptions,
   /// Cross-transport encryption configuration. Applied to the QUIC gossip
   /// path (plain UDP on the same socket as the QUIC packets); the QUIC
   /// reliable path always skips — quinn-encrypted streams already provide
   /// confidentiality.
+  #[cfg(encryption)]
   encryption: crate::EncryptionOptions,
   /// Checksum configuration for the gossip (unreliable) plane — the QUIC
   /// datagram path. A checksum guards the connectionless datagram path, which
@@ -143,6 +145,7 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// corruption detection is an unreliable-plane concern (matching the original
   /// Go memberlist and the legacy port). A disabled `ChecksumOptions` makes the
   /// gossip path identity.
+  #[cfg(checksum)]
   checksum: crate::ChecksumOptions,
   /// Cluster label for all reliable bridges spawned by this coordinator, or
   /// `None` when no label is configured.
@@ -358,8 +361,11 @@ where
       ep,
       quinn,
       cfg,
+      #[cfg(compression)]
       compression: crate::CompressionOptions::new(),
+      #[cfg(encryption)]
       encryption: crate::EncryptionOptions::new(),
+      #[cfg(checksum)]
       checksum: crate::ChecksumOptions::new(),
       label: None,
       skip_inbound_label_check: false,
@@ -392,6 +398,16 @@ where
   /// Build the coordinator with an explicit cross-transport compression
   /// configuration. [`Self::new`] is `with_compression` with compression
   /// disabled.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   pub fn with_compression(
     ep: Endpoint<I, SocketAddr, R>,
@@ -443,6 +459,16 @@ where
   }
 
   /// The configured cross-transport compression options.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub fn compression(&self) -> crate::CompressionOptions {
     self.compression
   }
@@ -454,6 +480,16 @@ where
   /// confidentiality and integrity intrinsically, so compression is
   /// applied only to the gossip path (plain UDP datagrams sharing
   /// the same socket as the QUIC packets).
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub fn set_compression_options(&mut self, compression: crate::CompressionOptions) {
     self.compression = compression;
   }
@@ -461,6 +497,16 @@ where
   /// Compress one outbound gossip datagram for the wire. When compression is
   /// disabled, or the datagram does not benefit, the original bytes are
   /// returned.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
     match self.compression.apply(datagram) {
       Ok(crate::CompressionOutcome::Compressed(packed)) => {
@@ -491,6 +537,17 @@ where
   /// The configured gossip-plane checksum options. Applies to the QUIC
   /// datagram (unreliable) path only; the reliable bidi path carries no
   /// checksum.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub fn checksum(&self) -> crate::ChecksumOptions {
     self.checksum
   }
@@ -499,6 +556,17 @@ where
   /// outbound gossip datagram via [`Self::checksum_gossip`]. The reliable bidi
   /// bridge carries no checksum (quinn provides its own integrity), so there is
   /// no per-bridge fan-out.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub fn set_checksum_options(
     &mut self,
     checksum: crate::ChecksumOptions,
@@ -522,6 +590,17 @@ where
   /// Returns `Err` when a checksum algorithm is configured but its backend was
   /// not built into this binary; the driver MUST drop the gossip rather than
   /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
     match self.checksum.apply(datagram)? {
       crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
@@ -531,6 +610,11 @@ where
 
   /// The configured cross-transport encryption options. Applies to the
   /// gossip path only; the QUIC reliable path always skips.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn encryption_options(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }
@@ -551,6 +635,11 @@ where
   /// for a primary key whose backend was not built into this binary. The
   /// driver MUST drop the gossip in that case; emitting unencrypted bytes
   /// on an encrypted-cluster path would bypass authentication silently.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn encrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::EncryptionError> {
     let keyring = match self.encryption.keyring() {
       Some(kr) => kr,
@@ -577,6 +666,11 @@ where
   /// `[Encrypted[Checksumed[Compressed[frame]]]]`; this helper reverses all
   /// layers, so authentication and integrity never depend on integration
   /// discipline.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
@@ -603,7 +697,9 @@ where
   /// (zero on a QUIC endpoint) — so a driver reads one unified counter regardless
   /// of transport.
   pub fn metrics(&self) -> crate::metrics::Metrics {
-    let mut m = self.ep.metrics();
+    // `Endpoint::metrics` returns a borrow; `Metrics` is `Copy`, so take an
+    // owned copy to fold in this endpoint's datagram-plane shed count.
+    let mut m = *self.ep.metrics();
     m.gossip_ingress_dropped = m
       .gossip_ingress_dropped
       .saturating_add(self.datagram_ingress_dropped);
@@ -858,6 +954,11 @@ where
   /// Routes through [`Self::set_encryption_options`] so the bridge-fan-out
   /// runs in both the builder and the in-place setter, matching
   /// [`crate::streams::StreamEndpoint::with_encryption`].
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   pub fn with_encryption(mut self, encryption: crate::EncryptionOptions) -> Self {
     self.set_encryption_options(encryption);
@@ -883,6 +984,11 @@ where
   /// `bridge.set_encryption(encryption.clone())` clone-and-call still
   /// runs once per live bridge — pure waste on a config reconciler that
   /// republishes the same effective policy.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn set_encryption_options(&mut self, encryption: crate::EncryptionOptions) {
     if self.encryption == encryption {
       self.encryption = encryption;
@@ -2033,7 +2139,9 @@ where
                   stream,
                   ch,
                   sid,
+                  #[cfg(compression)]
                   self.compression,
+                  #[cfg(encryption)]
                   self.encryption.clone(),
                   reliable_max,
                   self.label.clone(),
@@ -2316,7 +2424,9 @@ where
                       stream,
                       ch,
                       sid,
+                      #[cfg(compression)]
                       self.compression,
+                      #[cfg(encryption)]
                       self.encryption.clone(),
                       reliable_max,
                       self.label.clone(),

@@ -17,7 +17,7 @@ use core::net::SocketAddr;
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
 #[cfg(not(feature = "std"))]
-use std::{boxed::Box, collections::VecDeque};
+use std::{boxed::Box, collections::VecDeque, vec::Vec};
 
 use memberlist_proto::{
   AliveDelegate, Endpoint, EndpointOptions, Instant, LabelOptions, MergeDelegate, Node,
@@ -41,18 +41,38 @@ use crate::{
 /// ceiling for an on-wire gossip datagram. Matches the async drivers.
 const UDP_PAYLOAD_MAX: usize = 65507;
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing and the arena/ceiling arithmetic that sizes from it is
+/// the plaintext size.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// Size the inbound-gossip receive scratch from the effective gossip MTU.
 ///
 /// The machine caps an outbound gossip datagram's PLAINTEXT at the configured
 /// [`EndpointOptions::gossip_mtu`]; the on-wire datagram can then exceed that by
-/// up to [`memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD`] (the checksum wrapper)
-/// plus [`memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD`] (30 B of wrapper header,
-/// nonce, and AEAD tag) when both transforms are enabled. The buffer must hold
-/// the largest such on-wire datagram, so it is sized to
+/// up to `CHECKSUMED_WRAPPER_OVERHEAD` (the checksum wrapper) plus
+/// `ENCRYPTED_WRAPPER_OVERHEAD` (30 B of wrapper header, nonce, and AEAD tag)
+/// when both transforms are enabled. The buffer must hold the largest such
+/// on-wire datagram, so it is sized to
 /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`,
 /// floored at 1500 (the common Ethernet payload) so the default
 /// ([`memberlist_proto::DEFAULT_GOSSIP_MTU`], 1400) keeps a little headroom and
-/// any sub-1500 MTU never under-sizes it.
+/// any sub-1500 MTU never under-sizes it. Each wrapper overhead is `0` when its
+/// backend is not built in (that transform can never be applied).
 ///
 /// A driver's datagram receive (e.g. smoltcp's `udp::Socket::recv_slice`) may
 /// POP the datagram before checking the caller's slice length, so a datagram
@@ -60,10 +80,7 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// knob the machine uses to bound outbound gossip means a correctly-configured
 /// cluster never truncates an in-budget datagram.
 fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
-  (gossip_mtu
-    + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-    + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
-    .max(1500)
+  (gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD).max(1500)
 }
 
 /// Validate every construction-time config field that does NOT depend on the
@@ -86,16 +103,19 @@ fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
 ///   downstream arena arithmetic would overflow.
 /// - [`InitError::ZeroCloseTimeout`] — `cfg.close_timeout` is zero, which would
 ///   force-abort every graceful reliable close immediately.
-/// - [`InitError::Encryption`] — `transform.encryption` carries a keyring with a
+/// - `InitError::Encryption` — `transform.encryption` carries a keyring with a
 ///   key this build cannot use: an AEAD backend not compiled in, or a key whose
 ///   cipher variant disagrees with its algorithm tag. The keyring is probed
 ///   entropy-free (see `probe_encryption_keyring`); runtime nonce-entropy
 ///   availability is a separate, per-send concern and is deliberately not gated
-///   here.
+///   here. Only present when an encryption backend is built in.
 ///
 /// `gossip_mtu` is passed explicitly (rather than read from an `EndpointOptions`)
 /// so a driver can preflight while its `EndpointOptions` is still in the
 /// resolver's address domain — `EndpointOptions::gossip_mtu` is callable there.
+// Without any transform backend the `transform` argument's only reads (the
+// encryption/checksum probes) are gated out, leaving it unused.
+#[cfg_attr(not(any(encryption, checksum)), allow(unused_variables))]
 pub fn validate_runtime_config(
   cfg: &Options,
   transform: &TransformOptions,
@@ -117,9 +137,8 @@ pub fn validate_runtime_config(
   // Bounding it here makes every downstream
   // `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` safe
   // and mirrors the async drivers' reject-not-clamp doctrine.
-  let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
-    - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-    - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+  let gossip_mtu_ceiling =
+    UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
   if gossip_mtu > gossip_mtu_ceiling {
     return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
       gossip_mtu,
@@ -141,7 +160,9 @@ pub fn validate_runtime_config(
   // encrypted gossip datagram. The probe is entropy-free and shared with the
   // runtime rotation setter (`Engine::set_encryption_options`), so the two screens
   // always agree on which keyrings are usable and neither couples its verdict to a
-  // transient entropy condition.
+  // transient entropy condition. Without an encryption backend no keyring can be
+  // configured, so there is nothing to probe.
+  #[cfg(encryption)]
   probe_encryption_keyring(&transform.encryption).map_err(InitError::Encryption)?;
 
   // Validate the gossip checksum configuration too, for the same reason: an
@@ -149,6 +170,9 @@ pub fn validate_runtime_config(
   // rather than a silent runtime drop of every gossip datagram. The probe is a
   // trial `apply` of an empty payload; a disabled (no-algorithm) policy is always
   // usable. Checksum is a gossip-plane concern only; reliable streams carry none.
+  // Without a checksum backend no algorithm can be configured, so there is
+  // nothing to probe.
+  #[cfg(checksum)]
   transform.checksum.apply(&[]).map_err(InitError::Checksum)?;
 
   Ok(())
@@ -178,6 +202,7 @@ pub fn validate_runtime_config(
 /// ([`validate_runtime_config`]) and rotation ([`Engine::set_encryption_options`])
 /// share this one entropy-free probe so they cannot disagree on which keyrings are
 /// usable.
+#[cfg(encryption)]
 fn probe_encryption_keyring(
   encryption: &memberlist_proto::EncryptionOptions,
 ) -> Result<(), memberlist_proto::EncryptionError> {
@@ -452,19 +477,26 @@ where
     // Retain the validated label for the gossip codec (same source, both planes
     // share one label so they cannot diverge).
     let label = transform.label.clone();
-    let mut endpoint = StreamEndpoint::with_compression(
+    // Build the coordinator with all transforms disabled, then layer in each
+    // configured transform whose backend is built in. With none built in the
+    // base coordinator carries no transform state and the planes stay plaintext.
+    #[allow(unused_mut)]
+    let mut endpoint = StreamEndpoint::new(
       ep,
       label_opts,
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
       Box::new(|addr: &SocketAddr| *addr),
-      transform.compression,
-    )
-    .with_encryption(transform.encryption);
+    );
+    #[cfg(compression)]
+    endpoint.set_compression_options(transform.compression);
+    #[cfg(encryption)]
+    endpoint.set_encryption_options(transform.encryption);
     // Gossip-plane (unreliable) checksum. Unlike compression/encryption it is
     // not chainable on the builder because reliable streams carry no checksum
     // (no per-bridge fan-out); the in-place setter updates only the gossip
     // field. With a default `TransformOptions` no algorithm is selected and the
     // gossip codec stays identity.
+    #[cfg(checksum)]
     endpoint
       .set_checksum_options(transform.checksum)
       .map_err(InitError::Checksum)?;
@@ -987,6 +1019,16 @@ where
   /// call and is fanned out to every live reliable bridge so long-lived
   /// push/pull exchanges adopt it on their next outbound encode. Returns
   /// `NotRunning` after `leave()` (the change could never reach the wire).
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub fn set_compression_options(
     &mut self,
     opts: memberlist_proto::CompressionOptions,
@@ -1014,6 +1056,11 @@ where
   /// key in the supplied keyring cannot be used by this build (e.g.
   /// `EncryptionError::UnsupportedAlgorithm`). The existing policy is unchanged
   /// in either case.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub fn set_encryption_options(
     &mut self,
     opts: memberlist_proto::EncryptionOptions,
@@ -1235,16 +1282,27 @@ where
     // 2b. Unwrap the encryption/compression transforms, then decode each raw
     // gossip frame and feed typed messages back.
     while let Some((src, raw)) = self.endpoint.poll_memberlist_ingress() {
-      // Strip the Encrypted-then-Compressed wrapper stack FIRST (each layer is
-      // identity when its wrapper is absent, and the whole call is identity when
-      // no keyring is configured, so the plaintext path is preserved exactly). On
-      // an encrypted cluster the strict-mode entry check rejects a non-Encrypted
-      // datagram here; a corrupt frame, an unknown algorithm, or an oversized
-      // wrapper is likewise an Err. Drop on Err — a plaintext datagram on an
-      // encrypted node, or a corrupt frame, must not reach the decoder. Gossip is
-      // lossy and self-healing.
+      // Strip the Encrypted-then-Checksumed-then-Compressed wrapper stack FIRST
+      // (each layer is identity when its wrapper is absent, so the plaintext path
+      // is preserved exactly). With an encryption backend the endpoint's
+      // keyring-aware unwrap also enforces the strict-mode entry check on an
+      // encrypted cluster; without one the base unwrap strips any checksum and
+      // compression wrappers (and is identity for a plain frame). A corrupt frame,
+      // an unknown or not-built-in algorithm, an oversized wrapper, or a checksum
+      // mismatch is an Err. Drop on Err — a plaintext datagram on an encrypted
+      // node, or a corrupt frame, must not reach the decoder. Gossip is lossy and
+      // self-healing.
+      #[cfg(encryption)]
       let decrypted = match self.endpoint.decrypt_gossip(&raw) {
         Ok(p) => bytes::Bytes::from(p),
+        Err(_) => continue,
+      };
+      #[cfg(not(encryption))]
+      let decrypted = match memberlist_proto::framing::unwrap_transforms(
+        &raw,
+        self.endpoint.endpoint_ref().gossip_mtu(),
+      ) {
+        Ok(p) => bytes::Bytes::from(p.into_owned()),
         Err(_) => continue,
       };
       let opts = memberlist_proto::codec::DecodeOptions::new(self.label.clone());
@@ -2397,26 +2455,37 @@ where
       };
       // Apply the cross-transport transforms to the encoded frame before it hits the
       // wire: compress, then checksum, then encrypt, so the on-wire byte order is
-      // `[Encrypted[Checksumed[Compressed[frame]]]]`. All are identity when disabled, so a
-      // default `TransformOptions` sends the same plaintext frame as before. Staged into
-      // owned `Vec`s here so the `&self.endpoint` transform borrows end before the gossip
-      // send below.
-      let compressed = self.endpoint.compress_gossip(&bytes);
-      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
-        Ok(b) => b,
-        // Checksum is configured but its backend was not built into this binary. Drop
-        // rather than emit an unverifiable datagram on a checksum-configured path.
-        // Gossip is lossy and self-healing.
-        Err(_) => continue,
-      };
-      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
-        Ok(b) => b,
-        // Encryption is configured but the backend rejected the request (e.g. a primary
-        // key whose AEAD algorithm was not built into this binary). Drop: emitting the
-        // plaintext frame on an encrypted-cluster path would silently bypass
-        // authentication. Gossip is lossy and self-healing.
-        Err(_) => continue,
-      };
+      // `[Encrypted[Checksumed[Compressed[frame]]]]`. Each is present only when its
+      // backend is built in; with none, the encoded frame goes out as-is. Staged into
+      // an owned `Vec` here so the `&self.endpoint` transform borrows end before the
+      // gossip send below.
+      #[allow(unused_mut)]
+      let mut on_wire: Vec<u8> = bytes.to_vec();
+      #[cfg(compression)]
+      {
+        on_wire = self.endpoint.compress_gossip(&on_wire);
+      }
+      #[cfg(checksum)]
+      {
+        on_wire = match self.endpoint.checksum_gossip(&on_wire) {
+          Ok(b) => b,
+          // Checksum is configured but its backend was not built into this binary. Drop
+          // rather than emit an unverifiable datagram on a checksum-configured path.
+          // Gossip is lossy and self-healing.
+          Err(_) => continue,
+        };
+      }
+      #[cfg(encryption)]
+      {
+        on_wire = match self.endpoint.encrypt_gossip(&on_wire) {
+          Ok(b) => b,
+          // Encryption is configured but the backend rejected the request (e.g. a primary
+          // key whose AEAD algorithm was not built into this binary). Drop: emitting the
+          // plaintext frame on an encrypted-cluster path would silently bypass
+          // authentication. Gossip is lossy and self-healing.
+          Err(_) => continue,
+        };
+      }
       // Last-line egress drop: a non-routable destination (unspecified/multicast/broadcast
       // IP or port 0) is screened here so no bad address from ANY source (gossip,
       // push/pull, config) reaches the gossip socket. The link layer would itself reject

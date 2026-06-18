@@ -67,13 +67,13 @@ jobs:
           # crates' own integration suites, so they are not run here — sparing the
           # job the simulation suite's multi-minute llvm-cov pass.
           cargo llvm-cov --no-report -p memberlist-proto \
-            --features "std,cidr,tcp,tls-rustls-ring,quic-rustls-ring,lz4,snappy,crc32,xxhash64,aes-gcm,chacha20-poly1305"
+            --features "std,cidr,tcp,tls-rustls-ring,quic-rustls-ring,lz4,snappy,zstd,brotli,crc32,xxhash32,xxhash64,xxhash3,murmur3,aes-gcm,chacha20-poly1305"
           cargo llvm-cov --no-report -p memberlist-reactor \
             --features "tcp,tls-rustls-ring,quic-rustls-ring,lz4,crc32,aes-gcm,cidr,tokio"
           cargo llvm-cov --no-report -p memberlist-compio \
             --features "tcp,tls-rustls-ring,quic-rustls-ring,lz4,crc32,aes-gcm,chacha20-poly1305,cidr"
           cargo llvm-cov --no-report -p memberlist-embedded \
-            --features "std,cidr,lz4,snappy,crc32,xxhash64,aes-gcm,chacha20-poly1305"
+            --features "std,cidr,lz4,snappy,zstd,brotli,crc32,xxhash32,xxhash64,xxhash3,murmur3,aes-gcm,chacha20-poly1305"
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload to codecov.io

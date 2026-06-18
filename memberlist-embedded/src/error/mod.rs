@@ -77,6 +77,11 @@ pub enum InitError {
   /// `getrandom` at send time, so on a target whose backend is missing or failing
   /// the node still constructs and then cannot encrypt outbound traffic — gossip
   /// datagrams and reliable exchanges alike fail as they are sent.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   Encryption(memberlist_proto::EncryptionError),
   /// The configured gossip checksum algorithm cannot be used by this build.
   ///
@@ -87,6 +92,17 @@ pub enum InitError {
   /// the datagram — so a "successfully" configured checksum would silently
   /// disable ALL gossip. Construction probes the configured algorithm and
   /// surfaces this typed error instead.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   Checksum(memberlist_proto::ChecksumError),
 }
 
@@ -125,7 +141,9 @@ impl fmt::Display for InitError {
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
+      #[cfg(encryption)]
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
+      #[cfg(checksum)]
       InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
     }
   }
@@ -137,12 +155,14 @@ impl From<EndpointInitError> for InitError {
   }
 }
 
+#[cfg(encryption)]
 impl From<memberlist_proto::EncryptionError> for InitError {
   fn from(e: memberlist_proto::EncryptionError) -> Self {
     InitError::Encryption(e)
   }
 }
 
+#[cfg(checksum)]
 impl From<memberlist_proto::ChecksumError> for InitError {
   fn from(e: memberlist_proto::ChecksumError) -> Self {
     InitError::Checksum(e)
@@ -155,7 +175,9 @@ impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       InitError::Endpoint(e) => Some(e),
+      #[cfg(encryption)]
       InitError::Encryption(e) => Some(e),
+      #[cfg(checksum)]
       InitError::Checksum(e) => Some(e),
       _ => None,
     }
@@ -169,6 +191,11 @@ impl std::error::Error for InitError {
 /// this type: it can fail BOTH on lifecycle and on an unusable keyring. The
 /// other runtime setters have a single failure domain and report through the
 /// machine's [`memberlist_proto::Error`] (lifecycle + size).
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ControlError {
@@ -180,6 +207,7 @@ pub enum ControlError {
   Encryption(memberlist_proto::EncryptionError),
 }
 
+#[cfg(encryption)]
 impl fmt::Display for ControlError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
@@ -191,13 +219,14 @@ impl fmt::Display for ControlError {
   }
 }
 
+#[cfg(encryption)]
 impl From<memberlist_proto::EncryptionError> for ControlError {
   fn from(e: memberlist_proto::EncryptionError) -> Self {
     ControlError::Encryption(e)
   }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(encryption, feature = "std"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for ControlError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

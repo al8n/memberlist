@@ -146,12 +146,14 @@ pub(crate) struct StreamBridge<I, A, R> {
   /// compress/decompress point on the reliable path; a disabled
   /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
   /// frame with the framed bytes verbatim).
+  #[cfg(compression)]
   compression: crate::CompressionOptions,
   /// Cross-transport encryption configuration. The bridge is the single
   /// encrypt/decrypt point on the reliable path when `R::is_secure() ==
   /// false`. For a secure transport (TLS), the constructor receives a
   /// disabled `EncryptionOptions` regardless of the endpoint configuration —
   /// the per-impl const `is_secure()` branch is optimized away.
+  #[cfg(encryption)]
   encryption: crate::EncryptionOptions,
   /// Inbound reliable-unit accumulation buffer. A byte stream does not
   /// preserve `write_plaintext`/`read_plaintext` boundaries, so each
@@ -200,8 +202,8 @@ where
   pub(crate) fn new(
     mut records: R,
     deadline: Instant,
-    compression: crate::CompressionOptions,
-    encryption: crate::EncryptionOptions,
+    #[cfg(compression)] compression: crate::CompressionOptions,
+    #[cfg(encryption)] encryption: crate::EncryptionOptions,
     reliable_max: usize,
   ) -> Self {
     // Bound the record layer's outbound buffer to one reliable unit so a
@@ -214,6 +216,7 @@ where
     // path costs CPU and bandwidth without adding security, and the peer's
     // bridge will mirror the same skip. The branch is optimized away —
     // `R::is_secure()` is a per-impl const fn.
+    #[cfg(encryption)]
     let effective_encryption = if R::is_secure() {
       crate::EncryptionOptions::new()
     } else {
@@ -228,11 +231,93 @@ where
       pending_eof: false,
       phase: StreamPhase::Handshaking,
       deadline,
+      #[cfg(compression)]
       compression,
+      #[cfg(encryption)]
       encryption: effective_encryption,
       recv_accum: Vec::new(),
       reliable_max,
     }
+  }
+
+  /// Encode one outbound reliable unit: compress (when built in), then encrypt
+  /// (when built in), then length-delimit. The inverse of
+  /// [`Self::take_reliable_unit`]. With no transform backend this is just
+  /// `[unit_len][framed]`.
+  // `unused_mut` / `unused_assignments`: the `payload` binding is reassigned
+  // only under the compression/encryption cfgs, so with one or neither built in
+  // the initial binding (or a stage's write) is never observed.
+  #[allow(unused_mut, unused_assignments)]
+  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, crate::framing::FrameError> {
+    use std::borrow::Cow;
+    let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
+    #[cfg(compression)]
+    {
+      payload = Cow::Owned(crate::compression::compress_reliable_payload(
+        &self.compression,
+        framed,
+      ));
+    }
+    #[cfg(encryption)]
+    {
+      payload = Cow::Owned(
+        crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
+          .map_err(crate::framing::FrameError::Encryption)?,
+      );
+    }
+    let mut out = Vec::with_capacity(5 + payload.len());
+    crate::framing::encode_varint_u32(payload.len() as u32, &mut out);
+    out.extend_from_slice(&payload);
+    Ok(out)
+  }
+
+  /// Take one complete reliable unit `[unit_len][payload]` off the front of
+  /// `buf`, stripping the encryption (when built in) then checksum/compression
+  /// wrappers. `Ok(None)` when more bytes are needed. The inverse of
+  /// [`Self::encode_reliable_unit`].
+  fn take_reliable_unit(
+    &self,
+    buf: &[u8],
+    max: usize,
+  ) -> Result<Option<(Vec<u8>, usize)>, crate::framing::FrameError> {
+    use crate::framing::{FrameError, decode_varint_u32};
+    let (unit_len, vbytes) = match decode_varint_u32(buf) {
+      Ok(v) => v,
+      Err(FrameError::Incomplete(..)) | Err(FrameError::Empty) => return Ok(None),
+      Err(e) => return Err(e),
+    };
+    let unit_len = unit_len as usize;
+    // With encryption the wrapper inflates the payload by a fixed
+    // ENCRYPTED_WRAPPER_OVERHEAD, so allow that slack on the on-wire unit bound;
+    // the post-decrypt plaintext is still bounded tightly by `max`.
+    #[cfg(encryption)]
+    let effective_unit_max = if self.encryption.is_enabled() {
+      max.saturating_add(crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD)
+    } else {
+      max
+    };
+    #[cfg(not(encryption))]
+    let effective_unit_max = max;
+    if unit_len > effective_unit_max {
+      return Err(FrameError::FrameTooLarge(unit_len));
+    }
+    let total = vbytes + unit_len;
+    if buf.len() < total {
+      return Ok(None);
+    }
+    let payload = &buf[vbytes..total];
+    let plaintext = {
+      #[cfg(encryption)]
+      {
+        crate::framing::unwrap_transforms_with_encryption(payload, max, &self.encryption)?
+      }
+      #[cfg(not(encryption))]
+      {
+        crate::framing::unwrap_transforms(payload, max)?
+      }
+    }
+    .into_owned();
+    Ok(Some((plaintext, total)))
   }
 
   /// Replace the bridge's effective encryption options. Called by
@@ -264,6 +349,7 @@ where
   /// new policy from construction.
   ///
   /// [`BridgePhase::Failed(BridgeFailure::EncryptionPolicyChanged)`]: BridgePhase::Failed
+  #[cfg(encryption)]
   pub(crate) fn set_encryption(&mut self, encryption: crate::EncryptionOptions) {
     if R::is_secure() {
       self.encryption = crate::EncryptionOptions::new();
@@ -284,6 +370,7 @@ where
   /// self-describes its algorithm via the compression-tag prefix, so
   /// a peer always decompresses the bytes it received under whatever
   /// policy was active at the producer's encode time.
+  #[cfg(compression)]
   pub(crate) fn set_compression(&mut self, compression: crate::CompressionOptions) {
     self.compression = compression;
   }
@@ -510,11 +597,7 @@ where
       let drained = self.records.read_plaintext(&mut surfaced);
       self.recv_accum.extend_from_slice(&surfaced);
       loop {
-        match crate::take_reliable_unit_with_encryption(
-          &self.recv_accum,
-          &self.encryption,
-          self.reliable_max,
-        ) {
+        match self.take_reliable_unit(&self.recv_accum, self.reliable_max) {
           Ok(Some((plaintext, consumed))) => {
             self.recv_accum.drain(..consumed);
             if self
@@ -1006,14 +1089,10 @@ where
       // feature was not built into this binary) is fatal — emitting plaintext
       // on the wire would silently bypass authentication on an
       // encrypted-cluster reliable exchange. Atomically retire-then-fail.
-      let unit = match crate::encode_reliable_unit_with_encryption(
-        &self.compression,
-        &self.encryption,
-        &gathered,
-      ) {
+      let unit = match self.encode_reliable_unit(&gathered) {
         Ok(u) => u,
         Err(e) => {
-          self.fail_with_retire(BridgeFailure::Transport(format!("encrypt: {e}")));
+          self.fail_with_retire(BridgeFailure::Transport(format!("reliable encode: {e}")));
           return Err(());
         }
       };

@@ -4,10 +4,13 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_proto::{
-  AliveDelegate, ChecksumOptions, CompressionOptions, EncryptionOptions, MergeDelegate,
-  label::validate_label, typed::Meta,
-};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
+use memberlist_proto::{AliveDelegate, MergeDelegate, label::validate_label, typed::Meta};
 
 use crate::cidr::CidrFilter;
 
@@ -49,8 +52,11 @@ pub struct MemberlistOptions {
   max_stream_frame_size: Option<usize>,
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
+  #[cfg(compression)]
   compression: CompressionOptions,
+  #[cfg(checksum)]
   checksum: ChecksumOptions,
+  #[cfg(encryption)]
   encryption: EncryptionOptions,
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
@@ -99,6 +105,16 @@ impl MemberlistOptions {
   }
 
   /// Sets the initial gossip+stream compression policy.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
     self.compression = compression;
@@ -109,6 +125,17 @@ impl MemberlistOptions {
   ///
   /// Checksumming is applied to the gossip datagram path only — NOT the
   /// reliable stream path, whose transport already provides integrity.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[must_use]
   pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
     self.checksum = checksum;
@@ -116,6 +143,11 @@ impl MemberlistOptions {
   }
 
   /// Sets the initial gossip+stream encryption policy.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   pub fn with_encryption(mut self, encryption: EncryptionOptions) -> Self {
     self.encryption = encryption;
@@ -185,6 +217,16 @@ impl MemberlistOptions {
   }
 
   /// The initial gossip+stream compression policy.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   pub fn compression(&self) -> &CompressionOptions {
     &self.compression
@@ -193,12 +235,28 @@ impl MemberlistOptions {
   /// The initial gossip (unreliable) checksum policy.
   ///
   /// Applied to the gossip datagram path only — NOT the reliable stream path.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[must_use]
   pub fn checksum(&self) -> &ChecksumOptions {
     &self.checksum
   }
 
   /// The initial gossip+stream encryption policy.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   pub fn encryption(&self) -> &EncryptionOptions {
     &self.encryption

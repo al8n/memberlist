@@ -4,10 +4,13 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use memberlist_proto::{
-  CheapClone, ChecksumOptions, CompressionOptions, EncryptionOptions, config::EndpointOptions,
-  label::validate_label, typed::Meta,
-};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
+use memberlist_proto::{CheapClone, config::EndpointOptions, label::validate_label, typed::Meta};
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
@@ -68,8 +71,11 @@ pub struct MemberlistOptions {
   max_stream_frame_size: Option<usize>,
   initial_meta: Option<Meta>,
   initial_local_state: Option<Bytes>,
+  #[cfg(compression)]
   compression: CompressionOptions,
+  #[cfg(checksum)]
   checksum: ChecksumOptions,
+  #[cfg(encryption)]
   encryption: EncryptionOptions,
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
@@ -159,6 +165,16 @@ impl MemberlistOptions {
   /// uncompressed until a runtime
   /// [`set_compression_options`](crate::Memberlist::set_compression_options)
   /// call is made.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   #[inline]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
@@ -175,6 +191,17 @@ impl MemberlistOptions {
   /// datagrams are wrapped in a checksum frame and inbound ones are verified.
   /// The reliable-stream path carries NO checksum: the stream transport
   /// (TCP/TLS/QUIC) provides its own integrity guarantee there.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[must_use]
   #[inline]
   pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
@@ -188,6 +215,11 @@ impl MemberlistOptions {
   /// call is made. A keyring naming an unsupported AEAD algorithm is rejected
   /// at [`Memberlist::new`](crate::Memberlist::new) before any socket is
   /// bound.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   #[inline]
   pub fn with_encryption(mut self, encryption: EncryptionOptions) -> Self {
@@ -264,6 +296,16 @@ impl MemberlistOptions {
   }
 
   /// The initial gossip and reliable-stream compression policy.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[inline]
   pub const fn compression(&self) -> &CompressionOptions {
     &self.compression
@@ -271,12 +313,28 @@ impl MemberlistOptions {
 
   /// The initial gossip (unreliable) checksum policy. Checksum is not applied
   /// on the reliable-stream path.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[inline]
   pub const fn checksum(&self) -> &ChecksumOptions {
     &self.checksum
   }
 
   /// The initial gossip and reliable-stream encryption policy.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[inline]
   pub const fn encryption(&self) -> &EncryptionOptions {
     &self.encryption
@@ -295,6 +353,24 @@ impl MemberlistOptions {
   }
 }
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// The IP-layer maximum UDP payload: 65535 (the 16-bit UDP length field)
 /// minus the 8-byte UDP header minus the 20-byte IPv4 header. A gossip packet
 /// is emitted as one UDP datagram, so its on-wire size can never exceed this.
@@ -311,9 +387,8 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// and that must be `<= UDP_PAYLOAD_MAX`. So the valid maximum plaintext
 /// `gossip_mtu` is
 /// `UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD`.
-pub(crate) const GOSSIP_MTU_MAX: usize = UDP_PAYLOAD_MAX
-  - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-  - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+pub(crate) const GOSSIP_MTU_MAX: usize =
+  UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
 
 /// The lower bound on the plaintext `gossip_mtu`. A gossip packet is the
 /// transport for the SWIM protocol's mandatory single-datagram control
@@ -804,6 +879,7 @@ where
 /// Returns the wire [`EncryptionError`](memberlist_proto::EncryptionError) when
 /// the policy is unusable so the caller can reject the reconfiguration instead
 /// of acking a false `Ok`.
+#[cfg(encryption)]
 pub(crate) fn validate_encryption_options(
   opts: &memberlist_proto::EncryptionOptions,
 ) -> Result<(), memberlist_proto::EncryptionError> {
@@ -842,6 +918,7 @@ pub(crate) fn validate_encryption_options(
 /// Returns the wire [`ChecksumError`](memberlist_proto::ChecksumError) when the
 /// policy is unusable so the caller can reject the reconfiguration instead of
 /// acking a false `Ok`.
+#[cfg(checksum)]
 pub(crate) fn validate_checksum_options(
   opts: &ChecksumOptions,
 ) -> Result<(), memberlist_proto::ChecksumError> {
