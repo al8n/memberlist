@@ -268,11 +268,7 @@ where
 /// ([`StreamIo::Conn`]). `R` is the gossip RNG the driver injects at
 /// construction (defaulting to [`SmallRng`]); the driver owns seeding it from
 /// its entropy source, keeping the core free of any entropy acquisition.
-pub struct Engine<I, C, R = SmallRng>
-where
-  I: memberlist_proto::Id,
-  R: Rng,
-{
+pub struct Engine<I, C, R = SmallRng> {
   endpoint: StreamEndpoint<I, SocketAddr, RawRecords, R>,
   /// Sizing / port configuration; retained for the reliable-plane paths.
   cfg: Options,
