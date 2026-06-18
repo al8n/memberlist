@@ -136,6 +136,11 @@ pub enum InitError {
   /// `getrandom` at send time, so on a target whose backend is missing or failing
   /// the node still constructs and then cannot encrypt outbound traffic — gossip
   /// datagrams and reliable exchanges alike fail as they are sent.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   Encryption(memberlist_proto::EncryptionError),
   /// The configured gossip checksum algorithm cannot be used by this build.
   ///
@@ -146,6 +151,17 @@ pub enum InitError {
   /// the datagram — so a "successfully" configured checksum would silently
   /// disable ALL gossip. Construction probes the configured algorithm and
   /// surfaces this typed error instead.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   Checksum(memberlist_proto::ChecksumError),
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
@@ -296,7 +312,9 @@ impl fmt::Display for InitError {
       InitError::Resolve(e) => write!(f, "advertise address resolution failed: {e}"),
       InitError::NoAddresses => f.write_str("advertise address resolution returned no addresses"),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
+      #[cfg(encryption)]
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),
+      #[cfg(checksum)]
       InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::UdpArenaTooLarge => {
@@ -342,7 +360,9 @@ impl InitError {
         ceiling: m.ceiling,
       }),
       E::Endpoint(inner) => InitError::Endpoint(inner),
+      #[cfg(encryption)]
       E::Encryption(inner) => InitError::Encryption(inner),
+      #[cfg(checksum)]
       E::Checksum(inner) => InitError::Checksum(inner),
       // `memberlist_embedded::InitError` is `#[non_exhaustive]`, so a wildcard is
       // required even though every variant it defines today is handled above and
@@ -360,12 +380,14 @@ impl From<EndpointInitError> for InitError {
   }
 }
 
+#[cfg(encryption)]
 impl From<memberlist_proto::EncryptionError> for InitError {
   fn from(e: memberlist_proto::EncryptionError) -> Self {
     InitError::Encryption(e)
   }
 }
 
+#[cfg(checksum)]
 impl From<memberlist_proto::ChecksumError> for InitError {
   fn from(e: memberlist_proto::ChecksumError) -> Self {
     InitError::Checksum(e)
@@ -378,7 +400,9 @@ impl std::error::Error for InitError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       InitError::Endpoint(e) => Some(e),
+      #[cfg(encryption)]
       InitError::Encryption(e) => Some(e),
+      #[cfg(checksum)]
       InitError::Checksum(e) => Some(e),
       InitError::Resolve(e) => Some(e.as_ref()),
       _ => None,

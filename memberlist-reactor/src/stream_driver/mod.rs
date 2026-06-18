@@ -30,28 +30,49 @@ use futures_util::{
   future::{FusedFuture, pending},
   pin_mut, select, select_biased,
 };
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
+#[cfg(checksum)]
+use memberlist_proto::streams::checksum_gossip_datagram;
+#[cfg(compression)]
+use memberlist_proto::streams::compress_gossip_datagram;
+#[cfg(encryption)]
+use memberlist_proto::streams::encrypt_gossip_datagram;
+// `unwrap_transforms_with_encryption` strips the outer `Encrypted` wrapper via
+// the configured keyring, so it exists only under an encryption backend; with
+// none the base `unwrap_transforms` strips the remaining (checksum/compression)
+// wrappers.
+#[cfg(encryption)]
+use memberlist_proto::unwrap_transforms_with_encryption;
+#[cfg(not(encryption))]
+use memberlist_proto::unwrap_transforms;
 use memberlist_proto::{
-  ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, PingId,
+  Instant, PingId,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
-  streams::{
-    ExchangeId, StreamAction, StreamTransport, checksum_gossip_datagram, compress_gossip_datagram,
-    encrypt_gossip_datagram,
-  },
+  streams::{ExchangeId, StreamAction, StreamTransport},
   typed::Message,
-  unwrap_transforms_with_encryption,
 };
 
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
 use crate::{
   NodeId, StreamEndpoint,
   cidr::{CidrFilter, cidr_blocks},
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -61,6 +82,24 @@ use crate::{
 
 /// IP-layer UDP payload maximum; caps the per-recv gossip buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
+
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing to the recv-buffer sizing.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing to the recv-buffer sizing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 
 /// Per-read buffer for a bridge's TCP socket. The machine reassembles frames
 /// across reads, so this only bounds one read's chunk, not a frame.
@@ -215,8 +254,11 @@ struct PendingUserSend {
 /// inbound and wrap outbound gossip datagrams inline on the pump. Rebuilt
 /// whenever the runtime options change ([`StreamDriver::rebuild_transform`]).
 struct TransformCtx {
+  #[cfg(compression)]
   compression: CompressionOptions,
+  #[cfg(checksum)]
   checksum: ChecksumOptions,
+  #[cfg(encryption)]
   encryption: EncryptionOptions,
   gossip_mtu: usize,
   label: Option<Bytes>,
@@ -233,8 +275,15 @@ fn transform_ingress<I: NodeId>(
 ) -> (SocketAddr, Vec<Message<I, SocketAddr>>) {
   // The only `Cow::Borrowed` result is the no-transform passthrough (the whole
   // input unchanged), so reuse the input `Bytes` instead of copying it — this is
-  // the common plain-gossip path. A real transform yields `Owned`.
-  let transformed = match unwrap_transforms_with_encryption(&raw, ctx.gossip_mtu, &ctx.encryption) {
+  // the common plain-gossip path. A real transform yields `Owned`. With an
+  // encryption backend built in the keyring-aware unwrap strips the outer
+  // `Encrypted` wrapper; with none the base `unwrap_transforms` strips the
+  // remaining (checksum/compression) wrappers, bounded by the gossip MTU.
+  #[cfg(encryption)]
+  let unwrapped = unwrap_transforms_with_encryption(&raw, ctx.gossip_mtu, &ctx.encryption);
+  #[cfg(not(encryption))]
+  let unwrapped = unwrap_transforms(&raw, ctx.gossip_mtu);
+  let transformed = match unwrapped {
     Ok(Cow::Borrowed(_)) => None,
     Ok(Cow::Owned(v)) => Some(Bytes::from(v)),
     Err(_) => return (from, Vec::new()),
@@ -269,9 +318,28 @@ fn transform_egress<I: NodeId>(
       (to, encode_outgoing_compound(&msgs, &encode_opts).ok()?)
     }
   };
-  let compressed = compress_gossip_datagram(&ctx.compression, &plain);
-  let checksummed = checksum_gossip_datagram(&ctx.checksum, &compressed).ok()?;
-  let on_wire = encrypt_gossip_datagram(&ctx.encryption, &checksummed).ok()?;
+  // Apply the cross-transport transforms to the encoded frame before it hits the
+  // wire: compress, then checksum, then encrypt, so the on-wire byte order is
+  // `[Encrypted[Checksumed[Compressed[frame]]]]`. Each is present only when its
+  // backend is built in; with none, the encoded frame goes out as-is.
+  #[allow(unused_mut)]
+  let mut on_wire: Vec<u8> = plain.to_vec();
+  #[cfg(compression)]
+  {
+    on_wire = compress_gossip_datagram(&ctx.compression, &on_wire);
+  }
+  #[cfg(checksum)]
+  {
+    // Checksum configured but its backend was not built in — drop rather than
+    // emit an unverifiable datagram on a checksum-configured path.
+    on_wire = checksum_gossip_datagram(&ctx.checksum, &on_wire).ok()?;
+  }
+  #[cfg(encryption)]
+  {
+    // Encryption-configured + backend-rejected — drop the datagram. Emitting
+    // plaintext on an encrypted-cluster path would silently bypass auth.
+    on_wire = encrypt_gossip_datagram(&ctx.encryption, &on_wire).ok()?;
+  }
   Some((peer, on_wire))
 }
 
@@ -281,8 +349,13 @@ fn build_transform<I: NodeId, T: StreamTransport, G: rand::Rng>(
   label: &Option<Bytes>,
 ) -> Arc<TransformCtx> {
   Arc::new(TransformCtx {
-    compression: endpoint.compression(),
-    checksum: endpoint.checksum(),
+    // `compression`/`checksum` accessors return `&Options`; copy out (both are
+    // `Copy`). `encryption_options` likewise returns a reference and is cloned.
+    #[cfg(compression)]
+    compression: *endpoint.compression(),
+    #[cfg(checksum)]
+    checksum: *endpoint.checksum(),
+    #[cfg(encryption)]
     encryption: endpoint.encryption_options().clone(),
     gossip_mtu: endpoint.gossip_mtu(),
     label: label.clone(),
@@ -313,8 +386,14 @@ pub(crate) struct StreamDriver<
   obs_payload_budget: Option<u64>,
   /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
   /// outbound gossip is stamped and inbound gossip is verified against the same
-  /// label. Stored here so `drain_surfaces` can read it each poll without a
-  /// per-call allocation.
+  /// label. Baked into the cached `transform` at construction; retained here so a
+  /// `rebuild_transform` (on a runtime transform-options change) re-derives the
+  /// context with the same label. With no transform backend built in nothing can
+  /// trigger a rebuild, so the field is only ever written.
+  #[cfg_attr(
+    not(any(compression, encryption, checksum)),
+    allow(dead_code, reason = "only read by the transform-change rebuild path")
+  )]
   pub(crate) label: Option<bytes::Bytes>,
   /// Application-data events retained after a full obs channel, retried on a
   /// later poll rather than dropped.
@@ -421,8 +500,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
-      .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
-      .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
+      .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     let (inbound_tx, inbound_rx) = flume::bounded(BRIDGE_INBOUND_CAP);
     let (dial_tx, dial_rx) = flume::unbounded();
@@ -470,7 +549,9 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
 
   /// Rebuild the cached transform context after a runtime options change
   /// (`Set{Compression,Checksum,Encryption}Options`), so the inline transform
-  /// path observes the new options.
+  /// path observes the new options. Only the transform-setter command arms call
+  /// it, so it is compiled only when a transform backend is built in.
+  #[cfg(any(compression, encryption, checksum))]
   fn rebuild_transform(&mut self) {
     self.transform = build_transform(&self.endpoint, &self.label);
   }
@@ -763,6 +844,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
           }
         }
       }
+      #[cfg(compression)]
       Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
         // Gate on a running node: after `leave()` the endpoint emits no
         // protocol traffic, so a new compression policy could never take
@@ -778,6 +860,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
+      #[cfg(checksum)]
       Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits no
         // gossip datagrams, so a new checksum policy (a gossip-plane concern)
@@ -801,6 +884,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
+      #[cfg(encryption)]
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits
         // no protocol traffic, so a new encryption policy could never take
@@ -1285,14 +1369,17 @@ where
             Command::SendReliable(SendReliableCmd { reply, .. }) => {
               let _ = reply.send(Err(Error::Shutdown));
             }
+            #[cfg(compression)]
             Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
               // Ignoring Err: the caller dropped its reply receiver.
               let _ = reply.send(Err(Error::Shutdown));
             }
+            #[cfg(checksum)]
             Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
               // Ignoring Err: the caller dropped its reply receiver.
               let _ = reply.send(Err(Error::Shutdown));
             }
+            #[cfg(encryption)]
             Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
               // Ignoring Err: the caller dropped its reply receiver.
               let _ = reply.send(Err(Error::Shutdown));
@@ -1578,7 +1665,9 @@ where
     }
     // Republish the load-shedding counters only when they change (a cheap u64
     // compare; the publish allocates only on a real change, which is rare).
-    let metrics = this.endpoint.endpoint_ref().metrics();
+    // `Endpoint::metrics` returns `&Metrics`; copy it out (`Metrics: Copy`) so the
+    // comparison and store below work on owned values.
+    let metrics = *this.endpoint.endpoint_ref().metrics();
     if metrics != this.last_metrics {
       this.last_metrics = metrics;
       this.shared.publish_metrics(metrics);

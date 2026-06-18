@@ -24,24 +24,13 @@ use buffa::Message as _;
 use bytes::Bytes;
 use varing::encoded_u32_varint_len;
 
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 use crate::compression::CompressionError;
 
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "xxhash64",
-  feature = "xxhash3",
-  feature = "murmur3"
-))]
+#[cfg(checksum)]
 use crate::checksum::ChecksumError;
 
-#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305",))]
+#[cfg(encryption)]
 use crate::encryption::{EncryptionError, EncryptionOptions};
 
 use crate::messages::memberlist::v1::{
@@ -239,12 +228,7 @@ pub enum FrameError {
   /// A compressed wrapper frame failed to decode (corrupt bytes, an unknown
   /// algorithm, or a declared length over the bomb-guard ceiling).
   #[error("compressed frame decode failed: {0}")]
-  #[cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  ))]
+  #[cfg(compression)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -259,7 +243,7 @@ pub enum FrameError {
   /// algorithm, a declared length over the bomb-guard ceiling, or every
   /// variant-filtered key in the keyring failed AEAD auth).
   #[error("encrypted frame decode failed: {0}")]
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -269,13 +253,7 @@ pub enum FrameError {
   /// match the carried digest, or the algorithm tag is unknown / its backend
   /// feature is not built in).
   #[error("checksumed frame decode failed: {0}")]
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -301,6 +279,13 @@ pub enum FrameError {
   /// force thousands of digest passes and buffer copies.
   #[error("non-canonical or repeated transform wrapper")]
   NonCanonicalTransform,
+  /// An inbound frame carries a transform wrapper (`Compressed`, `Checksumed`,
+  /// or `Encrypted`) whose backend feature is not built into this binary, so the
+  /// wrapper cannot be stripped. The frame is rejected rather than misinterpreted
+  /// as plaintext — a peer running a transform this node was not built with is a
+  /// configuration mismatch, not silently-droppable corruption.
+  #[error("frame carries a {0:?} transform whose backend is not built into this binary")]
+  UnsupportedTransform(MessageTag),
 }
 
 /// Body length of a message's buffa encoding (no plain-frame tag/varint).
@@ -606,24 +591,19 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
 /// `&EncryptionOptions` so an [`MessageTag::Encrypted`] wrapper can be
 /// decrypted via the configured keyring.
 ///
-/// The loop strips `Encrypted` first (when present), then `Checksumed` (when
-/// present), then `Compressed` (when present), then returns the inner buffer
-/// for the existing [`decode_message`] / [`decode_compound`] path. The loop
-/// handles a stack of arbitrary depth; the wire framing reserves the order as
-/// `[Encrypted][[Checksumed][[Compressed][frame]]]` (inner→outer: message →
-/// compress → checksum → encrypt), so a well-formed peer never produces an
-/// inverted stack.
+/// When encryption is configured (`is_enabled()`), the OUTERMOST inbound frame
+/// MUST be `Encrypted` — an unauthenticated frame on an encrypted path is
+/// rejected before any decoding. The single permitted `Encrypted` wrapper is
+/// then stripped via the keyring and the inner bytes handed to the base
+/// [`unwrap_transforms`] for the `Checksumed` and `Compressed` layers, enforcing
+/// the canonical order `Encrypted` → `Checksumed` → `Compressed`, each at most
+/// once (inner→outer the wire is `message → compress → checksum → encrypt`).
 ///
-/// A `Checksumed` wrapper recomputes the digest over its payload and rejects a
-/// mismatch (or an unknown / not-built-in algorithm) with
-/// [`FrameError::Checksum`] before the payload is unwrapped further, so a
-/// corrupted frame never reaches the message decoder.
-///
-/// `max_orig_len` bounds every wrapper's payload (the decompression-bomb
-/// guard for `Compressed` and the ciphertext-bomb guard for `Encrypted`); it
-/// is the UDP max-packet-size on the gossip path and the reliable
-/// max-frame-size on the reliable path.
-#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+/// `max_orig_len` bounds every wrapper's payload (the decompression-bomb guard
+/// for `Compressed` and the ciphertext-bomb guard for `Encrypted`); it is the
+/// UDP max-packet-size on the gossip path and the reliable max-frame-size on the
+/// reliable path.
+#[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -647,88 +627,117 @@ pub fn unwrap_transforms_with_encryption<'a>(
       return Err(FrameError::Encryption(EncryptionError::EncryptionRequired));
     }
   }
-  // The transform wrappers MUST appear in the canonical decode order
-  // `Encrypted` (stage 0) → `Checksumed` (stage 1) → `Compressed` (stage 2),
-  // each at most once. `stage` is the index of the next wrapper still allowed;
-  // a wrapper whose stage is behind `stage` (repeated or out of order) is
-  // rejected BEFORE it is verified or copied. This bounds the loop to at most
-  // three strips: without it, a peer could nest many publicly-forgeable
-  // `Checksumed` wrappers in one datagram to force thousands of digest passes
-  // and buffer copies per packet.
-  let mut current: Cow<'a, [u8]> = Cow::Borrowed(buf);
-  let mut stage: u8 = 0;
+  // Strip the single permitted outer `Encrypted` wrapper (when present), then
+  // hand the inner bytes to the base [`unwrap_transforms`] for the `Checksumed`
+  // and `Compressed` layers — enforcing the canonical decode order `Encrypted`
+  // → `Checksumed` → `Compressed`, each at most once.
+  if buf.first().copied() == Some(MessageTag::Encrypted as u8) {
+    // The decrypted plaintext may carry a `Checksumed` wrapper nested inside the
+    // encryption (`message → compress → checksum → encrypt`), so a frame valid at
+    // `max_orig_len` before checksumming decrypts to up to `max_orig_len +
+    // CHECKSUMED_WRAPPER_OVERHEAD`. Allow that slack on the decrypt bomb-guard;
+    // the base unwrap re-applies the tight `max_orig_len` ceiling on the final
+    // plaintext. With no checksum backend there is no nested checksum wrapper to
+    // account for, so the tight ceiling applies directly.
+    #[cfg(checksum)]
+    let ciphertext_ceiling =
+      max_orig_len.saturating_add(crate::checksum::CHECKSUMED_WRAPPER_OVERHEAD);
+    #[cfg(not(checksum))]
+    let ciphertext_ceiling = max_orig_len;
+    let decoded = crate::encryption::decode_encrypted_frame(encryption, buf, ciphertext_ceiling)?;
+    return Ok(Cow::Owned(
+      unwrap_transforms(&decoded, max_orig_len)?.into_owned(),
+    ));
+  }
+  unwrap_transforms(buf, max_orig_len)
+}
+
+/// Strip the leading `Checksumed` then `Compressed` transform wrappers off
+/// `buf`, returning the innermost plain-message-or-compound bytes.
+///
+/// This is the encryption-unaware base layer. It strips `Checksumed` (stage 1)
+/// then `Compressed` (stage 2), each at most once and in that order, and bounds
+/// every payload by `max_orig_len` (the decompression-bomb guard and the final
+/// plaintext ceiling). A leading `Encrypted` wrapper is rejected here — the
+/// encryption-aware [`unwrap_transforms_with_encryption`] strips the single
+/// permitted `Encrypted` layer before delegating to this base. A wrapper whose
+/// backend feature is not built into this binary is rejected with
+/// [`FrameError::UnsupportedTransform`] rather than misread as plaintext.
+// With neither a checksum nor a compression backend the loop strips nothing and
+// always returns on the first pass; the loop body is still the clearest shape for
+// the multi-wrapper case the backends enable.
+#[cfg_attr(not(any(checksum, compression)), allow(clippy::never_loop))]
+pub fn unwrap_transforms(buf: &[u8], max_orig_len: usize) -> Result<Cow<'_, [u8]>, FrameError> {
+  // `mut` only when a checksum/compression stage can re-own `current`/advance
+  // `stage`; with neither backend the base just rejects wrappers and returns.
+  #[cfg_attr(not(any(checksum, compression)), allow(unused_mut))]
+  let mut current: Cow<'_, [u8]> = Cow::Borrowed(buf);
+  // `Encrypted` is stage 0 (handled by the encryption-aware wrapper before it
+  // delegates here); the base layer's first permitted wrapper is `Checksumed`.
+  #[cfg_attr(not(any(checksum, compression)), allow(unused_mut))]
+  let mut stage: u8 = 1;
   loop {
     let lead = match current.first() {
       Some(b) => *b,
       None => return Err(FrameError::Empty),
     };
     if lead == MessageTag::Encrypted as u8 {
-      if stage > 0 {
+      // The base never decrypts. Without an encryption backend an `Encrypted`
+      // frame cannot be stripped; with one built in, the outer layer already
+      // stripped the single permitted `Encrypted` wrapper, so a second is
+      // non-canonical. Either way reject — never treat ciphertext as plaintext.
+      #[cfg(encryption)]
+      {
         return Err(FrameError::NonCanonicalTransform);
       }
-      // The decrypted plaintext may carry a `Checksumed` wrapper nested inside
-      // the encryption (`message → compress → checksum → encrypt`), so a frame
-      // valid at `max_orig_len` before checksumming decrypts to up to
-      // `max_orig_len + CHECKSUMED_WRAPPER_OVERHEAD`. Allow that slack here; the
-      // post-decompression payload is still bounded tightly by `max_orig_len`
-      // at the `Compressed` arm below.
-      let decoded = crate::encryption::decode_encrypted_frame(
-        encryption,
-        &current,
-        max_orig_len.saturating_add(crate::checksum::CHECKSUMED_WRAPPER_OVERHEAD),
-      )?;
-      current = Cow::Owned(decoded);
-      stage = 1;
-      continue;
+      #[cfg(not(encryption))]
+      {
+        return Err(FrameError::UnsupportedTransform(MessageTag::Encrypted));
+      }
     }
     if lead == MessageTag::Checksumed as u8 {
       if stage > 1 {
         return Err(FrameError::NonCanonicalTransform);
       }
-      // Strip the wrapper and verify the digest over the remaining payload;
-      // a mismatch / unknown / not-built-in algorithm rejects the frame
-      // before it is unwrapped further. The verified payload is a borrow of
-      // `current`, so re-own it before `current` is dropped.
-      let verified = crate::checksum::decode_checksummed_frame(&current)?.to_vec();
-      current = Cow::Owned(verified);
-      stage = 2;
-      continue;
+      #[cfg(checksum)]
+      {
+        // Strip the wrapper and verify the digest; a mismatch / unknown /
+        // not-built-in algorithm rejects the frame before it is unwrapped
+        // further. The verified payload borrows `current`, so re-own it.
+        let verified = crate::checksum::decode_checksummed_frame(&current)?.to_vec();
+        current = Cow::Owned(verified);
+        stage = 2;
+        continue;
+      }
+      #[cfg(not(checksum))]
+      {
+        return Err(FrameError::UnsupportedTransform(MessageTag::Checksumed));
+      }
     }
     if lead == MessageTag::Compressed as u8 {
       if stage > 2 {
         return Err(FrameError::NonCanonicalTransform);
       }
-      let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)?;
-      current = Cow::Owned(decoded);
-      stage = 3;
-      continue;
+      #[cfg(compression)]
+      {
+        let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)?;
+        current = Cow::Owned(decoded);
+        stage = 3;
+        continue;
+      }
+      #[cfg(not(compression))]
+      {
+        return Err(FrameError::UnsupportedTransform(MessageTag::Compressed));
+      }
     }
-    // Plain-message or compound tag — transform stack fully stripped. The
-    // `Encrypted` arm permitted `max_orig_len + CHECKSUMED_WRAPPER_OVERHEAD` of
-    // slack so a checksummed plaintext could decrypt; that slack is legitimate
-    // only as a checksum wrapper, which the `Checksumed` arm then strips. The
-    // fully-unwrapped frame the decoder finally sees must still honor the tight
-    // `max_orig_len` ceiling — otherwise a peer could smuggle an over-ceiling
-    // plain or checksum-only frame through the decrypt slack. (`decode_compressed_frame`
-    // already bounds a decompressed payload, so this never rejects a legitimate
-    // `Compressed` intermediate.)
+    // Plain-message or compound tag — the transform stack is fully stripped. The
+    // fully-unwrapped frame must honor the tight `max_orig_len` ceiling even
+    // when an outer decrypt step allowed a checksum wrapper's worth of slack.
     if current.len() > max_orig_len {
       return Err(FrameError::OversizePlaintext(current.len()));
     }
     return Ok(current);
   }
-}
-
-/// Encryption-unaware version of [`unwrap_transforms_with_encryption`]. A
-/// caller that did not opt into encryption never silently consumes an
-/// encrypted frame; an `Encrypted` wrapper surfaces as
-/// [`FrameError::Encryption`].
-pub fn unwrap_transforms(buf: &[u8], max_orig_len: usize) -> Result<Cow<'_, [u8]>, FrameError> {
-  unwrap_transforms_with_encryption(
-    buf,
-    max_orig_len,
-    &crate::encryption::EncryptionOptions::new(),
-  )
 }
 
 /// Build a `[TAG][VARINT_LEN][BODY]` plain frame around the supplied body bytes.

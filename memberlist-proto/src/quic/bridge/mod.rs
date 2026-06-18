@@ -98,16 +98,16 @@ pub(crate) struct Bridge<I, A> {
   /// compress/decompress point on the QUIC reliable path; a disabled
   /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
   /// frame with the framed bytes verbatim).
+  #[cfg(compression)]
   compression: crate::CompressionOptions,
   /// Cross-transport encryption configuration. The QUIC reliable path
   /// always skips the inner Encrypted wrapper — quinn-encrypted streams
   /// already provide confidentiality, and double-encrypting costs CPU
   /// and bandwidth without adding security. [`Self::new`] force-disables
   /// this field regardless of the caller's intent; the field is retained
-  /// so [`Self::pump_out`] / [`Self::pump_in`] can call the
-  /// encryption-aware codec helpers uniformly (a disabled
-  /// `EncryptionOptions` makes those helpers byte-identical to the
-  /// non-encryption variants).
+  /// so the reliable encode/decode can fold in the encryption stage
+  /// uniformly (a disabled `EncryptionOptions` makes that stage identity).
+  #[cfg(encryption)]
   encryption: crate::EncryptionOptions,
   /// Inbound reliable-unit accumulation buffer. A QUIC stream chunks bytes
   /// arbitrarily, so each `chunk.bytes` is appended here and every complete
@@ -199,8 +199,8 @@ where
     stream: Stream<I, A>,
     ch: ConnectionHandle,
     sid: QuicSid,
-    compression: crate::CompressionOptions,
-    _encryption: crate::EncryptionOptions,
+    #[cfg(compression)] compression: crate::CompressionOptions,
+    #[cfg(encryption)] _encryption: crate::EncryptionOptions,
     reliable_max: usize,
     label: Option<bytes::Bytes>,
     skip_inbound_label_check: bool,
@@ -222,10 +222,10 @@ where
     // QUIC streams are quinn-encrypted by construction. The reliable path
     // never carries an inner `Encrypted` wrapper, so the bridge stores a
     // disabled `EncryptionOptions` regardless of the caller's input. The
-    // codec helpers below (`encode_reliable_unit_with_encryption` /
-    // `take_reliable_unit_with_encryption`) collapse to the non-encryption
-    // variants when handed a disabled `EncryptionOptions`, keeping the
-    // on-wire bytes byte-identical to the pre-encryption-port shape.
+    // encryption stage of the reliable encode/decode collapses to identity
+    // when handed a disabled `EncryptionOptions`, keeping the on-wire bytes
+    // byte-identical to the pre-encryption-port shape.
+    #[cfg(encryption)]
     let encryption = crate::EncryptionOptions::new();
     // Defense-in-depth: an empty label normalizes to no-label so an empty
     // configured label never emits a `[12][0]` header, and an over-long label
@@ -249,7 +249,9 @@ where
       finish_called: false,
       phase: BridgePhase::Active,
       deadline,
+      #[cfg(compression)]
       compression,
+      #[cfg(encryption)]
       encryption,
       recv_accum: Vec::new(),
       reliable_max,
@@ -259,6 +261,91 @@ where
       inbound_label_validated,
       outbound_label_written,
     }
+  }
+
+  /// Encode one outbound reliable unit: compress (when built in), then encrypt
+  /// (when built in), then length-delimit. The inverse of
+  /// [`Self::take_reliable_unit`]. With no transform backend this is just
+  /// `[unit_len][framed]`.
+  ///
+  /// The QUIC reliable path force-disables encryption in the constructor
+  /// (quinn already encrypts the stream), so the encryption stage is identity
+  /// at runtime even when an encryption backend is built in; the stage is
+  /// retained for shape-parity with the plain-stream bridge.
+  // `unused_mut` / `unused_assignments`: the `payload` binding is reassigned
+  // only under the compression/encryption cfgs, so with one or neither built in
+  // the initial binding (or a stage's write) is never observed.
+  #[allow(unused_mut, unused_assignments)]
+  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, crate::framing::FrameError> {
+    use std::borrow::Cow;
+    let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
+    #[cfg(compression)]
+    {
+      payload = Cow::Owned(crate::compression::compress_reliable_payload(
+        &self.compression,
+        framed,
+      ));
+    }
+    #[cfg(encryption)]
+    {
+      payload = Cow::Owned(
+        crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
+          .map_err(crate::framing::FrameError::Encryption)?,
+      );
+    }
+    let mut out = Vec::with_capacity(5 + payload.len());
+    crate::framing::encode_varint_u32(payload.len() as u32, &mut out);
+    out.extend_from_slice(&payload);
+    Ok(out)
+  }
+
+  /// Take one complete reliable unit `[unit_len][payload]` off the front of
+  /// `buf`, stripping the encryption (when built in) then checksum/compression
+  /// wrappers. `Ok(None)` when more bytes are needed. The inverse of
+  /// [`Self::encode_reliable_unit`].
+  fn take_reliable_unit(
+    &self,
+    buf: &[u8],
+    max: usize,
+  ) -> Result<Option<(Vec<u8>, usize)>, crate::framing::FrameError> {
+    use crate::framing::{FrameError, decode_varint_u32};
+    let (unit_len, vbytes) = match decode_varint_u32(buf) {
+      Ok(v) => v,
+      Err(FrameError::Incomplete(..)) | Err(FrameError::Empty) => return Ok(None),
+      Err(e) => return Err(e),
+    };
+    let unit_len = unit_len as usize;
+    // With encryption the wrapper inflates the payload by a fixed
+    // ENCRYPTED_WRAPPER_OVERHEAD, so allow that slack on the on-wire unit bound;
+    // the post-decrypt plaintext is still bounded tightly by `max`.
+    #[cfg(encryption)]
+    let effective_unit_max = if self.encryption.is_enabled() {
+      max.saturating_add(crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD)
+    } else {
+      max
+    };
+    #[cfg(not(encryption))]
+    let effective_unit_max = max;
+    if unit_len > effective_unit_max {
+      return Err(FrameError::FrameTooLarge(unit_len));
+    }
+    let total = vbytes + unit_len;
+    if buf.len() < total {
+      return Ok(None);
+    }
+    let payload = &buf[vbytes..total];
+    let plaintext = {
+      #[cfg(encryption)]
+      {
+        crate::framing::unwrap_transforms_with_encryption(payload, max, &self.encryption)?
+      }
+      #[cfg(not(encryption))]
+      {
+        crate::framing::unwrap_transforms(payload, max)?
+      }
+    }
+    .into_owned();
+    Ok(Some((plaintext, total)))
   }
 
   /// Replace the bridge's effective encryption options. Called by
@@ -273,6 +360,7 @@ where
   /// the QUIC reliable path (gossip strictness propagates immediately via
   /// the coordinator's `self.encryption` since `decrypt_gossip` reads that
   /// field directly).
+  #[cfg(encryption)]
   pub(crate) fn set_encryption(&mut self, _encryption: crate::EncryptionOptions) {
     self.encryption = crate::EncryptionOptions::new();
   }
@@ -740,15 +828,11 @@ where
     }
     if !gathered.is_empty() {
       // The QUIC bridge force-disables encryption in its constructor (quinn
-      // already encrypts the stream), so the encryption layer never fails
-      // here. The fallible `Result` is still matched — the codec helper's
-      // signature is shared with the StreamBridge path — but on this path the
-      // error branch is unreachable in practice.
-      let unit = match crate::encode_reliable_unit_with_encryption(
-        &self.compression,
-        &self.encryption,
-        &gathered,
-      ) {
+      // already encrypts the stream), so the encryption stage never fails
+      // here. The fallible `Result` is still matched — the encode shares its
+      // shape with the StreamBridge path — but on this path the error branch
+      // is unreachable in practice.
+      let unit = match self.encode_reliable_unit(&gathered) {
         Ok(u) => u,
         Err(e) => {
           // Ignoring Err: idempotent retirement.
@@ -941,11 +1025,7 @@ where
                 // plain `Stream` here (no Option), so feed it directly.
                 let mut unit_err = false;
                 loop {
-                  match crate::take_reliable_unit_with_encryption(
-                    &self.recv_accum,
-                    &self.encryption,
-                    self.reliable_max,
-                  ) {
+                  match self.take_reliable_unit(&self.recv_accum, self.reliable_max) {
                     Ok(Some((plaintext, consumed))) => {
                       self.recv_accum.drain(..consumed);
                       if self.stream.handle_data(&plaintext, now).is_err() {

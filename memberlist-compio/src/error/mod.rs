@@ -2,6 +2,25 @@
 
 use std::io;
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing and the ceiling arithmetic that sizes from it is the
+/// plaintext size.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// Payload for [`MemberlistError::JoinAllFailed`]: every dispatched
 /// outbound push/pull exchange from a synchronous
 /// [`join`](crate::Memberlist::join) terminated without
@@ -93,10 +112,8 @@ impl core::fmt::Display for InvalidGossipMtu {
        near-MTU gossip packets deterministically unsendable",
       self.configured,
       self.ceiling,
-      self.ceiling
-        + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-        + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
-      memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD,
+      self.ceiling + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD,
+      ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD,
     )
   }
 }
@@ -264,6 +281,11 @@ pub enum MemberlistError {
   Entropy(#[source] io::Error),
 
   /// Encryption codec error from memberlist-wire.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[error(transparent)]
   Encryption(#[from] memberlist_proto::EncryptionError),
 
@@ -275,6 +297,17 @@ pub enum MemberlistError {
   /// [`set_checksum_options`](crate::Memberlist::set_checksum_options) setter so
   /// the misconfiguration is rejected rather than disabling gossip after a false
   /// `Ok`.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[error(transparent)]
   Checksum(#[from] memberlist_proto::ChecksumError),
 

@@ -22,7 +22,9 @@ mod bench {
   use core::net::SocketAddr;
 
   use bytes::Bytes;
-  use criterion::{Criterion, Throughput, black_box};
+  use std::hint::black_box;
+
+  use criterion::{Criterion, Throughput};
   use smol_str::SmolStr;
 
   use memberlist_proto::{

@@ -70,24 +70,13 @@ pub use conn::ExchangeId;
 pub use labeled::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 pub use transport::{Intake, StreamTransport};
 
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "xxhash64",
-  feature = "xxhash3",
-  feature = "murmur3"
-))]
+#[cfg(checksum)]
 use crate::checksum::{ChecksumError, ChecksumOptions, ChecksumOutcome};
 
-#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+#[cfg(encryption)]
 use crate::encryption::{EncryptionError, EncryptionOptions, encode_encrypted_frame};
 
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 use crate::compression::{CompressionOptions, CompressionOutcome, encode_compressed_frame};
 
 use core::{net::SocketAddr, time::Duration};
@@ -267,19 +256,14 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// Cross-transport compression configuration. The coordinator is the single
   /// compress/decompress point on both the gossip and reliable paths; a
   /// disabled `CompressionOptions` makes both paths identity.
-  #[cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  ))]
+  #[cfg(compression)]
   compression: CompressionOptions,
   /// Cross-transport encryption configuration. Applied across the unsecure
   /// paths (UDP gossip on every coordinator; the plain-TCP reliable path).
   /// On TLS the reliable path skips encryption (`R::is_secure() == true`);
   /// gossip is still encrypted (gossip is always plain UDP). A disabled
   /// configuration reduces all codec paths to identity.
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   encryption: EncryptionOptions,
   /// Checksum configuration for the gossip (unreliable) plane. A checksum
   /// guards the connectionless UDP datagram path — the only path without
@@ -288,13 +272,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
   /// transport's own end-to-end integrity (matching the original Go memberlist
   /// and the legacy port, where the CRC rides the UDP packet path only). A
   /// disabled `ChecksumOptions` makes the gossip path identity.
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   checksum: ChecksumOptions,
   /// In-flight reliable exchanges (one bridge each), keyed by [`ExchangeId`].
   /// Connection-per-exchange — no pool, slab, or drained-reap.
@@ -409,12 +387,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
 /// off-thread (e.g. on a CPU worker pool) with a cloned [`crate::CompressionOptions`].
 /// The on-wire form is kept only if it shrinks the datagram, so compressed
 /// gossip can never inflate past the uncompressed datagram.
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -447,13 +420,7 @@ pub fn compress_gossip_datagram(opts: &CompressionOptions, datagram: &[u8]) -> V
 /// Checksum one outbound gossip datagram — the body of
 /// [`StreamEndpoint::checksum_gossip`], factored out for off-thread use with a
 /// cloned [`ChecksumOptions`](crate::checksum::ChecksumOptions).
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "xxhash64",
-  feature = "xxhash3",
-  feature = "murmur3"
-))]
+#[cfg(checksum)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -477,7 +444,7 @@ pub fn checksum_gossip_datagram(
 /// Encrypt one outbound gossip datagram — the body of
 /// [`StreamEndpoint::encrypt_gossip`], factored out for off-thread use with a
 /// cloned [`EncryptionOptions`](crate::encryption::EncryptionOptions).
-#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+#[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -514,7 +481,16 @@ where
   }
 
   /// The configured cross-transport compression options.
-
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub const fn compression(&self) -> &CompressionOptions {
     &self.compression
   }
@@ -523,18 +499,22 @@ where
   /// driver calls this on the bytes it produced from a [`Transmit`] before
   /// handing them to the UDP socket. When compression is disabled, or the
   /// datagram does not benefit, the original bytes are returned.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
     compress_gossip_datagram(&self.compression, datagram)
   }
 
   /// The configured cross-transport checksum options.
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -558,13 +538,7 @@ where
   /// Returns `Err` when a checksum algorithm is configured but its backend was
   /// not built into this binary; the driver MUST drop the gossip rather than
   /// emit an unverifiable datagram, mirroring [`Self::encrypt_gossip`].
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -580,7 +554,7 @@ where
   }
 
   /// The configured cross-transport encryption options.
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -605,7 +579,7 @@ where
   /// for a primary key whose backend was not built into this binary. The
   /// driver MUST drop the gossip in that case; emitting unencrypted bytes
   /// on an encrypted-cluster path would bypass authentication silently.
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -640,7 +614,7 @@ where
   /// `[Encrypted[Checksumed[Compressed[frame]]]]`; this helper reverses all
   /// layers, so authentication and integrity never depend on integration
   /// discipline.
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -875,22 +849,11 @@ where
       cfg,
       sni_provider,
       peer_to_socket,
-      #[cfg(any(
-        feature = "lz4",
-        feature = "snappy",
-        feature = "zstd",
-        feature = "brotli"
-      ))]
+      #[cfg(compression)]
       compression: CompressionOptions::new(),
-      #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+      #[cfg(encryption)]
       encryption: EncryptionOptions::new(),
-      #[cfg(any(
-        feature = "crc32",
-        feature = "xxhash32",
-        feature = "xxhash64",
-        feature = "xxhash3",
-        feature = "murmur3"
-      ))]
+      #[cfg(checksum)]
       checksum: ChecksumOptions::new(),
       conns: StreamConns::new(),
       exchanges: FxHashMap::default(),
@@ -929,12 +892,7 @@ where
   /// Build the coordinator with an explicit cross-transport compression
   /// configuration. [`Self::new`] is `with_compression` with compression
   /// disabled.
-  #[cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  ))]
+  #[cfg(compression)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -966,7 +924,7 @@ where
   /// exchange under a default-disabled coordinator and then rebuilds via
   /// `coord = coord.with_encryption(opts)`, the live bridges receive the new
   /// policy too.
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -1083,8 +1041,7 @@ where
   /// wake an idle endpoint with no other scheduled timer would leave the
   /// failed bridges sitting in [`Self::conns`] until some unrelated event
   /// next triggered a tick.
-
-  #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+  #[cfg(encryption)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -1195,12 +1152,7 @@ where
   /// whatever policy was active at the producer's encode time. No
   /// bridge-failure cascade, no `out_transmit` / `mem_ingress` purge,
   /// no `policy_reap_pending` wake.
-  #[cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  ))]
+  #[cfg(compression)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -1231,14 +1183,7 @@ where
   /// The new policy takes effect on the next datagram; checksum is non-security
   /// and the wire frame self-describes its algorithm via the checksum-tag
   /// prefix, so a peer always verifies under whatever policy produced the bytes.
-
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3"
-  ))]
+  #[cfg(checksum)]
   #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -2310,7 +2255,9 @@ where
     let bridge = StreamBridge::new(
       records,
       now + self.ep.accept_handshake_deadline(),
+      #[cfg(compression)]
       self.compression,
+      #[cfg(encryption)]
       self.encryption.clone(),
       self.ep.max_stream_frame_size(),
     );
@@ -2567,7 +2514,9 @@ where
       let bridge = StreamBridge::new(
         records,
         deadline,
+        #[cfg(compression)]
         self.compression,
+        #[cfg(encryption)]
         self.encryption.clone(),
         self.ep.max_stream_frame_size(),
       );

@@ -19,9 +19,15 @@ use agnostic::{
 use memberlist_proto::QuicOptions;
 #[cfg(feature = "tcp")]
 use memberlist_proto::RawRecords;
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
 use memberlist_proto::{
-  AliveDelegate, ChecksumOptions, CompressionOptions, EncryptionOptions, Endpoint, EndpointOptions,
-  Instant, MergeDelegate, Node, event::Event, typed::NodeState,
+  AliveDelegate, Endpoint, EndpointOptions, Instant, MergeDelegate, Node, event::Event,
+  typed::NodeState,
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use memberlist_proto::{LabelOptions, streams::StreamTransport};
@@ -33,12 +39,21 @@ use rand::rngs::StdRng;
 use crate::quic_driver::QuicDriver;
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
+#[cfg(checksum)]
+use crate::transform::validate_checksum;
+#[cfg(encryption)]
+use crate::transform::validate_encryption;
 use crate::{
   NodeId,
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
   error::Error,
@@ -48,7 +63,6 @@ use crate::{
   resolver::{AddressResolver, MaybeResolved},
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
-  transform::{validate_checksum, validate_encryption},
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
@@ -211,12 +225,14 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
     // before the endpoint is built: a near-MTU gossip packet above the ceiling
     // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
     validate_gossip_mtu(&ml_opts)?;
+    #[cfg(encryption)]
     validate_encryption(ml_opts.encryption())?;
     // Reject a gossip checksum algorithm whose backend feature is absent: the
     // options builder accepts it, but every later `checksum_gossip` would fail
     // and the driver would drop the datagram — so a "successful" checksum config
     // would silently disable ALL gossip. Checksum is a gossip-plane concern only;
     // the reliable QUIC bridge carries no checksum.
+    #[cfg(checksum)]
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
@@ -234,15 +250,22 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
     // cannot diverge.
     let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
 
+    // `mut` only when at least one transform setter below is built in; with no
+    // backend the endpoint is moved straight into `with_label` unmutated.
+    #[cfg_attr(not(any(compression, checksum, encryption)), allow(unused_mut))]
     let mut endpoint = QuicEndpoint::new(ep, quic_config);
-    // Apply the configured compression, checksum, and encryption policies. QUIC's
-    // reliable path has its own connection-level security and integrity layer;
-    // compression, checksum, and encryption are applied to the gossip (UDP
-    // datagram) path only.
+    // Apply the configured compression, checksum, and encryption policies whose
+    // backends are built in. QUIC's reliable path has its own connection-level
+    // security and integrity layer; compression, checksum, and encryption are
+    // applied to the gossip (UDP datagram) path only. With a transform backend
+    // off the corresponding policy is unrepresentable, so its setter is gated out.
+    #[cfg(compression)]
     endpoint.set_compression_options(*ml_opts.compression());
+    #[cfg(checksum)]
     endpoint
       .set_checksum_options(*ml_opts.checksum())
       .map_err(Error::Checksum)?;
+    #[cfg(encryption)]
     endpoint.set_encryption_options(ml_opts.encryption().clone());
     // Thread the cluster label into the reliable bridge constructor so the
     // reliable plane enforces the same label as the gossip codec.
@@ -363,14 +386,23 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
         if ml_opts.skip_inbound_label_check() {
           label_opts = label_opts.skip_inbound_label_check();
         }
-        StreamEndpoint::with_compression(
+        // Build the coordinator with all transforms disabled, then layer in each
+        // configured transform whose backend is built in. With none built in the
+        // base coordinator carries no transform state and the planes stay plaintext.
+        #[allow(unused_mut)]
+        let mut endpoint = StreamEndpoint::new(
           ep,
           label_opts,
           Box::new(|_: &SocketAddr| -> Option<String> { None }),
           Box::new(|addr: &SocketAddr| *addr),
-          *ml_opts.compression(),
-        )
-        .with_encryption(ml_opts.encryption().clone())
+        );
+        #[cfg(compression)]
+        endpoint.set_compression_options(*ml_opts.compression());
+        #[cfg(encryption)]
+        {
+          endpoint = endpoint.with_encryption(ml_opts.encryption().clone());
+        }
+        endpoint
       },
     )
     .await
@@ -452,14 +484,23 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
         if ml_opts.skip_inbound_label_check() {
           label_opts = label_opts.skip_inbound_label_check();
         }
-        StreamEndpoint::with_compression(
+        // Build the coordinator with all transforms disabled, then layer in each
+        // configured transform whose backend is built in. With none built in the
+        // base coordinator carries no transform state and the planes stay plaintext.
+        #[allow(unused_mut)]
+        let mut endpoint = StreamEndpoint::new(
           ep,
           label_opts,
           Box::new(sni_provider),
           Box::new(|addr: &SocketAddr| *addr),
-          *ml_opts.compression(),
-        )
-        .with_encryption(ml_opts.encryption().clone())
+        );
+        #[cfg(compression)]
+        endpoint.set_compression_options(*ml_opts.compression());
+        #[cfg(encryption)]
+        {
+          endpoint = endpoint.with_encryption(ml_opts.encryption().clone());
+        }
+        endpoint
       },
     )
     .await
@@ -555,12 +596,14 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
     // Validate the encryption configuration before the endpoint is built, so an
     // unusable keyring surfaces as a typed construction error rather than silently
     // discarding every encrypted gossip datagram at runtime.
+    #[cfg(encryption)]
     validate_encryption(ml_opts.encryption())?;
     // Reject a gossip checksum algorithm whose backend feature is absent: the
     // options builder accepts it, but every later `checksum_gossip` would fail
     // and the driver would drop the datagram — so a "successful" checksum config
     // would silently disable ALL gossip. Checksum is a gossip-plane concern only;
     // the reliable stream path carries no checksum.
+    #[cfg(checksum)]
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
@@ -581,6 +624,7 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
     // because the stream transport already provides integrity — so it is set on
     // the built endpoint rather than threaded through the per-backend closure
     // (which configures the reliable-plane label/compression/encryption).
+    #[cfg(checksum)]
     endpoint
       .set_checksum_options(*ml_opts.checksum())
       .map_err(Error::Checksum)?;
@@ -1001,6 +1045,16 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   ///
   /// The change takes effect on the next outbound datagram. Rejected with
   /// `Err(NotRunning)` once the node has left the cluster.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<(), Error> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
@@ -1024,6 +1078,17 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// stream path carries no checksum, as its transport already provides
   /// integrity. The change takes effect on the next outbound datagram. Rejected
   /// with `Err(NotRunning)` once the node has left the cluster.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<(), Error> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
@@ -1047,6 +1112,11 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
   /// trial-encrypted to confirm the AEAD backend is compiled in. Rejected with
   /// `Err(NotRunning)` once the node has left the cluster, or with
   /// `Err(Encryption(_))` when the keyring contains an unsupported algorithm.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), Error> {
     if self.shared.is_shutdown() {
       return Err(Error::Shutdown);
@@ -1173,6 +1243,22 @@ async fn resolve_one<Res: AddressResolver>(
 /// and QUIC drivers' `GOSSIP_RECV_BUF_MAX` recv-buffer clamp (both `65507`).
 const UDP_PAYLOAD_MAX: usize = 65507;
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in (the proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted).
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in (the proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum).
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// The largest plaintext `gossip_mtu` whose on-wire datagram still fits a single
 /// UDP packet. A gossip packet's plaintext budget is `gossip_mtu`; the wire
 /// datagram after the checksum and encryption wrappers is at most
@@ -1180,9 +1266,8 @@ const UDP_PAYLOAD_MAX: usize = 65507;
 /// same model the drivers' recv buffers are sized to — compression only shrinks,
 /// the binding inflations are the checksum and encryption wrappers), and that
 /// must be `<= UDP_PAYLOAD_MAX`.
-const GOSSIP_MTU_MAX: usize = UDP_PAYLOAD_MAX
-  - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-  - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+const GOSSIP_MTU_MAX: usize =
+  UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
 
 /// Reject a configured `gossip_mtu` whose on-wire datagram cannot fit one UDP
 /// packet.

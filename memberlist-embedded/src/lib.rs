@@ -71,7 +71,13 @@ pub mod transform;
 pub use addr::socket_addr_is_routable;
 pub use config::{DEFAULT_CLOSE_TIMEOUT, Options};
 pub use engine::{Engine, validate_runtime_config};
-pub use error::{ControlError, GossipMtuTooLarge, InitError};
+pub use error::{GossipMtuTooLarge, InitError};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use error::ControlError;
 pub use gossip_io::GossipIo;
 // Admission predicates a caller can install via `Engine::set_alive_delegate` /
 // `set_merge_delegate`.
@@ -83,7 +89,33 @@ pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
 pub use resolver::{MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, ResolvedAddrs};
 pub use stream_io::{StreamIo, StreamIoError};
-pub use transform::{
-  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
-  Keyring, LabelError, SecretKey, TransformOptions,
-};
+pub use transform::{LabelError, TransformOptions};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use transform::{CompressAlgorithm, CompressionOptions};
+#[cfg(checksum)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
+pub use transform::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use transform::{EncryptionOptions, Keyring, SecretKey};

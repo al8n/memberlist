@@ -114,13 +114,13 @@ extern crate alloc as std;
 #[cfg(feature = "std")]
 extern crate std;
 
-// // The protocol state is intrinsically heap-backed (Vec/Box/String/maps), so a
-// // build with neither capability tier is unsupported. Fail with a clear message
-// // instead of a cascade of "cannot find type `Vec`" errors.
-// #[cfg(not(any(feature = "std", feature = "alloc")))]
-// compile_error!(
-//   "memberlist-proto requires the `std` or `alloc` feature (the protocol state needs a heap allocator)"
-// );
+// The protocol state is intrinsically heap-backed (Vec/Box/String/maps), so a
+// build with neither capability tier is unsupported. Fail with a clear message
+// instead of a cascade of "cannot find type `Vec`" errors.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!(
+  "memberlist-proto requires the `std` or `alloc` feature (the protocol state needs a heap allocator)"
+);
 
 #[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 mod bridge_phase;
@@ -178,13 +178,7 @@ pub(crate) mod wire;
 
 // ── Wire types, codec, and framing ──────────────────────────────────────────
 pub mod bridge;
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "xxhash64",
-  feature = "xxhash3",
-  feature = "murmur3"
-))]
+#[cfg(checksum)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -197,12 +191,7 @@ pub mod bridge;
 )]
 pub mod checksum;
 pub mod codec;
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -215,7 +204,7 @@ pub mod codec;
 pub mod compression;
 pub mod convert;
 pub mod data;
-#[cfg(any(feature = "aes-gcm", feature = "chacha20poly1305"))]
+#[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20poly1305")))
@@ -260,13 +249,7 @@ pub use time::Instant;
 
 pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use cheap_clone::CheapClone;
-#[cfg(any(
-  feature = "crc32",
-  feature = "xxhash32",
-  feature = "xxhash64",
-  feature = "xxhash3",
-  feature = "murmur3"
-))]
+#[cfg(checksum)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -285,12 +268,7 @@ pub use codec::{
   CodecError, DecodeOptions, EncodeOptions, TrailingData, TruncatedInput, decode_incoming,
   encode_outgoing, encode_outgoing_compound, parse_message, parse_messages,
 };
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
+#[cfg(compression)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(
@@ -303,9 +281,26 @@ pub use codec::{
 pub use compression::{
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
   UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,
-  encode_reliable_unit, encode_reliable_unit_with_encryption, take_reliable_unit,
-  take_reliable_unit_with_encryption,
+  encode_reliable_unit, take_reliable_unit,
 };
+// The encryption-aware reliable-unit codec helpers live in the `compression`
+// module (present only under a compression backend) AND name `EncryptionOptions`
+// (present only under an encryption backend), so they exist only when BOTH a
+// compression and an encryption backend are built in.
+#[cfg(all(compression, encryption))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(all(
+    any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    ),
+    any(feature = "aes-gcm", feature = "chacha20-poly1305")
+  )))
+)]
+pub use compression::{encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption};
 pub use convert::{
   AddrLengthMismatchInfo, ConvertError, id_from_bytes, id_to_bytes, socket_addr_from_bytes,
   socket_addr_to_bytes,
@@ -320,7 +315,7 @@ pub use data::{
   Data, DataRef, DuplicateFieldInfo, EncodeError, InsufficientBufferCapacity, MissingFieldInfo,
   UnknownTagInfo, UnknownWireTypeInfo,
 };
-#[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
+#[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
@@ -334,8 +329,16 @@ pub use framing::{
   AnyMessage, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
   FrameError, IncompleteFrame, MessageTag, decode_compound, decode_message, decode_plain_frame,
   encode_compound, encode_message, encode_plain_frame, unwrap_transforms,
-  unwrap_transforms_with_encryption,
 };
+// `unwrap_transforms_with_encryption` strips the outer `Encrypted` wrapper via
+// the configured keyring, so it exists only when an encryption backend is built
+// in (the base `unwrap_transforms` is always present above).
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use framing::unwrap_transforms_with_encryption;
 pub use id::Id;
 pub use node::Node;
 

@@ -259,23 +259,28 @@ where
       .memberlist_options
       .label()
       .map(bytes::Bytes::copy_from_slice);
-    let mut endpoint = QuicEndpoint::with_compression(
-      ep,
-      self.quic_config,
-      *runtime.memberlist_options.compression(),
-    )
-    .with_encryption(runtime.memberlist_options.encryption().clone())
-    .with_label(
-      label.clone(),
-      runtime.memberlist_options.skip_inbound_label_check(),
-    )
-    .expect("cluster label validated at the MemberlistOptions setter");
+    // Build the coordinator with all transforms disabled, then layer in each
+    // configured transform whose backend is built in. With none built in the
+    // base coordinator carries no transform state and the planes stay plaintext.
+    // The cluster label is not a transform — it is always applied.
+    #[allow(unused_mut)]
+    let mut endpoint = QuicEndpoint::new(ep, self.quic_config)
+      .with_label(
+        label.clone(),
+        runtime.memberlist_options.skip_inbound_label_check(),
+      )
+      .expect("cluster label validated at the MemberlistOptions setter");
+    #[cfg(compression)]
+    endpoint.set_compression_options(*runtime.memberlist_options.compression());
+    #[cfg(encryption)]
+    endpoint.set_encryption_options(runtime.memberlist_options.encryption().clone());
     // Checksum is gossip-plane (unreliable) only — the reliable QUIC bridge
     // carries no checksum (quinn provides its own integrity) — so it is
     // threaded via the gossip-plane setter rather than a builder.
     // Ignoring Err: the checksum policy was validated in `Memberlist::new`
     // (`validate_checksum_options`) before this driver task spawned, so its
     // backend is built in and this store cannot fail.
+    #[cfg(checksum)]
     let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
     crate::quic_driver::quic_driver_loop::<Self::Id, D, G>(
       endpoint,

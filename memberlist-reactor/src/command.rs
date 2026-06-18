@@ -4,7 +4,13 @@
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_proto::{ChecksumOptions, CompressionOptions, EncryptionOptions, Node};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
+use memberlist_proto::Node;
 
 use crate::error::Error;
 
@@ -27,10 +33,13 @@ pub(crate) enum Command<I> {
   /// Send one or more reliable directed user messages via the stream plane.
   SendReliable(SendReliableCmd),
   /// Reconfigure the gossip compression policy in place.
+  #[cfg(compression)]
   SetCompressionOptions(SetCompressionOptionsCmd),
   /// Reconfigure the gossip (unreliable) checksum policy in place.
+  #[cfg(checksum)]
   SetChecksumOptions(SetChecksumOptionsCmd),
   /// Reconfigure the gossip encryption policy in place.
+  #[cfg(encryption)]
   SetEncryptionOptions(SetEncryptionOptionsCmd),
   /// Replace this node's advertised metadata in place.
   UpdateNodeMetadata(UpdateNodeMetadataCmd),
@@ -94,6 +103,7 @@ pub(crate) struct SendReliableCmd {
 }
 
 /// Payload of [`Command::SetCompressionOptions`].
+#[cfg(compression)]
 pub(crate) struct SetCompressionOptionsCmd {
   /// The new compression policy to apply.
   pub(crate) opts: CompressionOptions,
@@ -102,6 +112,7 @@ pub(crate) struct SetCompressionOptionsCmd {
 }
 
 /// Payload of [`Command::SetChecksumOptions`].
+#[cfg(checksum)]
 pub(crate) struct SetChecksumOptionsCmd {
   /// The new gossip (unreliable) checksum policy to apply.
   pub(crate) opts: ChecksumOptions,
@@ -110,6 +121,7 @@ pub(crate) struct SetChecksumOptionsCmd {
 }
 
 /// Payload of [`Command::SetEncryptionOptions`].
+#[cfg(encryption)]
 pub(crate) struct SetEncryptionOptionsCmd {
   /// The new encryption policy to apply (validated before applying).
   pub(crate) opts: EncryptionOptions,

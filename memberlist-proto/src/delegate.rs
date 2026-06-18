@@ -15,7 +15,7 @@
 //! No delegate (`None`) accepts everything, mirroring Go's optional
 //! `config.Alive` / `config.Merge`.
 
-use std::{borrow::Cow, boxed::Box};
+use std::boxed::Box;
 
 use crate::typed::NodeState;
 

@@ -1,10 +1,35 @@
 //! Wire-traffic transforms: compression, encryption, and the reliable-plane
 //! cluster label.
 
-pub use memberlist_proto::{
-  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
-  Keyring, SecretKey,
-};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
+#[cfg(checksum)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
+pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
 
 #[cfg(not(feature = "std"))]
 use std::vec::Vec;
@@ -28,6 +53,16 @@ pub use memberlist_proto::LabelError;
 #[non_exhaustive]
 pub struct TransformOptions {
   /// Cross-transport gossip + reliable-plane compression.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub compression: CompressionOptions,
   /// Gossip (unreliable) plane checksum.
   ///
@@ -35,8 +70,24 @@ pub struct TransformOptions {
   /// streams carry no checksum (they rely on the stream transport's own
   /// integrity), matching memberlist-core and the legacy driver. [`Default`]
   /// selects no algorithm, leaving the gossip codec identity.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub checksum: ChecksumOptions,
   /// Cross-transport gossip + reliable-plane AEAD encryption.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub encryption: EncryptionOptions,
   /// Validated cluster label, or `None` for an unlabeled node.
   pub(crate) label: Option<Bytes>,
@@ -53,6 +104,16 @@ impl TransformOptions {
   }
 
   /// Set the cross-transport compression.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[must_use]
   pub fn with_compression(mut self, compression: CompressionOptions) -> Self {
     self.compression = compression;
@@ -63,6 +124,17 @@ impl TransformOptions {
   ///
   /// Applies to outbound gossip datagrams only; reliable streams carry no
   /// checksum.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   #[must_use]
   pub fn with_checksum(mut self, checksum: ChecksumOptions) -> Self {
     self.checksum = checksum;
@@ -70,6 +142,11 @@ impl TransformOptions {
   }
 
   /// Set the cross-transport encryption.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[must_use]
   pub fn with_encryption(mut self, encryption: EncryptionOptions) -> Self {
     self.encryption = encryption;

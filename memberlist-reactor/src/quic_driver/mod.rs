@@ -31,13 +31,24 @@ use memberlist_proto::{
   event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
 };
 
+// With no encryption backend the inbound path strips the remaining
+// (checksum/compression) transforms via the wire `unwrap_transforms`, since the
+// keyring-aware `decrypt_gossip` is gated out.
+#[cfg(not(encryption))]
+use memberlist_proto::framing::unwrap_transforms;
+
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
 use crate::{
   NodeId,
   cidr::{CidrFilter, cidr_blocks},
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   error::Error,
   observation::observation_payload_bytes,
@@ -47,6 +58,24 @@ use crate::{
 
 /// IP-layer UDP payload maximum; caps the per-recv buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
+
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing to the recv-buffer sizing.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing to the recv-buffer sizing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 
 /// Cap on the count of application-data events retained after a full observation
 /// channel (the payload byte budget bounds their bytes; this bounds their count).
@@ -167,8 +196,8 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
-      .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
-      .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
+      .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
       .min(GOSSIP_RECV_BUF_MAX);
     let last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
     Self {
@@ -391,6 +420,7 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
           reply,
         });
       }
+      #[cfg(compression)]
       Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
         // Gate on a running node: after `leave()` the endpoint emits no
         // protocol traffic, so a new compression policy could never take
@@ -405,6 +435,7 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
+      #[cfg(checksum)]
       Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits no
         // gossip datagrams, so a new checksum policy (a gossip-plane concern)
@@ -425,6 +456,7 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.send(res);
       }
+      #[cfg(encryption)]
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
         // Gate on a running node FIRST: after `leave()` the endpoint emits
         // no protocol traffic, so a new encryption policy could never take
@@ -622,8 +654,19 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
     let mut ingress = 0;
     while let Some((from, raw)) = self.endpoint.poll_memberlist_ingress() {
       ingress += 1;
+      // Strip the wire transforms in the order they were applied (encryption
+      // outermost, then checksum, then compression), yielding the plain frame.
+      // With no encryption backend built in there is no `decrypt_gossip`, so the
+      // remaining transforms are stripped via the wire `unwrap_transforms`,
+      // bounded by the configured gossip MTU.
+      #[cfg(encryption)]
       let plain = match self.endpoint.decrypt_gossip(&raw) {
         Ok(p) => Bytes::from(p),
+        Err(_) => continue,
+      };
+      #[cfg(not(encryption))]
+      let plain = match unwrap_transforms(&raw, self.endpoint.gossip_mtu()) {
+        Ok(p) => Bytes::from(p.into_owned()),
         Err(_) => continue,
       };
       let inner = match decode_incoming(plain, &decode_opts) {
@@ -673,20 +716,38 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
           }
         }
       };
-      let compressed = self.endpoint.compress_gossip(&plain);
-      let checksummed = match self.endpoint.checksum_gossip(&compressed) {
-        Ok(b) => b,
-        // Checksum configured but its backend was not built in — drop rather
-        // than emit an unverifiable datagram on a checksum-configured path.
-        Err(_) => continue,
-      };
+      // Apply the cross-transport transforms to the encoded frame before it hits
+      // the wire: compress, then checksum, then encrypt, so the on-wire byte order
+      // is `[Encrypted[Checksumed[Compressed[frame]]]]`. Each is present only when
+      // its backend is built in; with none, the encoded frame goes out as-is.
+      #[allow(unused_mut)]
+      let mut staged: Vec<u8> = plain.to_vec();
+      #[cfg(compression)]
+      {
+        staged = self.endpoint.compress_gossip(&staged);
+      }
+      #[cfg(checksum)]
+      {
+        staged = match self.endpoint.checksum_gossip(&staged) {
+          Ok(b) => b,
+          // Checksum configured but its backend was not built in — drop rather
+          // than emit an unverifiable datagram on a checksum-configured path.
+          Err(_) => continue,
+        };
+      }
+      #[cfg(encryption)]
+      {
+        staged = match self.endpoint.encrypt_gossip(&staged) {
+          Ok(b) => b,
+          // Encryption-configured + backend-rejected — drop the datagram.
+          // Emitting plaintext on an encrypted-cluster path would bypass auth.
+          Err(_) => continue,
+        };
+      }
       // `Bytes` so the datagram-queue path and the UDP fallback can share the
       // same encoded payload without a second copy (`clone` is an O(1) refcount
       // bump).
-      let on_wire = match self.endpoint.encrypt_gossip(&checksummed) {
-        Ok(b) => Bytes::from(b),
-        Err(_) => continue,
-      };
+      let on_wire = Bytes::from(staged);
       match self.endpoint.unreliable_transport() {
         UnreliableTransport::Udp => {
           if let Some(socket) = self.socket.as_ref() {
@@ -897,14 +958,17 @@ impl<I: NodeId, R: Runtime, G: rand::Rng + Unpin> Future for QuicDriver<I, R, G>
           Command::SendReliable(SendReliableCmd { reply, .. }) => {
             let _ = reply.send(Err(Error::Shutdown));
           }
+          #[cfg(compression)]
           Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }
+          #[cfg(checksum)]
           Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));
           }
+          #[cfg(encryption)]
           Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => {
             // Ignoring Err: the caller dropped its reply receiver.
             let _ = reply.send(Err(Error::Shutdown));

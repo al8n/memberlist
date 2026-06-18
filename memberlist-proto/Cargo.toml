@@ -54,7 +54,6 @@ std = [
   "triomphe/default",
   "varing/default",
   "derive_more/std",
-  "aead?/default",
   "aes-gcm?/default",
   "chacha20poly1305?/default",
   "lz4_flex?/default",
@@ -132,16 +131,12 @@ brotli = ["std", "dep:brotli", "brotli/std"]
 # dependency) supplies per-frame nonces and the `SecretKey::random_*` helpers.
 aes-gcm = [
   "alloc",
-  "dep:aead",
-  "aead/alloc",
   "dep:aes-gcm",
   "aes-gcm/aes",
   "aes-gcm/alloc",
 ]
 chacha20-poly1305 = [
   "alloc",
-  "dep:aead",
-  "aead/alloc",
   "dep:chacha20poly1305",
   "chacha20poly1305/alloc",
 ]
@@ -204,8 +199,8 @@ snap = { version = "1", optional = true }
 lz4_flex = { version = "0.13", optional = true, default-features = false }
 zstd = { version = "0.13", optional = true }
 
-# AEAD backends — opt-in (see the encryption-* features).
-aead = { version = "0.6", optional = true, default-features = false }
+# AEAD backends — opt-in (see the encryption-* features). The AEAD traits come
+# from each cipher's own `aead` re-export, so no direct `aead` dependency.
 aes-gcm = { version = "0.10", optional = true, default-features = false }
 chacha20poly1305 = { version = "0.10", optional = true, default-features = false }
 

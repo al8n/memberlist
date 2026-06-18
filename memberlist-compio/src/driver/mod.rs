@@ -42,10 +42,15 @@ use memberlist_proto::{
   typed::{NodeState, State},
 };
 
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
 use crate::{
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
   driver_options::{DriverOptions, StreamTransportOptions},
@@ -399,6 +404,24 @@ struct BridgeHandle {
 /// ceiling.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame is unencrypted, so the wrapper
+/// adds nothing to the recv-buffer sizing.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing to the recv-buffer sizing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// Compute the per-recv UDP buffer size from the coordinator's
 /// configured `gossip_mtu`. A datagram on the wire is at most
 /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD` bytes when encryption
@@ -431,8 +454,8 @@ where
 {
   endpoint
     .gossip_mtu()
-    .saturating_add(memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD)
-    .saturating_add(memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD)
+    .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
 }
 
@@ -633,7 +656,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // rebuild only on an actual membership/health change.
   let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
   // Same publish-on-change for the load-shedding counters.
-  let mut last_metrics = endpoint.endpoint_ref().metrics();
+  let mut last_metrics = *endpoint.endpoint_ref().metrics();
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
@@ -1276,8 +1299,11 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       Command::Shutdown(ShutdownCmd { reply }) => reply,
       Command::Leave(LeaveCmd { reply }) => reply,
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
+      #[cfg(compression)]
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
+      #[cfg(checksum)]
       Command::SetChecksumOptions(SetChecksumOptionsCmd { reply, .. }) => reply,
+      #[cfg(encryption)]
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
       Command::QueueUserBroadcast(cmd) => cmd.reply,
       Command::SetLocalState(cmd) => cmd.reply,
@@ -1594,6 +1620,7 @@ async fn dispatch_command<I, A, R, G>(
       // Ignoring Err: caller dropped the reply receiver.
       let _ = reply.send(res);
     }
+    #[cfg(compression)]
     Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
       // Gate on a running node: after `leave()` the endpoint emits no
       // protocol traffic, so a new compression policy could never take
@@ -1609,6 +1636,7 @@ async fn dispatch_command<I, A, R, G>(
       // Ignoring Err: caller dropped the reply receiver.
       let _ = reply.send(res);
     }
+    #[cfg(checksum)]
     Command::SetChecksumOptions(SetChecksumOptionsCmd { opts, reply }) => {
       // Gate on a running node FIRST: after `leave()` the endpoint emits no
       // gossip datagrams, so a new checksum policy could never take effect on
@@ -1629,6 +1657,7 @@ async fn dispatch_command<I, A, R, G>(
       // Ignoring Err: caller dropped the reply receiver.
       let _ = reply.send(res);
     }
+    #[cfg(encryption)]
     Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
       // Gate on a running node FIRST: after `leave()` the endpoint emits no
       // protocol traffic, so a new encryption policy could never take effect
@@ -1983,13 +2012,24 @@ fn dispatch_gossip<I, A, R, G>(
   // unconditionally handles a stale buffer left over from a prior
   // ingress that some earlier handle_gossip had no chance to drain.
   while let Some((from_addr, raw)) = endpoint.poll_memberlist_ingress() {
+    // Strip the wire transforms in the order they were applied (encryption
+    // outermost, then checksum, then compression), yielding the plain frame.
+    // Drop the datagram on a decrypt / checksum / unknown-tag / oversize error.
+    // Gossip is lossy and self-healing — the peer retransmits on the next gossip
+    // round. With no encryption backend built in there is no `decrypt_gossip`, so
+    // the remaining (checksum/compression) transforms are stripped directly via
+    // the wire `unwrap_transforms`, bounded by the configured gossip MTU.
+    #[cfg(encryption)]
     let plain = match endpoint.decrypt_gossip(&raw) {
       Ok(p) => Bytes::from(p),
-      // Drop the datagram on a decrypt / unknown-tag / oversize error.
-      // Gossip is lossy and self-healing — the peer retransmits on the
-      // next gossip round.
       Err(_) => continue,
     };
+    #[cfg(not(encryption))]
+    let plain =
+      match memberlist_proto::framing::unwrap_transforms(&raw, endpoint.gossip_mtu()) {
+        Ok(p) => Bytes::from(p.into_owned()),
+        Err(_) => continue,
+      };
     // Strip the optional cluster label and verify it matches. A
     // mismatched or absent label on a labeled cluster (or a labeled
     // frame on an unlabeled cluster) is rejected here, isolating gossip
@@ -2340,20 +2380,35 @@ where
         }
       }
     };
-    let compressed = endpoint.compress_gossip(&plain);
-    let checksummed = match endpoint.checksum_gossip(&compressed) {
-      Ok(bytes) => bytes,
-      // Checksum configured but its backend was not built in — drop rather
-      // than emit an unverifiable datagram on a checksum-configured path.
-      Err(_) => continue,
-    };
-    let on_wire = match endpoint.encrypt_gossip(&checksummed) {
-      Ok(bytes) => bytes,
-      // Encryption-configured + backend-rejected (e.g. unknown
-      // algorithm baked in) — drop the datagram. Emitting plaintext on
-      // an encrypted-cluster path would silently bypass auth.
-      Err(_) => continue,
-    };
+    // Apply the cross-transport transforms to the encoded frame before it hits
+    // the wire: compress, then checksum, then encrypt, so the on-wire byte order
+    // is `[Encrypted[Checksumed[Compressed[frame]]]]`. Each is present only when
+    // its backend is built in; with none, the encoded frame goes out as-is.
+    #[allow(unused_mut)]
+    let mut on_wire: Vec<u8> = plain.to_vec();
+    #[cfg(compression)]
+    {
+      on_wire = endpoint.compress_gossip(&on_wire);
+    }
+    #[cfg(checksum)]
+    {
+      on_wire = match endpoint.checksum_gossip(&on_wire) {
+        Ok(bytes) => bytes,
+        // Checksum configured but its backend was not built in — drop rather
+        // than emit an unverifiable datagram on a checksum-configured path.
+        Err(_) => continue,
+      };
+    }
+    #[cfg(encryption)]
+    {
+      on_wire = match endpoint.encrypt_gossip(&on_wire) {
+        Ok(bytes) => bytes,
+        // Encryption-configured + backend-rejected (e.g. unknown
+        // algorithm baked in) — drop the datagram. Emitting plaintext on
+        // an encrypted-cluster path would silently bypass auth.
+        Err(_) => continue,
+      };
+    }
     let peer_socket = endpoint.resolve_peer_socket(&peer);
     let BufResult(res, _buf) = gossip_socket.send_to(on_wire, peer_socket).await;
     // Ignoring Err: a transient send error (ENOBUFS, network down on
@@ -2994,7 +3049,7 @@ fn refresh_metrics_if_changed<I, A, R, G>(
   R: StreamTransport,
   G: rand::Rng,
 {
-  let m = endpoint.endpoint_ref().metrics();
+  let m = *endpoint.endpoint_ref().metrics();
   if m != *last {
     *last = m;
     metrics.store(Arc::new(m));

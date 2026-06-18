@@ -70,20 +70,61 @@ pub use resolver::{Resolver, SocketAddrResolver};
 // and its bound are the return type a custom `Resolver` must produce, so they are
 // part of this crate's public resolver API.
 pub use memberlist_embedded::{
-  AliveDelegate, ControlError, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate,
-  ResolvedAddrs,
+  AliveDelegate, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate, ResolvedAddrs,
 };
-pub use memberlist_proto::{EncryptionError, Node, PingId, StreamId, typed::NodeState};
+// `ControlError` is the encryption key-rotation error; it exists in the shared
+// core only when an encryption backend is built in.
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_embedded::ControlError;
+pub use memberlist_proto::{Node, PingId, StreamId, typed::NodeState};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_proto::EncryptionError;
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 // The wire transforms live in the shared `memberlist-embedded` core and are
-// re-exported here so the smoltcp public API is self-contained.
-pub use memberlist_embedded::transform::{
-  ChecksumAlgorithm, ChecksumOptions, CompressAlgorithm, CompressionOptions, EncryptionOptions,
-  Keyring, LabelError, SecretKey, TransformOptions,
-};
+// re-exported here so the smoltcp public API is self-contained. `TransformOptions`
+// and `LabelError` always exist; the per-backend option/algorithm/key types exist
+// only when their transform backend is built in.
+pub use memberlist_embedded::transform::{LabelError, TransformOptions};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_embedded::transform::{CompressAlgorithm, CompressionOptions};
+#[cfg(checksum)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  )))
+)]
+pub use memberlist_embedded::transform::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(encryption)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+)]
+pub use memberlist_embedded::transform::{EncryptionOptions, Keyring, SecretKey};
 
 mod addr;
 mod config;

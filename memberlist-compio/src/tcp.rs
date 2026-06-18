@@ -292,14 +292,20 @@ where
     if let Some(md) = runtime.merge_delegate {
       ep.set_merge_delegate(BoxedMerge(md));
     }
-    let mut endpoint = StreamEndpoint::with_compression(
+    // Build the coordinator with all transforms disabled, then layer in each
+    // configured transform whose backend is built in. With none built in the
+    // base coordinator carries no transform state and the planes stay plaintext.
+    #[allow(unused_mut)]
+    let mut endpoint = StreamEndpoint::new(
       ep,
       label_opts,
       Box::new(|_| None),
       Box::new(|addr| *addr),
-      *runtime.memberlist_options.compression(),
-    )
-    .with_encryption(runtime.memberlist_options.encryption().clone());
+    );
+    #[cfg(compression)]
+    endpoint.set_compression_options(*runtime.memberlist_options.compression());
+    #[cfg(encryption)]
+    endpoint.set_encryption_options(runtime.memberlist_options.encryption().clone());
     // Checksum is gossip-plane (unreliable) only — reliable bridges carry no
     // checksum — so it is threaded via the gossip-plane setter rather than a
     // reliable-bridge-fanning builder.
@@ -307,6 +313,7 @@ where
     // Ignoring Err: the checksum policy was validated in `Memberlist::new`
     // (`validate_checksum_options`) before this driver task spawned, so its
     // backend is built in and this store cannot fail.
+    #[cfg(checksum)]
     let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();

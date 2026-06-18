@@ -5,10 +5,11 @@ use core::{
   net::{IpAddr, SocketAddr},
 };
 
-use memberlist_embedded::{
-  AliveDelegate, ControlError, Engine, MaybeResolved, MergeDelegate,
-  transform::{CompressionOptions, EncryptionOptions},
-};
+use memberlist_embedded::{AliveDelegate, Engine, MaybeResolved, MergeDelegate};
+#[cfg(encryption)]
+use memberlist_embedded::{ControlError, transform::EncryptionOptions};
+#[cfg(compression)]
+use memberlist_embedded::transform::CompressionOptions;
 use memberlist_proto::{
   EndpointOptions, Instant, Node, Rng, SeedableRng, SmallRng, StreamId, event::PingId,
   typed::NodeState,
@@ -31,6 +32,25 @@ use crate::{
 /// The maximum UDP payload (`u16` length minus the 8-byte UDP header), the
 /// hard ceiling for an on-wire gossip datagram. Matches the async drivers.
 const UDP_PAYLOAD_MAX: usize = 65507;
+
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
+/// no encryption backend is built in. The proto const exists only under an
+/// encryption backend; with none the gossip frame goes out unencrypted, so the
+/// wrapper adds nothing and the arena/ceiling arithmetic that sizes from it is
+/// the plaintext size.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0` when
+/// no checksum backend is built in. The proto const exists only under a checksum
+/// backend; with none the gossip frame carries no checksum, so the wrapper adds
+/// nothing.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 
 /// The largest per-socket TCP receive-buffer smoltcp accepts: 1 GiB.
 ///
@@ -423,9 +443,8 @@ where
     // and mirrors the async drivers' reject-not-clamp doctrine. (The engine
     // re-validates it too; the driver needs it before sizing the UDP arenas.) Done
     // before any UDP allocation.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
-      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    let gossip_mtu_ceiling =
+      UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
     if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
       return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: ep_cfg.gossip_mtu(),
@@ -569,9 +588,8 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram = ep_cfg.gossip_mtu()
-      + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-      + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram =
+      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -837,9 +855,8 @@ where
     // and mirrors the async drivers' reject-not-clamp doctrine. (The engine
     // re-validates it too; the driver needs it before sizing the UDP arenas.) Done
     // before any UDP allocation.
-    let gossip_mtu_ceiling = UDP_PAYLOAD_MAX
-      - memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-      - memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    let gossip_mtu_ceiling =
+      UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
     if ep_cfg.gossip_mtu() > gossip_mtu_ceiling {
       return Err(InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: ep_cfg.gossip_mtu(),
@@ -973,9 +990,8 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram = ep_cfg.gossip_mtu()
-      + memberlist_proto::ENCRYPTED_WRAPPER_OVERHEAD
-      + memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram =
+      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -1367,6 +1383,16 @@ where
 
   /// Replace the gossip+stream compression policy at runtime. Returns
   /// `NotRunning` after [`leave`](Self::leave).
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   #[inline]
   pub fn set_compression_options(
     &mut self,
@@ -1379,6 +1405,11 @@ where
   /// keyring is validated before it is applied; an unusable key is rejected
   /// without changing the live policy. Returns `NotRunning` after
   /// [`leave`](Self::leave) (gated before validation).
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   #[inline]
   pub fn set_encryption_options(&mut self, opts: EncryptionOptions) -> Result<(), ControlError> {
     self.engine.set_encryption_options(opts)

@@ -35,18 +35,29 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
 use memberlist_proto::{
-  CheapClone, ChecksumOptions, CompressionOptions, EncryptionOptions, Instant, Node,
+  CheapClone, Instant, Node,
   event::Event,
   typed::{NodeState, State},
 };
 
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
 use crate::{
   EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
-    SendUserCmd, SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd,
-    SetEncryptionOptionsCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
     WaitForCompletionArgs,
   },
   delegate::Delegate,
@@ -262,6 +273,7 @@ where
     // primary paired with an unsupported secondary — a common key-rotation state
     // — is also caught. Checked before any socket is bound (before
     // `T::new`), so a misconfigured keyring fails fast with no resources held.
+    #[cfg(encryption)]
     crate::options::validate_encryption_options(memberlist_opts.encryption())
       .map_err(MemberlistError::Encryption)?;
     // Fail fast when the configured gossip checksum algorithm's backend feature
@@ -271,6 +283,7 @@ where
     // silently disable ALL gossip. Caught before any socket is bound (before
     // `T::new`), mirroring the encryption probe above. Checksum is a gossip-plane
     // concern only; the reliable stream path carries no checksum.
+    #[cfg(checksum)]
     crate::options::validate_checksum_options(memberlist_opts.checksum())
       .map_err(MemberlistError::Checksum)?;
     let transport = T::new(transport_opts, resolver, advertise_resolver)
@@ -818,6 +831,16 @@ impl<I, A> Memberlist<I, A> {
 
   /// Reconfigure the gossip compression policy in place. Takes effect on
   /// the next outbound datagram.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
   pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -842,6 +865,17 @@ impl<I, A> Memberlist<I, A> {
   /// reliable-stream path — the stream transport (TCP/TLS/QUIC) provides its
   /// own integrity guarantee there, so reliable bridges carry no checksum and
   /// this reconfiguration has no per-bridge fan-out.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
   pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -887,6 +921,11 @@ impl<I, A> Memberlist<I, A> {
   /// the approved approach remains OUT-OF-BAND key revocation at the peer —
   /// every peer rejects the compromised key on its keyring removal, and any
   /// leaked-window gossip bytes become undecryptable the moment they land.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
   pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
