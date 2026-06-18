@@ -14,6 +14,7 @@ use memberlist_proto::{
 use smol_str::SmolStr;
 
 use crate::{
+  checker::Transition,
   clock::Clock,
   network::{Network, VirtualStream},
 };
@@ -174,7 +175,7 @@ pub struct Cluster {
   /// illegal intermediate transition that a later same-step mutation would
   /// otherwise overwrite (e.g. an in-place resurrection refuted to a legal
   /// higher incarnation by a later message of the same compound datagram).
-  pub(crate) history_transitions: Vec<crate::checker::Transition>,
+  pub(crate) history_transitions: Vec<Transition>,
 }
 
 impl Cluster {
@@ -656,11 +657,9 @@ impl Cluster {
         if before[idx] != (now_state, now_inc) {
           let pruned =
             now_state.is_none() && self.pruned_this_step.contains(&(observer, subject.clone()));
-          self
-            .history_transitions
-            .push(crate::checker::Transition::new(
-              observer, subject, now_state, now_inc, pruned,
-            ));
+          self.history_transitions.push(Transition::new(
+            observer, subject, now_state, now_inc, pruned,
+          ));
         }
         idx += 1;
       }
@@ -940,7 +939,7 @@ impl Cluster {
   /// `(state, incarnation)` overwritten by a later same-tick mutation is still
   /// observed. See [`history_transitions`](Self::history_transitions) (the
   /// field) for the recording contract.
-  pub fn history_transitions(&self) -> &[crate::checker::Transition] {
+  pub fn history_transitions(&self) -> &[Transition] {
     &self.history_transitions
   }
 
@@ -1281,15 +1280,13 @@ impl Cluster {
         let now_state = self.member_liveness(host, subject);
         let now_inc = self.get_node_incarnation(host, subject);
         if before_row != (now_state, now_inc) {
-          self
-            .history_transitions
-            .push(crate::checker::Transition::new(
-              host,
-              subject.clone(),
-              now_state,
-              now_inc,
-              false,
-            ));
+          self.history_transitions.push(Transition::new(
+            host,
+            subject.clone(),
+            now_state,
+            now_inc,
+            false,
+          ));
         }
       }
     }
