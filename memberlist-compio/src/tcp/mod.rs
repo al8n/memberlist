@@ -25,6 +25,8 @@ use crate::{
   delegate::{BoxedAlive, BoxedMerge},
   maybe_resolved::MaybeResolved,
 };
+use core::fmt;
+use std::io::ErrorKind;
 
 /// Per-backend TCP-specific transport options.
 ///
@@ -123,8 +125,8 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -153,13 +155,13 @@ where
     options.stream.validate()?;
     let local_id = options.local_id.ok_or_else(|| {
       MemberlistError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
+        ErrorKind::InvalidInput,
         "local_id required",
       ))
     })?;
     let advertise_input = options.advertise_addr.ok_or_else(|| {
       MemberlistError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
+        ErrorKind::InvalidInput,
         "advertise_addr required",
       ))
     })?;
@@ -173,7 +175,7 @@ where
           .map_err(|e| MemberlistError::Resolve(std::io::Error::other(e.to_string())))?;
         advertise_resolver.pick(candidates).map_err(|e| {
           MemberlistError::Resolve(std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
+            ErrorKind::AddrNotAvailable,
             e.to_string(),
           ))
         })?
@@ -206,10 +208,7 @@ where
           Ok(gossip_socket) => break (tcp_listener, bound, gossip_socket),
           Err(e)
             if ephemeral
-              && matches!(
-                e.kind(),
-                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
-              )
+              && matches!(e.kind(), ErrorKind::AddrInUse | ErrorKind::PermissionDenied)
               && attempt < EPHEMERAL_BIND_RETRIES =>
           {
             // Release the claimed TCP port and retry on a fresh ephemeral pair.

@@ -3,6 +3,7 @@
 
 use crate::error::Result;
 use bytes::Bytes;
+use futures_channel::oneshot::Sender;
 #[cfg(checksum)]
 use memberlist_proto::ChecksumOptions;
 #[cfg(compression)]
@@ -48,13 +49,13 @@ pub(crate) struct JoinCmd {
   /// Dispatch semantic — see [`JoinKind`].
   pub(crate) kind: JoinKind,
   /// One-shot reply channel for the join result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<usize>>,
+  pub(crate) reply: Sender<Result<usize>>,
 }
 
 /// Payload for [`Command::Leave`].
 pub(crate) struct LeaveCmd {
   /// One-shot reply channel for the leave result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::UpdateNodeMetadata`].
@@ -62,7 +63,7 @@ pub(crate) struct UpdateNodeMetadataCmd {
   /// New raw metadata bytes for the local node.
   pub(crate) meta: Vec<u8>,
   /// One-shot reply channel for the update result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::SetCompressionOptions`].
@@ -71,7 +72,7 @@ pub(crate) struct SetCompressionOptionsCmd {
   /// New compression configuration to apply in place.
   pub(crate) opts: CompressionOptions,
   /// One-shot reply channel for the reconfiguration result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::SetChecksumOptions`].
@@ -80,7 +81,7 @@ pub(crate) struct SetChecksumOptionsCmd {
   /// New gossip-plane checksum configuration to apply in place.
   pub(crate) opts: ChecksumOptions,
   /// One-shot reply channel for the reconfiguration result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::SetEncryptionOptions`].
@@ -89,13 +90,13 @@ pub(crate) struct SetEncryptionOptionsCmd {
   /// New encryption configuration to apply in place.
   pub(crate) opts: EncryptionOptions,
   /// One-shot reply channel for the reconfiguration result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::Shutdown`].
 pub(crate) struct ShutdownCmd {
   /// One-shot reply channel for the shutdown acknowledgement.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 /// Payload for [`Command::QueueUserBroadcast`].
@@ -103,15 +104,12 @@ pub(crate) struct QueueUserBroadcastCmd {
   /// Application bytes to disseminate cluster-wide via gossip.
   data: Bytes,
   /// One-shot reply channel for the enqueue acknowledgement.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 impl QueueUserBroadcastCmd {
   /// Construct from the broadcast bytes and a reply channel.
-  pub(crate) const fn new(
-    data: Bytes,
-    reply: futures_channel::oneshot::Sender<Result<()>>,
-  ) -> Self {
+  pub(crate) const fn new(data: Bytes, reply: Sender<Result<()>>) -> Self {
     Self { data, reply }
   }
 
@@ -126,15 +124,12 @@ pub(crate) struct SetLocalStateCmd {
   /// Application push/pull local-state snapshot bytes.
   state: Bytes,
   /// One-shot reply channel for the set acknowledgement.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 impl SetLocalStateCmd {
   /// Construct from the snapshot bytes and a reply channel.
-  pub(crate) const fn new(
-    state: Bytes,
-    reply: futures_channel::oneshot::Sender<Result<()>>,
-  ) -> Self {
+  pub(crate) const fn new(state: Bytes, reply: Sender<Result<()>>) -> Self {
     Self { state, reply }
   }
 
@@ -149,15 +144,12 @@ pub(crate) struct SetAckPayloadCmd {
   /// Application payload bytes attached to outbound probe acks.
   payload: Bytes,
   /// One-shot reply channel for the set acknowledgement.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 impl SetAckPayloadCmd {
   /// Construct from the ack-payload bytes and a reply channel.
-  pub(crate) const fn new(
-    payload: Bytes,
-    reply: futures_channel::oneshot::Sender<Result<()>>,
-  ) -> Self {
+  pub(crate) const fn new(payload: Bytes, reply: Sender<Result<()>>) -> Self {
     Self { payload, reply }
   }
 
@@ -172,15 +164,12 @@ pub(crate) struct PingCmd<I> {
   /// The node to ping (id + wire address).
   node: Node<I, SocketAddr>,
   /// One-shot reply channel for the round-trip time.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<Duration>>,
+  pub(crate) reply: Sender<Result<Duration>>,
 }
 
 impl<I> PingCmd<I> {
   /// Construct from a target node and a reply channel.
-  pub(crate) const fn new(
-    node: Node<I, SocketAddr>,
-    reply: futures_channel::oneshot::Sender<Result<Duration>>,
-  ) -> Self {
+  pub(crate) const fn new(node: Node<I, SocketAddr>, reply: Sender<Result<Duration>>) -> Self {
     Self { node, reply }
   }
 
@@ -197,16 +186,12 @@ pub(crate) struct SendUserCmd {
   /// One or more unreliable user-message payloads to direct to `to`.
   payloads: Vec<Bytes>,
   /// One-shot reply channel for the send result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 impl SendUserCmd {
   /// Construct from a destination, payloads, and a reply channel.
-  pub(crate) fn new(
-    to: SocketAddr,
-    payloads: Vec<Bytes>,
-    reply: futures_channel::oneshot::Sender<Result<()>>,
-  ) -> Self {
+  pub(crate) fn new(to: SocketAddr, payloads: Vec<Bytes>, reply: Sender<Result<()>>) -> Self {
     Self {
       to,
       payloads,
@@ -232,16 +217,12 @@ pub(crate) struct SendReliableCmd {
   /// One or more reliable user-message payloads to deliver to `to`.
   payloads: Vec<Bytes>,
   /// One-shot reply channel for the send result.
-  pub(crate) reply: futures_channel::oneshot::Sender<Result<()>>,
+  pub(crate) reply: Sender<Result<()>>,
 }
 
 impl SendReliableCmd {
   /// Construct from a destination, payloads, and a reply channel.
-  pub(crate) fn new(
-    to: SocketAddr,
-    payloads: Vec<Bytes>,
-    reply: futures_channel::oneshot::Sender<Result<()>>,
-  ) -> Self {
+  pub(crate) fn new(to: SocketAddr, payloads: Vec<Bytes>, reply: Sender<Result<()>>) -> Self {
     Self {
       to,
       payloads,

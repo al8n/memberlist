@@ -1,6 +1,6 @@
 use super::*;
 use crate::{FirstAddrResolver, MaybeResolved, OsResolver, SocketAddrResolver};
-use std::net::SocketAddr;
+use std::{io::ErrorKind, net::SocketAddr};
 
 fn test_tcp_opts() -> TcpTransportOptions {
   let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -34,7 +34,7 @@ async fn new_without_local_id_errors() {
   .await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("local_id"));
     }
     Err(other) => panic!("expected InvalidInput(local_id), got {other:?}"),
@@ -55,7 +55,7 @@ async fn new_without_advertise_addr_errors() {
   .await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("advertise_addr"));
     }
     Err(other) => panic!("expected InvalidInput(advertise_addr), got {other:?}"),

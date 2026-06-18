@@ -4,48 +4,55 @@ use memberlist_proto::TlsOptions;
 
 use super::*;
 use crate::{FirstAddrResolver, MaybeResolved, OsResolver, SocketAddrResolver};
+use rustls::{
+  client::danger::{HandshakeSignatureValid, ServerCertVerified},
+  crypto::CryptoProvider,
+  pki_types::CertificateDer,
+  version::TLS13,
+};
+use std::io::ErrorKind;
 
 /// Accept-any server-cert verifier for the construction test.
 ///
 /// The transport-construction test does NOT exercise the TLS handshake;
 /// the verifier just has to type-check inside a `ClientConfig`.
 #[derive(Debug)]
-struct AcceptAnyServer(Arc<rustls::crypto::CryptoProvider>);
+struct AcceptAnyServer(Arc<CryptoProvider>);
 
 impl rustls::client::danger::ServerCertVerifier for AcceptAnyServer {
   fn verify_server_cert(
     &self,
-    _e: &rustls::pki_types::CertificateDer<'_>,
-    _i: &[rustls::pki_types::CertificateDer<'_>],
+    _e: &CertificateDer<'_>,
+    _i: &[CertificateDer<'_>],
     _n: &rustls::pki_types::ServerName<'_>,
     _o: &[u8],
     _t: rustls::pki_types::UnixTime,
-  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-    Ok(rustls::client::danger::ServerCertVerified::assertion())
+  ) -> Result<ServerCertVerified, rustls::Error> {
+    Ok(ServerCertVerified::assertion())
   }
   fn verify_tls12_signature(
     &self,
     _m: &[u8],
-    _c: &rustls::pki_types::CertificateDer<'_>,
+    _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn verify_tls13_signature(
     &self,
     _m: &[u8],
-    _c: &rustls::pki_types::CertificateDer<'_>,
+    _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
     self.0.signature_verification_algorithms.supported_schemes()
   }
 }
 
-fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-  rustls::crypto::CryptoProvider::get_default()
+fn crypto_provider() -> Arc<CryptoProvider> {
+  CryptoProvider::get_default()
     .cloned()
     .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
 }
@@ -56,22 +63,20 @@ fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 fn test_tls_options() -> TlsOptions {
   let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()])
     .expect("rcgen generate_simple_self_signed");
-  let chain = vec![rustls::pki_types::CertificateDer::from(
-    ck.cert.der().to_vec(),
-  )];
+  let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
   let key = rustls::pki_types::PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
 
   let provider = crypto_provider();
 
   let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3 supported")
     .with_no_client_auth()
     .with_single_cert(chain, key)
     .expect("valid self-signed cert");
 
   let client_cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3 supported")
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AcceptAnyServer(provider)))
@@ -114,7 +119,7 @@ async fn new_without_local_id_errors() {
   .await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("local_id"));
     }
     Err(other) => panic!("expected InvalidInput(local_id), got {other:?}"),
@@ -136,7 +141,7 @@ async fn new_without_advertise_addr_errors() {
   .await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("advertise_addr"));
     }
     Err(other) => panic!("expected InvalidInput(advertise_addr), got {other:?}"),
@@ -158,7 +163,7 @@ async fn new_without_tls_options_errors() {
   .await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("tls_options"));
     }
     Err(other) => panic!("expected InvalidInput(tls_options), got {other:?}"),

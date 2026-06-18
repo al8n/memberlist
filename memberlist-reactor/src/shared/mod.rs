@@ -17,6 +17,7 @@ use arc_swap::ArcSwap;
 use flume::{Receiver, Sender};
 
 use crate::{command::Command, snapshot::MemberlistSnapshot};
+use memberlist_proto::metrics::Metrics;
 
 /// The lock-guarded part of [`Shared`]: the command queue handles push onto, and
 /// the driver's parked waker.
@@ -35,7 +36,7 @@ pub(crate) struct Shared<I> {
   snapshot: ArcSwap<MemberlistSnapshot<I, SocketAddr>>,
   /// The machine's load-shedding counters, republished by the driver when they
   /// change so a handle reads them lock-free (see `Memberlist::metrics`).
-  metrics: ArcSwap<memberlist_proto::metrics::Metrics>,
+  metrics: ArcSwap<Metrics>,
   /// Recoverable EventStream-forward drops (membership / control gaps).
   events_dropped: AtomicU64,
   /// Observation-channel drops (a slow delegate; may lose application data).
@@ -69,7 +70,7 @@ impl<I> Shared<I> {
         closed: false,
       }),
       snapshot: ArcSwap::from_pointee(initial),
-      metrics: ArcSwap::from_pointee(memberlist_proto::metrics::Metrics::default()),
+      metrics: ArcSwap::from_pointee(Metrics::default()),
       events_dropped: AtomicU64::new(0),
       observation_dropped: AtomicU64::new(0),
       shutdown: AtomicBool::new(false),
@@ -124,12 +125,12 @@ impl<I> Shared<I> {
   }
 
   /// Publishes the machine's load-shedding counters for handles to read.
-  pub(crate) fn publish_metrics(&self, m: memberlist_proto::metrics::Metrics) {
+  pub(crate) fn publish_metrics(&self, m: Metrics) {
     self.metrics.store(Arc::new(m));
   }
 
   /// Loads the latest published counters.
-  pub(crate) fn load_metrics(&self) -> memberlist_proto::metrics::Metrics {
+  pub(crate) fn load_metrics(&self) -> Metrics {
     *self.metrics.load_full()
   }
 

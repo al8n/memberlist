@@ -65,6 +65,7 @@ use crate::{
   resolver::{AdvertiseAddrResolver, Resolver},
   transport::{Transport, TransportRuntime},
 };
+use memberlist_proto::metrics::Metrics;
 use rand::rngs::StdRng;
 
 /// Cheaply clonable handle to a running memberlist driver.
@@ -95,7 +96,7 @@ pub struct Memberlist<I, A> {
   /// state-affecting tick.
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   /// The machine's load-shedding counters, read lock-free via `metrics()`.
-  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  metrics: Arc<ArcSwap<Metrics>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
   events_rx: Receiver<Event<I, SocketAddr>>,
@@ -379,9 +380,7 @@ where
       1,
       0,
     )));
-    let metrics = Arc::new(ArcSwap::from_pointee(
-      memberlist_proto::metrics::Metrics::default(),
-    ));
+    let metrics = Arc::new(ArcSwap::from_pointee(Metrics::default()));
 
     let (commands_tx, commands_rx) = flume::unbounded();
     let (events_tx, events_rx) = flume::bounded(driver_opts.event_queue_cap());
@@ -478,7 +477,7 @@ impl<I, A> Memberlist<I, A> {
   /// are monotonic for the node's lifetime; difference successive reads for rates.
   /// See [`memberlist_proto::metrics::Metrics`].
   #[inline]
-  pub fn metrics(&self) -> memberlist_proto::metrics::Metrics {
+  pub fn metrics(&self) -> Metrics {
     *self.metrics.load_full()
   }
 

@@ -79,6 +79,7 @@ use crate::{
   shared::Shared,
   snapshot::snapshot_of,
 };
+use memberlist_proto::metrics::Metrics;
 
 /// IP-layer UDP payload maximum; caps the per-recv gossip buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
@@ -495,7 +496,7 @@ where
   last_snapshot_version: u64,
   /// The load-shedding counters last published to `shared`; republished only when
   /// `endpoint.metrics()` differs from this.
-  last_metrics: memberlist_proto::metrics::Metrics,
+  last_metrics: Metrics,
 }
 
 impl<I, R, T, G> StreamDriver<I, R, T, G>
@@ -567,7 +568,7 @@ where
       cidr_policy,
       transform,
       last_snapshot_version,
-      last_metrics: memberlist_proto::metrics::Metrics::default(),
+      last_metrics: Metrics::default(),
     }
   }
 

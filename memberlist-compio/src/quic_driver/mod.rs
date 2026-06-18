@@ -57,6 +57,8 @@ use crate::{
   snapshot::MemberlistSnapshot,
   transport::runtime::CidrFilter,
 };
+use core::{fmt, time::Duration};
+use memberlist_proto::metrics::Metrics;
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
 /// capped at 65507 bytes (the IP-layer maximum once the 8-byte UDP
@@ -171,7 +173,7 @@ struct PendingPing {
   /// Correlation token minted by `endpoint.ping(…)`.
   ping_id: memberlist_proto::PingId,
   /// One-shot reply channel back to the `ping()` caller.
-  reply: futures_channel::oneshot::Sender<Result<core::time::Duration>>,
+  reply: futures_channel::oneshot::Sender<Result<Duration>>,
 }
 
 /// Driver-side state for one outstanding reliable directed-send call.
@@ -238,9 +240,9 @@ where
   /// The endpoint snapshot version last stored into `snapshot`; the snapshot is
   /// rebuilt only when it differs (a rebuild clones every NodeState).
   last_snapshot_version: u64,
-  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  metrics: Arc<ArcSwap<Metrics>>,
   /// The load-shedding counters last stored into `metrics` (published on change).
-  last_metrics: memberlist_proto::metrics::Metrics,
+  last_metrics: Metrics,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
@@ -296,8 +298,8 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -325,7 +327,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   events_dropped: Arc<AtomicU64>,
   observation_dropped: Arc<AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
-  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  metrics: Arc<ArcSwap<Metrics>>,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: DriverOptions,
   delegate: D,
@@ -336,8 +338,8 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -406,7 +408,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     snapshot,
     last_snapshot_version: 0,
     metrics,
-    last_metrics: memberlist_proto::metrics::Metrics::default(),
+    last_metrics: Metrics::default(),
     shutdown_flag,
     driver_opts,
     cidr_policy,
@@ -903,8 +905,8 @@ async fn observation_task<I, D>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -969,7 +971,7 @@ async fn dispatch_command<I, G>(
   pending_leave: &mut Option<PendingLeave>,
   pending_pings: &mut Vec<PendingPing>,
   pending_user_sends: &mut Vec<PendingUserSend>,
-  leave_timeout: core::time::Duration,
+  leave_timeout: Duration,
   cidr_policy: &CidrFilter,
   cmd: Command<I>,
   now: Instant,
@@ -977,8 +979,8 @@ async fn dispatch_command<I, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -1407,8 +1409,8 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -1507,8 +1509,8 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2011,8 +2013,8 @@ fn refresh_snapshot<I, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2033,8 +2035,8 @@ fn refresh_snapshot_if_changed<I, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2052,14 +2054,14 @@ fn refresh_snapshot_if_changed<I, G>(
 /// change; a cheap `Copy` compare, allocating only on a real change).
 fn refresh_metrics_if_changed<I, G>(
   endpoint: &QuicEndpoint<I, G>,
-  metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
-  last: &mut memberlist_proto::metrics::Metrics,
+  metrics: &Arc<ArcSwap<Metrics>>,
+  last: &mut Metrics,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2079,8 +2081,8 @@ fn refresh_snapshot_inner<I, R>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,

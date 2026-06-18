@@ -87,12 +87,13 @@ use memberlist_proto::{
   event::{Reliability, UserPacket},
   typed::{NodeState, State},
 };
+use std::sync::atomic::AtomicBool;
 
 /// A waker that records, via a shared flag, whether it was woken. Built on the
 /// safe `std::task::Wake` trait (the crate forbids `unsafe`). The driver-poll
 /// tests pass one through a `Context` and only need it to be a valid, harmless
 /// waker — its wake is a no-op flag flip.
-struct FlagWaker(Arc<std::sync::atomic::AtomicBool>);
+struct FlagWaker(Arc<AtomicBool>);
 
 impl Wake for FlagWaker {
   fn wake(self: Arc<Self>) {
@@ -104,9 +105,7 @@ impl Wake for FlagWaker {
 }
 
 fn flag_waker() -> Waker {
-  Waker::from(Arc::new(FlagWaker(Arc::new(
-    std::sync::atomic::AtomicBool::new(false),
-  ))))
+  Waker::from(Arc::new(FlagWaker(Arc::new(AtomicBool::new(false)))))
 }
 
 /// An application-data `Event::UserPacket` of exactly `len` payload bytes —
@@ -766,7 +765,7 @@ async fn shutdown_preempts_live_bridge_without_awaiting_it() {
   // if something cancels it — which nothing does. It is therefore provably still
   // alive at the instant shutdown completes.
   let (_gate_tx, gate_rx) = oneshot::channel::<()>();
-  let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let exited = Arc::new(AtomicBool::new(false));
   let exited_in_task = exited.clone();
   let proxy = TokioRuntime::spawn(async move {
     // Wait for the teardown's explicit preemption; a teardown that merely dropped
