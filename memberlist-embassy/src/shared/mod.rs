@@ -63,11 +63,7 @@ pub(crate) struct Waiters {
 ///
 /// Shared via [`Rc`] (single-core cooperative). `I` is the node id type; `R` is
 /// the gossip RNG (defaulting to [`SmallRng`]).
-pub(crate) struct Shared<I, R = SmallRng>
-where
-  I: memberlist_proto::Id,
-  R: Rng,
-{
+pub(crate) struct Shared<I, R = SmallRng> {
   /// The transport-agnostic driving core (SWIM machine, reliable-plane state +
   /// pool, gossip codec, join-seed queue), behind interior mutability.
   pub(crate) engine: RefCell<Engine<I, SlotId, R>>,
