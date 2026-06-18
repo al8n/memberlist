@@ -184,16 +184,7 @@ pub struct Stream<I, A> {
 
 impl<I, A> Stream<I, A>
 where
-  I: crate::Id,
-  A: Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  A: Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
 {
   /// The unique identifier for this stream.
   pub fn id(&self) -> StreamId {
@@ -330,6 +321,142 @@ where
     }
   }
 
+  /// Fire the deadline. If `now >= deadline`, transition the phase toward failure.
+  pub fn handle_timeout(&mut self, now: Instant) {
+    let deadline = match self.deadline {
+      Some(d) => d,
+      None => return,
+    };
+    if now < deadline {
+      return;
+    }
+    match &self.phase {
+      StreamPhase::Done | StreamPhase::Failed(_) => {}
+      _ => {
+        self.enter_failed(StreamError::Timeout);
+      }
+    }
+  }
+
+  fn enter_failed(&mut self, err: StreamError) {
+    // A failed stream holds no pending bytes. Clearing `output_buf` makes
+    // a timed-out/failed exchange un-drainable by a later `poll_transmit`
+    // (paired with that method's terminal guard); clearing `input_buf`
+    // drops any half-buffered inbound frame nothing will ever consume
+    // (frees memory). Clearing `endpoint_events` is load-bearing: a
+    // late post-dispatch validation failure (e.g. trailing-bytes after
+    // a legitimate frame) MUST NOT let the FSM-event side effects of
+    // the rejected frame survive — `dispatch_message` enqueues
+    // `PushPullRequestReceived` / `PushPullReplyReceived` /
+    // `ReliablePingAcked` / `UserDataReceived` BEFORE the post-dispatch
+    // guard fires, and the driver's bridge would drain them and call
+    // back into `Endpoint::handle_stream_event` (merging state /
+    // encoding a response) for a stream that has just been declared
+    // invalid. Discarding the queue at failure-entry makes the entire
+    // exchange's side effects atomic with the success/failure decision.
+    // Idempotent — `handle_data` early-returns on a terminal phase so
+    // this runs at most once per stream.
+    self.input_buf.clear();
+    self.output_buf.clear();
+    self.endpoint_events.clear();
+    // Clear queued lifecycle events too. `dispatch_message` queues
+    // `StreamEvent::Closed` when a frame completes the exchange, but
+    // a subsequent post-dispatch validation (trailing-bytes guard,
+    // for example) can still reject the same delivery — without
+    // clearing the queue here, a `poll_event` drain would observe
+    // `Closed` then `Failed`, contradicting the dispatch/validation
+    // atomicity. After this function returns the only lifecycle
+    // event the driver sees for this stream is the `Failed` we push
+    // below.
+    self.stream_events.clear();
+    self
+      .stream_events
+      .push_back(StreamEvent::Failed(err.to_string()));
+    self.phase = StreamPhase::Failed(err);
+  }
+
+  /// Probe whether a complete frame is in `input_buf`.
+  ///
+  /// Plain-frame layout: `[TAG: 1 byte][VARINT body_len][BODY: body_len bytes]`.
+  /// We read the varint manually so we can compute `total` (and reject an
+  /// oversize frame) BEFORE the body is buffered, rather than relying on
+  /// the later `MessageRef::decode` underflow.
+  ///
+  /// - `Ok(Some((tag, total)))` — a full frame is present.
+  /// - `Ok(None)` — header/body not yet fully buffered (keep reading).
+  /// - `Err(_)` — the declared frame total exceeds `max_frame_size`, or the
+  ///   length varint overflows `u32`. Both bound memory: the oversize
+  ///   check fires the instant the varint decodes (before the body is
+  ///   buffered), so a peer cannot make us buffer a huge declared body;
+  ///   the overflow is caught within the first 5 varint bytes.
+  #[allow(dead_code)]
+  fn probe_frame(&self) -> Result<Option<(u8, usize)>, StreamError> {
+    let buf = &self.input_buf;
+    if buf.is_empty() {
+      return Ok(None);
+    }
+    let tag = buf[0];
+    // Decode the length varint into a u64 so a crafted *terminal* byte
+    // cannot wrap (`80 80 80 80 10` is 2^32: the 5th byte shifted left
+    // by 28 would wrap the u32 to 0 and slip past the size guard). 5
+    // LEB128 bytes already cover a 35-bit length, far beyond any sane
+    // `max_frame_size`; a 6th continuation byte means the declared length
+    // is absurd → reject.
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    let mut varint_bytes = 0usize;
+    for i in 1..buf.len().min(6) {
+      let b = buf[i];
+      varint_bytes += 1;
+      value |= ((b & 0x7f) as u64) << shift;
+      if b & 0x80 == 0 {
+        // Terminal byte: `value` is exact (no wrap). The wire framing
+        // length is a u32 by protocol (`framing::decode_varint_u32`), so
+        // a declared body length beyond u32::MAX is malformed REGARDLESS
+        // of `max_stream_frame_size` — reject it before the cap compare.
+        // Otherwise a cap configured above 4 GiB would let a terminal
+        // overflowing varint pass here and then mis-decode downstream
+        // (the u32 wire decoder wraps it), reopening the boundary/DoS path.
+        if value > u32::MAX as u64 {
+          return Err(StreamError::Decode(
+            format!("inbound stream frame length {value} exceeds the u32 wire limit").into(),
+          ));
+        }
+        // Compare the full frame total in u64 against the cap BEFORE
+        // buffering the body.
+        let total_u64 = 1u64 + varint_bytes as u64 + value;
+        if total_u64 > self.max_frame_size as u64 {
+          return Err(StreamError::Decode(
+            format!(
+              "inbound stream frame declares {total_u64} bytes, exceeds max {}",
+              self.max_frame_size
+            )
+            .into(),
+          ));
+        }
+        let total = total_u64 as usize; // <= max_frame_size, fits usize
+        if buf.len() >= total {
+          return Ok(Some((tag, total)));
+        } else {
+          return Ok(None); // body not yet fully buffered (bounded by max)
+        }
+      }
+      shift += 7;
+      if shift >= 35 {
+        return Err(StreamError::Decode(
+          "inbound stream frame length varint too long / out of range".into(),
+        ));
+      }
+    }
+    Ok(None) // varint bytes not yet fully buffered
+  }
+}
+
+impl<I, A> Stream<I, A>
+where
+  A: Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  I: crate::Id,
+{
   /// Feed raw plain-frame bytes from the driver. Accumulates into `input_buf`
   /// and attempts to decode one complete frame. May queue endpoint events.
   ///
@@ -467,136 +594,6 @@ where
     }
     self.input_buf.extend_from_slice(data);
     self.try_decode_frame(now)
-  }
-
-  /// Fire the deadline. If `now >= deadline`, transition the phase toward failure.
-  pub fn handle_timeout(&mut self, now: Instant) {
-    let deadline = match self.deadline {
-      Some(d) => d,
-      None => return,
-    };
-    if now < deadline {
-      return;
-    }
-    match &self.phase {
-      StreamPhase::Done | StreamPhase::Failed(_) => {}
-      _ => {
-        self.enter_failed(StreamError::Timeout);
-      }
-    }
-  }
-
-  fn enter_failed(&mut self, err: StreamError) {
-    // A failed stream holds no pending bytes. Clearing `output_buf` makes
-    // a timed-out/failed exchange un-drainable by a later `poll_transmit`
-    // (paired with that method's terminal guard); clearing `input_buf`
-    // drops any half-buffered inbound frame nothing will ever consume
-    // (frees memory). Clearing `endpoint_events` is load-bearing: a
-    // late post-dispatch validation failure (e.g. trailing-bytes after
-    // a legitimate frame) MUST NOT let the FSM-event side effects of
-    // the rejected frame survive — `dispatch_message` enqueues
-    // `PushPullRequestReceived` / `PushPullReplyReceived` /
-    // `ReliablePingAcked` / `UserDataReceived` BEFORE the post-dispatch
-    // guard fires, and the driver's bridge would drain them and call
-    // back into `Endpoint::handle_stream_event` (merging state /
-    // encoding a response) for a stream that has just been declared
-    // invalid. Discarding the queue at failure-entry makes the entire
-    // exchange's side effects atomic with the success/failure decision.
-    // Idempotent — `handle_data` early-returns on a terminal phase so
-    // this runs at most once per stream.
-    self.input_buf.clear();
-    self.output_buf.clear();
-    self.endpoint_events.clear();
-    // Clear queued lifecycle events too. `dispatch_message` queues
-    // `StreamEvent::Closed` when a frame completes the exchange, but
-    // a subsequent post-dispatch validation (trailing-bytes guard,
-    // for example) can still reject the same delivery — without
-    // clearing the queue here, a `poll_event` drain would observe
-    // `Closed` then `Failed`, contradicting the dispatch/validation
-    // atomicity. After this function returns the only lifecycle
-    // event the driver sees for this stream is the `Failed` we push
-    // below.
-    self.stream_events.clear();
-    self
-      .stream_events
-      .push_back(StreamEvent::Failed(err.to_string()));
-    self.phase = StreamPhase::Failed(err);
-  }
-
-  /// Probe whether a complete frame is in `input_buf`.
-  ///
-  /// Plain-frame layout: `[TAG: 1 byte][VARINT body_len][BODY: body_len bytes]`.
-  /// We read the varint manually so we can compute `total` (and reject an
-  /// oversize frame) BEFORE the body is buffered, rather than relying on
-  /// the later `MessageRef::decode` underflow.
-  ///
-  /// - `Ok(Some((tag, total)))` — a full frame is present.
-  /// - `Ok(None)` — header/body not yet fully buffered (keep reading).
-  /// - `Err(_)` — the declared frame total exceeds `max_frame_size`, or the
-  ///   length varint overflows `u32`. Both bound memory: the oversize
-  ///   check fires the instant the varint decodes (before the body is
-  ///   buffered), so a peer cannot make us buffer a huge declared body;
-  ///   the overflow is caught within the first 5 varint bytes.
-  #[allow(dead_code)]
-  fn probe_frame(&self) -> Result<Option<(u8, usize)>, StreamError> {
-    let buf = &self.input_buf;
-    if buf.is_empty() {
-      return Ok(None);
-    }
-    let tag = buf[0];
-    // Decode the length varint into a u64 so a crafted *terminal* byte
-    // cannot wrap (`80 80 80 80 10` is 2^32: the 5th byte shifted left
-    // by 28 would wrap the u32 to 0 and slip past the size guard). 5
-    // LEB128 bytes already cover a 35-bit length, far beyond any sane
-    // `max_frame_size`; a 6th continuation byte means the declared length
-    // is absurd → reject.
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut varint_bytes = 0usize;
-    for i in 1..buf.len().min(6) {
-      let b = buf[i];
-      varint_bytes += 1;
-      value |= ((b & 0x7f) as u64) << shift;
-      if b & 0x80 == 0 {
-        // Terminal byte: `value` is exact (no wrap). The wire framing
-        // length is a u32 by protocol (`framing::decode_varint_u32`), so
-        // a declared body length beyond u32::MAX is malformed REGARDLESS
-        // of `max_stream_frame_size` — reject it before the cap compare.
-        // Otherwise a cap configured above 4 GiB would let a terminal
-        // overflowing varint pass here and then mis-decode downstream
-        // (the u32 wire decoder wraps it), reopening the boundary/DoS path.
-        if value > u32::MAX as u64 {
-          return Err(StreamError::Decode(
-            format!("inbound stream frame length {value} exceeds the u32 wire limit").into(),
-          ));
-        }
-        // Compare the full frame total in u64 against the cap BEFORE
-        // buffering the body.
-        let total_u64 = 1u64 + varint_bytes as u64 + value;
-        if total_u64 > self.max_frame_size as u64 {
-          return Err(StreamError::Decode(
-            format!(
-              "inbound stream frame declares {total_u64} bytes, exceeds max {}",
-              self.max_frame_size
-            )
-            .into(),
-          ));
-        }
-        let total = total_u64 as usize; // <= max_frame_size, fits usize
-        if buf.len() >= total {
-          return Ok(Some((tag, total)));
-        } else {
-          return Ok(None); // body not yet fully buffered (bounded by max)
-        }
-      }
-      shift += 7;
-      if shift >= 35 {
-        return Err(StreamError::Decode(
-          "inbound stream frame length varint too long / out of range".into(),
-        ));
-      }
-    }
-    Ok(None) // varint bytes not yet fully buffered
   }
 
   #[allow(dead_code)]
