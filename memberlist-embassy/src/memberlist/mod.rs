@@ -13,11 +13,11 @@ use alloc::{rc::Rc, vec::Vec};
 
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
 use embassy_time::Timer;
+#[cfg(compression)]
+use memberlist_embedded::transform::CompressionOptions;
 use memberlist_embedded::{
   AliveDelegate, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig, TransformOptions,
 };
-#[cfg(compression)]
-use memberlist_embedded::transform::CompressionOptions;
 #[cfg(encryption)]
 use memberlist_embedded::{ControlError, transform::EncryptionOptions};
 use memberlist_proto::{

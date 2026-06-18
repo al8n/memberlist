@@ -5,11 +5,11 @@ use core::{
   net::{IpAddr, SocketAddr},
 };
 
+#[cfg(compression)]
+use memberlist_embedded::transform::CompressionOptions;
 use memberlist_embedded::{AliveDelegate, Engine, MaybeResolved, MergeDelegate};
 #[cfg(encryption)]
 use memberlist_embedded::{ControlError, transform::EncryptionOptions};
-#[cfg(compression)]
-use memberlist_embedded::transform::CompressionOptions;
 use memberlist_proto::{
   EndpointOptions, Instant, Node, Rng, SeedableRng, SmallRng, StreamId, event::PingId,
   typed::NodeState,

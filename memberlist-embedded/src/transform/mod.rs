@@ -1,17 +1,6 @@
 //! Wire-traffic transforms: compression, encryption, and the reliable-plane
 //! cluster label.
 
-#[cfg(compression)]
-#[cfg_attr(
-  docsrs,
-  doc(cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  )))
-)]
-pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
 #[cfg(checksum)]
 #[cfg_attr(
   docsrs,
@@ -24,6 +13,17 @@ pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
   )))
 )]
 pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
 #[cfg(encryption)]
 #[cfg_attr(
   docsrs,

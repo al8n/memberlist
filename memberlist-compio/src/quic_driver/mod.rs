@@ -49,9 +49,7 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd,
-  },
+  command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver_options::DriverOptions,
   driver_shared::{ExchangeId, cidr_blocks, dispatch_event_delegate},
@@ -1538,13 +1536,11 @@ where
         Err(_) => continue,
       };
       #[cfg(not(encryption))]
-      let plain = match memberlist_proto::framing::unwrap_transforms(
-        &raw,
-        state.endpoint.gossip_mtu(),
-      ) {
-        Ok(p) => Bytes::from(p.into_owned()),
-        Err(_) => continue,
-      };
+      let plain =
+        match memberlist_proto::framing::unwrap_transforms(&raw, state.endpoint.gossip_mtu()) {
+          Ok(p) => Bytes::from(p.into_owned()),
+          Err(_) => continue,
+        };
       let inner = match decode_incoming(plain, &decode_opts) {
         Ok(b) => b,
         Err(_) => continue,

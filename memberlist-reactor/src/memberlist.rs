@@ -15,16 +15,16 @@ use agnostic::{
   Runtime,
   net::{Net, UdpSocket},
 };
-#[cfg(feature = "quic")]
-use memberlist_proto::QuicOptions;
-#[cfg(feature = "tcp")]
-use memberlist_proto::RawRecords;
 #[cfg(checksum)]
 use memberlist_proto::ChecksumOptions;
 #[cfg(compression)]
 use memberlist_proto::CompressionOptions;
 #[cfg(encryption)]
 use memberlist_proto::EncryptionOptions;
+#[cfg(feature = "quic")]
+use memberlist_proto::QuicOptions;
+#[cfg(feature = "tcp")]
+use memberlist_proto::RawRecords;
 use memberlist_proto::{
   AliveDelegate, Endpoint, EndpointOptions, Instant, MergeDelegate, Node, event::Event,
   typed::NodeState,
@@ -35,16 +35,16 @@ use memberlist_proto::{LabelOptions, streams::StreamTransport};
 use memberlist_proto::{Labeled, TlsOptions, TlsRecords};
 use rand::rngs::StdRng;
 
-#[cfg(feature = "quic")]
-use crate::quic_driver::QuicDriver;
-#[cfg(any(feature = "tcp", feature = "tls"))]
-use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 #[cfg(checksum)]
 use crate::command::SetChecksumOptionsCmd;
 #[cfg(compression)]
 use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
+#[cfg(feature = "quic")]
+use crate::quic_driver::QuicDriver;
+#[cfg(any(feature = "tcp", feature = "tls"))]
+use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 #[cfg(checksum)]
 use crate::transform::validate_checksum;
 #[cfg(encryption)]
