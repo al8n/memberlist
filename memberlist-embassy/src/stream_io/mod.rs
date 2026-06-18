@@ -20,6 +20,7 @@ use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use memberlist_embedded::{StreamIo, StreamIoError};
 
 use crate::mailbox::{Command, Mailbox};
+use alloc::vec::Vec;
 
 /// An opaque pool-slot identifier — the engine's reliable-plane connection
 /// handle (`StreamIo::Conn`) for this driver. A plain index into the slot arrays.
@@ -51,7 +52,7 @@ pub struct EmbassyStream<'a> {
   /// wake nudges exactly that slot's worker to act on the freshly-posted command.
   pub(crate) cmd_wakes: &'a [SlotWake],
   /// The driver-owned free-list of currently-unassigned slots.
-  pub(crate) free: &'a mut alloc::vec::Vec<SlotId>,
+  pub(crate) free: &'a mut Vec<SlotId>,
 }
 
 impl<'a> EmbassyStream<'a> {
@@ -60,7 +61,7 @@ impl<'a> EmbassyStream<'a> {
   pub(crate) fn new(
     slots: &'a [RefCell<Mailbox>],
     cmd_wakes: &'a [SlotWake],
-    free: &'a mut alloc::vec::Vec<SlotId>,
+    free: &'a mut Vec<SlotId>,
   ) -> Self {
     Self {
       slots,

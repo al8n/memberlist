@@ -2,13 +2,15 @@ use core::time::Duration;
 use std::error::Error;
 
 use super::{InitError, OpError, SocketTimeoutOutOfRange};
+use alloc::boxed::Box;
+use core::fmt;
 
 /// A sample resolver error for the boxed `Resolve` variants.
 #[derive(Debug)]
 struct SampleResolveError;
 
-impl core::fmt::Display for SampleResolveError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for SampleResolveError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("sample resolve error")
   }
 }
@@ -45,7 +47,7 @@ fn init_error_variants_display_and_source() {
   assert!(engine.source().is_some());
 
   // The `Resolve` variant boxes a generic error and forwards its source.
-  let resolve = InitError::Resolve(alloc::boxed::Box::new(SampleResolveError));
+  let resolve = InitError::Resolve(Box::new(SampleResolveError));
   assert!(resolve.is_resolve());
   assert!(!resolve.to_string().is_empty());
   assert!(resolve.source().is_some());
@@ -77,7 +79,7 @@ fn op_error_variants_display_and_predicates() {
   assert!(not_running.is_not_running());
 
   // The `Resolve` variant boxes a generic error and forwards its source.
-  let resolve = OpError::Resolve(alloc::boxed::Box::new(SampleResolveError));
+  let resolve = OpError::Resolve(Box::new(SampleResolveError));
   assert!(resolve.is_resolve());
   assert!(!resolve.to_string().is_empty());
   assert!(resolve.source().is_some());

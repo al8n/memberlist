@@ -36,6 +36,9 @@ use crate::{
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane},
 };
+use core::hash::Hash;
+use memberlist_proto::{codec::EncodeOptions, event::Event};
+use std::sync::Arc;
 
 /// The maximum UDP payload (`u16` length minus the 8-byte UDP header), the hard
 /// ceiling for an on-wire gossip datagram. Matches the async drivers.
@@ -406,14 +409,14 @@ where
   /// Returns events emitted by the machine during the last `pump` tick. Returns
   /// `None` when the event queue is empty; call again after the next `pump` tick.
   #[inline]
-  pub fn poll_event(&mut self) -> Option<memberlist_proto::event::Event<I, SocketAddr>> {
+  pub fn poll_event(&mut self) -> Option<Event<I, SocketAddr>> {
     let ev = self.endpoint.poll_event();
     // Prune the outbound-StreamId correlation entry for a completing exchange, for
     // EVERY consumer (not only a driver that awaits sends), so the map cannot grow
     // unbounded; stash the removed StreamId for the immediately-following caller (a
     // send-awaiting driver reads it via `last_completed_send`).
     self.last_completed_send = None;
-    if let Some(memberlist_proto::event::Event::ExchangeCompleted(ec)) = &ev {
+    if let Some(Event::ExchangeCompleted(ec)) = &ev {
       self.last_completed_send = self.outbound_stream_ids.remove(&ec.eid());
     }
     ev
@@ -471,11 +474,11 @@ where
   /// field reflects the live gossip-FSM state (`Alive` / `Suspect` / `Dead` /
   /// `Unknown`), not the frozen wire-format value.
   #[inline]
-  pub fn by_id(&self, id: &I) -> Option<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn by_id(&self, id: &I) -> Option<Arc<NodeState<I, SocketAddr>>> {
     let ep = self.endpoint.endpoint_ref();
     let ns = ep.member(id)?;
     let fsm = ep.member_liveness(id).unwrap_or(State::Unknown(0));
-    Some(std::sync::Arc::new(ns.as_ref().clone().with_state(fsm)))
+    Some(Arc::new(ns.as_ref().clone().with_state(fsm)))
   }
 
   /// All members currently in the `Alive` FSM state.
@@ -484,13 +487,13 @@ where
   /// `online_members()[i].state() == State::Alive` always holds. Consistent with
   /// `is_alive`: if `is_alive(id)` is `true`, `id` appears here.
   #[inline]
-  pub fn online_members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn online_members(&self) -> std::vec::Vec<Arc<NodeState<I, SocketAddr>>> {
     let ep = self.endpoint.endpoint_ref();
     ep.members()
       .filter_map(|ns| {
         let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
         if fsm == State::Alive {
-          Some(std::sync::Arc::new(ns.as_ref().clone().with_state(fsm)))
+          Some(Arc::new(ns.as_ref().clone().with_state(fsm)))
         } else {
           None
         }
@@ -518,12 +521,12 @@ where
   ///
   /// Mirrors the legacy `Memberlist::members` name.
   #[inline]
-  pub fn members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn members(&self) -> std::vec::Vec<Arc<NodeState<I, SocketAddr>>> {
     let ep = self.endpoint.endpoint_ref();
     ep.members()
       .map(|ns| {
         let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
-        std::sync::Arc::new(ns.as_ref().clone().with_state(fsm))
+        Arc::new(ns.as_ref().clone().with_state(fsm))
       })
       .collect()
   }
@@ -533,14 +536,14 @@ where
   pub fn members_by(
     &self,
     mut pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
-  ) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  ) -> std::vec::Vec<Arc<NodeState<I, SocketAddr>>> {
     let ep = self.endpoint.endpoint_ref();
     ep.members()
       .filter_map(|ns| {
         let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
         let stamped = ns.as_ref().clone().with_state(fsm);
         if pred(&stamped) {
-          Some(std::sync::Arc::new(stamped))
+          Some(Arc::new(stamped))
         } else {
           None
         }
@@ -601,7 +604,7 @@ where
 
   /// The local node's `NodeState`, stamped with the current FSM liveness.
   #[inline]
-  pub fn local_state(&self) -> std::sync::Arc<NodeState<I, SocketAddr>> {
+  pub fn local_state(&self) -> Arc<NodeState<I, SocketAddr>> {
     let ep = self.endpoint.endpoint_ref();
     let local_id = ep.local_id_ref();
     let ns = ep
@@ -612,7 +615,7 @@ where
     // member_liveness may return None.  Unknown(0) would be wrong here because it
     // implies the node's health is uncertain, which it never is locally.
     let fsm = ep.member_liveness(local_id).unwrap_or(State::Alive);
-    std::sync::Arc::new(ns.as_ref().clone().with_state(fsm))
+    Arc::new(ns.as_ref().clone().with_state(fsm))
   }
 
   // ── Directed I/O ──────────────────────────────────────────────────────────
@@ -919,7 +922,7 @@ where
   where
     G: GossipIo,
   {
-    let enc = memberlist_proto::codec::EncodeOptions::new(self.label.clone());
+    let enc = EncodeOptions::new(self.label.clone());
     while let Some(transmit) = self.endpoint.poll_memberlist_transmit() {
       let (dest, bytes) = match encode_transmit::<I>(transmit, &enc) {
         Some(pair) => pair,
@@ -987,7 +990,7 @@ where
 impl<I, C, R> Engine<I, C, R>
 where
   I: memberlist_proto::Id,
-  C: Copy + Eq + core::hash::Hash,
+  C: Copy + Eq + Hash,
 {
   /// Construct an engine, panicking on a misconfiguration.
   ///
@@ -1925,7 +1928,7 @@ where
 impl<I, C, R> Engine<I, C, R>
 where
   I: memberlist_proto::Id,
-  C: Copy + Eq + core::hash::Hash,
+  C: Copy + Eq + Hash,
   R: Rng,
 {
   /// Advance the memberlist state machine once over the driver's already-ticked
@@ -2586,7 +2589,7 @@ fn min_opt(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 /// - `Transmit::Compound` → compound frame (two or more messages piggybacked).
 fn encode_transmit<I>(
   t: Transmit<I, SocketAddr>,
-  enc: &memberlist_proto::codec::EncodeOptions,
+  enc: &EncodeOptions,
 ) -> Option<(SocketAddr, bytes::Bytes)>
 where
   I: memberlist_proto::Data,

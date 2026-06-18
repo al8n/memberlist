@@ -2,6 +2,7 @@ use super::*;
 
 use std::{cell::RefCell, collections::VecDeque, rc::Rc, vec, vec::Vec};
 
+use core::net::{IpAddr, Ipv4Addr};
 use smoltcp::{
   iface::{Config as IfConfig, Interface, SocketSet},
   phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken},
@@ -110,14 +111,8 @@ fn established() -> (
   let ha = set_a.add(mk());
   let hb = set_b.add(mk());
 
-  let local_a = SocketAddr::new(
-    core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 1)),
-    7946,
-  );
-  let remote_b = SocketAddr::new(
-    core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 2)),
-    7946,
-  );
+  let local_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 7946);
+  let remote_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946);
 
   // B listens; A dials. Both views borrow their own set for the call only.
   {

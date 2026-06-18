@@ -5,6 +5,8 @@ use core::fmt;
 use memberlist_proto::EndpointInitError;
 
 use crate::interface::{HardwareAddress, IpCidr, Medium, Route};
+use core::net::SocketAddr;
+use std::boxed::Box;
 
 /// Why constructing a [`Memberlist`](crate::Memberlist) failed.
 ///
@@ -53,7 +55,7 @@ pub enum InitError {
   /// destination — smoltcp's socket layer rejects the unspecified address and
   /// port 0 (`Unaddressable`) and the route / neighbor lookup asserts the address
   /// is unicast. The offending address is carried for diagnostics.
-  NonRoutableAdvertiseAddr(core::net::SocketAddr),
+  NonRoutableAdvertiseAddr(SocketAddr),
   /// [`InterfaceOptions::ip_addrs`](crate::InterfaceOptions::ip_addrs) was empty,
   /// so the interface would accept no packets.
   MissingIpAddress,
@@ -88,7 +90,7 @@ pub enum InitError {
   /// interface discards. The advertised IP must exactly match a configured
   /// interface address. The offending advertise address is carried for
   /// diagnostics.
-  AdvertiseAddrNotLocal(core::net::SocketAddr),
+  AdvertiseAddrNotLocal(SocketAddr),
   /// A configured route's gateway (`via_router`) is not unicast.
   ///
   /// On Ethernet egress smoltcp resolves an off-link next hop through its
@@ -113,7 +115,7 @@ pub enum InitError {
   /// `source()` chain; a caller that knows its concrete resolver can downcast.
   /// No `Send`/`Sync` bound — the smoltcp [`Resolver`](crate::Resolver) is
   /// single-threaded by design, so its error need not cross threads.
-  Resolve(std::boxed::Box<dyn core::error::Error + 'static>),
+  Resolve(Box<dyn core::error::Error + 'static>),
   /// The address resolver succeeded but yielded no address for the advertise
   /// address, so the node would have nothing to advertise.
   NoAddresses,
@@ -423,7 +425,7 @@ pub enum JoinError {
   /// `source()` chain; a caller that knows its concrete resolver can downcast.
   /// No `Send`/`Sync` bound — the smoltcp [`Resolver`](crate::Resolver) is
   /// single-threaded by design, so its error need not cross threads.
-  Resolve(std::boxed::Box<dyn core::error::Error + 'static>),
+  Resolve(Box<dyn core::error::Error + 'static>),
   /// The engine rejected the join (e.g. the node has already left).
   Control(memberlist_proto::Error),
   /// A non-empty seed set resolved to no wire address — a discovery failure

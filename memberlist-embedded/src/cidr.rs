@@ -8,6 +8,7 @@
 //! policy as the inner of its built-in routable-address alive filter.
 //! [`CidrFilter`] carries the policy through the engine field without a `cfg` gate.
 
+use core::net::IpAddr;
 /// The CIDR policy carried by the engine: the real
 /// [`CidrPolicy`](memberlist_proto::CidrPolicy) when the `cidr` feature is on, the
 /// zero-sized `()` otherwise — so the engine field needs no `cfg` gate.
@@ -22,11 +23,11 @@ pub(crate) type CidrFilter = ();
 /// compile away to nothing.
 #[cfg(feature = "cidr")]
 #[inline]
-pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: core::net::IpAddr) -> bool {
+pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: IpAddr) -> bool {
   filter.as_ref().is_some_and(|policy| policy.is_blocked(&ip))
 }
 #[cfg(not(feature = "cidr"))]
 #[inline]
-pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: core::net::IpAddr) -> bool {
+pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: IpAddr) -> bool {
   false
 }

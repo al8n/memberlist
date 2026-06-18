@@ -1,10 +1,11 @@
 use super::{Command, EmbassyStream, Mailbox, SlotId, SlotWake};
+use alloc::vec::Vec;
 use core::{cell::RefCell, net::SocketAddr};
 use memberlist_embedded::{StreamIo, StreamIoError};
 
 /// Build `n` fresh mailboxes (each `cap` bytes per ring) and `n` wakes for a
 /// view. Returns them so the test frame owns them for the view's lifetime.
-fn slots(n: usize, cap: usize) -> (alloc::vec::Vec<RefCell<Mailbox>>, alloc::vec::Vec<SlotWake>) {
+fn slots(n: usize, cap: usize) -> (Vec<RefCell<Mailbox>>, Vec<SlotWake>) {
   let mb = (0..n)
     .map(|_| RefCell::new(Mailbox::new(cap, cap)))
     .collect();
@@ -26,7 +27,7 @@ fn slot_id_exposes_its_raw_index() {
 #[test]
 fn free_list_take_give_and_count() {
   let (mb, wakes) = slots(2, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert_eq!(view.free_count(), 0);
@@ -49,7 +50,7 @@ fn free_list_take_give_and_count() {
 #[test]
 fn reuse_ready_tracks_reset_done() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert!(view.reuse_ready(SlotId(0)), "a fresh slot is reuse-ready");
@@ -65,7 +66,7 @@ fn reuse_ready_tracks_reset_done() {
 #[test]
 fn listen_posts_for_a_valid_port_and_rejects_port_zero() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert!(matches!(
@@ -93,7 +94,7 @@ fn listen_posts_for_a_valid_port_and_rejects_port_zero() {
 #[test]
 fn connect_posts_a_dial() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   view.connect(SlotId(0), sa(2), 1234).expect("connect posts");
@@ -106,7 +107,7 @@ fn connect_posts_a_dial() {
 #[test]
 fn lifecycle_predicates_reflect_the_mailbox() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   // A fresh slot is neither open nor established and has no peer.
@@ -134,7 +135,7 @@ fn lifecycle_predicates_reflect_the_mailbox() {
 #[test]
 fn send_respects_outbound_capacity() {
   let (mb, wakes) = slots(1, 4);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
   mb[0].borrow_mut().established = true;
 
@@ -152,7 +153,7 @@ fn send_respects_outbound_capacity() {
 #[test]
 fn recv_drains_inbound_and_returns_none_when_empty() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert!(
@@ -175,7 +176,7 @@ fn recv_drains_inbound_and_returns_none_when_empty() {
 #[test]
 fn send_queue_sums_unwritten_and_unacked() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert_eq!(view.send_queue(SlotId(0)), 0);
@@ -192,7 +193,7 @@ fn send_queue_sums_unwritten_and_unacked() {
 #[test]
 fn recv_finished_is_the_drained_peer_fin() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert!(!view.recv_finished(SlotId(0)), "no FIN yet ⇒ not finished");
@@ -220,7 +221,7 @@ fn recv_finished_is_the_drained_peer_fin() {
 #[test]
 fn close_and_abort_post_commands() {
   let (mb, wakes) = slots(1, 64);
-  let mut free = alloc::vec::Vec::new();
+  let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   view.close(SlotId(0));
