@@ -474,6 +474,370 @@ impl<I, A, R> Endpoint<I, A, R> {
   pub const fn advertise_ref(&self) -> &A {
     self.cfg.advertise_addr_ref()
   }
+
+  /// Driver feeds an incoming application user-data payload.
+  ///
+  /// For `reliability: Unreliable` (UDP datagram), emits
+  /// [`Event::UserPacket`] directly. For `reliability: Reliable` (stream),
+  /// the driver should instead use the stream FSM path:
+  /// `accept_stream` → feed bytes via `handle_data` →
+  /// drain `EndpointEvent::UserDataReceived` → call `handle_stream_event`.
+  /// This method is retained for the UDP path only.
+  pub(crate) fn handle_user_data(&mut self, from: A, data: Bytes, reliability: Reliability) {
+    self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
+  }
+
+  /// Drop pending stream-dial intents whose deadline has elapsed without a
+  /// `dial_succeeded` / `dial_failed` callback. A correct driver always reports
+  /// a dial outcome, but a lost result would otherwise leak the intent — which
+  /// for a push/pull holds a full encoded membership snapshot — forever. This
+  /// machine-side backstop mirrors `dial_failed` for each swept intent: a
+  /// reliable-ping fallback is retired so a late event cannot match it; a
+  /// push/pull or user-message intent is dropped silently.
+  fn fire_expired_stream_intents(&mut self, now: Instant) {
+    let expired: Vec<StreamId> = self
+      .pending_stream_intents
+      .iter()
+      .filter(|(_, intent)| now >= intent.deadline)
+      .map(|(id, _)| *id)
+      .collect();
+    for id in expired {
+      if let Some(intent) = self.pending_stream_intents.remove(&id) {
+        if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
+          self.retire_reliable_fallback(probe_seq);
+        }
+      }
+    }
+  }
+
+  /// Send Nack for any indirect-ping forwards whose deadline has expired.
+  fn fire_expired_forwards(&mut self, now: Instant) {
+    let expired: Vec<u32> = self
+      .indirect_forwards
+      .iter()
+      .filter(|(_, f)| f.deadline <= now)
+      .map(|(s, _)| *s)
+      .collect();
+    for seq in expired {
+      let Some(forward) = self.indirect_forwards.remove(&seq) else {
+        continue;
+      };
+      // Remove THIS forward's AckRegistry entry by seq. `poll_expired`
+      // would pop the globally-oldest expired entry instead — and direct
+      // probe entries are intentionally left registered past their direct
+      // deadline so relayed/indirect Acks can still match. Evicting one of
+      // those here would drop a later Ack as untracked and cause a false
+      // probe failure / spurious Suspect.
+      // Ignoring Err: idempotent removal — the entry may already be gone.
+      let _ = self.ack_registry.remove(seq);
+      // Nack the original requester at its VALIDATED address — the same
+      // value the relay-Ack path uses, NOT an id→members lookup. A lossy
+      // lookup would silently drop the Nack when the requester id is
+      // absent from local membership (asymmetric membership) or misroute
+      // it when stale, corrupting the requester's
+      // `expected_nacks - seen` Lifeguard accounting.
+      let nack = Nack::new(forward.requester_seq);
+      self
+        .pending_transmits
+        .push_back(Transmit::Packet(PacketTransmit::new(
+          forward.reply_to_addr,
+          Message::Nack(nack),
+        )));
+    }
+  }
+
+  /// Drain the next application-facing event, or `None` if no event is queued.
+  pub fn poll_event(&mut self) -> Option<Event<I, A>> {
+    self.pending_events.pop_front()
+  }
+
+  /// Re-enqueue an event at the back of the pending-events buffer.
+  ///
+  /// Used by the simulation harness after handling `PendingAlive` decisions:
+  /// any non-`PendingAlive` events that surfaced during the decision loop are
+  /// re-enqueued so that callers can observe them via [`poll_event`](Self::poll_event).
+  pub fn requeue_event(&mut self, ev: Event<I, A>) {
+    // A leaving/left node re-admits no dial: drop a requeued DialRequested so a
+    // held event cannot tell a raw driver to dial after leave.
+    if !self.is_running() && matches!(ev, Event::DialRequested(_)) {
+      return;
+    }
+    self.pending_events.push_back(ev);
+  }
+
+  /// Drain the next outgoing transmit, or `None` if nothing is queued.
+  pub fn poll_transmit(&mut self) -> Option<Transmit<I, A>> {
+    let tx = self.pending_transmits.pop_front();
+    // Leave-completion signal: count down the explicit boundary set by
+    // `leave()`. When the last dead-self notice has been returned (handed
+    // to the I/O layer), emit `Event::LeftCluster`. Drivers wait for
+    // `LeftCluster` (with their own timeout → `LeaveTimeout`) before
+    // reporting the leave done / tearing down the socket. Only decrement
+    // on an actual pop; the boundary counts the dead-self tail plus any
+    // stale prefix, never trailing post-leave traffic, so unrelated
+    // packets cannot trigger or delay it.
+    if tx.is_some() {
+      if let Some(rem) = self.leave_flush_remaining {
+        // `checked_sub` so a future invariant break cannot wrap the count to
+        // `usize::MAX` and silently suppress `LeftCluster` forever (leaving
+        // drivers to hit their leave timeout). A reached-zero count emits.
+        match rem.checked_sub(1) {
+          Some(0) | None => {
+            self.emit_event(Event::LeftCluster);
+            self.leave_flush_remaining = None;
+          }
+          Some(rem) => {
+            self.leave_flush_remaining = Some(rem);
+          }
+        }
+      }
+    }
+    tx
+  }
+
+  /// Earliest deadline the driver should call `handle_timeout(now)` for.
+  ///
+  /// Returns the minimum across:
+  /// - Active suspicion timers on Members.
+  /// - In-flight probe FSM deadlines (`AwaitingDirectAck` / `AwaitingIndirect`).
+  /// - Outstanding indirect-ping forward deadlines.
+  ///
+  /// Returns `None` if all three sources are empty.
+  pub fn poll_timeout(&self) -> Option<Instant> {
+    // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
+    // indirect forwards are inert (handle_timeout fires none of them), so
+    // surfacing their now-stale deadlines would spin the driver through
+    // immediate, no-progress wakeups during the drain.
+    if self.lifecycle != Lifecycle::Running {
+      return None;
+    }
+    let suspicion_deadline = self
+      .members
+      .iter()
+      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
+      .min();
+    let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
+    let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
+    let intent_deadline = self
+      .pending_stream_intents
+      .values()
+      .map(|i| i.deadline)
+      .min();
+    [
+      suspicion_deadline,
+      probe_deadline,
+      forward_deadline,
+      intent_deadline,
+      self.next_probe,
+      self.next_gossip,
+      self.next_pushpull,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+  }
+
+  /// Number of broadcasts currently in the gossip queue.
+  pub fn broadcast_queue_len(&self) -> usize {
+    self.broadcast.num_queued()
+  }
+
+  /// Number of transmits queued for `poll_transmit`. A driver can read this to
+  /// shed or apply back-pressure when the machine's outbound backlog grows
+  /// (it advances one or two entries per inbound packet while the driver lags).
+  #[inline(always)]
+  pub fn pending_transmits_len(&self) -> usize {
+    self.pending_transmits.len()
+  }
+
+  /// Number of events queued for `poll_event`. A driver can read this to shed
+  /// or apply back-pressure when the machine's event backlog grows.
+  #[inline(always)]
+  pub fn pending_events_len(&self) -> usize {
+    self.pending_events.len()
+  }
+
+  /// The configured full-exchange stream timeout. The stream coordinator uses it
+  /// to bound an inbound push/pull RESPONSE window, so a large response on a slow
+  /// link is not cut by a hardcoded deadline shorter than the request side's.
+  #[cfg(any(feature = "tls", feature = "tcp"))]
+  #[inline(always)]
+  pub(crate) fn stream_timeout(&self) -> Duration {
+    self.cfg.stream_timeout()
+  }
+
+  /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
+  /// it to admission-gate inbound exchanges.
+  #[cfg(any(feature = "tls", feature = "tcp"))]
+  #[inline(always)]
+  pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
+    self.cfg.max_inbound_streams()
+  }
+
+  /// Read the current ack payload as a byte slice.
+  #[inline(always)]
+  pub fn ack_payload(&self) -> &[u8] {
+    self.ack_payload.as_ref()
+  }
+
+  /// Return a cheap clone of the current ack payload buffer.
+  #[inline(always)]
+  pub fn ack_payload_bytes(&self) -> Bytes {
+    self.ack_payload.clone()
+  }
+
+  /// Read the current local-state snapshot as a byte slice.
+  #[inline(always)]
+  pub fn local_state_snapshot(&self) -> &[u8] {
+    self.local_state_snapshot.as_ref()
+  }
+
+  /// Return a cheap clone of the current local-state snapshot buffer.
+  #[inline(always)]
+  pub fn local_state_snapshot_bytes(&self) -> Bytes {
+    self.local_state_snapshot.clone()
+  }
+
+  /// Number of user-data payloads currently queued for piggyback gossip.
+  pub fn user_broadcast_queue_len(&self) -> usize {
+    self.user_broadcasts.len()
+  }
+
+  /// Conservative upper bound on the bytes a single drained user payload of
+  /// length `L` adds to the assembled gossip compound. The true per-part
+  /// framing is deeper than this constant: a `Message::UserData` bridges to
+  /// `pb::UserData { bytes data = 1 }` (memberlist-wire `bridge.rs`), so the
+  /// full worst-case chain is
+  ///   compound `inner_len` varint (u32 LEB128 ≤ 5)
+  /// + `UserData` plain-frame tag (1)
+  /// + plain-frame body-len varint (u32 LEB128 ≤ 5)
+  /// + protobuf field-1 tag (1)
+  /// + protobuf `data` length varint (u32 LEB128 ≤ 5)
+  ///   = 17 in the unbounded worst case.
+  ///
+  /// 11 is still a SOUND conservative charge for every *admissible* payload:
+  /// a payload is only drained when `L + USER_PART_OVERHEAD <= user_budget`,
+  /// and `user_budget <= compound_budget = 1400 - (COMPOUND_TAG_LEN +
+  /// COMPOUND_MAX_COUNT_PREFIX_LEN) = 1394`, so any drained payload has
+  /// `L <= 1383`. At that size every length varint above is ≤ 2 bytes, so
+  /// the *true* assembled-part overhead is at most `2 + 1 + 2 + 1 + 2 = 8
+  /// <= 11`. Do NOT "tighten" this toward 8 — the 8 only holds under the
+  /// `L <= 1383` admission bound proven here; the conservative 11 keeps the
+  /// constant correct without depending on that derivation at the call site.
+  const USER_PART_OVERHEAD: usize = crate::wire::COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
+
+  /// Drain user-data payloads up to `limit` total bytes,
+  /// in FIFO order. Used by the gossip scheduler. Returns the drained
+  /// payloads. Bytes that don't fit remain in the queue.
+  pub(crate) fn drain_user_broadcasts(&mut self, limit: usize) -> Vec<Bytes> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    while let Some(front) = self.user_broadcasts.front() {
+      let next_len = front.len().saturating_add(Self::USER_PART_OVERHEAD);
+      if used.saturating_add(next_len) > limit {
+        break;
+      }
+      let bytes = self.user_broadcasts.pop_front().expect("just peeked");
+      used += next_len;
+      out.push(bytes);
+    }
+    out
+  }
+
+  fn allocate_seq(&mut self) -> u32 {
+    // Skip 0 (reserved) and any seq still live in a probe / ack-registry /
+    // indirect-forward slot, so a `u32` wrap cannot silently replace an
+    // in-flight probe's slot and orphan it into a spurious suspect. Bounded:
+    // the live maps are tiny relative to the 2^32 space, so this almost never
+    // iterates more than once.
+    loop {
+      self.next_seq = self.next_seq.wrapping_add(1);
+      if self.next_seq == 0 {
+        continue;
+      }
+      if !self.probes.contains_key(&self.next_seq)
+        && !self.indirect_forwards.contains_key(&self.next_seq)
+        && !self.ack_registry.contains(self.next_seq)
+      {
+        return self.next_seq;
+      }
+    }
+  }
+
+  /// The driver failed to dial the peer for stream `id`. Removes the pending
+  /// intent. For `ReliablePing` streams the probe FSM is driven to failure
+  /// (the peer is marked Suspect). `PushPull` and `UserMessage` dial failures
+  /// are silent at the machine level; the driver surfaces them through its own
+  /// channel.
+  pub fn dial_failed(&mut self, id: StreamId, _err: crate::error::StreamError, now: Instant) {
+    let Some(intent) = self.pending_stream_intents.remove(&id) else {
+      return;
+    };
+    if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
+      // Reliable-fallback dial failed. This does NOT fail the probe: the
+      // fallback runs concurrently with the indirect pings, and a
+      // fallback failure is just a "did not make contact" — the indirect
+      // path keeps racing the single cumulative deadline. Just retire the
+      // fallback stream so a late event can't match it.
+      // `now` is part of the public signature for symmetry with `dial_succeeded`;
+      // discard it explicitly to keep the unused-parameter lint quiet.
+      let _ = now;
+      self.retire_reliable_fallback(probe_seq);
+    }
+    // PushPull and UserMessage dial failures are silent at the machine level;
+    // the application surfaces the error through its own channel.
+  }
+
+  /// Clear the concurrent reliable-ping fallback from probe `seq` (if it is
+  /// in `AwaitingIndirect` with that fallback armed). The probe is left
+  /// running so the indirect path can still succeed or time out — a
+  /// fallback failure must never short-circuit the probe to failure.
+  fn retire_reliable_fallback(&mut self, seq: u32) {
+    if let Some(probe) = self.probes.get_mut(&seq) {
+      if let ProbePhase::AwaitingIndirect(AwaitingIndirect {
+        reliable_stream_id, ..
+      }) = &mut probe.phase
+      {
+        *reliable_stream_id = None;
+      }
+    }
+  }
+
+  /// Encode a `StreamCommand::SendPushPullResponse` into raw bytes suitable
+  /// for loading into a `Stream::output_buf`. The driver calls this after
+  /// receiving the command from `handle_stream_event`, then calls
+  /// `stream_load_response(stream, bytes, deadline)`.
+  ///
+  /// Takes pre-built `PushNodeState` entries so incarnation numbers are
+  /// available (they live in `LocalNodeState`, not `NodeState`). The driver
+  /// may build them from the `StreamCommand::SendPushPullResponse.local_states`
+  /// slice using the incarnation values it tracks separately.
+  ///
+  /// Standalone associated function; does not read or modify `Endpoint` state.
+  pub fn encode_push_pull_response(
+    local_states: &[PushNodeState<I, A>],
+    user_data: bytes::Bytes,
+    join: bool,
+  ) -> Vec<u8>
+  where
+    I: Data + CheapClone,
+    A: Data + CheapClone,
+  {
+    let pp = PushPull::new(join, local_states.iter().map(|pns| pns.cheap_clone()))
+      .with_user_data(user_data);
+    let msg = Message::PushPull(pp);
+    crate::wire::encode_message::<I, A>(&msg)
+      .expect("PushPull encode cannot fail for well-formed data")
+  }
+
+  /// Pre-load a [`Stream`]'s output buffer with a response payload and set a
+  /// write deadline. After this call `stream.poll_transmit()` will drain the
+  /// encoded bytes. The stream must be in `InboundSendingResponse` phase when
+  /// this is called.
+  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Vec<u8>, deadline: Instant) {
+    stream.output_buf.extend(encoded);
+    stream.deadline = Some(deadline);
+  }
 }
 
 impl<I, A, R> Endpoint<I, A, R>
@@ -505,6 +869,74 @@ where
   /// Number of tracked members.
   pub fn num_members(&self) -> usize {
     self.members.len()
+  }
+
+  /// Compute the (min, max) suspicion timeouts for the current cluster size.
+  fn suspicion_timeouts(&self) -> (Duration, Duration) {
+    let n = self.num_members().max(1) as f64;
+    let node_scale = crate::mathf::log10(n).max(1.0);
+    let interval = self.cfg.probe_interval();
+    let min_ms =
+      (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
+    let min = Duration::from_millis(min_ms);
+    // `checked_mul` to degrade a pathologically-large configured product to the
+    // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
+    // discipline as `Awareness::scale_timeout`); unreachable for any sane config.
+    let max = min
+      .checked_mul(self.cfg.suspicion_max_timeout_mult())
+      .unwrap_or(min);
+    (min, max)
+  }
+
+  /// Last state-change [`Instant`] for `peer`, or `None` if unknown.
+  pub fn node_state_change(&self, peer: &I) -> Option<Instant> {
+    self.members.get(peer).map(|m| m.state_ref().state_change())
+  }
+
+  /// Current incarnation number for `peer`, or `None` if unknown.
+  pub fn node_incarnation(&self, peer: &I) -> Option<u32> {
+    self.members.get(peer).map(|m| m.state_ref().incarnation())
+  }
+
+  /// Incarnation number for the local node (i.e. `self.local_id_ref()`).
+  pub fn local_incarnation(&self) -> u32 {
+    self
+      .members
+      .get(self.cfg.local_id_ref())
+      .map(|m| m.state_ref().incarnation())
+      .unwrap_or(0)
+  }
+
+  /// Roll `peer`'s `state_change` timestamp back by `delta`.
+  ///
+  /// Used by simulation tests to age a peer's state without sleeping, so
+  /// that suspicion-timeout logic fires immediately on the next tick.
+  /// No-op if `peer` is not a known member.
+  pub fn age_member(&mut self, peer: &I, delta: core::time::Duration) {
+    if let Some(m) = self.members.get_mut(peer) {
+      let old = m.state_ref().state_change();
+      // Saturating subtraction: Instant cannot go below its origin.
+      m.state_mut().set_state_change(old - delta);
+    }
+  }
+
+  /// Disable reliable-stream pings to this target. Future probes will use
+  /// best-effort packet probes only. No-op if already disabled.
+  pub fn disable_reliable_ping(&mut self, target: I) {
+    self.reliable_pings_disabled.insert(target);
+  }
+
+  /// Re-enable reliable-stream pings to this target. No-op if not currently
+  /// disabled.
+  pub fn enable_reliable_ping(&mut self, target: &I) {
+    self.reliable_pings_disabled.remove(target);
+  }
+
+  /// Returns `true` if reliable-stream pings are enabled for this target.
+  /// The default is enabled; this returns `false` only after
+  /// `disable_reliable_ping(target)`.
+  pub fn is_reliable_ping_enabled(&self, target: &I) -> bool {
+    !self.reliable_pings_disabled.contains(target)
   }
 }
 
@@ -922,23 +1354,6 @@ where
     }
   }
 
-  /// Compute the (min, max) suspicion timeouts for the current cluster size.
-  fn suspicion_timeouts(&self) -> (Duration, Duration) {
-    let n = self.num_members().max(1) as f64;
-    let node_scale = crate::mathf::log10(n).max(1.0);
-    let interval = self.cfg.probe_interval();
-    let min_ms =
-      (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
-    let min = Duration::from_millis(min_ms);
-    // `checked_mul` to degrade a pathologically-large configured product to the
-    // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
-    // discipline as `Awareness::scale_timeout`); unreachable for any sane config.
-    let max = min
-      .checked_mul(self.cfg.suspicion_max_timeout_mult())
-      .unwrap_or(min);
-    (min, max)
-  }
-
   /// Apply an incoming Suspect to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
@@ -1229,18 +1644,6 @@ where
     self.process_dead(dead, at);
   }
 
-  /// Driver feeds an incoming application user-data payload.
-  ///
-  /// For `reliability: Unreliable` (UDP datagram), emits
-  /// [`Event::UserPacket`] directly. For `reliability: Reliable` (stream),
-  /// the driver should instead use the stream FSM path:
-  /// `accept_stream` → feed bytes via `handle_data` →
-  /// drain `EndpointEvent::UserDataReceived` → call `handle_stream_event`.
-  /// This method is retained for the UDP path only.
-  pub(crate) fn handle_user_data(&mut self, from: A, data: Bytes, reliability: Reliability) {
-    self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
-  }
-
   /// Driver feeds an incoming Ping. Replies with an Ack via
   /// `pending_transmits`. Misrouted Pings (not addressed to the local node)
   /// are silently dropped.
@@ -1496,29 +1899,6 @@ where
     self.fire_probe_scheduler(now);
     self.fire_gossip_scheduler(now);
     self.fire_pushpull_scheduler(now);
-  }
-
-  /// Drop pending stream-dial intents whose deadline has elapsed without a
-  /// `dial_succeeded` / `dial_failed` callback. A correct driver always reports
-  /// a dial outcome, but a lost result would otherwise leak the intent — which
-  /// for a push/pull holds a full encoded membership snapshot — forever. This
-  /// machine-side backstop mirrors `dial_failed` for each swept intent: a
-  /// reliable-ping fallback is retired so a late event cannot match it; a
-  /// push/pull or user-message intent is dropped silently.
-  fn fire_expired_stream_intents(&mut self, now: Instant) {
-    let expired: Vec<StreamId> = self
-      .pending_stream_intents
-      .iter()
-      .filter(|(_, intent)| now >= intent.deadline)
-      .map(|(id, _)| *id)
-      .collect();
-    for id in expired {
-      if let Some(intent) = self.pending_stream_intents.remove(&id) {
-        if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
-          self.retire_reliable_fallback(probe_seq);
-        }
-      }
-    }
   }
 
   /// Fire any expired suspicion timers, transitioning the peer to Dead.
@@ -1798,42 +2178,6 @@ where
           probe.target,
         )));
       }
-    }
-  }
-
-  /// Send Nack for any indirect-ping forwards whose deadline has expired.
-  fn fire_expired_forwards(&mut self, now: Instant) {
-    let expired: Vec<u32> = self
-      .indirect_forwards
-      .iter()
-      .filter(|(_, f)| f.deadline <= now)
-      .map(|(s, _)| *s)
-      .collect();
-    for seq in expired {
-      let Some(forward) = self.indirect_forwards.remove(&seq) else {
-        continue;
-      };
-      // Remove THIS forward's AckRegistry entry by seq. `poll_expired`
-      // would pop the globally-oldest expired entry instead — and direct
-      // probe entries are intentionally left registered past their direct
-      // deadline so relayed/indirect Acks can still match. Evicting one of
-      // those here would drop a later Ack as untracked and cause a false
-      // probe failure / spurious Suspect.
-      // Ignoring Err: idempotent removal — the entry may already be gone.
-      let _ = self.ack_registry.remove(seq);
-      // Nack the original requester at its VALIDATED address — the same
-      // value the relay-Ack path uses, NOT an id→members lookup. A lossy
-      // lookup would silently drop the Nack when the requester id is
-      // absent from local membership (asymmetric membership) or misroute
-      // it when stale, corrupting the requester's
-      // `expected_nacks - seen` Lifeguard accounting.
-      let nack = Nack::new(forward.requester_seq);
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          forward.reply_to_addr,
-          Message::Nack(nack),
-        )));
     }
   }
 
@@ -2167,134 +2511,6 @@ where
     }
   }
 
-  /// Drain the next application-facing event, or `None` if no event is queued.
-  pub fn poll_event(&mut self) -> Option<Event<I, A>> {
-    self.pending_events.pop_front()
-  }
-
-  /// Re-enqueue an event at the back of the pending-events buffer.
-  ///
-  /// Used by the simulation harness after handling `PendingAlive` decisions:
-  /// any non-`PendingAlive` events that surfaced during the decision loop are
-  /// re-enqueued so that callers can observe them via [`poll_event`](Self::poll_event).
-  pub fn requeue_event(&mut self, ev: Event<I, A>) {
-    // A leaving/left node re-admits no dial: drop a requeued DialRequested so a
-    // held event cannot tell a raw driver to dial after leave.
-    if !self.is_running() && matches!(ev, Event::DialRequested(_)) {
-      return;
-    }
-    self.pending_events.push_back(ev);
-  }
-
-  /// Drain the next outgoing transmit, or `None` if nothing is queued.
-  pub fn poll_transmit(&mut self) -> Option<Transmit<I, A>> {
-    let tx = self.pending_transmits.pop_front();
-    // Leave-completion signal: count down the explicit boundary set by
-    // `leave()`. When the last dead-self notice has been returned (handed
-    // to the I/O layer), emit `Event::LeftCluster`. Drivers wait for
-    // `LeftCluster` (with their own timeout → `LeaveTimeout`) before
-    // reporting the leave done / tearing down the socket. Only decrement
-    // on an actual pop; the boundary counts the dead-self tail plus any
-    // stale prefix, never trailing post-leave traffic, so unrelated
-    // packets cannot trigger or delay it.
-    if tx.is_some() {
-      if let Some(rem) = self.leave_flush_remaining {
-        // `checked_sub` so a future invariant break cannot wrap the count to
-        // `usize::MAX` and silently suppress `LeftCluster` forever (leaving
-        // drivers to hit their leave timeout). A reached-zero count emits.
-        match rem.checked_sub(1) {
-          Some(0) | None => {
-            self.emit_event(Event::LeftCluster);
-            self.leave_flush_remaining = None;
-          }
-          Some(rem) => {
-            self.leave_flush_remaining = Some(rem);
-          }
-        }
-      }
-    }
-    tx
-  }
-
-  /// Earliest deadline the driver should call `handle_timeout(now)` for.
-  ///
-  /// Returns the minimum across:
-  /// - Active suspicion timers on Members.
-  /// - In-flight probe FSM deadlines (`AwaitingDirectAck` / `AwaitingIndirect`).
-  /// - Outstanding indirect-ping forward deadlines.
-  ///
-  /// Returns `None` if all three sources are empty.
-  pub fn poll_timeout(&self) -> Option<Instant> {
-    // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
-    // indirect forwards are inert (handle_timeout fires none of them), so
-    // surfacing their now-stale deadlines would spin the driver through
-    // immediate, no-progress wakeups during the drain.
-    if self.lifecycle != Lifecycle::Running {
-      return None;
-    }
-    let suspicion_deadline = self
-      .members
-      .iter()
-      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
-      .min();
-    let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
-    let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
-    let intent_deadline = self
-      .pending_stream_intents
-      .values()
-      .map(|i| i.deadline)
-      .min();
-    [
-      suspicion_deadline,
-      probe_deadline,
-      forward_deadline,
-      intent_deadline,
-      self.next_probe,
-      self.next_gossip,
-      self.next_pushpull,
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-  }
-
-  /// Number of broadcasts currently in the gossip queue.
-  pub fn broadcast_queue_len(&self) -> usize {
-    self.broadcast.num_queued()
-  }
-
-  /// Number of transmits queued for `poll_transmit`. A driver can read this to
-  /// shed or apply back-pressure when the machine's outbound backlog grows
-  /// (it advances one or two entries per inbound packet while the driver lags).
-  #[inline(always)]
-  pub fn pending_transmits_len(&self) -> usize {
-    self.pending_transmits.len()
-  }
-
-  /// Number of events queued for `poll_event`. A driver can read this to shed
-  /// or apply back-pressure when the machine's event backlog grows.
-  #[inline(always)]
-  pub fn pending_events_len(&self) -> usize {
-    self.pending_events.len()
-  }
-
-  /// The configured full-exchange stream timeout. The stream coordinator uses it
-  /// to bound an inbound push/pull RESPONSE window, so a large response on a slow
-  /// link is not cut by a hardcoded deadline shorter than the request side's.
-  #[cfg(any(feature = "tls", feature = "tcp"))]
-  #[inline(always)]
-  pub(crate) fn stream_timeout(&self) -> Duration {
-    self.cfg.stream_timeout()
-  }
-
-  /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
-  /// it to admission-gate inbound exchanges.
-  #[cfg(any(feature = "tls", feature = "tcp"))]
-  #[inline(always)]
-  pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
-    self.cfg.max_inbound_streams()
-  }
-
   /// Drain all queued broadcasts and return their messages.
   ///
   /// Useful in tests that need to inspect the content (e.g. verify an Alive
@@ -2309,38 +2525,6 @@ where
     // No compound assembly here (caller inspects messages individually) and
     // no MTU — pass overhead 0 / unlimited budget.
     self.broadcast.take_broadcasts(num_nodes, 0, usize::MAX)
-  }
-
-  /// Last state-change [`Instant`] for `peer`, or `None` if unknown.
-  pub fn node_state_change(&self, peer: &I) -> Option<Instant> {
-    self.members.get(peer).map(|m| m.state_ref().state_change())
-  }
-
-  /// Current incarnation number for `peer`, or `None` if unknown.
-  pub fn node_incarnation(&self, peer: &I) -> Option<u32> {
-    self.members.get(peer).map(|m| m.state_ref().incarnation())
-  }
-
-  /// Incarnation number for the local node (i.e. `self.local_id_ref()`).
-  pub fn local_incarnation(&self) -> u32 {
-    self
-      .members
-      .get(self.cfg.local_id_ref())
-      .map(|m| m.state_ref().incarnation())
-      .unwrap_or(0)
-  }
-
-  /// Roll `peer`'s `state_change` timestamp back by `delta`.
-  ///
-  /// Used by simulation tests to age a peer's state without sleeping, so
-  /// that suspicion-timeout logic fires immediately on the next tick.
-  /// No-op if `peer` is not a known member.
-  pub fn age_member(&mut self, peer: &I, delta: core::time::Duration) {
-    if let Some(m) = self.members.get_mut(peer) {
-      let old = m.state_ref().state_change();
-      // Saturating subtraction: Instant cannot go below its origin.
-      m.state_mut().set_state_change(old - delta);
-    }
   }
 
   /// Remove `Dead` and `Left` members whose `state_change` is older than
@@ -2432,37 +2616,6 @@ where
     Ok(())
   }
 
-  /// Read the current ack payload as a byte slice.
-  #[inline(always)]
-  pub fn ack_payload(&self) -> &[u8] {
-    self.ack_payload.as_ref()
-  }
-
-  /// Return a cheap clone of the current ack payload buffer.
-  #[inline(always)]
-  pub fn ack_payload_bytes(&self) -> Bytes {
-    self.ack_payload.clone()
-  }
-
-  /// Disable reliable-stream pings to this target. Future probes will use
-  /// best-effort packet probes only. No-op if already disabled.
-  pub fn disable_reliable_ping(&mut self, target: I) {
-    self.reliable_pings_disabled.insert(target);
-  }
-
-  /// Re-enable reliable-stream pings to this target. No-op if not currently
-  /// disabled.
-  pub fn enable_reliable_ping(&mut self, target: &I) {
-    self.reliable_pings_disabled.remove(target);
-  }
-
-  /// Returns `true` if reliable-stream pings are enabled for this target.
-  /// The default is enabled; this returns `false` only after
-  /// `disable_reliable_ping(target)`.
-  pub fn is_reliable_ping_enabled(&self, target: &I) -> bool {
-    !self.reliable_pings_disabled.contains(target)
-  }
-
   /// Update the local-state snapshot used for outgoing push/pull messages.
   /// Replaces legacy `NodeDelegate::local_state` — instead of the state
   /// machine pulling at send-time, the application pushes the freshest
@@ -2493,18 +2646,6 @@ where
     validate_local_state_snapshot::<I, A>(&bytes, self.cfg.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
     Ok(())
-  }
-
-  /// Read the current local-state snapshot as a byte slice.
-  #[inline(always)]
-  pub fn local_state_snapshot(&self) -> &[u8] {
-    self.local_state_snapshot.as_ref()
-  }
-
-  /// Return a cheap clone of the current local-state snapshot buffer.
-  #[inline(always)]
-  pub fn local_state_snapshot_bytes(&self) -> Bytes {
-    self.local_state_snapshot.clone()
   }
 
   /// Queue an opaque user-data payload to ride along with outgoing gossip
@@ -2548,11 +2689,6 @@ where
     }
     self.user_broadcasts.push_back(data);
     Ok(())
-  }
-
-  /// Number of user-data payloads currently queued for piggyback gossip.
-  pub fn user_broadcast_queue_len(&self) -> usize {
-    self.user_broadcasts.len()
   }
 
   /// Enqueue a directed unreliable user message to `to` (no gossip, no
@@ -2619,47 +2755,6 @@ where
         Ok(())
       }
     }
-  }
-
-  /// Conservative upper bound on the bytes a single drained user payload of
-  /// length `L` adds to the assembled gossip compound. The true per-part
-  /// framing is deeper than this constant: a `Message::UserData` bridges to
-  /// `pb::UserData { bytes data = 1 }` (memberlist-wire `bridge.rs`), so the
-  /// full worst-case chain is
-  ///   compound `inner_len` varint (u32 LEB128 ≤ 5)
-  /// + `UserData` plain-frame tag (1)
-  /// + plain-frame body-len varint (u32 LEB128 ≤ 5)
-  /// + protobuf field-1 tag (1)
-  /// + protobuf `data` length varint (u32 LEB128 ≤ 5)
-  ///   = 17 in the unbounded worst case.
-  ///
-  /// 11 is still a SOUND conservative charge for every *admissible* payload:
-  /// a payload is only drained when `L + USER_PART_OVERHEAD <= user_budget`,
-  /// and `user_budget <= compound_budget = 1400 - (COMPOUND_TAG_LEN +
-  /// COMPOUND_MAX_COUNT_PREFIX_LEN) = 1394`, so any drained payload has
-  /// `L <= 1383`. At that size every length varint above is ≤ 2 bytes, so
-  /// the *true* assembled-part overhead is at most `2 + 1 + 2 + 1 + 2 = 8
-  /// <= 11`. Do NOT "tighten" this toward 8 — the 8 only holds under the
-  /// `L <= 1383` admission bound proven here; the conservative 11 keeps the
-  /// constant correct without depending on that derivation at the call site.
-  const USER_PART_OVERHEAD: usize = crate::wire::COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
-
-  /// Drain user-data payloads up to `limit` total bytes,
-  /// in FIFO order. Used by the gossip scheduler. Returns the drained
-  /// payloads. Bytes that don't fit remain in the queue.
-  pub(crate) fn drain_user_broadcasts(&mut self, limit: usize) -> Vec<Bytes> {
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    while let Some(front) = self.user_broadcasts.front() {
-      let next_len = front.len().saturating_add(Self::USER_PART_OVERHEAD);
-      if used.saturating_add(next_len) > limit {
-        break;
-      }
-      let bytes = self.user_broadcasts.pop_front().expect("just peeked");
-      used += next_len;
-      out.push(bytes);
-    }
-    out
   }
 
   /// Re-broadcast our own Alive with updated metadata.
@@ -2876,26 +2971,6 @@ where
       .iter()
       .nth(idx)
       .map(|m| m.state_ref().id_ref().cheap_clone())
-  }
-
-  fn allocate_seq(&mut self) -> u32 {
-    // Skip 0 (reserved) and any seq still live in a probe / ack-registry /
-    // indirect-forward slot, so a `u32` wrap cannot silently replace an
-    // in-flight probe's slot and orphan it into a spurious suspect. Bounded:
-    // the live maps are tiny relative to the 2^32 space, so this almost never
-    // iterates more than once.
-    loop {
-      self.next_seq = self.next_seq.wrapping_add(1);
-      if self.next_seq == 0 {
-        continue;
-      }
-      if !self.probes.contains_key(&self.next_seq)
-        && !self.indirect_forwards.contains_key(&self.next_seq)
-        && !self.ack_registry.contains(self.next_seq)
-      {
-        return self.next_seq;
-      }
-    }
   }
 
   /// Driver feeds an incoming IndirectPing. We forward a Ping to the target
@@ -3258,30 +3333,6 @@ where
     })
   }
 
-  /// The driver failed to dial the peer for stream `id`. Removes the pending
-  /// intent. For `ReliablePing` streams the probe FSM is driven to failure
-  /// (the peer is marked Suspect). `PushPull` and `UserMessage` dial failures
-  /// are silent at the machine level; the driver surfaces them through its own
-  /// channel.
-  pub fn dial_failed(&mut self, id: StreamId, _err: crate::error::StreamError, now: Instant) {
-    let Some(intent) = self.pending_stream_intents.remove(&id) else {
-      return;
-    };
-    if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
-      // Reliable-fallback dial failed. This does NOT fail the probe: the
-      // fallback runs concurrently with the indirect pings, and a
-      // fallback failure is just a "did not make contact" — the indirect
-      // path keeps racing the single cumulative deadline. Just retire the
-      // fallback stream so a late event can't match it.
-      // `now` is part of the public signature for symmetry with `dial_succeeded`;
-      // discard it explicitly to keep the unused-parameter lint quiet.
-      let _ = now;
-      self.retire_reliable_fallback(probe_seq);
-    }
-    // PushPull and UserMessage dial failures are silent at the machine level;
-    // the application surfaces the error through its own channel.
-  }
-
   /// The driver accepted an inbound stream from `from`. Endpoint mints a
   /// fresh `StreamId` and returns an inbound-phase `Stream<I, A>`. The
   /// driver feeds bytes via `stream.handle_data(bytes, now)`.
@@ -3476,57 +3527,6 @@ where
       }
       _ => {}
     }
-  }
-
-  /// Clear the concurrent reliable-ping fallback from probe `seq` (if it is
-  /// in `AwaitingIndirect` with that fallback armed). The probe is left
-  /// running so the indirect path can still succeed or time out — a
-  /// fallback failure must never short-circuit the probe to failure.
-  fn retire_reliable_fallback(&mut self, seq: u32) {
-    if let Some(probe) = self.probes.get_mut(&seq) {
-      if let ProbePhase::AwaitingIndirect(AwaitingIndirect {
-        reliable_stream_id, ..
-      }) = &mut probe.phase
-      {
-        *reliable_stream_id = None;
-      }
-    }
-  }
-
-  /// Encode a `StreamCommand::SendPushPullResponse` into raw bytes suitable
-  /// for loading into a `Stream::output_buf`. The driver calls this after
-  /// receiving the command from `handle_stream_event`, then calls
-  /// `stream_load_response(stream, bytes, deadline)`.
-  ///
-  /// Takes pre-built `PushNodeState` entries so incarnation numbers are
-  /// available (they live in `LocalNodeState`, not `NodeState`). The driver
-  /// may build them from the `StreamCommand::SendPushPullResponse.local_states`
-  /// slice using the incarnation values it tracks separately.
-  ///
-  /// Standalone associated function; does not read or modify `Endpoint` state.
-  pub fn encode_push_pull_response(
-    local_states: &[PushNodeState<I, A>],
-    user_data: bytes::Bytes,
-    join: bool,
-  ) -> Vec<u8>
-  where
-    I: Data + CheapClone,
-    A: Data + CheapClone,
-  {
-    let pp = PushPull::new(join, local_states.iter().map(|pns| pns.cheap_clone()))
-      .with_user_data(user_data);
-    let msg = Message::PushPull(pp);
-    crate::wire::encode_message::<I, A>(&msg)
-      .expect("PushPull encode cannot fail for well-formed data")
-  }
-
-  /// Pre-load a [`Stream`]'s output buffer with a response payload and set a
-  /// write deadline. After this call `stream.poll_transmit()` will drain the
-  /// encoded bytes. The stream must be in `InboundSendingResponse` phase when
-  /// this is called.
-  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Vec<u8>, deadline: Instant) {
-    stream.output_buf.extend(encoded);
-    stream.deadline = Some(deadline);
   }
 
   /// Initiate a graceful leave. Marks the local node `Left` synchronously
