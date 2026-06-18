@@ -1787,7 +1787,7 @@ fn drained_reap_then_subsequent_dial_redials_and_converges() {
     if c.live_bridge_count(a) > 0 {
       bridge_opened = true;
     } else if bridge_opened && c.live_bridge_count(b) == 0 {
-      // BridgePhase model: both peers reach `BothClosed` only after
+      // LinkState model: both peers reach `BothClosed` only after
       // their respective FIN ACKs are observed. The initiator (A) may
       // reach `BothClosed` ~1 RTT before the responder (B): A's FIN ACK
       // arrives first (because A sent FIN first), and B's `BothClosed`

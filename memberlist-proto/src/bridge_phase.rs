@@ -27,7 +27,7 @@ use std::string::String;
 /// The conceptual lifecycle is transport-agnostic; the anchors are
 /// transport-specific.
 #[derive(Debug)]
-pub(crate) enum BridgePhase {
+pub(crate) enum LinkState {
   /// Both halves active; bridge is pumping bytes both directions.
   Active,
   /// Send half retired — local FIN ack'd by peer. Recv half still active OR
@@ -47,7 +47,7 @@ pub(crate) enum BridgePhase {
   Failed(BridgeFailure),
 }
 
-/// Reason the bridge transitioned to [`BridgePhase::Failed`]. Carries
+/// Reason the bridge transitioned to [`LinkState::Failed`]. Carries
 /// through to the `EndpointEvent::StreamErrored` notice delivered to the
 /// FSM by `drain_then_reap`, so the FSM's failure attribution is
 /// preserved end-to-end.

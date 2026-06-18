@@ -2349,7 +2349,7 @@ where
             // stream has reached `DataRecvd`. Route to the owning
             // bridge so it transitions `Active -> SendClosed` (or
             // `RecvClosed -> BothClosed`). The bridge's terminality
-            // criterion is `BridgePhase::BothClosed | Failed(_)`, so
+            // criterion is `LinkState::BothClosed | Failed(_)`, so
             // this transition is the load-bearing send-half retirement
             // observable — not `SendStream::finish()`'s return.
             //
