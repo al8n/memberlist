@@ -163,6 +163,519 @@ impl<I, A, R> Drop for Memberlist<I, A, R> {
   }
 }
 
+// Handle operations that read a cached snapshot or push a command over the
+// channel to the driver — none touch node identity directly, so they impose no
+// bound and stay callable on a `Memberlist` of any id type.
+impl<I, A, R> Memberlist<I, A, R> {
+  /// The latest membership snapshot, read lock-free.
+  #[must_use]
+  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, SocketAddr>> {
+    self.shared.load_snapshot()
+  }
+
+  /// The machine's cumulative load-shedding counters, read lock-free. The counts
+  /// are monotonic for the node's lifetime; difference successive reads for rates.
+  /// See [`memberlist_proto::metrics::Metrics`].
+  #[must_use]
+  pub fn metrics(&self) -> memberlist_proto::metrics::Metrics {
+    self.shared.load_metrics()
+  }
+
+  /// The number of known members.
+  #[must_use]
+  pub fn num_members(&self) -> usize {
+    self.shared.load_snapshot().num_members()
+  }
+
+  /// Subscribes to the membership / control event stream. Application data is
+  /// delivered to the [`Delegate`], not here.
+  #[must_use]
+  pub fn events(&self) -> EventStream<I, SocketAddr> {
+    EventStream::new(self.events_rx.clone())
+  }
+
+  /// The cumulative count of events dropped at the event-stream fan-out (a slow
+  /// subscriber); these are recoverable from the snapshot.
+  #[must_use]
+  pub fn events_dropped(&self) -> u64 {
+    self.shared.events_dropped()
+  }
+
+  /// The cumulative count of events dropped at the observation channel (a slow
+  /// delegate); these may include unrecoverable application data.
+  #[must_use]
+  pub fn observation_dropped(&self) -> u64 {
+    self.shared.observation_dropped()
+  }
+
+  /// The local node's advertised address.
+  #[must_use]
+  #[inline]
+  pub fn advertise_address(&self) -> SocketAddr {
+    *self.shared.load_snapshot().local_ref().address_ref()
+  }
+
+  /// The local node's full state from the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn local_state(&self) -> Arc<NodeState<I, SocketAddr>> {
+    self.shared.load_snapshot().local_ref().clone()
+  }
+
+  /// Look up a member by id in the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn by_id(&self, id: &I) -> Option<Arc<NodeState<I, SocketAddr>>>
+  where
+    I: PartialEq,
+  {
+    self.shared.load_snapshot().by_id(id).cloned()
+  }
+
+  /// All members currently in the alive state, from the latest published
+  /// snapshot.
+  #[must_use]
+  #[inline]
+  pub fn online_members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self
+      .shared
+      .load_snapshot()
+      .online_members()
+      .cloned()
+      .collect()
+  }
+
+  /// Number of alive members. Equivalent to
+  /// [`MemberlistSnapshot::alive_count`] on the snapshot.
+  #[must_use]
+  #[inline]
+  pub fn num_online_members(&self) -> usize {
+    self.shared.load_snapshot().alive_count()
+  }
+
+  /// All known members (alive + suspect + dead/left) from the latest
+  /// published snapshot. Mirrors the legacy `Memberlist::members` name.
+  #[must_use]
+  #[inline]
+  pub fn members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self.shared.load_snapshot().members().to_vec()
+  }
+
+  /// Members matching `pred`, from the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn members_by(
+    &self,
+    pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
+  ) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self
+      .shared
+      .load_snapshot()
+      .members_by(pred)
+      .cloned()
+      .collect()
+  }
+
+  /// Count of members matching `pred`.
+  #[must_use]
+  #[inline]
+  pub fn num_members_by(&self, pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool) -> usize {
+    self.shared.load_snapshot().num_members_by(pred)
+  }
+
+  /// Map-filter members, collecting all `Some` results into a `Vec`.
+  #[must_use]
+  #[inline]
+  pub fn members_map_by<O>(&self, f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>) -> Vec<O> {
+    self.shared.load_snapshot().members_map_by(f)
+  }
+
+  /// The local node's Lifeguard health score (`0` = healthy; higher = worse).
+  #[must_use]
+  #[inline]
+  pub fn health_score(&self) -> usize {
+    self.shared.load_snapshot().health_score()
+  }
+
+  /// Joins the cluster by contacting `seeds` (resolved via `resolver`), waiting
+  /// for the push/pull exchanges to complete and returning the number contacted.
+  /// Errors with `JoinFailed` if seeds were dispatched but none was reached.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(seeds = seeds.len())))]
+  pub async fn join<Res>(
+    &self,
+    resolver: &Res,
+    seeds: &[MaybeResolved<Res::Address>],
+  ) -> Result<usize, Error>
+  where
+    Res: AddressResolver<Address = A>,
+  {
+    self.join_inner(resolver, seeds, true).await
+  }
+
+  /// Like [`join`](Self::join) but fire-and-forget: dispatches the seeds and
+  /// returns the dispatched count immediately, without awaiting the exchanges.
+  pub async fn join_detached<Res>(
+    &self,
+    resolver: &Res,
+    seeds: &[MaybeResolved<Res::Address>],
+  ) -> Result<usize, Error>
+  where
+    Res: AddressResolver<Address = A>,
+  {
+    self.join_inner(resolver, seeds, false).await
+  }
+
+  async fn join_inner<Res>(
+    &self,
+    resolver: &Res,
+    seeds: &[MaybeResolved<Res::Address>],
+    wait: bool,
+  ) -> Result<usize, Error>
+  where
+    Res: AddressResolver<Address = A>,
+  {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let mut addrs = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+      match seed {
+        MaybeResolved::Resolved(s) => addrs.push(*s),
+        MaybeResolved::Unresolved(a) => addrs.extend(
+          resolver
+            .resolve(a)
+            .await
+            .map_err(|e| Error::Resolve(Box::new(e)))?,
+        ),
+      }
+    }
+    // A non-empty seed list resolving to zero addresses is a bootstrap failure,
+    // not a successful zero-contact join.
+    if !seeds.is_empty() && addrs.is_empty() {
+      return Err(Error::JoinFailed(seeds.len()));
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self.shared.push_command(Command::Join(JoinCmd {
+      addrs,
+      wait,
+      reply: tx,
+    })) {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Gracefully leaves the cluster (the node stops participating).
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+  pub async fn leave(&self) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::Leave(LeaveCmd { reply: tx }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Stops the driver and releases its bound socket(s), so an immediate rebind on
+  /// the same address succeeds with no grace period. `shutdown()` returns once
+  /// those sockets are released; it aborts in-flight reliable-stream exchanges but
+  /// does not block on their connection cleanup, so the rebind guarantee holds
+  /// regardless of any in-flight stream sockets.
+  ///
+  /// What is released, and how in-flight reliable streams are reclaimed, depends on
+  /// the backend:
+  /// - **TCP / TLS**: the UDP gossip socket and the TCP listener are freed. An
+  ///   active established stream is preempted at once; a stream already in its
+  ///   graceful close keeps draining, with a non-reading peer dropped after
+  ///   `close_timeout` of no write progress (an idle bound, not a total one — a
+  ///   slow but progressing peer can take longer); an in-flight outbound dial is
+  ///   bounded by `DIAL_TIMEOUT`.
+  /// - **QUIC**: the single UDP transport socket is freed. Every reliable stream
+  ///   multiplexes over it, so there is no separate listener, accept task, or
+  ///   `close_timeout` / `DIAL_TIMEOUT` cleanup — dropping the socket tears the
+  ///   streams down with it.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+  pub async fn shutdown(&self) -> Result<(), Error> {
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::Shutdown(ShutdownCmd { reply: tx }))
+    {
+      // The queue is already closed: a shutdown is in flight (or done). The
+      // driver may still hold its bind socket(s) — the stream driver's UDP gossip
+      // socket and TCP listener, or the QUIC driver's UDP transport socket — so do
+      // NOT return early; await teardown completion before reporting success,
+      // otherwise this caller could rebind into a still-bound port.
+      self.shared.wait_shutdown_complete().await;
+      return Ok(());
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Probes `node` and returns the measured round-trip time.
+  ///
+  /// Returns `Err(NotRunning)` if the node is not running, `Err(PingTimeout)`
+  /// if no ack arrived within the probe deadline, or `Err(Shutdown)` if the
+  /// driver shut down while waiting.
+  pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<std::time::Duration, Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::Ping(PingCmd { node, reply: tx }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sends a single unreliable directed user message to `to` via gossip.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
+  pub async fn send(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
+    self.send_many(to, core::iter::once(payload)).await
+  }
+
+  /// Sends multiple unreliable directed user messages to `to` via gossip.
+  pub async fn send_many(
+    &self,
+    to: SocketAddr,
+    payloads: impl IntoIterator<Item = bytes::Bytes>,
+  ) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self.shared.push_command(Command::SendUser(SendUserCmd {
+      to,
+      payloads,
+      reply: tx,
+    })) {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sends a single reliable directed user message to `to` via the stream
+  /// plane (TCP or QUIC), waiting for the exchange to complete.
+  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
+  pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
+    self.send_many_reliable(to, core::iter::once(payload)).await
+  }
+
+  /// Sends multiple reliable directed user messages to `to` via the stream
+  /// plane, waiting for all exchanges to complete.
+  pub async fn send_many_reliable(
+    &self,
+    to: SocketAddr,
+    payloads: impl IntoIterator<Item = bytes::Bytes>,
+  ) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SendReliable(SendReliableCmd {
+        to,
+        payloads,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Reconfigures the gossip compression policy in place.
+  ///
+  /// The change takes effect on the next outbound datagram. Rejected with
+  /// `Err(NotRunning)` once the node has left the cluster.
+  #[cfg(compression)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "lz4",
+      feature = "snappy",
+      feature = "zstd",
+      feature = "brotli"
+    )))
+  )]
+  pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetCompressionOptions(SetCompressionOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Reconfigures the gossip (unreliable) checksum policy in place.
+  ///
+  /// Checksumming applies to the gossip datagram path only — the reliable
+  /// stream path carries no checksum, as its transport already provides
+  /// integrity. The change takes effect on the next outbound datagram. Rejected
+  /// with `Err(NotRunning)` once the node has left the cluster.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
+  pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetChecksumOptions(SetChecksumOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Reconfigures the gossip encryption policy in place.
+  ///
+  /// The keyring is validated before being applied: every key in the ring is
+  /// trial-encrypted to confirm the AEAD backend is compiled in. Rejected with
+  /// `Err(NotRunning)` once the node has left the cluster, or with
+  /// `Err(Encryption(_))` when the keyring contains an unsupported algorithm.
+  #[cfg(encryption)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
+  )]
+  pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
+        opts,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Replaces this node's advertised metadata in place. The change bumps the
+  /// node's incarnation and gossips out; peers observe it via
+  /// [`Delegate::notify_update`]. Rejected with `Err(NotRunning)` once the node
+  /// has left, or a size error when the metadata exceeds the configured cap.
+  pub async fn update_node_metadata(&self, meta: Vec<u8>) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::UpdateNodeMetadata(UpdateNodeMetadataCmd {
+        meta,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Queues an application user-broadcast for cluster-wide gossip. The bytes
+  /// ride the gossip path and surface on peers via [`Delegate::notify_user_msg`].
+  /// Rejected with `Err(NotRunning)` once the node has left, or a size error
+  /// when the framed datagram exceeds the gossip MTU.
+  pub async fn queue_user_broadcast(&self, data: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::QueueUserBroadcast(QueueUserBroadcastCmd {
+        data,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sets the application push/pull local-state snapshot carried in subsequent
+  /// push/pull exchanges; it surfaces on peers via
+  /// [`Delegate::merge_remote_state`]. Rejected with `Err(NotRunning)` once the
+  /// node has left, or a size error when the framed snapshot exceeds the stream
+  /// frame budget.
+  pub async fn set_local_state(&self, state: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetLocalState(SetLocalStateCmd {
+        state,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sets the payload attached to outbound probe acks; it surfaces on the
+  /// probing peer via [`Delegate::notify_ping_complete`]. Rejected with
+  /// `Err(NotRunning)` once the node has left, or `Err(Proto)` when the
+  /// framed ack would exceed the gossip packet budget.
+  pub async fn set_ack_payload(&self, payload: bytes::Bytes) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    if !self
+      .shared
+      .push_command(Command::SetAckPayload(SetAckPayloadCmd {
+        payload,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.await.map_err(|_| Error::Shutdown)?
+  }
+}
+
+// Constructors that build and spawn a transport backend, plus the few accessors
+// that clone or hash the local id — all of which need full node identity.
 impl<I, A, R> Memberlist<I, A, R>
 where
   I: NodeId,
@@ -706,51 +1219,10 @@ where
     })
   }
 
-  /// The latest membership snapshot, read lock-free.
-  #[must_use]
-  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, SocketAddr>> {
-    self.shared.load_snapshot()
-  }
-
-  /// The machine's cumulative load-shedding counters, read lock-free. The counts
-  /// are monotonic for the node's lifetime; difference successive reads for rates.
-  /// See [`memberlist_proto::metrics::Metrics`].
-  #[must_use]
-  pub fn metrics(&self) -> memberlist_proto::metrics::Metrics {
-    self.shared.load_metrics()
-  }
-
   /// This node's own identity and advertised address.
   #[must_use]
   pub fn local(&self) -> Node<I, SocketAddr> {
     self.shared.load_snapshot().local()
-  }
-
-  /// The number of known members.
-  #[must_use]
-  pub fn num_members(&self) -> usize {
-    self.shared.load_snapshot().num_members()
-  }
-
-  /// Subscribes to the membership / control event stream. Application data is
-  /// delivered to the [`Delegate`], not here.
-  #[must_use]
-  pub fn events(&self) -> EventStream<I, SocketAddr> {
-    EventStream::new(self.events_rx.clone())
-  }
-
-  /// The cumulative count of events dropped at the event-stream fan-out (a slow
-  /// subscriber); these are recoverable from the snapshot.
-  #[must_use]
-  pub fn events_dropped(&self) -> u64 {
-    self.shared.events_dropped()
-  }
-
-  /// The cumulative count of events dropped at the observation channel (a slow
-  /// delegate); these may include unrecoverable application data.
-  #[must_use]
-  pub fn observation_dropped(&self) -> u64 {
-    self.shared.observation_dropped()
   }
 
   /// The local node's id.
@@ -763,471 +1235,6 @@ where
       .local_ref()
       .id_ref()
       .cheap_clone()
-  }
-
-  /// The local node's advertised address.
-  #[must_use]
-  #[inline]
-  pub fn advertise_address(&self) -> SocketAddr {
-    *self.shared.load_snapshot().local_ref().address_ref()
-  }
-
-  /// The local node's full state from the latest published snapshot.
-  #[must_use]
-  #[inline]
-  pub fn local_state(&self) -> Arc<NodeState<I, SocketAddr>> {
-    self.shared.load_snapshot().local_ref().clone()
-  }
-
-  /// Look up a member by id in the latest published snapshot.
-  #[must_use]
-  #[inline]
-  pub fn by_id(&self, id: &I) -> Option<Arc<NodeState<I, SocketAddr>>>
-  where
-    I: PartialEq,
-  {
-    self.shared.load_snapshot().by_id(id).cloned()
-  }
-
-  /// All members currently in the alive state, from the latest published
-  /// snapshot.
-  #[must_use]
-  #[inline]
-  pub fn online_members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
-    self
-      .shared
-      .load_snapshot()
-      .online_members()
-      .cloned()
-      .collect()
-  }
-
-  /// Number of alive members. Equivalent to
-  /// [`MemberlistSnapshot::alive_count`] on the snapshot.
-  #[must_use]
-  #[inline]
-  pub fn num_online_members(&self) -> usize {
-    self.shared.load_snapshot().alive_count()
-  }
-
-  /// All known members (alive + suspect + dead/left) from the latest
-  /// published snapshot. Mirrors the legacy `Memberlist::members` name.
-  #[must_use]
-  #[inline]
-  pub fn members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
-    self.shared.load_snapshot().members().to_vec()
-  }
-
-  /// Members matching `pred`, from the latest published snapshot.
-  #[must_use]
-  #[inline]
-  pub fn members_by(
-    &self,
-    pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
-  ) -> Vec<Arc<NodeState<I, SocketAddr>>> {
-    self
-      .shared
-      .load_snapshot()
-      .members_by(pred)
-      .cloned()
-      .collect()
-  }
-
-  /// Count of members matching `pred`.
-  #[must_use]
-  #[inline]
-  pub fn num_members_by(&self, pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool) -> usize {
-    self.shared.load_snapshot().num_members_by(pred)
-  }
-
-  /// Map-filter members, collecting all `Some` results into a `Vec`.
-  #[must_use]
-  #[inline]
-  pub fn members_map_by<O>(&self, f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>) -> Vec<O> {
-    self.shared.load_snapshot().members_map_by(f)
-  }
-
-  /// The local node's Lifeguard health score (`0` = healthy; higher = worse).
-  #[must_use]
-  #[inline]
-  pub fn health_score(&self) -> usize {
-    self.shared.load_snapshot().health_score()
-  }
-
-  /// Joins the cluster by contacting `seeds` (resolved via `resolver`), waiting
-  /// for the push/pull exchanges to complete and returning the number contacted.
-  /// Errors with `JoinFailed` if seeds were dispatched but none was reached.
-  #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(seeds = seeds.len())))]
-  pub async fn join<Res>(
-    &self,
-    resolver: &Res,
-    seeds: &[MaybeResolved<Res::Address>],
-  ) -> Result<usize, Error>
-  where
-    Res: AddressResolver<Address = A>,
-  {
-    self.join_inner(resolver, seeds, true).await
-  }
-
-  /// Like [`join`](Self::join) but fire-and-forget: dispatches the seeds and
-  /// returns the dispatched count immediately, without awaiting the exchanges.
-  pub async fn join_detached<Res>(
-    &self,
-    resolver: &Res,
-    seeds: &[MaybeResolved<Res::Address>],
-  ) -> Result<usize, Error>
-  where
-    Res: AddressResolver<Address = A>,
-  {
-    self.join_inner(resolver, seeds, false).await
-  }
-
-  async fn join_inner<Res>(
-    &self,
-    resolver: &Res,
-    seeds: &[MaybeResolved<Res::Address>],
-    wait: bool,
-  ) -> Result<usize, Error>
-  where
-    Res: AddressResolver<Address = A>,
-  {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let mut addrs = Vec::with_capacity(seeds.len());
-    for seed in seeds {
-      match seed {
-        MaybeResolved::Resolved(s) => addrs.push(*s),
-        MaybeResolved::Unresolved(a) => addrs.extend(
-          resolver
-            .resolve(a)
-            .await
-            .map_err(|e| Error::Resolve(Box::new(e)))?,
-        ),
-      }
-    }
-    // A non-empty seed list resolving to zero addresses is a bootstrap failure,
-    // not a successful zero-contact join.
-    if !seeds.is_empty() && addrs.is_empty() {
-      return Err(Error::JoinFailed(seeds.len()));
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self.shared.push_command(Command::Join(JoinCmd {
-      addrs,
-      wait,
-      reply: tx,
-    })) {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Gracefully leaves the cluster (the node stops participating).
-  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
-  pub async fn leave(&self) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::Leave(LeaveCmd { reply: tx }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Stops the driver and releases its bound socket(s), so an immediate rebind on
-  /// the same address succeeds with no grace period. `shutdown()` returns once
-  /// those sockets are released; it aborts in-flight reliable-stream exchanges but
-  /// does not block on their connection cleanup, so the rebind guarantee holds
-  /// regardless of any in-flight stream sockets.
-  ///
-  /// What is released, and how in-flight reliable streams are reclaimed, depends on
-  /// the backend:
-  /// - **TCP / TLS**: the UDP gossip socket and the TCP listener are freed. An
-  ///   active established stream is preempted at once; a stream already in its
-  ///   graceful close keeps draining, with a non-reading peer dropped after
-  ///   `close_timeout` of no write progress (an idle bound, not a total one — a
-  ///   slow but progressing peer can take longer); an in-flight outbound dial is
-  ///   bounded by `DIAL_TIMEOUT`.
-  /// - **QUIC**: the single UDP transport socket is freed. Every reliable stream
-  ///   multiplexes over it, so there is no separate listener, accept task, or
-  ///   `close_timeout` / `DIAL_TIMEOUT` cleanup — dropping the socket tears the
-  ///   streams down with it.
-  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
-  pub async fn shutdown(&self) -> Result<(), Error> {
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::Shutdown(ShutdownCmd { reply: tx }))
-    {
-      // The queue is already closed: a shutdown is in flight (or done). The
-      // driver may still hold its bind socket(s) — the stream driver's UDP gossip
-      // socket and TCP listener, or the QUIC driver's UDP transport socket — so do
-      // NOT return early; await teardown completion before reporting success,
-      // otherwise this caller could rebind into a still-bound port.
-      self.shared.wait_shutdown_complete().await;
-      return Ok(());
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Probes `node` and returns the measured round-trip time.
-  ///
-  /// Returns `Err(NotRunning)` if the node is not running, `Err(PingTimeout)`
-  /// if no ack arrived within the probe deadline, or `Err(Shutdown)` if the
-  /// driver shut down while waiting.
-  pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<std::time::Duration, Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::Ping(PingCmd { node, reply: tx }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Sends a single unreliable directed user message to `to` via gossip.
-  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
-  pub async fn send(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
-    self.send_many(to, core::iter::once(payload)).await
-  }
-
-  /// Sends multiple unreliable directed user messages to `to` via gossip.
-  pub async fn send_many(
-    &self,
-    to: SocketAddr,
-    payloads: impl IntoIterator<Item = bytes::Bytes>,
-  ) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self.shared.push_command(Command::SendUser(SendUserCmd {
-      to,
-      payloads,
-      reply: tx,
-    })) {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Sends a single reliable directed user message to `to` via the stream
-  /// plane (TCP or QUIC), waiting for the exchange to complete.
-  #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, payload), fields(to = %to, len = payload.len())))]
-  pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
-    self.send_many_reliable(to, core::iter::once(payload)).await
-  }
-
-  /// Sends multiple reliable directed user messages to `to` via the stream
-  /// plane, waiting for all exchanges to complete.
-  pub async fn send_many_reliable(
-    &self,
-    to: SocketAddr,
-    payloads: impl IntoIterator<Item = bytes::Bytes>,
-  ) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SendReliable(SendReliableCmd {
-        to,
-        payloads,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Reconfigures the gossip compression policy in place.
-  ///
-  /// The change takes effect on the next outbound datagram. Rejected with
-  /// `Err(NotRunning)` once the node has left the cluster.
-  #[cfg(compression)]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      feature = "lz4",
-      feature = "snappy",
-      feature = "zstd",
-      feature = "brotli"
-    )))
-  )]
-  pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SetCompressionOptions(SetCompressionOptionsCmd {
-        opts,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Reconfigures the gossip (unreliable) checksum policy in place.
-  ///
-  /// Checksumming applies to the gossip datagram path only — the reliable
-  /// stream path carries no checksum, as its transport already provides
-  /// integrity. The change takes effect on the next outbound datagram. Rejected
-  /// with `Err(NotRunning)` once the node has left the cluster.
-  #[cfg(checksum)]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3"
-    )))
-  )]
-  pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SetChecksumOptions(SetChecksumOptionsCmd {
-        opts,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Reconfigures the gossip encryption policy in place.
-  ///
-  /// The keyring is validated before being applied: every key in the ring is
-  /// trial-encrypted to confirm the AEAD backend is compiled in. Rejected with
-  /// `Err(NotRunning)` once the node has left the cluster, or with
-  /// `Err(Encryption(_))` when the keyring contains an unsupported algorithm.
-  #[cfg(encryption)]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
-  )]
-  pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SetEncryptionOptions(SetEncryptionOptionsCmd {
-        opts,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Replaces this node's advertised metadata in place. The change bumps the
-  /// node's incarnation and gossips out; peers observe it via
-  /// [`Delegate::notify_update`]. Rejected with `Err(NotRunning)` once the node
-  /// has left, or a size error when the metadata exceeds the configured cap.
-  pub async fn update_node_metadata(&self, meta: Vec<u8>) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::UpdateNodeMetadata(UpdateNodeMetadataCmd {
-        meta,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Queues an application user-broadcast for cluster-wide gossip. The bytes
-  /// ride the gossip path and surface on peers via [`Delegate::notify_user_msg`].
-  /// Rejected with `Err(NotRunning)` once the node has left, or a size error
-  /// when the framed datagram exceeds the gossip MTU.
-  pub async fn queue_user_broadcast(&self, data: bytes::Bytes) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::QueueUserBroadcast(QueueUserBroadcastCmd {
-        data,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Sets the application push/pull local-state snapshot carried in subsequent
-  /// push/pull exchanges; it surfaces on peers via
-  /// [`Delegate::merge_remote_state`]. Rejected with `Err(NotRunning)` once the
-  /// node has left, or a size error when the framed snapshot exceeds the stream
-  /// frame budget.
-  pub async fn set_local_state(&self, state: bytes::Bytes) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SetLocalState(SetLocalStateCmd {
-        state,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
-  }
-
-  /// Sets the payload attached to outbound probe acks; it surfaces on the
-  /// probing peer via [`Delegate::notify_ping_complete`]. Rejected with
-  /// `Err(NotRunning)` once the node has left, or `Err(Proto)` when the
-  /// framed ack would exceed the gossip packet budget.
-  pub async fn set_ack_payload(&self, payload: bytes::Bytes) -> Result<(), Error> {
-    if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
-    }
-    let (tx, rx) = futures_channel::oneshot::channel();
-    if !self
-      .shared
-      .push_command(Command::SetAckPayload(SetAckPayloadCmd {
-        payload,
-        reply: tx,
-      }))
-    {
-      return Err(Error::Shutdown);
-    }
-    rx.await.map_err(|_| Error::Shutdown)?
   }
 }
 
