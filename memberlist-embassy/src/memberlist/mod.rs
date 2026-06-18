@@ -143,11 +143,7 @@ fn embedded_options(cfg: &Options) -> EngineConfig {
 /// the engine only ever sees `SocketAddr`. `R` is the gossip RNG (defaulting to
 /// [`SmallRng`]); [`new`](Self::new) seeds it from the platform entropy source,
 /// while [`new_with_rng`](Self::new_with_rng) accepts a caller-supplied one.
-pub struct Memberlist<I, A, R = SmallRng>
-where
-  I: memberlist_proto::Id,
-  R: Rng,
-{
+pub struct Memberlist<I, A, R = SmallRng> {
   shared: Rc<Shared<I, R>>,
   // Ties the handle to the resolver's unresolved address type. Not held in any
   // field of `Shared` — `join` and construction resolve addresses in this domain

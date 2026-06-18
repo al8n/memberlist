@@ -59,11 +59,7 @@ use crate::{
 /// RNG (defaulting to [`SmallRng`](memberlist_proto::SmallRng)). Built by
 /// [`Memberlist::new`](crate::Memberlist::new), which hands back the paired
 /// [`Memberlist`](crate::Memberlist) handle.
-pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng>
-where
-  I: memberlist_proto::Id,
-  R: Rng,
-{
+pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng> {
   pub(crate) shared: Rc<Shared<I, R>>,
   pub(crate) udp: UdpSocket<'a>,
   pub(crate) tcp: [TcpSocket<'a>; N],
