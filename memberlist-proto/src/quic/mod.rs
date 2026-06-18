@@ -325,11 +325,8 @@ pub struct QuicEndpoint<I, R = SmallRng> {
 // well-formedness bag — no method-side additions, so the heavier
 // `I: Debug + Display + Send + Sync + 'static` constraints carried by
 // the impl blocks below are NOT required to call any of these.
-impl<I, R> QuicEndpoint<I, R>
-where
-  R: Rng,
-  I: crate::Id,
-{
+// Construction, transform configuration, and plain accessors — no `I: Id`.
+impl<I, R> QuicEndpoint<I, R> {
   /// Build the coordinator. The quinn endpoint is created with the bundled
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
   /// connection-ID / path-challenge RNG from the OS (production entropy).
@@ -724,7 +721,14 @@ where
   pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, SocketAddr, R> {
     &mut self.ep
   }
+}
 
+// Methods that forward into the `Endpoint` membership machine.
+impl<I, R> QuicEndpoint<I, R>
+where
+  R: Rng,
+  I: crate::Id,
+{
   /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
   /// [`Endpoint::start_scheduling`].
   #[inline]
@@ -803,7 +807,10 @@ where
   pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
     self.ep.set_ack_payload(payload)
   }
+}
 
+// Pollers and transport-level accessors — no membership identity needed.
+impl<I, R> QuicEndpoint<I, R> {
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
   pub fn poll_transmit(&mut self) -> Option<(SocketAddr, Bytes)> {
     self.out.pop_front()
