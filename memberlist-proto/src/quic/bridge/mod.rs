@@ -156,7 +156,7 @@ pub(crate) struct Bridge<I, A> {
 
 impl<I, A> Bridge<I, A>
 where
-  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + 'static,
 {
   /// Build a `Bridge` over a freshly opened/accepted quinn bidi stream.
   ///
@@ -1019,7 +1019,7 @@ where
 
 impl<I, A> Bridge<I, A>
 where
-  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + 'static,
   I: crate::Id,
 {
   /// Pump inbound quinn bytes into the memberlist stream.

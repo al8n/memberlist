@@ -947,7 +947,7 @@ impl<I, A, R> Endpoint<I, A, R>
 where
   R: Rng,
   I: Id,
-  A: CheapClone + Data + PartialEq + Send + Sync + 'static,
+  A: CheapClone + Data + PartialEq + 'static,
 {
   /// Fallibly construct a new endpoint at the driver-supplied `now`. Inserts
   /// the local node as Alive at incarnation 1, stamping its initial state at
@@ -3751,7 +3751,7 @@ fn test_seeded_rng() -> SmallRng {
 impl<I, A> Endpoint<I, A, SmallRng>
 where
   I: Id,
-  A: CheapClone + Data + PartialEq + Send + Sync + 'static,
+  A: CheapClone + Data + PartialEq + 'static,
 {
   #[cfg(feature = "std")]
   pub(crate) fn new_seeded(cfg: EndpointOptions<I, A>) -> Self {

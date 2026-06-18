@@ -173,7 +173,7 @@ pub(crate) struct StreamBridge<I, A, R> {
 impl<I, A, R> StreamBridge<I, A, R>
 where
   R: StreamTransport,
-  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + 'static,
 {
   /// Build a `Handshaking` bridge wrapping a fresh record layer. The dial /
   /// accept deadline bounds the handshake / label exchange; the `Stream` (and
@@ -945,7 +945,7 @@ where
 impl<I, A, R> StreamBridge<I, A, R>
 where
   R: StreamTransport,
-  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + 'static,
   I: crate::Id,
 {
   /// Feed bytes the driver read from the transport connection. A zero-length
