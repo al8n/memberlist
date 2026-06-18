@@ -244,14 +244,25 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// bounded here by popping-and-dropping past either limit. Best-effort
   /// accounting only — never a membership signal.
   datagram_ingress_dropped: u64,
+  /// Test-only instrumentation counters — one per negative-control regression
+  /// test; see [`TestCounters`] for the per-counter contract. Never compiled
+  /// into production builds.
+  #[cfg(test)]
+  counters: TestCounters,
+}
+
+/// Test-only instrumentation for [`QuicEndpoint`] — one counter per
+/// negative-control regression test. Never compiled into production builds.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestCounters {
   /// Test-only counter incremented once per `EndpointEvent` drained from
   /// every connection's `poll_endpoint_events()` queue inside
-  /// [`Self::service_quinn`]. Exists ONLY for the negative-control regression
+  /// [`QuicEndpoint::service_quinn`]. Exists ONLY for the negative-control regression
   /// test that proves the endpoint-event drain loop runs at all (a missing
   /// drain leaves the counter at zero and breaks CID issuance / reset-token
-  /// registration in quinn-proto — see [`Self::service_quinn`] for the
+  /// registration in quinn-proto — see [`QuicEndpoint::service_quinn`] for the
   /// per-event contract). Never compiled into production builds.
-  #[cfg(test)]
   endpoint_events_processed: u64,
   /// Test-only counter incremented once per [`Endpoint::handle_timeout`] call,
   /// i.e. once per membership-time advance. Exists ONLY for the regression test
@@ -259,10 +270,9 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// membership time — only the driver's explicit `handle_timeout` does — so a
   /// probe Ack carried in a datagram cannot be timed out before it is decoded.
   /// Never compiled into production builds.
-  #[cfg(test)]
   membership_time_advances: u64,
   /// Test-only counter incremented once per bridge `drain_then_reap`'d
-  /// inside [`Self::service_quinn`] on an `Event::ConnectionLost` — the
+  /// inside [`QuicEndpoint::service_quinn`] on an `Event::ConnectionLost` — the
   /// strict-poll self-sufficiency path that closes the D1 drain within
   /// the SAME tick the loss is observed (rather than deferring to a
   /// future `pump_bridges` that a strict-poll driver may never wake to
@@ -270,11 +280,10 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// this counter advances under strict poll-surface driving; reverting
   /// the inline drain to mere `mark_fatal()` leaves it at zero. Never
   /// compiled into production builds.
-  #[cfg(test)]
   bridges_reaped_on_connection_lost: u64,
   /// Test-only counter incremented once per bridge pumped by the
-  /// post-acceptance second `pump_bridges` invocation in [`Self::run_tick`]
-  /// (step 5.5) / [`Self::flush_outbound`] that was inserted into
+  /// post-acceptance second `pump_bridges` invocation in [`QuicEndpoint::run_tick`]
+  /// (step 5.5) / [`QuicEndpoint::flush_outbound`] that was inserted into
   /// `self.bridges` by `service_quinn`'s `accept(Dir::Bi)` loop (step 4)
   /// or `service_dials`'s `open(Dir::Bi)` (step 5) AFTER step (2)'s
   /// `pump_bridges` already ran this tick. A newly-inserted inbound bridge
@@ -290,9 +299,8 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// regression test asserts it advances under strict poll-surface
   /// driving and reverting step (5.5) leaves it at zero. Never compiled
   /// into production builds.
-  #[cfg(test)]
   bridges_pumped_after_acceptance: u64,
-  /// Test-only counter incremented once each time [`Self::route_datagram_event`]
+  /// Test-only counter incremented once each time [`QuicEndpoint::route_datagram_event`]
   /// surfaces an `AcceptError::response` from `quinn_proto::Endpoint::accept`
   /// onto the driver-facing `out` queue. quinn-proto attaches an
   /// `Option<Transmit>` to its `AcceptError` whenever `accept` owes a
@@ -302,7 +310,6 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// `Transmit.size` equals `buf.len()`; without this counter we have no
   /// observable seam to assert the refusal/close `Transmit` actually reaches
   /// the driver via the `out` queue. Never compiled into production builds.
-  #[cfg(test)]
   accept_error_responses_emitted: u64,
   /// Test-only counter incremented each time `pump_bridges`'s
   /// post-`drain_payload_only` `is_terminal()` re-check fires — i.e. a
@@ -314,7 +321,6 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// would otherwise show the bridge transiently — appearing on accept
   /// then immediately reaping in the same tick. Never compiled into
   /// production builds.
-  #[cfg(test)]
   bridges_terminalized_via_close_command: u64,
 }
 
@@ -373,17 +379,7 @@ impl<I, R> QuicEndpoint<I, R> {
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
       #[cfg(test)]
-      endpoint_events_processed: 0,
-      #[cfg(test)]
-      membership_time_advances: 0,
-      #[cfg(test)]
-      bridges_reaped_on_connection_lost: 0,
-      #[cfg(test)]
-      bridges_pumped_after_acceptance: 0,
-      #[cfg(test)]
-      accept_error_responses_emitted: 0,
-      #[cfg(test)]
-      bridges_terminalized_via_close_command: 0,
+      counters: TestCounters::default(),
     }
   }
 
@@ -1148,8 +1144,10 @@ impl<I, R> QuicEndpoint<I, R> {
                   .push_back((t.destination, Bytes::copy_from_slice(&buf[..t.size])));
                 #[cfg(test)]
                 {
-                  self.accept_error_responses_emitted =
-                    self.accept_error_responses_emitted.saturating_add(1);
+                  self.counters.accept_error_responses_emitted = self
+                    .counters
+                    .accept_error_responses_emitted
+                    .saturating_add(1);
                 }
               }
             }
@@ -1403,7 +1401,7 @@ impl<I, R> QuicEndpoint<I, R> {
   /// `handle_timeout` may. See [`Self::service_quic_inbound`].
   #[cfg(test)]
   pub(crate) fn membership_time_advances(&self) -> u64 {
-    self.membership_time_advances
+    self.counters.membership_time_advances
   }
 
   /// The datagram `max_size` of the pooled connection to `peer`, or `None` if
@@ -1923,7 +1921,8 @@ where
           if br.is_terminal() {
             #[cfg(test)]
             {
-              self.bridges_terminalized_via_close_command = self
+              self.counters.bridges_terminalized_via_close_command = self
+                .counters
                 .bridges_terminalized_via_close_command
                 .saturating_add(1);
             }
@@ -1940,7 +1939,7 @@ where
   }
 
   /// Test-only variant of [`Self::pump_bridges`] that increments
-  /// [`Self::bridges_pumped_after_acceptance`] once for each bridge whose
+  /// [`TestCounters::bridges_pumped_after_acceptance`] once for each bridge whose
   /// id is NOT in `pre_snapshot_ids` (i.e. inserted into `self.bridges`
   /// AFTER the snapshot was taken). Used by step (5.5) of [`Self::run_tick`]
   /// and the post-`service_quinn` second pump in [`Self::flush_outbound`] to
@@ -1962,8 +1961,10 @@ where
     for id in &ids {
       if let Some(mut br) = self.bridges.remove(id) {
         if !pre_snapshot_ids.contains(id) {
-          self.bridges_pumped_after_acceptance =
-            self.bridges_pumped_after_acceptance.saturating_add(1);
+          self.counters.bridges_pumped_after_acceptance = self
+            .counters
+            .bridges_pumped_after_acceptance
+            .saturating_add(1);
         }
         let _ = br.pump_in(&mut self.conns, now);
         let _ = br.pump_out(&mut self.conns, now);
@@ -1978,7 +1979,8 @@ where
           // re-check so this test-only variant matches production reap
           // semantics under an admission-rejected `Close`.
           if br.is_terminal() {
-            self.bridges_terminalized_via_close_command = self
+            self.counters.bridges_terminalized_via_close_command = self
+              .counters
               .bridges_terminalized_via_close_command
               .saturating_add(1);
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
@@ -2195,7 +2197,8 @@ where
     if advance_membership_time {
       #[cfg(test)]
       {
-        self.membership_time_advances = self.membership_time_advances.saturating_add(1);
+        self.counters.membership_time_advances =
+          self.counters.membership_time_advances.saturating_add(1);
       }
       self.ep.handle_timeout(now);
     }
@@ -2436,7 +2439,8 @@ where
         }
         #[cfg(test)]
         {
-          self.endpoint_events_processed = self.endpoint_events_processed.saturating_add(1);
+          self.counters.endpoint_events_processed =
+            self.counters.endpoint_events_processed.saturating_add(1);
         }
         if let Some(conn_ev) = self.quinn.handle_event(ch, ev) {
           // Queue for the NEXT iteration of this connection — see
@@ -2524,8 +2528,10 @@ where
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
             #[cfg(test)]
             {
-              self.bridges_reaped_on_connection_lost =
-                self.bridges_reaped_on_connection_lost.saturating_add(1);
+              self.counters.bridges_reaped_on_connection_lost = self
+                .counters
+                .bridges_reaped_on_connection_lost
+                .saturating_add(1);
             }
             // ConnectionLost ⇒ `fail_connection_lost` set the phase to
             // `Failed(ConnectionLost)`; outcome is unconditionally
