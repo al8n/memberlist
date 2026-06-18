@@ -1,3 +1,7 @@
+//! Tests for the generic per-exchange connection map
+//! ([`crate::streams::conn::StreamConns`]) driving the plain-TCP record layer
+//! ([`RawRecords`](records::RawRecords)).
+
 use crate::{Instant, streams::conn::StreamConns};
 use core::{net::SocketAddr, time::Duration};
 use smol_str::SmolStr;

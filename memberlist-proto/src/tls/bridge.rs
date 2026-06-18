@@ -1,4 +1,12 @@
-use super::*;
+//! Tests for the generic `memberlist::Stream` <-> record-layer byte-pump
+//! ([`crate::streams::bridge::StreamBridge`]) wrapping the TLS record layer
+//! ([`TlsRecords`](super::records::TlsRecords)).
+
+use crate::{
+  bridge_phase::{BridgeFailure, BridgePhase},
+  endpoint::Endpoint,
+};
+
 use crate::Instant;
 use core::{net::SocketAddr, time::Duration};
 use std::sync::Arc;
@@ -7,7 +15,7 @@ use bytes::Bytes;
 use rustls::pki_types::ServerName;
 use smol_str::SmolStr;
 
-use super::super::records::TlsRecords;
+use super::records::TlsRecords;
 use crate::{
   config::EndpointOptions,
   error::StreamError,

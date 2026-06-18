@@ -1,11 +1,19 @@
-use super::*;
+//! Tests for the generic `memberlist::Stream` <-> record-layer byte-pump
+//! ([`crate::streams::bridge::StreamBridge`]) wrapping the raw-passthrough
+//! plain-TCP record layer ([`RawRecords`](super::records::RawRecords)).
+
+use crate::{
+  bridge_phase::{BridgeFailure, BridgePhase},
+  endpoint::Endpoint,
+};
+
 use crate::Instant;
 use core::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use smol_str::SmolStr;
 
-use super::super::records::RawRecords;
+use super::records::RawRecords;
 use crate::{
   config::EndpointOptions,
   error::StreamError,
