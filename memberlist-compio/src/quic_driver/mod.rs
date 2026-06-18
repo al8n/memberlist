@@ -33,12 +33,12 @@ use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_proto::{
-  DatagramSendOutcome, Instant, Node, UnreliableTransport,
+  DatagramSendStatus, Instant, Node, UnreliableTransport,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
+  event::{Event, ExchangeKind, ExchangeStatus, PushPullKind, Transmit},
   typed::{NodeState, State},
 };
 
@@ -98,7 +98,7 @@ struct PendingJoin {
   /// resolved.
   pending: HashSet<ExchangeId>,
   /// Number of dispatched outbound exchanges that terminated with
-  /// `ExchangeOutcome::Succeeded`. Duplicate seeds produce duplicate
+  /// `ExchangeStatus::Succeeded`. Duplicate seeds produce duplicate
   /// exchanges and each successful one counts independently.
   contacted: usize,
   /// Total outbound-exchange count this call dispatched, used to
@@ -1637,12 +1637,12 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendOutcome::Queued => needs_flush = true,
+            DatagramSendStatus::Queued => needs_flush = true,
             // NotReady may mean queue_unreliable_datagram just initiated a cold
             // dial; flush this tick so the connection's Initial is emitted now
             // (else the connection does not warm until the next driver wake). The
             // gossip itself still goes out immediately over the UDP fallback.
-            DatagramSendOutcome::NotReady => {
+            DatagramSendStatus::NotReady => {
               needs_flush = true;
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
@@ -1651,7 +1651,7 @@ where
             }
             // TooLarge: the connection is already Established (max_size was Some),
             // so there is no pending Initial to flush; just fall back to UDP.
-            DatagramSendOutcome::TooLarge => {
+            DatagramSendStatus::TooLarge => {
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
               // lossy and the next probe/gossip round recovers.
@@ -1739,7 +1739,7 @@ where
         && payload.kind() == ExchangeKind::PushPull
       {
         let eid = payload.eid();
-        let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
+        let succeeded = matches!(payload.outcome(), ExchangeStatus::Succeeded);
         let completed_key = state
           .pending_joins
           .iter_mut()
@@ -1808,7 +1808,7 @@ where
         && payload.kind() == ExchangeKind::UserMessage
       {
         let eid = payload.eid();
-        let failed = matches!(payload.outcome(), ExchangeOutcome::Failed);
+        let failed = matches!(payload.outcome(), ExchangeStatus::Failed);
         if let Some(idx) = state
           .pending_user_sends
           .iter()

@@ -277,7 +277,7 @@ fn checksum_options_default_is_disabled() {
   assert!(opts.algorithm().is_none());
   assert!(!opts.is_enabled());
   let outcome = opts.apply(b"data").expect("disabled never errors");
-  assert!(matches!(outcome, ChecksumOutcome::Plain));
+  assert!(matches!(outcome, ChecksumOutput::Plain));
 }
 
 #[test]
@@ -293,8 +293,8 @@ fn checksum_options_builders_and_setters_select_algorithm() {
   assert!(opts.is_enabled());
   let outcome = opts.apply(b"payload").expect("backend ok");
   let framed = match outcome {
-    ChecksumOutcome::Checksumed(f) => f,
-    ChecksumOutcome::Plain => panic!("an enabled algorithm must wrap"),
+    ChecksumOutput::Checksumed(f) => f,
+    ChecksumOutput::Plain => panic!("an enabled algorithm must wrap"),
   };
   assert_eq!(framed[0], CHECKSUMED_TAG);
   // In-place setters / clear.
@@ -311,10 +311,10 @@ fn checksum_options_builders_and_setters_select_algorithm() {
 
 #[test]
 fn checksum_outcome_equality() {
-  assert_eq!(ChecksumOutcome::Plain, ChecksumOutcome::Plain);
+  assert_eq!(ChecksumOutput::Plain, ChecksumOutput::Plain);
   assert_eq!(
-    ChecksumOutcome::Checksumed(vec![1, 2, 3]),
-    ChecksumOutcome::Checksumed(vec![1, 2, 3])
+    ChecksumOutput::Checksumed(vec![1, 2, 3]),
+    ChecksumOutput::Checksumed(vec![1, 2, 3])
   );
-  assert_ne!(ChecksumOutcome::Plain, ChecksumOutcome::Checksumed(vec![1]));
+  assert_ne!(ChecksumOutput::Plain, ChecksumOutput::Checksumed(vec![1]));
 }

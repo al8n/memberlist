@@ -51,7 +51,7 @@ impl UnreliableTransport {
 /// Result of offering one unreliable datagram to the connection pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IsVariant, Display)]
 #[display("{}", self.as_str())]
-pub enum DatagramSendOutcome {
+pub enum DatagramSendStatus {
   /// Accepted onto an established connection; it flows out via the normal
   /// `service_quinn` -> `poll_transmit` pump.
   Queued,
@@ -64,14 +64,14 @@ pub enum DatagramSendOutcome {
   TooLarge,
 }
 
-impl DatagramSendOutcome {
+impl DatagramSendStatus {
   /// Returns a string representation of the outcome.
   #[inline(always)]
   pub const fn as_str(&self) -> &str {
     match self {
-      DatagramSendOutcome::Queued => "queued",
-      DatagramSendOutcome::NotReady => "not_ready",
-      DatagramSendOutcome::TooLarge => "too_large",
+      DatagramSendStatus::Queued => "queued",
+      DatagramSendStatus::NotReady => "not_ready",
+      DatagramSendStatus::TooLarge => "too_large",
     }
   }
 }

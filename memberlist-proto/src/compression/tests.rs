@@ -99,7 +99,7 @@ fn unknown_algorithm_fails_both_directions() {
 fn below_threshold_payload_is_left_plain() {
   // A 5-byte payload with a 64-byte threshold: never compressed.
   let outcome = apply_compression(CompressAlgorithm::Unknown(0), 64, b"small");
-  assert!(matches!(outcome, Ok(CompressionOutcome::Plain)));
+  assert!(matches!(outcome, Ok(CompressionOutput::Plain)));
 }
 
 #[cfg(feature = "lz4")]
@@ -113,8 +113,8 @@ fn incompressible_above_threshold_payload_is_left_plain() {
   }
   let outcome = apply_compression(CompressAlgorithm::Lz4, 8, &input).expect("no backend error");
   match outcome {
-    CompressionOutcome::Plain => {}
-    CompressionOutcome::Compressed(packed) => {
+    CompressionOutput::Plain => {}
+    CompressionOutput::Compressed(packed) => {
       assert!(
         packed.len() < input.len(),
         "Compressed outcome must be smaller"
@@ -129,13 +129,13 @@ fn compressible_above_threshold_payload_is_compressed() {
   let input = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec();
   let outcome = apply_compression(CompressAlgorithm::Lz4, 8, &input).expect("no backend error");
   match outcome {
-    CompressionOutcome::Compressed(packed) => {
+    CompressionOutput::Compressed(packed) => {
       assert!(
         packed.len() < input.len(),
         "highly compressible input must shrink"
       );
     }
-    CompressionOutcome::Plain => panic!("compressible input above threshold must compress"),
+    CompressionOutput::Plain => panic!("compressible input above threshold must compress"),
   }
 }
 
@@ -214,7 +214,7 @@ fn compression_options_default_is_disabled() {
   let opts = CompressionOptions::new();
   assert!(opts.algorithm().is_none());
   let outcome = opts.apply(&[0u8; 4096]).expect("disabled never errors");
-  assert!(matches!(outcome, CompressionOutcome::Plain));
+  assert!(matches!(outcome, CompressionOutput::Plain));
 }
 
 #[cfg(feature = "lz4")]
@@ -226,9 +226,9 @@ fn compression_options_builders_select_algorithm_and_threshold() {
   assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Lz4));
   assert_eq!(opts.threshold(), 16);
   let outcome = opts.apply(&b"A".repeat(256)).expect("backend ok");
-  assert!(matches!(outcome, CompressionOutcome::Compressed(_)));
+  assert!(matches!(outcome, CompressionOutput::Compressed(_)));
   let outcome = opts.apply(b"AAAA").expect("backend ok");
-  assert!(matches!(outcome, CompressionOutcome::Plain));
+  assert!(matches!(outcome, CompressionOutput::Plain));
 }
 
 #[test]
@@ -622,14 +622,14 @@ fn compression_options_maybe_algorithm_builder() {
 
 #[test]
 fn compression_outcome_equality() {
-  assert_eq!(CompressionOutcome::Plain, CompressionOutcome::Plain);
+  assert_eq!(CompressionOutput::Plain, CompressionOutput::Plain);
   assert_eq!(
-    CompressionOutcome::Compressed(vec![1, 2, 3]),
-    CompressionOutcome::Compressed(vec![1, 2, 3])
+    CompressionOutput::Compressed(vec![1, 2, 3]),
+    CompressionOutput::Compressed(vec![1, 2, 3])
   );
   assert_ne!(
-    CompressionOutcome::Plain,
-    CompressionOutcome::Compressed(vec![1])
+    CompressionOutput::Plain,
+    CompressionOutput::Compressed(vec![1])
   );
 }
 

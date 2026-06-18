@@ -24,7 +24,7 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 /// Payload for [`MemberlistError::JoinAllFailed`]: every dispatched
 /// outbound push/pull exchange from a synchronous
 /// [`join`](crate::Memberlist::join) terminated without
-/// `ExchangeOutcome::Succeeded`, OR the per-call deadline elapsed
+/// `ExchangeStatus::Succeeded`, OR the per-call deadline elapsed
 /// before any exchange could succeed.
 #[derive(Debug)]
 pub struct JoinAllFailed {
@@ -321,7 +321,7 @@ pub enum MemberlistError {
 
   /// The synchronous [`join`](crate::Memberlist::join) attempt
   /// resolved without any dispatched outbound push/pull exchange
-  /// terminating with `ExchangeOutcome::Succeeded` — either every
+  /// terminating with `ExchangeStatus::Succeeded` — either every
   /// exchange terminated `Failed` (dial failure, frame/record-layer
   /// rejection, peer hung up before the response was decoded), or
   /// the per-call deadline elapsed before any could succeed.

@@ -1007,7 +1007,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
 
 /// Offering an unreliable datagram to a peer that already holds an
 /// Established pooled connection enqueues it on that connection
-/// (`DatagramSendOutcome::Queued`). The datagram does not surface on
+/// (`DatagramSendStatus::Queued`). The datagram does not surface on
 /// `poll_transmit` synchronously — it rides out via the normal
 /// `service_quinn -> poll_transmit` pump on a later tick — so the contract
 /// asserted here is the `Queued` outcome, not an immediate transmit.
@@ -1069,7 +1069,7 @@ fn queue_unreliable_datagram_to_established_peer_is_queued() {
   );
 
   let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
-  assert_eq!(outcome, super::DatagramSendOutcome::Queued);
+  assert_eq!(outcome, super::DatagramSendStatus::Queued);
 }
 
 /// A received application datagram surfaces through the SAME
@@ -1137,7 +1137,7 @@ fn received_datagram_surfaces_through_the_same_memberlist_ingress_as_udp() {
   let payload = Bytes::from_static(b"\x01hello-datagram");
   assert_eq!(
     a.queue_unreliable_datagram(b_addr, payload.clone(), now),
-    super::DatagramSendOutcome::Queued
+    super::DatagramSendStatus::Queued
   );
 
   // Pump: A's tick puts the datagram packet onto a.out; ferry it into B;
@@ -1233,7 +1233,7 @@ fn inbound_datagram_dropped_when_ingress_backlog_at_cap() {
   // service_quinn drain finds mem_ingress at the cap and drops + counts it.
   assert_eq!(
     b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01y"), now),
-    super::DatagramSendOutcome::Queued
+    super::DatagramSendStatus::Queued
   );
   for _ in 0..50 {
     b.handle_timeout(now);
@@ -1345,11 +1345,11 @@ fn per_peer_ingress_cap_does_not_starve_other_peers() {
   let t_payload = Bytes::from_static(b"\x01t-probe-ack");
   assert_eq!(
     t.queue_unreliable_datagram(a_addr, t_payload.clone(), now),
-    super::DatagramSendOutcome::Queued
+    super::DatagramSendStatus::Queued
   );
   assert_eq!(
     b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01b-flood"), now),
-    super::DatagramSendOutcome::Queued
+    super::DatagramSendStatus::Queued
   );
   let dropped_before = a.datagram_ingress_dropped();
 
@@ -1455,7 +1455,7 @@ fn queue_unreliable_datagram_to_unknown_peer_is_not_ready_and_initiates_dial() {
   let mut a = make_endpoint("a", a_addr, now);
 
   let outcome = a.queue_unreliable_datagram(unknown, Bytes::from_static(b"x"), now);
-  assert_eq!(outcome, super::DatagramSendOutcome::NotReady);
+  assert_eq!(outcome, super::DatagramSendStatus::NotReady);
   assert!(
     a.conns.handle_for(&unknown).is_some(),
     "queue must initiate a dial to an unknown peer"
@@ -1479,7 +1479,7 @@ fn cold_peer_datagram_then_flush_emits_quic_initial_same_tick() {
 
   assert_eq!(
     a.queue_unreliable_datagram(cold, Bytes::from_static(b"\x01g"), now),
-    super::DatagramSendOutcome::NotReady
+    super::DatagramSendStatus::NotReady
   );
   // What the driver now does on NotReady:
   a.flush_outbound_transmits(now);
@@ -1685,7 +1685,7 @@ fn expired_dial_does_not_open_unowned_bidi_stream() {
 /// `poll_event` yields no `ExchangeCompleted` — the assertion fails.
 #[test]
 fn expired_user_message_dial_emits_failed_exchange_completed() {
-  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome};
+  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeStatus};
 
   let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
   // No B endpoint is bound: the dial targets a port nothing listens on,
@@ -1746,7 +1746,7 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   );
   assert_eq!(
     payload.outcome(),
-    ExchangeOutcome::Failed,
+    ExchangeStatus::Failed,
     "a pre-bridge dial failure MUST carry outcome = Failed"
   );
   assert_eq!(
@@ -1784,7 +1784,7 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
 /// completion is surfaced) fails — the join hang regresses.
 #[test]
 fn expired_push_pull_dial_emits_failed_exchange_completed() {
-  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome};
+  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeStatus};
 
   let a_addr: SocketAddr = "127.0.0.1:7973".parse().unwrap();
   let unreachable: SocketAddr = "127.0.0.1:7974".parse().unwrap();
@@ -1840,7 +1840,7 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   );
   assert_eq!(
     payload.outcome(),
-    ExchangeOutcome::Failed,
+    ExchangeStatus::Failed,
     "a pre-bridge dial failure MUST carry outcome = Failed"
   );
   assert_eq!(
@@ -2568,7 +2568,7 @@ fn oversize_unreliable_datagram_reports_too_large() {
   let too_big = Bytes::from(vec![0u8; max + 1]);
   assert_eq!(
     a.queue_unreliable_datagram(b_addr, too_big, now),
-    super::DatagramSendOutcome::TooLarge,
+    super::DatagramSendStatus::TooLarge,
     "a payload of max_size+1 ({} bytes) must be TooLarge, not silently dropped",
     max + 1,
   );
@@ -2577,7 +2577,7 @@ fn oversize_unreliable_datagram_reports_too_large() {
   let ok = Bytes::from(vec![0u8; max]);
   assert_eq!(
     a.queue_unreliable_datagram(b_addr, ok, now),
-    super::DatagramSendOutcome::Queued,
+    super::DatagramSendStatus::Queued,
     "a payload of exactly max_size ({max} bytes) must be Queued",
   );
 }
@@ -2634,12 +2634,12 @@ fn full_datagram_send_buffer_reports_not_ready_without_eviction() {
   let mut saw_not_ready = false;
   for _ in 0..10_000 {
     match a.queue_unreliable_datagram(b_addr, payload.clone(), now) {
-      super::DatagramSendOutcome::Queued => {}
-      super::DatagramSendOutcome::NotReady => {
+      super::DatagramSendStatus::Queued => {}
+      super::DatagramSendStatus::NotReady => {
         saw_not_ready = true;
         break;
       }
-      super::DatagramSendOutcome::TooLarge => {
+      super::DatagramSendStatus::TooLarge => {
         panic!("payload within max_size must not be TooLarge")
       }
     }
@@ -2716,7 +2716,7 @@ fn udp_mode_does_not_advertise_datagram_support() {
   // driver falls back to plain UDP rather than dropping the payload.
   assert_eq!(
     b.queue_unreliable_datagram(a_addr, Bytes::from_static(b"\x01x"), now),
-    super::DatagramSendOutcome::NotReady,
+    super::DatagramSendStatus::NotReady,
     "a Datagram-mode peer must get NotReady for a Udp-mode node that disabled datagrams"
   );
 }
@@ -3278,7 +3278,7 @@ fn poll_memberlist_ingress_decrements_then_removes_per_peer_counter() {
 /// `service_dials` runs against the standing `dial_pending` entry.
 #[test]
 fn service_dials_retires_intent_when_cached_connection_is_closed() {
-  use crate::event::{Event, ExchangeId, ExchangeOutcome};
+  use crate::event::{Event, ExchangeId, ExchangeStatus};
 
   let self_addr: SocketAddr = "127.0.0.1:7860".parse().unwrap();
   let peer: SocketAddr = "127.0.0.1:7861".parse().unwrap();
@@ -3325,7 +3325,7 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
     "a dial against a closed never-Established cached connection MUST retire \
        the intent via ExchangeCompleted(Failed), not redial",
   );
-  assert_eq!(payload.outcome(), ExchangeOutcome::Failed);
+  assert_eq!(payload.outcome(), ExchangeStatus::Failed);
   assert!(
     a.dial_pending.is_empty(),
     "the retired intent must not be requeued onto dial_pending"
@@ -3361,7 +3361,7 @@ fn peer_stop_sending_terminalizes_responder_bridge_via_stopped_arm() {
   // plane).
   assert_eq!(
     a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now),
-    super::DatagramSendOutcome::NotReady,
+    super::DatagramSendStatus::NotReady,
     "the first datagram to a cold peer is best-effort NotReady and warms a dial"
   );
   a.flush_outbound_transmits(now);

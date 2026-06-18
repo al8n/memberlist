@@ -71,13 +71,13 @@ pub use labeled::{LabelOptions, LabelOptionsError, Labeled, Passthrough};
 pub use transport::{Intake, StreamTransport};
 
 #[cfg(checksum)]
-use crate::checksum::{ChecksumError, ChecksumOptions, ChecksumOutcome};
+use crate::checksum::{ChecksumError, ChecksumOptions, ChecksumOutput};
 
 #[cfg(encryption)]
 use crate::encryption::{EncryptionError, EncryptionOptions, encode_encrypted_frame};
 
 #[cfg(compression)]
-use crate::compression::{CompressionOptions, CompressionOutcome, encode_compressed_frame};
+use crate::compression::{CompressionOptions, CompressionOutput, encode_compressed_frame};
 
 use core::net::SocketAddr;
 use std::{
@@ -98,7 +98,7 @@ use crate::{
   FxHashMap, Instant,
   endpoint::Endpoint,
   event::{
-    Event, ExchangeCompleted, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit,
+    Event, ExchangeCompleted, ExchangeKind, ExchangeStatus, PushPullKind, StreamId, Transmit,
   },
 };
 use bridge::StreamBridge;
@@ -385,7 +385,7 @@ where
 )]
 pub fn compress_gossip_datagram(opts: &CompressionOptions, datagram: &[u8]) -> Vec<u8> {
   match opts.apply(datagram) {
-    Ok(CompressionOutcome::Compressed(packed)) => {
+    Ok(CompressionOutput::Compressed(packed)) => {
       let wrapped = encode_compressed_frame(
         opts
           .algorithm()
@@ -422,8 +422,8 @@ pub fn checksum_gossip_datagram(
   datagram: &[u8],
 ) -> Result<Vec<u8>, ChecksumError> {
   match opts.apply(datagram)? {
-    ChecksumOutcome::Checksumed(framed) => Ok(framed),
-    ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+    ChecksumOutput::Checksumed(framed) => Ok(framed),
+    ChecksumOutput::Plain => Ok(datagram.to_vec()),
   }
 }
 
@@ -1660,9 +1660,9 @@ where
     // None) do NOT emit — synchronous-join drivers observe ONLY their
     // own outbound exchange's terminal outcome.
     let outcome = if br.is_failed() {
-      ExchangeOutcome::Failed
+      ExchangeStatus::Failed
     } else {
-      ExchangeOutcome::Succeeded
+      ExchangeStatus::Succeeded
     };
     let removed = self.exchanges.remove(&id);
     if let Some(meta) = &removed
@@ -1854,7 +1854,7 @@ where
                 .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
                   id,
                   crate::CheapClone::cheap_clone(&meta.peer),
-                  ExchangeOutcome::Failed,
+                  ExchangeStatus::Failed,
                   kind,
                 )));
             }
@@ -2299,7 +2299,7 @@ where
   /// The driver's outbound dial task for exchange `id` failed to connect
   /// (connection refused, dial timeout, host unreachable) BEFORE any bytes
   /// flowed. Fails the owning bridge so the next coordinator tick reaps it
-  /// with [`ExchangeOutcome::Failed`] and emits the terminal
+  /// with [`ExchangeStatus::Failed`] and emits the terminal
   /// [`Event::ExchangeCompleted`].
   ///
   /// This is distinct from [`Self::handle_transport_data`] with `eof = true`:
@@ -2325,7 +2325,7 @@ where
   /// The driver observed a mid-exchange transport ERROR (a read/write I/O
   /// failure or a peer RESET) for exchange `id` AFTER the wire was established.
   /// Fails the owning bridge with [`BridgeFailure::ConnectionLost`] so the next
-  /// coordinator tick reaps it with [`ExchangeOutcome::Failed`] and emits the
+  /// coordinator tick reaps it with [`ExchangeStatus::Failed`] and emits the
   /// terminal [`Event::ExchangeCompleted`].
   ///
   /// Use this — NOT `handle_transport_data(id, &[], eof = true, now)` — for a

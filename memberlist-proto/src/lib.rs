@@ -129,7 +129,7 @@ mod bridge_phase;
 mod quic;
 #[cfg(feature = "quic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
-pub use quic::{DatagramSendOutcome, QuicEndpoint, QuicOptions, UnreliableTransport};
+pub use quic::{DatagramSendStatus, QuicEndpoint, QuicOptions, UnreliableTransport};
 
 #[cfg(feature = "tls")]
 mod tls;
@@ -262,7 +262,7 @@ pub use cheap_clone::CheapClone;
 )]
 pub use checksum::{
   CHECKSUMED_WRAPPER_OVERHEAD, ChecksumAlgorithm, ChecksumDigest, ChecksumError, ChecksumOptions,
-  ChecksumOutcome, decode_checksummed_frame, digest, encode_checksummed_frame, verify,
+  ChecksumOutput, decode_checksummed_frame, digest, encode_checksummed_frame, verify,
 };
 pub use codec::{
   CodecError, DecodeOptions, EncodeOptions, TrailingData, TruncatedInput, decode_incoming,
@@ -279,7 +279,7 @@ pub use codec::{
   )))
 )]
 pub use compression::{
-  CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
+  CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutput, OversizeOriginal,
   UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,
   encode_reliable_unit, take_reliable_unit,
 };
@@ -306,7 +306,7 @@ pub use convert::{
   socket_addr_to_bytes,
 };
 pub use label::{
-  LABEL_OVERHEAD, LABELED_TAG, LabelError, LabelOutcome, MAX_LABEL_LEN, classify_header,
+  LABEL_OVERHEAD, LABELED_TAG, LabelError, LabelVerdict, MAX_LABEL_LEN, classify_header,
   effective_label, encode_label_prefix, validate_label,
 };
 // `data::DecodeError` is reached via `crate::data::DecodeError`; the crate-root

@@ -589,7 +589,7 @@ impl<I, A> Memberlist<I, A> {
   ///
   /// The returned count is the number of dispatched exchanges that
   /// terminated with
-  /// [`ExchangeOutcome::Succeeded`](memberlist_proto::event::ExchangeOutcome::Succeeded)
+  /// [`ExchangeStatus::Succeeded`](memberlist_proto::event::ExchangeStatus::Succeeded)
   /// — i.e. the peer's response decoded cleanly, the record layer +
   /// frame + payload all accepted, and the peer's state was merged
   /// into membership. Each exchange counts independently, so passing

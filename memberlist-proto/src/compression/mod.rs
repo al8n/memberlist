@@ -408,7 +408,7 @@ pub fn decompress(
 
 /// The result of running [`apply_compression`] over a payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompressionOutcome {
+pub enum CompressionOutput {
   /// The payload was left uncompressed — it was below the size threshold, or
   /// compressing it did not produce a smaller result. The caller emits the
   /// original bytes with no wrapper.
@@ -420,24 +420,24 @@ pub enum CompressionOutcome {
 /// Decide whether `input` should be compressed under `algo`, applying the
 /// `threshold` minimum size and the don't-expand fallback.
 ///
-/// - An `input` shorter than `threshold` is left [`CompressionOutcome::Plain`]
+/// - An `input` shorter than `threshold` is left [`CompressionOutput::Plain`]
 ///   — tiny gossip packets do not benefit and the wrapper has overhead.
 /// - Otherwise `input` is compressed; if the compressed form is not strictly
-///   smaller than `input`, the result is still [`CompressionOutcome::Plain`].
+///   smaller than `input`, the result is still [`CompressionOutput::Plain`].
 ///   Compression can therefore never inflate a payload.
 pub fn apply_compression(
   algo: CompressAlgorithm,
   threshold: usize,
   input: &[u8],
-) -> Result<CompressionOutcome, CompressionError> {
+) -> Result<CompressionOutput, CompressionError> {
   if input.len() < threshold {
-    return Ok(CompressionOutcome::Plain);
+    return Ok(CompressionOutput::Plain);
   }
   let packed = compress(algo, input)?;
   if packed.len() < input.len() {
-    Ok(CompressionOutcome::Compressed(packed))
+    Ok(CompressionOutput::Compressed(packed))
   } else {
-    Ok(CompressionOutcome::Plain)
+    Ok(CompressionOutput::Plain)
   }
 }
 
@@ -464,7 +464,7 @@ impl Default for CompressionOptions {
 
 impl CompressionOptions {
   /// A new, disabled configuration — no algorithm, the default threshold.
-  /// Every payload is left [`CompressionOutcome::Plain`]. The operator opts in
+  /// Every payload is left [`CompressionOutput::Plain`]. The operator opts in
   /// by chaining `.with_algorithm(algo)` or `.maybe_algorithm(Some(algo))`.
   #[inline(always)]
   pub const fn new() -> Self {
@@ -541,12 +541,12 @@ impl CompressionOptions {
   }
 
   /// Run the configured compression over `payload`. When no algorithm is set
-  /// the payload is always [`CompressionOutcome::Plain`]; otherwise this
+  /// the payload is always [`CompressionOutput::Plain`]; otherwise this
   /// applies the threshold + don't-expand fallback via [`apply_compression`].
-  pub fn apply(&self, payload: &[u8]) -> Result<CompressionOutcome, CompressionError> {
+  pub fn apply(&self, payload: &[u8]) -> Result<CompressionOutput, CompressionError> {
     match self.algorithm {
       Some(algo) => apply_compression(algo, self.threshold, payload),
-      None => Ok(CompressionOutcome::Plain),
+      None => Ok(CompressionOutput::Plain),
     }
   }
 }
@@ -615,7 +615,7 @@ pub fn decode_compressed_frame(
 /// that does not preserve write/read boundaries.
 ///
 /// The wrapped payload is guaranteed never to exceed `framed`: the
-/// `[CompressionOutcome::Compressed]` branch wraps the compressed bytes in a
+/// `[CompressionOutput::Compressed]` branch wraps the compressed bytes in a
 /// `[Compressed]` frame whose header can push the wrapped length past `framed`
 /// even when the raw compressed bytes are smaller, so the wrapped payload is
 /// emitted only when it is shorter than `framed` — otherwise `framed` is sent
@@ -638,7 +638,7 @@ pub fn encode_reliable_unit(opts: &CompressionOptions, framed: &[u8]) -> Vec<u8>
 /// one don't-expand-on-the-wire rule. Does NOT length-delimit.
 pub(crate) fn compress_reliable_payload(opts: &CompressionOptions, framed: &[u8]) -> Vec<u8> {
   match opts.apply(framed) {
-    Ok(CompressionOutcome::Compressed(packed)) => {
+    Ok(CompressionOutput::Compressed(packed)) => {
       let wrapped = encode_compressed_frame(
         opts
           .algorithm()
@@ -728,7 +728,7 @@ pub fn encode_reliable_unit_with_encryption(
 ) -> Result<Vec<u8>, crate::encryption::EncryptionError> {
   // Step 1: compression — yields a `[Compressed]` wrapper or the plain bytes.
   let compressed_or_plain: Vec<u8> = match compression.apply(framed) {
-    Ok(CompressionOutcome::Compressed(packed)) => {
+    Ok(CompressionOutput::Compressed(packed)) => {
       let wrapped = encode_compressed_frame(
         compression
           .algorithm()

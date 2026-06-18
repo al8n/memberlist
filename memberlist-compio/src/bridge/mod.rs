@@ -241,8 +241,8 @@ pub(crate) async fn bridge_task<S>(
               // Aborted mid-write, or the drain made no progress for
               // `close_timeout`: discard and tear down (drop the write half →
               // RST), no EOF.
-              WriteOutcome::Aborted | WriteOutcome::TimedOut => break,
-              WriteOutcome::Wrote(res) => {
+              WriteStatus::Aborted | WriteStatus::TimedOut => break,
+              WriteStatus::Wrote(res) => {
                 if let Err(err) = res {
                   // Ignoring Err: shutdown race — driver-side receiver may
                   // be gone if the driver is tearing down.
@@ -307,8 +307,8 @@ pub(crate) async fn bridge_task<S>(
           // mid-flight; progress resets the deadline, so only a peer making NO
           // progress for the full `close_timeout` times out.
           match write_cancellable(&mut write_half, bytes, &mut cancel_fut, close_timeout).await {
-            WriteOutcome::Aborted | WriteOutcome::TimedOut => break,
-            WriteOutcome::Wrote(res) => {
+            WriteStatus::Aborted | WriteStatus::TimedOut => break,
+            WriteStatus::Wrote(res) => {
               if let Err(err) = res {
                 // Ignoring Err: shutdown-race reasoning.
                 let _ = inbound_tx
@@ -407,7 +407,7 @@ pub(crate) async fn bridge_task<S>(
 }
 
 /// The result of a [`write_cancellable`] race — one of three outcomes.
-enum WriteOutcome {
+enum WriteStatus {
   /// An explicit abort preempted the write: the bridge must tear down and
   /// discard, writing nothing further.
   Aborted,
@@ -456,7 +456,7 @@ async fn write_cancellable<W, C>(
   mut bytes: Vec<u8>,
   mut cancel_fut: &mut C,
   close_timeout: Duration,
-) -> WriteOutcome
+) -> WriteStatus
 where
   W: AsyncWrite,
   C: Future<Output = ()> + FusedFuture + Unpin,
@@ -473,10 +473,10 @@ where
       // Explicit abort only (a disconnect was mapped to `pending()`). Listed
       // first so it preempts immediately, even a write blocked mid-frame on an
       // unresponsive peer, ahead of the timeout backstop.
-      () = &mut cancel_fut => return WriteOutcome::Aborted,
+      () = &mut cancel_fut => return WriteStatus::Aborted,
       // Backstop: no progress on this partial write for the full
       // `close_timeout` (a non-reading peer) → abandon and RST on teardown.
-      () = timeout_fut => return WriteOutcome::TimedOut,
+      () = timeout_fut => return WriteStatus::TimedOut,
       // Write the unwritten tail. `slice` consumes the owned buffer and is
       // returned so the next iteration recovers it via `into_inner`.
       res = write_half.write(bytes.slice(written..)).fuse() => res,
@@ -486,17 +486,17 @@ where
       // A zero-byte write makes no progress; surface it as a write error so the
       // caller reports it and tears down, rather than spinning forever.
       Ok(0) => {
-        return WriteOutcome::Wrote(Err(io::Error::new(
+        return WriteStatus::Wrote(Err(io::Error::new(
           io::ErrorKind::WriteZero,
           "write returned zero bytes",
         )));
       }
       // Progress: advance and loop with a fresh deadline.
       Ok(n) => written += n,
-      Err(e) => return WriteOutcome::Wrote(Err(e)),
+      Err(e) => return WriteStatus::Wrote(Err(e)),
     }
   }
-  WriteOutcome::Wrote(Ok(()))
+  WriteStatus::Wrote(Ok(()))
 }
 
 #[cfg(all(test, feature = "tcp"))]

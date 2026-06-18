@@ -26,7 +26,7 @@ use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
-  label::{LabelOutcome, classify_header, encode_label_prefix},
+  label::{LabelVerdict, classify_header, encode_label_prefix},
   stream::Stream,
 };
 
@@ -972,7 +972,7 @@ where
     }
     let expected = self.label.as_deref();
     match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
-      LabelOutcome::Accepted(consumed) => {
+      LabelVerdict::Accepted(consumed) => {
         self.recv_accum.drain(..consumed);
         self.inbound_label_validated = true;
         if !self.eager_outbound_label && !self.outbound_label_written {
@@ -983,8 +983,8 @@ where
         }
         Ok(true)
       }
-      LabelOutcome::Incomplete => Ok(false),
-      LabelOutcome::Rejected(e) => Err(e),
+      LabelVerdict::Incomplete => Ok(false),
+      LabelVerdict::Rejected(e) => Err(e),
     }
   }
 
@@ -1066,7 +1066,7 @@ where
                 if !self.inbound_label_validated {
                   let expected = self.label.as_deref();
                   match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
-                    LabelOutcome::Accepted(consumed) => {
+                    LabelVerdict::Accepted(consumed) => {
                       self.recv_accum.drain(..consumed);
                       self.inbound_label_validated = true;
                       // Acceptor lazy release: now that the peer's label is
@@ -1081,12 +1081,12 @@ where
                         self.outbound_label_written = true;
                       }
                     }
-                    LabelOutcome::Incomplete => {
+                    LabelVerdict::Incomplete => {
                       // Not enough bytes yet; hold recv_accum and wait for the
                       // next chunk.
                       break;
                     }
-                    LabelOutcome::Rejected(_) => {
+                    LabelVerdict::Rejected(_) => {
                       decode_failed = true;
                       break;
                     }
