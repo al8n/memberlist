@@ -191,11 +191,7 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 /// the gossip RNG (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from
 /// the pinned interface seed, or from an independent `getrandom` draw when none is
 /// pinned, while [`with_rng`](Self::with_rng) accepts a caller-supplied one.
-pub struct Memberlist<I, A, D: Device, R = SmallRng>
-where
-  I: memberlist_proto::Id,
-  R: Rng,
-{
+pub struct Memberlist<I, A, D: Device, R = SmallRng> {
   iface: Interface,
   /// The seed handed to smoltcp's interface RNG at construction (TCP ISN /
   /// ephemeral port selection). Retained because smoltcp does not expose it;
@@ -223,6 +219,8 @@ where
   _a: core::marker::PhantomData<fn(A)>,
 }
 
+// Constructors that build the embedded engine with an OS-seeded `SmallRng` —
+// they need full node identity to stand up the membership machine.
 impl<I, A, D: Device> Memberlist<I, A, D, SmallRng>
 where
   I: memberlist_proto::Id,
@@ -708,6 +706,24 @@ where
   }
 }
 
+// A pure field accessor — needs neither node identity nor the RNG.
+impl<I, A, D: Device, R> Memberlist<I, A, D, R> {
+  /// The seed handed to smoltcp's interface RNG at construction.
+  ///
+  /// A diagnostic for the interface-seed contract: smoltcp seeds its TCP
+  /// initial-sequence-number and ephemeral-port RNG from this value but does not
+  /// expose it, so a test uses this to witness that an unpinned
+  /// [`InterfaceOptions`] drew a nonzero seed from system entropy and a pinned one
+  /// was applied verbatim.
+  #[doc(hidden)]
+  #[inline]
+  pub fn interface_random_seed(&self) -> u64 {
+    self.iface_random_seed
+  }
+}
+
+// Membership operations that drive the embedded engine each `poll` — joining,
+// gossip, queries, and config — all needing full node identity.
 impl<I, A, D: Device, R: Rng> Memberlist<I, A, D, R>
 where
   I: memberlist_proto::Id,
@@ -1100,19 +1116,6 @@ where
       _device: core::marker::PhantomData,
       _a: core::marker::PhantomData,
     })
-  }
-
-  /// The seed handed to smoltcp's interface RNG at construction.
-  ///
-  /// A diagnostic for the interface-seed contract: smoltcp seeds its TCP
-  /// initial-sequence-number and ephemeral-port RNG from this value but does not
-  /// expose it, so a test uses this to witness that an unpinned
-  /// [`InterfaceOptions`] drew a nonzero seed from system entropy and a pinned one
-  /// was applied verbatim.
-  #[doc(hidden)]
-  #[inline]
-  pub fn interface_random_seed(&self) -> u64 {
-    self.iface_random_seed
   }
 
   /// Number of inbound reliable connections this node has accepted on its TCP
