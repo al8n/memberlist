@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use bytes::{Bytes, BytesMut};
 use smol_str::SmolStr;
 
-use super::{InboundKind, OutboundKind, Stream, StreamPhase};
+use super::{OutboundKind, Stream, StreamPhase};
 use crate::{
   error::StreamError,
   event::{EndpointEvent, PushPullKind, StreamEvent, StreamId},
@@ -185,7 +185,7 @@ fn poll_transmit_push_pull_request_awaits_response() {
 fn poll_transmit_inbound_response_drains_to_done_closed() {
   let t0 = Instant::now();
   let mut s = stream_in(
-    StreamPhase::InboundSendingResponse(InboundKind::ReliablePing(3)),
+    StreamPhase::InboundSendingResponse,
     Some(t0 + Duration::from_secs(5)),
   );
   s.output_buf.extend([8u8]);
@@ -384,7 +384,7 @@ fn eof_while_sending_reliable_ping_request_is_peer_closed() {
 fn eof_while_inbound_sending_response_clean_is_ok() {
   let t0 = Instant::now();
   let mut s = stream_in(
-    StreamPhase::InboundSendingResponse(InboundKind::PushPull),
+    StreamPhase::InboundSendingResponse,
     Some(t0 + Duration::from_secs(5)),
   );
   assert!(s.handle_data(&[], t0).is_ok());
@@ -396,7 +396,7 @@ fn eof_while_inbound_sending_response_clean_is_ok() {
 fn eof_while_inbound_sending_response_with_partial_is_peer_closed() {
   let t0 = Instant::now();
   let mut s = stream_in(
-    StreamPhase::InboundSendingResponse(InboundKind::PushPull),
+    StreamPhase::InboundSendingResponse,
     Some(t0 + Duration::from_secs(5)),
   );
   s.input_buf.extend_from_slice(&[0x08, 0x05]); // partial frame header
@@ -538,7 +538,7 @@ fn partial_body_waits_for_remainder() {
 // ─────────────────────────── dispatch: inbound first ──────────────────────
 
 /// Inbound PushPull (Join) → emits `PushPullRequestReceived`, phase advances
-/// to `InboundSendingResponse(PushPull)`.
+/// to `InboundSendingResponse`.
 #[test]
 fn inbound_push_pull_join_emits_request_received() {
   let t0 = Instant::now();
@@ -555,10 +555,7 @@ fn inbound_push_pull_join_emits_request_received() {
     }
     other => panic!("expected PushPullRequestReceived, got {other:?}"),
   }
-  assert!(matches!(
-    s.phase,
-    StreamPhase::InboundSendingResponse(InboundKind::PushPull)
-  ));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse));
 }
 
 /// Inbound PushPull with join=false maps to `PushPullKind::Refresh`.
@@ -578,7 +575,7 @@ fn inbound_push_pull_refresh_kind() {
 }
 
 /// Inbound Ping addressed to us → an Ack is encoded into `output_buf` and
-/// the phase advances to `InboundSendingResponse(ReliablePing)`; no endpoint
+/// the phase advances to `InboundSendingResponse`; no endpoint
 /// event is queued (the Ack is self-contained).
 #[test]
 fn inbound_ping_for_us_encodes_ack() {
@@ -590,10 +587,7 @@ fn inbound_ping_for_us_encodes_ack() {
   let f = ping_frame("local", 7002, 77);
   s.handle_data(&f, t0).expect("ping decodes");
   assert!(s.poll_endpoint_event().is_none(), "Ack is self-contained");
-  assert!(matches!(
-    s.phase,
-    StreamPhase::InboundSendingResponse(InboundKind::ReliablePing(77))
-  ));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse));
   // The encoded Ack is queued for transmit.
   let mut out = Vec::new();
   let n = s.poll_transmit(t0, &mut out).expect("ack bytes queued");
@@ -773,7 +767,7 @@ fn outbound_user_message_ignores_inbound_noise() {
 fn frame_in_sending_phase_rejected() {
   let t0 = Instant::now();
   let mut s = stream_in(
-    StreamPhase::InboundSendingResponse(InboundKind::PushPull),
+    StreamPhase::InboundSendingResponse,
     Some(t0 + Duration::from_secs(5)),
   );
   let f = push_pull_frame(true);

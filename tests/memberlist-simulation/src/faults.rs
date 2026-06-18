@@ -10,7 +10,6 @@ use std::{
 ///
 /// Fields are `pub(crate)` so `Cluster` and tests can mutate them
 /// directly without a public setter API.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct FaultConfig {
   /// One-shot drop set: the next datagram FROM this address is dropped.
@@ -45,7 +44,6 @@ impl FaultConfig {
 
   /// Returns `true` if a datagram from `from` to `to` should be delivered.
   /// Side-effect: consumes a pending one-shot drop.
-  #[allow(dead_code)]
   pub(crate) fn should_deliver(&mut self, from: SocketAddr, to: SocketAddr) -> bool {
     if self.drop_next.remove(&from) {
       return false;
@@ -62,7 +60,6 @@ impl FaultConfig {
   /// NOT touch the one-shot `drop_next` set, so it is safe to call on an
   /// already-established virtual stream each tick to decide whether the link
   /// is currently cut.
-  #[allow(dead_code)]
   pub(crate) fn partitioned(&self, a: SocketAddr, b: SocketAddr) -> bool {
     match self.partitions {
       Some(ref groups) => {

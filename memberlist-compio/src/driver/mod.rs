@@ -241,7 +241,6 @@ pub(crate) struct BridgeEof {
 /// error on either the read or write half. The `err` is preserved on the
 /// payload for the upcoming logger hook (the dead-code allow lets it
 /// travel today even though no current consumer reads it).
-#[allow(dead_code)]
 pub(crate) struct BridgeError {
   /// Exchange that failed.
   pub(crate) eid: ExchangeId,
@@ -280,7 +279,6 @@ pub(crate) struct OutboundOkReady {
 /// connect error. The `err` is preserved on the payload for the upcoming
 /// logger hook (the dead-code allow lets it travel today even though no
 /// current consumer reads it).
-#[allow(dead_code)]
 pub(crate) struct OutboundFailReady {
   /// The exchange whose dial failed.
   pub(crate) eid: ExchangeId,

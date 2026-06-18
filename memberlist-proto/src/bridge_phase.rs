@@ -6,10 +6,9 @@
 //! `IoState::peer_has_closed()` (or a TCP `read == 0`). The phase shape and
 //! its monotonic terminality are transport-agnostic.
 //!
-//! These items are consumed by whichever coordinator is compiled; the
-//! `#![allow(dead_code)]` covers a `tls`-only build until the TLS coordinator
-//! composes them (the QUIC build already does).
-#![allow(dead_code)]
+//! These items are consumed by whichever coordinator is compiled. The two
+//! `BridgeFailure` variants only the stream (TCP/TLS) coordinator constructs
+//! carry a narrow `cfg_attr` allow for the QUIC-only build that shares the enum.
 
 use std::string::String;
 
@@ -78,6 +77,9 @@ pub(crate) enum BridgeFailure {
   /// `dial_succeeded(None)` reap path; runs `clear_outbound` +
   /// `purge_transmit_for` + `purge_pending_connect_for` before dropping
   /// the bridge without `collect_bridge_transmits`.
+  // Constructed only by the stream (TCP/TLS) coordinator; the QUIC build shares
+  // the enum but never reaches this transition.
+  #[cfg_attr(not(any(feature = "tls", feature = "tcp")), allow(dead_code))]
   DialRetired,
   /// The operator changed the cross-transport encryption policy on the
   /// coordinator (`StreamEndpoint::set_encryption_options`) while this
@@ -90,5 +92,12 @@ pub(crate) enum BridgeFailure {
   /// that uses the new policy from construction. TLS bridges
   /// (`R::is_secure() == true`) are unaffected — their queued bytes are
   /// already wire-encrypted by the transport.
+  // Constructed only by the stream (TCP/TLS) coordinator's encryption-policy
+  // path; dead without both an insecure stream transport and an encryption
+  // backend.
+  #[cfg_attr(
+    not(all(any(feature = "tls", feature = "tcp"), encryption)),
+    allow(dead_code)
+  )]
   EncryptionPolicyChanged,
 }

@@ -41,7 +41,6 @@ use smallvec::SmallVec;
 /// Source of a probe — distinguishes failure-detection probes (default) from
 /// application-level pings issued via `Endpoint::ping`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum ProbeKind {
   /// SWIM failure-detection probe; outcome updates Awareness and may
   /// transition the target to Suspect.
@@ -53,7 +52,6 @@ pub(crate) enum ProbeKind {
 
 /// State of one in-flight probe, keyed in `Endpoint::probes` by sequence number.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct Probe<I, A> {
   /// The peer being probed.
   pub(crate) target: Arc<NodeState<I, A>>,
@@ -126,7 +124,7 @@ pub(crate) struct AwaitingIndirect<A> {
 /// Current phase of a [`Probe`] FSM. Newtype variants only — each payload
 /// is its own struct.
 #[derive(Debug)]
-#[allow(dead_code, clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum ProbePhase<A> {
   /// Waiting for a direct Ack from the target. If the deadline elapses
   /// without one, transition to `AwaitingIndirect` (sending IndirectPings
@@ -137,46 +135,6 @@ pub(crate) enum ProbePhase<A> {
   /// target), the concurrently-opened reliable-ping `ReliablePingAcked`,
   /// or for the single cumulative deadline to elapse (→ suspect).
   AwaitingIndirect(AwaitingIndirect<A>),
-}
-
-/// Successful-probe payload. See [`ProbeOutcome::Success`].
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct ProbeSuccess<I, A> {
-  /// The probed peer.
-  pub(crate) target: Arc<NodeState<I, A>>,
-  /// Round-trip time.
-  pub(crate) rtt: core::time::Duration,
-  /// Ack payload carried by the response.
-  pub(crate) payload: bytes::Bytes,
-  /// What kind of probe this was.
-  pub(crate) kind: ProbeKind,
-}
-
-/// Failed-probe payload. See [`ProbeOutcome::Failure`].
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct ProbeFailure<I, A> {
-  /// The probed peer.
-  pub(crate) target: Arc<NodeState<I, A>>,
-  /// What kind of probe this was.
-  pub(crate) kind: ProbeKind,
-  /// `Some((expected, seen))` if we entered AwaitingIndirect and the
-  /// failure happened there; `None` if the failure happened on the direct
-  /// path (no indirect was attempted, e.g., empty cluster).
-  pub(crate) nack_stats: Option<(usize, usize)>,
-}
-
-/// Terminal outcome of a probe. Newtype variants only — each payload is
-/// its own struct.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) enum ProbeOutcome<I, A> {
-  /// Probe succeeded — target is healthy.
-  Success(ProbeSuccess<I, A>),
-  /// Probe failed — target should be marked Suspect (Detection) or
-  /// silently dropped (Ping).
-  Failure(ProbeFailure<I, A>),
 }
 
 impl<I, A> Probe<I, A> {
@@ -190,7 +148,6 @@ impl<I, A> Probe<I, A> {
   ///   `probe_interval`, which only the Endpoint has) and stored as-is —
   ///   Detection: `sent_at + awareness.scale_timeout(probe_interval)`;
   ///   Ping: `sent_at + probe_timeout`.
-  #[allow(dead_code)]
   pub(crate) fn new_direct(
     target: Arc<NodeState<I, A>>,
     sent_at: Instant,
@@ -226,7 +183,6 @@ impl<I, A> Probe<I, A> {
   /// Equals the `AwaitingDirectAck` phase deadline by construction.
   /// Always the *unscaled* `probe_timeout` — memberlist-core's direct UDP
   /// wait is `opts.probe_timeout`, NOT the awareness-scaled interval.
-  #[allow(dead_code)]
   pub(crate) fn direct_deadline(&self, probe_timeout: Duration) -> Instant {
     self.sent_at + probe_timeout
   }
@@ -238,7 +194,6 @@ impl<I, A> Probe<I, A> {
   /// at construction (memberlist-core computes `sent + probe_interval`
   /// once at `sent`, where `probe_interval` is the awareness-scaled SWIM
   /// period for Detection, or `probe_timeout` for a direct-only Ping).
-  #[allow(dead_code)]
   pub(crate) fn failure_deadline(&self) -> Instant {
     self.failure_deadline
   }
@@ -255,7 +210,6 @@ impl<I, A> Probe<I, A> {
   /// terminates then rather than uselessly waiting out a direct sub-window
   /// longer than its whole budget. `AwaitingIndirect`'s stored deadline
   /// already IS `failure_deadline`.
-  #[allow(dead_code)]
   pub(crate) fn deadline(&self) -> Instant {
     match &self.phase {
       ProbePhase::AwaitingDirectAck(p) => p.deadline.min(self.failure_deadline),
