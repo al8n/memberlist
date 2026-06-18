@@ -1107,12 +1107,11 @@ where
 }
 
 // Methods that drive the inner `Endpoint` membership machine, encode wire
-// types, or run the bridge pump/reap helpers — all of which need full node
-// identity (`I: Id`), the gossip RNG, and the address bounds.
+// types, or run the bridge pump/reap helpers — needing full node identity and
+// the address bounds, but not the gossip RNG.
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
   R: StreamTransport,
-  G: Rng,
   I: crate::Id,
   A: crate::CheapClone + crate::Data + PartialEq + 'static,
 {
@@ -1373,13 +1372,6 @@ where
     }
   }
 
-  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
-  /// [`Endpoint::start_scheduling`].
-  #[inline]
-  pub fn start_scheduling(&mut self, now: Instant) {
-    self.ep.start_scheduling(now);
-  }
-
   /// Re-broadcast the local node's metadata. Pass-through to
   /// [`Endpoint::update_meta`]; the inner endpoint bumps the local
   /// incarnation and queues an `Alive` broadcast carrying the new bytes
@@ -1471,13 +1463,6 @@ where
   pub fn start_probe(&mut self, now: Instant) -> bool {
     self.last_now = Some(now);
     self.ep.start_probe(now)
-  }
-
-  /// Seed an `Alive` state on the inner membership endpoint (bootstrap path).
-  /// Pass-through to [`Endpoint::handle_alive`]; sets `last_now`.
-  pub fn handle_alive(&mut self, from: A, alive: crate::typed::Alive<I, A>, at: Instant) {
-    self.last_now = Some(at);
-    self.ep.handle_alive(from, alive, at);
   }
 
   /// Inject a `Suspect` event on the inner membership endpoint (test-harness
@@ -1582,15 +1567,6 @@ where
     best
   }
 
-  /// Feed one decoded unreliable memberlist
-  /// [`Message`](crate::typed::Message) into the inner membership
-  /// endpoint. Pass-through to [`Endpoint::handle_packet`]; the composed unit's
-  /// unreliable ingress is `handle_gossip` → `poll_memberlist_ingress` → (codec
-  /// decode) → `handle_packet`, never a direct call into the inner `Endpoint`.
-  pub fn handle_packet(&mut self, from: A, msg: crate::typed::Message<I, A>, now: Instant) {
-    self.ep.handle_packet(from, msg, now);
-  }
-
   /// The reliable-unit ceiling a given exchange's bridge was built with, for a
   /// test asserting the ceiling tracks `EndpointOptions::max_stream_frame_size`
   /// rather than a hard-coded constant.
@@ -1643,87 +1619,6 @@ where
         crate::streams::phase::StreamPhase::Established(crate::bridge_phase::BridgePhase::Active)
       ) && !b.fin_owed()
     })
-  }
-
-  /// Step (2) of the per-tick order: pump every bridge's outbound half, drain
-  /// each non-terminal stream's endpoint-events into the `Endpoint`, and
-  /// D1-drain-then-reap any bridge that turned terminal.
-  ///
-  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
-  /// after `service_dials`. There is no inbound `pump_in`: inbound bytes are
-  /// fed through [`Self::handle_transport_data`] →
-  /// `StreamBridge::handle_transport_data` directly; this step only drives the
-  /// outbound side and the endpoint-event drain.
-  fn pump_bridges(&mut self, now: Instant) {
-    // Service ONLY the dirty bridges. The set is drained here; a bridge that
-    // still carries a retained record-layer tail after this pass re-marks itself
-    // dirty below so the next tick re-drives it. A bridge with neither new input
-    // nor a tail is left out of the set and skipped until it receives data again
-    // (or `handle_timeout` marks every bridge dirty on the periodic path).
-    for id in core::mem::take(&mut self.dirty) {
-      // Split borrow: take the bridge out, operate, put back (or reap).
-      let Some(mut br) = self.conns.remove(id) else {
-        continue;
-      };
-      // Replay any pre-promotion buffered plaintext FIRST (inbound), before
-      // the outbound pump. A peer that coalesced its first request with its
-      // label prefix had that request stripped of its label and buffered as
-      // inbound plaintext while the bridge was still `Handshaking`; this is
-      // the post-mint pump (run AFTER `service_handshake_completions`
-      // promoted the bridge), so the buffered plaintext reassembles into the
-      // just-minted `Stream` THIS tick rather than waiting for the next
-      // transport read. A no-op on every bridge with no buffered tail (the
-      // steady state).
-      // Ignoring Err: a replay failure terminalizes the bridge; the
-      // `is_terminal()` reap path below handles it. There is no separate
-      // action.
-      let _ = br.replay_pending(now);
-      // `pump_out` sets the bridge `fatal` flag on a transport / FSM error, so
-      // `is_terminal()` below drives the prompt reap; the `#[must_use]` Result
-      // is consumed — terminality is the signal.
-      // Ignoring Err: `pump_out` failing terminalizes the bridge; the
-      // `is_terminal()` reap path below handles it. There is no separate
-      // action.
-      let _ = br.pump_out(now);
-      if br.is_terminal() {
-        br.drain_then_reap(&mut self.ep, now);
-        self.reap_bridge(id, &mut br, now);
-        drop(br);
-      } else {
-        // Drain endpoint-events EVERY tick (non-terminal payload-only path).
-        br.drain_payload_only(&mut self.ep, now);
-        // `drain_payload_only` may flip the bridge to terminal (a
-        // `StreamCommand::Close` from an admission-rejected join sets `fatal`);
-        // re-check so the bridge D1-drains and reaps in this SAME tick rather
-        // than holding the connection until its exchange deadline.
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, now);
-          self.reap_bridge(id, &mut br, now);
-          drop(br);
-        } else {
-          // Graceful half-close signal: the bridge retired its send half
-          // (clean exchange) and is awaiting the peer's FIN, so tell the
-          // driver to half-close the transport write side after it has
-          // drained our buffered bytes. Emitted at most once per exchange.
-          // The bridge's outbound bytes are collected by `finalize_tick`
-          // while it is still alive — only a reaped (dropped) bridge needs
-          // the inline reap-time collection in `reap_bridge`.
-          self.maybe_emit_shutdown(id, &br);
-          // Keep re-driving a bridge that retained a record-layer ciphertext tail
-          // (TLS large-frame receive back-pressure): it has unconsumed input to
-          // replay once its consumer drains, so it must stay dirty. A reliable
-          // exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND
-          // to re-drive — `pump_out` gathers the whole unit in one pass.
-          if br.needs_repump() {
-            self.dirty.insert(id);
-          }
-          self.conns.insert(id, br);
-          // Collect this bridge's outbound in `collect_transmits` below — only
-          // pumped-and-alive bridges can have produced new bytes this tick.
-          self.pumped.insert(id);
-        }
-      }
-    }
   }
 
   /// Reap a terminal bridge: forget the exchange and emit its teardown action.
@@ -2016,6 +1911,337 @@ where
     }
   }
 
+  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]: collect
+  /// outbound bytes from every live bridge. (Terminal bridges already flushed
+  /// their final bytes at reap time inside [`Self::reap_bridge`].)
+  fn finalize_tick(&mut self, _now: Instant) {
+    self.collect_transmits();
+  }
+
+  /// Collect outbound bytes from the bridges pumped this tick into the outbound
+  /// queue, tagged with the exchange handle + peer. Only a bridge `pump_bridges`
+  /// serviced can have produced new bytes, so draining `pumped` (rather than
+  /// every bridge) keeps this O(pumped) instead of O(all bridges) per tick.
+  fn collect_transmits(&mut self) {
+    for id in core::mem::take(&mut self.pumped) {
+      if let Some(mut br) = self.conns.remove(id) {
+        self.collect_bridge_transmits(id, &mut br);
+        self.conns.insert(id, br);
+      }
+    }
+  }
+
+  /// The driver accepted an inbound transport connection from `from`.
+  /// On admission, allocates an [`ExchangeId`], builds a server-side
+  /// `Handshaking` bridge bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns
+  /// `Some(id)` — the handle the driver tags this connection's inbound bytes
+  /// with. The `Stream` is minted later (at label / handshake settled, via
+  /// `Endpoint::accept_stream`).
+  ///
+  /// Returns `None` when the connection is NOT admitted: the node is
+  /// leaving/left, the optional `max_inbound_streams` ceiling is reached, or the
+  /// record-layer acceptor is misconfigured. No bridge is built, so the driver
+  /// should drop the connection immediately rather than spawn a per-connection
+  /// servicing task — the rejection is observable BEFORE that resource is
+  /// committed, which is what makes the inbound cap bound driver-side state too.
+  pub fn accept_connection(&mut self, from: A, now: Instant) -> Option<ExchangeId> {
+    self.last_now = Some(now);
+    // A leaving/left node accepts no NEW inbound reliable stream; streams
+    // accepted before leave keep draining.
+    if !self.ep.is_running() {
+      return None;
+    }
+    // Admission-gate inbound exchanges against the optional ceiling so a peer
+    // cannot grow inbound bridge state — each pins up to ~3x the max frame size
+    // transiently — without bound. Outbound exchanges are never gated here.
+    if let Some(max) = self.ep.max_inbound_streams() {
+      let inbound = self.exchanges.values().filter(|m| !m.outbound).count();
+      if inbound >= max {
+        self.ep.metrics_mut().inbound_streams_rejected += 1;
+        return None;
+      }
+    }
+    // A record-layer acceptor construction error (a misconfigured record layer)
+    // is unrecoverable for this connection: no bridge, no exchange.
+    let records = match R::acceptor(&self.cfg) {
+      Ok(records) => records,
+      Err(_) => return None,
+    };
+    let id = self.conns.allocate();
+    // SocketAddr conversion needed: `peer_socket` tags entries on
+    // `out_transmit` (driver-facing SocketAddr-typed queue) so the driver
+    // writes bytes on the right transport connection.
+    let peer_socket = (self.peer_to_socket)(&from);
+    let peer = crate::CheapClone::cheap_clone(&from);
+    let bridge = StreamBridge::new(
+      records,
+      now + self.ep.accept_handshake_deadline(),
+      #[cfg(compression)]
+      self.compression,
+      #[cfg(encryption)]
+      self.encryption.clone(),
+      self.ep.max_stream_frame_size(),
+    );
+    self.conns.insert(id, bridge);
+    // The accepted bridge awaits its `Stream` mint once its label / handshake
+    // step settles, so it is a handshake-completion candidate. (No dirty mark:
+    // a fresh accepted bridge has no work until its first inbound bytes arrive.)
+    self.unminted.insert(id);
+    self.exchanges.insert(
+      id,
+      ExchangeMeta {
+        peer_socket,
+        peer,
+        mint: Some(PendingMint::Inbound(from)),
+        fin_emitted: false,
+        // Inbound exchange — the initiator-side wrapper that picks the kind
+        // never ran locally. Leave unset; the reap path does not emit
+        // kind-specific events for inbound.
+        kind: None,
+        outbound: false,
+      },
+    );
+    Some(id)
+  }
+
+  /// Step (5): drain the private `dial_pending` deque, surfacing one
+  /// [`StreamAction::Connect`] and building one `Handshaking` client bridge per
+  /// intent. Does NOT call `dial_succeeded` — the `Stream` is minted at the
+  /// label / handshake-settled step (step 4) across a later tick (or this same
+  /// tick when invoked from a `start_*` flush, since a no-handshake dialer's
+  /// label step settles at construction).
+  pub(crate) fn service_dials(&mut self, now: Instant) {
+    // A leaving/left node initiates no dial: skip sieving and draining so no
+    // bridge is built or Connect surfaced after leave. Defensive — the start_*
+    // gates and requeue_event already prevent new DialRequested — but this
+    // guards any residual intent against opening a fresh connection.
+    if !self.ep.is_running() {
+      return;
+    }
+    // Sieve any DialRequested newly emitted by the inner endpoint into the
+    // private deque, then drain that deque as the sole input. Non-DialRequested
+    // events stay in the inner endpoint's queue for the public `poll_event`.
+    self.sieve_dial_events();
+    let pending = core::mem::take(&mut self.dial_pending);
+    for entry in pending {
+      let PendingDial {
+        id,
+        peer,
+        deadline,
+        attempted: _,
+      } = entry;
+      // Take the kind stashed by the originating `start_*` wrapper up front.
+      // Every pre-`ExchangeMeta` failure path below — expired deadline, TLS
+      // SNI rejection at `R::dial_context`, dialer construction error —
+      // calls `dial_failed` and `continue`s without re-inserting, so the
+      // map is implicitly cleaned up on every failure exit. Only the
+      // success path past `ExchangeMeta` allocation re-inserts (so a later
+      // `reap_bridge` can carry the exchange's kind on
+      // `Event::ExchangeCompleted`). `None` here indicates a `DialRequested`
+      // emitted outside this coordinator's start path — kept defensive
+      // (reap then does not emit a kind-specific event for this exchange).
+      let exchange_kind = self.pending_outbound_kinds.remove(&id);
+      // Retire the intent without opening a connection if its own deadline
+      // has already elapsed (mirrors the sibling coordinators'
+      // expired-intent gate).
+      if now >= deadline {
+        self.ep.dial_failed(
+          id,
+          crate::error::StreamError::DialFailed("stream dial deadline elapsed".into()),
+          now,
+        );
+        continue;
+      }
+      // SocketAddr conversion needed: `peer_socket` tags entries on
+      // `out_transmit` and the `StreamAction::Connect(ConnectInfo)` payload
+      // (both driver-facing SocketAddr-typed surfaces).
+      let peer_socket = (self.peer_to_socket)(&peer);
+      let peer_a = crate::CheapClone::cheap_clone(&peer);
+      // Resolve the per-dial record-layer context (e.g. the TLS verification
+      // identity). An `Err` is the soft-fail-via-dial_failed path —
+      // retire the intent for this one peer and move on.
+      let sni_owned = (self.sni_provider)(&peer);
+      let ctx = match R::dial_context::<A>(&peer, sni_owned.as_deref()) {
+        Ok(c) => c,
+        Err(msg) => {
+          self
+            .ep
+            .dial_failed(id, crate::error::StreamError::DialFailed(msg.into()), now);
+          continue;
+        }
+      };
+      // Construct the dialer record layer. A construction error retires the
+      // intent (a misconfigured record layer cannot dial); for a record layer
+      // with infallible constructors this branch is unreachable.
+      let records = match R::dialer(&self.cfg, ctx) {
+        Ok(r) => r,
+        Err(e) => {
+          self.ep.dial_failed(
+            id,
+            crate::error::StreamError::DialFailed(
+              format!("record-layer construction failed: {e}").into(),
+            ),
+            now,
+          );
+          continue;
+        }
+      };
+      let exchange = self.conns.allocate();
+      let bridge = StreamBridge::new(
+        records,
+        deadline,
+        #[cfg(compression)]
+        self.compression,
+        #[cfg(encryption)]
+        self.encryption.clone(),
+        self.ep.max_stream_frame_size(),
+      );
+      self.conns.insert(exchange, bridge);
+      // A fresh dial bridge needs pumping this tick to flush its request bytes
+      // once its label / handshake step settles (a no-handshake dialer settles at
+      // construction), so the following `pump_bridges` must service it; it also
+      // awaits its `Stream` mint, so it is a handshake-completion candidate.
+      self.dirty.insert(exchange);
+      self.unminted.insert(exchange);
+      self.exchanges.insert(
+        exchange,
+        ExchangeMeta {
+          peer_socket,
+          peer: peer_a,
+          mint: Some(PendingMint::Outbound(id)),
+          fin_emitted: false,
+          kind: exchange_kind,
+          outbound: true,
+        },
+      );
+      // `id` is the machine `StreamId` of the originating `start_*` dial,
+      // threaded into the Connect so a driver can correlate a surfaced Connect
+      // back to the exact `start_*` it issued — `service_dials` drains the
+      // SHARED `dial_pending` deque, so one command's drain can also flush an
+      // unrelated same-peer dial; the peer address alone does not call-scope it.
+      let action = StreamAction::Connect(ConnectInfo::new(exchange, peer_socket, id));
+      debug_assert!(
+        matches!(action, StreamAction::Connect(_)),
+        "pending_connects holds only Connect actions",
+      );
+      self.pending_connects.push_back(action);
+    }
+  }
+}
+
+// The coordinator tick, scheduler arming, and the transport/inbound handlers
+// that fan out into probe/gossip work — the methods that draw the gossip RNG.
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
+where
+  G: Rng,
+  R: StreamTransport,
+  I: crate::Id,
+  A: crate::CheapClone + crate::Data + PartialEq + 'static,
+{
+  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
+  /// [`Endpoint::start_scheduling`].
+  #[inline]
+  pub fn start_scheduling(&mut self, now: Instant) {
+    self.ep.start_scheduling(now);
+  }
+
+  /// Seed an `Alive` state on the inner membership endpoint (bootstrap path).
+  /// Pass-through to [`Endpoint::handle_alive`]; sets `last_now`.
+  pub fn handle_alive(&mut self, from: A, alive: crate::typed::Alive<I, A>, at: Instant) {
+    self.last_now = Some(at);
+    self.ep.handle_alive(from, alive, at);
+  }
+
+  /// Feed one decoded unreliable memberlist
+  /// [`Message`](crate::typed::Message) into the inner membership
+  /// endpoint. Pass-through to [`Endpoint::handle_packet`]; the composed unit's
+  /// unreliable ingress is `handle_gossip` → `poll_memberlist_ingress` → (codec
+  /// decode) → `handle_packet`, never a direct call into the inner `Endpoint`.
+  pub fn handle_packet(&mut self, from: A, msg: crate::typed::Message<I, A>, now: Instant) {
+    self.ep.handle_packet(from, msg, now);
+  }
+
+  /// Step (2) of the per-tick order: pump every bridge's outbound half, drain
+  /// each non-terminal stream's endpoint-events into the `Endpoint`, and
+  /// D1-drain-then-reap any bridge that turned terminal.
+  ///
+  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
+  /// after `service_dials`. There is no inbound `pump_in`: inbound bytes are
+  /// fed through [`Self::handle_transport_data`] →
+  /// `StreamBridge::handle_transport_data` directly; this step only drives the
+  /// outbound side and the endpoint-event drain.
+  fn pump_bridges(&mut self, now: Instant) {
+    // Service ONLY the dirty bridges. The set is drained here; a bridge that
+    // still carries a retained record-layer tail after this pass re-marks itself
+    // dirty below so the next tick re-drives it. A bridge with neither new input
+    // nor a tail is left out of the set and skipped until it receives data again
+    // (or `handle_timeout` marks every bridge dirty on the periodic path).
+    for id in core::mem::take(&mut self.dirty) {
+      // Split borrow: take the bridge out, operate, put back (or reap).
+      let Some(mut br) = self.conns.remove(id) else {
+        continue;
+      };
+      // Replay any pre-promotion buffered plaintext FIRST (inbound), before
+      // the outbound pump. A peer that coalesced its first request with its
+      // label prefix had that request stripped of its label and buffered as
+      // inbound plaintext while the bridge was still `Handshaking`; this is
+      // the post-mint pump (run AFTER `service_handshake_completions`
+      // promoted the bridge), so the buffered plaintext reassembles into the
+      // just-minted `Stream` THIS tick rather than waiting for the next
+      // transport read. A no-op on every bridge with no buffered tail (the
+      // steady state).
+      // Ignoring Err: a replay failure terminalizes the bridge; the
+      // `is_terminal()` reap path below handles it. There is no separate
+      // action.
+      let _ = br.replay_pending(now);
+      // `pump_out` sets the bridge `fatal` flag on a transport / FSM error, so
+      // `is_terminal()` below drives the prompt reap; the `#[must_use]` Result
+      // is consumed — terminality is the signal.
+      // Ignoring Err: `pump_out` failing terminalizes the bridge; the
+      // `is_terminal()` reap path below handles it. There is no separate
+      // action.
+      let _ = br.pump_out(now);
+      if br.is_terminal() {
+        br.drain_then_reap(&mut self.ep, now);
+        self.reap_bridge(id, &mut br, now);
+        drop(br);
+      } else {
+        // Drain endpoint-events EVERY tick (non-terminal payload-only path).
+        br.drain_payload_only(&mut self.ep, now);
+        // `drain_payload_only` may flip the bridge to terminal (a
+        // `StreamCommand::Close` from an admission-rejected join sets `fatal`);
+        // re-check so the bridge D1-drains and reaps in this SAME tick rather
+        // than holding the connection until its exchange deadline.
+        if br.is_terminal() {
+          br.drain_then_reap(&mut self.ep, now);
+          self.reap_bridge(id, &mut br, now);
+          drop(br);
+        } else {
+          // Graceful half-close signal: the bridge retired its send half
+          // (clean exchange) and is awaiting the peer's FIN, so tell the
+          // driver to half-close the transport write side after it has
+          // drained our buffered bytes. Emitted at most once per exchange.
+          // The bridge's outbound bytes are collected by `finalize_tick`
+          // while it is still alive — only a reaped (dropped) bridge needs
+          // the inline reap-time collection in `reap_bridge`.
+          self.maybe_emit_shutdown(id, &br);
+          // Keep re-driving a bridge that retained a record-layer ciphertext tail
+          // (TLS large-frame receive back-pressure): it has unconsumed input to
+          // replay once its consumer drains, so it must stay dirty. A reliable
+          // exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND
+          // to re-drive — `pump_out` gathers the whole unit in one pass.
+          if br.needs_repump() {
+            self.dirty.insert(id);
+          }
+          self.conns.insert(id, br);
+          // Collect this bridge's outbound in `collect_transmits` below — only
+          // pumped-and-alive bridges can have produced new bytes this tick.
+          self.pumped.insert(id);
+        }
+      }
+    }
+  }
+
   /// Zero-time outbound flush invoked from the high-level `start_*` APIs AFTER
   /// `service_dials`. Runs the shared tick tail (bridge pump + label /
   /// handshake-settled mint + `collect_transmits`) WITHOUT step (3)
@@ -2039,26 +2265,6 @@ where
     self.service_handshake_completions(now);
     self.pump_bridges(now);
     self.finalize_tick(now);
-  }
-
-  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]: collect
-  /// outbound bytes from every live bridge. (Terminal bridges already flushed
-  /// their final bytes at reap time inside [`Self::reap_bridge`].)
-  fn finalize_tick(&mut self, _now: Instant) {
-    self.collect_transmits();
-  }
-
-  /// Collect outbound bytes from the bridges pumped this tick into the outbound
-  /// queue, tagged with the exchange handle + peer. Only a bridge `pump_bridges`
-  /// serviced can have produced new bytes, so draining `pumped` (rather than
-  /// every bridge) keeps this O(pumped) instead of O(all bridges) per tick.
-  fn collect_transmits(&mut self) {
-    for id in core::mem::take(&mut self.pumped) {
-      if let Some(mut br) = self.conns.remove(id) {
-        self.collect_bridge_transmits(id, &mut br);
-        self.conns.insert(id, br);
-      }
-    }
   }
 
   /// Inbound bytes for one exchange's transport connection.
@@ -2151,79 +2357,6 @@ where
     }
     self.dirty.insert(id);
     self.run_tick(now);
-  }
-
-  /// The driver accepted an inbound transport connection from `from`.
-  /// On admission, allocates an [`ExchangeId`], builds a server-side
-  /// `Handshaking` bridge bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns
-  /// `Some(id)` — the handle the driver tags this connection's inbound bytes
-  /// with. The `Stream` is minted later (at label / handshake settled, via
-  /// `Endpoint::accept_stream`).
-  ///
-  /// Returns `None` when the connection is NOT admitted: the node is
-  /// leaving/left, the optional `max_inbound_streams` ceiling is reached, or the
-  /// record-layer acceptor is misconfigured. No bridge is built, so the driver
-  /// should drop the connection immediately rather than spawn a per-connection
-  /// servicing task — the rejection is observable BEFORE that resource is
-  /// committed, which is what makes the inbound cap bound driver-side state too.
-  pub fn accept_connection(&mut self, from: A, now: Instant) -> Option<ExchangeId> {
-    self.last_now = Some(now);
-    // A leaving/left node accepts no NEW inbound reliable stream; streams
-    // accepted before leave keep draining.
-    if !self.ep.is_running() {
-      return None;
-    }
-    // Admission-gate inbound exchanges against the optional ceiling so a peer
-    // cannot grow inbound bridge state — each pins up to ~3x the max frame size
-    // transiently — without bound. Outbound exchanges are never gated here.
-    if let Some(max) = self.ep.max_inbound_streams() {
-      let inbound = self.exchanges.values().filter(|m| !m.outbound).count();
-      if inbound >= max {
-        self.ep.metrics_mut().inbound_streams_rejected += 1;
-        return None;
-      }
-    }
-    // A record-layer acceptor construction error (a misconfigured record layer)
-    // is unrecoverable for this connection: no bridge, no exchange.
-    let records = match R::acceptor(&self.cfg) {
-      Ok(records) => records,
-      Err(_) => return None,
-    };
-    let id = self.conns.allocate();
-    // SocketAddr conversion needed: `peer_socket` tags entries on
-    // `out_transmit` (driver-facing SocketAddr-typed queue) so the driver
-    // writes bytes on the right transport connection.
-    let peer_socket = (self.peer_to_socket)(&from);
-    let peer = crate::CheapClone::cheap_clone(&from);
-    let bridge = StreamBridge::new(
-      records,
-      now + self.ep.accept_handshake_deadline(),
-      #[cfg(compression)]
-      self.compression,
-      #[cfg(encryption)]
-      self.encryption.clone(),
-      self.ep.max_stream_frame_size(),
-    );
-    self.conns.insert(id, bridge);
-    // The accepted bridge awaits its `Stream` mint once its label / handshake
-    // step settles, so it is a handshake-completion candidate. (No dirty mark:
-    // a fresh accepted bridge has no work until its first inbound bytes arrive.)
-    self.unminted.insert(id);
-    self.exchanges.insert(
-      id,
-      ExchangeMeta {
-        peer_socket,
-        peer,
-        mint: Some(PendingMint::Inbound(from)),
-        fin_emitted: false,
-        // Inbound exchange — the initiator-side wrapper that picks the kind
-        // never ran locally. Leave unset; the reap path does not emit
-        // kind-specific events for inbound.
-        kind: None,
-        outbound: false,
-      },
-    );
-    Some(id)
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt the
@@ -2369,129 +2502,5 @@ where
     // reap is complete. Leaving the latch set would have `poll_timeout` keep
     // returning immediate-due wakes forever once the reap is done.
     self.policy_reap_pending = false;
-  }
-
-  /// Step (5): drain the private `dial_pending` deque, surfacing one
-  /// [`StreamAction::Connect`] and building one `Handshaking` client bridge per
-  /// intent. Does NOT call `dial_succeeded` — the `Stream` is minted at the
-  /// label / handshake-settled step (step 4) across a later tick (or this same
-  /// tick when invoked from a `start_*` flush, since a no-handshake dialer's
-  /// label step settles at construction).
-  pub(crate) fn service_dials(&mut self, now: Instant) {
-    // A leaving/left node initiates no dial: skip sieving and draining so no
-    // bridge is built or Connect surfaced after leave. Defensive — the start_*
-    // gates and requeue_event already prevent new DialRequested — but this
-    // guards any residual intent against opening a fresh connection.
-    if !self.ep.is_running() {
-      return;
-    }
-    // Sieve any DialRequested newly emitted by the inner endpoint into the
-    // private deque, then drain that deque as the sole input. Non-DialRequested
-    // events stay in the inner endpoint's queue for the public `poll_event`.
-    self.sieve_dial_events();
-    let pending = core::mem::take(&mut self.dial_pending);
-    for entry in pending {
-      let PendingDial {
-        id,
-        peer,
-        deadline,
-        attempted: _,
-      } = entry;
-      // Take the kind stashed by the originating `start_*` wrapper up front.
-      // Every pre-`ExchangeMeta` failure path below — expired deadline, TLS
-      // SNI rejection at `R::dial_context`, dialer construction error —
-      // calls `dial_failed` and `continue`s without re-inserting, so the
-      // map is implicitly cleaned up on every failure exit. Only the
-      // success path past `ExchangeMeta` allocation re-inserts (so a later
-      // `reap_bridge` can carry the exchange's kind on
-      // `Event::ExchangeCompleted`). `None` here indicates a `DialRequested`
-      // emitted outside this coordinator's start path — kept defensive
-      // (reap then does not emit a kind-specific event for this exchange).
-      let exchange_kind = self.pending_outbound_kinds.remove(&id);
-      // Retire the intent without opening a connection if its own deadline
-      // has already elapsed (mirrors the sibling coordinators'
-      // expired-intent gate).
-      if now >= deadline {
-        self.ep.dial_failed(
-          id,
-          crate::error::StreamError::DialFailed("stream dial deadline elapsed".into()),
-          now,
-        );
-        continue;
-      }
-      // SocketAddr conversion needed: `peer_socket` tags entries on
-      // `out_transmit` and the `StreamAction::Connect(ConnectInfo)` payload
-      // (both driver-facing SocketAddr-typed surfaces).
-      let peer_socket = (self.peer_to_socket)(&peer);
-      let peer_a = crate::CheapClone::cheap_clone(&peer);
-      // Resolve the per-dial record-layer context (e.g. the TLS verification
-      // identity). An `Err` is the soft-fail-via-dial_failed path —
-      // retire the intent for this one peer and move on.
-      let sni_owned = (self.sni_provider)(&peer);
-      let ctx = match R::dial_context::<A>(&peer, sni_owned.as_deref()) {
-        Ok(c) => c,
-        Err(msg) => {
-          self
-            .ep
-            .dial_failed(id, crate::error::StreamError::DialFailed(msg.into()), now);
-          continue;
-        }
-      };
-      // Construct the dialer record layer. A construction error retires the
-      // intent (a misconfigured record layer cannot dial); for a record layer
-      // with infallible constructors this branch is unreachable.
-      let records = match R::dialer(&self.cfg, ctx) {
-        Ok(r) => r,
-        Err(e) => {
-          self.ep.dial_failed(
-            id,
-            crate::error::StreamError::DialFailed(
-              format!("record-layer construction failed: {e}").into(),
-            ),
-            now,
-          );
-          continue;
-        }
-      };
-      let exchange = self.conns.allocate();
-      let bridge = StreamBridge::new(
-        records,
-        deadline,
-        #[cfg(compression)]
-        self.compression,
-        #[cfg(encryption)]
-        self.encryption.clone(),
-        self.ep.max_stream_frame_size(),
-      );
-      self.conns.insert(exchange, bridge);
-      // A fresh dial bridge needs pumping this tick to flush its request bytes
-      // once its label / handshake step settles (a no-handshake dialer settles at
-      // construction), so the following `pump_bridges` must service it; it also
-      // awaits its `Stream` mint, so it is a handshake-completion candidate.
-      self.dirty.insert(exchange);
-      self.unminted.insert(exchange);
-      self.exchanges.insert(
-        exchange,
-        ExchangeMeta {
-          peer_socket,
-          peer: peer_a,
-          mint: Some(PendingMint::Outbound(id)),
-          fin_emitted: false,
-          kind: exchange_kind,
-          outbound: true,
-        },
-      );
-      // `id` is the machine `StreamId` of the originating `start_*` dial,
-      // threaded into the Connect so a driver can correlate a surfaced Connect
-      // back to the exact `start_*` it issued — `service_dials` drains the
-      // SHARED `dial_pending` deque, so one command's drain can also flush an
-      // unrelated same-peer dial; the peer address alone does not call-scope it.
-      let action = StreamAction::Connect(ConnectInfo::new(exchange, peer_socket, id));
-      debug_assert!(
-        matches!(action, StreamAction::Connect(_)),
-        "pending_connects holds only Connect actions",
-      );
-      self.pending_connects.push_back(action);
-    }
   }
 }
