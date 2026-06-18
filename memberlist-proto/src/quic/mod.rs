@@ -318,14 +318,9 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   bridges_terminalized_via_close_command: u64,
 }
 
-// Accessors / builders whose bodies touch only non-generic fields
-// (`compression`, `encryption`, `quinn`, `cfg`, `conns`, `out`,
-// `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
-// (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
-// well-formedness bag — no method-side additions, so the heavier
-// `I: Debug + Display + Send + Sync + 'static` constraints carried by
-// the impl blocks below are NOT required to call any of these.
-// Construction, transform configuration, and plain accessors — no `I: Id`.
+// Construction, transform configuration, transport plumbing, and accessors —
+// methods whose bodies touch only non-generic fields or delegate to an
+// `Endpoint` accessor that needs no node identity. No bound required.
 impl<I, R> QuicEndpoint<I, R> {
   /// Build the coordinator. The quinn endpoint is created with the bundled
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
@@ -721,20 +716,6 @@ impl<I, R> QuicEndpoint<I, R> {
   pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, SocketAddr, R> {
     &mut self.ep
   }
-}
-
-// Methods that forward into the `Endpoint` membership machine.
-impl<I, R> QuicEndpoint<I, R>
-where
-  R: Rng,
-  I: crate::Id,
-{
-  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
-  /// [`Endpoint::start_scheduling`].
-  #[inline]
-  pub fn start_scheduling(&mut self, now: Instant) {
-    self.ep.start_scheduling(now);
-  }
 
   /// Returns `true` if the endpoint is in normal operation (not leaving
   /// or left). Forwards to [`Endpoint::is_running`]. A driver consults
@@ -747,31 +728,6 @@ where
     self.ep.is_running()
   }
 
-  /// Update the local node's metadata. The new value is gossiped
-  /// through the standard alive-broadcast path.
-  ///
-  /// Pass-through to [`Endpoint::update_meta`]; the inner endpoint bumps
-  /// the local incarnation and queues an `Alive` broadcast carrying the
-  /// new bytes so peers converge to the updated metadata via the normal
-  /// SWIM path.
-  ///
-  /// # Errors
-  ///
-  /// Returns [`crate::error::Error::NotRunning`] if the local lifecycle has
-  /// already transitioned to `Leaving` / `Left` / `Shutdown`. Returns
-  /// [`crate::error::Error::MetaExceedsCap`] if `meta` exceeds the
-  /// per-endpoint cap configured at construction.
-  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), crate::error::Error> {
-    self.ep.update_meta(meta)
-  }
-
-  /// Queue an application user-broadcast for gossip dissemination. Forwards
-  /// to the inner membership [`Endpoint`].
-  #[inline]
-  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
-    self.ep.queue_user_broadcast(data)
-  }
-
   /// The reliable-stream frame ceiling
   /// ([`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)).
   /// The driver derives its observation-channel payload byte budget from this.
@@ -779,38 +735,6 @@ where
   pub fn max_stream_frame_size(&self) -> usize {
     self.ep.max_stream_frame_size()
   }
-
-  /// Set the application push-pull local-state snapshot. Forwards to the
-  /// inner [`Endpoint`].
-  ///
-  /// # Errors
-  ///
-  /// Returns [`crate::error::Error::LocalStateExceedsFrame`] if the snapshot's
-  /// framed PushPull would exceed the reliable-stream frame budget — such a
-  /// snapshot is deterministically untransmittable, so it is rejected rather
-  /// than stored.
-  #[inline]
-  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
-    self.ep.set_local_state_snapshot(bytes)
-  }
-
-  /// Set the application ack payload attached to probe acks. Forwards to the
-  /// inner [`Endpoint`].
-  ///
-  /// # Errors
-  ///
-  /// Returns [`crate::error::Error::AckPayloadExceedsMtu`] if the framed Ack
-  /// carrying `payload` would not fit the node's gossip packet budget — an
-  /// over-budget Ack is deterministically unsendable on the gossip socket,
-  /// so the payload is rejected rather than stored.
-  #[inline]
-  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
-    self.ep.set_ack_payload(payload)
-  }
-}
-
-// Pollers and transport-level accessors — no membership identity needed.
-impl<I, R> QuicEndpoint<I, R> {
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
   pub fn poll_transmit(&mut self) -> Option<(SocketAddr, Bytes)> {
     self.out.pop_front()
@@ -933,18 +857,6 @@ impl<I, R> QuicEndpoint<I, R> {
     }
     opened
   }
-}
-
-// Methods that delegate to `Endpoint`'s full-bag surface (`poll_event`,
-// `poll_transmit`, `poll_timeout`, `handle_packet`, `handle_alive`,
-// `handle_suspect`, `requeue_event`, `start_probe`, `leave`), drive
-// `Bridge` ops (whose impls require the full bag), or run the internal
-// bridge-pump / reap helpers.
-impl<I, R> QuicEndpoint<I, R>
-where
-  R: Rng,
-  I: crate::Id,
-{
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
   /// disabled. The configuration applies to the QUIC gossip (plain UDP)
@@ -1016,49 +928,6 @@ where
     self.encryption = encryption;
   }
 
-  /// Initiate one SWIM probe tick on the inner membership endpoint.
-  ///
-  /// Pass-through to [`Endpoint::start_probe`]. Sets `last_now` so the
-  /// next `poll_timeout` is anchored to a known-past instant (the same
-  /// idiom every other `handle_*` / `start_*` uses). The probe itself
-  /// rides the unreliable UDP path (`poll_memberlist_transmit`); only if
-  /// it fails does the reliable QUIC fallback kick in via the natural
-  /// suspicion / failure-detection timing.
-  pub fn start_probe(&mut self, now: Instant) -> bool {
-    self.last_now = Some(now);
-    self.ep.start_probe(now)
-  }
-
-  /// Seed an `Alive` state on the inner membership endpoint (typical
-  /// bootstrap path: a harness teaching the coordinator about a known
-  /// peer without going through a join push/pull).
-  ///
-  /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
-  pub fn handle_alive(
-    &mut self,
-    from: SocketAddr,
-    alive: crate::typed::Alive<I, SocketAddr>,
-    at: Instant,
-  ) {
-    self.last_now = Some(at);
-    self.ep.handle_alive(from, alive, at);
-  }
-
-  /// Inject a `Suspect` event on the inner membership endpoint
-  /// (test-harness path; a real driver gets Suspect via SWIM probe
-  /// timeouts or peer gossip).
-  ///
-  /// Pass-through to [`Endpoint::handle_suspect`]. Sets `last_now`.
-  pub fn handle_suspect(
-    &mut self,
-    from: SocketAddr,
-    suspect: crate::typed::Suspect<I>,
-    at: Instant,
-  ) {
-    self.last_now = Some(at);
-    self.ep.handle_suspect(from, suspect, at);
-  }
-
   /// Re-queue an event for observation by a later [`Self::poll_event`]
   /// (the sieving public drain).
   ///
@@ -1099,12 +968,6 @@ where
       }
       other => self.ep.requeue_event(other),
     }
-  }
-
-  /// Begin a graceful leave; delegates to the membership endpoint.
-  pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
-    self.last_now = Some(now);
-    self.ep.leave(now)
   }
 
   /// Next membership/lifecycle event for the driver, if any.
@@ -1245,38 +1108,6 @@ where
   /// the `LeftCluster` boundary).
   pub fn poll_memberlist_transmit(&mut self) -> Option<Transmit<I, SocketAddr>> {
     self.ep.poll_transmit()
-  }
-
-  /// Pump queued quinn outbound — including datagrams just handed to
-  /// [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) — into the
-  /// [`poll_transmit`](Self::poll_transmit) queue at the current instant WITHOUT
-  /// advancing any membership timer. A driver calls this after queuing
-  /// unreliable datagrams so they flush on the SAME tick they were queued: a
-  /// datagram carries a probe Ping whose timeout is armed in the same tick, and
-  /// a one-tick send latency would let that timeout fire before the Ping ever
-  /// left the host (a spurious failure). Idempotent and side-effect-free on
-  /// membership state (no `Endpoint::handle_timeout`); the existing zero-time
-  /// outbound flush the `start_*` paths already use.
-  pub fn flush_outbound_transmits(&mut self, now: Instant) {
-    self.flush_outbound(now);
-  }
-
-  /// Feed one decoded unreliable memberlist [`Message`](crate::typed::Message)
-  /// (a frame the codec-owning layer unwrapped from a datagram surfaced by
-  /// [`poll_memberlist_ingress`](Self::poll_memberlist_ingress)) into the
-  /// inner membership endpoint.
-  ///
-  /// Pass-through to [`Endpoint::handle_packet`]; the composed unit's public
-  /// ingress for the unreliable path is `handle_udp` → `poll_memberlist_ingress`
-  /// → (codec decode) → `handle_packet`, never a direct call into the inner
-  /// `Endpoint`.
-  pub fn handle_packet(
-    &mut self,
-    from: SocketAddr,
-    msg: crate::typed::Message<I, SocketAddr>,
-    now: Instant,
-  ) {
-    self.ep.handle_packet(from, msg, now);
   }
 
   fn route_datagram_event(
@@ -1465,115 +1296,6 @@ where
     }
   }
 
-  /// Step (2) of the per-tick order: pump every bridge's inbound + outbound
-  /// halves, drain each non-terminal stream's endpoint-events into the
-  /// `Endpoint`, and D1-drain-then-reap any bridge that turned terminal.
-  ///
-  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
-  /// after `service_dials` — a freshly-opened outbound bridge carries its
-  /// request bytes in its FSM `Stream` output buffer, and a single pump is
-  /// what moves those bytes into the quinn send stream so they emerge on
-  /// the next [`Self::collect_transmits`].
-  fn pump_bridges(&mut self, now: Instant) {
-    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      // Split borrow: take the bridge out, operate, put back (or reap).
-      if let Some(mut br) = self.bridges.remove(id) {
-        // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
-        // error, so `is_terminal()` below drives the prompt reap; the
-        // `#[must_use]` Results are consumed — terminality is the signal.
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        // Drain endpoint-events EVERY tick (not only when terminal).
-        // `drain_then_reap` also delivers the slot-gone notice (terminal
-        // only); a non-terminal stream drains its payload events with the
-        // SAME encode+load+flush but WITHOUT that notice.
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          let outcome = Self::outcome_for_terminal(&br);
-          // Reap AFTER drain: dropping the bridge frees its slot.
-          drop(br);
-          self.emit_exchange_completed(*id, outcome);
-        } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // `drain_payload_only` may flip the bridge to terminal (e.g.
-          // a `StreamCommand::Close` from an admission-rejected join sets
-          // `fatal`); re-check terminality so the bridge D1-drains and
-          // reaps in this SAME tick rather than holding the quinn bidi
-          // stream until its exchange deadline.
-          if br.is_terminal() {
-            #[cfg(test)]
-            {
-              self.bridges_terminalized_via_close_command = self
-                .bridges_terminalized_via_close_command
-                .saturating_add(1);
-            }
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let outcome = Self::outcome_for_terminal(&br);
-            drop(br);
-            self.emit_exchange_completed(*id, outcome);
-          } else {
-            self.bridges.insert(*id, br);
-          }
-        }
-      }
-    }
-  }
-
-  /// Test-only variant of [`Self::pump_bridges`] that increments
-  /// [`Self::bridges_pumped_after_acceptance`] once for each bridge whose
-  /// id is NOT in `pre_snapshot_ids` (i.e. inserted into `self.bridges`
-  /// AFTER the snapshot was taken). Used by step (5.5) of [`Self::run_tick`]
-  /// and the post-`service_quinn` second pump in [`Self::flush_outbound`] to
-  /// prove the post-acceptance pump actually runs on every newly-inserted
-  /// bridge — the negative-control regression test reverts the step (5.5)
-  /// call site and the counter stays at zero.
-  ///
-  /// The body is otherwise byte-identical to `pump_bridges`: the counter
-  /// increment is the ONLY observable difference, so production behaviour
-  /// (the second pump's effect on `self.bridges` and the inner `Endpoint`)
-  /// is unchanged.
-  #[cfg(test)]
-  fn pump_bridges_tracking_post_acceptance(
-    &mut self,
-    now: Instant,
-    pre_snapshot_ids: &std::collections::HashSet<StreamId>,
-  ) {
-    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      if let Some(mut br) = self.bridges.remove(id) {
-        if !pre_snapshot_ids.contains(id) {
-          self.bridges_pumped_after_acceptance =
-            self.bridges_pumped_after_acceptance.saturating_add(1);
-        }
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          let outcome = Self::outcome_for_terminal(&br);
-          drop(br);
-          self.emit_exchange_completed(*id, outcome);
-        } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
-          // re-check so this test-only variant matches production reap
-          // semantics under an admission-rejected `Close`.
-          if br.is_terminal() {
-            self.bridges_terminalized_via_close_command = self
-              .bridges_terminalized_via_close_command
-              .saturating_add(1);
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let outcome = Self::outcome_for_terminal(&br);
-            drop(br);
-            self.emit_exchange_completed(*id, outcome);
-          } else {
-            self.bridges.insert(*id, br);
-          }
-        }
-      }
-    }
-  }
-
   /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
   /// step (5) connection drained-reap, then [`Self::collect_transmits`].
   ///
@@ -1750,15 +1472,262 @@ where
   }
 }
 
-// Methods that drive the coordinator tick (`run_tick` ->
-// `service_dials` / `service_quinn`, `flush_outbound` ->
-// `service_quinn`, the `start_*` wrappers and the `handle_udp` /
-// `handle_timeout` driver entrypoints).
+// Methods that drive the inner `Endpoint` membership machine, encode wire
+// types, or run the bridge pump/reap tick — all needing full node identity.
 impl<I, R> QuicEndpoint<I, R>
 where
   R: Rng,
   I: crate::Id,
 {
+  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
+  /// [`Endpoint::start_scheduling`].
+  #[inline]
+  pub fn start_scheduling(&mut self, now: Instant) {
+    self.ep.start_scheduling(now);
+  }
+
+  /// Update the local node's metadata. The new value is gossiped
+  /// through the standard alive-broadcast path.
+  ///
+  /// Pass-through to [`Endpoint::update_meta`]; the inner endpoint bumps
+  /// the local incarnation and queues an `Alive` broadcast carrying the
+  /// new bytes so peers converge to the updated metadata via the normal
+  /// SWIM path.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::NotRunning`] if the local lifecycle has
+  /// already transitioned to `Leaving` / `Left` / `Shutdown`. Returns
+  /// [`crate::error::Error::MetaExceedsCap`] if `meta` exceeds the
+  /// per-endpoint cap configured at construction.
+  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), crate::error::Error> {
+    self.ep.update_meta(meta)
+  }
+
+  /// Queue an application user-broadcast for gossip dissemination. Forwards
+  /// to the inner membership [`Endpoint`].
+  #[inline]
+  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.queue_user_broadcast(data)
+  }
+
+  /// Set the application push-pull local-state snapshot. Forwards to the
+  /// inner [`Endpoint`].
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::LocalStateExceedsFrame`] if the snapshot's
+  /// framed PushPull would exceed the reliable-stream frame budget — such a
+  /// snapshot is deterministically untransmittable, so it is rejected rather
+  /// than stored.
+  #[inline]
+  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.set_local_state_snapshot(bytes)
+  }
+
+  /// Set the application ack payload attached to probe acks. Forwards to the
+  /// inner [`Endpoint`].
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::AckPayloadExceedsMtu`] if the framed Ack
+  /// carrying `payload` would not fit the node's gossip packet budget — an
+  /// over-budget Ack is deterministically unsendable on the gossip socket,
+  /// so the payload is rejected rather than stored.
+  #[inline]
+  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.set_ack_payload(payload)
+  }
+
+  /// Initiate one SWIM probe tick on the inner membership endpoint.
+  ///
+  /// Pass-through to [`Endpoint::start_probe`]. Sets `last_now` so the
+  /// next `poll_timeout` is anchored to a known-past instant (the same
+  /// idiom every other `handle_*` / `start_*` uses). The probe itself
+  /// rides the unreliable UDP path (`poll_memberlist_transmit`); only if
+  /// it fails does the reliable QUIC fallback kick in via the natural
+  /// suspicion / failure-detection timing.
+  pub fn start_probe(&mut self, now: Instant) -> bool {
+    self.last_now = Some(now);
+    self.ep.start_probe(now)
+  }
+
+  /// Seed an `Alive` state on the inner membership endpoint (typical
+  /// bootstrap path: a harness teaching the coordinator about a known
+  /// peer without going through a join push/pull).
+  ///
+  /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
+  pub fn handle_alive(
+    &mut self,
+    from: SocketAddr,
+    alive: crate::typed::Alive<I, SocketAddr>,
+    at: Instant,
+  ) {
+    self.last_now = Some(at);
+    self.ep.handle_alive(from, alive, at);
+  }
+
+  /// Inject a `Suspect` event on the inner membership endpoint
+  /// (test-harness path; a real driver gets Suspect via SWIM probe
+  /// timeouts or peer gossip).
+  ///
+  /// Pass-through to [`Endpoint::handle_suspect`]. Sets `last_now`.
+  pub fn handle_suspect(
+    &mut self,
+    from: SocketAddr,
+    suspect: crate::typed::Suspect<I>,
+    at: Instant,
+  ) {
+    self.last_now = Some(at);
+    self.ep.handle_suspect(from, suspect, at);
+  }
+
+  /// Begin a graceful leave; delegates to the membership endpoint.
+  pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
+    self.last_now = Some(now);
+    self.ep.leave(now)
+  }
+
+  /// Pump queued quinn outbound — including datagrams just handed to
+  /// [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) — into the
+  /// [`poll_transmit`](Self::poll_transmit) queue at the current instant WITHOUT
+  /// advancing any membership timer. A driver calls this after queuing
+  /// unreliable datagrams so they flush on the SAME tick they were queued: a
+  /// datagram carries a probe Ping whose timeout is armed in the same tick, and
+  /// a one-tick send latency would let that timeout fire before the Ping ever
+  /// left the host (a spurious failure). Idempotent and side-effect-free on
+  /// membership state (no `Endpoint::handle_timeout`); the existing zero-time
+  /// outbound flush the `start_*` paths already use.
+  pub fn flush_outbound_transmits(&mut self, now: Instant) {
+    self.flush_outbound(now);
+  }
+
+  /// Feed one decoded unreliable memberlist [`Message`](crate::typed::Message)
+  /// (a frame the codec-owning layer unwrapped from a datagram surfaced by
+  /// [`poll_memberlist_ingress`](Self::poll_memberlist_ingress)) into the
+  /// inner membership endpoint.
+  ///
+  /// Pass-through to [`Endpoint::handle_packet`]; the composed unit's public
+  /// ingress for the unreliable path is `handle_udp` → `poll_memberlist_ingress`
+  /// → (codec decode) → `handle_packet`, never a direct call into the inner
+  /// `Endpoint`.
+  pub fn handle_packet(
+    &mut self,
+    from: SocketAddr,
+    msg: crate::typed::Message<I, SocketAddr>,
+    now: Instant,
+  ) {
+    self.ep.handle_packet(from, msg, now);
+  }
+
+  /// Step (2) of the per-tick order: pump every bridge's inbound + outbound
+  /// halves, drain each non-terminal stream's endpoint-events into the
+  /// `Endpoint`, and D1-drain-then-reap any bridge that turned terminal.
+  ///
+  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
+  /// after `service_dials` — a freshly-opened outbound bridge carries its
+  /// request bytes in its FSM `Stream` output buffer, and a single pump is
+  /// what moves those bytes into the quinn send stream so they emerge on
+  /// the next [`Self::collect_transmits`].
+  fn pump_bridges(&mut self, now: Instant) {
+    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
+    for id in &ids {
+      // Split borrow: take the bridge out, operate, put back (or reap).
+      if let Some(mut br) = self.bridges.remove(id) {
+        // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
+        // error, so `is_terminal()` below drives the prompt reap; the
+        // `#[must_use]` Results are consumed — terminality is the signal.
+        let _ = br.pump_in(&mut self.conns, now);
+        let _ = br.pump_out(&mut self.conns, now);
+        // Drain endpoint-events EVERY tick (not only when terminal).
+        // `drain_then_reap` also delivers the slot-gone notice (terminal
+        // only); a non-terminal stream drains its payload events with the
+        // SAME encode+load+flush but WITHOUT that notice.
+        if br.is_terminal() {
+          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          let outcome = Self::outcome_for_terminal(&br);
+          // Reap AFTER drain: dropping the bridge frees its slot.
+          drop(br);
+          self.emit_exchange_completed(*id, outcome);
+        } else {
+          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
+          // `drain_payload_only` may flip the bridge to terminal (e.g.
+          // a `StreamCommand::Close` from an admission-rejected join sets
+          // `fatal`); re-check terminality so the bridge D1-drains and
+          // reaps in this SAME tick rather than holding the quinn bidi
+          // stream until its exchange deadline.
+          if br.is_terminal() {
+            #[cfg(test)]
+            {
+              self.bridges_terminalized_via_close_command = self
+                .bridges_terminalized_via_close_command
+                .saturating_add(1);
+            }
+            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            let outcome = Self::outcome_for_terminal(&br);
+            drop(br);
+            self.emit_exchange_completed(*id, outcome);
+          } else {
+            self.bridges.insert(*id, br);
+          }
+        }
+      }
+    }
+  }
+
+  /// Test-only variant of [`Self::pump_bridges`] that increments
+  /// [`Self::bridges_pumped_after_acceptance`] once for each bridge whose
+  /// id is NOT in `pre_snapshot_ids` (i.e. inserted into `self.bridges`
+  /// AFTER the snapshot was taken). Used by step (5.5) of [`Self::run_tick`]
+  /// and the post-`service_quinn` second pump in [`Self::flush_outbound`] to
+  /// prove the post-acceptance pump actually runs on every newly-inserted
+  /// bridge — the negative-control regression test reverts the step (5.5)
+  /// call site and the counter stays at zero.
+  ///
+  /// The body is otherwise byte-identical to `pump_bridges`: the counter
+  /// increment is the ONLY observable difference, so production behaviour
+  /// (the second pump's effect on `self.bridges` and the inner `Endpoint`)
+  /// is unchanged.
+  #[cfg(test)]
+  fn pump_bridges_tracking_post_acceptance(
+    &mut self,
+    now: Instant,
+    pre_snapshot_ids: &std::collections::HashSet<StreamId>,
+  ) {
+    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
+    for id in &ids {
+      if let Some(mut br) = self.bridges.remove(id) {
+        if !pre_snapshot_ids.contains(id) {
+          self.bridges_pumped_after_acceptance =
+            self.bridges_pumped_after_acceptance.saturating_add(1);
+        }
+        let _ = br.pump_in(&mut self.conns, now);
+        let _ = br.pump_out(&mut self.conns, now);
+        if br.is_terminal() {
+          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          let outcome = Self::outcome_for_terminal(&br);
+          drop(br);
+          self.emit_exchange_completed(*id, outcome);
+        } else {
+          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
+          // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
+          // re-check so this test-only variant matches production reap
+          // semantics under an admission-rejected `Close`.
+          if br.is_terminal() {
+            self.bridges_terminalized_via_close_command = self
+              .bridges_terminalized_via_close_command
+              .saturating_add(1);
+            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            let outcome = Self::outcome_for_terminal(&br);
+            drop(br);
+            self.emit_exchange_completed(*id, outcome);
+          } else {
+            self.bridges.insert(*id, br);
+          }
+        }
+      }
+    }
+  }
   /// Inbound datagram from the one UDP socket.
   ///
   /// The `Quic` class is fully processed: the datagram is fed into quinn-proto's
