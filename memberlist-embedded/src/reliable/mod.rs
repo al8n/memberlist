@@ -30,7 +30,7 @@
 //! handle (`StreamIo::Conn`).
 
 use bytes::Bytes;
-use core::net::SocketAddr;
+use core::{hash::Hash, net::SocketAddr};
 use hashbrown::HashMap;
 use memberlist_proto::{Instant, streams::ExchangeId};
 use std::{collections::VecDeque, vec::Vec};
@@ -338,7 +338,7 @@ pub struct ReliablePlane<C> {
 
 impl<C> ReliablePlane<C>
 where
-  C: core::hash::Hash + Eq,
+  C: Hash + Eq,
 {
   /// Create an empty reliable plane: no pool entries, no connections, no
   /// listener, no closing slots. Slots are added by the driver immediately
@@ -377,7 +377,7 @@ where
 
 impl<C> Default for ReliablePlane<C>
 where
-  C: core::hash::Hash + Eq,
+  C: Hash + Eq,
 {
   fn default() -> Self {
     Self::new()

@@ -36,6 +36,7 @@ use crate::{
   stream_io::{SlotId, SlotWake},
   time,
 };
+use alloc::boxed::Box;
 
 /// The largest [`Options::socket_timeout`](crate::Options::socket_timeout)
 /// [`Memberlist::new`] accepts. A per-socket inactivity backstop longer than a day is
@@ -376,7 +377,7 @@ where
     let resolved = resolver
       .resolve(ep_cfg.advertise_addr_ref())
       .await
-      .map_err(|e| InitError::Resolve(alloc::boxed::Box::new(e)))?
+      .map_err(|e| InitError::Resolve(Box::new(e)))?
       .into_iter()
       .next()
       .ok_or(InitError::NoAddresses)?;
@@ -539,7 +540,7 @@ where
             resolver
               .resolve(a)
               .await
-              .map_err(|e| OpError::Resolve(alloc::boxed::Box::new(e)))?,
+              .map_err(|e| OpError::Resolve(Box::new(e)))?,
           );
         }
       }

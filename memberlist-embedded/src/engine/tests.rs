@@ -7,8 +7,10 @@ use core::{
 
 use memberlist_proto::{
   CompressionOptions, EncryptionOptions, Keyring, SecretKey, SeedableRng, SmallRng,
+  typed::NodeState,
 };
 use smol_str::SmolStr;
+use std::vec::Vec;
 
 /// A fixed-seed gossip RNG for the engine constructors. These are single-node
 /// state tests; a deterministic seed keeps them reproducible.
@@ -32,15 +34,13 @@ impl GossipIo for NoGossip {
 /// feature gates.
 #[cfg(any(feature = "crc32", feature = "cidr"))]
 struct CaptureGossip {
-  sent: std::vec::Vec<std::vec::Vec<u8>>,
+  sent: Vec<Vec<u8>>,
 }
 
 #[cfg(any(feature = "crc32", feature = "cidr"))]
 impl CaptureGossip {
   fn new() -> Self {
-    Self {
-      sent: std::vec::Vec::new(),
-    }
+    Self { sent: Vec::new() }
   }
 }
 
@@ -60,7 +60,7 @@ impl GossipIo for CaptureGossip {
 /// injected first so gossip has a destination. Only the checksum wire-shape
 /// tests consume it, so it shares their feature gate.
 #[cfg(feature = "crc32")]
-fn capture_gossip(transform: TransformOptions) -> std::vec::Vec<std::vec::Vec<u8>> {
+fn capture_gossip(transform: TransformOptions) -> Vec<Vec<u8>> {
   let now = Instant::from_origin(Duration::from_secs(86_400));
   let cfg = Options::new()
     .with_port(7946)
@@ -86,7 +86,7 @@ fn capture_gossip(transform: TransformOptions) -> std::vec::Vec<std::vec::Vec<u8
 }
 
 struct NoStream {
-  free: std::vec::Vec<u32>,
+  free: Vec<u32>,
   /// What `accepted_peer` reports for any slot — `Some` to simulate a settled
   /// inbound handshake so `check_listener` proceeds to `accept_connection`.
   accept_peer: Option<SocketAddr>,
@@ -214,7 +214,7 @@ fn set_compression_options_accepted_and_engine_still_pumps() {
 fn custom_alive_delegate_restricts_admission() {
   struct RejectId(SmolStr);
   impl AliveDelegate<SmolStr, SocketAddr> for RejectId {
-    fn notify_alive(&self, peer: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+    fn notify_alive(&self, peer: &NodeState<SmolStr, SocketAddr>) -> bool {
       peer.id_ref() != &self.0
     }
   }
@@ -290,7 +290,7 @@ fn set_alive_delegate_preserves_the_cidr_policy() {
 
   struct AcceptAll;
   impl AliveDelegate<SmolStr, SocketAddr> for AcceptAll {
-    fn notify_alive(&self, _: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+    fn notify_alive(&self, _: &NodeState<SmolStr, SocketAddr>) -> bool {
       true
     }
   }
@@ -480,10 +480,7 @@ fn cidr_blocked_unreliable_send_emits_no_datagram() {
 fn custom_merge_delegate_installs_and_engine_still_pumps() {
   struct RejectAllMerges;
   impl MergeDelegate<SmolStr, SocketAddr> for RejectAllMerges {
-    fn notify_merge(
-      &self,
-      _peers: &[memberlist_proto::typed::NodeState<SmolStr, SocketAddr>],
-    ) -> bool {
+    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
       false
     }
   }
@@ -566,7 +563,7 @@ fn control_setters_reject_after_leave() {
 fn admission_delegate_install_after_leave_is_inert() {
   struct AcceptAll;
   impl AliveDelegate<SmolStr, SocketAddr> for AcceptAll {
-    fn notify_alive(&self, _: &memberlist_proto::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+    fn notify_alive(&self, _: &NodeState<SmolStr, SocketAddr>) -> bool {
       true
     }
   }
@@ -820,20 +817,20 @@ fn try_new_at_accepts_disabled_checksum() {
 
 struct QueueGossip {
   /// Pending inbound datagrams: each entry is `(src, bytes)`.
-  inbound: std::vec::Vec<(SocketAddr, std::vec::Vec<u8>)>,
+  inbound: Vec<(SocketAddr, Vec<u8>)>,
   /// Outbound datagrams captured from `send`.
-  outbound: std::vec::Vec<(std::vec::Vec<u8>, SocketAddr)>,
+  outbound: Vec<(Vec<u8>, SocketAddr)>,
 }
 
 impl QueueGossip {
   fn new() -> Self {
     Self {
-      inbound: std::vec::Vec::new(),
-      outbound: std::vec::Vec::new(),
+      inbound: Vec::new(),
+      outbound: Vec::new(),
     }
   }
 
-  fn push(&mut self, src: SocketAddr, bytes: std::vec::Vec<u8>) {
+  fn push(&mut self, src: SocketAddr, bytes: Vec<u8>) {
     self.inbound.push((src, bytes));
   }
 }

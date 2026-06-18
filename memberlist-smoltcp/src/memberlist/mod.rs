@@ -28,6 +28,8 @@ use crate::{
   interface::{HardwareAddress, Medium},
   stream_io::SmoltcpStream,
 };
+use core::marker::PhantomData;
+use std::{boxed::Box, sync::Arc, vec::Vec};
 
 /// The maximum UDP payload (`u16` length minus the 8-byte UDP header), the
 /// hard ceiling for an on-wire gossip datagram. Matches the async drivers.
@@ -211,12 +213,12 @@ pub struct Memberlist<I, A, D, R = SmallRng> {
   // `D` is not stored — it is passed in at construction time and then to
   // each `poll` call. `PhantomData` is required so the struct is generic
   // over `D` without actually holding it.
-  _device: core::marker::PhantomData<D>,
+  _device: PhantomData<D>,
   // Ties the handle to the resolver's unresolved address type. Not held in any
   // field — `join` and construction resolve addresses in this domain before the
   // engine, which only sees `SocketAddr`, ever observes them. `fn(A)` keeps the
   // marker contravariant in `A` and free of drop/auto-trait obligations.
-  _a: core::marker::PhantomData<fn(A)>,
+  _a: PhantomData<fn(A)>,
 }
 
 // Constructors that build the embedded engine with an OS-seeded `SmallRng` —
@@ -350,7 +352,7 @@ where
     // address is `NoAddresses`. From here on the advertise address is concrete.
     let resolved_advertise = resolver
       .resolve(ep_cfg.advertise_addr_ref())
-      .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .map_err(|e| InitError::Resolve(Box::new(e)))?
       .into_iter()
       .next()
       .ok_or(InitError::NoAddresses)?;
@@ -570,7 +572,7 @@ where
     // Allocate a gossip UDP socket with per-packet metadata rings and a flat
     // payload arena.  `SocketSet::new(Vec::new())` creates an alloc-backed,
     // growable socket storage — smoltcp accepts any `Into<ManagedSlice>`.
-    let mut sockets = SocketSet::new(std::vec::Vec::new());
+    let mut sockets = SocketSet::new(Vec::new());
 
     // Floor each UDP payload arena at "configured datagram slots × max on-wire
     // datagram". The machine caps an outbound gossip datagram's PLAINTEXT at
@@ -702,8 +704,8 @@ where
       sockets,
       udp,
       engine,
-      _device: core::marker::PhantomData,
-      _a: core::marker::PhantomData,
+      _device: PhantomData,
+      _a: PhantomData,
     })
   }
 }
@@ -781,7 +783,7 @@ where
     // of the bounded `ResolvedAddrs` is taken. See [`try_new`](Self::try_new).
     let resolved_advertise = resolver
       .resolve(ep_cfg.advertise_addr_ref())
-      .map_err(|e| InitError::Resolve(std::boxed::Box::new(e)))?
+      .map_err(|e| InitError::Resolve(Box::new(e)))?
       .into_iter()
       .next()
       .ok_or(InitError::NoAddresses)?;
@@ -991,7 +993,7 @@ where
     // Allocate a gossip UDP socket with per-packet metadata rings and a flat
     // payload arena.  `SocketSet::new(Vec::new())` creates an alloc-backed,
     // growable socket storage — smoltcp accepts any `Into<ManagedSlice>`.
-    let mut sockets = SocketSet::new(std::vec::Vec::new());
+    let mut sockets = SocketSet::new(Vec::new());
 
     // Floor each UDP payload arena at "configured datagram slots × max on-wire
     // datagram". The machine caps an outbound gossip datagram's PLAINTEXT at
@@ -1116,8 +1118,8 @@ where
       sockets,
       udp,
       engine,
-      _device: core::marker::PhantomData,
-      _a: core::marker::PhantomData,
+      _device: PhantomData,
+      _a: PhantomData,
     })
   }
 
@@ -1279,7 +1281,7 @@ where
   /// field reflects the live gossip-FSM state (`Alive` / `Suspect` / `Dead` /
   /// `Unknown`), not the frozen wire-format value.
   #[inline]
-  pub fn by_id(&self, id: &I) -> Option<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn by_id(&self, id: &I) -> Option<Arc<NodeState<I, SocketAddr>>> {
     self.engine.by_id(id)
   }
 
@@ -1289,7 +1291,7 @@ where
   /// `online_members()[i].state() == State::Alive` always holds. Consistent
   /// with `is_alive`: if `is_alive(id)` is `true`, `id` appears here.
   #[inline]
-  pub fn online_members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn online_members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
     self.engine.online_members()
   }
 
@@ -1306,7 +1308,7 @@ where
   ///
   /// Mirrors the legacy `Memberlist::members` name.
   #[inline]
-  pub fn members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  pub fn members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
     self.engine.members()
   }
 
@@ -1315,7 +1317,7 @@ where
   pub fn members_by(
     &self,
     pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
-  ) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+  ) -> Vec<Arc<NodeState<I, SocketAddr>>> {
     self.engine.members_by(pred)
   }
 
@@ -1329,10 +1331,7 @@ where
   ///
   /// Each `NodeState` passed to `f` is stamped with the current FSM liveness.
   #[inline]
-  pub fn members_map_by<O>(
-    &self,
-    f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>,
-  ) -> std::vec::Vec<O> {
+  pub fn members_map_by<O>(&self, f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>) -> Vec<O> {
     self.engine.members_map_by(f)
   }
 
@@ -1358,7 +1357,7 @@ where
 
   /// The local node's `NodeState`, stamped with the current FSM liveness.
   #[inline]
-  pub fn local_state(&self) -> std::sync::Arc<NodeState<I, SocketAddr>> {
+  pub fn local_state(&self) -> Arc<NodeState<I, SocketAddr>> {
     self.engine.local_state()
   }
 
@@ -1567,14 +1566,14 @@ where
     // type (capped at `MAX_RESOLVED_ADDRS_PER_SEED`), so a runaway resolver
     // cannot exhaust memory on a constrained target and no post-hoc `.take` is
     // needed — the cap is enforced by the type.
-    let mut resolved = std::vec::Vec::with_capacity(seeds.len());
+    let mut resolved = Vec::with_capacity(seeds.len());
     for seed in seeds {
       match seed {
         MaybeResolved::Resolved(s) => resolved.push(*s),
         MaybeResolved::Unresolved(a) => resolved.extend(
           resolver
             .resolve(a)
-            .map_err(|e| JoinError::Resolve(std::boxed::Box::new(e)))?,
+            .map_err(|e| JoinError::Resolve(Box::new(e)))?,
         ),
       }
     }

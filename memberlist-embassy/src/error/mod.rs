@@ -1,5 +1,6 @@
 //! Errors from constructing a [`Memberlist`](crate::Memberlist).
 
+use alloc::boxed::Box;
 use core::{fmt, time::Duration};
 
 /// Why constructing a [`Memberlist`](crate::Memberlist) node failed.
@@ -55,7 +56,7 @@ pub enum InitError {
   /// `source()` chain; a caller that knows its concrete resolver can downcast.
   /// No `Send`/`Sync` bound — the embassy [`AddressResolver`](crate::AddressResolver)
   /// is single-threaded by design, so its error need not cross threads.
-  Resolve(alloc::boxed::Box<dyn core::error::Error + 'static>),
+  Resolve(Box<dyn core::error::Error + 'static>),
   /// The address resolver succeeded but yielded no address for the advertise
   /// address, so the node would have nothing to advertise.
   NoAddresses,
@@ -201,7 +202,7 @@ pub enum OpError {
   /// `source()` chain; a caller that knows its concrete resolver can downcast.
   /// No `Send`/`Sync` bound — the embassy [`AddressResolver`](crate::AddressResolver)
   /// is single-threaded by design, so its error need not cross threads.
-  Resolve(alloc::boxed::Box<dyn core::error::Error + 'static>),
+  Resolve(Box<dyn core::error::Error + 'static>),
   /// A non-empty [`join`](crate::Memberlist::join) seed set resolved to no wire
   /// address — a discovery failure rather than a successful no-op join.
   NoAddresses,

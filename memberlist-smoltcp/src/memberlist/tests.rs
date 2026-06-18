@@ -63,8 +63,8 @@ fn gossip_seed_domain_separates_and_diverges_per_node() {
 fn new_node_is_sole_member() {
   let cfg = crate::Options::new();
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut dev = Loopback::new(Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     cfg,
     ip_iface(),
@@ -79,8 +79,8 @@ fn new_node_is_sole_member() {
 
 #[test]
 fn poll_emits_initial_gossip_and_a_deadline() {
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut dev = Loopback::new(Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
   let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     crate::Options::new(),
@@ -137,7 +137,9 @@ fn endpoint_is_routable_matches_smoltcp_unicast() {
 // Resolvers exercising the `join` resolution boundary. `Address = SocketAddr`
 // matches a node built with the [`SocketAddrResolver`](crate::SocketAddrResolver).
 
+use core::{convert::Infallible, time::Duration};
 use memberlist_embedded::ResolvedAddrs;
+use smoltcp::phy::{Loopback, Medium};
 
 /// Must never be invoked — the lifecycle guard rejects a left node's `join`
 /// before any seed is resolved.
@@ -145,7 +147,7 @@ struct UnreachableResolver;
 
 impl crate::Resolver for UnreachableResolver {
   type Address = SocketAddr;
-  type Error = core::convert::Infallible;
+  type Error = Infallible;
   fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
     unreachable!("a left node must not resolve seeds");
   }
@@ -156,7 +158,7 @@ struct EmptyResolver;
 
 impl crate::Resolver for EmptyResolver {
   type Address = SocketAddr;
-  type Error = core::convert::Infallible;
+  type Error = Infallible;
   fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
     Ok(ResolvedAddrs::new())
   }
@@ -169,7 +171,7 @@ struct FullResolver;
 
 impl crate::Resolver for FullResolver {
   type Address = SocketAddr;
-  type Error = core::convert::Infallible;
+  type Error = Infallible;
   fn resolve(&self, address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
     let mut addrs = ResolvedAddrs::new();
     // Fill to capacity; `push` past `MAX_RESOLVED_ADDRS_PER_SEED` returns the
@@ -185,16 +187,16 @@ struct PanicOnResolve;
 
 impl crate::Resolver for PanicOnResolve {
   type Address = SocketAddr;
-  type Error = core::convert::Infallible;
+  type Error = Infallible;
   fn resolve(&self, _address: &SocketAddr) -> Result<ResolvedAddrs, Self::Error> {
     panic!("the config preflight must reject the node before any address is resolved");
   }
 }
 
 fn started_node(
-  dev: &mut smoltcp::phy::Loopback,
+  dev: &mut Loopback,
   now: memberlist_proto::Instant,
-) -> Memberlist<SmolStr, SocketAddr, smoltcp::phy::Loopback> {
+) -> Memberlist<SmolStr, SocketAddr, Loopback> {
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
   let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
     crate::Options::new(),
@@ -211,8 +213,8 @@ fn started_node(
 
 #[test]
 fn join_after_leave_rejects_without_resolving() {
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut dev = Loopback::new(Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let mut m = started_node(&mut dev, now);
   m.leave(now).expect("leave a running node");
 
@@ -232,8 +234,8 @@ fn join_after_leave_rejects_without_resolving() {
 
 #[test]
 fn join_with_all_seeds_unresolvable_is_no_addresses() {
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut dev = Loopback::new(Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let mut m = started_node(&mut dev, now);
 
   // A non-empty seed set that resolves to nothing is a discovery failure.
@@ -248,8 +250,8 @@ fn join_with_all_seeds_unresolvable_is_no_addresses() {
 
 #[test]
 fn join_accepts_a_full_bounded_resolution() {
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
-  let now = memberlist_proto::Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut dev = Loopback::new(Medium::Ip);
+  let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let mut m = started_node(&mut dev, now);
 
   // A resolver that fills the bounded result to capacity still joins. The
@@ -265,9 +267,9 @@ fn join_accepts_a_full_bounded_resolution() {
 
 #[test]
 fn invalid_config_is_rejected_before_resolution() {
-  use core::time::Duration;
+  use Duration;
 
-  let mut dev = smoltcp::phy::Loopback::new(smoltcp::phy::Medium::Ip);
+  let mut dev = Loopback::new(Medium::Ip);
   let now = memberlist_proto::Instant::from_origin(Duration::from_secs(1));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946));
 
