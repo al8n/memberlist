@@ -173,16 +173,7 @@ pub(crate) struct StreamBridge<I, A, R> {
 impl<I, A, R> StreamBridge<I, A, R>
 where
   R: StreamTransport,
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
 {
   /// Build a `Handshaking` bridge wrapping a fresh record layer. The dial /
   /// accept deadline bounds the handshake / label exchange; the `Stream` (and
@@ -379,100 +370,6 @@ where
     matches!(self.phase, StreamPhase::Handshaking) && self.records.is_handshaking()
   }
 
-  /// Feed bytes the driver read from the transport connection. A zero-length
-  /// slice is the transport `read == 0` (peer half-closed the socket) anchor.
-  /// Returns `Err(())` if the record layer rejected the bytes (handshake /
-  /// label mismatch) — the bridge becomes terminal and the coordinator reaps it
-  /// with NO `Stream` minted (during `Handshaking`) or via the `StreamErrored`
-  /// D1 path (during `Established`).
-  ///
-  /// During `Handshaking` a record-layer rejection just makes the bridge
-  /// terminal: there is no `Stream` and no FSM queue to clear, and no endpoint
-  /// side effect can have happened (this is the handshake / label-mismatch
-  /// reject path).
-  ///
-  /// During `Established` a record-layer rejection routes through the
-  /// atomic-retire-then-fail helper (`BridgeFailure::Transport`); plaintext is
-  /// drained and fed to `Stream::handle_data` (a decode `Err` →
-  /// `BridgeFailure::Decode`); and the close anchor — the transport `read == 0`
-  /// EOF, or an in-band close — feeds `Stream::handle_data(&[], now)`. A
-  /// non-terminal-phase `Err` (`StreamError::PeerClosed`) is the truncation
-  /// path → `BridgeFailure::Decode`; a clean `Ok(())` advances
-  /// `observe_recv_fin()` → `RecvClosed`.
-  ///
-  /// A zero-length feed delivered while `phase == Handshaking` (the pre-promote
-  /// window) latches [`Self::pending_eof`] so the post-promotion
-  /// [`Self::replay_pending`] honors the out-of-band FIN. Without this latch a
-  /// driver delivering `[label||first request]` + the same-tick transport
-  /// `read == 0` as two coordinator-level calls — bytes first, then the
-  /// empty-slice EOF anchor — would have its EOF dropped (the empty-slice arm
-  /// of [`Self::intake_handshaking`] is a no-op while the bridge is still
-  /// pre-`Stream`), and the post-promote `pump_in_established` would never
-  /// observe the recv-half FIN (`R::peer_has_closed()` is permanently `false`
-  /// for a transport whose close is out of band — see [`Self::pending_eof`]).
-  pub(crate) fn handle_transport_data(&mut self, data: &[u8], now: Instant) -> Result<(), ()> {
-    // Terminal-ingress stop. A bridge that has reached a terminal
-    // [`BridgePhase`] — `BothClosed` (clean reap pending) or `Failed(_)`
-    // (any failure transition, e.g. an [`BridgeFailure::EncryptionPolicyChanged`]
-    // on a runtime [`super::StreamEndpoint::set_encryption_options`] update) —
-    // refuses further inbound bytes. Without this guard, network reads
-    // delivered between the failure transition and the wake-latch reap can
-    // still feed [`Self::pump_in_established`], decode + commit stream events
-    // from an exchange already declared dead, and have those events applied
-    // to the FSM by [`Self::drain_then_reap`]. The symmetric inbound
-    // complement to the outbound queue-purge that the failure transition
-    // already runs via `clear_outbound`.
-    if self.is_terminal() {
-      return Ok(());
-    }
-    // Pre-`Stream` (handshake / label) window: shuttle bytes until the
-    // handshake settles, retaining any tail for post-promotion replay (always
-    // empty for a raw-passthrough record layer — see `pending_inbound`). Once
-    // promoted, the established intake feeds the record layer and drains the
-    // surfaced plaintext into the `Stream`.
-    if self.stream.is_none() {
-      // Latch a same-tick out-of-band FIN delivered while still pre-`Stream` so
-      // the post-promote `replay_pending` honors it (see `pending_eof`). The
-      // bridge is still pre-`Stream` here, so the empty-slice intake itself is a
-      // no-op and the latch is the only carrier of the EOF signal across the
-      // promote boundary. Robust to ordering: a coalesced `[label||first request]`
-      // delivered as `(bytes, eof=true)` reaches this branch with
-      // `phase == Handshaking` regardless of whether `bytes` or `&[]` arrives
-      // first (the empty-slice second call latches; the first call surfaces the
-      // request as inbound plaintext, leaving the bridge still pre-`Stream` since
-      // the mint runs in `service_handshake_completions`).
-      if data.is_empty() {
-        // A pre-`Stream` EOF. If the handshake / label step has NOT settled, the
-        // peer half-closed before establishing the exchange — that handshake can
-        // never complete, so fail now (ConnectionLost) rather than holding a
-        // zombie bridge (and its record-layer buffers) until the accept
-        // deadline. If it HAS settled (the mint is merely deferred to the tick),
-        // this is the benign coalesced-close case: latch the FIN for
-        // post-promotion replay.
-        if self.records.is_handshaking() {
-          self.fail(BridgeFailure::ConnectionLost);
-          return Err(());
-        }
-        self.pending_eof = true;
-      }
-      return self.intake_handshaking(data, now);
-    }
-
-    // Established: a real transport read (a zero-length slice is the transport
-    // `read == 0` EOF anchor). A non-empty retained pre-promotion tail is
-    // replayed FIRST, ahead of the newly-supplied data, so the request
-    // reassembles in wire order. (`pending_inbound` is always empty for a
-    // raw-passthrough record layer, so the second arm is vestigial there.)
-    let eof = data.is_empty();
-    if self.pending_inbound.is_empty() {
-      self.pump_in_established(data, eof, now)
-    } else {
-      let mut combined = core::mem::take(&mut self.pending_inbound);
-      combined.extend_from_slice(data);
-      self.pump_in_established(&combined, eof, now)
-    }
-  }
-
   /// Pre-`Stream` intake. Feeds bytes into the record layer until either all
   /// supplied input is consumed or the handshake / label step settles mid-feed.
   ///
@@ -534,202 +431,6 @@ where
         return Ok(());
       }
     }
-  }
-
-  /// Established intake: feed `input` through the record layer in bounded steps,
-  /// draining surfaced plaintext into the `Stream` between steps, then map the
-  /// close anchor. `eof` is the transport `read == 0` marker (a zero-length
-  /// real transport read); a retained-tail replay passes `eof = false` (the
-  /// tail is buffered data, not an end-of-stream).
-  ///
-  /// A raw-passthrough record layer has no decrypted-plaintext buffer to fill
-  /// and never returns `Intake::Pending`, so a single read is consumed in one
-  /// pass — the bounded-interleave loop collapses to one iteration there. The
-  /// loop shape (each iteration makes progress or breaks) holds for a
-  /// backpressured record layer too.
-  fn pump_in_established(&mut self, input: &[u8], eof: bool, now: Instant) -> Result<(), ()> {
-    // Defense-in-depth terminal guard. The outermost
-    // [`Self::handle_transport_data`] entry already short-circuits a terminal
-    // bridge, and [`Self::replay_pending`] only runs at promote time. Guard
-    // here too so any future caller cannot feed bytes through this path
-    // post-failure (e.g. a same-tick decode failure during a multi-step
-    // intake loop must not re-enter and commit further stream events).
-    if self.is_terminal() {
-      return Ok(());
-    }
-    let mut offset = 0usize;
-    let mut decode_failed = false;
-    loop {
-      // An `Intake::Failed` is a handshake / label rejection — never produced
-      // once the handshake / label step has settled (this is the `Established`
-      // path), but routed through the atomic-retire-then-fail path defensively
-      // so no half-applied merge / ack survives an aborted exchange.
-      let intake = self.records.handle_transport_data(&input[offset..], now);
-      let consumed = match intake {
-        Intake::Done => {
-          offset = input.len();
-          true
-        }
-        // The carried count is bytes consumed before backpressure.
-        Intake::Pending(n) => {
-          offset += n;
-          n > 0
-        }
-        Intake::Failed => {
-          self.fail_with_retire(BridgeFailure::Transport(
-            "stream record rejected".to_string(),
-          ));
-          return Err(());
-        }
-      };
-
-      // Append the record layer's surfaced plaintext to the reliable-unit
-      // accumulator, then drain every COMPLETE `[unit_len][payload]` unit into
-      // the FSM. A trailing partial unit stays buffered for the next read.
-      let mut surfaced = Vec::new();
-      let drained = self.records.read_plaintext(&mut surfaced);
-      self.recv_accum.extend_from_slice(&surfaced);
-      loop {
-        match self.take_reliable_unit(&self.recv_accum, self.reliable_max) {
-          Ok(Some((plaintext, consumed))) => {
-            self.recv_accum.drain(..consumed);
-            if self
-              .stream
-              .as_mut()
-              .expect("stream is Some in the established intake")
-              .handle_data(&plaintext, now)
-              .is_err()
-            {
-              decode_failed = true;
-              break;
-            }
-          }
-          // Need more bytes — keep the partial and wait for the next read.
-          Ok(None) => break,
-          // A corrupt unit (bad inner wrapper, or an over-ceiling `unit_len`):
-          // terminalize the exchange.
-          Err(_) => {
-            self.fail_with_retire(BridgeFailure::Decode);
-            return Err(());
-          }
-        }
-      }
-
-      // Terminate once all input is consumed; a decode failure also stops the
-      // feed (the exchange is being torn down). Otherwise, if this step made no
-      // progress at all, break to honor the bounded-work contract.
-      if matches!(intake, Intake::Done) || decode_failed {
-        break;
-      }
-      if !consumed && drained == 0 {
-        // Defensive: retain the unconsumed input tail so a future backpressured
-        // record layer that stalls mid-buffer replays it on the next read
-        // (handle_transport_data's established branch prepends `pending_inbound`)
-        // instead of silently dropping it. Unreachable for the current record
-        // layers — passthrough consumes all input; a TLS `Pending` surfaces
-        // plaintext on the next `read_plaintext` — so normally a no-op.
-        if offset < input.len() {
-          self.pending_inbound.extend_from_slice(&input[offset..]);
-        }
-        break;
-      }
-    }
-
-    // Close anchor. A transport `read == 0` is the EOF marker; `records.peer_has_closed()`
-    // additionally carries a record layer's in-band close (always `false` for a
-    // transport whose close is out of band, so `eof` is the sole driver there):
-    // feed `Stream::handle_data(&[], now)`, the FSM's per-phase
-    // premature-vs-clean EOF decision. A premature EOF
-    // (`StreamError::PeerClosed`) is the truncation path → decode failure; a
-    // clean EOF (`Ok`) retires the recv half below via `observe_recv_fin`.
-    let fin_seen = eof || self.records.peer_has_closed();
-    if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
-      // A trailing partial reliable unit at EOF is a truncated transmission —
-      // the peer closed mid-unit. Treat it as a decode failure (the same
-      // outcome the FSM's premature-EOF path produces for a half frame).
-      self.fail_with_retire(BridgeFailure::Decode);
-      return Err(());
-    }
-    if fin_seen
-      && !decode_failed
-      && self
-        .stream
-        .as_mut()
-        .expect("stream is Some in the established intake")
-        .handle_data(&[], now)
-        .is_err()
-    {
-      decode_failed = true;
-    }
-
-    if decode_failed {
-      // Atomic failure: retire our half + discard buffered inbound plaintext
-      // BEFORE flipping the phase, so a same-tick reap cannot leak a
-      // half-applied exchange. The FSM's failure variant is preserved in
-      // `Stream::is_failed()`; `drain_then_reap`'s `StreamErrored` notice uses
-      // the `BridgeFailure::Decode` high-level reason.
-      self.fail_with_retire(BridgeFailure::Decode);
-      return Err(());
-    }
-
-    // Only after the FSM accepted the EOF (clean phase, or already terminal)
-    // do we retire the recv half. A premature-EOF rejection routed through the
-    // decode-fail path above before reaching here, so `RecvClosed` is the
-    // FSM-blessed recv-half-retired transition.
-    if fin_seen {
-      self.observe_recv_fin();
-    }
-
-    Ok(())
-  }
-
-  /// Drain any plaintext the record layer buffered pre-promotion through the
-  /// established intake, SAME tick as the promotion. The coordinator drives this
-  /// from its post-mint bridge pump (after [`Self::promote`]) so a first request
-  /// coalesced with the peer's `[label]` prefix reaches the just-minted `Stream`
-  /// without waiting for the next transport read.
-  ///
-  /// A TLS record layer distinguishes a retained large-frame ciphertext tail
-  /// from a small frame rustls already buffered; a raw-passthrough record layer
-  /// has no backpressure and so no retained tail (`pending_inbound` stays
-  /// empty — see its docs). The drain still runs whenever a `Stream` exists,
-  /// NOT only when a tail was retained: a peer that coalesced
-  /// `[label][first request]` had that request stripped of its label and
-  /// buffered as inbound plaintext inside the record layer while the bridge was
-  /// still `Handshaking`; feeding an EMPTY slice through
-  /// [`Self::pump_in_established`] drains that buffered plaintext into the
-  /// `Stream`. Gating on a non-empty tail would strand it until a later
-  /// transport read that a request-awaiting-reply peer will never send.
-  ///
-  /// The replay seeds `eof` from the [`Self::pending_eof`] latch: a same-tick
-  /// out-of-band FIN that arrived while the bridge was still `Handshaking` is
-  /// honored here, so a coalesced `[label||first request]||FIN` delivery
-  /// terminalizes on the same tick as the promote rather than stalling to the
-  /// exchange deadline. A peer that has NOT yet half-closed leaves the latch
-  /// `false`, so a push/pull request awaiting its response is not prematurely
-  /// signaled EOF. The latch is sticky (never cleared), mirroring
-  /// [`Self::fin_sent`] on the send side: `replay_pending` is idempotent, so a
-  /// subsequent same-tick call observes the same EOF and the FSM's already-EOF
-  /// state is a no-op. Returns `Err(())` if the drain terminalized the bridge
-  /// (decode / record failure), mirroring [`Self::handle_transport_data`].
-  pub(crate) fn replay_pending(&mut self, now: Instant) -> Result<(), ()> {
-    if self.stream.is_none() {
-      return Ok(());
-    }
-    // A terminal bridge — e.g. one failed at promote time by a policy change
-    // delivered between the handshake-settling tick and the post-mint replay
-    // — must not surface its retained pre-promote plaintext into the
-    // just-minted `Stream`. The retained tail (if any) is dropped along
-    // with the bridge by the next `pump_bridges` reap.
-    if self.is_terminal() {
-      return Ok(());
-    }
-    // Feed the retained tail (if any) FIRST, then drain. `core::mem::take`
-    // clears `pending_inbound` (always empty for a raw-passthrough record
-    // layer); an empty tail still drains the buffered surfaced plaintext and
-    // honors the close anchor.
-    let combined = core::mem::take(&mut self.pending_inbound);
-    self.pump_in_established(&combined, self.pending_eof, now)
   }
 
   /// Drain bytes the record layer wants to write into `out`. Returns the byte
@@ -1156,6 +857,387 @@ where
     )
   }
 
+  /// Test-only: expose the bridge phase.
+  #[cfg(test)]
+  #[inline(always)]
+  pub(crate) fn phase_ref(&self) -> &StreamPhase {
+    &self.phase
+  }
+
+  /// Test-only: expose whether no `Stream` has been minted yet (pre-promote
+  /// window).
+  #[cfg(test)]
+  pub(crate) fn stream_is_none(&self) -> bool {
+    self.stream.is_none()
+  }
+
+  /// Test-only: expose whether a `Stream` has been minted (post-promote).
+  #[cfg(all(test, feature = "tls"))]
+  pub(crate) fn stream_is_some(&self) -> bool {
+    self.stream.is_some()
+  }
+
+  /// Test-only: expose the snapshotted exchange deadline for assertions.
+  #[cfg(all(test, feature = "tls"))]
+  pub(crate) fn deadline(&self) -> Instant {
+    self.deadline
+  }
+
+  /// Whether this bridge must be re-pumped on the next tick even without new
+  /// transport input: it retained a record-layer ciphertext tail (TLS large-frame
+  /// receive back-pressure) that replays once its consumer drains. A reliable
+  /// exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND to
+  /// re-drive here — `pump_out` gathers the whole unit in one pass.
+  pub(crate) fn needs_repump(&self) -> bool {
+    !self.pending_inbound.is_empty()
+  }
+
+  /// Test-only: expose whether the pre-promote inbound buffer is empty
+  /// (always `true` for a raw-passthrough record layer; may be non-empty for a
+  /// TLS bridge that retained a ciphertext tail).
+  #[cfg(test)]
+  pub(crate) fn pending_inbound_is_empty(&self) -> bool {
+    self.pending_inbound.is_empty()
+  }
+
+  /// Test-only: expose the pre-promote out-of-band FIN latch (asserted by the
+  /// plain-TCP bridge tests, whose FIN is the only close anchor).
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn pending_eof(&self) -> bool {
+    self.pending_eof
+  }
+
+  /// Test-only: return the inner stream's FSM failure reason, if any. Mirrors
+  /// `stream.as_ref().and_then(|s| s.is_failed())` for use in tests that live
+  /// outside the `streams` module (where `stream` is private).
+  #[cfg(test)]
+  pub(crate) fn stream_is_failed(&self) -> Option<&crate::error::StreamError> {
+    self.stream.as_ref().and_then(|s| s.is_failed())
+  }
+
+  /// Test-only: expose the reliable-unit / decompressed-payload ceiling so a
+  /// test can assert it tracks the configured `max_stream_frame_size` rather
+  /// than a hard-coded constant.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn reliable_max(&self) -> usize {
+    self.reliable_max
+  }
+
+  /// Test-only: expose the effective [`EncryptionOptions`] the bridge stored
+  /// after the `R::is_secure()` selection in [`Self::new`] (or its later
+  /// [`Self::set_encryption`] update). Lets a TLS-flavor test assert that a
+  /// bridge handed an ENABLED keyring still ends up with a disabled
+  /// `EncryptionOptions` (TLS already provides confidentiality, so the
+  /// reliable path skips its inner Encrypted wrapper), and a TCP-flavor test
+  /// assert that a runtime
+  /// [`super::StreamEndpoint::set_encryption_options`] update reached every
+  /// live bridge. Gated on the transport features (`tls` / `tcp`) and on
+  /// `aes-gcm` (the asserting tests build a `Keyring`/`SecretKey`
+  /// from `memberlist-wire`).
+  ///
+  /// [`EncryptionOptions`]: crate::EncryptionOptions
+  #[cfg(all(test, any(feature = "tls", feature = "tcp"), feature = "aes-gcm"))]
+  pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
+    &self.encryption
+  }
+}
+
+impl<I, A, R> StreamBridge<I, A, R>
+where
+  R: StreamTransport,
+  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  I: crate::Id,
+{
+  /// Feed bytes the driver read from the transport connection. A zero-length
+  /// slice is the transport `read == 0` (peer half-closed the socket) anchor.
+  /// Returns `Err(())` if the record layer rejected the bytes (handshake /
+  /// label mismatch) — the bridge becomes terminal and the coordinator reaps it
+  /// with NO `Stream` minted (during `Handshaking`) or via the `StreamErrored`
+  /// D1 path (during `Established`).
+  ///
+  /// During `Handshaking` a record-layer rejection just makes the bridge
+  /// terminal: there is no `Stream` and no FSM queue to clear, and no endpoint
+  /// side effect can have happened (this is the handshake / label-mismatch
+  /// reject path).
+  ///
+  /// During `Established` a record-layer rejection routes through the
+  /// atomic-retire-then-fail helper (`BridgeFailure::Transport`); plaintext is
+  /// drained and fed to `Stream::handle_data` (a decode `Err` →
+  /// `BridgeFailure::Decode`); and the close anchor — the transport `read == 0`
+  /// EOF, or an in-band close — feeds `Stream::handle_data(&[], now)`. A
+  /// non-terminal-phase `Err` (`StreamError::PeerClosed`) is the truncation
+  /// path → `BridgeFailure::Decode`; a clean `Ok(())` advances
+  /// `observe_recv_fin()` → `RecvClosed`.
+  ///
+  /// A zero-length feed delivered while `phase == Handshaking` (the pre-promote
+  /// window) latches [`Self::pending_eof`] so the post-promotion
+  /// [`Self::replay_pending`] honors the out-of-band FIN. Without this latch a
+  /// driver delivering `[label||first request]` + the same-tick transport
+  /// `read == 0` as two coordinator-level calls — bytes first, then the
+  /// empty-slice EOF anchor — would have its EOF dropped (the empty-slice arm
+  /// of [`Self::intake_handshaking`] is a no-op while the bridge is still
+  /// pre-`Stream`), and the post-promote `pump_in_established` would never
+  /// observe the recv-half FIN (`R::peer_has_closed()` is permanently `false`
+  /// for a transport whose close is out of band — see [`Self::pending_eof`]).
+  pub(crate) fn handle_transport_data(&mut self, data: &[u8], now: Instant) -> Result<(), ()> {
+    // Terminal-ingress stop. A bridge that has reached a terminal
+    // [`BridgePhase`] — `BothClosed` (clean reap pending) or `Failed(_)`
+    // (any failure transition, e.g. an [`BridgeFailure::EncryptionPolicyChanged`]
+    // on a runtime [`super::StreamEndpoint::set_encryption_options`] update) —
+    // refuses further inbound bytes. Without this guard, network reads
+    // delivered between the failure transition and the wake-latch reap can
+    // still feed [`Self::pump_in_established`], decode + commit stream events
+    // from an exchange already declared dead, and have those events applied
+    // to the FSM by [`Self::drain_then_reap`]. The symmetric inbound
+    // complement to the outbound queue-purge that the failure transition
+    // already runs via `clear_outbound`.
+    if self.is_terminal() {
+      return Ok(());
+    }
+    // Pre-`Stream` (handshake / label) window: shuttle bytes until the
+    // handshake settles, retaining any tail for post-promotion replay (always
+    // empty for a raw-passthrough record layer — see `pending_inbound`). Once
+    // promoted, the established intake feeds the record layer and drains the
+    // surfaced plaintext into the `Stream`.
+    if self.stream.is_none() {
+      // Latch a same-tick out-of-band FIN delivered while still pre-`Stream` so
+      // the post-promote `replay_pending` honors it (see `pending_eof`). The
+      // bridge is still pre-`Stream` here, so the empty-slice intake itself is a
+      // no-op and the latch is the only carrier of the EOF signal across the
+      // promote boundary. Robust to ordering: a coalesced `[label||first request]`
+      // delivered as `(bytes, eof=true)` reaches this branch with
+      // `phase == Handshaking` regardless of whether `bytes` or `&[]` arrives
+      // first (the empty-slice second call latches; the first call surfaces the
+      // request as inbound plaintext, leaving the bridge still pre-`Stream` since
+      // the mint runs in `service_handshake_completions`).
+      if data.is_empty() {
+        // A pre-`Stream` EOF. If the handshake / label step has NOT settled, the
+        // peer half-closed before establishing the exchange — that handshake can
+        // never complete, so fail now (ConnectionLost) rather than holding a
+        // zombie bridge (and its record-layer buffers) until the accept
+        // deadline. If it HAS settled (the mint is merely deferred to the tick),
+        // this is the benign coalesced-close case: latch the FIN for
+        // post-promotion replay.
+        if self.records.is_handshaking() {
+          self.fail(BridgeFailure::ConnectionLost);
+          return Err(());
+        }
+        self.pending_eof = true;
+      }
+      return self.intake_handshaking(data, now);
+    }
+
+    // Established: a real transport read (a zero-length slice is the transport
+    // `read == 0` EOF anchor). A non-empty retained pre-promotion tail is
+    // replayed FIRST, ahead of the newly-supplied data, so the request
+    // reassembles in wire order. (`pending_inbound` is always empty for a
+    // raw-passthrough record layer, so the second arm is vestigial there.)
+    let eof = data.is_empty();
+    if self.pending_inbound.is_empty() {
+      self.pump_in_established(data, eof, now)
+    } else {
+      let mut combined = core::mem::take(&mut self.pending_inbound);
+      combined.extend_from_slice(data);
+      self.pump_in_established(&combined, eof, now)
+    }
+  }
+
+  /// Established intake: feed `input` through the record layer in bounded steps,
+  /// draining surfaced plaintext into the `Stream` between steps, then map the
+  /// close anchor. `eof` is the transport `read == 0` marker (a zero-length
+  /// real transport read); a retained-tail replay passes `eof = false` (the
+  /// tail is buffered data, not an end-of-stream).
+  ///
+  /// A raw-passthrough record layer has no decrypted-plaintext buffer to fill
+  /// and never returns `Intake::Pending`, so a single read is consumed in one
+  /// pass — the bounded-interleave loop collapses to one iteration there. The
+  /// loop shape (each iteration makes progress or breaks) holds for a
+  /// backpressured record layer too.
+  fn pump_in_established(&mut self, input: &[u8], eof: bool, now: Instant) -> Result<(), ()> {
+    // Defense-in-depth terminal guard. The outermost
+    // [`Self::handle_transport_data`] entry already short-circuits a terminal
+    // bridge, and [`Self::replay_pending`] only runs at promote time. Guard
+    // here too so any future caller cannot feed bytes through this path
+    // post-failure (e.g. a same-tick decode failure during a multi-step
+    // intake loop must not re-enter and commit further stream events).
+    if self.is_terminal() {
+      return Ok(());
+    }
+    let mut offset = 0usize;
+    let mut decode_failed = false;
+    loop {
+      // An `Intake::Failed` is a handshake / label rejection — never produced
+      // once the handshake / label step has settled (this is the `Established`
+      // path), but routed through the atomic-retire-then-fail path defensively
+      // so no half-applied merge / ack survives an aborted exchange.
+      let intake = self.records.handle_transport_data(&input[offset..], now);
+      let consumed = match intake {
+        Intake::Done => {
+          offset = input.len();
+          true
+        }
+        // The carried count is bytes consumed before backpressure.
+        Intake::Pending(n) => {
+          offset += n;
+          n > 0
+        }
+        Intake::Failed => {
+          self.fail_with_retire(BridgeFailure::Transport(
+            "stream record rejected".to_string(),
+          ));
+          return Err(());
+        }
+      };
+
+      // Append the record layer's surfaced plaintext to the reliable-unit
+      // accumulator, then drain every COMPLETE `[unit_len][payload]` unit into
+      // the FSM. A trailing partial unit stays buffered for the next read.
+      let mut surfaced = Vec::new();
+      let drained = self.records.read_plaintext(&mut surfaced);
+      self.recv_accum.extend_from_slice(&surfaced);
+      loop {
+        match self.take_reliable_unit(&self.recv_accum, self.reliable_max) {
+          Ok(Some((plaintext, consumed))) => {
+            self.recv_accum.drain(..consumed);
+            if self
+              .stream
+              .as_mut()
+              .expect("stream is Some in the established intake")
+              .handle_data(&plaintext, now)
+              .is_err()
+            {
+              decode_failed = true;
+              break;
+            }
+          }
+          // Need more bytes — keep the partial and wait for the next read.
+          Ok(None) => break,
+          // A corrupt unit (bad inner wrapper, or an over-ceiling `unit_len`):
+          // terminalize the exchange.
+          Err(_) => {
+            self.fail_with_retire(BridgeFailure::Decode);
+            return Err(());
+          }
+        }
+      }
+
+      // Terminate once all input is consumed; a decode failure also stops the
+      // feed (the exchange is being torn down). Otherwise, if this step made no
+      // progress at all, break to honor the bounded-work contract.
+      if matches!(intake, Intake::Done) || decode_failed {
+        break;
+      }
+      if !consumed && drained == 0 {
+        // Defensive: retain the unconsumed input tail so a future backpressured
+        // record layer that stalls mid-buffer replays it on the next read
+        // (handle_transport_data's established branch prepends `pending_inbound`)
+        // instead of silently dropping it. Unreachable for the current record
+        // layers — passthrough consumes all input; a TLS `Pending` surfaces
+        // plaintext on the next `read_plaintext` — so normally a no-op.
+        if offset < input.len() {
+          self.pending_inbound.extend_from_slice(&input[offset..]);
+        }
+        break;
+      }
+    }
+
+    // Close anchor. A transport `read == 0` is the EOF marker; `records.peer_has_closed()`
+    // additionally carries a record layer's in-band close (always `false` for a
+    // transport whose close is out of band, so `eof` is the sole driver there):
+    // feed `Stream::handle_data(&[], now)`, the FSM's per-phase
+    // premature-vs-clean EOF decision. A premature EOF
+    // (`StreamError::PeerClosed`) is the truncation path → decode failure; a
+    // clean EOF (`Ok`) retires the recv half below via `observe_recv_fin`.
+    let fin_seen = eof || self.records.peer_has_closed();
+    if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
+      // A trailing partial reliable unit at EOF is a truncated transmission —
+      // the peer closed mid-unit. Treat it as a decode failure (the same
+      // outcome the FSM's premature-EOF path produces for a half frame).
+      self.fail_with_retire(BridgeFailure::Decode);
+      return Err(());
+    }
+    if fin_seen
+      && !decode_failed
+      && self
+        .stream
+        .as_mut()
+        .expect("stream is Some in the established intake")
+        .handle_data(&[], now)
+        .is_err()
+    {
+      decode_failed = true;
+    }
+
+    if decode_failed {
+      // Atomic failure: retire our half + discard buffered inbound plaintext
+      // BEFORE flipping the phase, so a same-tick reap cannot leak a
+      // half-applied exchange. The FSM's failure variant is preserved in
+      // `Stream::is_failed()`; `drain_then_reap`'s `StreamErrored` notice uses
+      // the `BridgeFailure::Decode` high-level reason.
+      self.fail_with_retire(BridgeFailure::Decode);
+      return Err(());
+    }
+
+    // Only after the FSM accepted the EOF (clean phase, or already terminal)
+    // do we retire the recv half. A premature-EOF rejection routed through the
+    // decode-fail path above before reaching here, so `RecvClosed` is the
+    // FSM-blessed recv-half-retired transition.
+    if fin_seen {
+      self.observe_recv_fin();
+    }
+
+    Ok(())
+  }
+
+  /// Drain any plaintext the record layer buffered pre-promotion through the
+  /// established intake, SAME tick as the promotion. The coordinator drives this
+  /// from its post-mint bridge pump (after [`Self::promote`]) so a first request
+  /// coalesced with the peer's `[label]` prefix reaches the just-minted `Stream`
+  /// without waiting for the next transport read.
+  ///
+  /// A TLS record layer distinguishes a retained large-frame ciphertext tail
+  /// from a small frame rustls already buffered; a raw-passthrough record layer
+  /// has no backpressure and so no retained tail (`pending_inbound` stays
+  /// empty — see its docs). The drain still runs whenever a `Stream` exists,
+  /// NOT only when a tail was retained: a peer that coalesced
+  /// `[label][first request]` had that request stripped of its label and
+  /// buffered as inbound plaintext inside the record layer while the bridge was
+  /// still `Handshaking`; feeding an EMPTY slice through
+  /// [`Self::pump_in_established`] drains that buffered plaintext into the
+  /// `Stream`. Gating on a non-empty tail would strand it until a later
+  /// transport read that a request-awaiting-reply peer will never send.
+  ///
+  /// The replay seeds `eof` from the [`Self::pending_eof`] latch: a same-tick
+  /// out-of-band FIN that arrived while the bridge was still `Handshaking` is
+  /// honored here, so a coalesced `[label||first request]||FIN` delivery
+  /// terminalizes on the same tick as the promote rather than stalling to the
+  /// exchange deadline. A peer that has NOT yet half-closed leaves the latch
+  /// `false`, so a push/pull request awaiting its response is not prematurely
+  /// signaled EOF. The latch is sticky (never cleared), mirroring
+  /// [`Self::fin_sent`] on the send side: `replay_pending` is idempotent, so a
+  /// subsequent same-tick call observes the same EOF and the FSM's already-EOF
+  /// state is a no-op. Returns `Err(())` if the drain terminalized the bridge
+  /// (decode / record failure), mirroring [`Self::handle_transport_data`].
+  pub(crate) fn replay_pending(&mut self, now: Instant) -> Result<(), ()> {
+    if self.stream.is_none() {
+      return Ok(());
+    }
+    // A terminal bridge — e.g. one failed at promote time by a policy change
+    // delivered between the handshake-settling tick and the post-mint replay
+    // — must not surface its retained pre-promote plaintext into the
+    // just-minted `Stream`. The retained tail (if any) is dropped along
+    // with the bridge by the next `pump_bridges` reap.
+    if self.is_terminal() {
+      return Ok(());
+    }
+    // Feed the retained tail (if any) FIRST, then drain. `core::mem::take`
+    // clears `pending_inbound` (always empty for a raw-passthrough record
+    // layer); an empty tail still drains the buffered surfaced plaintext and
+    // honors the close anchor.
+    let combined = core::mem::take(&mut self.pending_inbound);
+    self.pump_in_established(&combined, self.pending_eof, now)
+  }
+
   /// D1 drain-before-reap. In strict order:
   ///
   /// 1. drain every queued [`Stream::poll_endpoint_event`] into the
@@ -1319,89 +1401,5 @@ where
         }
       }
     }
-  }
-
-  /// Test-only: expose the bridge phase.
-  #[cfg(test)]
-  #[inline(always)]
-  pub(crate) fn phase_ref(&self) -> &StreamPhase {
-    &self.phase
-  }
-
-  /// Test-only: expose whether no `Stream` has been minted yet (pre-promote
-  /// window).
-  #[cfg(test)]
-  pub(crate) fn stream_is_none(&self) -> bool {
-    self.stream.is_none()
-  }
-
-  /// Test-only: expose whether a `Stream` has been minted (post-promote).
-  #[cfg(all(test, feature = "tls"))]
-  pub(crate) fn stream_is_some(&self) -> bool {
-    self.stream.is_some()
-  }
-
-  /// Test-only: expose the snapshotted exchange deadline for assertions.
-  #[cfg(all(test, feature = "tls"))]
-  pub(crate) fn deadline(&self) -> Instant {
-    self.deadline
-  }
-
-  /// Whether this bridge must be re-pumped on the next tick even without new
-  /// transport input: it retained a record-layer ciphertext tail (TLS large-frame
-  /// receive back-pressure) that replays once its consumer drains. A reliable
-  /// exchange is one-unit-per-exchange, so there is no un-flushed OUTBOUND to
-  /// re-drive here — `pump_out` gathers the whole unit in one pass.
-  pub(crate) fn needs_repump(&self) -> bool {
-    !self.pending_inbound.is_empty()
-  }
-
-  /// Test-only: expose whether the pre-promote inbound buffer is empty
-  /// (always `true` for a raw-passthrough record layer; may be non-empty for a
-  /// TLS bridge that retained a ciphertext tail).
-  #[cfg(test)]
-  pub(crate) fn pending_inbound_is_empty(&self) -> bool {
-    self.pending_inbound.is_empty()
-  }
-
-  /// Test-only: expose the pre-promote out-of-band FIN latch (asserted by the
-  /// plain-TCP bridge tests, whose FIN is the only close anchor).
-  #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn pending_eof(&self) -> bool {
-    self.pending_eof
-  }
-
-  /// Test-only: return the inner stream's FSM failure reason, if any. Mirrors
-  /// `stream.as_ref().and_then(|s| s.is_failed())` for use in tests that live
-  /// outside the `streams` module (where `stream` is private).
-  #[cfg(test)]
-  pub(crate) fn stream_is_failed(&self) -> Option<&crate::error::StreamError> {
-    self.stream.as_ref().and_then(|s| s.is_failed())
-  }
-
-  /// Test-only: expose the reliable-unit / decompressed-payload ceiling so a
-  /// test can assert it tracks the configured `max_stream_frame_size` rather
-  /// than a hard-coded constant.
-  #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn reliable_max(&self) -> usize {
-    self.reliable_max
-  }
-
-  /// Test-only: expose the effective [`EncryptionOptions`] the bridge stored
-  /// after the `R::is_secure()` selection in [`Self::new`] (or its later
-  /// [`Self::set_encryption`] update). Lets a TLS-flavor test assert that a
-  /// bridge handed an ENABLED keyring still ends up with a disabled
-  /// `EncryptionOptions` (TLS already provides confidentiality, so the
-  /// reliable path skips its inner Encrypted wrapper), and a TCP-flavor test
-  /// assert that a runtime
-  /// [`super::StreamEndpoint::set_encryption_options`] update reached every
-  /// live bridge. Gated on the transport features (`tls` / `tcp`) and on
-  /// `aes-gcm` (the asserting tests build a `Keyring`/`SecretKey`
-  /// from `memberlist-wire`).
-  ///
-  /// [`EncryptionOptions`]: crate::EncryptionOptions
-  #[cfg(all(test, any(feature = "tls", feature = "tcp"), feature = "aes-gcm"))]
-  pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
-    &self.encryption
   }
 }

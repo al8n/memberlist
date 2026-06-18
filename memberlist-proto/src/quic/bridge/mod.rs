@@ -156,16 +156,7 @@ pub(crate) struct Bridge<I, A> {
 
 impl<I, A> Bridge<I, A>
 where
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
 {
   /// Build a `Bridge` over a freshly opened/accepted quinn bidi stream.
   ///
@@ -932,6 +923,105 @@ where
     Ok(())
   }
 
+  /// `true` once the bridge has reached a terminal [`BridgePhase`] —
+  /// either [`BridgePhase::BothClosed`] (clean: both halves transport-
+  /// retired) or [`BridgePhase::Failed`] (any failure path). The driver
+  /// then stops pumping and runs [`Bridge::drain_then_reap`].
+  ///
+  /// Symmetric terminality: phase is the SINGLE source of truth.
+  /// Reaches `true` iff the bridge has entered [`BridgePhase::BothClosed`]
+  /// (natural FIN paths on both halves) or [`BridgePhase::Failed`] (any
+  /// failure transition). The failure transitions retire BOTH QUIC
+  /// halves (`SendStream::reset` + `RecvStream::stop`) atomically BEFORE
+  /// flipping the phase, so a `Failed`-phase bridge has both halves
+  /// retired by construction.
+  ///
+  /// **No `stream.is_failed()` fallback.** Every FSM-internal failure
+  /// path that sets `stream.is_failed()` is observed by `pump_in` /
+  /// `pump_out` and cascaded into [`BridgePhase::Failed`] via the
+  /// atomic-retire-then-fail helpers. A bridge whose FSM is_failed
+  /// but whose phase is still `Active`/`SendClosed`/`RecvClosed` is
+  /// a transient inconsistency — the next pump observes it and
+  /// transitions atomically. Falling back to `stream.is_failed()` for
+  /// terminality would let a reap fire before the retirement step,
+  /// orphaning QUIC stream state.
+  pub(crate) fn is_terminal(&self) -> bool {
+    matches!(self.phase, BridgePhase::BothClosed | BridgePhase::Failed(_))
+  }
+
+  /// Test-only: expose the effective [`EncryptionOptions`] the bridge
+  /// stored after the force-disable in [`Self::new`]. Lets a QUIC test
+  /// assert that a bridge handed an ENABLED keyring still ends up with a
+  /// disabled `EncryptionOptions` — quinn already provides
+  /// confidentiality, so the reliable path skips its inner Encrypted
+  /// wrapper. Gated on `aes-gcm` (the asserting test builds a
+  /// `Keyring`/`SecretKey` from `memberlist-wire`).
+  ///
+  /// [`EncryptionOptions`]: crate::EncryptionOptions
+  #[cfg(all(test, feature = "aes-gcm"))]
+  pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
+    &self.encryption
+  }
+
+  /// Test-only: feed `bytes` into `recv_accum` and run the inbound label
+  /// classifier once. Returns `Ok(true)` when the latch is now set (either it
+  /// was already set or it just flipped), `Ok(false)` when the header is still
+  /// `Incomplete`, and `Err(reason)` when the header is `Rejected`.
+  ///
+  /// This drives the same classify path that `pump_in`'s chunk loop runs,
+  /// without requiring a real quinn connection. Lets label-unit tests drive
+  /// the validation state machine directly.
+  #[cfg(test)]
+  pub(crate) fn push_recv_and_classify(
+    &mut self,
+    bytes: &[u8],
+  ) -> Result<bool, crate::label::LabelError> {
+    self.recv_accum.extend_from_slice(bytes);
+    if self.inbound_label_validated {
+      return Ok(true);
+    }
+    let expected = self.label.as_deref();
+    match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
+      LabelOutcome::Accepted(consumed) => {
+        self.recv_accum.drain(..consumed);
+        self.inbound_label_validated = true;
+        if !self.eager_outbound_label && !self.outbound_label_written {
+          if let Some(lbl) = &self.label {
+            encode_label_prefix(lbl, &mut self.pending_out);
+          }
+          self.outbound_label_written = true;
+        }
+        Ok(true)
+      }
+      LabelOutcome::Incomplete => Ok(false),
+      LabelOutcome::Rejected(e) => Err(e),
+    }
+  }
+
+  /// Test-only: `true` once the inbound label latch is set.
+  #[cfg(test)]
+  pub(crate) fn inbound_label_validated(&self) -> bool {
+    self.inbound_label_validated
+  }
+
+  /// Test-only: `true` once the outbound label frame has been staged.
+  #[cfg(test)]
+  pub(crate) fn outbound_label_written(&self) -> bool {
+    self.outbound_label_written
+  }
+
+  /// Test-only: the bytes currently staged in `pending_out`.
+  #[cfg(test)]
+  pub(crate) fn pending_out_bytes(&self) -> &[u8] {
+    &self.pending_out
+  }
+}
+
+impl<I, A> Bridge<I, A>
+where
+  A: crate::Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  I: crate::Id,
+{
   /// Pump inbound quinn bytes into the memberlist stream.
   ///
   /// Returns `Err(())` if the quinn read or the memberlist decode failed
@@ -1137,32 +1227,6 @@ where
     }
 
     Ok(())
-  }
-
-  /// `true` once the bridge has reached a terminal [`BridgePhase`] —
-  /// either [`BridgePhase::BothClosed`] (clean: both halves transport-
-  /// retired) or [`BridgePhase::Failed`] (any failure path). The driver
-  /// then stops pumping and runs [`Bridge::drain_then_reap`].
-  ///
-  /// Symmetric terminality: phase is the SINGLE source of truth.
-  /// Reaches `true` iff the bridge has entered [`BridgePhase::BothClosed`]
-  /// (natural FIN paths on both halves) or [`BridgePhase::Failed`] (any
-  /// failure transition). The failure transitions retire BOTH QUIC
-  /// halves (`SendStream::reset` + `RecvStream::stop`) atomically BEFORE
-  /// flipping the phase, so a `Failed`-phase bridge has both halves
-  /// retired by construction.
-  ///
-  /// **No `stream.is_failed()` fallback.** Every FSM-internal failure
-  /// path that sets `stream.is_failed()` is observed by `pump_in` /
-  /// `pump_out` and cascaded into [`BridgePhase::Failed`] via the
-  /// atomic-retire-then-fail helpers. A bridge whose FSM is_failed
-  /// but whose phase is still `Active`/`SendClosed`/`RecvClosed` is
-  /// a transient inconsistency — the next pump observes it and
-  /// transitions atomically. Falling back to `stream.is_failed()` for
-  /// terminality would let a reap fire before the retirement step,
-  /// orphaning QUIC stream state.
-  pub(crate) fn is_terminal(&self) -> bool {
-    matches!(self.phase, BridgePhase::BothClosed | BridgePhase::Failed(_))
   }
 
   /// D1 drain-before-reap. In strict order:
@@ -1380,73 +1444,6 @@ where
         }
       }
     }
-  }
-
-  /// Test-only: expose the effective [`EncryptionOptions`] the bridge
-  /// stored after the force-disable in [`Self::new`]. Lets a QUIC test
-  /// assert that a bridge handed an ENABLED keyring still ends up with a
-  /// disabled `EncryptionOptions` — quinn already provides
-  /// confidentiality, so the reliable path skips its inner Encrypted
-  /// wrapper. Gated on `aes-gcm` (the asserting test builds a
-  /// `Keyring`/`SecretKey` from `memberlist-wire`).
-  ///
-  /// [`EncryptionOptions`]: crate::EncryptionOptions
-  #[cfg(all(test, feature = "aes-gcm"))]
-  pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
-    &self.encryption
-  }
-
-  /// Test-only: feed `bytes` into `recv_accum` and run the inbound label
-  /// classifier once. Returns `Ok(true)` when the latch is now set (either it
-  /// was already set or it just flipped), `Ok(false)` when the header is still
-  /// `Incomplete`, and `Err(reason)` when the header is `Rejected`.
-  ///
-  /// This drives the same classify path that `pump_in`'s chunk loop runs,
-  /// without requiring a real quinn connection. Lets label-unit tests drive
-  /// the validation state machine directly.
-  #[cfg(test)]
-  pub(crate) fn push_recv_and_classify(
-    &mut self,
-    bytes: &[u8],
-  ) -> Result<bool, crate::label::LabelError> {
-    self.recv_accum.extend_from_slice(bytes);
-    if self.inbound_label_validated {
-      return Ok(true);
-    }
-    let expected = self.label.as_deref();
-    match classify_header(&self.recv_accum, expected, self.skip_inbound_label_check) {
-      LabelOutcome::Accepted(consumed) => {
-        self.recv_accum.drain(..consumed);
-        self.inbound_label_validated = true;
-        if !self.eager_outbound_label && !self.outbound_label_written {
-          if let Some(lbl) = &self.label {
-            encode_label_prefix(lbl, &mut self.pending_out);
-          }
-          self.outbound_label_written = true;
-        }
-        Ok(true)
-      }
-      LabelOutcome::Incomplete => Ok(false),
-      LabelOutcome::Rejected(e) => Err(e),
-    }
-  }
-
-  /// Test-only: `true` once the inbound label latch is set.
-  #[cfg(test)]
-  pub(crate) fn inbound_label_validated(&self) -> bool {
-    self.inbound_label_validated
-  }
-
-  /// Test-only: `true` once the outbound label frame has been staged.
-  #[cfg(test)]
-  pub(crate) fn outbound_label_written(&self) -> bool {
-    self.outbound_label_written
-  }
-
-  /// Test-only: the bytes currently staged in `pending_out`.
-  #[cfg(test)]
-  pub(crate) fn pending_out_bytes(&self) -> &[u8] {
-    &self.pending_out
   }
 }
 
