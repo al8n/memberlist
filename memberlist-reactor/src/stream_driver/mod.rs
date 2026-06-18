@@ -181,7 +181,10 @@ struct BridgeEof {
 }
 
 /// The result a dial task reports back to the pump.
-enum DialOutcome<R: Runtime> {
+enum DialOutcome<R>
+where
+  R: Runtime,
+{
   /// The connection succeeded; hand the stream and its write channel back.
   Connected(DialConnected<R>),
   /// The connection failed or timed out; the pump fails the exchange.
@@ -189,7 +192,10 @@ enum DialOutcome<R: Runtime> {
 }
 
 /// Payload of [`DialOutcome::Connected`].
-struct DialConnected<R: Runtime> {
+struct DialConnected<R>
+where
+  R: Runtime,
+{
   eid: ExchangeId,
   stream: <R::Net as Net>::TcpStream,
   out_rx: Receiver<BridgeOut>,
@@ -268,11 +274,14 @@ struct TransformCtx {
 /// strip label → parse. Returns the source and the parsed messages — empty on
 /// any malformed/undecryptable datagram (gossip is lossy; the driver drops it).
 /// Runs inline on the pump (the transform is microsecond-scale per datagram).
-fn transform_ingress<I: NodeId>(
+fn transform_ingress<I>(
   ctx: &TransformCtx,
   from: SocketAddr,
   raw: Bytes,
-) -> (SocketAddr, Vec<Message<I, SocketAddr>>) {
+) -> (SocketAddr, Vec<Message<I, SocketAddr>>)
+where
+  I: NodeId,
+{
   // The only `Cow::Borrowed` result is the no-transform passthrough (the whole
   // input unchanged), so reuse the input `Bytes` instead of copying it — this is
   // the common plain-gossip path. A real transform yields `Owned`. With an
@@ -303,10 +312,13 @@ fn transform_ingress<I: NodeId>(
 /// compress → checksum → encrypt. Returns the peer and on-wire bytes, or `None`
 /// when encoding fails or a configured checksum/encryption backend is missing
 /// (the driver drops the datagram). Pure and `Send`.
-fn transform_egress<I: NodeId>(
+fn transform_egress<I>(
   ctx: &TransformCtx,
   transmit: Transmit<I, SocketAddr>,
-) -> Option<(SocketAddr, Vec<u8>)> {
+) -> Option<(SocketAddr, Vec<u8>)>
+where
+  I: NodeId,
+{
   let encode_opts = EncodeOptions::new(ctx.label.clone());
   let (peer, plain) = match transmit {
     Transmit::Packet(pkt) => {
@@ -344,10 +356,15 @@ fn transform_egress<I: NodeId>(
 }
 
 /// Build the transform context from the endpoint's current options.
-fn build_transform<I: NodeId, T: StreamTransport, G: rand::Rng>(
+fn build_transform<I, T, G>(
   endpoint: &StreamEndpoint<I, SocketAddr, T, G>,
   label: &Option<Bytes>,
-) -> Arc<TransformCtx> {
+) -> Arc<TransformCtx>
+where
+  I: NodeId,
+  T: StreamTransport,
+  G: rand::Rng,
+{
   Arc::new(TransformCtx {
     // `compression`/`checksum` accessors return `&Options`; copy out (both are
     // `Copy`). `encryption_options` likewise returns a reference and is cloned.
@@ -364,12 +381,13 @@ fn build_transform<I: NodeId, T: StreamTransport, G: rand::Rng>(
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
-pub(crate) struct StreamDriver<
+pub(crate) struct StreamDriver<I, R, T, G = rand::rngs::StdRng>
+where
   I: NodeId,
   R: Runtime,
   T: StreamTransport,
-  G: rand::Rng = rand::rngs::StdRng,
-> {
+  G: rand::Rng,
+{
   endpoint: StreamEndpoint<I, SocketAddr, T, G>,
   /// Unreliable gossip datagrams (the reliable exchanges run over TCP bridges).
   /// Wrapped in `Option` so the shutdown branch can drop it (releasing the bound
@@ -480,7 +498,13 @@ pub(crate) struct StreamDriver<
   last_metrics: memberlist_proto::metrics::Metrics,
 }
 
-impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R, T, G> {
+impl<I, R, T, G> StreamDriver<I, R, T, G>
+where
+  I: NodeId,
+  R: Runtime,
+  T: StreamTransport,
+  G: rand::Rng,
+{
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
     endpoint: StreamEndpoint<I, SocketAddr, T, G>,
@@ -1296,11 +1320,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng> StreamDriver<I, R,
   }
 }
 
-impl<I: NodeId, R: Runtime, T: StreamTransport, G: rand::Rng + Unpin> Future
-  for StreamDriver<I, R, T, G>
+impl<I, R, T, G> Future for StreamDriver<I, R, T, G>
 where
   T: Unpin,
   T::Options: Unpin,
+  I: NodeId,
+  R: Runtime,
+  T: StreamTransport,
+  G: rand::Rng + Unpin,
 {
   type Output = ();
 
@@ -1685,12 +1712,15 @@ where
 /// each enqueue. `accept` is async-only, so this cannot fold into the pump's
 /// poll; it stops promptly when the driver drops `shutdown_rx`'s sender, which
 /// cancels the pending `accept()` so the listener is released at once.
-pub(crate) async fn accept_task<I: NodeId, L: TcpListener>(
+pub(crate) async fn accept_task<I, L>(
   listener: L,
   accepted_tx: Sender<(L::Stream, SocketAddr)>,
   shutdown_rx: Receiver<()>,
   shared: Arc<Shared<I>>,
-) {
+) where
+  I: NodeId,
+  L: TcpListener,
+{
   loop {
     select! {
       conn = listener.accept().fuse() => match conn {
@@ -1721,14 +1751,17 @@ pub(crate) async fn accept_task<I: NodeId, L: TcpListener>(
 
 /// Dials `peer` for outbound exchange `eid` and reports the outcome to the pump,
 /// waking it afterwards.
-async fn dial_task<I: NodeId, R: Runtime>(
+async fn dial_task<I, R>(
   eid: ExchangeId,
   peer: SocketAddr,
   out_rx: Receiver<BridgeOut>,
   cancel_rx: oneshot::Receiver<()>,
   dial_tx: Sender<DialOutcome<R>>,
   shared: Arc<Shared<I>>,
-) {
+) where
+  I: NodeId,
+  R: Runtime,
+{
   let outcome = match <R::Net as Net>::TcpStream::connect_timeout(&peer, DIAL_TIMEOUT).await {
     Ok(stream) => DialOutcome::Connected(DialConnected {
       eid,
@@ -1767,7 +1800,7 @@ async fn dial_task<I: NodeId, R: Runtime>(
 /// on every chunk and never trips it. It fires only when a single partial write
 /// makes NO progress for the full `close_timeout`; the bridge is then torn down,
 /// dropping the write half so the OS RSTs the stuck stream.
-async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
+async fn bridge_task<I, R, S>(
   stream: S,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
@@ -1775,7 +1808,11 @@ async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
   inbound_tx: Sender<BridgeInbound>,
   shared: Arc<Shared<I>>,
   close_timeout: Duration,
-) {
+) where
+  I: NodeId,
+  R: Runtime,
+  S: TcpStream,
+{
   let (mut read_half, mut write_half) = stream.into_split();
   let mut buf = vec![0u8; BRIDGE_READ_BUF];
   let mut read_eof = false;

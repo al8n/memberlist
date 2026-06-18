@@ -185,7 +185,11 @@ impl<I, A> PushNodeState<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> CheapClone for PushNodeState<I, A> {
+impl<I, A> CheapClone for PushNodeState<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   fn cheap_clone(&self) -> Self {
     Self {
       id: self.id.cheap_clone(),
@@ -199,7 +203,11 @@ impl<I: CheapClone, A: CheapClone> CheapClone for PushNodeState<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
+impl<I, A> PushNodeState<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   /// Returns a [`Node`] with the same id and address as this [`PushNodeState`].
   pub fn node(&self) -> Node<I, A> {
     Node::new(self.id.cheap_clone(), self.addr.cheap_clone())

@@ -72,7 +72,11 @@ use agnostic::net::TcpListener;
 /// and a `Box<dyn _>` does not implement the trait directly).
 struct BoxedAlive<I, A>(Box<dyn AliveDelegate<I, A>>);
 
-impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
+impl<I, A> AliveDelegate<I, A> for BoxedAlive<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   fn notify_alive(&self, peer: &NodeState<I, A>) -> bool {
     self.0.notify_alive(peer)
   }
@@ -81,7 +85,11 @@ impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
 /// `MergeDelegate` counterpart to [`BoxedAlive`].
 struct BoxedMerge<I, A>(Box<dyn MergeDelegate<I, A>>);
 
-impl<I: 'static, A: 'static> MergeDelegate<I, A> for BoxedMerge<I, A> {
+impl<I, A> MergeDelegate<I, A> for BoxedMerge<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   fn notify_merge(&self, peers: &[NodeState<I, A>]) -> bool {
     self.0.notify_merge(peers)
   }
@@ -155,7 +163,10 @@ impl<I, A, R> Drop for Memberlist<I, A, R> {
   }
 }
 
-impl<I: NodeId, A, R> Memberlist<I, A, R> {
+impl<I, A, R> Memberlist<I, A, R>
+where
+  I: NodeId,
+{
   /// Builds a QUIC-backed node and spawns its driver on the runtime `R`, seeding
   /// the gossip RNG from the OS (a `StdRng`). Use
   /// [`quic_with_rng`](Self::quic_with_rng) to inject a different RNG.
@@ -1221,10 +1232,13 @@ impl<I: NodeId, A, R> Memberlist<I, A, R> {
 }
 
 /// Resolves a single address (the advertise / a seed) to one `SocketAddr`.
-async fn resolve_one<Res: AddressResolver>(
+async fn resolve_one<Res>(
   resolver: &Res,
   addr: MaybeResolved<Res::Address>,
-) -> Result<SocketAddr, Error> {
+) -> Result<SocketAddr, Error>
+where
+  Res: AddressResolver,
+{
   match addr {
     MaybeResolved::Resolved(s) => Ok(s),
     MaybeResolved::Unresolved(a) => resolver

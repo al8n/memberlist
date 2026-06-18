@@ -232,7 +232,10 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 // field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A, G>`
 // carries no I/A bounds at the struct level — those bounds appear only on the impl
 // blocks whose methods call `R::dial_context::<A>` and read the closures.
-pub struct StreamEndpoint<I, A, R: StreamTransport, G = SmallRng> {
+pub struct StreamEndpoint<I, A, R, G = SmallRng>
+where
+  R: StreamTransport,
+{
   ep: Endpoint<I, A, G>,
   cfg: R::Options,
   /// Per-peer SNI provider for the TLS reliable path. Returns `None` for

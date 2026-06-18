@@ -8,12 +8,18 @@ const _: () = {
   const NODE_ADDR_TAG: u8 = 2;
 
   #[inline]
-  const fn node_id_byte<I: Data>() -> u8 {
+  const fn node_id_byte<I>() -> u8
+  where
+    I: Data,
+  {
     merge(I::WIRE_TYPE, NODE_ID_TAG)
   }
 
   #[inline]
-  const fn node_addr_byte<A: Data>() -> u8 {
+  const fn node_addr_byte<A>() -> u8
+  where
+    A: Data,
+  {
     merge(A::WIRE_TYPE, NODE_ADDR_TAG)
   }
 

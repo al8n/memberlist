@@ -1193,12 +1193,14 @@ where
   /// loaded only inside the `SendPushPullResponse`/`Close` handling here, so
   /// skipping a tick silently drops the reply and leaves the peer with a
   /// half-applied merge.
-  pub(crate) fn drain_then_reap<G: rand::Rng>(
+  pub(crate) fn drain_then_reap<G>(
     &mut self,
     ep: &mut Endpoint<I, A, G>,
     conns: &mut ConnTable,
     now: Instant,
-  ) {
+  ) where
+    G: rand::Rng,
+  {
     while let Some(ev) = self.stream.poll_endpoint_event() {
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
@@ -1310,12 +1312,14 @@ where
   /// inbound exchange is never produced and the peer is left with a
   /// half-applied merge (split-brain) — the exact failure the D1 module
   /// contract warns about. Mirrors [`Bridge::drain_then_reap`] minus step (3).
-  pub(crate) fn drain_payload_only<G: rand::Rng>(
+  pub(crate) fn drain_payload_only<G>(
     &mut self,
     ep: &mut Endpoint<I, A, G>,
     conns: &mut ConnTable,
     now: Instant,
-  ) {
+  ) where
+    G: rand::Rng,
+  {
     // Defer endpoint-event commit until the recv half observes peer
     // FIN. A decoded frame's side effects (`PushPullRequestReceived`,
     // `PushPullReplyReceived`, `ReliablePingAcked`, `UserDataReceived`)

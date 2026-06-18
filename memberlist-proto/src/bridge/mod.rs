@@ -43,7 +43,10 @@ pub enum BridgeError {
 /// `encode_to_vec` convenience method is gated behind the data module's
 /// `std`/`alloc` features, so a generic `T: Data` cannot depend on it across
 /// every feature combination.
-fn data_to_bytes<T: Data>(val: &T) -> Result<Bytes, BridgeError> {
+fn data_to_bytes<T>(val: &T) -> Result<Bytes, BridgeError>
+where
+  T: Data,
+{
   let mut buf = vec![0u8; val.encoded_len()];
   val.encode(&mut buf)?;
   Ok(Bytes::from(buf))
@@ -55,7 +58,10 @@ fn data_to_bytes<T: Data>(val: &T) -> Result<Bytes, BridgeError> {
 /// garbage through in release builds — this is a runtime check so a
 /// malformed wire field is rejected at the wire→machine boundary in every
 /// build.
-fn data_from_bytes<T: Data>(buf: &Bytes) -> Result<T, BridgeError> {
+fn data_from_bytes<T>(buf: &Bytes) -> Result<T, BridgeError>
+where
+  T: Data,
+{
   let (bytes_read, val) = <T::Ref<'_> as DataRef<'_, T>>::decode(buf.as_ref())?;
   if bytes_read != buf.len() {
     return Err(BridgeError::Decode(DecodeError::custom(format!(
@@ -164,7 +170,10 @@ fn checked_version_byte(v: u32, field: &'static str) -> Result<u8, BridgeError> 
 /// explicitly-present value (including 0) goes through the range-checked
 /// byte path so it round-trips (e.g. 0 → Unknown(0)), keeping
 /// omitted-vs-explicit-zero distinct.
-fn versioned<T: From<u8> + Default>(v: Option<u32>, field: &'static str) -> Result<T, BridgeError> {
+fn versioned<T>(v: Option<u32>, field: &'static str) -> Result<T, BridgeError>
+where
+  T: From<u8> + Default,
+{
   match v {
     None => Ok(T::default()),
     Some(v) => Ok(T::from(checked_version_byte(v, field)?)),
@@ -174,7 +183,11 @@ fn versioned<T: From<u8> + Default>(v: Option<u32>, field: &'static str) -> Resu
 // ─── Node ────────────────────────────────────────────────────────────────────
 
 /// Convert `typed::Node<I,A>` → `pb::Node`.
-pub fn node_to_buffa<I: Data, A: Data>(n: &typed::Node<I, A>) -> Result<pb::Node, BridgeError> {
+pub fn node_to_buffa<I, A>(n: &typed::Node<I, A>) -> Result<pb::Node, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   Ok(pb::Node {
     id: Some(data_to_bytes(n.id_ref())?),
     addr: Some(data_to_bytes(n.addr_ref())?),
@@ -183,7 +196,11 @@ pub fn node_to_buffa<I: Data, A: Data>(n: &typed::Node<I, A>) -> Result<pb::Node
 }
 
 /// Convert `pb::Node` → `typed::Node<I,A>`.
-pub fn node_from_buffa<I: Data, A: Data>(b: &pb::Node) -> Result<typed::Node<I, A>, BridgeError> {
+pub fn node_from_buffa<I, A>(b: &pb::Node) -> Result<typed::Node<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let id: I = data_from_bytes(require_bytes(&b.id, "Node.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "Node.addr")?)?;
   Ok(typed::Node::new(id, addr))
@@ -193,9 +210,13 @@ pub fn node_from_buffa<I: Data, A: Data>(b: &pb::Node) -> Result<typed::Node<I, 
 
 /// Convert `typed::NodeState<I,A>` → `pb::PushNodeState`
 /// (`NodeState` maps to the proto `PushNodeState` shape).
-pub fn node_state_to_buffa<I: Data, A: Data>(
+pub fn node_state_to_buffa<I, A>(
   ns: &typed::NodeState<I, A>,
-) -> Result<pb::PushNodeState, BridgeError> {
+) -> Result<pb::PushNodeState, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   Ok(pb::PushNodeState {
     id: Some(data_to_bytes(ns.id_ref())?),
     addr: Some(data_to_bytes(ns.address_ref())?),
@@ -209,9 +230,13 @@ pub fn node_state_to_buffa<I: Data, A: Data>(
 }
 
 /// Convert `pb::PushNodeState` → `typed::NodeState<I,A>`.
-pub fn node_state_from_buffa<I: Data, A: Data>(
+pub fn node_state_from_buffa<I, A>(
   b: &pb::PushNodeState,
-) -> Result<typed::NodeState<I, A>, BridgeError> {
+) -> Result<typed::NodeState<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let id: I = data_from_bytes(require_bytes(&b.id, "PushNodeState.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "PushNodeState.addr")?)?;
   // NodeState carries no incarnation, but the wire field is required
@@ -239,9 +264,13 @@ pub fn node_state_from_buffa<I: Data, A: Data>(
 // ─── PushNodeState ───────────────────────────────────────────────────────────
 
 /// Convert `typed::PushNodeState<I,A>` → `pb::PushNodeState`.
-pub fn push_node_state_to_buffa<I: Data, A: Data>(
+pub fn push_node_state_to_buffa<I, A>(
   pns: &typed::PushNodeState<I, A>,
-) -> Result<pb::PushNodeState, BridgeError> {
+) -> Result<pb::PushNodeState, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   Ok(pb::PushNodeState {
     id: Some(data_to_bytes(pns.id_ref())?),
     addr: Some(data_to_bytes(pns.address_ref())?),
@@ -255,9 +284,13 @@ pub fn push_node_state_to_buffa<I: Data, A: Data>(
 }
 
 /// Convert `pb::PushNodeState` → `typed::PushNodeState<I,A>`.
-pub fn push_node_state_from_buffa<I: Data, A: Data>(
+pub fn push_node_state_from_buffa<I, A>(
   b: &pb::PushNodeState,
-) -> Result<typed::PushNodeState<I, A>, BridgeError> {
+) -> Result<typed::PushNodeState<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let id: I = data_from_bytes(require_bytes(&b.id, "PushNodeState.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "PushNodeState.addr")?)?;
   let incarnation = b.incarnation.ok_or(BridgeError::MissingField(
@@ -281,7 +314,11 @@ pub fn push_node_state_from_buffa<I: Data, A: Data>(
 // ─── Alive ───────────────────────────────────────────────────────────────────
 
 /// Convert `typed::Alive<I,A>` → `pb::Alive`.
-pub fn alive_to_buffa<I: Data, A: Data>(t: &typed::Alive<I, A>) -> Result<pb::Alive, BridgeError> {
+pub fn alive_to_buffa<I, A>(t: &typed::Alive<I, A>) -> Result<pb::Alive, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let pb_node = node_to_buffa(t.node_ref())?;
   Ok(pb::Alive {
     incarnation: Some(t.incarnation()),
@@ -294,9 +331,11 @@ pub fn alive_to_buffa<I: Data, A: Data>(t: &typed::Alive<I, A>) -> Result<pb::Al
 }
 
 /// Convert `pb::Alive` → `typed::Alive<I,A>`.
-pub fn alive_from_buffa<I: Data, A: Data>(
-  b: &pb::Alive,
-) -> Result<typed::Alive<I, A>, BridgeError> {
+pub fn alive_from_buffa<I, A>(b: &pb::Alive) -> Result<typed::Alive<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let pb_node = b
     .node
     .as_option()
@@ -318,7 +357,10 @@ pub fn alive_from_buffa<I: Data, A: Data>(
 // ─── Suspect ─────────────────────────────────────────────────────────────────
 
 /// Convert `typed::Suspect<I>` → `pb::Suspect`.
-pub fn suspect_to_buffa<I: Data>(t: &typed::Suspect<I>) -> Result<pb::Suspect, BridgeError> {
+pub fn suspect_to_buffa<I>(t: &typed::Suspect<I>) -> Result<pb::Suspect, BridgeError>
+where
+  I: Data,
+{
   Ok(pb::Suspect {
     incarnation: Some(t.incarnation()),
     node: Some(data_to_bytes(t.node_ref())?),
@@ -328,7 +370,10 @@ pub fn suspect_to_buffa<I: Data>(t: &typed::Suspect<I>) -> Result<pb::Suspect, B
 }
 
 /// Convert `pb::Suspect` → `typed::Suspect<I>`.
-pub fn suspect_from_buffa<I: Data>(b: &pb::Suspect) -> Result<typed::Suspect<I>, BridgeError> {
+pub fn suspect_from_buffa<I>(b: &pb::Suspect) -> Result<typed::Suspect<I>, BridgeError>
+where
+  I: Data,
+{
   let node: I = data_from_bytes(require_bytes(&b.node, "Suspect.node")?)?;
   let from: I = data_from_bytes(require_bytes(&b.from, "Suspect.from")?)?;
   let incarnation = b
@@ -340,7 +385,10 @@ pub fn suspect_from_buffa<I: Data>(b: &pb::Suspect) -> Result<typed::Suspect<I>,
 // ─── Dead ────────────────────────────────────────────────────────────────────
 
 /// Convert `typed::Dead<I>` → `pb::Dead`.
-pub fn dead_to_buffa<I: Data>(t: &typed::Dead<I>) -> Result<pb::Dead, BridgeError> {
+pub fn dead_to_buffa<I>(t: &typed::Dead<I>) -> Result<pb::Dead, BridgeError>
+where
+  I: Data,
+{
   Ok(pb::Dead {
     incarnation: Some(t.incarnation()),
     node: Some(data_to_bytes(t.node_ref())?),
@@ -350,7 +398,10 @@ pub fn dead_to_buffa<I: Data>(t: &typed::Dead<I>) -> Result<pb::Dead, BridgeErro
 }
 
 /// Convert `pb::Dead` → `typed::Dead<I>`.
-pub fn dead_from_buffa<I: Data>(b: &pb::Dead) -> Result<typed::Dead<I>, BridgeError> {
+pub fn dead_from_buffa<I>(b: &pb::Dead) -> Result<typed::Dead<I>, BridgeError>
+where
+  I: Data,
+{
   let node: I = data_from_bytes(require_bytes(&b.node, "Dead.node")?)?;
   let from: I = data_from_bytes(require_bytes(&b.from, "Dead.from")?)?;
   let incarnation = b
@@ -362,7 +413,11 @@ pub fn dead_from_buffa<I: Data>(b: &pb::Dead) -> Result<typed::Dead<I>, BridgeEr
 // ─── Ping ────────────────────────────────────────────────────────────────────
 
 /// Convert `typed::Ping<I,A>` → `pb::Ping`.
-pub fn ping_to_buffa<I: Data, A: Data>(t: &typed::Ping<I, A>) -> Result<pb::Ping, BridgeError> {
+pub fn ping_to_buffa<I, A>(t: &typed::Ping<I, A>) -> Result<pb::Ping, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   Ok(pb::Ping {
     sequence_number: Some(t.sequence_number()),
     source: BuffaMessageField::some(node_to_buffa(t.source_ref())?),
@@ -372,7 +427,11 @@ pub fn ping_to_buffa<I: Data, A: Data>(t: &typed::Ping<I, A>) -> Result<pb::Ping
 }
 
 /// Convert `pb::Ping` → `typed::Ping<I,A>`.
-pub fn ping_from_buffa<I: Data, A: Data>(b: &pb::Ping) -> Result<typed::Ping<I, A>, BridgeError> {
+pub fn ping_from_buffa<I, A>(b: &pb::Ping) -> Result<typed::Ping<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let source_pb = b
     .source
     .as_option()
@@ -394,9 +453,13 @@ pub fn ping_from_buffa<I: Data, A: Data>(b: &pb::Ping) -> Result<typed::Ping<I, 
 // ─── IndirectPing ─────────────────────────────────────────────────────────────
 
 /// Convert `typed::IndirectPing<I,A>` → `pb::IndirectPing`.
-pub fn indirect_ping_to_buffa<I: Data, A: Data>(
+pub fn indirect_ping_to_buffa<I, A>(
   t: &typed::IndirectPing<I, A>,
-) -> Result<pb::IndirectPing, BridgeError> {
+) -> Result<pb::IndirectPing, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   Ok(pb::IndirectPing {
     sequence_number: Some(t.sequence_number()),
     source: BuffaMessageField::some(node_to_buffa(t.source_ref())?),
@@ -406,9 +469,13 @@ pub fn indirect_ping_to_buffa<I: Data, A: Data>(
 }
 
 /// Convert `pb::IndirectPing` → `typed::IndirectPing<I,A>`.
-pub fn indirect_ping_from_buffa<I: Data, A: Data>(
+pub fn indirect_ping_from_buffa<I, A>(
   b: &pb::IndirectPing,
-) -> Result<typed::IndirectPing<I, A>, BridgeError> {
+) -> Result<typed::IndirectPing<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let source_pb = b
     .source
     .as_option()
@@ -464,9 +531,11 @@ pub fn nack_from_buffa(b: &pb::Nack) -> typed::Nack {
 // ─── PushPull ────────────────────────────────────────────────────────────────
 
 /// Convert `typed::PushPull<I,A>` → `pb::PushPull`.
-pub fn push_pull_to_buffa<I: Data, A: Data>(
-  t: &typed::PushPull<I, A>,
-) -> Result<pb::PushPull, BridgeError> {
+pub fn push_pull_to_buffa<I, A>(t: &typed::PushPull<I, A>) -> Result<pb::PushPull, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let states = t
     .states_slice()
     .iter()
@@ -481,9 +550,11 @@ pub fn push_pull_to_buffa<I: Data, A: Data>(
 }
 
 /// Convert `pb::PushPull` → `typed::PushPull<I,A>`.
-pub fn push_pull_from_buffa<I: Data, A: Data>(
-  b: &pb::PushPull,
-) -> Result<typed::PushPull<I, A>, BridgeError> {
+pub fn push_pull_from_buffa<I, A>(b: &pb::PushPull) -> Result<typed::PushPull<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   let states_iter = b
     .states
     .iter()
@@ -530,9 +601,11 @@ pub fn error_response_from_buffa(b: &pb::ErrorResponse) -> typed::ErrorResponse 
 ///
 /// This is the entry point the machine wire path calls when serialising
 /// outbound messages.
-pub fn message_to_any<I: Data, A: Data>(
-  m: &typed::Message<I, A>,
-) -> Result<AnyMessage, BridgeError> {
+pub fn message_to_any<I, A>(m: &typed::Message<I, A>) -> Result<AnyMessage, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   match m {
     typed::Message::Ping(v) => Ok(AnyMessage::Ping(ping_to_buffa(v)?)),
     typed::Message::IndirectPing(v) => Ok(AnyMessage::IndirectPing(indirect_ping_to_buffa(v)?)),
@@ -551,9 +624,11 @@ pub fn message_to_any<I: Data, A: Data>(
 ///
 /// This is the entry point the machine wire path calls when deserialising
 /// inbound messages.
-pub fn message_from_any<I: Data, A: Data>(
-  a: &AnyMessage,
-) -> Result<typed::Message<I, A>, BridgeError> {
+pub fn message_from_any<I, A>(a: &AnyMessage) -> Result<typed::Message<I, A>, BridgeError>
+where
+  I: Data,
+  A: Data,
+{
   match a {
     AnyMessage::Ping(v) => Ok(typed::Message::Ping(ping_from_buffa(v)?)),
     AnyMessage::IndirectPing(v) => Ok(typed::Message::IndirectPing(indirect_ping_from_buffa(v)?)),

@@ -134,7 +134,11 @@ impl<I, A> Alive<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
+impl<I, A> CheapClone for Alive<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   fn cheap_clone(&self) -> Self {
     Self {
       incarnation: self.incarnation,

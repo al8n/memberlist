@@ -1113,7 +1113,10 @@ pub type OptionsParts<T> = (
 /// passed to `Memberlist::new`. An unset predicate (the default) admits
 /// every peer / accepts every join merge; `Memberlist::new` installs the
 /// supplied predicates into the machine `Endpoint`.
-pub struct Options<T: Transport> {
+pub struct Options<T>
+where
+  T: Transport,
+{
   transport: T::Options,
   memberlist: MemberlistOptions,
   driver: DriverOptions,
@@ -1123,7 +1126,10 @@ pub struct Options<T: Transport> {
   cidr_policy: Option<memberlist_proto::CidrPolicy>,
 }
 
-impl<T: Transport> Options<T> {
+impl<T> Options<T>
+where
+  T: Transport,
+{
   /// Construct from per-backend transport options + SWIM + driver defaults.
   /// Both admission predicates default to unset (admit all).
   #[inline]

@@ -13,7 +13,10 @@ impl ConflictDelegate for DefaultConflict {
   type Address = SocketAddr;
 }
 
-fn block_on<F: core::future::Future>(mut fut: F) -> F::Output {
+fn block_on<F>(mut fut: F) -> F::Output
+where
+  F: core::future::Future,
+{
   use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
   fn raw() -> RawWaker {
     fn no_op(_: *const ()) {}

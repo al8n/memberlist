@@ -1212,12 +1212,11 @@ where
   ///    outbound, flush deferred FINs, complete `Closing` drains, re-rebalance,
   ///    then drain + send outbound gossip.
   /// 8. **Deadline** — `min(machine_next, closing_next)`.
-  pub fn pump<G: GossipIo, S: StreamIo<Conn = C>>(
-    &mut self,
-    now: Instant,
-    gossip: &mut G,
-    stream: &mut S,
-  ) -> Option<Instant> {
+  pub fn pump<G, S>(&mut self, now: Instant, gossip: &mut G, stream: &mut S) -> Option<Instant>
+  where
+    G: GossipIo,
+    S: StreamIo<Conn = C>,
+  {
     // 1a. Reap gracefully-closing connections. The driver's step-1 stack tick may
     // have advanced FIN exchanges to completion; reclaim any that are now fully
     // closed (or have exceeded `cfg.close_timeout`) so the freed handles back new
@@ -1497,7 +1496,10 @@ where
   /// socket (forcing it straight to `Closed`) before returning it, so a stuck
   /// graceful close cannot permanently shrink the pool. A healthy close reaches
   /// `Closed` long before the deadline and is reclaimed on the `!is_open()` path.
-  fn reap_closing<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn reap_closing<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Retain the still-closing handles; give the finished (or timed-out) ones back
     // to the pool.
     let pool = &mut self.plane.pool;
@@ -1534,7 +1536,10 @@ where
   /// accept a not-yet-established SynReceived socket whose handshake an
   /// RST/retransmit could still revert to Listen, silently turning the exchange's
   /// socket into a second listener and wedging the join).
-  fn check_listener<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn check_listener<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     let c = match self.plane.listener {
       Some(c) => c,
       None => return,
@@ -1608,7 +1613,10 @@ where
   /// from accepting inbound reliable connections.
   ///
   /// A no-op when a listener already exists or the pool is empty.
-  fn ensure_listener<S: StreamIo<Conn = C>>(&mut self, stream: &mut S) {
+  fn ensure_listener<S>(&mut self, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     if self.plane.listener.is_some() {
       return;
     }
@@ -1642,14 +1650,10 @@ where
   /// so the bridge is ultimately retired by its own dial/handshake deadline; the
   /// driver has no prompt dial-cancel path.) Shared by the live `Connect` drain and
   /// the deferred `drain_pending_dials` retry so both dial identically.
-  fn dial<S: StreamIo<Conn = C>>(
-    &mut self,
-    eid: ExchangeId,
-    peer: SocketAddr,
-    c: C,
-    now: Instant,
-    stream: &mut S,
-  ) {
+  fn dial<S>(&mut self, eid: ExchangeId, peer: SocketAddr, c: C, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Reject an outbound dial to a CIDR-blocked peer before `connect`: a blocked
     // peer forms no reliable connection in either direction (the accept guard
     // drops its passive opens; this drops our active dials, so a join toward a
@@ -1714,7 +1718,10 @@ where
   /// removed from `connections` by `teardown`, so this never dials a dead exchange.
   /// Each assigned connection's parked `out` bytes and `fin_pending` FIN survive the
   /// transition and flush/fire once the socket is Established.
-  fn drain_pending_dials<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn drain_pending_dials<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Collect the waiting dials oldest-first. The borrow of `connections` is
     // released before the dial loop mutates the plane.
     let mut waiting: std::vec::Vec<(ExchangeId, SocketAddr)> = self
@@ -1762,7 +1769,10 @@ where
   /// (7d''), over every slot the machine's teardown / close paths freed THIS tick, so
   /// an in-tick free immediately backs a waiting dial or restores the listener
   /// rather than sitting idle until the next pump.
-  fn rebalance_pool<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn rebalance_pool<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     self.ensure_listener(stream);
     self.drain_pending_dials(now, stream);
   }
@@ -1799,7 +1809,10 @@ where
   /// connection (DISCARDING its buffered `out` bytes), hard-`abort()`s the socket
   /// (RST), and returns it straight to the pool. No `Closing` drain, no graceful FIN
   /// — the bytes are stale and the peer is given up on.
-  fn drain_stream_actions<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn drain_stream_actions<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // The machine guarantees all Connects surface before any Shutdown/Close/Abort
     // (see StreamEndpoint::poll_action ordering contract). Draining fully in one pass
     // is therefore safe: no teardown can precede its Connect.
@@ -1903,7 +1916,10 @@ where
   /// A `PendingDial` connection (pool was exhausted, no slot assigned) has nothing to
   /// reset or reclaim: removing it is the whole abort, so a failed exchange is never
   /// later dialed.
-  fn abort_exchange<S: StreamIo<Conn = C>>(&mut self, eid: ExchangeId, stream: &mut S) {
+  fn abort_exchange<S>(&mut self, eid: ExchangeId, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     let Some(conn) = self.plane.connections.remove(&eid) else {
       return;
     };
@@ -1969,7 +1985,10 @@ where
   /// A connection still in `PendingDial` (its bridge timed out before a slot freed)
   /// has no socket: removing it is the whole teardown, so a retired exchange is never
   /// later dialed.
-  fn teardown<S: StreamIo<Conn = C>>(&mut self, eid: ExchangeId, now: Instant, stream: &mut S) {
+  fn teardown<S>(&mut self, eid: ExchangeId, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Inspect the connection WITHOUT removing it: a graceful close that still has
     // bytes to deliver must stay mapped (transition to `Closing`) so the egress pump
     // can finish flushing them. Only the paths that complete the teardown this tick
@@ -2089,7 +2108,10 @@ where
   /// The `Closing` deadline is folded into `pump()`'s returned wakeup (alongside the
   /// `closing`-map deadlines) so a deadline-driven caller wakes in time to run this
   /// abort backstop by `close_timeout`.
-  fn flush_closing<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn flush_closing<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Classify each Closing connection without holding the `connections` borrow across
     // the mutating socket / pool / closing-map calls below.
     enum Outcome<C> {
@@ -2178,7 +2200,10 @@ where
   /// EOF. `Some(n>0)` is data, `Some(0)`/`None` an empty ring (which is the peer FIN
   /// iff `recv_finished`), so no spurious EOF is delivered before the handshake
   /// completes.
-  fn pump_inbound_reliable<S: StreamIo<Conn = C>>(&mut self, now: Instant, stream: &mut S) {
+  fn pump_inbound_reliable<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Scratch buffer for one read. 4 KiB matches the default socket rx ring size;
     // reads chunk that size at most, and the machine reassembles frames across multiple
     // calls to handle_transport_data.
@@ -2273,7 +2298,10 @@ where
   /// (FinWait*) carries no `out` bytes — `flush_pending_shutdowns` emits its FIN only
   /// after `out` drained — so it is never selected here, and the eventual `Close`
   /// reclaims it.
-  fn pump_outbound_reliable<S: StreamIo<Conn = C>>(&mut self, stream: &mut S) {
+  fn pump_outbound_reliable<S>(&mut self, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // --- Pass 1: append new transmits to their connection's out queue ---
     while let Some((eid, _peer, bytes)) = self.endpoint.poll_transport_transmit() {
       if let Some(conn) = self.plane.connections.get_mut(&eid) {
@@ -2356,7 +2384,10 @@ where
   /// `state == Established` check rather than re-deriving readiness from the socket, and
   /// keeps `ConnState` an honest reflection of the lifecycle. `PendingDial` connections
   /// (no socket) and ones already `Established`/`HalfClosed` are left as-is.
-  fn promote_established<S: StreamIo<Conn = C>>(&mut self, stream: &mut S) {
+  fn promote_established<S>(&mut self, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     let promote: std::vec::Vec<ExchangeId> = self
       .plane
       .connections
@@ -2406,7 +2437,10 @@ where
   /// connection still `Dialing`/`PendingDial` (socket not yet writable) keeps its
   /// `fin_pending` flag and fires on a later tick once it reaches `Established`; the
   /// machine-issued abrupt `Close` on the bridge's deadline bounds the wait.
-  fn flush_pending_shutdowns<S: StreamIo<Conn = C>>(&mut self, stream: &mut S) {
+  fn flush_pending_shutdowns<S>(&mut self, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
     // Collect the connections ready to emit their FIN: `fin_pending` set, in
     // `Established`, socket fully drained and acknowledged, `out` empty. The
     // `connections` borrow is released before the mutation below.
@@ -2446,7 +2480,10 @@ where
   /// multi-message batch (`Transmit::Compound`) is encoded as a compound frame. Encoding
   /// errors and a full tx ring both silently drop the datagram — gossip is best-effort
   /// and SWIM recovers on the next round.
-  fn drain_gossip_transmits<G: GossipIo>(&mut self, gossip: &mut G) {
+  fn drain_gossip_transmits<G>(&mut self, gossip: &mut G)
+  where
+    G: GossipIo,
+  {
     let enc = memberlist_proto::codec::EncodeOptions::new(self.label.clone());
     while let Some(transmit) = self.endpoint.poll_memberlist_transmit() {
       let (dest, bytes) = match encode_transmit::<I>(transmit, &enc) {

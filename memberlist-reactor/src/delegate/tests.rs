@@ -11,7 +11,10 @@ use smol_str::SmolStr;
 use super::*;
 
 /// Dependency-free single-poll driver for the trivially-ready default hooks.
-fn block_on<F: Future>(fut: F) -> F::Output {
+fn block_on<F>(fut: F) -> F::Output
+where
+  F: Future,
+{
   let waker = Waker::noop();
   let mut cx = Context::from_waker(waker);
   let mut fut = pin!(fut);

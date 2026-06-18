@@ -45,7 +45,10 @@ pub(crate) fn label(s: &str) -> Option<Vec<u8>> {
 /// match the localhost-SAN test certs used by TLS tests, and is also
 /// harmlessly supplied for plain-TCP tests (the TCP record layer ignores SNI).
 #[allow(dead_code)]
-pub(crate) fn test_sni_provider<A: 'static>() -> Box<dyn Fn(&A) -> Option<String> + Send + Sync> {
+pub(crate) fn test_sni_provider<A>() -> Box<dyn Fn(&A) -> Option<String> + Send + Sync>
+where
+  A: 'static,
+{
   Box::new(|_addr: &A| Some("localhost".to_string()))
 }
 
@@ -102,11 +105,14 @@ where
 /// Shuttle bytes both ways once: `a` out → `b` in, `b` out → `a` in at
 /// `now`. Returns `true` if either side produced bytes this round.
 #[allow(dead_code)]
-pub(crate) fn shuttle<R: StreamTransport>(
+pub(crate) fn shuttle<R>(
   a: &mut StreamBridge<SmolStr, SocketAddr, R>,
   b: &mut StreamBridge<SmolStr, SocketAddr, R>,
   now: Instant,
-) -> bool {
+) -> bool
+where
+  R: StreamTransport,
+{
   let mut moved = false;
   let mut buf = Vec::new();
   if a.poll_transport_transmit(&mut buf) > 0 {
@@ -163,10 +169,10 @@ where
 /// is not equality-comparable), so the comparison is structural via
 /// `phase_label`.
 #[allow(dead_code)]
-pub(crate) fn assert_phase<R: StreamTransport>(
-  bridge: &StreamBridge<SmolStr, SocketAddr, R>,
-  expected: &StreamPhase,
-) {
+pub(crate) fn assert_phase<R>(bridge: &StreamBridge<SmolStr, SocketAddr, R>, expected: &StreamPhase)
+where
+  R: StreamTransport,
+{
   let actual = bridge.phase_ref();
   assert!(
     phase_label(actual) == phase_label(expected),

@@ -94,7 +94,10 @@ impl<I> Suspicion<I> {
   }
 }
 
-impl<I: Eq + core::hash::Hash> Suspicion<I> {
+impl<I> Suspicion<I>
+where
+  I: Eq + core::hash::Hash,
+{
   /// Construct a new suspicion state. `from` is the original suspector and
   /// is excluded from confirmations (so a peer's own suspicion can't count
   /// as a confirmation if it bounces back via gossip). `now` is the current
@@ -119,7 +122,10 @@ impl<I: Eq + core::hash::Hash> Suspicion<I> {
   }
 }
 
-impl<I: Eq + core::hash::Hash + CheapClone> Suspicion<I> {
+impl<I> Suspicion<I>
+where
+  I: Eq + core::hash::Hash + CheapClone,
+{
   /// Register a confirmation from `from`. Returns whether the deadline was
   /// advanced. The caller (Endpoint) is responsible for re-arming any
   /// external timer using the new deadline.
