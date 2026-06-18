@@ -328,7 +328,7 @@ pub struct QuicEndpoint<I, R = SmallRng> {
 impl<I, R> QuicEndpoint<I, R>
 where
   R: Rng,
-  I: crate::Id + crate::Data + crate::CheapClone,
+  I: crate::Id,
 {
   /// Build the coordinator. The quinn endpoint is created with the bundled
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
@@ -936,14 +936,7 @@ where
 impl<I, R> QuicEndpoint<I, R>
 where
   R: Rng,
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
 {
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
@@ -1757,14 +1750,7 @@ where
 impl<I, R> QuicEndpoint<I, R>
 where
   R: Rng,
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
 {
   /// Inbound datagram from the one UDP socket.
   ///

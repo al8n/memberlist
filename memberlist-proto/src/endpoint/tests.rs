@@ -18,14 +18,7 @@ fn process_alive_auto<I, A>(
   bootstrap: bool,
   now: Instant,
 ) where
-  I: crate::Id
-    + Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: crate::CheapClone
     + Data
     + Eq
