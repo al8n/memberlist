@@ -80,13 +80,13 @@ pub use memberlist_embedded::{
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
 )]
 pub use memberlist_embedded::ControlError;
-pub use memberlist_proto::{Node, PingId, StreamId, typed::NodeState};
 #[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
 )]
 pub use memberlist_proto::EncryptionError;
+pub use memberlist_proto::{Node, PingId, StreamId, typed::NodeState};
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
@@ -95,18 +95,6 @@ pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 // re-exported here so the smoltcp public API is self-contained. `TransformOptions`
 // and `LabelError` always exist; the per-backend option/algorithm/key types exist
 // only when their transform backend is built in.
-pub use memberlist_embedded::transform::{LabelError, TransformOptions};
-#[cfg(compression)]
-#[cfg_attr(
-  docsrs,
-  doc(cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  )))
-)]
-pub use memberlist_embedded::transform::{CompressAlgorithm, CompressionOptions};
 #[cfg(checksum)]
 #[cfg_attr(
   docsrs,
@@ -119,12 +107,24 @@ pub use memberlist_embedded::transform::{CompressAlgorithm, CompressionOptions};
   )))
 )]
 pub use memberlist_embedded::transform::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_embedded::transform::{CompressAlgorithm, CompressionOptions};
 #[cfg(encryption)]
 #[cfg_attr(
   docsrs,
   doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
 )]
 pub use memberlist_embedded::transform::{EncryptionOptions, Keyring, SecretKey};
+pub use memberlist_embedded::transform::{LabelError, TransformOptions};
 
 mod addr;
 mod config;

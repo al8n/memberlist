@@ -111,17 +111,6 @@ pub use memberlist_proto::streams::LabelOptions;
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
-#[cfg(compression)]
-#[cfg_attr(
-  docsrs,
-  doc(cfg(any(
-    feature = "lz4",
-    feature = "snappy",
-    feature = "zstd",
-    feature = "brotli"
-  )))
-)]
-pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
 #[cfg(checksum)]
 #[cfg_attr(
   docsrs,
@@ -134,6 +123,17 @@ pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
   )))
 )]
 pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
+#[cfg(compression)]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  )))
+)]
+pub use memberlist_proto::{CompressAlgorithm, CompressionOptions};
 #[cfg(encryption)]
 #[cfg_attr(
   docsrs,

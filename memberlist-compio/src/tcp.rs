@@ -296,12 +296,8 @@ where
     // configured transform whose backend is built in. With none built in the
     // base coordinator carries no transform state and the planes stay plaintext.
     #[allow(unused_mut)]
-    let mut endpoint = StreamEndpoint::new(
-      ep,
-      label_opts,
-      Box::new(|_| None),
-      Box::new(|addr| *addr),
-    );
+    let mut endpoint =
+      StreamEndpoint::new(ep, label_opts, Box::new(|_| None), Box::new(|addr| *addr));
     #[cfg(compression)]
     endpoint.set_compression_options(*runtime.memberlist_options.compression());
     #[cfg(encryption)]

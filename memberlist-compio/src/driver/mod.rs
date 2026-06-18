@@ -49,9 +49,7 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd,
-  },
+  command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver_options::{DriverOptions, StreamTransportOptions},
   driver_shared::{
@@ -2025,11 +2023,10 @@ fn dispatch_gossip<I, A, R, G>(
       Err(_) => continue,
     };
     #[cfg(not(encryption))]
-    let plain =
-      match memberlist_proto::framing::unwrap_transforms(&raw, endpoint.gossip_mtu()) {
-        Ok(p) => Bytes::from(p.into_owned()),
-        Err(_) => continue,
-      };
+    let plain = match memberlist_proto::framing::unwrap_transforms(&raw, endpoint.gossip_mtu()) {
+      Ok(p) => Bytes::from(p.into_owned()),
+      Err(_) => continue,
+    };
     // Strip the optional cluster label and verify it matches. A
     // mismatched or absent label on a labeled cluster (or a labeled
     // frame on an unlabeled cluster) is rejected here, isolating gossip

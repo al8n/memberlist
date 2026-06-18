@@ -46,10 +46,10 @@ use memberlist_proto::streams::encrypt_gossip_datagram;
 // the configured keyring, so it exists only under an encryption backend; with
 // none the base `unwrap_transforms` strips the remaining (checksum/compression)
 // wrappers.
-#[cfg(encryption)]
-use memberlist_proto::unwrap_transforms_with_encryption;
 #[cfg(not(encryption))]
 use memberlist_proto::unwrap_transforms;
+#[cfg(encryption)]
+use memberlist_proto::unwrap_transforms_with_encryption;
 use memberlist_proto::{
   Instant, PingId,
   codec::{
