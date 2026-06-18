@@ -1,3 +1,7 @@
+//! Tests for the generic per-exchange connection map
+//! ([`crate::streams::conn::StreamConns`]) driving the TLS record layer
+//! ([`TlsRecords`](records::TlsRecords)).
+
 use crate::{Instant, streams::conn::StreamConns, tls::options::tests::test_server};
 use core::{net::SocketAddr, time::Duration};
 use smol_str::SmolStr;
