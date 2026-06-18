@@ -31,7 +31,7 @@ pub(crate) struct WaitForCompletionArgs {
 ///   terminated (`ExchangeCompleted` observed for its `ExchangeId`
 ///   with `kind == ExchangeKind::PushPull`) OR the deadline elapses,
 ///   whichever comes first. The reply carries the count of exchanges
-///   whose outcome was `ExchangeOutcome::Succeeded`; zero successes
+///   whose outcome was `ExchangeStatus::Succeeded`; zero successes
 ///   surface as `JoinAllFailed`.
 pub(crate) enum JoinKind {
   /// Reply immediately with the dispatched-exchange count.

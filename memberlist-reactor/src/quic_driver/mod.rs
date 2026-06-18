@@ -23,12 +23,12 @@ use agnostic::{
 use bytes::Bytes;
 use flume::Sender;
 use memberlist_proto::{
-  DatagramSendOutcome, Instant, PingId, UnreliableTransport,
+  DatagramSendStatus, Instant, PingId, UnreliableTransport,
   codec::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
-  event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
+  event::{Event, ExchangeId, ExchangeKind, ExchangeStatus, PushPullKind, Transmit},
 };
 
 // With no encryption backend the inbound path strips the remaining
@@ -555,7 +555,7 @@ where
     match ev {
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::PushPull => {
         let eid = p.eid();
-        let succeeded = matches!(p.outcome(), ExchangeOutcome::Succeeded);
+        let succeeded = matches!(p.outcome(), ExchangeStatus::Succeeded);
         let mut completed = None;
         for (key, pj) in self.pending_joins.iter_mut() {
           if pj.pending.remove(&eid) {
@@ -612,7 +612,7 @@ where
       // Reliable user-send completion: reduce the pending set; reply when empty.
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::UserMessage => {
         let eid = p.eid();
-        let failed = matches!(p.outcome(), ExchangeOutcome::Failed);
+        let failed = matches!(p.outcome(), ExchangeStatus::Failed);
         if let Some(idx) = self
           .pending_user_sends
           .iter()
@@ -771,12 +771,12 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendOutcome::Queued => needs_flush = true,
+            DatagramSendStatus::Queued => needs_flush = true,
             // NotReady may mean queue_unreliable_datagram just initiated a cold
             // dial; flush this tick so the connection's Initial is emitted now
             // (else the connection does not warm until the next driver wake). The
             // gossip itself still goes out immediately over the UDP fallback.
-            DatagramSendOutcome::NotReady => {
+            DatagramSendStatus::NotReady => {
               needs_flush = true;
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
@@ -786,7 +786,7 @@ where
             }
             // TooLarge: the connection is already Established (max_size was Some),
             // so there is no pending Initial to flush; just fall back to UDP.
-            DatagramSendOutcome::TooLarge => {
+            DatagramSendStatus::TooLarge => {
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
                 // is lossy and the next probe/gossip round recovers.

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use smol_str::SmolStr;
 
 use super::{
-  CompoundTransmit, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeOutcome, NodeConflict,
+  CompoundTransmit, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeStatus, NodeConflict,
   PacketTransmit, PingId, PushPullKind, Reliability, Transmit, UserPacket,
 };
 use crate::typed::{Ack, Message, NodeState, PushNodeState, State};
@@ -26,8 +26,8 @@ fn hint_enums_expose_their_predicates() {
   assert!(ExchangeKind::PushPull.is_push_pull());
   assert!(!ExchangeKind::ReliablePing.is_push_pull());
   assert!(!ExchangeKind::UserMessage.is_push_pull());
-  assert!(ExchangeOutcome::Succeeded.is_succeeded());
-  assert!(!ExchangeOutcome::Failed.is_succeeded());
+  assert!(ExchangeStatus::Succeeded.is_succeeded());
+  assert!(!ExchangeStatus::Failed.is_succeeded());
 }
 
 #[test]
@@ -41,12 +41,12 @@ fn exchange_completed_carries_its_fields() {
   let ec = ExchangeCompleted::new(
     ExchangeId::new(3),
     addr(7000),
-    ExchangeOutcome::Failed,
+    ExchangeStatus::Failed,
     ExchangeKind::PushPull,
   );
   assert_eq!(ec.eid(), ExchangeId::new(3));
   assert_eq!(ec.peer(), &addr(7000));
-  assert_eq!(ec.outcome(), ExchangeOutcome::Failed);
+  assert_eq!(ec.outcome(), ExchangeStatus::Failed);
   assert_eq!(ec.kind(), ExchangeKind::PushPull);
 }
 

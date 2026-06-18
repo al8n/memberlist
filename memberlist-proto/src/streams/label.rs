@@ -47,7 +47,7 @@
 //! node) is a gossip-plane concern (`memberlist/src/codec.rs`) and is never
 //! enforced on the reliable stream.
 
-use crate::label::{LabelOutcome, classify_header, encode_label_prefix};
+use crate::label::{LabelVerdict, classify_header, encode_label_prefix};
 #[cfg(not(feature = "std"))]
 use std::vec::Vec;
 
@@ -278,7 +278,7 @@ impl LabelGate {
       self.label.as_deref(),
       self.skip_inbound_label_check,
     ) {
-      LabelOutcome::Accepted(consumed) => {
+      LabelVerdict::Accepted(consumed) => {
         // Drop the header (or nothing, for an accepted unlabeled inbound) and
         // hand back the rest verbatim. `inbound_raw` is not needed past this.
         let tail = self.inbound_raw.split_off(consumed);
@@ -291,8 +291,8 @@ impl LabelGate {
         self.queue_outbound_prefix_if_needed();
         LabelIntake::Validated(tail)
       }
-      LabelOutcome::Incomplete => LabelIntake::Buffering,
-      LabelOutcome::Rejected(_) => LabelIntake::Rejected,
+      LabelVerdict::Incomplete => LabelIntake::Buffering,
+      LabelVerdict::Rejected(_) => LabelIntake::Rejected,
     }
   }
 

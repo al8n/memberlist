@@ -413,7 +413,7 @@ pub fn decode_checksummed_frame(frame: &[u8]) -> Result<&[u8], FrameError> {
 
 /// The result of running [`ChecksumOptions::apply`] over a payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChecksumOutcome {
+pub enum ChecksumOutput {
   /// No checksum is configured — the caller emits the payload with no wrapper.
   Plain,
   /// The payload was wrapped; the carried bytes are the full
@@ -435,7 +435,7 @@ pub struct ChecksumOptions {
 
 impl ChecksumOptions {
   /// A new, disabled configuration — no algorithm. Every payload is left
-  /// [`ChecksumOutcome::Plain`]. The operator opts in by chaining
+  /// [`ChecksumOutput::Plain`]. The operator opts in by chaining
   /// `.with_algorithm(algo)` or `.maybe_algorithm(Some(algo))`.
   #[inline(always)]
   pub const fn new() -> Self {
@@ -494,15 +494,15 @@ impl ChecksumOptions {
   }
 
   /// Wrap `payload` in a checksumed frame when an algorithm is configured.
-  /// When none is set the payload is always [`ChecksumOutcome::Plain`].
+  /// When none is set the payload is always [`ChecksumOutput::Plain`].
   /// Surfaces the algorithm's error when its backend is not built in (the
   /// caller fails rather than emitting an unverifiable frame).
-  pub fn apply(&self, payload: &[u8]) -> Result<ChecksumOutcome, ChecksumError> {
+  pub fn apply(&self, payload: &[u8]) -> Result<ChecksumOutput, ChecksumError> {
     match self.algorithm {
-      Some(algo) => Ok(ChecksumOutcome::Checksumed(encode_checksummed_frame(
+      Some(algo) => Ok(ChecksumOutput::Checksumed(encode_checksummed_frame(
         algo, payload,
       )?)),
-      None => Ok(ChecksumOutcome::Plain),
+      None => Ok(ChecksumOutput::Plain),
     }
   }
 }

@@ -30,7 +30,7 @@ mod bench {
   use memberlist_proto::{
     codec::{EncodeOptions, encode_outgoing, encode_outgoing_compound, parse_messages},
     compression::{
-      CompressAlgorithm, CompressionOptions, CompressionOutcome, encode_compressed_frame,
+      CompressAlgorithm, CompressionOptions, CompressionOutput, encode_compressed_frame,
     },
     encryption::{
       EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey, encode_encrypted_frame, encrypt,
@@ -77,7 +77,7 @@ mod bench {
   /// emit plain. The lz4 compress cost is paid either way (as in the driver).
   fn compress_like_driver(opts: &CompressionOptions, datagram: &[u8]) -> Vec<u8> {
     match opts.apply(datagram) {
-      Ok(CompressionOutcome::Compressed(packed)) => {
+      Ok(CompressionOutput::Compressed(packed)) => {
         let wrapped = encode_compressed_frame(
           opts
             .algorithm()

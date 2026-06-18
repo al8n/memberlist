@@ -151,14 +151,14 @@ fn gossip_roundtrip(
   // Step 2: compression (when enabled and the result shrinks). The wrapper
   // carries the original length so the decoder bounds its output buffer.
   let compressed: Vec<u8> = match compression.apply(&framed).map_err(|e| e.to_string())? {
-    memberlist_proto::CompressionOutcome::Compressed(packed) => encode_compressed_frame(
+    memberlist_proto::CompressionOutput::Compressed(packed) => encode_compressed_frame(
       compression
         .algorithm()
         .expect("Compressed implies an algorithm"),
       framed.len(),
       &packed,
     ),
-    memberlist_proto::CompressionOutcome::Plain => framed.to_vec(),
+    memberlist_proto::CompressionOutput::Plain => framed.to_vec(),
   };
 
   // Step 3: checksum (when enabled). Wrap the compressed-or-plain bytes in a

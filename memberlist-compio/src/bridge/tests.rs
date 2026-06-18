@@ -405,7 +405,7 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
        for this to exercise the idle-vs-total-cap distinction"
   );
   assert!(
-    matches!(outcome, WriteOutcome::Wrote(Ok(()))),
+    matches!(outcome, WriteStatus::Wrote(Ok(()))),
     "a slow-but-progressing peer must be written in full, not timed out"
   );
   assert_eq!(
@@ -596,7 +596,7 @@ async fn stalled_peer_still_times_out() {
     write_cancellable(&mut writer, vec![0xAAu8; 4096], &mut cancel, close_timeout).await;
 
   assert!(
-    matches!(outcome, WriteOutcome::TimedOut),
+    matches!(outcome, WriteStatus::TimedOut),
     "a peer making no progress for close_timeout must time out"
   );
 }
@@ -617,7 +617,7 @@ async fn explicit_abort_preempts_stalled_write() {
     write_cancellable(&mut writer, vec![0xBBu8; 4096], &mut cancel, close_timeout).await;
 
   assert!(
-    matches!(outcome, WriteOutcome::Aborted),
+    matches!(outcome, WriteStatus::Aborted),
     "an explicit abort must preempt a stalled write immediately"
   );
 }

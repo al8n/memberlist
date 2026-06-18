@@ -381,7 +381,7 @@ fn send_many_delivers_multiple_packets_to_peer() {
 /// push/pull, so `send_reliable` works exactly like join for the reliable plane.
 #[test]
 fn send_reliable_delivers_via_tcp_and_emits_exchange_completed() {
-  use memberlist_proto::event::{ExchangeKind, ExchangeOutcome};
+  use memberlist_proto::event::{ExchangeKind, ExchangeStatus};
   use memberlist_smoltcp::StreamId;
 
   let ((mut a, mut da), (mut b, mut db), mut clk) = converge_two_nodes();
@@ -411,7 +411,7 @@ fn send_reliable_delivers_via_tcp_and_emits_exchange_completed() {
     // Watch A's events for ExchangeCompleted{kind=UserMessage, outcome=Succeeded}.
     while let Some(ev) = a.poll_event() {
       if let Event::ExchangeCompleted(ec) = ev {
-        if ec.kind() == ExchangeKind::UserMessage && ec.outcome() == ExchangeOutcome::Succeeded {
+        if ec.kind() == ExchangeKind::UserMessage && ec.outcome() == ExchangeStatus::Succeeded {
           exchange_succeeded = true;
         }
       }

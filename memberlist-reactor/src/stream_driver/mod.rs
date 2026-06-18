@@ -56,7 +56,7 @@ use memberlist_proto::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
+  event::{Event, ExchangeKind, ExchangeStatus, PushPullKind, StreamId, Transmit},
   streams::{ExchangeId, StreamAction, StreamTransport},
   typed::Message,
 };
@@ -181,7 +181,7 @@ struct BridgeEof {
 }
 
 /// The result a dial task reports back to the pump.
-enum DialOutcome<R>
+enum DialStatus<R>
 where
   R: Runtime,
 {
@@ -191,7 +191,7 @@ where
   Failed(ExchangeId),
 }
 
-/// Payload of [`DialOutcome::Connected`].
+/// Payload of [`DialStatus::Connected`].
 struct DialConnected<R>
 where
   R: Runtime,
@@ -463,9 +463,9 @@ where
   /// Cloned into each spawned bridge task to report inbound bytes/EOF.
   inbound_tx: Sender<BridgeInbound>,
   /// Dial completions from the dial tasks.
-  dial_rx: Receiver<DialOutcome<R>>,
+  dial_rx: Receiver<DialStatus<R>>,
   /// Cloned into each spawned dial task to report its outcome.
-  dial_tx: Sender<DialOutcome<R>>,
+  dial_tx: Sender<DialStatus<R>>,
   recv_buf: Vec<u8>,
   recv_batch: usize,
   /// Per-poll cap on each drained surface (bounds the work one poll performs;
@@ -1004,7 +1004,7 @@ where
     match ev {
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::PushPull => {
         let eid = p.eid();
-        let succeeded = matches!(p.outcome(), ExchangeOutcome::Succeeded);
+        let succeeded = matches!(p.outcome(), ExchangeStatus::Succeeded);
         let mut completed = None;
         for (key, pj) in self.pending_joins.iter_mut() {
           if pj.pending_eids.remove(&eid) {
@@ -1062,7 +1062,7 @@ where
       // The event continues to the observation task below (additive).
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::UserMessage => {
         let eid = p.eid();
-        let failed = matches!(p.outcome(), ExchangeOutcome::Failed);
+        let failed = matches!(p.outcome(), ExchangeStatus::Failed);
         if let Some(idx) = self
           .pending_user_sends
           .iter()
@@ -1108,7 +1108,7 @@ where
         let (out_tx, out_rx) = flume::unbounded();
         let (cancel_tx, cancel_rx) = oneshot::channel();
         // No bridge task yet — the dial owns the connecting FD until it completes,
-        // at which point `DialOutcome::Connected` spawns the bridge.
+        // at which point `DialStatus::Connected` spawns the bridge.
         self.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
         self.spawn_dial(eid, peer, out_rx, cancel_rx);
       }
@@ -1592,7 +1592,7 @@ where
     // Dial outcomes: bridge a connected stream, or fail the exchange via EOF.
     while let Ok(outcome) = this.dial_rx.try_recv() {
       match outcome {
-        DialOutcome::Connected(DialConnected {
+        DialStatus::Connected(DialConnected {
           eid,
           stream,
           out_rx,
@@ -1605,7 +1605,7 @@ where
             this.spawn_bridge(eid, stream, out_rx, cancel_rx);
           }
         }
-        DialOutcome::Failed(eid) => {
+        DialStatus::Failed(eid) => {
           // Drive the exchange to a DIAL FAILURE — NOT a benign EOF feed.
           // A connect that never established has no wire, and a one-way
           // `UserMessage` maps a clean EOF to a SUCCESSFUL completion
@@ -1756,20 +1756,20 @@ async fn dial_task<I, R>(
   peer: SocketAddr,
   out_rx: Receiver<BridgeOut>,
   cancel_rx: oneshot::Receiver<()>,
-  dial_tx: Sender<DialOutcome<R>>,
+  dial_tx: Sender<DialStatus<R>>,
   shared: Arc<Shared<I>>,
 ) where
   I: NodeId,
   R: Runtime,
 {
   let outcome = match <R::Net as Net>::TcpStream::connect_timeout(&peer, DIAL_TIMEOUT).await {
-    Ok(stream) => DialOutcome::Connected(DialConnected {
+    Ok(stream) => DialStatus::Connected(DialConnected {
       eid,
       stream,
       out_rx,
       cancel_rx,
     }),
-    Err(_) => DialOutcome::Failed(eid),
+    Err(_) => DialStatus::Failed(eid),
   };
   // Ignoring Err: the pump dropped its receiver (driver shut down).
   let _ = dial_tx.send(outcome);

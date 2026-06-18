@@ -77,7 +77,7 @@ pub enum LabelError {
 /// Outcome of validating the inbound label header against the configured
 /// expectation. Returned by [`classify_header`].
 #[derive(Debug)]
-pub enum LabelOutcome {
+pub enum LabelVerdict {
   /// Header parsed and accepted. The carried `usize` is the number of
   /// leading bytes (`[12][len][label]`, or `0` for an accepted unlabeled
   /// inbound) that the caller must skip before the payload.
@@ -144,7 +144,7 @@ pub fn encode_label_prefix(label: &[u8], out: &mut Vec<u8>) {
 ///
 /// This is the pure per-call decision extracted from the inbound-label
 /// truth table. The caller is responsible for buffering partial reads until
-/// this function returns something other than [`LabelOutcome::Incomplete`].
+/// this function returns something other than [`LabelVerdict::Incomplete`].
 ///
 /// Truth table (faithful to `memberlist-core/src/network.rs` and the frozen
 /// `memberlist-proto` decoder):
@@ -177,50 +177,50 @@ pub fn classify_header(
   buf: &[u8],
   expected: Option<&[u8]>,
   skip_inbound_label_check: bool,
-) -> LabelOutcome {
+) -> LabelVerdict {
   match buf.first() {
-    None => LabelOutcome::Incomplete,
+    None => LabelVerdict::Incomplete,
     Some(&LABELED_TAG) => {
       if buf.len() < LABEL_OVERHEAD {
-        return LabelOutcome::Incomplete;
+        return LabelVerdict::Incomplete;
       }
       let len = buf[1] as usize;
       // A faithful peer never declares a length above the cap; reject
       // immediately without waiting for the remaining bytes.
       if len > MAX_LABEL_LEN {
-        return LabelOutcome::Rejected(LabelError::TooLong(len));
+        return LabelVerdict::Rejected(LabelError::TooLong(len));
       }
       if buf.len() < LABEL_OVERHEAD + len {
-        return LabelOutcome::Incomplete;
+        return LabelVerdict::Incomplete;
       }
       let header_label = &buf[LABEL_OVERHEAD..LABEL_OVERHEAD + len];
       // Frozen `memberlist-proto::Label` is validated UTF-8; reject a
       // non-UTF-8 label before any match to close the "accepted if bytes
       // happen to match" footgun.
       if core::str::from_utf8(header_label).is_err() {
-        return LabelOutcome::Rejected(LabelError::NotUtf8);
+        return LabelVerdict::Rejected(LabelError::NotUtf8);
       }
       match expected {
-        Some(exp) if exp == header_label => LabelOutcome::Accepted(LABEL_OVERHEAD + len),
-        Some(_) => LabelOutcome::Rejected(LabelError::Mismatch),
+        Some(exp) if exp == header_label => LabelVerdict::Accepted(LABEL_OVERHEAD + len),
+        Some(_) => LabelVerdict::Rejected(LabelError::Mismatch),
         // Labeled frame but no local label: double label. Not suppressed by
         // `skip_inbound_label_check` (memberlist-core suppresses only the
         // missing-label case), so an unlabeled node never accepts another
         // cluster's labeled traffic.
-        None => LabelOutcome::Rejected(LabelError::DoubleLabel),
+        None => LabelVerdict::Rejected(LabelError::DoubleLabel),
       }
     }
     // First byte is not the label tag: the inbound is unlabeled.
     Some(_) => match expected {
       // No label expected: accept verbatim, consuming nothing.
-      None => LabelOutcome::Accepted(0),
+      None => LabelVerdict::Accepted(0),
       // A label was expected but none arrived: reject, unless the inbound
       // check is suppressed, in which case accept as unlabeled.
       Some(_) => {
         if skip_inbound_label_check {
-          LabelOutcome::Accepted(0)
+          LabelVerdict::Accepted(0)
         } else {
-          LabelOutcome::Rejected(LabelError::Mismatch)
+          LabelVerdict::Rejected(LabelError::Mismatch)
         }
       }
     },

@@ -37,7 +37,7 @@ use memberlist_proto::{
     DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
     parse_messages,
   },
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
+  event::{Event, ExchangeKind, ExchangeStatus, PushPullKind, StreamId, Transmit},
   streams::{StreamAction, StreamTransport},
   typed::{NodeState, State},
 };
@@ -75,7 +75,7 @@ use crate::{
 /// completions). Each `start_push_pull` allocates a fresh
 /// `ExchangeId`; the driver tracks every outbound `ExchangeId` it
 /// dispatched and counts each one that terminates with
-/// `ExchangeOutcome::Succeeded`. Tracking by `ExchangeId` (rather than
+/// `ExchangeStatus::Succeeded`. Tracking by `ExchangeId` (rather than
 /// by `SocketAddr`) preserves duplicate-seed semantics: passing the
 /// same address twice produces two exchanges and two independent
 /// counts.
@@ -87,7 +87,7 @@ struct PendingJoin {
   /// for every dispatched exchange) the call has fully resolved.
   pending: HashSet<ExchangeId>,
   /// Number of dispatched outbound exchanges that terminated with
-  /// `ExchangeOutcome::Succeeded`. Duplicate seeds produce duplicate
+  /// `ExchangeStatus::Succeeded`. Duplicate seeds produce duplicate
   /// exchanges and each successful one counts independently.
   contacted: usize,
   /// Total outbound-exchange count this call dispatched, used to
@@ -2499,7 +2499,7 @@ where
       && payload.kind() == ExchangeKind::PushPull
     {
       let eid = payload.eid();
-      let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
+      let succeeded = matches!(payload.outcome(), ExchangeStatus::Succeeded);
       if let Some(idx) = pending
         .joins
         .iter()
@@ -2577,7 +2577,7 @@ where
       && payload.kind() == ExchangeKind::UserMessage
     {
       let eid = payload.eid();
-      let failed = matches!(payload.outcome(), ExchangeOutcome::Failed);
+      let failed = matches!(payload.outcome(), ExchangeStatus::Failed);
       if let Some(idx) = pending
         .user_sends
         .iter()

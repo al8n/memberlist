@@ -336,7 +336,7 @@ fn set_alive_delegate_preserves_the_cidr_policy() {
 fn cidr_blocked_send_reliable_fails_not_succeeds() {
   use memberlist_proto::{
     CidrPolicy,
-    event::{Event, ExchangeKind, ExchangeOutcome},
+    event::{Event, ExchangeKind, ExchangeStatus},
   };
 
   let cfg = Options::new()
@@ -381,7 +381,7 @@ fn cidr_blocked_send_reliable_fails_not_succeeds() {
   }
   assert_eq!(
     outcome,
-    Some(ExchangeOutcome::Failed),
+    Some(ExchangeStatus::Failed),
     "a CIDR-blocked send_reliable must complete as Failed (a benign EOF would falsely succeed it)"
   );
 }

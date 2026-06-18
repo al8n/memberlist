@@ -99,7 +99,7 @@ fn classify_header_matching_label_accepted() {
   let mut buf = vec![LABELED_TAG, 9u8];
   buf.extend_from_slice(b"cluster-x");
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Accepted(n) => assert_eq!(n, LABEL_OVERHEAD + 9),
+    LabelVerdict::Accepted(n) => assert_eq!(n, LABEL_OVERHEAD + 9),
     other => panic!("expected Accepted, got {other:?}"),
   }
 }
@@ -109,7 +109,7 @@ fn classify_header_mismatched_label_rejected_mismatch() {
   let mut buf = vec![LABELED_TAG, 5u8];
   buf.extend_from_slice(b"other");
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::Mismatch) => {}
+    LabelVerdict::Rejected(LabelError::Mismatch) => {}
     other => panic!("expected Rejected(Mismatch), got {other:?}"),
   }
 }
@@ -120,7 +120,7 @@ fn classify_header_labeled_frame_no_expected_label_double_label() {
   buf.extend_from_slice(b"cluster-x");
   // skip_inbound_label_check does NOT suppress DoubleLabel.
   match classify_header(&buf, None, true) {
-    LabelOutcome::Rejected(LabelError::DoubleLabel) => {}
+    LabelVerdict::Rejected(LabelError::DoubleLabel) => {}
     other => panic!("expected Rejected(DoubleLabel), got {other:?}"),
   }
 }
@@ -130,7 +130,7 @@ fn classify_header_empty_label_header_double_label() {
   // `[12][0]` — an empty-label header that the encoder never emits.
   let buf = [LABELED_TAG, 0u8];
   match classify_header(&buf, None, false) {
-    LabelOutcome::Rejected(LabelError::DoubleLabel) => {}
+    LabelVerdict::Rejected(LabelError::DoubleLabel) => {}
     other => panic!("expected Rejected(DoubleLabel) for [12][0], got {other:?}"),
   }
 }
@@ -140,7 +140,7 @@ fn classify_header_over_long_declared_length_too_long() {
   // `[12][254]` — two bytes are sufficient for the guard to fire immediately.
   let buf = [LABELED_TAG, 254u8];
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::TooLong(_)) => {}
+    LabelVerdict::Rejected(LabelError::TooLong(_)) => {}
     other => panic!("expected Rejected(TooLong), got {other:?}"),
   }
 }
@@ -149,7 +149,7 @@ fn classify_header_over_long_declared_length_too_long() {
 fn classify_header_over_long_255_too_long() {
   let buf = [LABELED_TAG, 255u8];
   match classify_header(&buf, Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::TooLong(_)) => {}
+    LabelVerdict::Rejected(LabelError::TooLong(_)) => {}
     other => panic!("expected Rejected(TooLong) for len=255, got {other:?}"),
   }
 }
@@ -160,7 +160,7 @@ fn classify_header_max_len_253_accepted() {
   buf.extend_from_slice(&vec![b'x'; MAX_LABEL_LEN]);
   let expected = vec![b'x'; MAX_LABEL_LEN];
   match classify_header(&buf, Some(&expected), false) {
-    LabelOutcome::Accepted(n) => assert_eq!(n, LABEL_OVERHEAD + MAX_LABEL_LEN),
+    LabelVerdict::Accepted(n) => assert_eq!(n, LABEL_OVERHEAD + MAX_LABEL_LEN),
     other => panic!("expected Accepted for 253-byte label, got {other:?}"),
   }
 }
@@ -171,7 +171,7 @@ fn classify_header_non_utf8_label_rejected_before_match() {
   // but the UTF-8 check fires before the match, so it is rejected.
   let buf = [LABELED_TAG, 2u8, 0xff, 0xfe];
   match classify_header(&buf, Some(&[0xff, 0xfe]), false) {
-    LabelOutcome::Rejected(LabelError::NotUtf8) => {}
+    LabelVerdict::Rejected(LabelError::NotUtf8) => {}
     other => panic!("expected Rejected(NotUtf8), got {other:?}"),
   }
 }
@@ -182,7 +182,7 @@ fn classify_header_non_utf8_label_rejected_before_match() {
 fn classify_header_empty_buf_incomplete() {
   assert!(matches!(
     classify_header(&[], Some(b"cluster-x"), false),
-    LabelOutcome::Incomplete
+    LabelVerdict::Incomplete
   ));
 }
 
@@ -190,7 +190,7 @@ fn classify_header_empty_buf_incomplete() {
 fn classify_header_only_tag_byte_incomplete() {
   assert!(matches!(
     classify_header(&[LABELED_TAG], Some(b"cluster-x"), false),
-    LabelOutcome::Incomplete
+    LabelVerdict::Incomplete
   ));
 }
 
@@ -200,7 +200,7 @@ fn classify_header_partial_label_body_incomplete() {
   let buf = [LABELED_TAG, 9u8, b'c', b'l', b'u', b's'];
   assert!(matches!(
     classify_header(&buf, Some(b"cluster-x"), false),
-    LabelOutcome::Incomplete
+    LabelVerdict::Incomplete
   ));
 }
 
@@ -209,7 +209,7 @@ fn classify_header_partial_label_body_incomplete() {
 #[test]
 fn classify_header_unlabeled_no_expected_accepted_zero() {
   match classify_header(b"payload", None, false) {
-    LabelOutcome::Accepted(0) => {}
+    LabelVerdict::Accepted(0) => {}
     other => panic!("expected Accepted(0), got {other:?}"),
   }
 }
@@ -217,7 +217,7 @@ fn classify_header_unlabeled_no_expected_accepted_zero() {
 #[test]
 fn classify_header_unlabeled_with_expected_rejected_mismatch() {
   match classify_header(b"payload", Some(b"cluster-x"), false) {
-    LabelOutcome::Rejected(LabelError::Mismatch) => {}
+    LabelVerdict::Rejected(LabelError::Mismatch) => {}
     other => panic!("expected Rejected(Mismatch), got {other:?}"),
   }
 }
@@ -225,7 +225,7 @@ fn classify_header_unlabeled_with_expected_rejected_mismatch() {
 #[test]
 fn classify_header_unlabeled_with_expected_skip_accepted_zero() {
   match classify_header(b"payload", Some(b"cluster-x"), true) {
-    LabelOutcome::Accepted(0) => {}
+    LabelVerdict::Accepted(0) => {}
     other => panic!("expected Accepted(0) with skip, got {other:?}"),
   }
 }
@@ -236,7 +236,7 @@ fn classify_header_skip_does_not_suppress_double_label() {
   let mut buf = vec![LABELED_TAG, 9u8];
   buf.extend_from_slice(b"cluster-x");
   match classify_header(&buf, None, true) {
-    LabelOutcome::Rejected(LabelError::DoubleLabel) => {}
+    LabelVerdict::Rejected(LabelError::DoubleLabel) => {}
     other => panic!("expected Rejected(DoubleLabel) even with skip, got {other:?}"),
   }
 }
@@ -251,7 +251,7 @@ fn classify_header_skip_does_not_rescue_twelve_byte_first_unit() {
   let mut buf = vec![LABELED_TAG, 4u8];
   buf.extend_from_slice(b"zzzz");
   match classify_header(&buf, Some(b"cluster-x"), true) {
-    LabelOutcome::Rejected(LabelError::Mismatch) => {}
+    LabelVerdict::Rejected(LabelError::Mismatch) => {}
     other => panic!("expected Rejected(Mismatch) even with skip, got {other:?}"),
   }
 }
@@ -268,7 +268,7 @@ fn encode_then_classify_roundtrip() {
   prefixed.extend_from_slice(b"inner-payload");
 
   match classify_header(&prefixed, Some(label), false) {
-    LabelOutcome::Accepted(n) => {
+    LabelVerdict::Accepted(n) => {
       assert_eq!(n, LABEL_OVERHEAD + label.len());
       assert_eq!(&prefixed[n..], b"inner-payload");
     }

@@ -1567,7 +1567,7 @@ where
   {
     // Classify each Closing connection without holding the `connections` borrow across
     // the mutating socket / pool / closing-map calls below.
-    enum Outcome<C> {
+    enum ClosingAction<C> {
       /// Drained: emit the FIN and park the handle in `closing`.
       Fin(C),
       /// No drain progress for the full `close_timeout`: abort and reclaim.
@@ -1577,7 +1577,7 @@ where
       Progress(usize),
     }
 
-    let mut actions: std::vec::Vec<(ExchangeId, Outcome<C>)> = std::vec::Vec::new();
+    let mut actions: std::vec::Vec<(ExchangeId, ClosingAction<C>)> = std::vec::Vec::new();
     for (&eid, conn) in self.plane.connections.iter() {
       if conn.state != ConnState::Closing {
         continue;
@@ -1593,32 +1593,32 @@ where
       // deadline every tick it acks.
       let undelivered = conn.out_bytes() + stream.send_queue(c);
       if undelivered == 0 {
-        actions.push((eid, Outcome::Fin(c)));
+        actions.push((eid, ClosingAction::Fin(c)));
       } else if undelivered < conn.close_drain_mark {
-        actions.push((eid, Outcome::Progress(undelivered)));
+        actions.push((eid, ClosingAction::Progress(undelivered)));
       } else if conn.close_deadline.is_some_and(|d| now >= d) {
         // No progress for the full `close_timeout`: the peer stalled / vanished. Give up
         // on the remainder and reclaim the socket so the pool cannot wedge.
-        actions.push((eid, Outcome::Abort(c)));
+        actions.push((eid, ClosingAction::Abort(c)));
       }
     }
 
     for (eid, outcome) in actions {
       match outcome {
-        Outcome::Fin(c) => {
+        ClosingAction::Fin(c) => {
           // Every byte was delivered: FIN the transmit half so the peer reads a clean
           // EOF, then park for the reap backstop.
           self.plane.connections.remove(&eid);
           stream.close(c);
           self.plane.closing.insert(c, now + self.cfg.close_timeout);
         }
-        Outcome::Abort(c) => {
+        ClosingAction::Abort(c) => {
           // Idle deadline elapsed: RST and reclaim at once.
           self.plane.connections.remove(&eid);
           stream.abort(c);
           self.plane.pool.give(c);
         }
-        Outcome::Progress(mark) => {
+        ClosingAction::Progress(mark) => {
           // Re-arm the idle deadline from `now`; keep the connection mapped so the egress
           // pump keeps draining.
           if let Some(conn) = self.plane.connections.get_mut(&eid) {

@@ -1741,7 +1741,7 @@ fn pump_in_labeled_validates_inbound_label_over_live_stream() {
 
 /// `pump_in` over a live quinn stream for a LABELED bridge whose peer sends a
 /// MISMATCHED label header: the inline classifier returns
-/// `LabelOutcome::Rejected`, flipping `decode_failed` and routing the bridge
+/// `LabelVerdict::Rejected`, flipping `decode_failed` and routing the bridge
 /// through the decode-fail retire block (`Failed(Decode)`).
 #[test]
 fn pump_in_labeled_mismatched_inbound_label_rejected_over_live_stream() {
@@ -1772,7 +1772,7 @@ fn pump_in_labeled_mismatched_inbound_label_rejected_over_live_stream() {
   assert_eq!(
     result,
     Err(()),
-    "a mismatched inbound label must fail pump_in via LabelOutcome::Rejected"
+    "a mismatched inbound label must fail pump_in via LabelVerdict::Rejected"
   );
   assert!(
     matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
@@ -1783,7 +1783,7 @@ fn pump_in_labeled_mismatched_inbound_label_rejected_over_live_stream() {
 
 /// `pump_in` over a live quinn stream for a LABELED bridge whose peer delivers
 /// the label header SPLIT across two writes: the first `pump_in` sees only a
-/// partial header → `LabelOutcome::Incomplete` (the `break` that holds
+/// partial header → `LabelVerdict::Incomplete` (the `break` that holds
 /// `recv_accum` for the next chunk), and a later `pump_in` completes it and
 /// latches `inbound_label_validated`.
 #[test]

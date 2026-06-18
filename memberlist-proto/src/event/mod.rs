@@ -134,7 +134,7 @@ impl ExchangeKind {
 /// Terminal outcome of one reliable exchange, observed by the driver
 /// via [`Event::ExchangeCompleted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExchangeOutcome {
+pub enum ExchangeStatus {
   /// The exchange validated end-to-end (frame decoder, record layer,
   /// payload merge for push/pull, ack-decode for reliable ping, etc.)
   /// and any membership/probe side effects were applied. For an
@@ -148,11 +148,11 @@ pub enum ExchangeOutcome {
   Failed,
 }
 
-impl ExchangeOutcome {
+impl ExchangeStatus {
   /// Returns `true` if this is `Succeeded`.
   #[inline(always)]
   pub const fn is_succeeded(self) -> bool {
-    matches!(self, ExchangeOutcome::Succeeded)
+    matches!(self, ExchangeStatus::Succeeded)
   }
 }
 
@@ -172,7 +172,7 @@ impl ExchangeOutcome {
 pub struct ExchangeCompleted<A> {
   eid: ExchangeId,
   peer: A,
-  outcome: ExchangeOutcome,
+  outcome: ExchangeStatus,
   kind: ExchangeKind,
 }
 
@@ -188,7 +188,7 @@ impl<A> ExchangeCompleted<A> {
   pub(crate) const fn new(
     eid: ExchangeId,
     peer: A,
-    outcome: ExchangeOutcome,
+    outcome: ExchangeStatus,
     kind: ExchangeKind,
   ) -> Self {
     Self {
@@ -213,7 +213,7 @@ impl<A> ExchangeCompleted<A> {
 
   /// The terminal outcome.
   #[inline(always)]
-  pub const fn outcome(&self) -> ExchangeOutcome {
+  pub const fn outcome(&self) -> ExchangeStatus {
     self.outcome
   }
 
@@ -659,7 +659,7 @@ pub enum Event<I, A> {
   /// or `Endpoint::dial_failed(id, err, now)` on failure.
   DialRequested(DialRequested<A>),
   /// A reliable exchange terminated, with the validated outcome (see
-  /// [`ExchangeOutcome`]). Fired from the coordinator's bridge-reap
+  /// [`ExchangeStatus`]). Fired from the coordinator's bridge-reap
   /// path for ALL outbound bridge kinds (push/pull, reliable ping,
   /// reliable user message); consumers filter by
   /// [`ExchangeCompleted::kind`] to focus on the bridges they care

@@ -15,7 +15,7 @@ mod demux;
 mod transport_mode;
 
 pub use crypto::QuicOptions;
-pub use transport_mode::{DatagramSendOutcome, UnreliableTransport};
+pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
 use crate::Instant;
 use core::net::SocketAddr;
@@ -28,7 +28,7 @@ use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 use crate::{
   endpoint::Endpoint,
   event::{
-    Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId,
+    Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeStatus, PushPullKind, StreamId,
     Transmit,
   },
 };
@@ -501,7 +501,7 @@ impl<I, R> QuicEndpoint<I, R> {
   )]
   pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
     match self.compression.apply(datagram) {
-      Ok(crate::CompressionOutcome::Compressed(packed)) => {
+      Ok(crate::CompressionOutput::Compressed(packed)) => {
         let wrapped = crate::encode_compressed_frame(
           self
             .compression
@@ -595,8 +595,8 @@ impl<I, R> QuicEndpoint<I, R> {
   )]
   pub fn checksum_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, crate::ChecksumError> {
     match self.checksum.apply(datagram)? {
-      crate::ChecksumOutcome::Checksumed(framed) => Ok(framed),
-      crate::ChecksumOutcome::Plain => Ok(datagram.to_vec()),
+      crate::ChecksumOutput::Checksumed(framed) => Ok(framed),
+      crate::ChecksumOutput::Plain => Ok(datagram.to_vec()),
     }
   }
 
@@ -1206,7 +1206,7 @@ impl<I, R> QuicEndpoint<I, R> {
   /// and the test-only acceptance-tracking pump). Outbound only —
   /// inbound (server-accepted) bridges have no entry in
   /// `pending_outbound_kinds` and silently no-op here.
-  fn emit_exchange_completed(&mut self, id: StreamId, outcome: ExchangeOutcome) {
+  fn emit_exchange_completed(&mut self, id: StreamId, outcome: ExchangeStatus) {
     let Some(kind) = self.pending_outbound_kinds.remove(&id) else {
       return;
     };
@@ -1272,14 +1272,14 @@ impl<I, R> QuicEndpoint<I, R> {
         .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
           ExchangeId::from(id),
           peer,
-          ExchangeOutcome::Failed,
+          ExchangeStatus::Failed,
           kind,
         )));
     }
     self.ep.dial_failed(id, err, now);
   }
 
-  /// Determine the [`ExchangeOutcome`] of a bridge at the moment it is
+  /// Determine the [`ExchangeStatus`] of a bridge at the moment it is
   /// being reaped. Mirrors [`super::streams::StreamEndpoint::reap_bridge`]'s
   /// rule: any failure phase (`BridgeFailure::Timeout`, `Transport`,
   /// `Decode`, `ConnectionLost`, `AdmissionClosed`, `DialRetired`,
@@ -1288,11 +1288,11 @@ impl<I, R> QuicEndpoint<I, R> {
   /// be terminal before this is called — terminal-after-D1 is the only
   /// site that knows the final outcome.
   #[inline]
-  fn outcome_for_terminal(br: &Bridge<I, SocketAddr>) -> ExchangeOutcome {
+  fn outcome_for_terminal(br: &Bridge<I, SocketAddr>) -> ExchangeStatus {
     if br.is_phase_failed() {
-      ExchangeOutcome::Failed
+      ExchangeStatus::Failed
     } else {
-      ExchangeOutcome::Succeeded
+      ExchangeStatus::Succeeded
     }
   }
 
@@ -1425,7 +1425,7 @@ impl<I, R> QuicEndpoint<I, R> {
     peer: SocketAddr,
     bytes: Bytes,
     now: Instant,
-  ) -> DatagramSendOutcome {
+  ) -> DatagramSendStatus {
     let sni_arc = self.cfg.sni_for(&peer);
     let ch = match self.conns.get_or_dial(
       &mut self.quinn,
@@ -1436,18 +1436,18 @@ impl<I, R> QuicEndpoint<I, R> {
     ) {
       Ok(ch) => ch,
       // A dial that cannot even be initiated (ConnectError) — best effort.
-      Err(_) => return DatagramSendOutcome::NotReady,
+      Err(_) => return DatagramSendStatus::NotReady,
     };
     let Some(e) = self.conns.get_mut(ch) else {
-      return DatagramSendOutcome::NotReady;
+      return DatagramSendStatus::NotReady;
     };
     let conn = e.conn_mut();
     match conn.datagrams().max_size() {
       // Still handshaking, peer doesn't support datagrams, or disabled locally.
       // Best-effort: the driver falls back to UDP; a later datagram lands once
       // the connection is Established.
-      None => return DatagramSendOutcome::NotReady,
-      Some(max) if bytes.len() > max => return DatagramSendOutcome::TooLarge,
+      None => return DatagramSendStatus::NotReady,
+      Some(max) if bytes.len() > max => return DatagramSendStatus::TooLarge,
       Some(_) => {}
     }
     // drop = false: under send-buffer pressure quinn returns Blocked and leaves
@@ -1458,15 +1458,15 @@ impl<I, R> QuicEndpoint<I, R> {
     // driver then falls back to plain UDP) preserves the earlier critical
     // datagrams and loses nothing.
     match conn.datagrams().send(bytes, false) {
-      Ok(()) => DatagramSendOutcome::Queued,
+      Ok(()) => DatagramSendStatus::Queued,
       // Send buffer full: the driver falls back to plain UDP for this payload.
       // Not a drop (the payload still goes out over UDP) and not counted.
-      Err(quinn_proto::SendDatagramError::Blocked(_)) => DatagramSendOutcome::NotReady,
+      Err(quinn_proto::SendDatagramError::Blocked(_)) => DatagramSendStatus::NotReady,
       // UnsupportedByPeer / Disabled / TooLarge are excluded by the max_size
       // pre-check above; any residual error is unexpected — count and fall back.
       Err(_) => {
         self.datagram_dropped = self.datagram_dropped.saturating_add(1);
-        DatagramSendOutcome::NotReady
+        DatagramSendStatus::NotReady
       }
     }
   }

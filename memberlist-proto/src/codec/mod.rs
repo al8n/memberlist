@@ -13,7 +13,7 @@ use std::vec::Vec;
 use crate::{
   Data, framing,
   label::{
-    LABEL_OVERHEAD, LabelError, LabelOutcome, classify_header, effective_label,
+    LABEL_OVERHEAD, LabelError, LabelVerdict, classify_header, effective_label,
     encode_label_prefix, validate_label,
   },
   message_from_any, message_to_any,
@@ -250,7 +250,7 @@ pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecE
   // The datagram path never suppresses the inbound label check; datagrams
   // are single-shot and carry no per-stream policy.
   match classify_header(&raw, expected, false) {
-    LabelOutcome::Accepted(consumed) => {
+    LabelVerdict::Accepted(consumed) => {
       let inner = raw.slice(consumed..);
       if inner.is_empty() {
         if consumed > 0 {
@@ -260,8 +260,8 @@ pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecE
       }
       Ok(inner)
     }
-    LabelOutcome::Incomplete => Err(CodecError::Truncated(TruncatedInput::LabelHeader)),
-    LabelOutcome::Rejected(e) => Err(CodecError::Label(e)),
+    LabelVerdict::Incomplete => Err(CodecError::Truncated(TruncatedInput::LabelHeader)),
+    LabelVerdict::Rejected(e) => Err(CodecError::Label(e)),
   }
 }
 
