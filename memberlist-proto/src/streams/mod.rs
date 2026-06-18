@@ -1,4 +1,4 @@
-//! Composed stream-transport ⊕ memberlist Sans-I/O super-state-machine.
+//! Composed stream-transport ⊕ memberlist Sans-I/O coordinator.
 //!
 //! `StreamEndpoint<I, A, R>` runs memberlist over a record-layer-shaped
 //! reliable transport (`R: StreamTransport`) for reliable exchanges and
@@ -201,6 +201,24 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
     StreamAction::Connect(_) => unreachable!("teardown_exchange called on a Connect action"),
   }
 }
+
+/// [`StreamEndpoint`] over the plain-TCP reliable transport — the reliable
+/// sibling of `TlsEndpoint` and `QuicEndpoint`.
+///
+/// `RawRecords` is the labeled plain-TCP record layer (`Labeled<Passthrough>`);
+/// unreliable gossip still flows over plain UDP.
+#[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
+pub type TcpEndpoint<I, A, G = SmallRng> = StreamEndpoint<I, A, crate::tcp::RawRecords, G>;
+
+/// [`StreamEndpoint`] over the TLS-over-TCP reliable transport — the reliable
+/// sibling of `TcpEndpoint` and `QuicEndpoint`.
+///
+/// The transport is the TLS record layer under a cluster label
+/// (`Labeled<TlsRecords>`); unreliable gossip still flows over plain UDP.
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub type TlsEndpoint<I, A, G = SmallRng> = StreamEndpoint<I, A, Labeled<crate::tls::TlsRecords>, G>;
 
 /// Coordinator: `memberlist::Endpoint` (unreliable gossip + membership)
 /// composed with a per-exchange record-layer-shaped reliable transport

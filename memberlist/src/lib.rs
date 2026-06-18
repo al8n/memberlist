@@ -12,7 +12,7 @@
 extern crate alloc;
 
 /// The runtime-agnostic protocol core: the membership machine, the QUIC
-/// super-machine, options, typed messages, events, and transforms.
+/// coordinator, options, typed messages, events, and transforms.
 pub use memberlist_proto as proto;
 
 #[cfg(feature = "tokio")]

@@ -2,7 +2,7 @@
 //!
 //! # Cluster authentication on the TLS reliable path
 //!
-//! The composed super-state-machine treats the **TLS handshake as the
+//! The composed coordinator treats the **TLS handshake as the
 //! security layer** for the reliable path (push/pull, reliable-ping fallback,
 //! reliable user messages). Memberlist's wire-level AES-GCM and wire-label are
 //! not applied inside a TLS connection — the TLS record layer supersedes them;

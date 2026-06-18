@@ -2,7 +2,7 @@
 //!
 //! # Cluster authentication on the QUIC reliable path
 //!
-//! The composed super-state-machine treats **QUIC's TLS 1.3 handshake as the
+//! The composed coordinator treats **QUIC's TLS 1.3 handshake as the
 //! security layer** for the reliable path (push/pull, reliable-ping fallback,
 //! reliable user messages). Memberlist's wire-level AES-GCM encryption is
 //! skipped on QUIC — layering it atop QUIC's TLS is redundant double-

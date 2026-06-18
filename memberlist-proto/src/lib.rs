@@ -135,10 +135,16 @@ pub use quic::{DatagramSendStatus, QuicEndpoint, QuicOptions, UnreliableTranspor
 mod tls;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub use streams::TlsEndpoint;
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use tls::{TlsOptions, TlsRecords};
 
 #[cfg(feature = "tcp")]
 mod tcp;
+#[cfg(feature = "tcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
+pub use streams::TcpEndpoint;
 #[cfg(feature = "tcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 pub use tcp::RawRecords;

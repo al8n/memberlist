@@ -1,7 +1,7 @@
 //! `memberlist-reactor` — reactor-I/O async driver for the Sans-I/O
 //! [`memberlist-proto`](memberlist_proto).
 //!
-//! Drives memberlist-proto's Sans-I/O super-machines — `StreamEndpoint`
+//! Drives memberlist-proto's Sans-I/O coordinators — `StreamEndpoint`
 //! (TCP / TLS) and `QuicEndpoint` (QUIC, which embeds `quinn-proto`) — on
 //! **reactor-pattern** async runtimes (tokio, smol, ...) through the
 //! [`agnostic`] runtime abstraction, so one implementation serves every reactor
