@@ -177,6 +177,65 @@ fn queue_broadcast_id_allocated_after_reset_no_desync() {
   );
 }
 
+/// Reproduction of al8n/memberlist#131 (the memberlist side). The dropped
+/// broadcast there is a serf QUERY — a UNIQUE broadcast (`id() == None`,
+/// `is_unique()`), which never invalidates and whose only path to an `id_gen`
+/// reset is the drain emptying the queue. After such a reset, several
+/// same-length unique broadcasts (serf node-ids are fixed-length UUIDs, so the
+/// encoded lengths collide) must coexist and all be delivered. The legacy
+/// `TransmitLimitedQueue` could assign two simultaneously-queued items the same
+/// `(transmits, msg_len, id)` BTreeSet key, making the second `insert` a silent
+/// no-op — the dropped query in the issue. The Sans-I/O queue allocates the id
+/// after the reset and `insert_into` refuses an m/q desync, so none is lost.
+#[test]
+fn issue_131_unique_same_length_broadcasts_survive_reset() {
+  let mut q: BroadcastQueue<&'static str, UniqueBroadcast> = BroadcastQueue::new(3);
+
+  // Cycle through full drains that empty the queue and reset id_gen — a node
+  // whose earlier queries finished rebroadcasting. retransmit_limit(_, 0) == 0,
+  // so each take finishes and removes its single broadcast.
+  for i in 0..3 {
+    q.queue_broadcast(UniqueBroadcast {
+      msg: format!("warm{i}"),
+    });
+    let _ = q.take_broadcasts(0, 0, 4096);
+    assert!(q.is_empty());
+  }
+  assert_eq!(q.id_gen, 0, "a fully drained queue resets the id generator");
+
+  // Now queue many SAME-LENGTH unique broadcasts that all stay queued (the high
+  // node count keeps the retransmit ceiling well above zero). Each must insert.
+  let count = 32usize;
+  for i in 0..count {
+    let before = q.num_queued();
+    q.queue_broadcast(UniqueBroadcast {
+      msg: format!("q{i:04}"), // every message is length 5 ⇒ identical msg_len
+    });
+    assert_eq!(
+      q.num_queued(),
+      before + 1,
+      "unique broadcast {i} was silently dropped on insert (key collision)"
+    );
+  }
+
+  // No two simultaneously-queued items share a queue id (the BTreeSet would
+  // silently collapse a duplicate `(transmits, msg_len, id)` key).
+  let ids: BTreeSet<u64> = q.q.iter().map(|it| it.id).collect();
+  assert_eq!(
+    ids.len(),
+    count,
+    "duplicate queue ids ⇒ a silent drop occurred"
+  );
+
+  // Every queued broadcast is actually transmittable.
+  let delivered = q.take_broadcasts(10_000, 0, 10_000_000);
+  assert_eq!(
+    delivered.len(),
+    count,
+    "all same-length unique queries must be deliverable (none dropped)"
+  );
+}
+
 #[test]
 fn limit_prevents_oversized_messages() {
   let mut q = BroadcastQueue::new(3);
