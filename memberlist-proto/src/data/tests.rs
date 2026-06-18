@@ -16,13 +16,14 @@ use crate::{
   Node,
   wire_type::{WireType, merge, skip, split},
 };
+use core::fmt;
 
 /// Encode into an exact-sized buffer, decode it back, and assert the value and
 /// the consumed/written lengths all agree. Exercises `encoded_len` + `encode` +
 /// `decode` + `from_ref` for one value.
 fn roundtrip<T>(val: T)
 where
-  T: Data + PartialEq + core::fmt::Debug,
+  T: Data + PartialEq + fmt::Debug,
 {
   let len = val.encoded_len();
   let mut buf = std::vec![0u8; len];
@@ -44,7 +45,7 @@ where
 /// so the call is valid for every `Data` type.
 fn roundtrip_length_delimited<T>(val: T)
 where
-  T: Data + PartialEq + core::fmt::Debug,
+  T: Data + PartialEq + fmt::Debug,
 {
   let len = val.encoded_len_with_length_delimited();
   let mut buf = std::vec![0u8; len];
@@ -69,7 +70,7 @@ where
 /// Run both framings plus the `to_vec` / `to_bytes` convenience encoders.
 fn check<T>(val: T)
 where
-  T: Data + Clone + PartialEq + core::fmt::Debug,
+  T: Data + Clone + PartialEq + fmt::Debug,
 {
   roundtrip(val.clone());
   roundtrip_length_delimited(val.clone());

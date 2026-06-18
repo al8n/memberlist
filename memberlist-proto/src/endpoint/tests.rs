@@ -23,8 +23,8 @@ fn process_alive_auto<I, A>(
     + Data
     + Eq
     + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -72,7 +72,7 @@ fn new_at_stamps_local_member_at_driver_clock() {
   // not the wall clock — otherwise the machine reads a clock the driver does
   // not own and carries a local `state_change` in the driver's own future,
   // where later `duration_since` could saturate or panic.
-  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let t0 = Instant::from_origin(Duration::from_secs(1));
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
   assert_eq!(
     e.node_state_change(&SmolStr::new("local")),
@@ -82,14 +82,14 @@ fn new_at_stamps_local_member_at_driver_clock() {
 
   // Driving entirely with driver instants at/after `t0` (all far below the
   // wall clock) must not panic.
-  e.handle_timeout(t0 + core::time::Duration::from_millis(500));
+  e.handle_timeout(t0 + Duration::from_millis(500));
 }
 
 #[test]
 fn try_new_at_with_seed_is_infallible() {
   // A seeded config never touches platform entropy, so the fallible
   // constructor always succeeds — the fully Sans-I/O / deterministic path.
-  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let t0 = Instant::from_origin(Duration::from_secs(1));
   let e = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(cfg(), t0)
     .expect("seeded construction never fails");
   assert_eq!(e.num_members(), 1);
@@ -100,8 +100,7 @@ fn scheduler_deadlines_saturate_at_extreme_now() {
   // A pathological near-maximum clock must not panic when the scheduler builds
   // probe/gossip/push-pull deadlines as `now + interval`; the forward
   // arithmetic saturates instead.
-  let near_max =
-    Instant::from_origin(core::time::Duration::MAX - core::time::Duration::from_secs(1));
+  let near_max = Instant::from_origin(Duration::MAX - Duration::from_secs(1));
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), near_max);
   e.start_scheduling(near_max);
   e.handle_timeout(near_max);
@@ -290,7 +289,7 @@ fn reset_nodes_with_now_before_state_change_does_not_panic() {
   // earlier `now` (a stale timer tick, a virtual-clock domain, or a direct
   // `reset_nodes` call). The elapsed-since-state_change must saturate to zero
   // rather than panic, and the member must not be reclaimed yet.
-  let t_late = Instant::from_origin(core::time::Duration::from_secs(100));
+  let t_late = Instant::from_origin(Duration::from_secs(100));
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t_late);
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, t_late);
   while e.poll_event().is_some() {}
@@ -304,7 +303,7 @@ fn reset_nodes_with_now_before_state_change_does_not_panic() {
     State::Dead
   );
 
-  let t_early = Instant::from_origin(core::time::Duration::from_secs(1));
+  let t_early = Instant::from_origin(Duration::from_secs(1));
   e.reset_nodes(t_early); // must not panic
   assert!(
     e.members.get(&SmolStr::new("bob")).is_some(),
@@ -687,7 +686,7 @@ fn broadcast_queue_grows_on_alive_and_suspect() {
 /// An [`AliveDelegate`] that vetoes every inbound alive.
 struct RejectAllAlive;
 impl crate::delegate::AliveDelegate<SmolStr, SocketAddr> for RejectAllAlive {
-  fn notify_alive(&self, _peer: &crate::typed::NodeState<SmolStr, SocketAddr>) -> bool {
+  fn notify_alive(&self, _peer: &NodeState<SmolStr, SocketAddr>) -> bool {
     false
   }
 }
@@ -722,8 +721,8 @@ fn alive_no_delegate_applies_the_message() {
 struct RejectAllMerge {
   seen: std::sync::Mutex<Vec<SmolStr>>,
 }
-impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
-  fn notify_merge(&self, peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+impl MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
+  fn notify_merge(&self, peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
     *self.seen.lock().unwrap() = peers.iter().map(|p| p.id_ref().clone()).collect();
     false
   }
@@ -740,7 +739,7 @@ fn merge_delegate_vetoes_join_push_pull() {
   use bytes::Bytes;
   use std::sync::{Arc, Mutex};
 
-  use crate::event::PushPullRequestReceived;
+  use PushPullRequestReceived;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
@@ -786,7 +785,7 @@ fn merge_delegate_vetoes_outbound_push_pull_reply() {
   use bytes::Bytes;
   use std::sync::{Arc, Mutex};
 
-  use crate::event::PushPullReplyReceived;
+  use PushPullReplyReceived;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
@@ -831,7 +830,7 @@ fn merge_delegate_vetoes_refresh_push_pull() {
   use bytes::Bytes;
   use std::sync::{Arc, Mutex};
 
-  use crate::event::PushPullRequestReceived;
+  use PushPullRequestReceived;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
@@ -866,8 +865,8 @@ fn merge_delegate_vetoes_refresh_push_pull() {
 /// Newtype so an `Arc<RejectAllMerge>` can be installed as the boxed
 /// `MergeDelegate` while the test retains a handle to inspect `seen`.
 struct ArcMerge(std::sync::Arc<RejectAllMerge>);
-impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for ArcMerge {
-  fn notify_merge(&self, peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+impl MergeDelegate<SmolStr, SocketAddr> for ArcMerge {
+  fn notify_merge(&self, peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
     self.0.notify_merge(peers)
   }
 }
@@ -893,7 +892,7 @@ fn set_ack_payload_oversized_is_rejected() {
   let budget = cfg().gossip_mtu();
   let res = e.set_ack_payload(Bytes::from(vec![0xab_u8; 4096]));
   match res {
-    Err(crate::error::Error::AckPayloadExceedsMtu(info)) => {
+    Err(Error::AckPayloadExceedsMtu(info)) => {
       let (encoded, reported_budget) = (info.size(), info.limit());
       assert!(
         encoded > reported_budget,
@@ -1044,7 +1043,7 @@ fn set_local_state_snapshot_rejects_oversized() {
   let oversized = Bytes::from(vec![0u8; 8192]);
   let res = e.set_local_state_snapshot(oversized);
   assert!(
-    matches!(res, Err(crate::error::Error::LocalStateExceedsFrame(_))),
+    matches!(res, Err(Error::LocalStateExceedsFrame(_))),
     "oversized snapshot must be rejected with LocalStateExceedsFrame, got {res:?}"
   );
   // Rejected, not stored: the snapshot is still empty.
@@ -1417,7 +1416,7 @@ fn detection_late_direct_ack_in_awaiting_indirect_emits_ping_completed() {
   // Confirm the probe is genuinely in AwaitingIndirect (NOT AwaitingDirectAck)
   // when the Ack lands.
   match &e.probes.get(&seq).expect("probe still in flight").phase {
-    crate::probe::ProbePhase::AwaitingIndirect(_) => {}
+    ProbePhase::AwaitingIndirect(_) => {}
     other => panic!("expected AwaitingIndirect, got {other:?}"),
   }
   // And that escalation traffic (indirect fan-out) was actually emitted.
@@ -1580,10 +1579,7 @@ fn nacked_by_addrs(
   seq: u32,
 ) -> smallvec::SmallVec<[SocketAddr; 4]> {
   match &e.probes.get(&seq).expect("probe present").phase {
-    crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
-      nacked_by,
-      ..
-    }) => nacked_by.clone(),
+    ProbePhase::AwaitingIndirect(AwaitingIndirect { nacked_by, .. }) => nacked_by.clone(),
     other => panic!("expected AwaitingIndirect, got {other:?}"),
   }
 }
@@ -1604,14 +1600,14 @@ fn indirect_probe_at(
   let expected_nacks = indirect_peers.len();
   e.probes.insert(
     seq,
-    crate::probe::Probe {
+    Probe {
       target,
       sent_at,
-      kind: crate::probe::ProbeKind::Detection,
+      kind: ProbeKind::Detection,
       // For Detection in AwaitingIndirect the failure deadline IS the
       // phase (cumulative) deadline, by the single-source invariant.
       failure_deadline,
-      phase: crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+      phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         indirect_peers,
         nacked_by: smallvec::SmallVec::new(),
@@ -1757,7 +1753,16 @@ fn nack_flood_from_one_peer_does_not_suppress_awareness_penalty() {
 
 // ─────────────── handle_indirect_ping ────────────────────────────────────
 
+use crate::{
+  delegate::MergeDelegate,
+  error::{EndpointInitError, Error, StreamError},
+  event::{PushPullKind, PushPullReplyReceived, PushPullRequestReceived, StreamEvent},
+  probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
+  stream::StreamPhase,
+  typed::NodeState,
+};
 use IndirectPing;
+use core::{fmt, time::Duration};
 
 fn ind_ping(
   target_id: &str,
@@ -1969,7 +1974,7 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
   // and entered AwaitingIndirect with one cumulative deadline.
   let probe = e.probes.get(&seq).expect("probe still in flight");
   match &probe.phase {
-    crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
       reliable_stream_id,
       deadline,
       ..
@@ -2360,7 +2365,7 @@ fn ping_emits_ping_and_records_app_ping_state() {
   };
   assert!(matches!(
     e.probes.get(&seq).map(|p| p.kind),
-    Some(crate::probe::ProbeKind::Ping)
+    Some(ProbeKind::Ping)
   ));
 }
 
@@ -2529,7 +2534,7 @@ fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
     "no suspicion / awareness penalty until the fallback also fails"
   );
   match &e.probes.get(&seq).expect("probe still racing").phase {
-    crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
       expected_nacks,
       reliable_stream_id,
       ..
@@ -2808,7 +2813,7 @@ fn dial_failed_removes_intent() {
 
 #[test]
 fn accept_stream_returns_inbound_stream() {
-  use crate::stream::StreamPhase;
+  use StreamPhase;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
@@ -2821,9 +2826,9 @@ fn accept_stream_returns_inbound_stream() {
 
 #[test]
 fn outbound_push_pull_decode_and_merge() {
-  use crate::event::PushPullKind;
   use PushNodeState;
   use PushPull;
+  use PushPullKind;
   use State;
   use bytes::Bytes;
 
@@ -2983,23 +2988,23 @@ fn post_leave_data_setters_reject_with_not_running() {
   assert!(e.is_left());
   assert!(matches!(
     e.set_ack_payload(Bytes::from_static(b"x")),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
   assert!(matches!(
     e.set_local_state_snapshot(Bytes::from_static(b"x")),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
   assert!(matches!(
     e.queue_user_broadcast(Bytes::from_static(b"x")),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
 }
 
 #[test]
 fn post_leave_push_pull_reply_does_not_merge() {
-  use crate::event::PushPullKind;
   use PushNodeState;
   use PushPull;
+  use PushPullKind;
   use State;
   use bytes::Bytes;
 
@@ -3100,7 +3105,7 @@ fn post_leave_push_pull_request_closes_without_replying() {
 
 #[test]
 fn post_leave_pending_push_pull_dial_is_refused() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
@@ -3121,7 +3126,7 @@ fn post_leave_pending_push_pull_dial_is_refused() {
 
 #[test]
 fn post_leave_detection_probe_does_not_fan_out() {
-  use core::time::Duration;
+  use Duration;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
@@ -3239,25 +3244,25 @@ fn post_leave_directed_io_rejects() {
 
   assert!(matches!(
     e.send_user_packet(peer, Bytes::from_static(b"x")),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
   assert!(matches!(
     e.send_user_packets(peer, &[Bytes::from_static(b"x")]),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
   assert!(matches!(
     e.ping(Node::new(SmolStr::new("bob"), peer), t0),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
   assert!(matches!(
     e.start_user_message(peer, Bytes::from_static(b"x"), t0),
-    Err(crate::error::Error::NotRunning)
+    Err(Error::NotRunning)
   ));
 }
 
 #[test]
 fn post_leave_poll_timeout_is_none_so_no_spin() {
-  use core::time::Duration;
+  use Duration;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(cfg().with_probe_timeout(Duration::from_millis(50)));
@@ -3284,8 +3289,8 @@ fn post_leave_poll_timeout_is_none_so_no_spin() {
 
 #[test]
 fn post_leave_initiators_are_inert() {
-  use crate::event::PushPullKind;
-  use core::time::Duration;
+  use Duration;
+  use PushPullKind;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
@@ -3345,7 +3350,7 @@ fn post_leave_reliable_user_data_is_not_delivered() {
 
 #[test]
 fn post_leave_no_stale_dial_requested_event() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
@@ -3366,7 +3371,7 @@ fn post_leave_no_stale_dial_requested_event() {
 
 #[test]
 fn post_leave_requeue_event_drops_dial_requested() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let t0 = Instant::now();
@@ -3619,10 +3624,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   let mut buf = Vec::new();
   assert!(s_out.poll_transmit(t0, &mut buf).is_some(), "request bytes");
   assert!(
-    matches!(
-      s_out.phase,
-      crate::stream::StreamPhase::OutboundAwaitingResponse(_)
-    ),
+    matches!(s_out.phase, StreamPhase::OutboundAwaitingResponse(_)),
     "drain must advance OutboundSendingRequest → OutboundAwaitingResponse"
   );
 
@@ -3667,7 +3669,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   assert!(
     s_in
       .poll_event()
-      .is_some_and(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
+      .is_some_and(|ev| matches!(ev, StreamEvent::Closed)),
     "Done must emit StreamEvent::Closed"
   );
 }
@@ -4056,12 +4058,12 @@ fn reliable_ping_ack_drives_probe_success() {
   let stream_id = StreamId::from_raw(999);
   e.probes.insert(
     probe_seq,
-    crate::probe::Probe {
+    Probe {
       target: bob,
       sent_at: now,
-      kind: crate::probe::ProbeKind::Detection,
+      kind: ProbeKind::Detection,
       failure_deadline: now + Duration::from_secs(5),
-      phase: crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+      phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
         indirect_peers: smallvec::SmallVec::new(),
         nacked_by: smallvec::SmallVec::new(),
@@ -4124,7 +4126,7 @@ fn start_user_message_encodes_user_data() {
   assert!(
     stream
       .poll_event()
-      .is_some_and(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
+      .is_some_and(|ev| matches!(ev, StreamEvent::Closed)),
     "user-message completion must emit StreamEvent::Closed"
   );
 }
@@ -4270,7 +4272,7 @@ fn timed_out_stream_never_transmits_queued_bytes() {
 /// timeout).
 #[test]
 fn fatal_frame_error_terminalizes_stream_fsm() {
-  use crate::event::StreamEvent;
+  use StreamEvent;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(cfg().with_max_stream_frame_size(1024));
@@ -4317,7 +4319,7 @@ fn fatal_frame_error_terminalizes_stream_fsm() {
 /// still racing its single cumulative deadline.
 #[test]
 fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
-  use crate::error::StreamError;
+  use StreamError;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
@@ -4336,12 +4338,12 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
   let deadline = t0 + Duration::from_secs(5);
   e.probes.insert(
     probe_seq,
-    crate::probe::Probe {
+    Probe {
       target: bob,
       sent_at: t0,
-      kind: crate::probe::ProbeKind::Detection,
+      kind: ProbeKind::Detection,
       failure_deadline: deadline,
-      phase: crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+      phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
         indirect_peers: smallvec::SmallVec::new(),
         nacked_by: smallvec::SmallVec::new(),
@@ -4356,7 +4358,7 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
   // Probe still alive — the indirect path keeps racing the deadline.
   let probe = e.probes.get(&probe_seq).expect("probe must NOT be removed");
   match &probe.phase {
-    crate::probe::ProbePhase::AwaitingIndirect(crate::probe::AwaitingIndirect {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
       reliable_stream_id,
       deadline: d,
       ..
@@ -4567,10 +4569,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   );
   assert!(buf.is_empty(), "no bytes may reach the wire post-deadline");
   assert!(
-    matches!(
-      s.phase,
-      crate::stream::StreamPhase::Failed(StreamError::Timeout)
-    ),
+    matches!(s.phase, StreamPhase::Failed(StreamError::Timeout)),
     "poll_transmit past the deadline fails the stream, got {:?}",
     s.phase
   );
@@ -4673,7 +4672,7 @@ fn eof_with_incomplete_buffered_frame_fails_peer_closed() {
 
 #[test]
 fn eof_on_terminal_stream_is_a_noop() {
-  use crate::stream::StreamPhase;
+  use StreamPhase;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -4742,12 +4741,7 @@ fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
   let t0 = Instant::now();
   // Need a probe sequence first — start_reliable_ping is keyed on the
   // probe_seq from an originating UDP probe. Use a synthetic seq.
-  let id = e.start_reliable_ping(
-    SmolStr::from("peer"),
-    peer,
-    42,
-    t0 + core::time::Duration::from_secs(1),
-  );
+  let id = e.start_reliable_ping(SmolStr::from("peer"), peer, 42, t0 + Duration::from_secs(1));
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
 
@@ -4768,7 +4762,7 @@ fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
 
 #[test]
 fn eof_in_outbound_sending_request_user_message_is_ok() {
-  use crate::stream::StreamPhase;
+  use StreamPhase;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -4812,7 +4806,7 @@ fn build_push_pull_request_bytes() -> Vec<u8> {
 
 #[test]
 fn eof_in_inbound_sending_response_empty_buf_is_ok() {
-  use crate::stream::StreamPhase;
+  use StreamPhase;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -4997,9 +4991,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   // surfaces, no Closed.
   let events: Vec<_> = core::iter::from_fn(|| s.poll_event()).collect();
   assert!(
-    !events
-      .iter()
-      .any(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
+    !events.iter().any(|ev| matches!(ev, StreamEvent::Closed)),
     "no Closed lifecycle event after split-delivery failure — got {events:?}"
   );
 }
@@ -5009,7 +5001,7 @@ fn done_phase_empty_eof_is_still_a_noop() {
   // Done + EMPTY data (the EOF marker) MUST remain a no-op — this is
   // the clean-close path the QUIC bridge uses to signal peer FIN after
   // a successful exchange (companion to the Done+data fail-Decode case).
-  use crate::stream::StreamPhase;
+  use StreamPhase;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -5251,10 +5243,7 @@ fn end_to_end_push_pull_membership_convergence() {
   // OutboundAwaitingResponse — the real driver contract, no manual phase
   // mutation and no removed write-completion helper.
   assert!(
-    matches!(
-      stream_a.phase,
-      crate::stream::StreamPhase::OutboundAwaitingResponse(_)
-    ),
+    matches!(stream_a.phase, StreamPhase::OutboundAwaitingResponse(_)),
     "poll_transmit must advance the outbound phase"
   );
 
@@ -5943,10 +5932,7 @@ fn update_meta_after_leave_returns_not_running() {
   while e.poll_event().is_some() {}
 
   let meta = Meta::try_from(Bytes::from_static(b"v2")).unwrap();
-  assert!(matches!(
-    e.update_meta(meta),
-    Err(crate::error::Error::NotRunning)
-  ));
+  assert!(matches!(e.update_meta(meta), Err(Error::NotRunning)));
   // No resurrecting Alive may have been produced.
   assert!(
     e.poll_transmit().is_none(),
@@ -6622,7 +6608,7 @@ fn gossip_oversized_user_broadcast_rejected_at_enqueue() {
   // deterministically untransmittable and rejected without being stored.
   assert!(matches!(
     e.queue_user_broadcast(bytes::Bytes::from(vec![0x5a_u8; 2000])),
-    Err(crate::error::Error::UserBroadcastExceedsMtu(_))
+    Err(Error::UserBroadcastExceedsMtu(_))
   ));
   assert_eq!(
     e.user_broadcast_queue_len(),
@@ -7085,17 +7071,17 @@ fn age_member_rolls_state_change_back_and_is_noop_for_unknown() {
   let before = e
     .node_state_change(&SmolStr::new("peer"))
     .expect("peer present");
-  e.age_member(&SmolStr::new("peer"), core::time::Duration::from_secs(5));
+  e.age_member(&SmolStr::new("peer"), Duration::from_secs(5));
   let after = e
     .node_state_change(&SmolStr::new("peer"))
     .expect("peer present");
   assert_eq!(
-    before - core::time::Duration::from_secs(5),
+    before - Duration::from_secs(5),
     after,
     "state_change must roll back by exactly the delta"
   );
   // Aging an unknown member is a silent no-op (no panic, no state created).
-  e.age_member(&SmolStr::new("ghost"), core::time::Duration::from_secs(1));
+  e.age_member(&SmolStr::new("ghost"), Duration::from_secs(1));
   assert!(e.node_incarnation(&SmolStr::new("ghost")).is_none());
 }
 
@@ -7436,17 +7422,14 @@ fn update_meta_rejects_oversized_meta() {
   let err = e
     .update_meta(big)
     .expect_err("oversized meta must be rejected");
-  assert!(
-    matches!(err, crate::error::Error::MetaExceedsCap(_)),
-    "got {err:?}"
-  );
+  assert!(matches!(err, Error::MetaExceedsCap(_)), "got {err:?}");
 }
 
 // ─── stream events: RemoteStateReceived + reliable-ping failure ──────────────
 
 #[test]
 fn push_pull_reply_with_user_data_emits_remote_state_received() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
   use bytes::Bytes;
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
@@ -7454,7 +7437,7 @@ fn push_pull_reply_with_user_data_emits_remote_state_received() {
   let states = vec![pns("carol", 7003, 1, State::Alive)];
   // A non-empty user_data payload must surface as RemoteStateReceived after
   // the merge is admitted.
-  let ev = EndpointEvent::PushPullReplyReceived(crate::event::PushPullReplyReceived::new(
+  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new(
     peer,
     states,
     Bytes::from_static(b"peer-app-state"),
@@ -7473,13 +7456,13 @@ fn push_pull_reply_with_user_data_emits_remote_state_received() {
 
 #[test]
 fn push_pull_request_with_user_data_emits_remote_state_received_and_response() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
   use bytes::Bytes;
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let now = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let states = vec![pns("carol", 7003, 1, State::Alive)];
-  let ev = EndpointEvent::PushPullRequestReceived(crate::event::PushPullRequestReceived::new(
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
     peer,
     states,
     Bytes::from_static(b"inbound-app-state"),
@@ -7557,7 +7540,7 @@ fn dial_failed_for_unknown_stream_is_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.dial_failed(
     StreamId::from_raw(999),
-    crate::error::StreamError::PeerClosed,
+    StreamError::PeerClosed,
     Instant::now(),
   );
 }
@@ -7629,10 +7612,10 @@ fn gossip_scheduler_skips_left_members_as_candidates() {
 fn try_new_at_rejects_meta_larger_than_meta_max_size() {
   let meta = Meta::try_from(Bytes::from(vec![0u8; 64])).expect("within wire ceiling");
   let c = cfg().with_initial_meta(meta).with_meta_max_size(10);
-  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let t0 = Instant::from_origin(Duration::from_secs(1));
   let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
   assert!(
-    matches!(res, Err(crate::error::EndpointInitError::MetaTooLarge(_))),
+    matches!(res, Err(EndpointInitError::MetaTooLarge(_))),
     "initial_meta over meta_max_size must be rejected"
   );
 }
@@ -7640,13 +7623,10 @@ fn try_new_at_rejects_meta_larger_than_meta_max_size() {
 #[test]
 fn try_new_at_rejects_zero_awareness_multiplier() {
   let c = cfg().with_awareness_max_multiplier(0);
-  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let t0 = Instant::from_origin(Duration::from_secs(1));
   let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
   assert!(
-    matches!(
-      res,
-      Err(crate::error::EndpointInitError::AwarenessMultiplierZero)
-    ),
+    matches!(res, Err(EndpointInitError::AwarenessMultiplierZero)),
     "a zero awareness multiplier must be rejected, not panic"
   );
 }

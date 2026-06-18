@@ -1,3 +1,10 @@
+use crate::{
+  streams::{Labeled, StreamEndpoint},
+  tls::records::TlsRecords,
+};
+use core::{fmt, net::SocketAddr};
+use rustls::pki_types::ServerName;
+use std::sync::Arc;
 #[test]
 fn tls_records_is_secure_returns_true() {
   use super::TlsRecords;
@@ -19,8 +26,8 @@ fn tls_endpoint_type_is_constructible_signature() {
       + crate::CheapClone
       + Eq
       + core::hash::Hash
-      + core::fmt::Debug
-      + core::fmt::Display
+      + fmt::Debug
+      + fmt::Display
       + Send
       + Sync
       + 'static,
@@ -32,16 +39,9 @@ fn tls_endpoint_type_is_constructible_signature() {
       crate::endpoint::Endpoint<I, A>,
       crate::streams::LabelOptions<super::TlsOptions>,
       Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
-      Box<dyn Fn(&A) -> core::net::SocketAddr + Send + Sync>,
-    ) -> crate::streams::StreamEndpoint<
-      I,
-      A,
-      crate::streams::Labeled<crate::tls::records::TlsRecords>,
-    > = crate::streams::StreamEndpoint::<
-      I,
-      A,
-      crate::streams::Labeled<crate::tls::records::TlsRecords>,
-    >::new;
+      Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
+    ) -> StreamEndpoint<I, A, Labeled<TlsRecords>> =
+      StreamEndpoint::<I, A, Labeled<TlsRecords>>::new;
   }
 }
 
@@ -53,7 +53,7 @@ fn tls_endpoint_type_is_constructible_signature() {
 #[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_gossip_encryption_roundtrip() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -93,7 +93,7 @@ fn tls_endpoint_gossip_encryption_roundtrip() {
 /// in `tcp/mod.rs::stream_endpoint_gossip_encryption_disabled_is_byte_identical`.
 #[test]
 fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use smol_str::SmolStr;
 
@@ -124,7 +124,7 @@ fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
 #[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
 #[test]
 fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -163,7 +163,7 @@ fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
 #[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame};
   use smol_str::SmolStr;
@@ -199,7 +199,7 @@ fn tls_endpoint_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
 #[cfg(feature = "aes-gcm")]
 #[test]
 fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -250,7 +250,7 @@ fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead(
 /// — pure config plumbing.
 #[test]
 fn tls_endpoint_gossip_mtu_is_propagated_from_config() {
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use smol_str::SmolStr;
 
@@ -287,7 +287,7 @@ fn tls_endpoint_gossip_mtu_is_propagated_from_config() {
 #[test]
 fn tls_endpoint_set_encryption_options_purges_buffered_gossip_on_policy_change() {
   use crate::Instant;
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -340,7 +340,7 @@ fn tls_endpoint_set_encryption_options_purges_buffered_gossip_on_policy_change()
 #[test]
 fn tls_endpoint_set_encryption_options_is_noop_when_reapplying_same_policy() {
   use crate::Instant;
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -398,7 +398,7 @@ fn tls_endpoint_set_encryption_options_is_noop_when_reapplying_same_policy() {
 #[test]
 fn tls_endpoint_set_encryption_options_keeps_live_bridge_via_is_secure() {
   use crate::Instant;
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use crate::{EncryptionOptions, Keyring, SecretKey};
   use smol_str::SmolStr;
@@ -453,7 +453,7 @@ fn tls_endpoint_set_encryption_options_keeps_live_bridge_via_is_secure() {
 #[test]
 fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
   use crate::Instant;
-  use core::net::SocketAddr;
+  use SocketAddr;
 
   use smol_str::SmolStr;
 
@@ -528,11 +528,11 @@ fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
 #[test]
 fn failed_established_tls_exchange_no_close_notify_before_abort() {
   use crate::Instant;
+  use Arc;
   use core::{net::SocketAddr, time::Duration};
-  use std::sync::Arc;
 
+  use ServerName;
   use bytes::Bytes;
-  use rustls::pki_types::ServerName;
   use smol_str::SmolStr;
 
   use super::{TlsOptions, TlsRecords};
@@ -848,10 +848,10 @@ fn tls_two_same_label_nodes_complete_a_reliable_exchange() {
 #[test]
 fn tls_acceptor_rejects_mismatched_inbound_label_before_mint() {
   use crate::Instant;
-  use core::net::SocketAddr;
-  use std::sync::Arc;
+  use Arc;
+  use SocketAddr;
 
-  use rustls::pki_types::ServerName;
+  use ServerName;
   use smol_str::SmolStr;
 
   use super::{TlsOptions, TlsRecords};
@@ -980,10 +980,10 @@ fn tls_acceptor_rejects_mismatched_inbound_label_before_mint() {
 #[test]
 fn tls_acceptor_discloses_no_label_before_inbound_validates() {
   use crate::Instant;
-  use core::net::SocketAddr;
-  use std::sync::Arc;
+  use Arc;
+  use SocketAddr;
 
-  use rustls::pki_types::ServerName;
+  use ServerName;
   use smol_str::SmolStr;
 
   use super::{TlsOptions, TlsRecords};
@@ -1103,9 +1103,9 @@ fn tls_acceptor_discloses_no_label_before_inbound_validates() {
 #[test]
 fn tls_unlabeled_node_passes_through_a_12_byte_first_unit() {
   use crate::Instant;
-  use std::sync::Arc;
+  use Arc;
 
-  use rustls::pki_types::ServerName;
+  use ServerName;
 
   use super::{TlsOptions, TlsRecords};
   use crate::{

@@ -191,8 +191,8 @@ fn bridge_module_compiles() {
       + crate::CheapClone
       + Eq
       + core::hash::Hash
-      + core::fmt::Debug
-      + core::fmt::Display
+      + fmt::Debug
+      + fmt::Display
       + Send
       + Sync
       + 'static,
@@ -862,10 +862,8 @@ fn inbound_join_bridge_with_rejecting_endpoint() -> (
   // `PushPullRequestReceived{Join}` — the event the rejecting delegate turns
   // into `StreamCommand::Close`.
   let dave = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
-  let dave_state =
-    crate::typed::PushNodeState::new(1, SmolStr::new("dave"), dave, crate::typed::State::Alive);
-  let pp =
-    crate::typed::PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
+  let dave_state = PushNodeState::new(1, SmolStr::new("dave"), dave, State::Alive);
+  let pp = PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
   let bytes =
     crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::PushPull(pp)).expect("encode");
   bridge
@@ -973,7 +971,11 @@ fn pump_in_out_are_ok_noops_when_connection_absent() {
 
 use quinn_proto::{ConnectionHandle as QpCh, Endpoint as QuinnEndpoint, Transmit as QpTransmit};
 
-use crate::quic::crypto::tests::{test_client, test_endpoint_config, test_server};
+use crate::{
+  quic::crypto::tests::{test_client, test_endpoint_config, test_server},
+  typed::{Node, PushNodeState, PushPull, State},
+};
+use core::{fmt, time::Duration};
 
 const CLIENT_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6500);
 const SERVER_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6501);
@@ -1683,8 +1685,8 @@ fn pump_in_labeled_validates_inbound_label_over_live_stream() {
   crate::label::encode_label_prefix(&label, &mut wire);
   let ping = crate::typed::Message::<SmolStr, SocketAddr>::Ping(crate::typed::Ping::new(
     1,
-    crate::typed::Node::new(SmolStr::new("client"), CLIENT_ADDR),
-    crate::typed::Node::new(SmolStr::new("server"), SERVER_ADDR),
+    Node::new(SmolStr::new("client"), CLIENT_ADDR),
+    Node::new(SmolStr::new("server"), SERVER_ADDR),
   ));
   let framed = crate::wire::encode_message::<SmolStr, SocketAddr>(&ping).expect("encode ping");
   let unit = crate::encode_reliable_unit(&crate::CompressionOptions::new(), &framed);
@@ -1861,7 +1863,7 @@ fn pump_out_deadline_with_pending_out_tail_fails_timeout() {
   // The inner FSM's deadline must be `Some` and `<= now`. A fresh inbound
   // accept_stream carries an exchange deadline at `now + stream_timeout`; we
   // pump at a `now` far in the future so `poll_timeout() <= now`.
-  let future = past + core::time::Duration::from_secs(3600);
+  let future = past + Duration::from_secs(3600);
   assert!(
     bridge.stream.poll_timeout().is_some(),
     "a pre-Done stream must expose its exchange deadline"
@@ -2070,7 +2072,7 @@ fn pump_out_post_transmit_fsm_timeout_retires() {
   // (`!pending_out.is_empty()`) is skipped and the FSM must self-fail inside
   // `poll_transmit` at the future `now`.
   assert!(bridge.pending_out.is_empty());
-  let future = Instant::from_std(pair.now) + core::time::Duration::from_secs(3600);
+  let future = Instant::from_std(pair.now) + Duration::from_secs(3600);
 
   let result = bridge.pump_out(&mut pair.server_conns, future);
   assert_eq!(
@@ -2140,10 +2142,8 @@ fn inbound_join_bridge_accepting(
   // delegate is set, so `handle_stream_event` will return
   // `SendPushPullResponse`).
   let dave = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
-  let dave_state =
-    crate::typed::PushNodeState::new(1, SmolStr::new("dave"), dave, crate::typed::State::Alive);
-  let pp =
-    crate::typed::PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
+  let dave_state = PushNodeState::new(1, SmolStr::new("dave"), dave, State::Alive);
+  let pp = PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
   let bytes =
     crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::PushPull(pp)).expect("encode");
   bridge
@@ -2185,7 +2185,7 @@ fn drain_then_reap_sends_push_pull_response_over_live_stream() {
   // default), so the refresh moves it to a DIFFERENT, earlier value — the
   // observable that the arm ran (a no-op drain would leave the accept
   // deadline untouched).
-  let expected = Instant::from_std(pair.now) + core::time::Duration::from_secs(5);
+  let expected = Instant::from_std(pair.now) + Duration::from_secs(5);
   assert_eq!(
     bridge.deadline, expected,
     "the SendPushPullResponse arm must refresh the bridge deadline to \

@@ -1,7 +1,8 @@
 //! Broadcast trait and `BroadcastQueue` — the gossip retransmit queue.
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
-use crate::FxHashMap;
+use crate::{FxHashMap, typed::Message};
+use core::{cmp::Ordering, fmt, hash::Hash};
 
 /// Computes the per-message retransmit ceiling using the formula
 /// `retransmit_mult * ceil(log10(num_nodes + 1))`.
@@ -15,11 +16,11 @@ pub fn retransmit_limit(retransmit_mult: u32, num_nodes: u32) -> u32 {
 ///
 /// Sync version of `memberlist-core::broadcast::Broadcast`: `finished()` is
 /// a synchronous notification (default no-op) instead of an async fn.
-pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
+pub trait Broadcast: fmt::Debug + Send + Sync + 'static {
   /// Type used to identify broadcasts so newer ones can invalidate older ones.
-  type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
+  type Id: Clone + Eq + Hash + fmt::Debug + fmt::Display;
   /// Type of the message payload (cloned out of the queue when sent).
-  type Message: Clone + core::fmt::Debug + Send + Sync + 'static;
+  type Message: Clone + fmt::Debug + Send + Sync + 'static;
 
   /// Optional id used to deduplicate / invalidate. If `None`, the broadcast is
   /// not deduplicated by id (see `is_unique`).
@@ -79,13 +80,13 @@ impl<B> PartialEq for LimitedBroadcast<B> {
 impl<B> Eq for LimitedBroadcast<B> {}
 
 impl<B> PartialOrd for LimitedBroadcast<B> {
-  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
     Some(self.cmp(other))
   }
 }
 
 impl<B> Ord for LimitedBroadcast<B> {
-  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+  fn cmp(&self, other: &Self) -> Ordering {
     self
       .transmits
       .cmp(&other.transmits)
@@ -108,7 +109,7 @@ impl<B> PartialEq<&LimitedBroadcast<B>> for Cmp {
 }
 
 impl<B> PartialOrd<&LimitedBroadcast<B>> for Cmp {
-  fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<core::cmp::Ordering> {
+  fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<Ordering> {
     Some(
       self
         .transmits
@@ -175,7 +176,7 @@ impl<Id, B> BroadcastQueue<Id, B> {
 
 impl<Id, B> BroadcastQueue<Id, B>
 where
-  Id: core::hash::Hash + core::cmp::Eq + core::clone::Clone,
+  Id: Hash + core::cmp::Eq + core::clone::Clone,
   B: Broadcast<Id = Id>,
 {
   fn insert_into(&mut self, item: LimitedBroadcast<B>) {
@@ -475,12 +476,12 @@ where
 #[derive(Debug)]
 pub struct MemberlistBroadcast<I, A> {
   node: I,
-  msg: crate::typed::Message<I, A>,
+  msg: Message<I, A>,
 }
 
 impl<I, A> MemberlistBroadcast<I, A> {
   /// Construct a new broadcast for the given peer id, carrying `msg`.
-  pub const fn new(node: I, msg: crate::typed::Message<I, A>) -> Self {
+  pub const fn new(node: I, msg: Message<I, A>) -> Self {
     Self { node, msg }
   }
 
@@ -492,7 +493,7 @@ impl<I, A> MemberlistBroadcast<I, A> {
 
   /// The wire-format message to gossip.
   #[inline(always)]
-  pub const fn message_ref(&self) -> &crate::typed::Message<I, A> {
+  pub const fn message_ref(&self) -> &Message<I, A> {
     &self.msg
   }
 }
@@ -503,7 +504,7 @@ where
   A: crate::CheapClone + crate::Data + 'static,
 {
   type Id = I;
-  type Message = crate::typed::Message<I, A>;
+  type Message = Message<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
     Some(&self.node)

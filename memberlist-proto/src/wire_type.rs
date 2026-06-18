@@ -7,6 +7,7 @@
 use derive_more::IsVariant;
 
 use crate::data::DecodeError;
+use core::fmt;
 
 /// A wire type used in Protobuf-like encoding/decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
@@ -39,8 +40,8 @@ impl WireType {
   }
 }
 
-impl core::fmt::Display for WireType {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for WireType {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}", self.as_str())
   }
 }

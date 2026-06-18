@@ -15,7 +15,7 @@
 #[cfg(not(feature = "std"))]
 use std::vec::Vec;
 
-use crate::{Data, framing, message_from_any, message_to_any, typed::Message};
+use crate::{Data, error::StreamError, framing, message_from_any, message_to_any, typed::Message};
 
 /// Re-exported compound-frame overhead constants (defined in
 /// `memberlist-wire::framing`) for the gossip MTU budget in `endpoint.rs`.
@@ -33,9 +33,7 @@ pub(crate) use crate::framing::{
 /// `.expect()` the result — mirroring the prior
 /// `proto::Message::encode_to_vec().expect(...)` convention.
 #[inline]
-pub(crate) fn encode_message<I, A>(
-  msg: &Message<I, A>,
-) -> Result<Vec<u8>, crate::error::StreamError>
+pub(crate) fn encode_message<I, A>(msg: &Message<I, A>) -> Result<Vec<u8>, StreamError>
 where
   I: Data,
   A: Data,
@@ -52,9 +50,7 @@ where
 /// and `StreamError::Bridge` for the typed-to-buffa bridge — so the FSM keeps
 /// the `source()` chain rather than a flattened string.
 #[inline]
-pub(crate) fn decode_message<I, A>(
-  buf: &[u8],
-) -> Result<(usize, Message<I, A>), crate::error::StreamError>
+pub(crate) fn decode_message<I, A>(buf: &[u8]) -> Result<(usize, Message<I, A>), StreamError>
 where
   I: Data,
   A: Data,

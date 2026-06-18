@@ -5,6 +5,7 @@ use core::str::FromStr;
 use std::{string::String, vec::Vec};
 
 use bytes::{Bytes, BytesMut};
+use core::cmp::PartialEq;
 
 /// Invalid meta error.
 #[non_exhaustive]
@@ -99,25 +100,25 @@ impl core::ops::Deref for Meta {
   }
 }
 
-impl core::cmp::PartialEq<[u8]> for Meta {
+impl PartialEq<[u8]> for Meta {
   fn eq(&self, other: &[u8]) -> bool {
     self.as_bytes().eq(other)
   }
 }
 
-impl core::cmp::PartialEq<&[u8]> for Meta {
+impl PartialEq<&[u8]> for Meta {
   fn eq(&self, other: &&[u8]) -> bool {
     self.as_bytes().eq(*other)
   }
 }
 
-impl core::cmp::PartialEq<Bytes> for Meta {
+impl PartialEq<Bytes> for Meta {
   fn eq(&self, other: &Bytes) -> bool {
     self.as_bytes().eq(other.as_ref())
   }
 }
 
-impl core::cmp::PartialEq<Vec<u8>> for Meta {
+impl PartialEq<Vec<u8>> for Meta {
   fn eq(&self, other: &Vec<u8>) -> bool {
     self.as_bytes().eq(other.as_slice())
   }

@@ -1,12 +1,8 @@
-use super::*;
+use super::{super::crypto::QuicOptions, *};
 use crate::quic::crypto::tests::{test_client, test_endpoint_config, test_server};
 
-fn quinn_pair() -> (
-  QuinnEndpoint,
-  QuinnEndpoint,
-  super::super::crypto::QuicOptions,
-) {
-  let cfg = super::super::crypto::QuicOptions::new(
+fn quinn_pair() -> (QuinnEndpoint, QuinnEndpoint, QuicOptions) {
+  let cfg = QuicOptions::new(
     test_endpoint_config(&[3u8; 32]),
     test_server(),
     test_client(),

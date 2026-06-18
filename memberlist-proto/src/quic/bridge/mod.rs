@@ -26,9 +26,11 @@ use crate::{
   bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
+  framing::FrameError,
   label::{LabelVerdict, classify_header, encode_label_prefix},
   stream::Stream,
 };
+use core::time::Duration;
 
 /// Couples one memberlist reliable-exchange [`Stream`] to one quinn bidi
 /// stream on a pooled connection, pumping bytes both ways and enforcing the
@@ -260,7 +262,7 @@ where
   // only under the compression/encryption cfgs, so with one or neither built in
   // the initial binding (or a stage's write) is never observed.
   #[allow(unused_mut, unused_assignments)]
-  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, crate::framing::FrameError> {
+  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, FrameError> {
     use std::borrow::Cow;
     let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
     #[cfg(compression)]
@@ -274,7 +276,7 @@ where
     {
       payload = Cow::Owned(
         crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
-          .map_err(crate::framing::FrameError::Encryption)?,
+          .map_err(FrameError::Encryption)?,
       );
     }
     let mut out = Vec::with_capacity(5 + payload.len());
@@ -291,7 +293,7 @@ where
     &self,
     buf: &[u8],
     max: usize,
-  ) -> Result<Option<(Vec<u8>, usize)>, crate::framing::FrameError> {
+  ) -> Result<Option<(Vec<u8>, usize)>, FrameError> {
     use crate::framing::{FrameError, decode_varint_u32};
     let (unit_len, vbytes) = match decode_varint_u32(buf) {
       Ok(v) => v,
@@ -1275,7 +1277,7 @@ where
             // deadlines byte-identical. The send-side timeout is reset
             // on the response leg for exactly this reason: the response
             // window must measure from response start, not from accept.
-            let response_deadline = now + core::time::Duration::from_secs(5);
+            let response_deadline = now + Duration::from_secs(5);
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
@@ -1406,7 +1408,7 @@ where
             // fire on the stale accept deadline before the fresh response
             // window elapses (see the `drain_then_reap` arm's full
             // rationale).
-            let response_deadline = now + core::time::Duration::from_secs(5);
+            let response_deadline = now + Duration::from_secs(5);
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);

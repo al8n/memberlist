@@ -16,8 +16,9 @@ use smol_str::SmolStr;
 use super::records::RawRecords;
 use crate::{
   config::EndpointOptions,
+  delegate::MergeDelegate,
   error::StreamError,
-  event::Event,
+  event::{Event, PushPullKind},
   streams::{
     bridge::StreamBridge,
     phase::BridgePhase,
@@ -25,6 +26,7 @@ use crate::{
       TEST_RELIABLE_MAX, addr, handshaking_pair as shared_handshaking_pair, label, phase_label,
     },
   },
+  typed::NodeState,
 };
 
 /// Build a `Handshaking` dialer/acceptor `RawRecords` bridge pair over a
@@ -852,7 +854,7 @@ fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
 /// merge — both bridges converge to `BothClosed` and reap cleanly.
 #[test]
 fn push_pull_request_response_round_trips_then_reaps() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let now = Instant::now();
   let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
@@ -942,12 +944,12 @@ fn push_pull_request_response_round_trips_then_reaps() {
 /// within the same tick (no pinning to the exchange deadline).
 #[test]
 fn inbound_push_pull_admission_rejected_fails_bridge() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   /// Vetoes every merge.
   struct RejectAll;
-  impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAll {
-    fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+  impl MergeDelegate<SmolStr, SocketAddr> for RejectAll {
+    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
       false
     }
   }
@@ -1019,7 +1021,7 @@ fn inbound_push_pull_admission_rejected_fails_bridge() {
 /// bridge encodes + loads the reply into the inbound stream's `output_buf`.
 #[test]
 fn drain_then_reap_loads_push_pull_response() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let now = Instant::now();
   let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
@@ -1450,12 +1452,12 @@ fn drain_then_reap_decode_failed_bridge_routes_errored_notice() {
 /// queued but `drain_payload_only` never ran before the bridge went terminal.
 #[test]
 fn drain_then_reap_close_arm_rejects_inbound_merge() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   /// Vetoes every merge.
   struct RejectAll;
-  impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAll {
-    fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+  impl MergeDelegate<SmolStr, SocketAddr> for RejectAll {
+    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
       false
     }
   }

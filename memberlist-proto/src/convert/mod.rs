@@ -37,6 +37,7 @@ use core::{
 };
 
 use bytes::Bytes;
+use core::fmt;
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 use smol_str::SmolStr;
 
@@ -78,8 +79,8 @@ impl AddrLengthMismatchInfo {
   }
 }
 
-impl core::fmt::Display for AddrLengthMismatchInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for AddrLengthMismatchInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "expected {} bytes for version {}, got {}",

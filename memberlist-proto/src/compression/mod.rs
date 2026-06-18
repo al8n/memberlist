@@ -19,9 +19,11 @@ use std::{string::ToString, vec::Vec};
 
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
-use crate::framing::{
-  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
+use crate::{
+  encryption::EncryptionOptions,
+  framing::{FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms},
 };
+use core::fmt;
 
 /// Compression level for zstd. The backend accepts levels 1–22; the default is 3
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
@@ -223,8 +225,8 @@ impl UnitLenExceedsMaxInfo {
   }
 }
 
-impl core::fmt::Display for UnitLenExceedsMaxInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for UnitLenExceedsMaxInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "on-wire unit length {} exceeds the maximum {}",
@@ -723,7 +725,7 @@ pub fn take_reliable_unit(
 #[cfg(encryption)]
 pub fn encode_reliable_unit_with_encryption(
   compression: &CompressionOptions,
-  encryption: &crate::encryption::EncryptionOptions,
+  encryption: &EncryptionOptions,
   framed: &[u8],
 ) -> Result<Vec<u8>, crate::encryption::EncryptionError> {
   // Step 1: compression — yields a `[Compressed]` wrapper or the plain bytes.
@@ -784,7 +786,7 @@ pub fn encode_reliable_unit_with_encryption(
 #[cfg(encryption)]
 pub fn take_reliable_unit_with_encryption(
   buf: &[u8],
-  encryption: &crate::encryption::EncryptionOptions,
+  encryption: &EncryptionOptions,
   max_orig_len: usize,
 ) -> Result<Option<(Vec<u8>, usize)>, FrameError> {
   use crate::framing::unwrap_transforms_with_encryption;

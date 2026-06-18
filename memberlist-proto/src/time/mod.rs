@@ -8,7 +8,7 @@
 //! [`Instant::from_origin`]. This mirrors how the machine is handed `now` rather
 //! than reading a clock itself.
 
-use core::time::Duration;
+use core::{ops::Sub, time::Duration};
 
 /// A monotonic point in time, represented as a [`Duration`] since an opaque
 /// origin chosen by the driver.
@@ -147,7 +147,7 @@ impl core::ops::AddAssign<Duration> for Instant {
 
 /// `Instant - Duration` walks backwards in time, saturating at the origin so a
 /// deadline computed before the origin can never panic.
-impl core::ops::Sub<Duration> for Instant {
+impl Sub<Duration> for Instant {
   type Output = Self;
   #[inline(always)]
   fn sub(self, rhs: Duration) -> Self {
@@ -157,7 +157,7 @@ impl core::ops::Sub<Duration> for Instant {
 
 /// `Instant - Instant` is the gap between them, saturating at zero on
 /// out-of-order input.
-impl core::ops::Sub<Instant> for Instant {
+impl Sub<Instant> for Instant {
   type Output = Duration;
   #[inline(always)]
   fn sub(self, earlier: Self) -> Duration {

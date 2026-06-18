@@ -65,6 +65,7 @@ use crate::{
   bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
+  framing::FrameError,
   stream::Stream,
   streams::{
     phase::BridgePhase,
@@ -232,7 +233,7 @@ where
   // only under the compression/encryption cfgs, so with one or neither built in
   // the initial binding (or a stage's write) is never observed.
   #[allow(unused_mut, unused_assignments)]
-  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, crate::framing::FrameError> {
+  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, FrameError> {
     use std::borrow::Cow;
     let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
     #[cfg(compression)]
@@ -246,7 +247,7 @@ where
     {
       payload = Cow::Owned(
         crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
-          .map_err(crate::framing::FrameError::Encryption)?,
+          .map_err(FrameError::Encryption)?,
       );
     }
     let mut out = Vec::with_capacity(5 + payload.len());
@@ -263,7 +264,7 @@ where
     &self,
     buf: &[u8],
     max: usize,
-  ) -> Result<Option<(Vec<u8>, usize)>, crate::framing::FrameError> {
+  ) -> Result<Option<(Vec<u8>, usize)>, FrameError> {
     use crate::framing::{FrameError, decode_varint_u32};
     let (unit_len, vbytes) = match decode_varint_u32(buf) {
       Ok(v) => v,

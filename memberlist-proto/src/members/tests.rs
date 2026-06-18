@@ -1,8 +1,12 @@
 use super::*;
 use crate::typed::{Meta, NodeState, State};
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::{
+  net::{IpAddr, Ipv4Addr, SocketAddr},
+  time::Duration,
+};
 use rand::{SeedableRng, rngs::SmallRng};
 use smol_str::SmolStr;
+use std::panic::AssertUnwindSafe;
 
 fn make_node(id: &str, port: u16, st: State) -> NodeState<SmolStr, SocketAddr> {
   NodeState::new(
@@ -30,7 +34,7 @@ fn local_node_state_state_change_updates_on_set_state() {
   let now = Instant::now();
   let mut s = LocalNodeState::new(make_node("a", 7000, State::Alive), now);
   assert_eq!(s.state(), State::Alive);
-  let later = now + core::time::Duration::from_secs(1);
+  let later = now + Duration::from_secs(1);
   s.set_state(State::Suspect, later);
   assert_eq!(s.state(), State::Suspect);
   assert_eq!(s.state_change(), later);
@@ -229,7 +233,7 @@ fn local_node_state_incarnation_and_state_change_mutators() {
   assert_eq!(s.incarnation(), 42);
 
   assert_eq!(s.state_change(), now);
-  let later = now + core::time::Duration::from_secs(3);
+  let later = now + Duration::from_secs(3);
   s.set_state_change(later);
   assert_eq!(s.state_change(), later);
   // set_state_change must not disturb the liveness state itself.
@@ -240,8 +244,8 @@ fn suspicion(from: &str) -> Suspicion<SmolStr> {
   Suspicion::new(
     SmolStr::new(from),
     3,
-    core::time::Duration::from_millis(100),
-    core::time::Duration::from_millis(500),
+    Duration::from_millis(100),
+    Duration::from_millis(500),
     Instant::now(),
   )
 }
@@ -312,7 +316,7 @@ fn members_iter_and_iter_mut() {
 fn insert_at_random_at_panics_on_duplicate_id() {
   let mut m = Members::new(local_node());
   m.insert(member("alice", 7000, State::Alive));
-  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+  let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
     m.insert_at_random_at(member("alice", 7000, State::Alive), 0);
   }));
   assert!(result.is_err(), "duplicate id must panic");
@@ -323,7 +327,7 @@ fn insert_at_random_at_panics_on_out_of_range_target() {
   let mut m = Members::new(local_node());
   m.insert(member("alice", 7000, State::Alive));
   // len is 1; target 5 is out of `0..=len`.
-  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+  let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
     m.insert_at_random_at(member("bob", 7001, State::Alive), 5);
   }));
   assert!(result.is_err(), "out-of-range target must panic");

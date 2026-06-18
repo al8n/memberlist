@@ -15,7 +15,9 @@ use crate::{
     ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
     test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
   },
+  typed::Alive,
 };
+use std::collections::HashMap;
 
 /// Public-constructor signature check. Mirrors
 /// `tls::tests::tls_endpoint_type_is_constructible_signature`; behavioural
@@ -188,7 +190,7 @@ fn same_peer_dials_carry_distinct_stream_ids() {
     .expect("issued while running");
   assert_ne!(sid_a, sid_b, "each dial gets a fresh StreamId");
 
-  let mut seen: std::collections::HashMap<StreamId, SocketAddr> = std::collections::HashMap::new();
+  let mut seen: HashMap<StreamId, SocketAddr> = HashMap::new();
   while let Some(action) = coord.poll_action() {
     if let StreamAction::Connect(info) = action {
       assert!(
@@ -3669,12 +3671,12 @@ fn end_to_end_push_pull_join_merges_both_views() {
   // non-empty and the merge is observable on both ends.
   dialer.handle_alive(
     dialer_addr,
-    crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("dpeer"), addr(7900))),
+    Alive::new(1, crate::Node::new(SmolStr::new("dpeer"), addr(7900))),
     now,
   );
   acceptor.handle_alive(
     acceptor_addr,
-    crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("apeer"), addr(7901))),
+    Alive::new(1, crate::Node::new(SmolStr::new("apeer"), addr(7901))),
     now,
   );
 
@@ -3763,7 +3765,7 @@ fn poll_timeout_folds_pending_dial_and_returns_immediate_due_when_unattempted() 
   // anchor has a reference instant.
   coord.handle_alive(
     addr(7001),
-    crate::typed::Alive::new(1, crate::Node::new(SmolStr::new("seed"), addr(7001))),
+    Alive::new(1, crate::Node::new(SmolStr::new("seed"), addr(7001))),
     now,
   );
 

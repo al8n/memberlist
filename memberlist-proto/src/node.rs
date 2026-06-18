@@ -1,6 +1,7 @@
 //! A node identifier paired with its advertised address.
 
 use cheap_clone::CheapClone;
+use core::fmt;
 
 /// A node identifier `I` paired with its advertised address `A`.
 ///
@@ -39,13 +40,13 @@ impl<I, A> Node<I, A> {
   }
 }
 
-impl<I, A> core::fmt::Display for Node<I, A>
+impl<I, A> fmt::Display for Node<I, A>
 where
-  I: core::fmt::Display,
-  A: core::fmt::Display,
+  I: fmt::Display,
+  A: fmt::Display,
 {
   #[inline]
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }
 }

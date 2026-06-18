@@ -1,7 +1,12 @@
 use super::*;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{
+  client::danger::{HandshakeSignatureValid, ServerCertVerified},
+  crypto::CryptoProvider,
+  pki_types::{CertificateDer, PrivateKeyDer},
+  version::TLS13,
+};
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+fn provider() -> Arc<CryptoProvider> {
   Arc::new(rustls::crypto::ring::default_provider())
 }
 
@@ -9,7 +14,7 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// quic crypto tests; behavioural determinism is the virtual clock, not any
 /// test-only crypto hook.
 #[derive(Debug)]
-struct AnyServer(Arc<rustls::crypto::CryptoProvider>);
+struct AnyServer(Arc<CryptoProvider>);
 impl rustls::client::danger::ServerCertVerifier for AnyServer {
   fn verify_server_cert(
     &self,
@@ -18,24 +23,24 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
     _n: &ServerName<'_>,
     _o: &[u8],
     _t: rustls::pki_types::UnixTime,
-  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-    Ok(rustls::client::danger::ServerCertVerified::assertion())
+  ) -> Result<ServerCertVerified, rustls::Error> {
+    Ok(ServerCertVerified::assertion())
   }
   fn verify_tls12_signature(
     &self,
     _m: &[u8],
     _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn verify_tls13_signature(
     &self,
     _m: &[u8],
     _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
     self.0.signature_verification_algorithms.supported_schemes()
@@ -53,13 +58,13 @@ fn pair() -> (TlsRecords, TlsRecords) {
   let p = provider();
   let (chain, key) = self_signed();
   let server = rustls::ServerConfig::builder_with_provider(p.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(chain, key)
     .unwrap();
   let client = rustls::ClientConfig::builder_with_provider(p.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer(p)))
