@@ -60,14 +60,7 @@ fn quic_endpoint_type_is_constructible_signature() {
   // `QuicOptions` bundle.
   fn _sig<I>()
   where
-    I: crate::Id
-      + crate::Data
-      + crate::CheapClone
-      + core::fmt::Debug
-      + core::fmt::Display
-      + Send
-      + Sync
-      + 'static,
+    I: crate::Id,
   {
     let _: fn(
       crate::endpoint::Endpoint<I, SocketAddr>,

@@ -136,14 +136,7 @@ where
 #[allow(dead_code)]
 pub(crate) fn drain_events<I, A, R>(coord: &mut StreamEndpoint<I, A, R>) -> Vec<Event<I, A>>
 where
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: crate::Data
     + crate::CheapClone
     + Eq

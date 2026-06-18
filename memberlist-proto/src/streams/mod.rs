@@ -757,7 +757,7 @@ where
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
   G: Rng,
-  I: crate::Id + crate::Data + crate::CheapClone,
+  I: crate::Id,
   A: crate::Data
     + crate::CheapClone
     + Eq
@@ -807,14 +807,7 @@ where
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
   G: Rng,
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: crate::Data
     + crate::CheapClone
     + Eq
@@ -2067,14 +2060,7 @@ where
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
   G: Rng,
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: crate::Data
     + crate::CheapClone
     + Eq

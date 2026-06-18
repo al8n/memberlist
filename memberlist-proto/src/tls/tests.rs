@@ -14,14 +14,7 @@ fn tls_endpoint_type_is_constructible_signature() {
   // the virtual TCP). This guards the public constructor signature only.
   fn _sig<I, A>()
   where
-    I: crate::Id
-      + crate::Data
-      + crate::CheapClone
-      + core::fmt::Debug
-      + core::fmt::Display
-      + Send
-      + Sync
-      + 'static,
+    I: crate::Id,
     A: crate::Data
       + crate::CheapClone
       + Eq

@@ -184,14 +184,7 @@ pub struct Stream<I, A> {
 
 impl<I, A> Stream<I, A>
 where
-  I: crate::Id
-    + Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: Data
     + crate::CheapClone
     + Eq

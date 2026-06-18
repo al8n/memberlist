@@ -499,24 +499,8 @@ impl<I, A> MemberlistBroadcast<I, A> {
 
 impl<I, A> Broadcast for MemberlistBroadcast<I, A>
 where
-  I: crate::CheapClone
-    + crate::Data
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: crate::CheapClone
-    + crate::Data
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
+  A: crate::CheapClone + crate::Data + Send + Sync + 'static,
 {
   type Id = I;
   type Message = crate::typed::Message<I, A>;

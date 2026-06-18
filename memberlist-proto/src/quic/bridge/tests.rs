@@ -186,14 +186,7 @@ fn pre_fin_transport_failure_discards_queued_payload_events() {
 fn bridge_module_compiles() {
   fn _assert<I, A>()
   where
-    I: crate::Id
-      + crate::Data
-      + crate::CheapClone
-      + core::fmt::Debug
-      + core::fmt::Display
-      + Send
-      + Sync
-      + 'static,
+    I: crate::Id,
     A: crate::Data
       + crate::CheapClone
       + Eq

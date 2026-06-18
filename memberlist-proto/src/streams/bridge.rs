@@ -173,14 +173,7 @@ pub(crate) struct StreamBridge<I, A, R> {
 impl<I, A, R> StreamBridge<I, A, R>
 where
   R: StreamTransport,
-  I: crate::Id
-    + crate::Data
-    + crate::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: crate::Id,
   A: crate::Data
     + crate::CheapClone
     + Eq
