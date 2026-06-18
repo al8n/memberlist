@@ -464,6 +464,9 @@ pub fn encrypt_gossip_datagram(
   encode_encrypted_frame(key.algorithm(), key, datagram)
 }
 
+// Construction, configuration, transport plumbing, and accessors — everything
+// that drives the stream transport or reads coordinator state without touching
+// node identity. `R: StreamTransport` is the struct's intrinsic field bound.
 impl<I, A, R, G> StreamEndpoint<I, A, R, G>
 where
   R: StreamTransport,
@@ -752,23 +755,6 @@ where
   pub fn pending_memberlist_ingress(&self) -> usize {
     self.mem_ingress.len()
   }
-}
-
-impl<I, A, R, G> StreamEndpoint<I, A, R, G>
-where
-  G: Rng,
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  R: StreamTransport,
-{
   /// Fully cancel a not-yet-opened exchange: drop its bridge, metadata, and any
   /// queued outbound bytes. Used by `leave()` for an unopened outbound exchange
   /// (its `Connect` never drained) and by the post-leave inbound mint guard for
@@ -797,28 +783,6 @@ where
       .pending_teardowns
       .push_back(StreamAction::Abort(ExchangeRef::new(id)));
   }
-}
-
-// The full SWIM bag on `I`. Methods that delegate to `Endpoint`'s full-bag
-// surface (`poll_event`, `poll_transmit`, `poll_timeout`, `handle_packet`,
-// `handle_alive`, `handle_suspect`, `requeue_event`, `start_probe`,
-// `leave`), drive `StreamConns` / `StreamBridge` ops (whose impls require
-// the full bag), or run the internal bridge-pump / mint / reap helpers.
-impl<I, A, R, G> StreamEndpoint<I, A, R, G>
-where
-  G: Rng,
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  R: StreamTransport,
-{
   /// Build the coordinator from a membership [`Endpoint`], the record
   /// layer's options bundle (`R::Options`), a per-peer SNI provider, and a
   /// per-peer `SocketAddr` resolver.
@@ -911,6 +875,247 @@ where
     this
   }
 
+  /// Replace the gossip-plane checksum options in place. The driver calls this
+  /// when the operator updates the checksum policy at runtime. Single-threaded
+  /// `&mut self` — no lock.
+  ///
+  /// Checksum is a gossip-plane (unreliable) concern, so this updates only the
+  /// coordinator's own field — read by [`Self::checksum_gossip`] on the next
+  /// outbound datagram. Reliable stream bridges carry no checksum (they rely on
+  /// the stream transport's own integrity), so there is no per-bridge fan-out.
+  /// The new policy takes effect on the next datagram; checksum is non-security
+  /// and the wire frame self-describes its algorithm via the checksum-tag
+  /// prefix, so a peer always verifies under whatever policy produced the bytes.
+  #[cfg(checksum)]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3"
+    )))
+  )]
+  pub fn set_checksum_options(&mut self, checksum: ChecksumOptions) -> Result<(), ChecksumError> {
+    // Validate the algorithm's backend is built into this binary BEFORE storing
+    // it: an unusable policy is accepted by the options builder, but every
+    // subsequent `checksum_gossip` would then fail and the codec-owning driver
+    // would drop the datagram — silently disabling all gossip behind a false
+    // success. The empty-payload probe surfaces `Disabled` / `UnknownAlgorithm`.
+    checksum.apply(&[])?;
+    self.checksum = checksum;
+    Ok(())
+  }
+
+  /// Returns `true` if the endpoint is in normal operation (not leaving
+  /// or left). Forwards to [`Endpoint::is_running`]. A driver consults
+  /// this before calling [`Self::leave`] to distinguish a leave that
+  /// actually initiates the dead-self flush (and will emit
+  /// [`Event::LeftCluster`]) from an
+  /// idempotent post-leave no-op (which will not).
+  #[inline]
+  pub fn is_running(&self) -> bool {
+    self.ep.is_running()
+  }
+
+  /// The reliable-stream frame ceiling
+  /// ([`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)).
+  /// The driver derives its observation-channel payload byte budget from this.
+  #[inline]
+  pub fn max_stream_frame_size(&self) -> usize {
+    self.ep.max_stream_frame_size()
+  }
+
+  /// Install a custom peer-admission predicate. Forwards to
+  /// [`Endpoint::set_alive_delegate`]; the machine consults it inline for every
+  /// inbound Alive (gossip and join push/pull).
+  #[inline]
+  pub fn set_alive_delegate(&mut self, delegate: impl crate::delegate::AliveDelegate<I, A>) {
+    self.ep.set_alive_delegate(delegate);
+  }
+
+  /// Install a custom join-merge predicate. Forwards to
+  /// [`Endpoint::set_merge_delegate`]; the machine consults it on each join
+  /// push/pull merge.
+  #[inline]
+  pub fn set_merge_delegate(&mut self, delegate: impl crate::delegate::MergeDelegate<I, A>) {
+    self.ep.set_merge_delegate(delegate);
+  }
+
+  /// Re-queue an event for observation by a later [`Self::poll_event`].
+  ///
+  /// Anchors `last_now = Some(now)` unconditionally. `Event::DialRequested` is
+  /// routed DIRECTLY into the private `dial_pending` deque (bypassing the inner
+  /// queue) so a caller that calls [`Self::poll_timeout`] WITHOUT an
+  /// intervening [`Self::poll_event`] sieve still sees the immediate-due rescue
+  /// term; every other variant delegates to [`Endpoint::requeue_event`].
+  pub fn requeue_event(&mut self, ev: Event<I, A>, now: Instant) {
+    self.last_now = Some(now);
+    match ev {
+      Event::DialRequested(dial) => {
+        // A leaving/left node re-admits no dial: dropping a requeued
+        // DialRequested stops a held event from restarting a transport dial
+        // (service_dials would otherwise build a bridge and surface a Connect).
+        if !self.ep.is_running() {
+          return;
+        }
+        let (id, peer, deadline) = dial.into_parts();
+        self.dial_pending.push_back(PendingDial {
+          id,
+          peer,
+          deadline,
+          attempted: false,
+        });
+      }
+      other => self.ep.requeue_event(other),
+    }
+  }
+
+  /// Next membership/lifecycle event for the driver, if any.
+  ///
+  /// `Event::DialRequested` is sieved out of the inner endpoint's queue into
+  /// the private [`dial_pending`](Self::dial_pending) deque and is NEVER
+  /// returned to external callers: the coordinator IS the driver and dials
+  /// itself (see [`Self::service_dials`]). External callers only observe
+  /// application-visible events.
+  pub fn poll_event(&mut self) -> Option<Event<I, A>> {
+    loop {
+      match self.ep.poll_event()? {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
+          self.dial_pending.push_back(PendingDial {
+            id,
+            peer,
+            deadline,
+            attempted: false,
+          });
+          continue;
+        }
+        other => return Some(other),
+      }
+    }
+  }
+
+  /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
+  /// onto the unreliable (UDP) path, if any.
+  ///
+  /// Each call drains ONE `Transmit` straight out of the inner
+  /// `Endpoint::poll_transmit`; nothing is prebuffered coordinator-internally,
+  /// so the inner pop — which decrements `Endpoint`'s leave-completion counter
+  /// and emits `Event::LeftCluster` after the last dead-self notice — happens
+  /// at the SAME moment the datagram crosses to the external driver. A caller
+  /// that `leave(now)`s, ticks, and then reads `poll_event` cannot observe
+  /// `LeftCluster` until it has drained the dead-self tail through this
+  /// accessor: tearing the socket down on `LeftCluster` therefore guarantees
+  /// every dead-self broadcast has been handed to the driver, so peers see
+  /// `Dead`/`Left` rather than wrongly Suspecting.
+  pub fn poll_memberlist_transmit(&mut self) -> Option<Transmit<I, A>> {
+    self.ep.poll_transmit()
+  }
+
+  /// Mutable borrow of the inner membership endpoint, for tests that must
+  /// drive a scenario the public `start_*` wrappers cannot reach — e.g.
+  /// invoking `Endpoint::start_reliable_ping` WITHOUT the in-band
+  /// `service_dials` + `flush_outbound` the coordinator wrapper runs, or
+  /// retiring a dial intent directly with `Endpoint::dial_failed`.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A, G> {
+    &mut self.ep
+  }
+
+  /// Snapshot of every live exchange handle, for tests that probe which
+  /// bridges the coordinator currently holds.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn exchange_ids(&self) -> Vec<ExchangeId> {
+    self.conns.ids()
+  }
+
+  /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
+  /// [`StreamAction::Abort`] to the teardown queue, for tests that exercise
+  /// [`Self::poll_action`]'s Connect-before-teardown ordering by injecting a
+  /// teardown at the same producer site `maybe_emit_shutdown` / `reap_bridge` use.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn push_teardown(&mut self, action: StreamAction) {
+    debug_assert!(
+      matches!(
+        action,
+        StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+      ),
+      "pending_teardowns holds only Shutdown / Close / Abort actions",
+    );
+    self.pending_teardowns.push_back(action);
+  }
+
+  /// Move any `Event::DialRequested` currently in the inner endpoint's queue
+  /// into the private [`dial_pending`](Self::dial_pending) deque, preserving
+  /// FIFO order of every other event.
+  pub(crate) fn sieve_dial_events(&mut self) {
+    let mut others: Vec<Event<I, A>> = Vec::new();
+    while let Some(ev) = self.ep.poll_event() {
+      match ev {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
+          self.dial_pending.push_back(PendingDial {
+            id,
+            peer,
+            deadline,
+            attempted: false,
+          });
+        }
+        other => others.push(other),
+      }
+    }
+    for ev in others {
+      self.ep.requeue_event(ev);
+    }
+  }
+  /// Inbound gossip datagram from the UDP socket.
+  ///
+  /// **Buffered only** — the codec-owning driver MUST drain via
+  /// [`Self::poll_memberlist_ingress`], decode each frame, feed every typed
+  /// message via [`Self::handle_packet`], and then call
+  /// [`Self::handle_timeout`] to advance time. Running [`Self::handle_timeout`]
+  /// before the buffered gossip is decoded and fed would risk same-instant
+  /// probe / suspect timers firing before a just-arrived `Ack` / `Alive` is
+  /// applied — a spurious fallback ping or false `Suspect` could fire even
+  /// though the resolving message is already sitting in
+  /// [`Self::poll_memberlist_ingress`]'s queue locally. Every UDP datagram is
+  /// carried as gossip (reliable exchanges ride separate transport connections).
+  pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
+    self.last_now = Some(now);
+    // A leaving/left node buffers no inbound gossip: handle_packet would drop it
+    // anyway, so do not allocate or queue it during the drain.
+    if !self.ep.is_running() {
+      return;
+    }
+    // Machine-side backstop: bound the gossip ingress buffer so a driver that
+    // does not gate its socket reads cannot grow it without limit. A per-SOURCE
+    // fairness cap like the QUIC datagram plane's is deliberately omitted here —
+    // UDP source addresses are forgeable, so a per-source cap gives little
+    // protection, while a chatty single source is already bounded by this total
+    // cap; the QUIC plane's per-peer cap is meaningful only because its datagrams
+    // ride authenticated connections.
+    if self.mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
+      self.ep.metrics_mut().gossip_ingress_dropped += 1;
+      return;
+    }
+    self
+      .mem_ingress
+      .push_back((from, Bytes::copy_from_slice(datagram)));
+  }
+}
+
+// Methods that drive the inner `Endpoint` membership machine, encode wire
+// types, or run the bridge pump/reap helpers — all of which need full node
+// identity (`I: Id`), the gossip RNG, and the address bounds.
+impl<I, A, R, G> StreamEndpoint<I, A, R, G>
+where
+  R: StreamTransport,
+  G: Rng,
+  I: crate::Id,
+  A: crate::CheapClone + crate::Data + PartialEq + Send + Sync + 'static,
+{
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
   /// disabled.
@@ -1168,55 +1373,11 @@ where
     }
   }
 
-  /// Replace the gossip-plane checksum options in place. The driver calls this
-  /// when the operator updates the checksum policy at runtime. Single-threaded
-  /// `&mut self` — no lock.
-  ///
-  /// Checksum is a gossip-plane (unreliable) concern, so this updates only the
-  /// coordinator's own field — read by [`Self::checksum_gossip`] on the next
-  /// outbound datagram. Reliable stream bridges carry no checksum (they rely on
-  /// the stream transport's own integrity), so there is no per-bridge fan-out.
-  /// The new policy takes effect on the next datagram; checksum is non-security
-  /// and the wire frame self-describes its algorithm via the checksum-tag
-  /// prefix, so a peer always verifies under whatever policy produced the bytes.
-  #[cfg(checksum)]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3"
-    )))
-  )]
-  pub fn set_checksum_options(&mut self, checksum: ChecksumOptions) -> Result<(), ChecksumError> {
-    // Validate the algorithm's backend is built into this binary BEFORE storing
-    // it: an unusable policy is accepted by the options builder, but every
-    // subsequent `checksum_gossip` would then fail and the codec-owning driver
-    // would drop the datagram — silently disabling all gossip behind a false
-    // success. The empty-payload probe surfaces `Disabled` / `UnknownAlgorithm`.
-    checksum.apply(&[])?;
-    self.checksum = checksum;
-    Ok(())
-  }
-
   /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
   /// [`Endpoint::start_scheduling`].
   #[inline]
   pub fn start_scheduling(&mut self, now: Instant) {
     self.ep.start_scheduling(now);
-  }
-
-  /// Returns `true` if the endpoint is in normal operation (not leaving
-  /// or left). Forwards to [`Endpoint::is_running`]. A driver consults
-  /// this before calling [`Self::leave`] to distinguish a leave that
-  /// actually initiates the dead-self flush (and will emit
-  /// [`Event::LeftCluster`]) from an
-  /// idempotent post-leave no-op (which will not).
-  #[inline]
-  pub fn is_running(&self) -> bool {
-    self.ep.is_running()
   }
 
   /// Re-broadcast the local node's metadata. Pass-through to
@@ -1273,14 +1434,6 @@ where
     self.ep.send_user_packets(to, payloads)
   }
 
-  /// The reliable-stream frame ceiling
-  /// ([`max_stream_frame_size`](crate::config::EndpointOptions::max_stream_frame_size)).
-  /// The driver derives its observation-channel payload byte budget from this.
-  #[inline]
-  pub fn max_stream_frame_size(&self) -> usize {
-    self.ep.max_stream_frame_size()
-  }
-
   /// Set the application push-pull local-state snapshot. Forwards to the
   /// inner [`Endpoint`].
   ///
@@ -1309,22 +1462,6 @@ where
     self.ep.set_ack_payload(payload)
   }
 
-  /// Install a custom peer-admission predicate. Forwards to
-  /// [`Endpoint::set_alive_delegate`]; the machine consults it inline for every
-  /// inbound Alive (gossip and join push/pull).
-  #[inline]
-  pub fn set_alive_delegate(&mut self, delegate: impl crate::delegate::AliveDelegate<I, A>) {
-    self.ep.set_alive_delegate(delegate);
-  }
-
-  /// Install a custom join-merge predicate. Forwards to
-  /// [`Endpoint::set_merge_delegate`]; the machine consults it on each join
-  /// push/pull merge.
-  #[inline]
-  pub fn set_merge_delegate(&mut self, delegate: impl crate::delegate::MergeDelegate<I, A>) {
-    self.ep.set_merge_delegate(delegate);
-  }
-
   /// Initiate one SWIM probe tick on the inner membership endpoint.
   ///
   /// Pass-through to [`Endpoint::start_probe`]; sets `last_now`. The probe
@@ -1348,35 +1485,6 @@ where
   pub fn handle_suspect(&mut self, from: A, suspect: crate::typed::Suspect<I>, at: Instant) {
     self.last_now = Some(at);
     self.ep.handle_suspect(from, suspect, at);
-  }
-
-  /// Re-queue an event for observation by a later [`Self::poll_event`].
-  ///
-  /// Anchors `last_now = Some(now)` unconditionally. `Event::DialRequested` is
-  /// routed DIRECTLY into the private `dial_pending` deque (bypassing the inner
-  /// queue) so a caller that calls [`Self::poll_timeout`] WITHOUT an
-  /// intervening [`Self::poll_event`] sieve still sees the immediate-due rescue
-  /// term; every other variant delegates to [`Endpoint::requeue_event`].
-  pub fn requeue_event(&mut self, ev: Event<I, A>, now: Instant) {
-    self.last_now = Some(now);
-    match ev {
-      Event::DialRequested(dial) => {
-        // A leaving/left node re-admits no dial: dropping a requeued
-        // DialRequested stops a held event from restarting a transport dial
-        // (service_dials would otherwise build a bridge and surface a Connect).
-        if !self.ep.is_running() {
-          return;
-        }
-        let (id, peer, deadline) = dial.into_parts();
-        self.dial_pending.push_back(PendingDial {
-          id,
-          peer,
-          deadline,
-          attempted: false,
-        });
-      }
-      other => self.ep.requeue_event(other),
-    }
   }
 
   /// Begin a graceful leave; delegates to the membership endpoint after making
@@ -1416,31 +1524,6 @@ where
       }
     }
     self.ep.leave(now)
-  }
-
-  /// Next membership/lifecycle event for the driver, if any.
-  ///
-  /// `Event::DialRequested` is sieved out of the inner endpoint's queue into
-  /// the private [`dial_pending`](Self::dial_pending) deque and is NEVER
-  /// returned to external callers: the coordinator IS the driver and dials
-  /// itself (see [`Self::service_dials`]). External callers only observe
-  /// application-visible events.
-  pub fn poll_event(&mut self) -> Option<Event<I, A>> {
-    loop {
-      match self.ep.poll_event()? {
-        Event::DialRequested(dial) => {
-          let (id, peer, deadline) = dial.into_parts();
-          self.dial_pending.push_back(PendingDial {
-            id,
-            peer,
-            deadline,
-            attempted: false,
-          });
-          continue;
-        }
-        other => return Some(other),
-      }
-    }
   }
 
   /// Unified next-deadline = `min` over the membership endpoint, every bridge
@@ -1499,23 +1582,6 @@ where
     best
   }
 
-  /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
-  /// onto the unreliable (UDP) path, if any.
-  ///
-  /// Each call drains ONE `Transmit` straight out of the inner
-  /// `Endpoint::poll_transmit`; nothing is prebuffered coordinator-internally,
-  /// so the inner pop — which decrements `Endpoint`'s leave-completion counter
-  /// and emits `Event::LeftCluster` after the last dead-self notice — happens
-  /// at the SAME moment the datagram crosses to the external driver. A caller
-  /// that `leave(now)`s, ticks, and then reads `poll_event` cannot observe
-  /// `LeftCluster` until it has drained the dead-self tail through this
-  /// accessor: tearing the socket down on `LeftCluster` therefore guarantees
-  /// every dead-self broadcast has been handed to the driver, so peers see
-  /// `Dead`/`Left` rather than wrongly Suspecting.
-  pub fn poll_memberlist_transmit(&mut self) -> Option<Transmit<I, A>> {
-    self.ep.poll_transmit()
-  }
-
   /// Feed one decoded unreliable memberlist
   /// [`Message`](crate::typed::Message) into the inner membership
   /// endpoint. Pass-through to [`Endpoint::handle_packet`]; the composed unit's
@@ -1523,23 +1589,6 @@ where
   /// decode) → `handle_packet`, never a direct call into the inner `Endpoint`.
   pub fn handle_packet(&mut self, from: A, msg: crate::typed::Message<I, A>, now: Instant) {
     self.ep.handle_packet(from, msg, now);
-  }
-
-  /// Mutable borrow of the inner membership endpoint, for tests that must
-  /// drive a scenario the public `start_*` wrappers cannot reach — e.g.
-  /// invoking `Endpoint::start_reliable_ping` WITHOUT the in-band
-  /// `service_dials` + `flush_outbound` the coordinator wrapper runs, or
-  /// retiring a dial intent directly with `Endpoint::dial_failed`.
-  #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A, G> {
-    &mut self.ep
-  }
-
-  /// Snapshot of every live exchange handle, for tests that probe which
-  /// bridges the coordinator currently holds.
-  #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn exchange_ids(&self) -> Vec<ExchangeId> {
-    self.conns.ids()
   }
 
   /// The reliable-unit ceiling a given exchange's bridge was built with, for a
@@ -1594,22 +1643,6 @@ where
         crate::streams::phase::StreamPhase::Established(crate::bridge_phase::BridgePhase::Active)
       ) && !b.fin_owed()
     })
-  }
-
-  /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
-  /// [`StreamAction::Abort`] to the teardown queue, for tests that exercise
-  /// [`Self::poll_action`]'s Connect-before-teardown ordering by injecting a
-  /// teardown at the same producer site `maybe_emit_shutdown` / `reap_bridge` use.
-  #[cfg(all(test, feature = "tcp"))]
-  pub(crate) fn push_teardown(&mut self, action: StreamAction) {
-    debug_assert!(
-      matches!(
-        action,
-        StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
-      ),
-      "pending_teardowns holds only Shutdown / Close / Abort actions",
-    );
-    self.pending_teardowns.push_back(action);
   }
 
   /// Step (2) of the per-tick order: pump every bridge's outbound half, drain
@@ -2015,30 +2048,6 @@ where
     self.collect_transmits();
   }
 
-  /// Move any `Event::DialRequested` currently in the inner endpoint's queue
-  /// into the private [`dial_pending`](Self::dial_pending) deque, preserving
-  /// FIFO order of every other event.
-  pub(crate) fn sieve_dial_events(&mut self) {
-    let mut others: Vec<Event<I, A>> = Vec::new();
-    while let Some(ev) = self.ep.poll_event() {
-      match ev {
-        Event::DialRequested(dial) => {
-          let (id, peer, deadline) = dial.into_parts();
-          self.dial_pending.push_back(PendingDial {
-            id,
-            peer,
-            deadline,
-            attempted: false,
-          });
-        }
-        other => others.push(other),
-      }
-    }
-    for ev in others {
-      self.ep.requeue_event(ev);
-    }
-  }
-
   /// Collect outbound bytes from the bridges pumped this tick into the outbound
   /// queue, tagged with the exchange handle + peer. Only a bridge `pump_bridges`
   /// serviced can have produced new bytes, so draining `pumped` (rather than
@@ -2050,61 +2059,6 @@ where
         self.conns.insert(id, br);
       }
     }
-  }
-}
-
-// The full SWIM bag. Methods that resolve a peer address to a transport
-// `SocketAddr` via the stored `peer_to_socket` closure, derive a per-dial
-// record-layer context via `R::dial_context::<A>`, or transitively reach
-// either through the coordinator tick (`run_tick` → `service_dials`).
-impl<I, A, R, G> StreamEndpoint<I, A, R, G>
-where
-  G: Rng,
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  R: StreamTransport,
-{
-  /// Inbound gossip datagram from the UDP socket.
-  ///
-  /// **Buffered only** — the codec-owning driver MUST drain via
-  /// [`Self::poll_memberlist_ingress`], decode each frame, feed every typed
-  /// message via [`Self::handle_packet`], and then call
-  /// [`Self::handle_timeout`] to advance time. Running [`Self::handle_timeout`]
-  /// before the buffered gossip is decoded and fed would risk same-instant
-  /// probe / suspect timers firing before a just-arrived `Ack` / `Alive` is
-  /// applied — a spurious fallback ping or false `Suspect` could fire even
-  /// though the resolving message is already sitting in
-  /// [`Self::poll_memberlist_ingress`]'s queue locally. Every UDP datagram is
-  /// carried as gossip (reliable exchanges ride separate transport connections).
-  pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
-    self.last_now = Some(now);
-    // A leaving/left node buffers no inbound gossip: handle_packet would drop it
-    // anyway, so do not allocate or queue it during the drain.
-    if !self.ep.is_running() {
-      return;
-    }
-    // Machine-side backstop: bound the gossip ingress buffer so a driver that
-    // does not gate its socket reads cannot grow it without limit. A per-SOURCE
-    // fairness cap like the QUIC datagram plane's is deliberately omitted here —
-    // UDP source addresses are forgeable, so a per-source cap gives little
-    // protection, while a chatty single source is already bounded by this total
-    // cap; the QUIC plane's per-peer cap is meaningful only because its datagrams
-    // ride authenticated connections.
-    if self.mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
-      self.ep.metrics_mut().gossip_ingress_dropped += 1;
-      return;
-    }
-    self
-      .mem_ingress
-      .push_back((from, Bytes::copy_from_slice(datagram)));
   }
 
   /// Inbound bytes for one exchange's transport connection.
