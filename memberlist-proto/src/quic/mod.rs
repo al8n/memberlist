@@ -27,6 +27,7 @@ use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 
 use crate::{
   endpoint::Endpoint,
+  error::{Error, StreamError},
   event::{
     Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeStatus, PushPullKind, StreamId,
     Transmit,
@@ -35,6 +36,10 @@ use crate::{
 use bridge::Bridge;
 use conn::ConnTable;
 use demux::{Class, classify};
+use std::collections::VecDeque;
+// `HashSet` only types a `#[cfg(test)]` snapshot parameter.
+#[cfg(test)]
+use std::collections::HashSet;
 
 /// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
 /// drain. quinn's `datagram_receive_buffer_size` bounds inbound BYTES but not
@@ -71,7 +76,7 @@ const MAX_INGRESS_DATAGRAMS_PER_PEER: usize = 1024;
 /// QUIC datagram drain in `service_quinn` can call it while the
 /// `self.conns.get_mut(..)` connection borrow is still live.
 fn push_mem_ingress_capped(
-  mem_ingress: &mut std::collections::VecDeque<(SocketAddr, Bytes)>,
+  mem_ingress: &mut VecDeque<(SocketAddr, Bytes)>,
   per_peer: &mut HashMap<SocketAddr, usize>,
   dropped: &mut u64,
   from: SocketAddr,
@@ -184,7 +189,7 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// Outbound UDP datagrams produced this tick (quinn datagrams + stateless
   /// `Response`s; the memberlist unreliable path is NOT prebuffered — see
   /// [`poll_memberlist_transmit`](Self::poll_memberlist_transmit)).
-  out: std::collections::VecDeque<(SocketAddr, Bytes)>,
+  out: VecDeque<(SocketAddr, Bytes)>,
   /// Raw inbound memberlist datagrams the first-byte demux classified as
   /// `Class::Memberlist`. `memberlist-proto` has no umbrella `codec`
   /// dependency, so the coordinator cannot decode them in-crate and MUST NOT
@@ -194,7 +199,7 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// — the same idiom the coordinator uses for QUIC `Transmit`/`DatagramEvent`
   /// — for the codec-owning layer to unwrap and feed back through
   /// [`handle_packet`](Self::handle_packet).
-  mem_ingress: std::collections::VecDeque<(SocketAddr, Bytes)>,
+  mem_ingress: VecDeque<(SocketAddr, Bytes)>,
   /// Per-peer count of entries currently in `mem_ingress`, maintained on every
   /// push and pop, so the inbound datagram drain can bound one peer's standing
   /// share of the shared queue (fairness against a single-peer flood)
@@ -216,7 +221,7 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// entry carries an `attempted` bit so a freshly-sieved intent surfaces
   /// in [`Self::poll_timeout`] as an immediate-due wake — see
   /// [`PendingDial`].
-  dial_pending: std::collections::VecDeque<PendingDial>,
+  dial_pending: VecDeque<PendingDial>,
   /// Most recent `now: Instant` injected by `handle_udp` / `handle_timeout` /
   /// any high-level `start_*` wrapper. Used by [`Self::poll_timeout`] as the
   /// known-past anchor for the immediate-due wake of an unattempted
@@ -371,10 +376,10 @@ impl<I, R> QuicEndpoint<I, R> {
       bridges: HashMap::new(),
       pending_outbound_kinds: HashMap::new(),
       pending_outbound_peers: HashMap::new(),
-      out: std::collections::VecDeque::new(),
-      mem_ingress: std::collections::VecDeque::new(),
+      out: VecDeque::new(),
+      mem_ingress: VecDeque::new(),
       mem_ingress_per_peer: HashMap::new(),
-      dial_pending: std::collections::VecDeque::new(),
+      dial_pending: VecDeque::new(),
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
@@ -1259,7 +1264,7 @@ impl<I, R> QuicEndpoint<I, R> {
   /// into the probe FSM by `dial_failed` itself, which terminalizes the
   /// fallback-probe path; a second `ExchangeCompleted` is neither parked
   /// on nor expected by any driver for the reliable-ping fallback.
-  fn retire_failed_dial(&mut self, id: StreamId, err: crate::error::StreamError, now: Instant) {
+  fn retire_failed_dial(&mut self, id: StreamId, err: StreamError, now: Instant) {
     let kind = self.pending_outbound_kinds.remove(&id);
     let peer = self.pending_outbound_peers.remove(&id);
     if let (Some(kind @ (ExchangeKind::UserMessage | ExchangeKind::PushPull)), Some(peer)) =
@@ -1490,14 +1495,14 @@ where
   /// already transitioned to `Leaving` / `Left` / `Shutdown`. Returns
   /// [`crate::error::Error::MetaExceedsCap`] if `meta` exceeds the
   /// per-endpoint cap configured at construction.
-  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), crate::error::Error> {
+  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), Error> {
     self.ep.update_meta(meta)
   }
 
   /// Queue an application user-broadcast for gossip dissemination. Forwards
   /// to the inner membership [`Endpoint`].
   #[inline]
-  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), Error> {
     self.ep.queue_user_broadcast(data)
   }
 
@@ -1511,7 +1516,7 @@ where
   /// snapshot is deterministically untransmittable, so it is rejected rather
   /// than stored.
   #[inline]
-  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), Error> {
     self.ep.set_local_state_snapshot(bytes)
   }
 
@@ -1525,7 +1530,7 @@ where
   /// over-budget Ack is deterministically unsendable on the gossip socket,
   /// so the payload is rejected rather than stored.
   #[inline]
-  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), Error> {
     self.ep.set_ack_payload(payload)
   }
 
@@ -1558,7 +1563,7 @@ where
   }
 
   /// Begin a graceful leave; delegates to the membership endpoint.
-  pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
+  pub fn leave(&mut self, now: Instant) -> Result<(), Error> {
     self.last_now = Some(now);
     self.ep.leave(now)
   }
@@ -1578,7 +1583,7 @@ where
     &mut self,
     node: crate::Node<I, SocketAddr>,
     now: Instant,
-  ) -> Result<crate::PingId, crate::error::Error> {
+  ) -> Result<crate::PingId, Error> {
     self.ep.ping(node, now)
   }
 
@@ -1588,11 +1593,7 @@ where
   ///
   /// Returns `Err` if any payload exceeds the configured `gossip_mtu` ceiling.
   #[inline]
-  pub fn send_user_packets(
-    &mut self,
-    to: SocketAddr,
-    payloads: &[Bytes],
-  ) -> Result<(), crate::error::Error> {
+  pub fn send_user_packets(&mut self, to: SocketAddr, payloads: &[Bytes]) -> Result<(), Error> {
     self.ep.send_user_packets(to, payloads)
   }
 
@@ -1640,7 +1641,7 @@ where
         // pre-bridge-creation failure paths below.
         self.retire_failed_dial(
           id,
-          crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
+          StreamError::DialFailed("quic dial deadline elapsed".into()),
           now,
         );
         continue;
@@ -1709,7 +1710,7 @@ where
                   // failure sites.
                   self.retire_failed_dial(
                     id,
-                    crate::error::StreamError::DialFailed(
+                    StreamError::DialFailed(
                       "quic dial intent invalidated before bridge creation".into(),
                     ),
                     now,
@@ -1784,9 +1785,7 @@ where
                 if is_closed_now {
                   self.retire_failed_dial(
                     id,
-                    crate::error::StreamError::DialFailed(
-                      "quic stream open: cached connection closed".into(),
-                    ),
+                    StreamError::DialFailed("quic stream open: cached connection closed".into()),
                     now,
                   );
                 } else if now < deadline {
@@ -1799,9 +1798,7 @@ where
                 } else {
                   self.retire_failed_dial(
                     id,
-                    crate::error::StreamError::DialFailed(
-                      "quic stream open deadline elapsed".into(),
-                    ),
+                    StreamError::DialFailed("quic stream open deadline elapsed".into()),
                     now,
                   );
                 }
@@ -1810,11 +1807,7 @@ where
           }
         }
         Err(e) => {
-          self.retire_failed_dial(
-            id,
-            crate::error::StreamError::DialFailed(e.to_string().into()),
-            now,
-          );
+          self.retire_failed_dial(id, StreamError::DialFailed(e.to_string().into()), now);
         }
       }
     }
@@ -1955,7 +1948,7 @@ where
   fn pump_bridges_tracking_post_acceptance(
     &mut self,
     now: Instant,
-    pre_snapshot_ids: &std::collections::HashSet<StreamId>,
+    pre_snapshot_ids: &HashSet<StreamId>,
   ) {
     let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
     for id in &ids {
@@ -2115,7 +2108,7 @@ where
     peer: SocketAddr,
     payload: Bytes,
     now: Instant,
-  ) -> Result<StreamId, crate::error::Error> {
+  ) -> Result<StreamId, Error> {
     self.last_now = Some(now);
     // Propagate the inner lifecycle refusal: a Leaving/Left node starts no new
     // reliable user message and registers no outbound intent.
@@ -2191,7 +2184,7 @@ where
     // (1) inbound feed already done in `handle_udp` before this tick.
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
     #[cfg(test)]
-    let pre_step2_ids: std::collections::HashSet<StreamId> = self.bridges.keys().copied().collect();
+    let pre_step2_ids: HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     // (3) THEN memberlist timers (probe cumulative-deadline, suspicion).
     if advance_membership_time {
@@ -2265,8 +2258,7 @@ where
   /// pumped bridges is the same property documented there.
   fn flush_outbound(&mut self, now: Instant) {
     #[cfg(test)]
-    let pre_first_pump_ids: std::collections::HashSet<StreamId> =
-      self.bridges.keys().copied().collect();
+    let pre_first_pump_ids: HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     self.service_quinn(now);
     #[cfg(test)]

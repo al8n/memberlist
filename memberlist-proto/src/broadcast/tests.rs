@@ -1,4 +1,5 @@
 use super::*;
+use core::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A simple broadcast type for testing. `id` is `Some(node_name)` so
@@ -335,11 +336,11 @@ fn prune_keeps_only_max_retain() {
 #[test]
 fn memberlist_broadcast_invalidates_by_node_id() {
   use crate::typed::{Ack, Message};
-  let m1: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
+  let m1: MemberlistBroadcast<smol_str::SmolStr, SocketAddr> =
     MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(7)));
-  let m2: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
+  let m2: MemberlistBroadcast<smol_str::SmolStr, SocketAddr> =
     MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(8)));
-  let m3: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
+  let m3: MemberlistBroadcast<smol_str::SmolStr, SocketAddr> =
     MemberlistBroadcast::new(smol_str::SmolStr::new("bob"), Message::Ack(Ack::new(9)));
   assert!(m1.invalidates(&m2));
   assert!(!m1.invalidates(&m3));
@@ -536,7 +537,7 @@ fn id_gen_wraps_at_u64_max() {
 #[test]
 fn memberlist_broadcast_accessors_and_wire_encoded_len() {
   use crate::typed::{Ack, Message};
-  let b: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
+  let b: MemberlistBroadcast<smol_str::SmolStr, SocketAddr> =
     MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(7)));
   assert_eq!(b.node_ref(), &smol_str::SmolStr::new("alice"));
   assert!(matches!(b.message_ref(), Message::Ack(_)));
@@ -544,9 +545,7 @@ fn memberlist_broadcast_accessors_and_wire_encoded_len() {
   assert!(matches!(Broadcast::message(&b), Message::Ack(_)));
   // The real wire encoded_len path (bridges to memberlist-wire) is positive.
   let len =
-    <MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> as Broadcast>::encoded_len(
-      b.message_ref(),
-    );
+    <MemberlistBroadcast<smol_str::SmolStr, SocketAddr> as Broadcast>::encoded_len(b.message_ref());
   assert!(len > 0, "an Ack message must encode to a nonzero length");
   // finished() is the default no-op and must not panic.
   Broadcast::finished(&b);
@@ -555,10 +554,8 @@ fn memberlist_broadcast_accessors_and_wire_encoded_len() {
 #[test]
 fn memberlist_broadcast_queue_dedups_by_node_id() {
   use crate::typed::{Ack, Message};
-  let mut q: BroadcastQueue<
-    smol_str::SmolStr,
-    MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr>,
-  > = BroadcastQueue::new(3);
+  let mut q: BroadcastQueue<smol_str::SmolStr, MemberlistBroadcast<smol_str::SmolStr, SocketAddr>> =
+    BroadcastQueue::new(3);
   q.queue_broadcast(MemberlistBroadcast::new(
     smol_str::SmolStr::new("alice"),
     Message::Ack(Ack::new(1)),

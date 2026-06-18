@@ -35,6 +35,7 @@ use core::{
 use ipnet::IpNet;
 
 use crate::{FxHashSet, delegate::AliveDelegate, typed::NodeState};
+use std::collections::HashSet;
 
 /// A Classless Inter-Domain Routing (CIDR) peer-admission allow-list.
 ///
@@ -162,8 +163,8 @@ impl CidrPolicy {
 /// [`Default`] produce allow-all. (std only; no_std builds use [`FromIterator`]
 /// or [`TryFrom`].)
 #[cfg(feature = "std")]
-impl From<std::collections::HashSet<IpNet>> for CidrPolicy {
-  fn from(allowed_cidrs: std::collections::HashSet<IpNet>) -> Self {
+impl From<HashSet<IpNet>> for CidrPolicy {
+  fn from(allowed_cidrs: HashSet<IpNet>) -> Self {
     Self {
       allowed_cidrs: Some(allowed_cidrs.into_iter().collect()),
     }

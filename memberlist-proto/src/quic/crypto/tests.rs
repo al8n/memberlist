@@ -1,4 +1,8 @@
 use super::*;
+use rustls::{
+  client::danger::{HandshakeSignatureValid, ServerCertVerified},
+  version::TLS13,
+};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 fn self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
@@ -26,7 +30,7 @@ pub(crate) fn test_server() -> quinn_proto::ServerConfig {
   let (chain, key) = self_signed();
   let provider = Arc::new(rustls::crypto::ring::default_provider());
   let rustls_server = rustls::ServerConfig::builder_with_provider(provider)
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(chain, key)
@@ -48,8 +52,8 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
     _server_name: &rustls_pki_types::ServerName,
     _ocsp_response: &[u8],
     _now: rustls_pki_types::UnixTime,
-  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-    Ok(rustls::client::danger::ServerCertVerified::assertion())
+  ) -> Result<ServerCertVerified, rustls::Error> {
+    Ok(ServerCertVerified::assertion())
   }
 
   fn verify_tls12_signature(
@@ -57,8 +61,8 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
     _message: &[u8],
     _cert: &CertificateDer,
     _dss: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
 
   fn verify_tls13_signature(
@@ -66,8 +70,8 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
     _message: &[u8],
     _cert: &CertificateDer,
     _dss: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
 
   fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -81,7 +85,7 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
 pub(crate) fn test_client() -> quinn_proto::ClientConfig {
   let provider = Arc::new(rustls::crypto::ring::default_provider());
   let cfg = rustls::ClientConfig::builder_with_provider(provider)
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer))

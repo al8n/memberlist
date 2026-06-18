@@ -30,8 +30,10 @@ use crate::{
     UserPacket,
   },
   members::{LocalNodeState, Member, Members},
+  metrics::Metrics,
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
   stream::{OutboundKind, Stream, StreamPhase},
+  wire::{COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN},
 };
 
 #[cfg(test)]
@@ -215,7 +217,7 @@ pub struct Endpoint<I, A, R = SmallRng> {
   snapshot_version: u64,
   /// Cumulative operational counters bumped as the machine sheds load at its
   /// bounds. Read by drivers via [`Self::metrics`].
-  metrics: crate::metrics::Metrics,
+  metrics: Metrics,
   /// Round-robin index into `members` for `start_probe`'s target selection.
   probe_index: usize,
   /// Probe ticks since the last `reset_nodes` sweep. Once it reaches the
@@ -405,13 +407,13 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// A snapshot of the machine's cumulative operational counters (load shed at
   /// the membership / ingress / amplification bounds). See [`crate::metrics`].
   #[inline]
-  pub const fn metrics(&self) -> &crate::metrics::Metrics {
+  pub const fn metrics(&self) -> &Metrics {
     &self.metrics
   }
 
   /// Mutable access for the machine's own bound-shedding sites to bump a counter.
   #[inline(always)]
-  pub const fn metrics_mut(&mut self) -> &mut crate::metrics::Metrics {
+  pub const fn metrics_mut(&mut self) -> &mut Metrics {
     &mut self.metrics
   }
 
@@ -724,7 +726,7 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// <= 11`. Do NOT "tighten" this toward 8 — the 8 only holds under the
   /// `L <= 1383` admission bound proven here; the conservative 11 keeps the
   /// constant correct without depending on that derivation at the call site.
-  const USER_PART_OVERHEAD: usize = crate::wire::COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
+  const USER_PART_OVERHEAD: usize = COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
 
   /// Drain user-data payloads up to `limit` total bytes,
   /// in FIFO order. Used by the gossip scheduler. Returns the drained
@@ -1014,7 +1016,7 @@ where
       indirect_forwards: FxHashMap::default(),
       next_seq: 0,
       snapshot_version: 0,
-      metrics: crate::metrics::Metrics::default(),
+      metrics: Metrics::default(),
       probe_index: 0,
       probes_since_reset: 0,
       incarnation: initial_incarnation,
@@ -1922,16 +1924,15 @@ where
       [] => Ok(()),
       [one] => self.send_user_packet(to, one.cheap_clone()),
       many => {
-        let mut assembled =
-          crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN;
+        let mut assembled = COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN;
         let mut msgs = Vec::with_capacity(many.len());
         for p in many {
           let m = Message::UserData(p.cheap_clone());
           let part_len = crate::wire::encode_message::<I, A>(&m)
             .map(|b| b.len())
             .unwrap_or(usize::MAX);
-          assembled = assembled
-            .saturating_add(crate::wire::COMPOUND_MAX_PART_PREFIX_LEN.saturating_add(part_len));
+          assembled =
+            assembled.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN.saturating_add(part_len));
           msgs.push(m);
         }
         let budget = self.gossip_mtu();
@@ -2090,12 +2091,12 @@ where
       // the gossip budget (COMPOUND_TAG_LEN + count varint + per-part
       // inner_len varint + each plain-frame len). .expect() per the
       // machine-built-message convention (Ping/Suspect always bridge).
-      let assembled_upper = crate::wire::COMPOUND_TAG_LEN
-        + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN
+      let assembled_upper = COMPOUND_TAG_LEN
+        + COMPOUND_MAX_COUNT_PREFIX_LEN
         + probe_msgs
           .iter()
           .map(|m| {
-            crate::wire::COMPOUND_MAX_PART_PREFIX_LEN
+            COMPOUND_MAX_PART_PREFIX_LEN
               + crate::wire::encode_message::<I, A>(m)
                 .expect("outbound probe message must bridge to wire form")
                 .len()
@@ -3280,10 +3281,10 @@ where
     // `take_broadcasts` together with the per-part overhead.
     let compound_budget = self
       .gossip_mtu()
-      .saturating_sub(crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN);
+      .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN);
     let (membership_broadcasts, membership_used) = self.broadcast.take_broadcasts_measured(
       num_nodes,
-      crate::wire::COMPOUND_MAX_PART_PREFIX_LEN,
+      COMPOUND_MAX_PART_PREFIX_LEN,
       compound_budget,
     );
 

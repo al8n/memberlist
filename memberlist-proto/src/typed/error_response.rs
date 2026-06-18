@@ -1,3 +1,4 @@
+use core::fmt;
 use smol_str::SmolStr;
 
 /// Error response from the remote peer
@@ -38,8 +39,8 @@ impl ErrorResponse {
   }
 }
 
-impl core::fmt::Display for ErrorResponse {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for ErrorResponse {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}", self.message)
   }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::encryption::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions};
 
 #[cfg(compression)]
 #[test]
@@ -384,7 +385,7 @@ fn reliable_unit_corrupt_inner_wrapper_is_rejected() {
 
 #[test]
 fn reliable_unit_disabled_encryption_is_byte_identical() {
-  use crate::encryption::EncryptionOptions;
+  use EncryptionOptions;
   let comp = CompressionOptions::new();
   let enc = EncryptionOptions::new();
   let framed = b"plain reliable frame bytes that are not compressed or encrypted".to_vec();
@@ -398,7 +399,7 @@ fn reliable_unit_disabled_encryption_is_byte_identical() {
 
 #[test]
 fn reliable_unit_encryption_disabled_compression_disabled_is_unchanged() {
-  use crate::encryption::EncryptionOptions;
+  use EncryptionOptions;
   let comp = CompressionOptions::new();
   let enc = EncryptionOptions::new();
   let framed = b"some bytes".to_vec();
@@ -481,7 +482,7 @@ fn encrypted_reliable_unit_at_max_orig_len_roundtrips() {
   let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
   for max_orig_len in [1400usize, 4096, 64 * 1024] {
     for plaintext_len in [
-      max_orig_len - crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD,
+      max_orig_len - ENCRYPTED_WRAPPER_OVERHEAD,
       max_orig_len - 1,
       max_orig_len,
     ] {
@@ -509,7 +510,7 @@ fn encrypted_reliable_unit_one_byte_past_envelope_max_is_rejected() {
   let key = SecretKey::Aes256([0x99; 32]);
   let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
   let max_orig_len = 1024usize;
-  let bad_unit_len = max_orig_len + crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD + 1;
+  let bad_unit_len = max_orig_len + ENCRYPTED_WRAPPER_OVERHEAD + 1;
   let mut buf = Vec::new();
   encode_varint_u32(bad_unit_len as u32, &mut buf);
   // A few junk body bytes — irrelevant; the bomb-guard fires before any
@@ -645,7 +646,7 @@ fn take_reliable_unit_rejects_corrupt_leading_varint() {
 fn take_reliable_unit_with_encryption_rejects_corrupt_leading_varint() {
   // The encryption-aware decoder propagates the same hard varint corruption
   // (the non-Incomplete `Err(e)` arm) rather than stalling on `None`.
-  use crate::encryption::EncryptionOptions;
+  use EncryptionOptions;
   let buf = [0x80, 0x80, 0x80, 0x80, 0x10, 0x00];
   assert!(take_reliable_unit_with_encryption(&buf, &EncryptionOptions::new(), 1 << 20).is_err());
 }

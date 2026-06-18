@@ -612,8 +612,8 @@ pub fn unwrap_transforms_with_encryption<'a>(
   buf: &'a [u8],
   max_orig_len: usize,
   encryption: &EncryptionOptions,
-) -> Result<std::borrow::Cow<'a, [u8]>, FrameError> {
-  use std::borrow::Cow;
+) -> Result<Cow<'a, [u8]>, FrameError> {
+  use Cow;
   // Strict mode: when encryption is configured, the OUTERMOST inbound frame
   // MUST be wrapped in `Encrypted`. A plain-message / compound /
   // compression-only datagram arriving on an encrypted path is

@@ -18,6 +18,7 @@ use std::{
   sync::Arc,
 };
 
+use crate::config::DEFAULT_MAX_STREAM_FRAME_SIZE;
 use rustls::{
   ClientConfig, ClientConnection, ServerConfig, ServerConnection, pki_types::ServerName,
 };
@@ -196,7 +197,7 @@ impl TlsRecords {
     // never binds on the normal path. The real bound is `pending`/`send_limit`.
     // `StreamBridge::new` re-sizes both via `set_send_capacity` right after
     // construction; this default keeps a direct caller bounded too.
-    let limit = sized_send_limit(crate::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    let limit = sized_send_limit(DEFAULT_MAX_STREAM_FRAME_SIZE);
     c.set_buffer_limit(Some(limit.saturating_mul(2)));
     Ok(Self {
       conn: Conn::Client(c),
@@ -212,7 +213,7 @@ impl TlsRecords {
   pub(crate) fn server(server: Arc<ServerConfig>) -> Result<Self, rustls::Error> {
     let mut s = ServerConnection::new(server)?;
     // Loose 2x backstop; same rationale as the client constructor.
-    let limit = sized_send_limit(crate::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    let limit = sized_send_limit(DEFAULT_MAX_STREAM_FRAME_SIZE);
     s.set_buffer_limit(Some(limit.saturating_mul(2)));
     Ok(Self {
       conn: Conn::Server(s),

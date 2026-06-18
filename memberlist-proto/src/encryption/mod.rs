@@ -30,6 +30,7 @@
 
 use std::vec::Vec;
 
+use core::fmt;
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 /// Identifies the AEAD backend an encrypted frame was produced with. Each
@@ -136,8 +137,8 @@ pub enum SecretKey {
   ChaCha20Poly1305([u8; 32]),
 }
 
-impl core::fmt::Debug for SecretKey {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for SecretKey {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       #[cfg(feature = "aes-gcm")]
       Self::Aes128(_) => write!(f, "SecretKey::Aes128(<redacted>)"),

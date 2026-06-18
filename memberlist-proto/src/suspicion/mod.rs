@@ -6,6 +6,7 @@ use crate::{FxHashSet, Instant};
 use core::time::Duration;
 
 use crate::CheapClone;
+use core::hash::Hash;
 
 /// Computes the remaining time before the suspect-timeout fires, given the
 /// number of confirmations received (`n`), the required threshold (`k`),
@@ -96,7 +97,7 @@ impl<I> Suspicion<I> {
 
 impl<I> Suspicion<I>
 where
-  I: Eq + core::hash::Hash,
+  I: Eq + Hash,
 {
   /// Construct a new suspicion state. `from` is the original suspector and
   /// is excluded from confirmations (so a peer's own suspicion can't count
@@ -124,7 +125,7 @@ where
 
 impl<I> Suspicion<I>
 where
-  I: Eq + core::hash::Hash + CheapClone,
+  I: Eq + Hash + CheapClone,
 {
   /// Register a confirmation from `from`. Returns whether the deadline was
   /// advanced. The caller (Endpoint) is responsible for re-arming any

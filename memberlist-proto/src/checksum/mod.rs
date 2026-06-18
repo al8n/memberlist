@@ -14,6 +14,7 @@
 use std::vec::Vec;
 
 use crate::framing::{FrameError, MessageTag};
+use core::fmt;
 
 /// Identifies the checksum backend a digest was produced with. Each backend is
 /// opt-in behind its own feature; a node that is handed a tag it was not built
@@ -230,8 +231,8 @@ pub enum ChecksumError {
   Mismatch,
 }
 
-impl core::fmt::Display for ChecksumAlgorithm {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for ChecksumAlgorithm {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       #[cfg(feature = "crc32")]
       Self::Crc32 => f.write_str("crc32"),

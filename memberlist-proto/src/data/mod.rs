@@ -12,6 +12,8 @@ use varing::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_len};
 
 use crate::wire_type::WireType;
 
+use core::fmt;
+use std::vec::Vec;
 pub use tuple::TupleEncoder;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -75,7 +77,7 @@ pub(crate) fn check_encoded_message_size(required: usize) -> Result<(), EncodeEr
 pub trait DataRef<'a, D>
 where
   D: Data + ?Sized,
-  Self: Copy + core::fmt::Debug + Send + Sync,
+  Self: Copy + fmt::Debug + Send + Sync,
 {
   /// Decodes the reference type from a buffer.
   ///
@@ -114,7 +116,7 @@ where
 // ─── Data ────────────────────────────────────────────────────────────────────
 
 /// The memberlist data can be transmitted through the network.
-pub trait Data: core::fmt::Debug + Send + Sync {
+pub trait Data: fmt::Debug + Send + Sync {
   /// The wire type of the data.
   const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
@@ -145,7 +147,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
 
   /// Encodes the message into a vec.
   #[cfg(any(feature = "std", feature = "alloc"))]
-  fn encode_to_vec(&self) -> Result<std::vec::Vec<u8>, EncodeError> {
+  fn encode_to_vec(&self) -> Result<Vec<u8>, EncodeError> {
     let len = self.encoded_len();
     let mut vec = std::vec![0; len];
     self.encode(&mut vec).map(|_| vec)
@@ -182,7 +184,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
 
   /// Encodes the message with a length-delimiter into a vec.
   #[cfg(any(feature = "std", feature = "alloc"))]
-  fn encode_length_delimited_to_vec(&self) -> Result<std::vec::Vec<u8>, EncodeError> {
+  fn encode_length_delimited_to_vec(&self) -> Result<Vec<u8>, EncodeError> {
     let len = self.encoded_len_with_length_delimited();
     let mut vec = std::vec![0; len];
     self.encode_length_delimited(&mut vec).map(|_| vec)
@@ -264,8 +266,8 @@ impl InsufficientBufferCapacity {
   }
 }
 
-impl core::fmt::Display for InsufficientBufferCapacity {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for InsufficientBufferCapacity {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "required: {}, remaining: {}",
@@ -378,8 +380,8 @@ impl MissingFieldInfo {
   }
 }
 
-impl core::fmt::Display for MissingFieldInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for MissingFieldInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "missing {} in {}", self.field, self.ty)
   }
 }
@@ -418,8 +420,8 @@ impl DuplicateFieldInfo {
   }
 }
 
-impl core::fmt::Display for DuplicateFieldInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for DuplicateFieldInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "duplicate field {} with tag {} in {}",
@@ -462,8 +464,8 @@ impl UnknownWireTypeInfo {
   }
 }
 
-impl core::fmt::Display for UnknownWireTypeInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for UnknownWireTypeInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "unknown wire type value {} with tag {} when decoding {}",
@@ -499,8 +501,8 @@ impl UnknownTagInfo {
   }
 }
 
-impl core::fmt::Display for UnknownTagInfo {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for UnknownTagInfo {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "unknown tag {} when decoding {}", self.tag, self.ty)
   }
 }

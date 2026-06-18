@@ -38,6 +38,7 @@ use crate::{
 /// Unique handle for a stream-oriented exchange.
 /// Re-exported from `event.rs`; used here to key the stream in `Endpoint`.
 pub use crate::event::StreamId;
+use crate::typed::Message;
 
 /// Decoded snapshot of a peer's push/pull message. Owned; emitted in
 /// `EndpointEvent::PushPullRequestReceived` or `EndpointEvent::PushPullReplyReceived`
@@ -666,12 +667,8 @@ where
     Ok(())
   }
 
-  fn dispatch_message(
-    &mut self,
-    msg: crate::typed::Message<I, A>,
-    now: Instant,
-  ) -> Result<(), StreamError> {
-    use crate::typed::Message;
+  fn dispatch_message(&mut self, msg: Message<I, A>, now: Instant) -> Result<(), StreamError> {
+    use Message;
 
     // The decode path now yields an owned `typed::Message`, so the message
     // is matched *by value*. To avoid the original `match &self.phase { … }`
@@ -809,7 +806,7 @@ where
             // (the ACK is fully self-contained — the responder doesn't need to
             // consult the Endpoint).
             let ack = crate::typed::Ack::new(ping_seq);
-            let ack_msg = crate::typed::Message::<I, A>::Ack(ack);
+            let ack_msg = Message::<I, A>::Ack(ack);
             let encoded = crate::wire::encode_message::<I, A>(&ack_msg)
               .expect("Ack encode cannot fail for well-formed data");
             self.output_buf.extend(encoded);

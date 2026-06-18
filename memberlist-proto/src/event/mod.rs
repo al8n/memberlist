@@ -6,6 +6,7 @@ use std::{string::String, vec::Vec};
 
 use crate::typed::{Message, NodeState, PushNodeState};
 use bytes::Bytes;
+use core::time::Duration;
 
 /// A coordinator-allocated handle for one in-flight reliable exchange,
 /// stable across the `Handshaking → Established` promotion (unlike
@@ -480,7 +481,7 @@ impl<A> RemoteStateReceived<A> {
 pub struct PingCompleted<I, A> {
   ping_id: PingId,
   node: Arc<NodeState<I, A>>,
-  rtt: core::time::Duration,
+  rtt: Duration,
   payload: Bytes,
 }
 
@@ -490,7 +491,7 @@ impl<I, A> PingCompleted<I, A> {
   pub const fn new(
     ping_id: PingId,
     node: Arc<NodeState<I, A>>,
-    rtt: core::time::Duration,
+    rtt: Duration,
     payload: Bytes,
   ) -> Self {
     Self {
@@ -515,7 +516,7 @@ impl<I, A> PingCompleted<I, A> {
 
   /// Measured round-trip-time.
   #[inline(always)]
-  pub const fn rtt(&self) -> core::time::Duration {
+  pub const fn rtt(&self) -> Duration {
     self.rtt
   }
 

@@ -1,4 +1,5 @@
 use super::*;
+use core::fmt;
 
 /// Represents a node in the cluster
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -204,12 +205,12 @@ where
   }
 }
 
-impl<I, A> core::fmt::Display for NodeState<I, A>
+impl<I, A> fmt::Display for NodeState<I, A>
 where
-  I: core::fmt::Display,
-  A: core::fmt::Display,
+  I: fmt::Display,
+  A: fmt::Display,
 {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }
 }

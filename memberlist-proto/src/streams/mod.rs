@@ -97,6 +97,7 @@ use rand::{Rng, rngs::SmallRng};
 use crate::{
   FxHashMap, Instant,
   endpoint::Endpoint,
+  error::{Error, StreamError},
   event::{
     Event, ExchangeCompleted, ExchangeKind, ExchangeStatus, PushPullKind, StreamId, Transmit,
   },
@@ -1384,14 +1385,14 @@ where
   /// already transitioned to `Leaving` / `Left` / `Shutdown` — a post-leave
   /// metadata update would bump the incarnation and resurrect the local
   /// node on peers that had observed its `Leave`.
-  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), crate::error::Error> {
+  pub fn update_meta(&mut self, meta: crate::typed::Meta) -> Result<(), Error> {
     self.ep.update_meta(meta)
   }
 
   /// Queue an application user-broadcast for gossip dissemination. Forwards
   /// to the inner membership [`Endpoint`].
   #[inline]
-  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), Error> {
     self.ep.queue_user_broadcast(data)
   }
 
@@ -1404,7 +1405,7 @@ where
     &mut self,
     node: crate::Node<I, A>,
     now: Instant,
-  ) -> Result<crate::event::PingId, crate::error::Error> {
+  ) -> Result<crate::event::PingId, Error> {
     self.last_now = Some(now);
     self.ep.ping(node, now)
   }
@@ -1412,18 +1413,14 @@ where
   /// Enqueue a directed unreliable user-data packet. Forwards to
   /// [`Endpoint::send_user_packet`].
   #[inline]
-  pub fn send_user_packet(&mut self, to: A, data: Bytes) -> Result<(), crate::error::Error> {
+  pub fn send_user_packet(&mut self, to: A, data: Bytes) -> Result<(), Error> {
     self.ep.send_user_packet(to, data)
   }
 
   /// Enqueue directed unreliable user-data packets (compound if ≥2).
   /// Forwards to [`Endpoint::send_user_packets`].
   #[inline]
-  pub fn send_user_packets(
-    &mut self,
-    to: A,
-    payloads: &[Bytes],
-  ) -> Result<(), crate::error::Error> {
+  pub fn send_user_packets(&mut self, to: A, payloads: &[Bytes]) -> Result<(), Error> {
     self.ep.send_user_packets(to, payloads)
   }
 
@@ -1437,7 +1434,7 @@ where
   /// snapshot is deterministically untransmittable, so it is rejected rather
   /// than stored.
   #[inline]
-  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), Error> {
     self.ep.set_local_state_snapshot(bytes)
   }
 
@@ -1451,7 +1448,7 @@ where
   /// over-budget Ack is deterministically unsendable on the gossip socket,
   /// so the payload is rejected rather than stored.
   #[inline]
-  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), Error> {
     self.ep.set_ack_payload(payload)
   }
 
@@ -1485,7 +1482,7 @@ where
   /// is dropped. Outbound exchanges past the request boundary (request already on
   /// the wire), and their teardown directives, are preserved so in-flight streams
   /// still close cleanly.
-  pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
+  pub fn leave(&mut self, now: Instant) -> Result<(), Error> {
     self.last_now = Some(now);
     self.dial_pending.clear();
     self.pending_outbound_kinds.clear();
@@ -1705,7 +1702,7 @@ where
       // does not re-enter `dial_failed`.
       self.ep.dial_failed(
         sid,
-        crate::error::StreamError::DialFailed("stream label exchange aborted".into()),
+        StreamError::DialFailed("stream label exchange aborted".into()),
         now,
       );
     }
@@ -2050,7 +2047,7 @@ where
       if now >= deadline {
         self.ep.dial_failed(
           id,
-          crate::error::StreamError::DialFailed("stream dial deadline elapsed".into()),
+          StreamError::DialFailed("stream dial deadline elapsed".into()),
           now,
         );
         continue;
@@ -2069,7 +2066,7 @@ where
         Err(msg) => {
           self
             .ep
-            .dial_failed(id, crate::error::StreamError::DialFailed(msg.into()), now);
+            .dial_failed(id, StreamError::DialFailed(msg.into()), now);
           continue;
         }
       };
@@ -2081,9 +2078,7 @@ where
         Err(e) => {
           self.ep.dial_failed(
             id,
-            crate::error::StreamError::DialFailed(
-              format!("record-layer construction failed: {e}").into(),
-            ),
+            StreamError::DialFailed(format!("record-layer construction failed: {e}").into()),
             now,
           );
           continue;
@@ -2424,7 +2419,7 @@ where
     peer: A,
     payload: Bytes,
     now: Instant,
-  ) -> Result<StreamId, crate::error::Error> {
+  ) -> Result<StreamId, Error> {
     self.last_now = Some(now);
     let id = self.ep.start_user_message(peer, payload, now)?;
     self

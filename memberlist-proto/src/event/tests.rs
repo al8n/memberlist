@@ -8,6 +8,7 @@ use super::{
   PacketTransmit, PingId, PushPullKind, Reliability, Transmit, UserPacket,
 };
 use crate::typed::{Ack, Message, NodeState, PushNodeState, State};
+use core::time::Duration;
 
 fn addr(port: u16) -> SocketAddr {
   SocketAddr::from(([127, 0, 0, 1], port))
@@ -155,12 +156,12 @@ fn ping_completed_exposes_all_fields() {
   let pc = PingCompleted::new(
     PingId::new(11),
     node.clone(),
-    core::time::Duration::from_millis(42),
+    Duration::from_millis(42),
     Bytes::from_static(b"ack-payload"),
   );
   assert_eq!(pc.ping_id(), PingId::new(11));
   assert!(Arc::ptr_eq(pc.node_ref(), &node));
-  assert_eq!(pc.rtt(), core::time::Duration::from_millis(42));
+  assert_eq!(pc.rtt(), Duration::from_millis(42));
   assert_eq!(pc.payload_ref().as_ref(), b"ack-payload");
 }
 
@@ -185,7 +186,7 @@ fn decode_error_exposes_source_and_message() {
 fn dial_requested_exposes_fields_and_parts() {
   use super::{DialRequested, StreamId};
   let now = crate::Instant::now();
-  let deadline = now + core::time::Duration::from_secs(5);
+  let deadline = now + Duration::from_secs(5);
   let dr = DialRequested::new(StreamId::from_raw(77), addr(60), deadline);
   assert_eq!(dr.id(), StreamId::from_raw(77));
   assert_eq!(dr.peer_ref(), &addr(60));

@@ -5,7 +5,14 @@ use bytes::Bytes;
 use smol_str::SmolStr;
 
 use super::{QuicEndpoint, UnreliableTransport};
-use crate::{config::EndpointOptions, endpoint::Endpoint, quic::QuicOptions};
+use crate::{
+  config::EndpointOptions,
+  endpoint::Endpoint,
+  event::{Event, PushPullKind, StreamId},
+  label::LabelError,
+  quic::QuicOptions,
+  typed::State,
+};
 
 fn test_config_with_mode(mode: UnreliableTransport) -> QuicOptions {
   let mut transport = quinn_proto::TransportConfig::default();
@@ -95,14 +102,14 @@ fn with_label_rejects_overlong() {
   let too_long = Bytes::from(vec![b'x'; crate::label::MAX_LABEL_LEN + 1]);
   let result = make_endpoint("n", "127.0.0.1:7602".parse().unwrap(), Instant::now())
     .with_label(Some(too_long), false);
-  assert!(matches!(result, Err(crate::label::LabelError::TooLong(_))));
+  assert!(matches!(result, Err(LabelError::TooLong(_))));
 }
 
 #[test]
 fn with_label_rejects_non_utf8() {
   let result = make_endpoint("n", "127.0.0.1:7603".parse().unwrap(), Instant::now())
     .with_label(Some(Bytes::from_static(&[0xff, 0xfe])), false);
-  assert!(matches!(result, Err(crate::label::LabelError::NotUtf8)));
+  assert!(matches!(result, Err(LabelError::NotUtf8)));
 }
 
 /// Regression guard: `service_quinn` MUST drain the per-connection
@@ -137,7 +144,7 @@ fn service_quinn_drains_poll_endpoint_events() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   // Drive the handshake by ferrying datagrams in both directions.
   // Bounded: ~50 round-trips is plenty for a handshake on a virtual
   // network with no loss.
@@ -228,7 +235,7 @@ fn emitted_quic_packets_always_have_fixed_bit_set() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   // Bounded ferry of every emitted datagram, asserting the demux
   // invariant on each. ~200 rounds is well past handshake completion
   // and enough push/pull traffic to give quinn-proto's per-packet
@@ -328,7 +335,7 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   // Capture A's single connection handle (the dial to B) once it
   // exists in A's slab.
   let mut harvested: Option<quinn_proto::ConnectionEvent> = None;
@@ -528,7 +535,7 @@ fn deferred_connection_event_backlog_surfaces_immediate_due_wake() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
 
   // Drive the handshake until A's ConnEntry has a deferred event
   // (NewIdentifiers from NeedIdentifiers at handshake completion).
@@ -633,7 +640,7 @@ fn deferred_connection_event_backlog_surfaces_immediate_due_wake() {
 /// `handle_timeout(now)` tick.
 #[test]
 fn requeued_dial_request_under_strict_poll_anchors_last_now() {
-  use crate::event::PushPullKind;
+  use PushPullKind;
 
   let a_addr: SocketAddr = "127.0.0.1:7941".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7942".parse().unwrap();
@@ -652,8 +659,8 @@ fn requeued_dial_request_under_strict_poll_anchors_last_now() {
   // Drain the DialRequested. The caller now holds it.
   let dial_requested = loop {
     match bare_ep.poll_event() {
-      Some(crate::event::Event::DialRequested(p)) => {
-        break crate::event::Event::DialRequested(p);
+      Some(Event::DialRequested(p)) => {
+        break Event::DialRequested(p);
       }
       Some(_) => continue,
       None => panic!("the bare Endpoint must have queued a DialRequested"),
@@ -758,7 +765,7 @@ fn connection_lost_immediately_reaps_bridges_under_strict_poll() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -914,7 +921,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
   // handle, not the exchange id.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..256 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -952,7 +959,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
   );
   assert_eq!(
     a.endpoint_mut().member_liveness(&b_id),
-    Some(crate::typed::State::Alive),
+    Some(State::Alive),
     "precondition: B must be tracked as Alive before the kill"
   );
 
@@ -985,7 +992,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
   );
   assert_eq!(
     a.endpoint_mut().member_liveness(&b_id),
-    Some(crate::typed::State::Alive),
+    Some(State::Alive),
     "closing a QUIC connection MUST NOT transition B's gossip liveness \
        (got {:?}); only a SWIM probe timeout may move B to Suspect/Dead, and \
        time was never advanced.",
@@ -997,9 +1004,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
   // exchange event and is allowed.
   while let Some(ev) = a.poll_event() {
     match &ev {
-      crate::event::Event::NodeJoined(ns)
-      | crate::event::Event::NodeLeft(ns)
-      | crate::event::Event::NodeUpdated(ns) => {
+      Event::NodeJoined(ns) | Event::NodeLeft(ns) | Event::NodeUpdated(ns) => {
         assert_ne!(
           ns.id_ref(),
           &b_id,
@@ -1008,7 +1013,7 @@ fn closing_a_pooled_connection_does_not_change_membership() {
              firewall forbids it from touching membership."
         );
       }
-      crate::event::Event::NodeConflict(nc) => {
+      Event::NodeConflict(nc) => {
         assert_ne!(
           nc.existing_ref().id_ref(),
           &b_id,
@@ -1040,7 +1045,7 @@ fn queue_unreliable_datagram_to_established_peer_is_queued() {
   // the datagram outcome, not the handle.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -1108,7 +1113,7 @@ fn received_datagram_surfaces_through_the_same_memberlist_ingress_as_udp() {
   // the surfaced datagram, not the handle.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -1214,7 +1219,7 @@ fn inbound_datagram_dropped_when_ingress_backlog_at_cap() {
   // handle.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -1316,10 +1321,10 @@ fn per_peer_ingress_cap_does_not_starve_other_peers() {
   // the drop counter, not the handles.
   let _ = t
     .endpoint_mut()
-    .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(a_addr, PushPullKind::Join, now);
   let _ = b
     .endpoint_mut()
-    .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(a_addr, PushPullKind::Join, now);
   for _ in 0..400 {
     for (peer, peer_addr) in [(&mut t, t_addr), (&mut b, b_addr)] {
       while let Some((to, bytes)) = peer.poll_transmit() {
@@ -1570,7 +1575,7 @@ fn expired_dial_does_not_open_unowned_bidi_stream() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -1633,7 +1638,7 @@ fn expired_dial_does_not_open_unowned_bidi_stream() {
   // through `dial_failed` BEFORE `Streams::open(Dir::Bi)` is called.
   let id = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Refresh, now);
+    .start_push_pull(b_addr, PushPullKind::Refresh, now);
   a.sieve_dial_events();
   assert_eq!(
     a.dial_pending.len(),
@@ -1823,7 +1828,7 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   // intent onto `dial_pending`. The returned `StreamId` is the
   // correlation handle the QUIC driver coerces to its parked
   // `ExchangeId`.
-  let id = a.start_push_pull(unreachable, crate::event::PushPullKind::Refresh, now);
+  let id = a.start_push_pull(unreachable, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
   assert_eq!(
     a.dial_pending.len(),
@@ -1941,7 +1946,7 @@ fn inbound_accepted_bridge_pumped_same_tick_under_strict_poll() {
   // to Established and exchange the push/pull bidi.
   // Ignoring StreamId return: tests assert on observable side
   // effects (poll_transmit/poll_event), not the handle itself.
-  let _ = a.start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
 
   // The push/pull exchange opens a bidi from A to B. Once `service_quinn`
   // on B has accepted that bidi, B's `bridges_pumped_after_acceptance`
@@ -2047,7 +2052,7 @@ fn accept_error_response_path_compiles_and_counter_is_wired() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -2141,7 +2146,7 @@ fn rejected_join_merge_close_terminalizes_bridge_same_tick() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
 
   // Bounded ferry — handshake completes, A sends Join state, B's
   // delegate rejects, B emits the Close. The loop terminates on
@@ -2245,7 +2250,7 @@ fn clean_bridge_reap_retires_quic_recv_half() {
 
   let _id = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
 
   // Drive the clean exchange to completion: handshake, A sends Join
   // state, B replies, both sides decode, both bridges become Done +
@@ -2385,7 +2390,7 @@ fn fsm_deadline_during_outbound_await_reaps_atomically_retired() {
   // effects (poll_transmit/poll_event), not the handle itself.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(unreachable, crate::event::PushPullKind::Refresh, now);
+    .start_push_pull(unreachable, PushPullKind::Refresh, now);
 
   // Drive A's tick: dial fires, Initial queued. Then jump time
   // past the bridge's exchange deadline (~5s by default; using 30s
@@ -2568,7 +2573,7 @@ fn oversize_unreliable_datagram_reports_too_large() {
   // Ignoring StreamId return: the test asserts on the datagram outcome.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -2637,7 +2642,7 @@ fn full_datagram_send_buffer_reports_not_ready_without_eviction() {
   // Ignoring StreamId return: the test asserts on the datagram outcome.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -2713,7 +2718,7 @@ fn udp_mode_does_not_advertise_datagram_support() {
   // capability, not the handle.
   let _ = b
     .endpoint_mut()
-    .start_push_pull(a_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(a_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
     while let Some((to, bytes)) = b.poll_transmit() {
@@ -2811,7 +2816,7 @@ fn quic_packet_ingress_does_not_advance_membership_time() {
   // packet to send to A. Ignoring StreamId: the test asserts on the counter.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
   let mut b_to_a: Option<Bytes> = None;
   for _ in 0..200 {
     while let Some((to, bytes)) = a.poll_transmit() {
@@ -2929,7 +2934,7 @@ fn membership_pass_throughs_forward_to_inner_endpoint() {
 /// direct-routing arm is covered by `requeued_dial_request_under_strict_poll_anchors_last_now`.)
 #[test]
 fn requeue_non_dial_event_round_trips_through_poll_event() {
-  use crate::event::Event;
+  use Event;
 
   let addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
   let now = Instant::now();
@@ -3206,7 +3211,7 @@ fn handle_udp_reject_class_datagram_is_dropped() {
 /// `DialRequested` in the inner queue for `poll_event` to sieve.
 #[test]
 fn poll_event_sieves_inner_dial_requested_out() {
-  use crate::event::Event;
+  use Event;
 
   let self_addr: SocketAddr = "127.0.0.1:7820".parse().unwrap();
   let peer: SocketAddr = "127.0.0.1:7821".parse().unwrap();
@@ -3335,7 +3340,7 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
 
   // Register a push/pull intent + dial in-band; the still-handshaking
   // connection requeues the intent onto `dial_pending`.
-  let id = a.start_push_pull(peer, crate::event::PushPullKind::Refresh, now);
+  let id = a.start_push_pull(peer, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
   assert_eq!(a.dial_pending.len(), 1, "precondition: intent requeued");
 
@@ -3466,7 +3471,7 @@ fn peer_stop_sending_terminalizes_responder_bridge_via_stopped_arm() {
     .write(b"\x05");
 
   // Ferry until B's `service_quinn` accepts the bidi and a bridge appears.
-  let mut b_id: Option<crate::event::StreamId> = None;
+  let mut b_id: Option<StreamId> = None;
   for _ in 0..100 {
     while let Some((to, bytes)) = a.poll_transmit() {
       if to == b_addr {
@@ -3569,7 +3574,7 @@ fn peer_acked_fin_routes_to_bridge_via_finished_arm() {
   // Ignoring StreamId return: the test inspects bridge phase, not the handle.
   let _ = a
     .endpoint_mut()
-    .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
+    .start_push_pull(b_addr, PushPullKind::Join, now);
 
   // Capture B's bridge id the moment B accepts the inbound exchange, then keep
   // driving. B's responder bridge sits at `RecvClosed` (recv FIN observed)
@@ -3580,7 +3585,7 @@ fn peer_acked_fin_routes_to_bridge_via_finished_arm() {
   // is terminal, so the next `pump_bridges` reaps the bridge CLEANLY (never
   // `is_phase_failed()`). A clean reap is reachable ONLY through the Finished
   // arm's `observe_send_fin` — every failure path sets `Failed(_)`.
-  let mut b_id: Option<crate::event::StreamId> = None;
+  let mut b_id: Option<StreamId> = None;
   let mut ever_failed = false;
   let mut clean_reaped = false;
   for _ in 0..300 {
