@@ -170,16 +170,25 @@ impl From<std::collections::HashSet<IpNet>> for CidrPolicy {
   }
 }
 
-impl<A: Into<IpNet>> FromIterator<A> for CidrPolicy {
+impl<A> FromIterator<A> for CidrPolicy
+where
+  A: Into<IpNet>,
+{
   /// Collect allowed networks. An empty iterator yields a block-all policy.
-  fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+  fn from_iter<T>(iter: T) -> Self
+  where
+    T: IntoIterator<Item = A>,
+  {
     Self {
       allowed_cidrs: Some(iter.into_iter().map(Into::into).collect()),
     }
   }
 }
 
-impl<A: AsRef<str>> TryFrom<&[A]> for CidrPolicy {
+impl<A> TryFrom<&[A]> for CidrPolicy
+where
+  A: AsRef<str>,
+{
   type Error = ipnet::AddrParseError;
 
   /// Parse a slice of CIDR strings (e.g. `["10.0.0.0/8", "127.0.0.1/32"]`).
@@ -227,7 +236,10 @@ impl<D> CidrAnd<D> {
   }
 }
 
-impl<I, D: AliveDelegate<I, SocketAddr>> AliveDelegate<I, SocketAddr> for CidrAnd<D> {
+impl<I, D> AliveDelegate<I, SocketAddr> for CidrAnd<D>
+where
+  D: AliveDelegate<I, SocketAddr>,
+{
   #[inline]
   fn notify_alive(&self, peer: &NodeState<I, SocketAddr>) -> bool {
     self.policy.is_allowed(&peer.address_ref().ip()) && self.inner.notify_alive(peer)

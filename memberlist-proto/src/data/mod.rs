@@ -31,7 +31,10 @@ mod tests;
 
 #[cfg(debug_assertions)]
 #[inline]
-pub(crate) fn debug_assert_write_eq<T: ?Sized>(actual: usize, expected: usize) {
+pub(crate) fn debug_assert_write_eq<T>(actual: usize, expected: usize)
+where
+  T: ?Sized,
+{
   debug_assert_eq!(
     actual,
     expected,
@@ -42,7 +45,10 @@ pub(crate) fn debug_assert_write_eq<T: ?Sized>(actual: usize, expected: usize) {
 
 #[cfg(debug_assertions)]
 #[inline]
-pub(crate) fn debug_assert_read_eq<T: ?Sized>(actual: usize, expected: usize) {
+pub(crate) fn debug_assert_read_eq<T>(actual: usize, expected: usize)
+where
+  T: ?Sized,
+{
   debug_assert_eq!(
     actual,
     expected,

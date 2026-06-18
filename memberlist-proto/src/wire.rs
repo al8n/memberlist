@@ -33,9 +33,13 @@ pub(crate) use crate::framing::{
 /// `.expect()` the result — mirroring the prior
 /// `proto::Message::encode_to_vec().expect(...)` convention.
 #[inline]
-pub(crate) fn encode_message<I: Data, A: Data>(
+pub(crate) fn encode_message<I, A>(
   msg: &Message<I, A>,
-) -> Result<Vec<u8>, crate::error::StreamError> {
+) -> Result<Vec<u8>, crate::error::StreamError>
+where
+  I: Data,
+  A: Data,
+{
   let any = message_to_any::<I, A>(msg)?;
   Ok(framing::encode_message(&any)?)
 }
@@ -48,9 +52,13 @@ pub(crate) fn encode_message<I: Data, A: Data>(
 /// and `StreamError::Bridge` for the typed-to-buffa bridge — so the FSM keeps
 /// the `source()` chain rather than a flattened string.
 #[inline]
-pub(crate) fn decode_message<I: Data, A: Data>(
+pub(crate) fn decode_message<I, A>(
   buf: &[u8],
-) -> Result<(usize, Message<I, A>), crate::error::StreamError> {
+) -> Result<(usize, Message<I, A>), crate::error::StreamError>
+where
+  I: Data,
+  A: Data,
+{
   let (consumed, any) = framing::decode_message(buf)?;
   let msg = message_from_any::<I, A>(&any)?;
   Ok((consumed, msg))

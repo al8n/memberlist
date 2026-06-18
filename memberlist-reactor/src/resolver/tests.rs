@@ -12,7 +12,10 @@ fn sock(port: u16) -> SocketAddr {
 /// A dependency-free single-poll driver for the trivially-ready resolver
 /// futures (each completes on first poll). Avoids pulling a runtime into the
 /// always-on (feature-bare) resolver module.
-fn block_on<F: Future>(fut: F) -> F::Output {
+fn block_on<F>(fut: F) -> F::Output
+where
+  F: Future,
+{
   let waker = Waker::noop();
   let mut cx = Context::from_waker(waker);
   let mut fut = pin!(fut);

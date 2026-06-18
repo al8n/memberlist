@@ -95,7 +95,7 @@ macro_rules! bail_ping_typed {
       }
     }
 
-    impl<I: CheapClone, A: CheapClone> CheapClone for $name<I, A> {
+    impl<I, A> CheapClone for $name<I, A> where I: CheapClone, A: CheapClone {
       fn cheap_clone(&self) -> Self {
         Self {
           sequence_number: self.sequence_number,

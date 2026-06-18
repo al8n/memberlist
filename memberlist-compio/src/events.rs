@@ -36,11 +36,19 @@ use std::{
 /// [`Memberlist::member_count`](crate::Memberlist::member_count) read
 /// path is unaffected by event loss and remains the authoritative
 /// source of current cluster state.
-pub struct EventStream<I: 'static, A: 'static> {
+pub struct EventStream<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   inner: RecvStream<'static, Event<I, A>>,
 }
 
-impl<I: 'static, A: 'static> EventStream<I, A> {
+impl<I, A> EventStream<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   /// Wrap a flume receiver into an `EventStream`.
   ///
   /// Consumes the receiver: the resulting stream lives `'static` and
@@ -52,7 +60,11 @@ impl<I: 'static, A: 'static> EventStream<I, A> {
   }
 }
 
-impl<I: 'static, A: 'static> Stream for EventStream<I, A> {
+impl<I, A> Stream for EventStream<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   type Item = Event<I, A>;
 
   fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

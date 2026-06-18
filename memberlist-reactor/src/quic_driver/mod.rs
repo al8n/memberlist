@@ -119,7 +119,12 @@ struct PendingUserSend {
 
 /// The single-owner QUIC driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
-pub(crate) struct QuicDriver<I: NodeId, R: Runtime, G: rand::Rng = rand::rngs::StdRng> {
+pub(crate) struct QuicDriver<I, R, G = rand::rngs::StdRng>
+where
+  I: NodeId,
+  R: Runtime,
+  G: rand::Rng,
+{
   endpoint: QuicEndpoint<I, G>,
   /// The shared UDP socket carrying QUIC packets (and gossip on the UDP-fallback
   /// path). Wrapped in `Option` so the shutdown branch can drop it (releasing the
@@ -180,7 +185,12 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime, G: rand::Rng = rand::rngs::S
   cidr_policy: CidrFilter,
 }
 
-impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
+impl<I, R, G> QuicDriver<I, R, G>
+where
+  I: NodeId,
+  R: Runtime,
+  G: rand::Rng,
+{
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
     endpoint: QuicEndpoint<I, G>,
@@ -910,7 +920,12 @@ impl<I: NodeId, R: Runtime, G: rand::Rng> QuicDriver<I, R, G> {
   }
 }
 
-impl<I: NodeId, R: Runtime, G: rand::Rng + Unpin> Future for QuicDriver<I, R, G> {
+impl<I, R, G> Future for QuicDriver<I, R, G>
+where
+  I: NodeId,
+  R: Runtime,
+  G: rand::Rng + Unpin,
+{
   type Output = ();
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {

@@ -39,14 +39,22 @@ impl<I, A> Node<I, A> {
   }
 }
 
-impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for Node<I, A> {
+impl<I, A> core::fmt::Display for Node<I, A>
+where
+  I: core::fmt::Display,
+  A: core::fmt::Display,
+{
   #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }
 }
 
-impl<I: CheapClone, A: CheapClone> CheapClone for Node<I, A> {
+impl<I, A> CheapClone for Node<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   fn cheap_clone(&self) -> Self {
     Self {
       id: self.id.cheap_clone(),

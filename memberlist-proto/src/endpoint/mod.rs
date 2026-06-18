@@ -3691,7 +3691,11 @@ where
 }
 
 /// Pick up to `k` items uniformly at random from `pool` using `rng`.
-fn pick_random<T: Clone, R: Rng>(pool: &[T], k: usize, rng: &mut R) -> Vec<T> {
+fn pick_random<T, R>(pool: &[T], k: usize, rng: &mut R) -> Vec<T>
+where
+  T: Clone,
+  R: Rng,
+{
   pool
     .iter()
     .sample(rng, k)
@@ -3724,7 +3728,10 @@ pub(crate) fn push_pull_scale(interval: Duration, n: usize) -> Duration {
 ///
 /// Uses the Endpoint's injected gossip RNG (passed in), so the result is
 /// deterministic for a seeded RNG (useful in tests).
-fn random_stagger<R: Rng>(interval: Duration, rng: &mut R) -> Duration {
+fn random_stagger<R>(interval: Duration, rng: &mut R) -> Duration
+where
+  R: Rng,
+{
   use rand::RngExt;
   let nanos = interval.as_nanos() as u64;
   if nanos == 0 {

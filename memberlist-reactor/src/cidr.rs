@@ -46,10 +46,13 @@ pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: std::net::IpAddr) -> bool {
   feature = "cidr",
   any(feature = "quic", feature = "tcp", feature = "tls")
 ))]
-pub(crate) fn compose_alive<I: 'static>(
+pub(crate) fn compose_alive<I>(
   filter: &CidrFilter,
   alive: Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>>,
-) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>> {
+) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>>
+where
+  I: 'static,
+{
   match (filter.clone(), alive) {
     (Some(policy), Some(user)) => Some(Box::new(memberlist_proto::CidrAnd::new(policy, user))),
     (Some(policy), None) => Some(Box::new(policy)),

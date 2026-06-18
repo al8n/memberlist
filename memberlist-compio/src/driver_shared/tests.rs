@@ -94,7 +94,10 @@ impl Delegate for Recorder {
 /// Drive a single future to completion on the current thread without a
 /// runtime: poll with a no-op waker. The dispatcher / `yield_once` futures
 /// never park on real I/O, so a busy-poll resolves them.
-fn block_on<F: core::future::Future>(mut fut: F) -> F::Output {
+fn block_on<F>(mut fut: F) -> F::Output
+where
+  F: core::future::Future,
+{
   use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
   fn raw() -> RawWaker {
     fn no_op(_: *const ()) {}

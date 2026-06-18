@@ -26,24 +26,45 @@ impl<I, A> Default for VoidDelegate<I, A> {
   }
 }
 
-impl<I: 'static, A: 'static> EventDelegate for VoidDelegate<I, A> {
+impl<I, A> EventDelegate for VoidDelegate<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   type Id = I;
   type Address = A;
 }
 
-impl<I: 'static, A: 'static> ConflictDelegate for VoidDelegate<I, A> {
+impl<I, A> ConflictDelegate for VoidDelegate<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   type Id = I;
   type Address = A;
 }
 
-impl<I: 'static, A: 'static> PingDelegate for VoidDelegate<I, A> {
+impl<I, A> PingDelegate for VoidDelegate<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   type Id = I;
   type Address = A;
 }
 
-impl<I: 'static, A: 'static> NodeDelegate for VoidDelegate<I, A> {}
+impl<I, A> NodeDelegate for VoidDelegate<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
+}
 
-impl<I: 'static, A: 'static> Delegate for VoidDelegate<I, A> {
+impl<I, A> Delegate for VoidDelegate<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   type Id = I;
   type Address = A;
 }

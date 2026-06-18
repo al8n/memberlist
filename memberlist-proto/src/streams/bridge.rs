@@ -1179,7 +1179,10 @@ where
   /// reliable-ping ack is applied. A `Handshaking` bridge has no `Stream` and no
   /// events, so this is a no-op (the coordinator reaps a failed-label bridge
   /// directly).
-  pub(crate) fn drain_then_reap<G: rand::Rng>(&mut self, ep: &mut Endpoint<I, A, G>, now: Instant) {
+  pub(crate) fn drain_then_reap<G>(&mut self, ep: &mut Endpoint<I, A, G>, now: Instant)
+  where
+    G: rand::Rng,
+  {
     if self.stream.is_none() {
       return;
     }
@@ -1278,11 +1281,10 @@ where
   /// response still runs here, though: without it the reply for an in-flight
   /// inbound exchange is never produced and the peer is left with a half-applied
   /// merge. Mirrors [`Self::drain_then_reap`] minus the lifecycle notice.
-  pub(crate) fn drain_payload_only<G: rand::Rng>(
-    &mut self,
-    ep: &mut Endpoint<I, A, G>,
-    now: Instant,
-  ) {
+  pub(crate) fn drain_payload_only<G>(&mut self, ep: &mut Endpoint<I, A, G>, now: Instant)
+  where
+    G: rand::Rng,
+  {
     if !matches!(
       self.phase,
       StreamPhase::Established(BridgePhase::RecvClosed)

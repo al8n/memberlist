@@ -51,7 +51,11 @@ pub trait Delegate:
 /// own and stays untouched.
 pub(crate) struct BoxedAlive<I, A>(pub(crate) Box<dyn AliveDelegate<I, A>>);
 
-impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
+impl<I, A> AliveDelegate<I, A> for BoxedAlive<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   fn notify_alive(&self, peer: &memberlist_proto::typed::NodeState<I, A>) -> bool {
     self.0.notify_alive(peer)
   }
@@ -61,7 +65,11 @@ impl<I: 'static, A: 'static> AliveDelegate<I, A> for BoxedAlive<I, A> {
 /// [`BoxedAlive`].
 pub(crate) struct BoxedMerge<I, A>(pub(crate) Box<dyn MergeDelegate<I, A>>);
 
-impl<I: 'static, A: 'static> MergeDelegate<I, A> for BoxedMerge<I, A> {
+impl<I, A> MergeDelegate<I, A> for BoxedMerge<I, A>
+where
+  I: 'static,
+  A: 'static,
+{
   fn notify_merge(&self, peers: &[memberlist_proto::typed::NodeState<I, A>]) -> bool {
     self.0.notify_merge(peers)
   }

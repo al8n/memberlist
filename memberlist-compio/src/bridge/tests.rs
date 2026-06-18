@@ -318,7 +318,10 @@ struct SlowWriter {
 }
 
 impl AsyncWrite for SlowWriter {
-  async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+  async fn write<T>(&mut self, buf: T) -> BufResult<usize, T>
+  where
+    T: IoBuf,
+  {
     compio::time::sleep(self.delay).await;
     let n = self.chunk.min(buf.buf_len());
     self.accepted.extend_from_slice(&buf.as_init()[..n]);
@@ -339,7 +342,10 @@ impl AsyncWrite for SlowWriter {
 struct StalledWriter;
 
 impl AsyncWrite for StalledWriter {
-  async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+  async fn write<T>(&mut self, buf: T) -> BufResult<usize, T>
+  where
+    T: IoBuf,
+  {
     compio::time::sleep(Duration::from_secs(3600)).await;
     BufResult(Ok(0), buf)
   }

@@ -17,7 +17,11 @@ pub struct NodeState<I, A> {
   delegate_version: DelegateVersion,
 }
 
-impl<I: CheapClone, A: CheapClone> From<Alive<I, A>> for NodeState<I, A> {
+impl<I, A> From<Alive<I, A>> for NodeState<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   fn from(value: Alive<I, A>) -> Self {
     let (id, addr) = value.node.into_parts();
     Self {
@@ -172,7 +176,11 @@ impl<I, A> NodeState<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> CheapClone for NodeState<I, A> {
+impl<I, A> CheapClone for NodeState<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   fn cheap_clone(&self) -> Self {
     Self {
       id: self.id.cheap_clone(),
@@ -185,14 +193,22 @@ impl<I: CheapClone, A: CheapClone> CheapClone for NodeState<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> NodeState<I, A> {
+impl<I, A> NodeState<I, A>
+where
+  I: CheapClone,
+  A: CheapClone,
+{
   /// Returns a [`Node`] with the same id and address as this [`NodeState`].
   pub fn node(&self) -> Node<I, A> {
     Node::new(self.id.cheap_clone(), self.addr.cheap_clone())
   }
 }
 
-impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for NodeState<I, A> {
+impl<I, A> core::fmt::Display for NodeState<I, A>
+where
+  I: core::fmt::Display,
+  A: core::fmt::Display,
+{
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }

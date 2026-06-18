@@ -62,7 +62,11 @@ impl<A, R> MaybeResolved<A, R> {
   }
 }
 
-impl<A: CheapClone, R: CheapClone> CheapClone for MaybeResolved<A, R> {
+impl<A, R> CheapClone for MaybeResolved<A, R>
+where
+  A: CheapClone,
+  R: CheapClone,
+{
   fn cheap_clone(&self) -> Self {
     match self {
       Self::Resolved(r) => Self::Resolved(r.cheap_clone()),

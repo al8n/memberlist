@@ -31,7 +31,11 @@ pub trait AliveDelegate<I, A>: Send + Sync + 'static {
 
 /// A boxed alive delegate is itself an [`AliveDelegate`], so a driver can store
 /// or compose delegates as trait objects.
-impl<I: 'static, A: 'static> AliveDelegate<I, A> for Box<dyn AliveDelegate<I, A>> {
+impl<I, A> AliveDelegate<I, A> for Box<dyn AliveDelegate<I, A>>
+where
+  I: 'static,
+  A: 'static,
+{
   #[inline]
   fn notify_alive(&self, peer: &NodeState<I, A>) -> bool {
     (**self).notify_alive(peer)

@@ -200,7 +200,10 @@ struct PendingUserSend {
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
-struct QuicDriverState<I, G: rand::Rng = rand::rngs::StdRng> {
+struct QuicDriverState<I, G = rand::rngs::StdRng>
+where
+  G: rand::Rng,
+{
   endpoint: QuicEndpoint<I, G>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
@@ -2069,7 +2072,7 @@ fn refresh_metrics_if_changed<I, G>(
   }
 }
 
-fn refresh_snapshot_inner<I, R: rand::Rng>(
+fn refresh_snapshot_inner<I, R>(
   ep: &memberlist_proto::Endpoint<I, SocketAddr, R>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
 ) where
@@ -2081,6 +2084,7 @@ fn refresh_snapshot_inner<I, R: rand::Rng>(
     + Send
     + Sync
     + 'static,
+  R: rand::Rng,
 {
   // Build a snapshot-local NodeState for each member with the FSM-tracked
   // liveness state (`member_liveness`) rather than the wire-protocol state
