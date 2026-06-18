@@ -184,7 +184,7 @@ pub struct Stream<I, A> {
 
 impl<I, A> Stream<I, A>
 where
-  A: Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: Data + crate::CheapClone + PartialEq + 'static,
 {
   /// The unique identifier for this stream.
   pub fn id(&self) -> StreamId {
@@ -454,7 +454,7 @@ where
 
 impl<I, A> Stream<I, A>
 where
-  A: Data + crate::CheapClone + PartialEq + Send + Sync + 'static,
+  A: Data + crate::CheapClone + PartialEq + 'static,
   I: crate::Id,
 {
   /// Feed raw plain-frame bytes from the driver. Accumulates into `input_buf`

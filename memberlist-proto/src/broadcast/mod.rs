@@ -500,7 +500,7 @@ impl<I, A> MemberlistBroadcast<I, A> {
 impl<I, A> Broadcast for MemberlistBroadcast<I, A>
 where
   I: crate::Id,
-  A: crate::CheapClone + crate::Data + Send + Sync + 'static,
+  A: crate::CheapClone + crate::Data + 'static,
 {
   type Id = I;
   type Message = crate::typed::Message<I, A>;

@@ -1114,7 +1114,7 @@ where
   R: StreamTransport,
   G: Rng,
   I: crate::Id,
-  A: crate::CheapClone + crate::Data + PartialEq + Send + Sync + 'static,
+  A: crate::CheapClone + crate::Data + PartialEq + 'static,
 {
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
