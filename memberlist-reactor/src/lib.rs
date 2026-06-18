@@ -75,6 +75,7 @@ pub use resolver::{AddressResolver, MaybeResolved, SocketAddrResolver};
 pub use resolver::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use snapshot::MemberlistSnapshot;
 
+use core::fmt;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 #[cfg_attr(
   docsrs,
@@ -154,8 +155,8 @@ pub trait NodeId:
   memberlist_proto::Id
   + memberlist_proto::Data
   + memberlist_proto::CheapClone
-  + core::fmt::Debug
-  + core::fmt::Display
+  + fmt::Debug
+  + fmt::Display
   + Send
   + Sync
   + Unpin
@@ -167,8 +168,8 @@ impl<T> NodeId for T where
   T: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + Unpin

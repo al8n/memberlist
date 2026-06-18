@@ -25,6 +25,7 @@ pub use void::VoidDelegate;
 
 // Admission predicates are the machine's Sans-I/O traits — re-exported so
 // compio users name them from one place when supplying them to `Options`.
+use memberlist_proto::typed::NodeState;
 pub use memberlist_proto::{AliveDelegate, MergeDelegate};
 
 /// compio's per-driver observation hook surface (NOT admission — that's
@@ -56,7 +57,7 @@ where
   I: 'static,
   A: 'static,
 {
-  fn notify_alive(&self, peer: &memberlist_proto::typed::NodeState<I, A>) -> bool {
+  fn notify_alive(&self, peer: &NodeState<I, A>) -> bool {
     self.0.notify_alive(peer)
   }
 }
@@ -70,7 +71,7 @@ where
   I: 'static,
   A: 'static,
 {
-  fn notify_merge(&self, peers: &[memberlist_proto::typed::NodeState<I, A>]) -> bool {
+  fn notify_merge(&self, peers: &[NodeState<I, A>]) -> bool {
     self.0.notify_merge(peers)
   }
 }

@@ -15,8 +15,10 @@ use memberlist_proto::{CheapClone, config::EndpointOptions, label::validate_labe
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
   driver_options::DriverOptions,
+  error::{GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidOption, MemberlistError},
   transport::Transport,
 };
+use memberlist_proto::config::{DEFAULT_MAX_STREAM_FRAME_SIZE, DEFAULT_META_MAX_SIZE};
 
 /// SWIM-protocol-level options applied to the machine-layer
 /// [`EndpointOptions`](memberlist_proto::config::EndpointOptions) inside each
@@ -238,15 +240,12 @@ impl MemberlistOptions {
   /// `LabelOptions` (plain TCP or TLS) and the gossip codec `EncodeOptions`,
   /// so the two planes cannot diverge.
   #[inline]
-  pub fn with_label(
-    mut self,
-    label: Option<Vec<u8>>,
-  ) -> Result<Self, crate::error::MemberlistError> {
+  pub fn with_label(mut self, label: Option<Vec<u8>>) -> Result<Self, MemberlistError> {
     self.label = match label {
       None => None,
       Some(v) if v.is_empty() => None,
       Some(v) => {
-        validate_label(&v).map_err(crate::error::MemberlistError::InvalidLabel)?;
+        validate_label(&v).map_err(MemberlistError::InvalidLabel)?;
         Some(Bytes::from(v))
       }
     };
@@ -435,19 +434,18 @@ pub(crate) const GOSSIP_MTU_MIN: usize = 512;
 /// misconfiguration fails fast, before any socket is bound; every backend
 /// (TCP/TLS/QUIC) routes through that single `Memberlist::new` path, so the
 /// check is enforced uniformly without per-backend duplication.
-pub(crate) fn validate_gossip_mtu(
-  opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError> {
+pub(crate) fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), MemberlistError> {
   if let Some(mtu) = opts.gossip_mtu() {
     if mtu > GOSSIP_MTU_MAX {
-      return Err(crate::error::MemberlistError::InvalidGossipMtu(
+      return Err(MemberlistError::InvalidGossipMtu(
         crate::error::InvalidGossipMtu::new(mtu, GOSSIP_MTU_MAX),
       ));
     }
     if mtu < GOSSIP_MTU_MIN {
-      return Err(crate::error::MemberlistError::GossipMtuTooSmall(
-        crate::error::GossipMtuTooSmall::new(mtu, GOSSIP_MTU_MIN),
-      ));
+      return Err(MemberlistError::GossipMtuTooSmall(GossipMtuTooSmall::new(
+        mtu,
+        GOSSIP_MTU_MIN,
+      )));
     }
   }
   Ok(())
@@ -487,53 +485,43 @@ pub(crate) fn validate_gossip_mtu(
 /// Called from `Memberlist::new` before the transport is constructed so the
 /// misconfiguration fails fast, before any socket is bound; every backend
 /// (TCP/TLS/QUIC) routes through that single path.
-pub(crate) fn validate_driver_options(
-  opts: &DriverOptions,
-) -> Result<(), crate::error::MemberlistError> {
+pub(crate) fn validate_driver_options(opts: &DriverOptions) -> Result<(), MemberlistError> {
   if opts.idle_wake_interval().is_zero() {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "idle_wake_interval",
-        "the driver-loop fallback sleep must be nonzero: a zero idle_wake_interval makes a \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "idle_wake_interval",
+      "the driver-loop fallback sleep must be nonzero: a zero idle_wake_interval makes a \
          quiescent endpoint busy-spin the driver loop and peg a CPU core"
-          .to_string(),
-      ),
-    ));
+        .to_string(),
+    )));
   }
   if opts.cmd_fairness_budget() == 0 {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "cmd_fairness_budget",
-        "the iter-top command fairness drain must pull at least one command per pass: the main \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "cmd_fairness_budget",
+      "the iter-top command fairness drain must pull at least one command per pass: the main \
          select biases the recv arm ahead of commands, so under a continuous inbound flood the \
          command arm is starved indefinitely and shutdown / leave / joins would never be \
          serviced; a zero budget disables the only drain that guarantees command progress"
-          .to_string(),
-      ),
-    ));
+        .to_string(),
+    )));
   }
   if opts.peek_budget().is_zero() {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "peek_budget",
-        "the past-due preemption peek must give the recv a nonzero window: on completion-based \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "peek_budget",
+      "the past-due preemption peek must give the recv a nonzero window: on completion-based \
          io_uring a freshly-submitted recv is always pending on first poll, so a zero peek \
          budget makes the timer arm win immediately, cancelling the recv and dropping a \
          kernel-buffered ack — the peer would be falsely suspected"
-          .to_string(),
-      ),
-    ));
+        .to_string(),
+    )));
   }
   if let crate::Channel::Bounded(0) = opts.observation_channel() {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "observation_channel",
-        "a Bounded(0) observation channel is a zero-capacity rendezvous: the driver's \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "observation_channel",
+      "a Bounded(0) observation channel is a zero-capacity rendezvous: the driver's \
          non-blocking try_send can never deposit an event into it, so the delegate would \
          observe nothing; use Channel::Unbounded or Bounded(n) with n >= 1"
-          .to_string(),
-      ),
-    ));
+        .to_string(),
+    )));
   }
   Ok(())
 }
@@ -572,12 +560,10 @@ pub(crate) fn validate_driver_options(
 /// spawned (the just-built transport is dropped on `Err`, closing its socket).
 /// Every backend (TCP/TLS/QUIC) is an alias over the one generic `Memberlist`,
 /// so this single call covers all three without per-backend duplication.
-pub(crate) fn validate_advertise_addr(
-  advertise_addr: &SocketAddr,
-) -> Result<(), crate::error::MemberlistError> {
+pub(crate) fn validate_advertise_addr(advertise_addr: &SocketAddr) -> Result<(), MemberlistError> {
   let reject = |reason: &str| {
-    Err(crate::error::MemberlistError::InvalidAdvertiseAddr(
-      crate::error::InvalidAdvertiseAddr::new(*advertise_addr, reason.to_string()),
+    Err(MemberlistError::InvalidAdvertiseAddr(
+      InvalidAdvertiseAddr::new(*advertise_addr, reason.to_string()),
     ))
   };
 
@@ -686,7 +672,7 @@ pub(crate) fn validate_gossip_mtu_for_identity<I>(
   local_id: &I,
   advertise_addr: &SocketAddr,
   opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError>
+) -> Result<(), MemberlistError>
 where
   I: memberlist_proto::Data + CheapClone,
 {
@@ -745,8 +731,8 @@ where
     let len = match encode_outgoing(msg, &EncodeOptions::default()) {
       Ok(bytes) => bytes.len(),
       Err(e) => {
-        return Err(crate::error::MemberlistError::InvalidAdvertiseAddr(
-          crate::error::InvalidAdvertiseAddr::new(
+        return Err(MemberlistError::InvalidAdvertiseAddr(
+          InvalidAdvertiseAddr::new(
             *advertise_addr,
             format!(
               "not representable on the compact `[16B IP][2B port]` wire layout \
@@ -762,9 +748,9 @@ where
   }
 
   if required > budget {
-    return Err(crate::error::MemberlistError::GossipMtuTooSmall(
-      crate::error::GossipMtuTooSmall::new(budget, required),
-    ));
+    return Err(MemberlistError::GossipMtuTooSmall(GossipMtuTooSmall::new(
+      budget, required,
+    )));
   }
   Ok(())
 }
@@ -799,7 +785,7 @@ pub(crate) fn validate_stream_frame_for_identity<I>(
   local_id: &I,
   advertise_addr: &SocketAddr,
   opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError>
+) -> Result<(), MemberlistError>
 where
   I: memberlist_proto::Data + CheapClone,
 {
@@ -810,7 +796,7 @@ where
 
   let max_frame = opts
     .max_stream_frame_size()
-    .unwrap_or(memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+    .unwrap_or(DEFAULT_MAX_STREAM_FRAME_SIZE);
 
   // The node's own state is the minimum any join / anti-entropy PushPull carries.
   // Size it for the WORST-CASE meta the node could ever broadcast — its
@@ -822,7 +808,7 @@ where
   // incarnation varint (`u32::MAX`) too.
   let meta_cap = opts
     .meta_max_size()
-    .unwrap_or(memberlist_proto::config::DEFAULT_META_MAX_SIZE)
+    .unwrap_or(DEFAULT_META_MAX_SIZE)
     .min(Meta::MAX_SIZE);
   let worst_case_meta = Meta::try_from(Bytes::from(vec![0u8; meta_cap])).unwrap_or_default();
   let local_state = PushNodeState::new(
@@ -839,17 +825,15 @@ where
     return Ok(());
   };
   if bytes.len() > max_frame {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "max_stream_frame_size",
-        format!(
-          "the reliable-stream frame ceiling ({max_frame}) is too small to carry the local \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "max_stream_frame_size",
+      format!(
+        "the reliable-stream frame ceiling ({max_frame}) is too small to carry the local \
            node's minimal push/pull frame ({} bytes): every join / anti-entropy exchange would \
            be rejected by the receiver's frame-length gate",
-          bytes.len()
-        ),
+        bytes.len()
       ),
-    ));
+    )));
   }
   Ok(())
 }
@@ -937,27 +921,23 @@ pub(crate) fn validate_checksum_options(
 /// `max_stream_frame_size` that passes construction could still have the first
 /// join / anti-entropy frame rejected at the receiver's frame-length gate.
 /// Reject it fail-fast, before any driver is spawned.
-pub(crate) fn validate_initial_meta(
-  opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError> {
+pub(crate) fn validate_initial_meta(opts: &MemberlistOptions) -> Result<(), MemberlistError> {
   let Some(meta) = opts.initial_meta() else {
     return Ok(());
   };
   let cap = opts
     .meta_max_size()
-    .unwrap_or(memberlist_proto::config::DEFAULT_META_MAX_SIZE)
+    .unwrap_or(DEFAULT_META_MAX_SIZE)
     .min(Meta::MAX_SIZE);
   if meta.as_bytes().len() > cap {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "initial_meta",
-        format!(
-          "initial_meta ({} bytes) exceeds the effective meta cap ({cap} bytes = \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "initial_meta",
+      format!(
+        "initial_meta ({} bytes) exceeds the effective meta cap ({cap} bytes = \
            min(meta_max_size, Meta::MAX_SIZE)): raise meta_max_size or shrink the initial meta",
-          meta.as_bytes().len()
-        ),
+        meta.as_bytes().len()
       ),
-    ));
+    )));
   }
   Ok(())
 }
@@ -985,7 +965,7 @@ pub(crate) fn validate_initial_meta(
 /// runtime frame-length gate.
 pub(crate) fn validate_initial_local_state<I, A>(
   opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError>
+) -> Result<(), MemberlistError>
 where
   I: memberlist_proto::Data,
   A: memberlist_proto::Data,
@@ -993,9 +973,9 @@ where
   if let Some(state) = opts.initial_local_state() {
     let cap = opts
       .max_stream_frame_size()
-      .unwrap_or(memberlist_proto::config::DEFAULT_MAX_STREAM_FRAME_SIZE);
+      .unwrap_or(DEFAULT_MAX_STREAM_FRAME_SIZE);
     memberlist_proto::endpoint::validate_local_state_snapshot::<I, A>(state, cap)
-      .map_err(crate::error::MemberlistError::Proto)?;
+      .map_err(MemberlistError::Proto)?;
   }
   Ok(())
 }
@@ -1030,35 +1010,31 @@ where
 /// large enough to be useful would reject valid small-frame configurations.
 pub(crate) fn validate_max_stream_frame_size(
   opts: &MemberlistOptions,
-) -> Result<(), crate::error::MemberlistError> {
+) -> Result<(), MemberlistError> {
   let Some(size) = opts.max_stream_frame_size() else {
     return Ok(());
   };
   if size == 0 {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "max_stream_frame_size",
-        "the reliable-stream frame ceiling must be nonzero: a zero ceiling rejects every \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "max_stream_frame_size",
+      "the reliable-stream frame ceiling must be nonzero: a zero ceiling rejects every \
          reliable frame, so the node can never complete a push/pull (join / anti-entropy) or \
          receive a reliable user message"
-          .to_string(),
-      ),
-    ));
+        .to_string(),
+    )));
   }
   // Reliable frame lengths are u32 on the wire; a cap above that is unreachable
   // as a receive gate and would let a local frame above u32::MAX fail to encode.
   if size > u32::MAX as usize {
-    return Err(crate::error::MemberlistError::InvalidOption(
-      crate::error::InvalidOption::new(
-        "max_stream_frame_size",
-        format!(
-          "the reliable-stream frame ceiling must not exceed the u32 wire limit ({}): reliable \
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "max_stream_frame_size",
+      format!(
+        "the reliable-stream frame ceiling must not exceed the u32 wire limit ({}): reliable \
            frame lengths are u32-encoded, so a larger cap is unreachable as a receive gate and a \
            locally-built frame above it would fail to encode",
-          u32::MAX
-        ),
+        u32::MAX
       ),
-    ));
+    )));
   }
   Ok(())
 }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
   AdvertiseAddrResolver, Delegate, MaybeResolved, Resolver, Transport, TransportRuntime,
+  error::MemberlistError,
 };
 use std::net::SocketAddr;
 
@@ -78,7 +79,7 @@ fn validate_driver_options_rejects_deterministic_break_knobs() {
     assert!(
       matches!(
         validate_driver_options(&opts),
-        Err(crate::error::MemberlistError::InvalidOption(_))
+        Err(MemberlistError::InvalidOption(_))
       ),
       "a deterministic-break knob at zero must be rejected: {opts:?}"
     );
@@ -147,7 +148,7 @@ fn identity_floor_rejects_scoped_ipv6_advertise_addr() {
     3,
   ));
   match validate_gossip_mtu_for_identity::<smol_str::SmolStr>(&id, &scoped_scope, &opts) {
-    Err(crate::error::MemberlistError::InvalidAdvertiseAddr(e)) => {
+    Err(MemberlistError::InvalidAdvertiseAddr(e)) => {
       assert_eq!(
         e.addr(),
         scoped_scope,
@@ -173,7 +174,7 @@ fn identity_floor_rejects_scoped_ipv6_advertise_addr() {
   assert!(
     matches!(
       validate_gossip_mtu_for_identity::<smol_str::SmolStr>(&id, &scoped_flow, &opts),
-      Err(crate::error::MemberlistError::InvalidAdvertiseAddr(_))
+      Err(MemberlistError::InvalidAdvertiseAddr(_))
     ),
     "a nonzero-flowinfo IPv6 advertise address must also be rejected"
   );
@@ -205,7 +206,7 @@ fn identity_floor_rejects_scoped_ipv6_advertise_addr() {
 // tested deterministically.
 #[test]
 fn validate_advertise_addr_rejects_unroutable_contacts() {
-  use crate::error::MemberlistError::InvalidAdvertiseAddr;
+  use MemberlistError::InvalidAdvertiseAddr;
 
   // Unspecified (the wildcard-bind footgun): 0.0.0.0 and [::].
   for addr in ["0.0.0.0:7946", "[::]:7946"] {
@@ -279,7 +280,7 @@ fn validate_max_stream_frame_size_bounds() {
   // Zero rejects every reliable frame — rejected fail-fast.
   assert!(matches!(
     validate_max_stream_frame_size(&MemberlistOptions::new().with_max_stream_frame_size(0)),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
   // Above the u32 wire envelope is rejected (unencodable body / unreachable
   // receive gate). Only representable where usize exceeds u32 (64-bit).
@@ -289,7 +290,7 @@ fn validate_max_stream_frame_size_bounds() {
       assert!(
         matches!(
           validate_max_stream_frame_size(&MemberlistOptions::new().with_max_stream_frame_size(bad)),
-          Err(crate::error::MemberlistError::InvalidOption(_))
+          Err(MemberlistError::InvalidOption(_))
         ),
         "cap {bad} above the u32 wire envelope must be rejected"
       );
@@ -317,7 +318,7 @@ fn validate_initial_local_state_honors_configured_cap() {
         .with_max_stream_frame_size(256)
         .with_initial_local_state(snapshot)
     ),
-    Err(crate::error::MemberlistError::Proto(_))
+    Err(MemberlistError::Proto(_))
   ));
 }
 
@@ -333,7 +334,7 @@ fn validate_stream_frame_for_identity_rejects_tiny_caps() {
       &addr,
       &MemberlistOptions::new().with_max_stream_frame_size(1)
     ),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
   // A small-but-realistic cap (256 KiB — the no-snapshot byte-backstop config)
   // and the machine default both genuinely fit the node, so both are accepted:
@@ -362,7 +363,7 @@ fn validate_stream_frame_for_identity_rejects_tiny_caps() {
         .with_meta_max_size(60 * 1024)
         .with_max_stream_frame_size(50 * 1024)
     ),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
   assert!(
     validate_stream_frame_for_identity(
@@ -398,7 +399,7 @@ fn validate_initial_meta_rejects_oversized() {
         .with_meta_max_size(64)
         .with_initial_meta(Meta::try_from(Bytes::from(vec![0u8; 128])).unwrap())
     ),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
 }
 
@@ -482,12 +483,12 @@ fn memberlist_options_label_validation_and_round_trip() {
   // Over the 253-byte max is rejected.
   assert!(matches!(
     MemberlistOptions::new().with_label(Some(vec![b'x'; 254])),
-    Err(crate::error::MemberlistError::InvalidLabel(_))
+    Err(MemberlistError::InvalidLabel(_))
   ));
   // Non-UTF-8 is rejected.
   assert!(matches!(
     MemberlistOptions::new().with_label(Some(vec![0xff, 0xfe])),
-    Err(crate::error::MemberlistError::InvalidLabel(_))
+    Err(MemberlistError::InvalidLabel(_))
   ));
 }
 
@@ -558,7 +559,7 @@ fn validate_gossip_mtu_enforces_floor_and_ceiling() {
   // Just above the UDP ceiling is rejected as InvalidGossipMtu, carrying the
   // offending value and the ceiling.
   match validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(GOSSIP_MTU_MAX + 1)) {
-    Err(crate::error::MemberlistError::InvalidGossipMtu(e)) => {
+    Err(MemberlistError::InvalidGossipMtu(e)) => {
       assert_eq!(
         e.configured(),
         GOSSIP_MTU_MAX + 1,
@@ -571,7 +572,7 @@ fn validate_gossip_mtu_enforces_floor_and_ceiling() {
 
   // Just below the control-packet floor is rejected as GossipMtuTooSmall.
   match validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(GOSSIP_MTU_MIN - 1)) {
-    Err(crate::error::MemberlistError::GossipMtuTooSmall(e)) => {
+    Err(MemberlistError::GossipMtuTooSmall(e)) => {
       assert_eq!(
         e.configured(),
         GOSSIP_MTU_MIN - 1,
@@ -584,7 +585,7 @@ fn validate_gossip_mtu_enforces_floor_and_ceiling() {
   // A tiny but nonzero value (1 byte) is below the floor ⇒ GossipMtuTooSmall.
   assert!(matches!(
     validate_gossip_mtu(&MemberlistOptions::new().with_gossip_mtu(1)),
-    Err(crate::error::MemberlistError::GossipMtuTooSmall(_))
+    Err(MemberlistError::GossipMtuTooSmall(_))
   ));
 }
 

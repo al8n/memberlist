@@ -66,6 +66,7 @@ use crate::{
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
+use std::io::ErrorKind;
 
 /// Wraps a boxed `AliveDelegate` so it satisfies the `impl AliveDelegate` bound
 /// of `Endpoint::set_alive_delegate` (the machine takes the predicate by value,
@@ -1086,10 +1087,7 @@ where
           Ok(socket) => break (listener, bound, socket),
           Err(e)
             if ephemeral
-              && matches!(
-                e.kind(),
-                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
-              )
+              && matches!(e.kind(), ErrorKind::AddrInUse | ErrorKind::PermissionDenied)
               && attempt < EPHEMERAL_BIND_RETRIES =>
           {
             // Release the claimed TCP port and retry on a fresh ephemeral pair.

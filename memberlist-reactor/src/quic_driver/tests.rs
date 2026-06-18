@@ -22,6 +22,8 @@ use crate::command::{
   JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetChecksumOptionsCmd,
   SetCompressionOptionsCmd, SetEncryptionOptionsCmd, ShutdownCmd,
 };
+use rustls::version::TLS13;
+use std::sync::Barrier;
 
 type TokioNet = <TokioRuntime as Runtime>::Net;
 
@@ -40,7 +42,7 @@ fn self_trusted_quic() -> QuicOptions {
 
   let provider = Arc::new(rustls::crypto::ring::default_provider());
   let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3")
     .with_no_client_auth()
     .with_single_cert(vec![cert], key)
@@ -51,7 +53,7 @@ fn self_trusted_quic() -> QuicOptions {
   let server_cfg = ServerConfig::with_crypto(Arc::new(qsc));
 
   let mut rustls_client = rustls::ClientConfig::builder_with_provider(provider)
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3")
     .with_root_certificates(roots)
     .with_no_client_auth();
@@ -382,7 +384,7 @@ async fn shutdown_fails_parked_leave() {
 /// encryption) are checked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_close_and_drain_fails_every_queued_command() {
-  use std::sync::Barrier;
+  use Barrier;
 
   const MAX_ATTEMPTS: usize = 20000;
   // Each command variant must, in SOME attempt, be pushed into the narrow
@@ -529,7 +531,7 @@ async fn shutdown_acks_every_same_poll_caller() {
 /// in the same drain; the reply set holds every concurrent caller instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_acks_concurrent_callers() {
-  use std::sync::Barrier;
+  use Barrier;
 
   const MAX_ATTEMPTS: usize = 20000;
   // The first `Shutdown` is queued before the poll, so it is always drained and

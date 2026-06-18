@@ -58,7 +58,11 @@ use crate::{
   },
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
+  transport::runtime::CidrFilter,
 };
+use core::{fmt, hash::Hash, time::Duration};
+use memberlist_proto::metrics::Metrics;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Driver-side state for one outstanding synchronous-join call.
 ///
@@ -161,7 +165,7 @@ struct PendingPing {
   /// Correlation token minted by `endpoint.ping(…)`.
   ping_id: memberlist_proto::PingId,
   /// One-shot reply channel back to the `ping()` caller.
-  reply: futures_channel::oneshot::Sender<Result<core::time::Duration>>,
+  reply: futures_channel::oneshot::Sender<Result<Duration>>,
 }
 
 /// Driver-side state for one outstanding reliable directed-send call.
@@ -431,17 +435,17 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -520,10 +524,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   listener: TcpListener,
   commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, A>>,
-  events_dropped: Arc<std::sync::atomic::AtomicU64>,
-  observation_dropped: Arc<std::sync::atomic::AtomicU64>,
+  events_dropped: Arc<AtomicU64>,
+  observation_dropped: Arc<AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
-  metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  metrics: Arc<ArcSwap<Metrics>>,
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
   shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -536,23 +540,23 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   label: Option<Bytes>,
   // Driver-level CIDR filter: drop gossip datagrams from a blocked source and
   // reject reliable streams from a blocked peer. `()` without the cidr feature.
-  cidr_policy: crate::transport::runtime::CidrFilter,
+  cidr_policy: CidrFilter,
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + From<SocketAddr>
     + Send
     + Sync
@@ -602,7 +606,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // backstop in `drain_events` uses it to bound the memory large reliable
   // payloads occupy while a delegate falls behind — a count cap alone cannot,
   // since one event can own a `max_stream_frame_size` payload.
-  let obs_payload_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
   compio::runtime::spawn(observation_task::<I, A, D>(
     obs_rx,
     delegate,
@@ -1288,7 +1292,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   //   5. Drop the bound sockets BEFORE acking the observed shutdown
   //      caller so an immediate rebind on the same port after
   //      `shutdown.await` succeeds.
-  shutdown_flag.store(true, std::sync::atomic::Ordering::Release);
+  shutdown_flag.store(true, Ordering::Release);
   while let Ok(c) = commands.try_recv() {
     let res = Err(MemberlistError::Shutdown);
     let reply: futures_channel::oneshot::Sender<Result<()>> = match c {
@@ -1413,27 +1417,27 @@ async fn dispatch_command<I, A, R, G>(
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
-  cidr_policy: &crate::transport::runtime::CidrFilter,
+  cidr_policy: &CidrFilter,
   shutdown_reply: &mut Option<futures_channel::oneshot::Sender<Result<()>>>,
   pending: &mut PendingCommands,
-  leave_timeout: core::time::Duration,
+  leave_timeout: Duration,
   cmd: Command<I>,
   now: Instant,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + From<SocketAddr>
     + Send
     + Sync
@@ -1899,17 +1903,17 @@ fn dispatch_bridge_inbound<I, A, R, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -1982,17 +1986,17 @@ fn dispatch_gossip<I, A, R, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + From<SocketAddr>
     + Send
     + Sync
@@ -2086,7 +2090,7 @@ fn process_one_action(
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
   capture: Option<(&HashSet<StreamId>, &mut HashSet<ExchangeId>)>,
-  cidr_policy: &crate::transport::runtime::CidrFilter,
+  cidr_policy: &CidrFilter,
 ) {
   match action {
     StreamAction::Connect(info) => {
@@ -2221,23 +2225,23 @@ fn drain_actions<I, A, R, G>(
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
-  cidr_policy: &crate::transport::runtime::CidrFilter,
+  cidr_policy: &CidrFilter,
 ) -> bool
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2282,17 +2286,17 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2336,17 +2340,17 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2436,8 +2440,8 @@ where
 async fn drain_events<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   obs_tx: &Sender<Event<I, A>>,
-  observation_dropped: &std::sync::atomic::AtomicU64,
-  obs_payload_bytes: &std::sync::atomic::AtomicU64,
+  observation_dropped: &AtomicU64,
+  obs_payload_bytes: &AtomicU64,
   obs_payload_budget: Option<u64>,
   pending: &mut PendingCommands,
 ) -> bool
@@ -2445,17 +2449,17 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2614,18 +2618,18 @@ where
     // fires a parked join/leave reply is never delayed by a backed-up delegate.
     if let (Some(budget), Some(bytes)) = (obs_payload_budget, payload_bytes) {
       if obs_payload_bytes
-        .load(std::sync::atomic::Ordering::Relaxed)
+        .load(Ordering::Relaxed)
         .saturating_add(bytes)
         > budget
       {
         yield_once().await;
       }
       if obs_payload_bytes
-        .load(std::sync::atomic::Ordering::Relaxed)
+        .load(Ordering::Relaxed)
         .saturating_add(bytes)
         > budget
       {
-        observation_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        observation_dropped.fetch_add(1, Ordering::Relaxed);
         continue;
       }
     }
@@ -2647,7 +2651,7 @@ where
         match obs_tx.try_send(ev) {
           Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
           Err(_) => {
-            observation_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            observation_dropped.fetch_add(1, Ordering::Relaxed);
           }
         }
       }
@@ -2683,24 +2687,24 @@ async fn observation_task<I, A, D>(
   obs_rx: Receiver<Event<I, A>>,
   delegate: D,
   events_tx: Sender<Event<I, A>>,
-  events_dropped: Arc<std::sync::atomic::AtomicU64>,
-  obs_payload_bytes: Arc<std::sync::atomic::AtomicU64>,
+  events_dropped: Arc<AtomicU64>,
+  obs_payload_bytes: Arc<AtomicU64>,
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2713,7 +2717,7 @@ async fn observation_task<I, A, D>(
     // reclaimed budget promptly. Membership / control events have no weight.
     let payload = observation_payload_bytes(&ev);
     if let Some(b) = payload {
-      obs_payload_bytes.fetch_sub(b, std::sync::atomic::Ordering::Relaxed);
+      obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
     }
     // Contain a panicking delegate hook so the task SURVIVES and keeps releasing
     // the byte-backstop reservations of still-queued events. A dead obs task
@@ -2736,7 +2740,7 @@ async fn observation_task<I, A, D>(
       .try_send(ev)
       .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
     {
-      events_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      events_dropped.fetch_add(1, Ordering::Relaxed);
     }
   }
 }
@@ -2872,17 +2876,17 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2933,17 +2937,17 @@ fn refresh_snapshot<I, A, R, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -2992,17 +2996,17 @@ fn refresh_snapshot_if_changed<I, A, R, G>(
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -3021,23 +3025,23 @@ fn refresh_snapshot_if_changed<I, A, R, G>(
 /// real change, which is rare).
 fn refresh_metrics_if_changed<I, A, R, G>(
   endpoint: &StreamEndpoint<I, A, R, G>,
-  metrics: &Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
-  last: &mut memberlist_proto::metrics::Metrics,
+  metrics: &Arc<ArcSwap<Metrics>>,
+  last: &mut Metrics,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -3060,22 +3064,22 @@ fn handle_bridge_ready<I, A, R, G>(
   bridge_inbound_tx: &Sender<BridgeInbound>,
   ready: BridgeReady,
   recv_buf_len: usize,
-  close_timeout: core::time::Duration,
+  close_timeout: Duration,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -3154,24 +3158,24 @@ fn handle_accepted<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
-  cidr_policy: &crate::transport::runtime::CidrFilter,
+  cidr_policy: &CidrFilter,
   stream_opts: StreamTransportOptions,
 ) -> bool
 where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_proto::Data
     + memberlist_proto::CheapClone
     + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
+    + Hash
+    + fmt::Debug
+    + fmt::Display
     + From<SocketAddr>
     + Send
     + Sync
@@ -3234,7 +3238,7 @@ fn spawn_bridge(
   cancel_rx: futures_channel::oneshot::Receiver<()>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   recv_buf_len: usize,
-  close_timeout: core::time::Duration,
+  close_timeout: Duration,
 ) {
   let inbound_tx = bridge_inbound_tx.clone();
   compio::runtime::spawn(crate::bridge::bridge_task(

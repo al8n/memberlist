@@ -55,6 +55,7 @@ use crate::{
   shared::Shared,
   snapshot::snapshot_of,
 };
+use memberlist_proto::metrics::Metrics;
 
 /// IP-layer UDP payload maximum; caps the per-recv buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
@@ -136,7 +137,7 @@ where
   /// republished only when it differs (see the stream driver for the rationale).
   last_snapshot_version: u64,
   /// The load-shedding counters last published to `shared` (republished on change).
-  last_metrics: memberlist_proto::metrics::Metrics,
+  last_metrics: Metrics,
   /// Hand-off to the observation task (delegate dispatch + event-stream fan-out).
   obs_tx: Sender<Event<I, SocketAddr>>,
   /// Cluster label threaded into the gossip `EncodeOptions` / `DecodeOptions` so
@@ -215,7 +216,7 @@ where
       socket: Some(socket),
       shared,
       last_snapshot_version,
-      last_metrics: memberlist_proto::metrics::Metrics::default(),
+      last_metrics: Metrics::default(),
       obs_tx,
       label,
       pending_joins: HashMap::new(),

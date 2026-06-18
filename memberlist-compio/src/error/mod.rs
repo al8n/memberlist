@@ -1,6 +1,7 @@
 //! Error types for memberlist-compio.
 
-use std::io;
+use core::fmt;
+use std::{io, net::SocketAddr};
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
@@ -58,8 +59,8 @@ impl JoinAllFailed {
   }
 }
 
-impl core::fmt::Display for JoinAllFailed {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for JoinAllFailed {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "join failed: contacted {} of {} seed(s)",
@@ -102,8 +103,8 @@ impl InvalidGossipMtu {
   }
 }
 
-impl core::fmt::Display for InvalidGossipMtu {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for InvalidGossipMtu {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "gossip_mtu {} exceeds the maximum sendable plaintext gossip payload of {} bytes \
@@ -153,8 +154,8 @@ impl GossipMtuTooSmall {
   }
 }
 
-impl core::fmt::Display for GossipMtuTooSmall {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for GossipMtuTooSmall {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "gossip_mtu {} is below the minimum of {} bytes required to carry the mandatory \
@@ -188,7 +189,7 @@ impl core::fmt::Display for GossipMtuTooSmall {
 /// class it fell into.
 #[derive(Debug)]
 pub struct InvalidAdvertiseAddr {
-  addr: std::net::SocketAddr,
+  addr: SocketAddr,
   reason: String,
 }
 
@@ -196,13 +197,13 @@ impl InvalidAdvertiseAddr {
   /// Build a new payload from the rejected advertise address and the reason
   /// it cannot serve as the local node's contact identity.
   #[inline]
-  pub(crate) fn new(addr: std::net::SocketAddr, reason: String) -> Self {
+  pub(crate) fn new(addr: SocketAddr, reason: String) -> Self {
     Self { addr, reason }
   }
 
   /// The advertise address that was rejected.
   #[inline]
-  pub fn addr(&self) -> std::net::SocketAddr {
+  pub fn addr(&self) -> SocketAddr {
     self.addr
   }
 
@@ -214,8 +215,8 @@ impl InvalidAdvertiseAddr {
   }
 }
 
-impl core::fmt::Display for InvalidAdvertiseAddr {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for InvalidAdvertiseAddr {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
       "advertise address {} cannot serve as this node's reachable contact \
@@ -258,8 +259,8 @@ impl InvalidOption {
   }
 }
 
-impl core::fmt::Display for InvalidOption {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for InvalidOption {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "invalid {} option: {}", self.option, self.reason)
   }
 }

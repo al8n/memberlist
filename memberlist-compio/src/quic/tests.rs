@@ -6,6 +6,8 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 use super::*;
 use crate::{FirstAddrResolver, MaybeResolved, OsResolver, SocketAddrResolver};
+use rustls::version::TLS13;
+use std::io::ErrorKind;
 
 const ALPN: &[u8] = b"memberlist-quic";
 
@@ -20,7 +22,7 @@ fn default_test_quic_config() -> QuicOptions {
   let provider = Arc::new(rustls::crypto::ring::default_provider());
 
   let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3")
     .with_no_client_auth()
     .with_single_cert(vec![cert.clone()], key)
@@ -34,7 +36,7 @@ fn default_test_quic_config() -> QuicOptions {
   let mut roots = RootCertStore::empty();
   roots.add(cert).expect("add root cert");
   let mut rustls_client = rustls::ClientConfig::builder_with_provider(provider)
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .expect("TLS 1.3")
     .with_root_certificates(roots)
     .with_no_client_auth();
@@ -95,7 +97,7 @@ async fn new_without_local_id_errors() {
     QuicTransport::<SmolStr, SocketAddr>::new(opts, &SocketAddrResolver, &FirstAddrResolver).await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("local_id"));
     }
     Err(other) => panic!("expected InvalidInput(local_id), got {other:?}"),
@@ -113,7 +115,7 @@ async fn new_without_advertise_addr_errors() {
     QuicTransport::<SmolStr, SocketAddr>::new(opts, &SocketAddrResolver, &FirstAddrResolver).await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("advertise_addr"));
     }
     Err(other) => panic!("expected InvalidInput(advertise_addr), got {other:?}"),
@@ -131,7 +133,7 @@ async fn new_without_quic_config_errors() {
     QuicTransport::<SmolStr, SocketAddr>::new(opts, &SocketAddrResolver, &FirstAddrResolver).await;
   match res {
     Err(MemberlistError::Io(e)) => {
-      assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+      assert_eq!(e.kind(), ErrorKind::InvalidInput);
       assert!(e.to_string().contains("quic_config"));
     }
     Err(other) => panic!("expected InvalidInput(quic_config), got {other:?}"),

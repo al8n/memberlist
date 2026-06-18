@@ -41,9 +41,11 @@ use crate::{
 /// the type that actually drives the QUIC endpoint.
 pub struct Quic;
 
+use core::fmt;
 /// QUIC config bundle handed to [`QuicTransport`]. Re-exported from
 /// `memberlist-proto` so callers don't need a direct dep.
 pub use memberlist_proto::QuicOptions;
+use std::io::ErrorKind;
 
 /// Per-backend QUIC-specific transport options.
 ///
@@ -139,8 +141,8 @@ where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
+    + fmt::Debug
+    + fmt::Display
     + Send
     + Sync
     + 'static,
@@ -162,19 +164,19 @@ where
   {
     let local_id = options.local_id.ok_or_else(|| {
       MemberlistError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
+        ErrorKind::InvalidInput,
         "local_id required",
       ))
     })?;
     let advertise_input = options.advertise_addr.ok_or_else(|| {
       MemberlistError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
+        ErrorKind::InvalidInput,
         "advertise_addr required",
       ))
     })?;
     let quic_config = options.quic_config.ok_or_else(|| {
       MemberlistError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
+        ErrorKind::InvalidInput,
         "quic_config required",
       ))
     })?;
@@ -188,7 +190,7 @@ where
           .map_err(|e| MemberlistError::Resolve(std::io::Error::other(e.to_string())))?;
         advertise_resolver.pick(candidates).map_err(|e| {
           MemberlistError::Resolve(std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
+            ErrorKind::AddrNotAvailable,
             e.to_string(),
           ))
         })?

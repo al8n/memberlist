@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::MemberlistError;
 
 #[test]
 fn driver_options_defaults_match_constants() {
@@ -107,14 +108,14 @@ fn stream_transport_options_validate() {
     StreamTransportOptions::new()
       .with_bridge_recv_buf_len(0)
       .validate(),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
   // A zero close timeout truncates every graceful close.
   assert!(matches!(
     StreamTransportOptions::new()
       .with_close_timeout(Duration::ZERO)
       .validate(),
-    Err(crate::error::MemberlistError::InvalidOption(_))
+    Err(MemberlistError::InvalidOption(_))
   ));
   // A zero inbound cap (valid rendezvous) and a zero dial timeout (loud) are
   // NOT rejected.

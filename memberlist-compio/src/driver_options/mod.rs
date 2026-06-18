@@ -9,6 +9,7 @@
 //! callers can derive new values from the default (e.g.
 //! `DEFAULT_JOIN_DEADLINE * 3`).
 
+use crate::error::{InvalidOption, MemberlistError};
 use core::time::Duration;
 
 /// Default per-call deadline for [`Memberlist::join`](crate::Memberlist::join).
@@ -382,28 +383,24 @@ impl StreamTransportOptions {
     feature = "tls-rustls-ring",
     feature = "tls-rustls-aws-lc-rs"
   ))]
-  pub(crate) fn validate(&self) -> Result<(), crate::error::MemberlistError> {
+  pub(crate) fn validate(&self) -> Result<(), MemberlistError> {
     if self.bridge_recv_buf_len == 0 {
-      return Err(crate::error::MemberlistError::InvalidOption(
-        crate::error::InvalidOption::new(
-          "bridge_recv_buf_len",
-          "the per-bridge reliable-stream read buffer must be nonzero: a zero-length read \
+      return Err(MemberlistError::InvalidOption(InvalidOption::new(
+        "bridge_recv_buf_len",
+        "the per-bridge reliable-stream read buffer must be nonzero: a zero-length read \
            returns Ok(0), which the bridge treats as peer EOF, so every TCP/TLS join / \
            push-pull stream exchange would break"
-            .to_string(),
-        ),
-      ));
+          .to_string(),
+      )));
     }
     if self.close_timeout.is_zero() {
-      return Err(crate::error::MemberlistError::InvalidOption(
-        crate::error::InvalidOption::new(
-          "close_timeout",
-          "the reliable graceful-close drain timeout must be nonzero: a zero timeout fires \
+      return Err(MemberlistError::InvalidOption(InvalidOption::new(
+        "close_timeout",
+        "the reliable graceful-close drain timeout must be nonzero: a zero timeout fires \
            immediately, so a graceful close abandons (RSTs) queued push/pull response bytes \
            instead of draining them, truncating reliable exchanges"
-            .to_string(),
-        ),
-      ));
+          .to_string(),
+      )));
     }
     Ok(())
   }

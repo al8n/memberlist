@@ -15,7 +15,9 @@ use std::sync::atomic::AtomicU64;
 
 use memberlist_proto::event::Event;
 
-use crate::delegate::Delegate;
+use crate::{delegate::Delegate, transport::runtime::CidrFilter};
+use core::task::Poll;
+use std::net::IpAddr;
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
@@ -93,11 +95,11 @@ pub(crate) async fn yield_once() {
   let mut yielded = false;
   core::future::poll_fn(move |cx| {
     if yielded {
-      core::task::Poll::Ready(())
+      Poll::Ready(())
     } else {
       yielded = true;
       cx.waker().wake_by_ref();
-      core::task::Poll::Pending
+      Poll::Pending
     }
   })
   .await
@@ -128,17 +130,11 @@ pub(crate) fn add_obs_payload(counter: &AtomicU64, bytes: Option<u64>) {
 /// policy blocks `ip` (always `false` without the `cidr` feature). Applied at recv
 /// (the gossip / QUIC datagram source) and at accept (the reliable stream peer).
 #[cfg(feature = "cidr")]
-pub(crate) fn cidr_blocks(
-  filter: &crate::transport::runtime::CidrFilter,
-  ip: std::net::IpAddr,
-) -> bool {
+pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: IpAddr) -> bool {
   filter.as_ref().is_some_and(|p| p.is_blocked(&ip))
 }
 #[cfg(not(feature = "cidr"))]
-pub(crate) fn cidr_blocks(
-  _filter: &crate::transport::runtime::CidrFilter,
-  _ip: std::net::IpAddr,
-) -> bool {
+pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: IpAddr) -> bool {
   false
 }
 

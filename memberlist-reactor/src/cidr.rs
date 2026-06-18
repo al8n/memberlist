@@ -12,6 +12,8 @@
 /// [`CidrPolicy`](memberlist_proto::CidrPolicy) when the `cidr` feature is on, the
 /// zero-sized `()` otherwise — so the [`Options`](crate::Options) field, the
 /// driver field, and the constructor parameter need no `cfg` gate.
+use std::net::IpAddr;
+use std::net::SocketAddr;
 #[cfg(feature = "cidr")]
 pub(crate) type CidrFilter = Option<memberlist_proto::CidrPolicy>;
 #[cfg(not(feature = "cidr"))]
@@ -26,7 +28,7 @@ pub(crate) type CidrFilter = ();
   any(feature = "quic", feature = "tcp", feature = "tls")
 ))]
 #[inline]
-pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: std::net::IpAddr) -> bool {
+pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: IpAddr) -> bool {
   filter.as_ref().is_some_and(|policy| policy.is_blocked(&ip))
 }
 #[cfg(all(
@@ -34,7 +36,7 @@ pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: std::net::IpAddr) -> bool {
   any(feature = "quic", feature = "tcp", feature = "tls")
 ))]
 #[inline]
-pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: std::net::IpAddr) -> bool {
+pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: IpAddr) -> bool {
   false
 }
 
@@ -48,8 +50,8 @@ pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: std::net::IpAddr) -> bool {
 ))]
 pub(crate) fn compose_alive<I>(
   filter: &CidrFilter,
-  alive: Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>>,
-) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>>
+  alive: Option<Box<dyn memberlist_proto::AliveDelegate<I, SocketAddr>>>,
+) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, SocketAddr>>>
 where
   I: 'static,
 {
@@ -65,7 +67,7 @@ where
 ))]
 pub(crate) fn compose_alive<I>(
   _filter: &CidrFilter,
-  alive: Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>>,
-) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, std::net::SocketAddr>>> {
+  alive: Option<Box<dyn memberlist_proto::AliveDelegate<I, SocketAddr>>>,
+) -> Option<Box<dyn memberlist_proto::AliveDelegate<I, SocketAddr>>> {
   alive
 }

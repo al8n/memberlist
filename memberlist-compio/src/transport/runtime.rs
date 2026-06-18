@@ -30,6 +30,7 @@ use crate::{
   snapshot::MemberlistSnapshot,
   transport::Transport,
 };
+use memberlist_proto::metrics::Metrics;
 
 // Helper type alias used in the `commands_rx` field: the command channel is
 // parameterised over the transport id type so `Command::Ping` can carry a
@@ -70,7 +71,7 @@ where
   pub(crate) observation_dropped: Arc<AtomicU64>,
   pub(crate) snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
   /// The machine's load-shedding counters, republished by the driver on change.
-  pub(crate) metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+  pub(crate) metrics: Arc<ArcSwap<Metrics>>,
   pub(crate) shutdown_flag: Arc<AtomicBool>,
   pub(crate) driver_options: DriverOptions,
   pub(crate) memberlist_options: MemberlistOptions,
@@ -99,7 +100,7 @@ where
     events_dropped: Arc<AtomicU64>,
     observation_dropped: Arc<AtomicU64>,
     snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
-    metrics: Arc<ArcSwap<memberlist_proto::metrics::Metrics>>,
+    metrics: Arc<ArcSwap<Metrics>>,
     shutdown_flag: Arc<AtomicBool>,
     driver_options: DriverOptions,
     memberlist_options: MemberlistOptions,

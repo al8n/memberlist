@@ -20,6 +20,7 @@ use super::{
   gossip_recv_buf_len, min_pending_join_deadline, min_pending_leave_deadline, process_one_action,
   reap_pending_joins, reap_pending_leave,
 };
+use core::time::Duration;
 
 fn addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
@@ -243,8 +244,8 @@ async fn pending_deadline_helpers_pick_the_earliest() {
   assert_eq!(min_pending_leave_deadline(&None), None);
 
   let base = Instant::now();
-  let earliest = base + core::time::Duration::from_secs(1);
-  let latest = base + core::time::Duration::from_secs(5);
+  let earliest = base + Duration::from_secs(1);
+  let latest = base + Duration::from_secs(5);
   let mk = |deadline| {
     let (tx, _rx) = futures_channel::oneshot::channel();
     PendingJoin {
@@ -258,7 +259,7 @@ async fn pending_deadline_helpers_pick_the_earliest() {
   let joins = vec![mk(latest), mk(earliest)];
   assert_eq!(min_pending_join_deadline(&joins), Some(earliest));
 
-  let leave_deadline = base + core::time::Duration::from_secs(3);
+  let leave_deadline = base + Duration::from_secs(3);
   let pl = PendingLeave {
     repliers: Vec::new(),
     deadline: leave_deadline,
@@ -279,14 +280,14 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
       pending: HashSet::new(),
       contacted: 0,
       requested: 4,
-      deadline: now + core::time::Duration::from_secs(60),
+      deadline: now + Duration::from_secs(60),
       reply: tx_fail,
     },
     PendingJoin {
       pending: HashSet::new(),
       contacted: 3,
       requested: 3,
-      deadline: now + core::time::Duration::from_secs(60),
+      deadline: now + Duration::from_secs(60),
       reply: tx_ok,
     },
   ];
@@ -314,7 +315,7 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
   let (tx_live, mut rx_live) = futures_channel::oneshot::channel::<super::Result<()>>();
   let mut not_expired = Some(PendingLeave {
     repliers: vec![tx_live],
-    deadline: now + core::time::Duration::from_secs(10),
+    deadline: now + Duration::from_secs(10),
   });
   reap_pending_leave(&mut not_expired, now).await;
   assert!(
@@ -331,7 +332,7 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
   let (tx_b, rx_b) = futures_channel::oneshot::channel::<super::Result<()>>();
   let mut expired = Some(PendingLeave {
     repliers: vec![tx_a, tx_b],
-    deadline: now - core::time::Duration::from_secs(1),
+    deadline: now - Duration::from_secs(1),
   });
   reap_pending_leave(&mut expired, now).await;
   assert!(expired.is_none(), "an expired leave clears its slot");

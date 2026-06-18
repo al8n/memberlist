@@ -3,7 +3,10 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use memberlist_proto::{Node, typed::NodeState};
+use memberlist_proto::{
+  Node,
+  typed::{NodeState, State},
+};
 
 /// An immutable snapshot of the cluster's observable membership at one instant.
 ///
@@ -105,7 +108,7 @@ impl<I, A> MemberlistSnapshot<I, A> {
     self
       .members
       .iter()
-      .filter(|ns| matches!(ns.state(), memberlist_proto::typed::State::Alive))
+      .filter(|ns| matches!(ns.state(), State::Alive))
   }
 
   /// Iterate members matching `pred`.
@@ -150,10 +153,8 @@ where
   let members: Vec<Arc<NodeState<I, SocketAddr>>> = ep
     .members()
     .map(|ns| {
-      let fsm = ep
-        .member_liveness(ns.id_ref())
-        .unwrap_or(memberlist_proto::typed::State::Unknown(0));
-      if matches!(fsm, memberlist_proto::typed::State::Alive) {
+      let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+      if matches!(fsm, State::Alive) {
         alive_count += 1;
       }
       Arc::new((*ns).clone().with_state(fsm))

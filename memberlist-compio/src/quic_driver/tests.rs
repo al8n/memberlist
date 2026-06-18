@@ -6,6 +6,7 @@ use super::{
   MemberlistError, PendingJoin, PendingLeave, min_pending_join_deadline,
   min_pending_leave_deadline, reap_pending_joins, reap_pending_leave,
 };
+use core::time::Duration;
 
 /// `min_pending_join_deadline` returns the EARLIEST deadline across waiters,
 /// and `None` when there are none. Folded into the driver's select timer so
@@ -20,8 +21,8 @@ async fn min_pending_join_deadline_picks_the_earliest() {
   );
 
   let base = Instant::now();
-  let earliest = base + core::time::Duration::from_secs(1);
-  let latest = base + core::time::Duration::from_secs(5);
+  let earliest = base + Duration::from_secs(1);
+  let latest = base + Duration::from_secs(5);
   for (key, deadline) in [(1u64, latest), (2u64, earliest)] {
     let (tx, _rx) = futures_channel::oneshot::channel();
     joins.insert(
@@ -47,7 +48,7 @@ async fn min_pending_join_deadline_picks_the_earliest() {
 #[compio::test]
 async fn min_pending_leave_deadline_tracks_the_parked_leave() {
   assert_eq!(min_pending_leave_deadline(&None), None);
-  let deadline = Instant::now() + core::time::Duration::from_secs(3);
+  let deadline = Instant::now() + Duration::from_secs(3);
   let pl = PendingLeave {
     repliers: Vec::new(),
     deadline,
@@ -94,7 +95,7 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
   let (tx_live, mut rx_live) = futures_channel::oneshot::channel::<super::Result<()>>();
   let mut not_expired = Some(PendingLeave {
     repliers: vec![tx_live],
-    deadline: now + core::time::Duration::from_secs(10),
+    deadline: now + Duration::from_secs(10),
   });
   reap_pending_leave(&mut not_expired, now).await;
   assert!(
@@ -110,7 +111,7 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
   let (tx, rx) = futures_channel::oneshot::channel::<super::Result<()>>();
   let mut expired = Some(PendingLeave {
     repliers: vec![tx],
-    deadline: now - core::time::Duration::from_secs(1),
+    deadline: now - Duration::from_secs(1),
   });
   reap_pending_leave(&mut expired, now).await;
   assert!(expired.is_none(), "an expired leave clears its slot");
@@ -137,7 +138,7 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
       pending: HashSet::new(),
       contacted: 0,
       requested: 3,
-      deadline: now + core::time::Duration::from_secs(60),
+      deadline: now + Duration::from_secs(60),
       reply: tx_fail,
     },
   );
@@ -149,7 +150,7 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
       pending: HashSet::new(),
       contacted: 2,
       requested: 2,
-      deadline: now + core::time::Duration::from_secs(60),
+      deadline: now + Duration::from_secs(60),
       reply: tx_ok,
     },
   );

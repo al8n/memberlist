@@ -8,6 +8,9 @@
 //! addresses.
 
 use std::{future::Future, net::SocketAddr};
+// `IpAddr` is only referenced by the `getifs` local-advertise path.
+#[cfg(feature = "getifs")]
+use std::net::IpAddr;
 
 /// Resolves an unresolved address (e.g. a `host:port` domain name) into wire
 /// [`SocketAddr`]s.
@@ -185,7 +188,7 @@ fn local_socket_addrs(
   // `private_addrs` / `public_addrs` use the broad RFC 6890 special-purpose
   // registry (CGNAT, benchmarking, NAT64, ...), not the RFC 1918 / RFC 4193
   // "reachable LAN contact" set we want to advertise.
-  let mut ips: Vec<std::net::IpAddr> = getifs::local_addrs()?
+  let mut ips: Vec<IpAddr> = getifs::local_addrs()?
     .iter()
     .map(|n| n.addr())
     .filter(|ip| scope.accepts(*ip))
@@ -210,7 +213,7 @@ fn local_socket_addrs(
 #[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]
 impl LocalAddrScope {
   /// Whether `ip` is an acceptable advertise candidate for this scope.
-  fn accepts(self, ip: std::net::IpAddr) -> bool {
+  fn accepts(self, ip: IpAddr) -> bool {
     use iprfc::{RFC1918, RFC4193, RFC6890};
     match self {
       // RFC 1918 (IPv4) + RFC 4193 unique-local (IPv6).
@@ -225,10 +228,10 @@ impl LocalAddrScope {
 
 /// Link-local (IPv4 169.254/16, IPv6 fe80::/10) — usable only on the local link.
 #[cfg(feature = "getifs")]
-fn is_link_local(ip: std::net::IpAddr) -> bool {
+fn is_link_local(ip: IpAddr) -> bool {
   match ip {
-    std::net::IpAddr::V4(a) => a.is_link_local(),
-    std::net::IpAddr::V6(a) => (a.segments()[0] & 0xffc0) == 0xfe80,
+    IpAddr::V4(a) => a.is_link_local(),
+    IpAddr::V6(a) => (a.segments()[0] & 0xffc0) == 0xfe80,
   }
 }
 
