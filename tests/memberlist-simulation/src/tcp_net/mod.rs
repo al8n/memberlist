@@ -51,6 +51,7 @@ use rand::{SeedableRng, rngs::SmallRng};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
+use memberlist_proto::typed::State;
 
 /// The concrete coordinator the harness drives.
 type Node1 = StreamEndpoint<SmolStr, SocketAddr, RawRecords>;
@@ -724,15 +725,11 @@ impl TcpCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
+    self.member_state(host, peer) == Some(State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
-  pub fn member_state(
-    &self,
-    host: SocketAddr,
-    peer: &SmolStr,
-  ) -> Option<memberlist_proto::typed::State> {
+  pub fn member_state(&self, host: SocketAddr, peer: &SmolStr) -> Option<State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -1472,10 +1469,9 @@ impl TcpCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Dead)
-            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(State::Dead) | Some(State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }

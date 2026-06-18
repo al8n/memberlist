@@ -42,6 +42,13 @@ use rand::{SeedableRng, rngs::SmallRng};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig};
+use memberlist_proto::typed::State;
+use rustls::{
+  client::danger::{HandshakeSignatureValid, ServerCertVerified},
+  crypto::CryptoProvider,
+  version::TLS13,
+};
+use std::collections::HashSet;
 
 /// The concrete coordinator the harness drives.
 ///
@@ -67,13 +74,13 @@ struct PendingDatagram {
 /// backend feature. The entire conformance suite runs under whichever is
 /// chosen (`quic` → ring, `quic-rustls-aws-lc-rs` → aws-lc-rs).
 #[cfg(not(feature = "quic-rustls-aws-lc-rs"))]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn sim_crypto_provider() -> Arc<CryptoProvider> {
   Arc::new(rustls::crypto::ring::default_provider())
 }
 
 /// See [`sim_crypto_provider`]. aws-lc-rs variant.
 #[cfg(feature = "quic-rustls-aws-lc-rs")]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn sim_crypto_provider() -> Arc<CryptoProvider> {
   Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
@@ -109,24 +116,24 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
       _n: &rustls_pki_types::ServerName<'_>,
       _o: &[u8],
       _t: rustls_pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-      Ok(rustls::client::danger::ServerCertVerified::assertion())
+    ) -> Result<ServerCertVerified, rustls::Error> {
+      Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
       &self,
       _m: &[u8],
       _c: &CertificateDer<'_>,
       _d: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-      Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+      Ok(HandshakeSignatureValid::assertion())
     }
     fn verify_tls13_signature(
       &self,
       _m: &[u8],
       _c: &CertificateDer<'_>,
       _d: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-      Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+      Ok(HandshakeSignatureValid::assertion())
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
       sim_crypto_provider()
@@ -151,7 +158,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
   // covered by `mtls_rejects_unauthenticated_client_no_side_effects`
   // in `tests/quic_conformance.rs`.
   let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(chain, key)
@@ -160,7 +167,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
   let server = quinn_proto::ServerConfig::with_crypto(Arc::new(qsc));
 
   let client_tls = rustls::ClientConfig::builder_with_provider(provider)
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer))
@@ -213,24 +220,24 @@ pub struct QuicCluster {
   /// Per-host record of whether the host has EVER observed the named peer in
   /// `Suspect` (scanned every tick — a transient Suspect that is later
   /// refuted would otherwise be invisible to an end-state assertion).
-  suspected: HashMap<SocketAddr, std::collections::HashSet<SmolStr>>,
+  suspected: HashMap<SocketAddr, HashSet<SmolStr>>,
   /// Per-host record of whether the host has EVER observed the named peer
   /// `Alive` (so a D1 test can assert "the merge reached the Endpoint" even
   /// if normal SWIM later transitions the peer away).
-  ever_alive: HashMap<SocketAddr, std::collections::HashSet<SmolStr>>,
+  ever_alive: HashMap<SocketAddr, HashSet<SmolStr>>,
   /// Per-host record of whether the host has EVER observed the named peer
   /// `Dead` or `Left` (so a leave test can assert the transition was
   /// observed even after the dead/left entry is later GC'd to absent).
-  ever_gone: HashMap<SocketAddr, std::collections::HashSet<SmolStr>>,
+  ever_gone: HashMap<SocketAddr, HashSet<SmolStr>>,
   /// Per-host record of whether `Event::LeftCluster` has fired.
-  left: std::collections::HashSet<SocketAddr>,
+  left: HashSet<SocketAddr>,
   /// Per-host SET of every distinct reliable `Event::UserPacket` payload
   /// observed (dedup is required because `scan_events` re-queues every event
   /// via [`Endpoint::requeue_event`], so a single emission is observed once
   /// per scan — a `Vec::push` would count duplicates and over-report). Kept
   /// so a test can assert the payload arrived AND the bridge carrying it was
   /// reaped (no leak), even though SWIM later does nothing with it.
-  user_packets: HashMap<SocketAddr, std::collections::HashSet<bytes::Bytes>>,
+  user_packets: HashMap<SocketAddr, HashSet<bytes::Bytes>>,
   /// One-shot D1 hook: the tick `host` FIRST merges a peer (the join reply
   /// reached its Endpoint), tear its QUIC connection down the SAME tick. The
   /// `bool` is whether it has fired.
@@ -322,7 +329,7 @@ impl QuicCluster {
       suspected: HashMap::new(),
       ever_alive: HashMap::new(),
       ever_gone: HashMap::new(),
-      left: std::collections::HashSet::new(),
+      left: HashSet::new(),
       user_packets: HashMap::new(),
       d1_drop_quic: None,
       d1_lose_conn: None,
@@ -1035,15 +1042,11 @@ impl QuicCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
+    self.member_state(host, peer) == Some(State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
-  pub fn member_state(
-    &self,
-    host: SocketAddr,
-    peer: &SmolStr,
-  ) -> Option<memberlist_proto::typed::State> {
+  pub fn member_state(&self, host: SocketAddr, peer: &SmolStr) -> Option<State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -1708,10 +1711,9 @@ impl QuicCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Dead)
-            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(State::Dead) | Some(State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }
@@ -1829,10 +1831,7 @@ impl QuicCluster {
       .endpoint_ref()
       .members()
       .filter(|ns| ns.id_ref() != &me)
-      .any(|ns| {
-        node.endpoint_ref().member_liveness(ns.id_ref())
-          == Some(memberlist_proto::typed::State::Alive)
-      })
+      .any(|ns| node.endpoint_ref().member_liveness(ns.id_ref()) == Some(State::Alive))
   }
 
   fn peers_of(&self, host: SocketAddr) -> Vec<SocketAddr> {

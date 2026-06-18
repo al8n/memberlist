@@ -50,6 +50,12 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
+use memberlist_proto::typed::State;
+use rustls::{
+  client::danger::{HandshakeSignatureValid, ServerCertVerified},
+  crypto::CryptoProvider,
+  version::TLS13,
+};
 
 /// The concrete coordinator the harness drives: the cluster-label decorator
 /// over the rustls-over-TCP record layer. The reliable plane is label-gated
@@ -60,13 +66,13 @@ type Node1 = StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>;
 /// feature. The entire conformance suite runs under whichever is chosen
 /// (`tls` → ring, `tls-rustls-aws-lc-rs` → aws-lc-rs).
 #[cfg(not(feature = "tls-rustls-aws-lc-rs"))]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn sim_crypto_provider() -> Arc<CryptoProvider> {
   Arc::new(rustls::crypto::ring::default_provider())
 }
 
 /// See [`sim_crypto_provider`]. aws-lc-rs variant.
 #[cfg(feature = "tls-rustls-aws-lc-rs")]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn sim_crypto_provider() -> Arc<CryptoProvider> {
   Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
@@ -74,7 +80,7 @@ pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// cluster-CA verification policy is the operator's; behavioural determinism
 /// in the sim is the virtual clock + the deterministic virtual TCP, not crypto.
 #[derive(Debug)]
-struct AnyServer(Arc<rustls::crypto::CryptoProvider>);
+struct AnyServer(Arc<CryptoProvider>);
 
 impl rustls::client::danger::ServerCertVerifier for AnyServer {
   fn verify_server_cert(
@@ -84,24 +90,24 @@ impl rustls::client::danger::ServerCertVerifier for AnyServer {
     _n: &rustls_pki_types::ServerName<'_>,
     _o: &[u8],
     _t: rustls_pki_types::UnixTime,
-  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-    Ok(rustls::client::danger::ServerCertVerified::assertion())
+  ) -> Result<ServerCertVerified, rustls::Error> {
+    Ok(ServerCertVerified::assertion())
   }
   fn verify_tls12_signature(
     &self,
     _m: &[u8],
     _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn verify_tls13_signature(
     &self,
     _m: &[u8],
     _c: &CertificateDer<'_>,
     _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    Ok(HandshakeSignatureValid::assertion())
   }
   fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
     self.0.signature_verification_algorithms.supported_schemes()
@@ -123,13 +129,13 @@ fn sim_tls_config() -> TlsOptions {
   let (chain, key) = self_signed();
   let provider = sim_crypto_provider();
   let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(chain, key)
     .unwrap();
   let client = rustls::ClientConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
@@ -158,13 +164,13 @@ fn sim_tls_config_mtls_required() -> TlsOptions {
 
   let (chain, key) = self_signed();
   let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .with_client_cert_verifier(verifier)
     .with_single_cert(chain, key)
     .unwrap();
   let client = rustls::ClientConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
+    .with_protocol_versions(&[&TLS13])
     .unwrap()
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
@@ -798,15 +804,11 @@ impl TlsCluster {
 
   /// `true` if `host` currently sees `peer` Alive.
   pub fn sees_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self.member_state(host, peer) == Some(memberlist_proto::typed::State::Alive)
+    self.member_state(host, peer) == Some(State::Alive)
   }
 
   /// `host`'s gossip-tracked liveness state for `peer`, if known.
-  pub fn member_state(
-    &self,
-    host: SocketAddr,
-    peer: &SmolStr,
-  ) -> Option<memberlist_proto::typed::State> {
+  pub fn member_state(&self, host: SocketAddr, peer: &SmolStr) -> Option<State> {
     self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
@@ -1547,10 +1549,9 @@ impl TlsCluster {
           .filter(|ns| ns.id_ref() != &me)
         {
           match node.endpoint_ref().member_liveness(ns.id_ref()) {
-            Some(memberlist_proto::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Alive) => alv.push(ns.id_ref().clone()),
-            Some(memberlist_proto::typed::State::Dead)
-            | Some(memberlist_proto::typed::State::Left) => gn.push(ns.id_ref().clone()),
+            Some(State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(State::Alive) => alv.push(ns.id_ref().clone()),
+            Some(State::Dead) | Some(State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }
