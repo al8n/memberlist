@@ -79,7 +79,7 @@ use crate::encryption::{EncryptionError, EncryptionOptions, encode_encrypted_fra
 #[cfg(compression)]
 use crate::compression::{CompressionOptions, CompressionOutcome, encode_compressed_frame};
 
-use core::{net::SocketAddr, time::Duration};
+use core::net::SocketAddr;
 use std::{
   boxed::Box,
   collections::{BTreeSet, VecDeque},
@@ -103,23 +103,6 @@ use crate::{
 };
 use bridge::StreamBridge;
 use conn::StreamConns;
-
-/// Handshake completion budget for an inbound (accepted) exchange.
-///
-/// Historical default for the server-side accept handshake deadline,
-/// retained as documentation. The runtime value is read from
-/// [`crate::config::EndpointOptions::accept_handshake_deadline`] —
-/// operators tune via `EndpointOptions::with_accept_handshake_deadline`;
-/// see [`crate::config::DEFAULT_ACCEPT_HANDSHAKE_DEADLINE`].
-///
-/// An accepted connection has no `Event::DialRequested` exchange
-/// deadline (only outbound dials carry that); the coordinator bounds
-/// its label / handshake step with this per-endpoint budget. A label /
-/// handshake step that has not settled by `now +
-/// accept_handshake_deadline` is reaped by the bridge's
-/// `poll_timeout` / `pump_out` deadline path with no `Stream` minted.
-#[allow(dead_code)]
-const ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Machine-side backstop on the buffered inbound gossip datagrams
 /// ([`StreamEndpoint::mem_ingress`]). A driver that does not gate its socket
@@ -1933,7 +1916,9 @@ where
 
   /// The driver accepted an inbound transport connection from `from`.
   /// On admission, allocates an [`ExchangeId`], builds a server-side
-  /// `Handshaking` bridge bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns
+  /// `Handshaking` bridge bounded by the configured
+  /// [`accept_handshake_deadline`](crate::config::EndpointOptions::accept_handshake_deadline),
+  /// and returns
   /// `Some(id)` — the handle the driver tags this connection's inbound bytes
   /// with. The `Stream` is minted later (at label / handshake settled, via
   /// `Endpoint::accept_stream`).

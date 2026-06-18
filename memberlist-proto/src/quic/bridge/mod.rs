@@ -25,7 +25,7 @@ use super::conn::ConnTable;
 use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
   endpoint::Endpoint,
-  event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored, StreamId},
+  event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
   label::{LabelOutcome, classify_header, encode_label_prefix},
   stream::Stream,
 };
@@ -478,16 +478,6 @@ where
   /// transitions).
   pub(crate) fn is_phase_failed(&self) -> bool {
     matches!(self.phase, BridgePhase::Failed(_))
-  }
-
-  /// The memberlist [`StreamId`] that correlates this bridge to its
-  /// [`Stream`] — the observation seam for the async driver shell to map a
-  /// reliable exchange back to its `StreamId`. The Sans-I/O coordinator keys
-  /// `bridges` by `stream.id()` directly at `accept`/`dial` time and does
-  /// not call this accessor in-crate, hence the narrowly-scoped allow below.
-  #[allow(dead_code)]
-  pub(crate) fn id(&self) -> StreamId {
-    self.stream.id()
   }
 
   /// The pooled quinn connection this bridge rides on.

@@ -673,8 +673,6 @@ fn bridge_accessors_and_set_encryption_force_disable() {
   );
   assert_eq!(bridge.ch(), ConnectionHandle(0));
   assert_eq!(bridge.sid(), QuicSid::new(Side::Client, Dir::Bi, 0));
-  // `id()` returns the inner stream's StreamId — exercise the accessor.
-  let _ = bridge.id();
   // Even handed a (would-be) enabled policy, the stored options stay
   // disabled on the QUIC reliable path.
   bridge.set_encryption(crate::EncryptionOptions::new());

@@ -2,7 +2,6 @@
 
 // pub(crate) items below will be consumed by `cluster.rs`.
 // Until then the dead_code lint would fire; suppress it for this module.
-#![allow(dead_code)]
 
 use std::{
   collections::{BTreeMap, HashSet, VecDeque},
@@ -67,10 +66,10 @@ pub(crate) struct PendingDatagram {
 /// connection does:
 ///
 /// * **Connection cut** — either endpoint crashes, or a partition opens across
-///   the link. [`Network::step_streams`] reaps the stream BEFORE pumping, so no
+///   the link. [`Network::step_streams_recording`] reaps the stream BEFORE pumping, so no
 ///   byte ever crosses a cut link and the exchange cannot complete.
 /// * **Latency** — a real exchange incurs RTT. This is not stamped explicitly:
-///   a push-pull spans several [`Network::step_streams`] pumps (request → load
+///   a push-pull spans several [`Network::step_streams_recording`] pumps (request → load
 ///   response → response), and between pumps the simulation clock advances to
 ///   the next endpoint deadline (gossip / probe timers) and to the latency-
 ///   delayed dial/ack datagrams. The exchange therefore already consumes
@@ -625,29 +624,8 @@ impl Network {
     any
   }
 
-  /// Pipe bytes between active virtual streams each tick.
-  ///
-  /// Streams are the RELIABLE TCP/QUIC plane (see [`VirtualStream`]). The
-  /// unreliable-datagram packet faults — probabilistic drop / duplicate /
-  /// jitter and the one-shot `drop_next` — are NOT applied here: a reliable
-  /// connection masks packet-level loss / duplication / reorder, so modeling it
-  /// as lossy would be unfaithful. A stream's only faults are connection cut
-  /// (crash or partition, reaped below before any pumping) and latency
-  /// (approximated by the natural step cadence, per [`VirtualStream`]).
-  ///
-  /// For each surviving stream pair:
-  /// 1. Drain initiator → acceptor bytes via `poll_transmit` / `handle_data`.
-  /// 2. Drain acceptor → initiator bytes via `poll_transmit` / `handle_data`.
-  /// 3. Route `EndpointEvent`s from each stream back into its owning endpoint
-  ///    and apply any returned `StreamCommand`.
-  /// 4. Fire `handle_timeout(now)` on each stream.
-  ///
-  /// Completed (both sides done) and failed streams are removed from `streams`.
-  pub(crate) fn step_streams(&mut self, streams: &mut Vec<VirtualStream>, now: Instant) {
-    self.step_streams_inner(streams, now, None);
-  }
-
-  /// Like [`step_streams`](Self::step_streams), but additionally records every
+  /// Pumps the streams like [`step_streams_inner`](Self::step_streams_inner), but
+  /// additionally records every
   /// per-event change to the endpoint membership a routed `EndpointEvent` causes
   /// into `out` as a [`Transition`], in event-dispatch order. A push-pull
   /// `EndpointEvent` (request or reply) merges remote state inline via
@@ -669,9 +647,26 @@ impl Network {
     self.step_streams_inner(streams, now, Some((subjects, out)));
   }
 
-  /// Shared stream-pumping skeleton for [`step_streams`](Self::step_streams) and
-  /// [`step_streams_recording`](Self::step_streams_recording). With
-  /// `recorder == None` it behaves exactly as the plain pump; with `Some` it
+  /// Pipe bytes between active virtual streams each tick.
+  ///
+  /// Streams are the RELIABLE TCP/QUIC plane (see [`VirtualStream`]). The
+  /// unreliable-datagram packet faults — probabilistic drop / duplicate /
+  /// jitter and the one-shot `drop_next` — are NOT applied here: a reliable
+  /// connection masks packet-level loss / duplication / reorder, so modeling it
+  /// as lossy would be unfaithful. A stream's only faults are connection cut
+  /// (crash or partition, reaped below before any pumping) and latency
+  /// (approximated by the natural step cadence, per [`VirtualStream`]).
+  ///
+  /// For each surviving stream pair:
+  /// 1. Drain initiator → acceptor bytes via `poll_transmit` / `handle_data`.
+  /// 2. Drain acceptor → initiator bytes via `poll_transmit` / `handle_data`.
+  /// 3. Route `EndpointEvent`s from each stream back into its owning endpoint
+  ///    and apply any returned `StreamCommand`.
+  /// 4. Fire `handle_timeout(now)` on each stream.
+  ///
+  /// Completed (both sides done) and failed streams are removed from `streams`.
+  ///
+  /// With `recorder == None` it behaves as the plain pump; with `Some` it
   /// snapshots the receiving observer's row before and after each routed
   /// `EndpointEvent` and pushes a [`Transition`] for every subject whose
   /// `(state, incarnation)` changed.

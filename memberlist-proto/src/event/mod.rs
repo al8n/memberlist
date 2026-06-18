@@ -30,13 +30,14 @@ use bytes::Bytes;
 pub struct ExchangeId(u64);
 
 impl ExchangeId {
-  /// Construct from a raw u64. Crate-internal: the streams
-  /// coordinator's allocator and the [`From<StreamId>`] coercion are
-  /// the only legitimate producers. `dead_code` allow guards builds
-  /// without the streams module (no `tcp` / `tls` feature) — the type
-  /// itself stays compiled so [`ExchangeCompleted`] is feature-uniform,
-  /// but the constructor has no caller in those builds.
-  #[allow(dead_code)]
+  /// Construct from a raw u64. Crate-internal: the streams coordinator's
+  /// allocator and the [`From<StreamId>`] coercion are the only producers, both
+  /// in the streams module. The type itself stays compiled so [`ExchangeId`] is
+  /// feature-uniform; the constructor has no caller without `tcp` / `tls`.
+  #[cfg_attr(
+    not(any(feature = "tls", feature = "tcp")),
+    allow(dead_code, reason = "only constructed by the streams coordinator")
+  )]
   #[inline(always)]
   pub(crate) const fn new(raw: u64) -> Self {
     Self(raw)
@@ -176,9 +177,13 @@ pub struct ExchangeCompleted<A> {
 }
 
 impl<A> ExchangeCompleted<A> {
-  /// Construct a new payload. Crate-internal: the coordinator's
-  /// bridge-reap path is the only legitimate producer.
-  #[allow(dead_code)]
+  /// Construct a new payload. Crate-internal: the stream/QUIC coordinators'
+  /// bridge-reap paths are the only producers, so the constructor has no caller
+  /// without `tcp` / `tls` / `quic`.
+  #[cfg_attr(
+    not(any(feature = "tls", feature = "tcp", feature = "quic")),
+    allow(dead_code, reason = "only constructed by the stream/QUIC coordinators")
+  )]
   #[inline(always)]
   pub(crate) const fn new(
     eid: ExchangeId,
@@ -247,7 +252,6 @@ pub struct StreamId(u64);
 impl StreamId {
   /// Construct from a raw u64. Crate-internal: the `Endpoint`'s allocator is
   /// the only legitimate producer of `StreamId`s.
-  #[allow(dead_code)]
   pub(crate) const fn from_raw(raw: u64) -> Self {
     Self(raw)
   }

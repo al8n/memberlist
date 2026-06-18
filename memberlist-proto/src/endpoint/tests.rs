@@ -4825,7 +4825,7 @@ fn eof_in_inbound_sending_response_empty_buf_is_ok() {
   s.handle_data(&request_bytes, t0)
     .expect("complete request frame is decoded");
   assert!(
-    matches!(s.phase, StreamPhase::InboundSendingResponse(_)),
+    matches!(s.phase, StreamPhase::InboundSendingResponse),
     "FSM did not reach InboundSendingResponse — phase = {:?}",
     s.phase
   );
@@ -5137,7 +5137,7 @@ fn second_frame_in_inbound_sending_response_fails_unexpected() {
   // InboundSendingResponse.
   let req = build_push_pull_request_bytes();
   s.handle_data(&req, t0).expect("decode request");
-  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse(_)));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse));
 
   // Adversarial peer sends a SECOND complete frame while we're still
   // sending the response. The FSM's `PhaseKind::Ignore` arm MUST fail
@@ -5171,7 +5171,7 @@ fn eof_in_inbound_sending_response_partial_trailing_fails() {
   // Feed a complete request frame (advances to InboundSendingResponse).
   let request_bytes = build_push_pull_request_bytes();
   s.handle_data(&request_bytes, t0).expect("decode request");
-  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse(_)));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse));
 
   // Feed a single byte of a SECOND frame (partial trailing).
   s.handle_data(&[7u8], t0)
