@@ -191,7 +191,7 @@ fn hardware_address_medium(addr: &HardwareAddress) -> Option<Medium> {
 /// the gossip RNG (defaulting to [`SmallRng`]); [`new`](Self::new) seeds it from
 /// the pinned interface seed, or from an independent `getrandom` draw when none is
 /// pinned, while [`with_rng`](Self::with_rng) accepts a caller-supplied one.
-pub struct Memberlist<I, A, D: Device, R = SmallRng> {
+pub struct Memberlist<I, A, D, R = SmallRng> {
   iface: Interface,
   /// The seed handed to smoltcp's interface RNG at construction (TCP ISN /
   /// ephemeral port selection). Retained because smoltcp does not expose it;
@@ -221,7 +221,7 @@ pub struct Memberlist<I, A, D: Device, R = SmallRng> {
 
 // Constructors that build the embedded engine with an OS-seeded `SmallRng` —
 // they need full node identity to stand up the membership machine.
-impl<I, A, D: Device> Memberlist<I, A, D, SmallRng>
+impl<I, A, D> Memberlist<I, A, D, SmallRng>
 where
   I: memberlist_proto::Id,
 {
@@ -250,6 +250,7 @@ where
   ) -> Self
   where
     Res: Resolver<Address = A>,
+    D: Device,
   {
     Self::try_new(cfg, iface, transform, ep_cfg, resolver, device, now).expect(
       "Memberlist::new: invalid interface configuration or entropy failure; use try_new to handle",
@@ -329,6 +330,7 @@ where
   ) -> Result<Self, InitError>
   where
     Res: Resolver<Address = A>,
+    D: Device,
   {
     // Run the engine's advertise-independent config preflight BEFORE resolving
     // the advertise address or touching the link layer. An invalid port, gossip
@@ -707,7 +709,7 @@ where
 }
 
 // A pure field accessor — needs neither node identity nor the RNG.
-impl<I, A, D: Device, R> Memberlist<I, A, D, R> {
+impl<I, A, D, R> Memberlist<I, A, D, R> {
   /// The seed handed to smoltcp's interface RNG at construction.
   ///
   /// A diagnostic for the interface-seed contract: smoltcp seeds its TCP
@@ -724,7 +726,7 @@ impl<I, A, D: Device, R> Memberlist<I, A, D, R> {
 
 // Membership operations that drive the embedded engine each `poll` — joining,
 // gossip, queries, and config — all needing full node identity.
-impl<I, A, D: Device, R: Rng> Memberlist<I, A, D, R>
+impl<I, A, D, R: Rng> Memberlist<I, A, D, R>
 where
   I: memberlist_proto::Id,
 {
@@ -762,6 +764,7 @@ where
   ) -> Result<Self, InitError>
   where
     Res: Resolver<Address = A>,
+    D: Device,
   {
     // Run the engine's advertise-independent config preflight BEFORE resolving
     // the advertise address or touching the link layer, exactly as in
@@ -1649,7 +1652,10 @@ where
   ///    into the engine's returned `min(machine, closing)` wakeup, so a caller
   ///    sleeping to the result wakes in time for the stack's retransmit /
   ///    delayed-ACK timers as well as every engine-owned deadline.
-  pub fn poll(&mut self, now: Instant, device: &mut D) -> Option<Instant> {
+  pub fn poll(&mut self, now: Instant, device: &mut D) -> Option<Instant>
+  where
+    D: Device,
+  {
     let s_now = to_smoltcp_instant(now);
 
     // 1. Stack tick.
