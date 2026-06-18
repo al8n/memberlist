@@ -160,18 +160,21 @@ fn service_quinn_drains_poll_endpoint_events() {
     // NEXT tick is fed.
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
   assert!(
-    a.endpoint_events_processed > 0,
+    a.counters.endpoint_events_processed > 0,
     "service_quinn must drain Connection::poll_endpoint_events() and \
        feed each non-Drained event to quinn::Endpoint::handle_event; \
        missing this drain breaks quinn-proto's polling contract"
   );
   assert!(
-    b.endpoint_events_processed > 0,
+    b.counters.endpoint_events_processed > 0,
     "same on the accepting side: handshake completion emits \
        `NeedIdentifiers` on both peers' connections"
   );
@@ -262,7 +265,10 @@ fn emitted_quic_packets_always_have_fixed_bit_set() {
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -369,7 +375,10 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
       }
     }
     b.handle_timeout(now);
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break 'ferry;
     }
   }
@@ -767,8 +776,8 @@ fn connection_lost_immediately_reaps_bridges_under_strict_poll() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
@@ -776,7 +785,10 @@ fn connection_lost_immediately_reaps_bridges_under_strict_poll() {
     // one endpoint event — otherwise iteration 1 (poll_transmit empty
     // because no `handle_timeout` has yet driven `service_dials`) bails
     // before the handshake even starts.
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -804,7 +816,7 @@ fn connection_lost_immediately_reaps_bridges_under_strict_poll() {
        before the idle-timeout is advanced"
   );
 
-  let before = a.bridges_reaped_on_connection_lost;
+  let before = a.counters.bridges_reaped_on_connection_lost;
   let bridges_before = a.live_bridge_count();
   assert!(bridges_before >= 1);
 
@@ -841,13 +853,13 @@ fn connection_lost_immediately_reaps_bridges_under_strict_poll() {
   // per bridge reaped on the `Event::ConnectionLost` path; with a
   // mere-`mark_fatal` shape the counter stays at zero.
   assert!(
-    a.bridges_reaped_on_connection_lost > before,
+    a.counters.bridges_reaped_on_connection_lost > before,
     "at least one bridge MUST have been drain_then_reap'd inside \
        `service_quinn` on the `Event::ConnectionLost` path this tick \
        (counter before = {before}, after = {}). Without the inline \
        drain, the bridge sits fatal in `self.bridges` and a strict-poll \
        driver gets no wake to reach the deferred reap.",
-    a.bridges_reaped_on_connection_lost,
+    a.counters.bridges_reaped_on_connection_lost,
   );
   assert_eq!(
     a.live_bridge_count(),
@@ -924,7 +936,10 @@ fn closing_a_pooled_connection_does_not_change_membership() {
     if a.endpoint_mut().num_members() >= 2 {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1043,12 +1058,15 @@ fn queue_unreliable_datagram_to_established_peer_is_queued() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1108,12 +1126,15 @@ fn received_datagram_surfaces_through_the_same_memberlist_ingress_as_udp() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1211,12 +1232,15 @@ fn inbound_datagram_dropped_when_ingress_backlog_at_cap() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1566,7 +1590,10 @@ fn expired_dial_does_not_open_unowned_bidi_stream() {
     // Only bail on no-traffic AFTER both sides have processed at least
     // one endpoint event — see the matching pattern in
     // `connection_lost_immediately_reaps_bridges_under_strict_poll`.
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1944,10 +1971,13 @@ fn inbound_accepted_bridge_pumped_same_tick_under_strict_poll() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     max_live_on_a = max_live_on_a.max(a.live_bridge_count());
-    if b.bridges_pumped_after_acceptance > 0 {
+    if b.counters.bridges_pumped_after_acceptance > 0 {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -1959,7 +1989,7 @@ fn inbound_accepted_bridge_pumped_same_tick_under_strict_poll() {
        completed and `service_dials`'s retry must have opened the bidi."
   );
   assert!(
-    b.bridges_pumped_after_acceptance > 0,
+    b.counters.bridges_pumped_after_acceptance > 0,
     "every bridge inserted into `self.bridges` by `service_quinn`'s \
        `accept(Dir::Bi)` loop (step 4) or `service_dials`'s `open(Dir::Bi)` \
        (step 5) MUST be pumped within the SAME tick by `run_tick`'s step \
@@ -1969,7 +1999,7 @@ fn inbound_accepted_bridge_pumped_same_tick_under_strict_poll() {
        next wakes at the bridge's exchange deadline (`Bridge::poll_timeout` \
        falls back to the snapshotted exchange deadline; \
        `quinn_proto::Connection::poll_timeout` reports transport timers only).",
-    b.bridges_pumped_after_acceptance,
+    b.counters.bridges_pumped_after_acceptance,
   );
 }
 
@@ -2034,18 +2064,21 @@ fn accept_error_response_path_compiles_and_counter_is_wired() {
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
 
   // No AcceptError fires for a clean handshake.
   assert_eq!(
-    a.accept_error_responses_emitted, 0,
+    a.counters.accept_error_responses_emitted, 0,
     "clean handshakes never trigger AcceptError; A counter MUST stay 0"
   );
   assert_eq!(
-    b.accept_error_responses_emitted, 0,
+    b.counters.accept_error_responses_emitted, 0,
     "clean handshakes never trigger AcceptError; B counter MUST stay 0"
   );
 }
@@ -2130,7 +2163,10 @@ fn rejected_join_merge_close_terminalizes_bridge_same_tick() {
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -2144,14 +2180,14 @@ fn rejected_join_merge_close_terminalizes_bridge_same_tick() {
   // `Close` arm would leave `fatal == false` and the re-check would
   // never fire (counter stays 0).
   assert!(
-    b.bridges_terminalized_via_close_command > 0,
+    b.counters.bridges_terminalized_via_close_command > 0,
     "B's `pump_bridges` post-`drain_payload_only` `is_terminal()` \
        re-check MUST have fired at least once for the rejected-merge \
        bridge (counter = {}). Without the full bidi retirement on the \
        `Close` arm the bridge stays non-terminal, and the re-check never \
        tips — the bridge lingers in `self.bridges` until its exchange \
        deadline (~5 s).",
-    b.bridges_terminalized_via_close_command,
+    b.counters.bridges_terminalized_via_close_command,
   );
 
   // And the bridge is gone by the time the loop terminates — no
@@ -2232,8 +2268,8 @@ fn clean_bridge_reap_retires_quic_recv_half() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if !moved
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
       && a.live_bridge_count() == 0
       && b.live_bridge_count() == 0
     {
@@ -2550,12 +2586,15 @@ fn oversize_unreliable_datagram_reports_too_large() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -2616,12 +2655,15 @@ fn full_datagram_send_buffer_reports_not_ready_without_eviction() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if a.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -2689,12 +2731,15 @@ fn udp_mode_does_not_advertise_datagram_support() {
     a.handle_timeout(now);
     b.handle_timeout(now);
     if b.live_bridge_count() >= 1
-      && a.endpoint_events_processed > 0
-      && b.endpoint_events_processed > 0
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
     {
       break;
     }
-    if !moved && a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 {
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
       break;
     }
   }
@@ -2785,7 +2830,10 @@ fn quic_packet_ingress_does_not_advance_membership_time() {
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if a.endpoint_events_processed > 0 && b.endpoint_events_processed > 0 && b_to_a.is_some() {
+    if a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+      && b_to_a.is_some()
+    {
       break;
     }
   }
