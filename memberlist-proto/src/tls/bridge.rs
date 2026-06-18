@@ -3,7 +3,7 @@
 //! ([`TlsRecords`](super::records::TlsRecords)).
 
 use crate::{
-  bridge_phase::{BridgeFailure, BridgePhase},
+  bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
 };
 
@@ -22,7 +22,7 @@ use crate::{
   event::Event,
   streams::{
     bridge::StreamBridge,
-    phase::StreamPhase,
+    phase::BridgePhase,
     test_support::{addr, handshaking_pair as shared_handshaking_pair, phase_label},
   },
   tls::options::tests::{test_client, test_server},
@@ -132,7 +132,7 @@ fn promote_installs_stream_and_enters_established() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Active)
+      BridgePhase::Established(LinkState::Active)
     ),
     "promote entered Established(Active)"
   );
@@ -200,7 +200,7 @@ fn frame_round_trips_then_clean_close_reaps() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "client reached BothClosed (sent request + close_notify, saw peer close_notify), got {:?}",
     phase_label(client.phase_ref())
@@ -208,7 +208,7 @@ fn frame_round_trips_then_clean_close_reaps() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "server reached BothClosed, got {:?}",
     phase_label(server.phase_ref())
@@ -666,7 +666,7 @@ fn handshake_failure_tears_down_with_no_stream_and_no_endpoint_events() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Transport(_)))
     ),
     "the reject is a Transport failure, got {:?}",
     phase_label(server.phase_ref())
@@ -723,7 +723,7 @@ fn truncation_read_zero_mid_frame_fails_peer_closed() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "truncation maps to Failed(Decode), got {:?}",
     phase_label(client.phase_ref())
@@ -780,7 +780,7 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Timeout))
     ),
     "the handshake timeout maps to Failed(Timeout), got {:?}",
     phase_label(client.phase_ref())

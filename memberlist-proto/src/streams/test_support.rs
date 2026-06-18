@@ -12,7 +12,7 @@ use smol_str::SmolStr;
 use crate::{
   config::EndpointOptions,
   endpoint::Endpoint,
-  streams::{bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport},
+  streams::{bridge::StreamBridge, phase::BridgePhase, transport::StreamTransport},
 };
 
 /// Default peer-to-socket resolver for test fixtures where `A = SocketAddr` —
@@ -97,15 +97,15 @@ where
   )
 }
 
-/// Render a `StreamPhase` as a static string label for diagnostics.
-pub(crate) fn phase_label(p: &StreamPhase) -> &'static str {
-  use crate::bridge_phase::BridgePhase;
+/// Render a `BridgePhase` as a static string label for diagnostics.
+pub(crate) fn phase_label(p: &BridgePhase) -> &'static str {
+  use crate::bridge_phase::LinkState;
   match p {
-    StreamPhase::Handshaking => "Handshaking",
-    StreamPhase::Established(BridgePhase::Active) => "Established(Active)",
-    StreamPhase::Established(BridgePhase::SendClosed) => "Established(SendClosed)",
-    StreamPhase::Established(BridgePhase::RecvClosed) => "Established(RecvClosed)",
-    StreamPhase::Established(BridgePhase::BothClosed) => "Established(BothClosed)",
-    StreamPhase::Established(BridgePhase::Failed(_)) => "Established(Failed)",
+    BridgePhase::Handshaking => "Handshaking",
+    BridgePhase::Established(LinkState::Active) => "Established(Active)",
+    BridgePhase::Established(LinkState::SendClosed) => "Established(SendClosed)",
+    BridgePhase::Established(LinkState::RecvClosed) => "Established(RecvClosed)",
+    BridgePhase::Established(LinkState::BothClosed) => "Established(BothClosed)",
+    BridgePhase::Established(LinkState::Failed(_)) => "Established(Failed)",
   }
 }

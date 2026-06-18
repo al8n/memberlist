@@ -2280,7 +2280,7 @@ fn clean_bridge_reap_retires_quic_recv_half() {
   );
 }
 
-/// `BridgePhase::Failed` reap MUST be recv-clean AND send-clean by
+/// `LinkState::Failed` reap MUST be recv-clean AND send-clean by
 /// construction — every failure transition retires both halves
 /// atomically BEFORE flipping the phase, so a bridge that becomes
 /// terminal via the failure path cannot orphan quinn stream state.

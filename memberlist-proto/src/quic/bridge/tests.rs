@@ -47,7 +47,7 @@ fn drain_payload_only_defers_until_recv_fin_observed() {
     false,
     false,
   );
-  assert!(matches!(bridge.phase, BridgePhase::Active));
+  assert!(matches!(bridge.phase, LinkState::Active));
 
   // Dispatch the UserData frame through the bridge's inner FSM. The
   // FSM transitions to `Done` and queues `EndpointEvent::UserDataReceived`
@@ -83,7 +83,7 @@ fn drain_payload_only_defers_until_recv_fin_observed() {
 
   // Flip the bridge to RecvClosed (peer FIN observed).
   bridge.observe_recv_fin();
-  assert!(matches!(bridge.phase, BridgePhase::RecvClosed));
+  assert!(matches!(bridge.phase, LinkState::RecvClosed));
 
   // Drain attempt #2 — gate releases. The queued event flows through
   // `Endpoint::handle_stream_event` which emits `Event::UserPacket`.
@@ -98,7 +98,7 @@ fn drain_payload_only_defers_until_recv_fin_observed() {
 
 /// A transport-level failure BEFORE peer FIN must not commit the
 /// queued endpoint events. `drain_payload_only` gates on
-/// `BridgePhase::RecvClosed`, but `drain_then_reap` is the terminal
+/// `LinkState::RecvClosed`, but `drain_then_reap` is the terminal
 /// D1 path and drains the FSM queue unconditionally to enforce D1
 /// before lifecycle delivery. When `Bridge::fail` is driven by a
 /// transport signal (peer RESET, ConnectionLost) while the bridge is
@@ -132,7 +132,7 @@ fn pre_fin_transport_failure_discards_queued_payload_events() {
     false,
     false,
   );
-  assert!(matches!(bridge.phase, BridgePhase::Active));
+  assert!(matches!(bridge.phase, LinkState::Active));
 
   // Dispatch a UserData frame — FSM → Done, queues
   // `EndpointEvent::UserDataReceived` AND `StreamEvent::Closed`.
@@ -150,7 +150,7 @@ fn pre_fin_transport_failure_discards_queued_payload_events() {
   bridge.fail_connection_lost();
   assert!(matches!(
     bridge.phase,
-    BridgePhase::Failed(BridgeFailure::ConnectionLost)
+    LinkState::Failed(BridgeFailure::ConnectionLost)
   ));
 
   // Drive the terminal D1 reap path. Without the pre-FIN queue clear
@@ -696,9 +696,9 @@ fn bridge_poll_timeout_some_while_active_none_when_terminal() {
   );
   // Drive to BothClosed via the two FIN observers.
   bridge.observe_send_fin();
-  assert!(matches!(bridge.phase, BridgePhase::SendClosed));
+  assert!(matches!(bridge.phase, LinkState::SendClosed));
   bridge.observe_recv_fin();
-  assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+  assert!(matches!(bridge.phase, LinkState::BothClosed));
   assert!(bridge.is_terminal(), "BothClosed is terminal");
   assert!(
     bridge.poll_timeout().is_none(),
@@ -714,14 +714,14 @@ fn fin_observers_are_noops_on_terminal_phase() {
   bridge.fail_connection_lost();
   assert!(matches!(
     bridge.phase,
-    BridgePhase::Failed(BridgeFailure::ConnectionLost)
+    LinkState::Failed(BridgeFailure::ConnectionLost)
   ));
   bridge.observe_send_fin();
   bridge.observe_recv_fin();
   assert!(
     matches!(
       bridge.phase,
-      BridgePhase::Failed(BridgeFailure::ConnectionLost)
+      LinkState::Failed(BridgeFailure::ConnectionLost)
     ),
     "FIN observers must not overwrite a sticky Failed phase"
   );
@@ -736,10 +736,7 @@ fn fail_stopped_already_retired_sets_transport_failure_and_is_sticky() {
   bridge.pending_out.extend_from_slice(b"stale outbound tail");
   bridge.fail_stopped_already_retired(quinn_proto::VarInt::from_u32(7));
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "STOP_SENDING maps to a Transport failure"
   );
   assert!(
@@ -749,10 +746,7 @@ fn fail_stopped_already_retired_sets_transport_failure_and_is_sticky() {
   // First failure wins.
   bridge.fail_connection_lost();
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "the first failure cause is sticky — ConnectionLost must not overwrite it"
   );
 }
@@ -783,7 +777,7 @@ fn drain_then_reap_notice_selection_covers_every_failure_reason() {
       SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
     ));
     let mut bridge = make_plain_bridge();
-    bridge.phase = BridgePhase::Failed(reason);
+    bridge.phase = LinkState::Failed(reason);
     assert!(bridge.is_terminal());
     // Drains the (empty) FSM event queue then emits the StreamErrored notice
     // for this reason — the arm under test. No panic == arm executed.
@@ -811,7 +805,7 @@ fn drain_then_reap_clean_bothclosed_emits_stream_closed() {
   let mut bridge = make_plain_bridge();
   bridge.observe_send_fin();
   bridge.observe_recv_fin();
-  assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+  assert!(matches!(bridge.phase, LinkState::BothClosed));
   bridge.drain_then_reap(&mut ep, &mut conns, t0);
   // No payload was dispatched, so the only effect is the clean StreamClosed
   // lifecycle notice routed into the Endpoint — no UserPacket may surface.
@@ -889,12 +883,12 @@ fn drain_payload_only_close_arm_terminalizes_on_rejected_merge() {
   let (mut ep, mut conns, mut bridge, t0) = inbound_join_bridge_with_rejecting_endpoint();
   // Release the RecvClosed gate so `drain_payload_only` actually drains.
   bridge.observe_recv_fin();
-  assert!(matches!(bridge.phase, BridgePhase::RecvClosed));
+  assert!(matches!(bridge.phase, LinkState::RecvClosed));
   bridge.drain_payload_only(&mut ep, &mut conns, t0);
   assert!(
     matches!(
       bridge.phase,
-      BridgePhase::Failed(BridgeFailure::AdmissionClosed)
+      LinkState::Failed(BridgeFailure::AdmissionClosed)
     ),
     "the rejected-merge Close command must terminalize the bridge as \
        AdmissionClosed — got {:?}",
@@ -913,7 +907,7 @@ fn drain_then_reap_close_arm_terminalizes_on_rejected_merge() {
   assert!(
     matches!(
       bridge.phase,
-      BridgePhase::Failed(BridgeFailure::AdmissionClosed)
+      LinkState::Failed(BridgeFailure::AdmissionClosed)
     ),
     "drain_then_reap's Close arm must terminalize as AdmissionClosed — got {:?}",
     bridge.phase
@@ -961,7 +955,7 @@ fn pump_in_out_are_ok_noops_when_connection_absent() {
     "pump_out is a no-op Ok when the connection is gone"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Active),
+    matches!(bridge.phase, LinkState::Active),
     "neither pump changes phase when the connection is absent"
   );
 }
@@ -1341,7 +1335,7 @@ fn pump_in_over_ceiling_unit_len_fails_decode() {
     "an over-ceiling unit_len must fail pump_in via the decode-fail retire path"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
     "a forged over-ceiling unit_len terminalizes the bridge as Failed(Decode) — got {:?}",
     bridge.phase
   );
@@ -1381,7 +1375,7 @@ fn pump_in_undecodable_unit_payload_fails_decode() {
     "an undecodable unit payload must fail pump_in via handle_data → decode_failed"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
     "an undecodable unit payload terminalizes the bridge as Failed(Decode) — got {:?}",
     bridge.phase
   );
@@ -1426,7 +1420,7 @@ fn pump_in_truncated_unit_at_fin_fails_decode() {
     "a FIN mid-unit must be treated as a truncated transmission (decode fail)"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
     "a truncated unit at FIN terminalizes the bridge as Failed(Decode) — got {:?}",
     bridge.phase
   );
@@ -1463,7 +1457,7 @@ fn pump_in_premature_fin_with_no_data_fails_decode() {
     "a premature FIN with no data must route through the FSM PeerClosed failure"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
     "a premature empty FIN terminalizes the bridge as Failed(Decode) — got {:?}",
     bridge.phase
   );
@@ -1504,10 +1498,7 @@ fn pump_in_peer_reset_recv_fails_transport() {
     "a peer RESET_STREAM on the recv half must fail pump_in via the reset path"
   );
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "a peer reset terminalizes the bridge as Failed(Transport) — got {:?}",
     bridge.phase
   );
@@ -1556,10 +1547,7 @@ fn pump_in_illegal_ordered_read_fails_transport() {
     "an ordered read after an unordered read must fail via IllegalOrderedRead"
   );
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "an illegal ordered read terminalizes the bridge as Failed(Transport) — got {:?}",
     bridge.phase
   );
@@ -1733,7 +1721,7 @@ fn pump_in_labeled_validates_inbound_label_over_live_stream() {
        label validates"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Active),
+    matches!(bridge.phase, LinkState::Active),
     "a matching label + valid reliable unit keeps the bridge non-failed — got {:?}",
     bridge.phase
   );
@@ -1775,7 +1763,7 @@ fn pump_in_labeled_mismatched_inbound_label_rejected_over_live_stream() {
     "a mismatched inbound label must fail pump_in via LabelVerdict::Rejected"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Decode)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
     "a mismatched inbound label terminalizes the bridge as Failed(Decode) — got {:?}",
     bridge.phase
   );
@@ -1886,7 +1874,7 @@ fn pump_out_deadline_with_pending_out_tail_fails_timeout() {
     "a back-pressured tail past the exchange deadline must fail pump_out"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Failed(BridgeFailure::Timeout)),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Timeout)),
     "the pre-write deadline check must terminalize the bridge as \
        Failed(Timeout) — got {:?}",
     bridge.phase
@@ -1950,7 +1938,7 @@ fn pump_out_blocked_pending_out_flush_retains_tail_and_waits() {
     "the blocked flush retains the staged tail intact — no loss, no growth, no duplication"
   );
   assert!(
-    !matches!(bridge.phase, BridgePhase::Failed(_)),
+    !matches!(bridge.phase, LinkState::Failed(_)),
     "a flow-control block is normal back-pressure, not a failure: phase = {:?}",
     bridge.phase
   );
@@ -2092,10 +2080,7 @@ fn pump_out_post_transmit_fsm_timeout_retires() {
        post-poll_transmit FSM-failure retire"
   );
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "the post-poll_transmit `stream.is_failed()` retire must terminalize the \
        bridge as Failed(Transport) — got {:?}",
     bridge.phase
@@ -2121,7 +2106,7 @@ fn pump_out_leading_guard_fsm_failed_retires() {
   bridge.stream.handle_timeout(inner_deadline);
   assert!(bridge.stream.is_failed().is_some());
   assert!(
-    matches!(bridge.phase, BridgePhase::Active),
+    matches!(bridge.phase, LinkState::Active),
     "the bridge phase has not yet cascaded the FSM failure"
   );
 
@@ -2134,10 +2119,7 @@ fn pump_out_leading_guard_fsm_failed_retires() {
     "pump_out's leading guard must fail an FSM-failed bridge before any write"
   );
   assert!(
-    matches!(
-      bridge.phase,
-      BridgePhase::Failed(BridgeFailure::Transport(_))
-    ),
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
     "the leading guard's `Some(e)` arm maps the FSM error to \
        Failed(Transport) — got {:?}",
     bridge.phase
@@ -2191,7 +2173,7 @@ fn drain_then_reap_sends_push_pull_response_over_live_stream() {
   // path runs.
   bridge.observe_send_fin();
   bridge.observe_recv_fin();
-  assert!(matches!(bridge.phase, BridgePhase::BothClosed));
+  assert!(matches!(bridge.phase, LinkState::BothClosed));
   assert!(bridge.is_terminal());
 
   let deadline_before = bridge.deadline;
@@ -2248,7 +2230,7 @@ fn drain_then_reap_fsm_failed_notice_arm() {
     "the inner FSM must be failed after its exchange deadline elapses"
   );
   assert!(
-    matches!(bridge.phase, BridgePhase::Active),
+    matches!(bridge.phase, LinkState::Active),
     "the bridge phase is still Active — the FSM failure has not yet cascaded"
   );
   assert!(

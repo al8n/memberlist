@@ -3,7 +3,7 @@
 //! plain-TCP record layer ([`RawRecords`](super::records::RawRecords)).
 
 use crate::{
-  bridge_phase::{BridgeFailure, BridgePhase},
+  bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
 };
 
@@ -20,7 +20,7 @@ use crate::{
   event::Event,
   streams::{
     bridge::StreamBridge,
-    phase::StreamPhase,
+    phase::BridgePhase,
     test_support::{
       TEST_RELIABLE_MAX, addr, handshaking_pair as shared_handshaking_pair, label, phase_label,
     },
@@ -185,7 +185,7 @@ fn frame_round_trips_then_fin_close_reaps() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "client reached BothClosed (sent request + FIN, saw peer FIN), got {:?}",
     phase_label(client.phase_ref())
@@ -193,7 +193,7 @@ fn frame_round_trips_then_fin_close_reaps() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "server reached BothClosed, got {:?}",
     phase_label(server.phase_ref())
@@ -262,7 +262,7 @@ fn label_mismatch_tears_down_with_no_stream_and_no_endpoint_events() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Transport(_)))
     ),
     "the reject is a Transport failure, got {:?}",
     phase_label(server.phase_ref())
@@ -330,7 +330,7 @@ fn dialer_bridge_rejects_mismatched_inbound_response_label() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Transport(_)))
     ),
     "the reject is a Transport failure, got {:?}",
     phase_label(client.phase_ref())
@@ -410,7 +410,7 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Timeout))
     ),
     "the timeout maps to Failed(Timeout), got {:?}",
     phase_label(server.phase_ref())
@@ -641,7 +641,7 @@ fn coalesced_label_plus_small_frame_with_eof_pre_promotion_terminalizes() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "the latched pre-promote FIN drove RecvClosed → BothClosed this tick, \
        got {:?}",
@@ -709,7 +709,7 @@ fn truncation_read_zero_mid_frame_fails_peer_closed() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "truncation maps to Failed(Decode), got {:?}",
     phase_label(client.phase_ref())
@@ -904,7 +904,7 @@ fn push_pull_request_response_round_trips_then_reaps() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "the acceptor produced its push/pull response and closed, got {:?}",
     phase_label(server.phase_ref())
@@ -912,7 +912,7 @@ fn push_pull_request_response_round_trips_then_reaps() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "the dialer received the reply and closed, got {:?}",
     phase_label(client.phase_ref())
@@ -998,7 +998,7 @@ fn inbound_push_pull_admission_rejected_fails_bridge() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::AdmissionClosed))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::AdmissionClosed))
     ),
     "a vetoed join push/pull fails the acceptor bridge with AdmissionClosed, \
        got {:?}",
@@ -1123,7 +1123,7 @@ fn established_intake_corrupt_unit_len_over_ceiling_fails_decode() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "a corrupt unit maps to Failed(Decode), got {:?}",
     phase_label(server.phase_ref())
@@ -1153,7 +1153,7 @@ fn established_intake_inner_frame_decode_failure_fails_bridge() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "an inner-frame decode failure maps to Failed(Decode), got {:?}",
     phase_label(server.phase_ref())
@@ -1196,7 +1196,7 @@ fn established_intake_partial_unit_then_eof_fails_decode() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "a truncated partial unit maps to Failed(Decode), got {:?}",
     phase_label(server.phase_ref())
@@ -1280,7 +1280,7 @@ fn second_half_close_observations_are_idempotent_at_both_closed() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "client reached BothClosed, got {:?}",
     phase_label(client.phase_ref())
@@ -1297,7 +1297,7 @@ fn second_half_close_observations_are_idempotent_at_both_closed() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::BothClosed)
     ),
     "a redundant double-close leaves BothClosed intact, got {:?}",
     phase_label(client.phase_ref())
@@ -1334,7 +1334,7 @@ fn pump_out_on_phase_failed_non_fsm_failed_bridge_is_idempotent() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Timeout))
     ),
     "the bridge is Failed(Timeout) with no FSM failure, got {:?}",
     phase_label(client.phase_ref())
@@ -1352,7 +1352,7 @@ fn pump_out_on_phase_failed_non_fsm_failed_bridge_is_idempotent() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Timeout))
     ),
     "the sticky reason is preserved across a redundant pump_out, got {:?}",
     phase_label(client.phase_ref())
@@ -1390,7 +1390,7 @@ fn drain_then_reap_timeout_failed_bridge_routes_errored_notice() {
   assert!(
     matches!(
       client.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Timeout))
     ),
     "bridge is Failed(Timeout), got {:?}",
     phase_label(client.phase_ref())
@@ -1424,7 +1424,7 @@ fn drain_then_reap_decode_failed_bridge_routes_errored_notice() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
     ),
     "bridge is Failed(Decode), got {:?}",
     phase_label(server.phase_ref())
@@ -1494,7 +1494,7 @@ fn drain_then_reap_close_arm_rejects_inbound_merge() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(BridgeFailure::AdmissionClosed))
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::AdmissionClosed))
     ),
     "the reap's Close arm failed the bridge AdmissionClosed, got {:?}",
     phase_label(server.phase_ref())
@@ -1536,7 +1536,7 @@ fn pump_out_on_fsm_failed_bridge_uses_fsm_reason() {
   assert!(
     matches!(
       server.phase_ref(),
-      StreamPhase::Established(BridgePhase::Failed(_))
+      BridgePhase::Established(LinkState::Failed(_))
     ),
     "the bridge is still in a Failed phase, got {:?}",
     phase_label(server.phase_ref())

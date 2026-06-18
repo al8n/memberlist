@@ -1572,34 +1572,34 @@ where
   }
 
   /// Whether the given exchange's live bridge is currently in
-  /// [`bridge_phase::BridgePhase::Failed`]. Used by the
+  /// [`bridge_phase::LinkState::Failed`]. Used by the
   /// encryption-policy-change regression test to assert that an insecure-transport
   /// bridge fails on a runtime [`Self::set_encryption_options`] update so the
   /// SWIM FSM retries the affected exchange under a fresh bridge constructed
   /// under the new policy.
   ///
-  /// [`bridge_phase::BridgePhase::Failed`]: crate::bridge_phase::BridgePhase::Failed
+  /// [`bridge_phase::LinkState::Failed`]: crate::bridge_phase::LinkState::Failed
   #[cfg(all(test, feature = "tcp", feature = "aes-gcm"))]
   pub(crate) fn bridge_is_failed(&mut self, id: ExchangeId) -> Option<bool> {
     self.conns.get_mut(id).map(|b| b.is_failed())
   }
 
   /// Whether the given exchange's live bridge is in
-  /// [`bridge_phase::BridgePhase::Active`] and has NOT yet retired its send half
+  /// [`bridge_phase::LinkState::Active`] and has NOT yet retired its send half
   /// ([`StreamBridge::fin_owed`] is `false`). Used by the TLS failed-reap
   /// regression to assert the pre-failure invariant — an Established bridge that
   /// has sent nothing — so the subsequent deadline failure runs
   /// `retire_halves`'s `send_close_notify` (queuing a `close_notify` into
   /// rustls's write buffer) rather than finding the send half already closed.
   ///
-  /// [`bridge_phase::BridgePhase::Active`]: crate::bridge_phase::BridgePhase::Active
+  /// [`bridge_phase::LinkState::Active`]: crate::bridge_phase::LinkState::Active
   /// [`StreamBridge::fin_owed`]: crate::streams::bridge::StreamBridge::fin_owed
   #[cfg(all(test, feature = "tls"))]
   pub(crate) fn bridge_is_established_pre_fin(&mut self, id: ExchangeId) -> Option<bool> {
     self.conns.get_mut(id).map(|b| {
       matches!(
         b.phase_ref(),
-        crate::streams::phase::StreamPhase::Established(crate::bridge_phase::BridgePhase::Active)
+        crate::streams::phase::BridgePhase::Established(crate::bridge_phase::LinkState::Active)
       ) && !b.fin_owed()
     })
   }

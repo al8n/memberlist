@@ -23,7 +23,7 @@ use quinn_proto::{ConnectionHandle, StreamId as QuicSid, VarInt};
 
 use super::conn::ConnTable;
 use crate::{
-  bridge_phase::{BridgeFailure, BridgePhase},
+  bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
   label::{LabelVerdict, classify_header, encode_label_prefix},
@@ -57,21 +57,21 @@ pub(crate) struct Bridge<I, A> {
   sent_any: bool,
   /// `SendStream::finish()` is a one-shot per quinn send stream — this
   /// latch guards against a second call once the request/response has
-  /// been fully written. Distinct from the `BridgePhase::SendClosed`
+  /// been fully written. Distinct from the `LinkState::SendClosed`
   /// transition: `finish_called` records that WE invoked `finish()`;
   /// `SendClosed` records that quinn has notified us the FIN was
   /// ack'd by the peer (`Event::Stream(StreamEvent::Finished)`), which is
   /// `~1` RTT later. The deferred-finish path uses `finish_called` to
   /// avoid re-finishing; terminality uses the phase.
   finish_called: bool,
-  /// Composed transport lifecycle — see [`BridgePhase`]. Replaces the
+  /// Composed transport lifecycle — see [`LinkState`]. Replaces the
   /// scattered `send_finished` / `fatal` / `fin_observed` / `read_any`
   /// flag combinations that the asymmetric (send-side only)
   /// `is_terminal` formula had to gate. Every transition is anchored to
   /// a quinn observable; `is_terminal` is now a single
   /// `matches!(self.phase, BothClosed | Failed(_))` check by
   /// construction.
-  phase: BridgePhase,
+  phase: LinkState,
   /// The bridge's own flush/lifetime deadline, snapshotted from the inner
   /// [`Stream`]'s exchange deadline at construction.
   ///
@@ -231,7 +231,7 @@ where
       pending_out: Vec::new(),
       sent_any: false,
       finish_called: false,
-      phase: BridgePhase::Active,
+      phase: LinkState::Active,
       deadline,
       #[cfg(compression)]
       compression,
@@ -361,9 +361,9 @@ where
   /// index.
   pub(crate) fn observe_send_fin(&mut self) {
     self.phase = match &self.phase {
-      BridgePhase::Active => BridgePhase::SendClosed,
-      BridgePhase::RecvClosed => BridgePhase::BothClosed,
-      BridgePhase::SendClosed | BridgePhase::BothClosed | BridgePhase::Failed(_) => return,
+      LinkState::Active => LinkState::SendClosed,
+      LinkState::RecvClosed => LinkState::BothClosed,
+      LinkState::SendClosed | LinkState::BothClosed | LinkState::Failed(_) => return,
     };
   }
 
@@ -376,16 +376,16 @@ where
   /// half is retired by natural FIN consumption.
   fn observe_recv_fin(&mut self) {
     self.phase = match &self.phase {
-      BridgePhase::Active => BridgePhase::RecvClosed,
-      BridgePhase::SendClosed => BridgePhase::BothClosed,
-      BridgePhase::RecvClosed | BridgePhase::BothClosed | BridgePhase::Failed(_) => return,
+      LinkState::Active => LinkState::RecvClosed,
+      LinkState::SendClosed => LinkState::BothClosed,
+      LinkState::RecvClosed | LinkState::BothClosed | LinkState::Failed(_) => return,
     };
   }
 
   /// Idempotent retirement of BOTH QUIC halves on this bridge's `sid`:
   /// `SendStream::reset(0)` + `RecvStream::stop(0)` + clear
   /// `pending_out`. Used by every failure transition that has `conns`
-  /// in scope, so a `BridgePhase::Failed` reap is recv-clean AND
+  /// in scope, so a `LinkState::Failed` reap is recv-clean AND
   /// send-clean by construction — no orphaned QUIC stream state.
   ///
   /// Idempotent: `reset` and `stop` return `Err(ClosedStream)` only
@@ -408,7 +408,7 @@ where
   }
 
   /// Atomic FAILURE transition: retire both QUIC halves AND set
-  /// `BridgePhase::Failed(reason)` in one step. Use this everywhere
+  /// `LinkState::Failed(reason)` in one step. Use this everywhere
   /// `conns` is in scope. The `fail()` helper without retirement is
   /// reserved for cases where the underlying connection is already
   /// gone (e.g. `fail_connection_lost`) so half retirement is moot.
@@ -448,16 +448,13 @@ where
   /// FIN already authorized the dispatched events; the failure is
   /// orthogonal.
   fn fail(&mut self, reason: BridgeFailure) {
-    if matches!(self.phase, BridgePhase::Failed(_)) {
+    if matches!(self.phase, LinkState::Failed(_)) {
       return;
     }
-    if !matches!(
-      self.phase,
-      BridgePhase::RecvClosed | BridgePhase::BothClosed
-    ) {
+    if !matches!(self.phase, LinkState::RecvClosed | LinkState::BothClosed) {
       self.stream.discard_pending_events();
     }
-    self.phase = BridgePhase::Failed(reason);
+    self.phase = LinkState::Failed(reason);
   }
 
   /// Stream ID of this bridge's underlying quinn bidi — used by the
@@ -468,7 +465,7 @@ where
     self.sid
   }
 
-  /// `true` iff the bridge is in [`BridgePhase::Failed`] — observable
+  /// `true` iff the bridge is in [`LinkState::Failed`] — observable
   /// shorthand for the pump_in/pump_out leading-fatal guards, for
   /// `drain_then_reap`'s lifecycle-notice selection, and for the
   /// coordinator's `Event::ExchangeCompleted` outcome decision at
@@ -477,7 +474,7 @@ where
   /// (FSM failure cascades into the bridge via the failure
   /// transitions).
   pub(crate) fn is_phase_failed(&self) -> bool {
-    matches!(self.phase, BridgePhase::Failed(_))
+    matches!(self.phase, LinkState::Failed(_))
   }
 
   /// The pooled quinn connection this bridge rides on.
@@ -843,7 +840,7 @@ where
     // FSM-failure detection AFTER `poll_transmit`: the FSM checks its
     // own deadline inside `poll_transmit` and transitions to
     // `Failed(Timeout)` if elapsed (returning `None` without yielding
-    // bytes). The bridge mirrors this into `BridgePhase::Failed` AND
+    // bytes). The bridge mirrors this into `LinkState::Failed` AND
     // retires both halves atomically, so the next tick's
     // `is_terminal()` (phase-authoritative) reaps a fully-retired
     // bridge. Without this an outbound exchange waiting for response
@@ -913,14 +910,14 @@ where
     Ok(())
   }
 
-  /// `true` once the bridge has reached a terminal [`BridgePhase`] —
-  /// either [`BridgePhase::BothClosed`] (clean: both halves transport-
-  /// retired) or [`BridgePhase::Failed`] (any failure path). The driver
+  /// `true` once the bridge has reached a terminal [`LinkState`] —
+  /// either [`LinkState::BothClosed`] (clean: both halves transport-
+  /// retired) or [`LinkState::Failed`] (any failure path). The driver
   /// then stops pumping and runs [`Bridge::drain_then_reap`].
   ///
   /// Symmetric terminality: phase is the SINGLE source of truth.
-  /// Reaches `true` iff the bridge has entered [`BridgePhase::BothClosed`]
-  /// (natural FIN paths on both halves) or [`BridgePhase::Failed`] (any
+  /// Reaches `true` iff the bridge has entered [`LinkState::BothClosed`]
+  /// (natural FIN paths on both halves) or [`LinkState::Failed`] (any
   /// failure transition). The failure transitions retire BOTH QUIC
   /// halves (`SendStream::reset` + `RecvStream::stop`) atomically BEFORE
   /// flipping the phase, so a `Failed`-phase bridge has both halves
@@ -928,7 +925,7 @@ where
   ///
   /// **No `stream.is_failed()` fallback.** Every FSM-internal failure
   /// path that sets `stream.is_failed()` is observed by `pump_in` /
-  /// `pump_out` and cascaded into [`BridgePhase::Failed`] via the
+  /// `pump_out` and cascaded into [`LinkState::Failed`] via the
   /// atomic-retire-then-fail helpers. A bridge whose FSM is_failed
   /// but whose phase is still `Active`/`SendClosed`/`RecvClosed` is
   /// a transient inconsistency — the next pump observes it and
@@ -936,7 +933,7 @@ where
   /// terminality would let a reap fire before the retirement step,
   /// orphaning QUIC stream state.
   pub(crate) fn is_terminal(&self) -> bool {
-    matches!(self.phase, BridgePhase::BothClosed | BridgePhase::Failed(_))
+    matches!(self.phase, LinkState::BothClosed | LinkState::Failed(_))
   }
 
   /// Test-only: expose the effective [`EncryptionOptions`] the bridge
@@ -1300,7 +1297,7 @@ where
       }
     }
 
-    // Recv-half retirement is structurally guaranteed by [`BridgePhase`]:
+    // Recv-half retirement is structurally guaranteed by [`LinkState`]:
     //   * `BothClosed` — `observe_recv_fin` already fired on
     //     `Chunks::next == Ok(None)` (quinn-proto retires recv state on
     //     this read).
@@ -1317,7 +1314,7 @@ where
     let id = self.stream.id();
     let fsm_failed = self.stream.is_failed();
     let notice = match (&self.phase, fsm_failed) {
-      (BridgePhase::Failed(reason), _) => {
+      (LinkState::Failed(reason), _) => {
         let err = match reason {
           BridgeFailure::Timeout => "exchange deadline elapsed".to_string(),
           BridgeFailure::Transport(s) => format!("transport: {s}"),
@@ -1380,7 +1377,7 @@ where
     // effects would drain here on the intervening tick — committing
     // a merge / emitting `UserDataReceived` BEFORE the adversarial
     // trailing bytes could invalidate the stream. With the gate, the
-    // drain waits until `BridgePhase::RecvClosed` (peer-FIN ack at
+    // drain waits until `LinkState::RecvClosed` (peer-FIN ack at
     // the QUIC layer, the protocol-level proof that no further bytes
     // can arrive). On adversarial split-delivery the chunk-2 failure
     // routes through `Stream::enter_failed` which clears
@@ -1388,13 +1385,13 @@ where
     // failed bridge ever reaches `drain_then_reap`.
     //
     // The terminal D1 path (`drain_then_reap`) is already safe:
-    // `BridgePhase::BothClosed` requires `observe_recv_fin` (peer
-    // FIN); `BridgePhase::Failed` requires `enter_failed` (queue
+    // `LinkState::BothClosed` requires `observe_recv_fin` (peer
+    // FIN); `LinkState::Failed` requires `enter_failed` (queue
     // already cleared). Cooperative peers that FIN in the same QUIC
     // delivery as the request/response bytes pay no extra latency —
     // `observe_recv_fin` fires the same tick. Only peers that split
     // FIN from the payload across ticks pay one extra tick.
-    if !matches!(self.phase, BridgePhase::RecvClosed) {
+    if !matches!(self.phase, LinkState::RecvClosed) {
       return;
     }
     while let Some(ev) = self.stream.poll_endpoint_event() {

@@ -1,8 +1,8 @@
 //! `memberlist::Stream` <-> record-layer byte-pump for one reliable exchange.
 //!
-//! Phase: `Handshaking` (no `Stream` yet) → `Established(BridgePhase)` (the
+//! Phase: `Handshaking` (no `Stream` yet) → `Established(LinkState)` (the
 //! byte pump runs and the half-close lifecycle tracks via the shared
-//! [`BridgePhase`]). The `Stream` is minted by the coordinator at
+//! [`LinkState`]). The `Stream` is minted by the coordinator at
 //! `dial_succeeded` / `accept_stream` once
 //! [`StreamTransport::is_handshaking`] clears the bridge-mint gate. For the
 //! acceptor that gate clears once the inbound label is read and validated (the
@@ -62,12 +62,12 @@ use crate::Instant;
 use std::{string::ToString, vec::Vec};
 
 use crate::{
-  bridge_phase::{BridgeFailure, BridgePhase},
+  bridge_phase::{BridgeFailure, LinkState},
   endpoint::Endpoint,
   event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
   stream::Stream,
   streams::{
-    phase::StreamPhase,
+    phase::BridgePhase,
     transport::{Intake, StreamTransport},
   },
 };
@@ -97,7 +97,7 @@ pub(crate) struct StreamBridge<I, A, R> {
   /// queued; for plain TCP it records that our send-half close is owed to the
   /// driver as an out-of-band TCP FIN (a shutdown-write), since
   /// `R::send_close_notify()` emits no in-band bytes there. Distinct from the
-  /// `BridgePhase::SendClosed` transition (which records that the send half is
+  /// `LinkState::SendClosed` transition (which records that the send half is
   /// retired): the two move in lockstep, but the latch is still needed because
   /// both `retire_halves` (failure path) and `pump_out` (clean path) may reach
   /// the close call and it must run at most once. Surfaced via [`Self::fin_owed`].
@@ -136,7 +136,7 @@ pub(crate) struct StreamBridge<I, A, R> {
   /// [`Self::fin_sent`] — once latched it is never cleared, so repeated
   /// replays observe the same EOF (idempotent).
   pending_eof: bool,
-  phase: StreamPhase,
+  phase: BridgePhase,
   /// The exchange deadline, snapshotted from the inner `Stream` at promotion.
   /// During `Handshaking` the deadline is the dial / accept deadline, supplied
   /// by the coordinator, and is the only timer the bridge contributes (no
@@ -213,7 +213,7 @@ where
       fin_sent: false,
       pending_inbound: Vec::new(),
       pending_eof: false,
-      phase: StreamPhase::Handshaking,
+      phase: BridgePhase::Handshaking,
       deadline,
       #[cfg(compression)]
       compression,
@@ -325,14 +325,14 @@ where
   /// wire after the operator publishes a new policy would leak plaintext
   /// post-enablement. The bridge therefore stores the new encryption (so the
   /// failure transition's telemetry reflects the policy change) AND fails to
-  /// [`BridgePhase::Failed(BridgeFailure::EncryptionPolicyChanged)`]; `fail`
+  /// [`LinkState::Failed(BridgeFailure::EncryptionPolicyChanged)`]; `fail`
   /// clears the record layer's outbound buffer, and the coordinator's
   /// post-iteration step in [`super::StreamEndpoint::set_encryption_options`]
   /// purges the already-drained chunks from the transmit queue. The SWIM
   /// FSM retries the affected exchange under a fresh bridge that uses the
   /// new policy from construction.
   ///
-  /// [`BridgePhase::Failed(BridgeFailure::EncryptionPolicyChanged)`]: BridgePhase::Failed
+  /// [`LinkState::Failed(BridgeFailure::EncryptionPolicyChanged)`]: LinkState::Failed
   #[cfg(encryption)]
   pub(crate) fn set_encryption(&mut self, encryption: crate::EncryptionOptions) {
     if R::is_secure() {
@@ -367,7 +367,7 @@ where
   /// the bridge moves to `Established`; the phase is still `Handshaking` in
   /// that one-tick window, so both conjuncts gate the pre-`Stream` state.
   pub(crate) fn is_handshaking(&self) -> bool {
-    matches!(self.phase, StreamPhase::Handshaking) && self.records.is_handshaking()
+    matches!(self.phase, BridgePhase::Handshaking) && self.records.is_handshaking()
   }
 
   /// Pre-`Stream` intake. Feeds bytes into the record layer until either all
@@ -447,7 +447,7 @@ where
       .poll_timeout()
       .expect("a freshly dialed/accepted Stream is pre-`Done` with a Some exchange deadline");
     self.stream = Some(stream);
-    self.phase = StreamPhase::Established(BridgePhase::Active);
+    self.phase = BridgePhase::Established(LinkState::Active);
   }
 
   /// Drive the SEND-half transition: `Active → SendClosed`, or
@@ -459,13 +459,13 @@ where
   /// no-op whose real anchor is the out-of-band TCP FIN owed to the driver via
   /// [`Self::fin_owed`].
   fn observe_send_fin(&mut self) {
-    let StreamPhase::Established(bp) = &mut self.phase else {
+    let BridgePhase::Established(bp) = &mut self.phase else {
       return;
     };
     *bp = match bp {
-      BridgePhase::Active => BridgePhase::SendClosed,
-      BridgePhase::RecvClosed => BridgePhase::BothClosed,
-      BridgePhase::SendClosed | BridgePhase::BothClosed | BridgePhase::Failed(_) => return,
+      LinkState::Active => LinkState::SendClosed,
+      LinkState::RecvClosed => LinkState::BothClosed,
+      LinkState::SendClosed | LinkState::BothClosed | LinkState::Failed(_) => return,
     };
   }
 
@@ -476,19 +476,19 @@ where
   /// Anchor: a clean `Stream::handle_data(&[], now)` after the peer's transport
   /// `read == 0` or in-band close.
   fn observe_recv_fin(&mut self) {
-    let StreamPhase::Established(bp) = &mut self.phase else {
+    let BridgePhase::Established(bp) = &mut self.phase else {
       return;
     };
     *bp = match bp {
-      BridgePhase::Active => BridgePhase::RecvClosed,
-      BridgePhase::SendClosed => BridgePhase::BothClosed,
-      BridgePhase::RecvClosed | BridgePhase::BothClosed | BridgePhase::Failed(_) => return,
+      LinkState::Active => LinkState::RecvClosed,
+      LinkState::SendClosed => LinkState::BothClosed,
+      LinkState::RecvClosed | LinkState::BothClosed | LinkState::Failed(_) => return,
     };
   }
 
   /// Idempotent retirement of both halves: record the send-half close (latched
   /// against a second call) and discard any surfaced-but-unconsumed inbound
-  /// plaintext. Used by every failure transition, so a `BridgePhase::Failed`
+  /// plaintext. Used by every failure transition, so a `LinkState::Failed`
   /// reap has the send half closed AND no buffered inbound plaintext by
   /// construction. For plain TCP `R::send_close_notify()` is a no-op (the TCP
   /// FIN is the out-of-band shutdown-write the driver issues once it sees
@@ -508,7 +508,7 @@ where
   }
 
   /// Atomic FAILURE transition: retire both halves AND set
-  /// `BridgePhase::Failed(reason)` in one step. The `is_terminal()` predicate is
+  /// `LinkState::Failed(reason)` in one step. The `is_terminal()` predicate is
   /// phase-authoritative, so a bridge that becomes `Failed` must already have its
   /// send half closed — otherwise a same-tick reap leaves the driver without the
   /// FIN signal.
@@ -541,12 +541,12 @@ where
   /// failures preserve the queue: the clean EOF already authorized the
   /// dispatched events; the failure is orthogonal.
   fn fail(&mut self, reason: BridgeFailure) {
-    if matches!(self.phase, StreamPhase::Established(BridgePhase::Failed(_))) {
+    if matches!(self.phase, BridgePhase::Established(LinkState::Failed(_))) {
       return;
     }
     if !matches!(
       self.phase,
-      StreamPhase::Established(BridgePhase::RecvClosed | BridgePhase::BothClosed)
+      BridgePhase::Established(LinkState::RecvClosed | LinkState::BothClosed)
     ) {
       if let Some(stream) = self.stream.as_mut() {
         stream.discard_pending_events();
@@ -576,7 +576,7 @@ where
     // partial reply; rustls still owns any ciphertext already fed on a prior
     // transmit, harmless because the failed exchange's socket is torn down.
     self.records.clear_outbound();
-    self.phase = StreamPhase::Established(BridgePhase::Failed(reason));
+    self.phase = BridgePhase::Established(LinkState::Failed(reason));
   }
 
   /// `true` once this bridge has retired its send half (clean `pump_out`
@@ -596,19 +596,19 @@ where
     self.fin_sent
   }
 
-  /// `true` iff the bridge is in [`BridgePhase::Failed`] — observable shorthand
+  /// `true` iff the bridge is in [`LinkState::Failed`] — observable shorthand
   /// for the `pump_out` leading-fatal guard and for `drain_then_reap`'s
   /// lifecycle-notice selection. Distinct from `Stream::is_failed()` (FSM-level
   /// failure, which cascades into the bridge via the failure transitions).
   fn is_phase_failed(&self) -> bool {
-    matches!(self.phase, StreamPhase::Established(BridgePhase::Failed(_)))
+    matches!(self.phase, BridgePhase::Established(LinkState::Failed(_)))
   }
 
   /// `true` iff this bridge has reached a failed terminal phase
-  /// ([`BridgePhase::Failed`]). The coordinator uses this to distinguish a
+  /// ([`LinkState::Failed`]). The coordinator uses this to distinguish a
   /// failed reap (stale pre-failure outbound chunks must be purged from
   /// `out_transmit` so they do not leak after the bridge is torn down) from a
-  /// clean [`BridgePhase::BothClosed`] reap (response chunks queued by earlier
+  /// clean [`LinkState::BothClosed`] reap (response chunks queued by earlier
   /// pumps are legitimate wire bytes that must reach the peer).
   ///
   /// A `Handshaking` bridge failure (handshake / label rejection / deadline
@@ -715,7 +715,7 @@ where
     // coordinator's pre-`Stream` reap collects it. Runs before the no-`Stream`
     // early return, and only while `Handshaking` so the `Established` flush
     // deadline (the `is_done()`-gated path below) is unchanged.
-    if matches!(self.phase, StreamPhase::Handshaking) && now >= self.deadline {
+    if matches!(self.phase, BridgePhase::Handshaking) && now >= self.deadline {
       self.fail(BridgeFailure::Timeout);
       return Err(());
     }
@@ -805,7 +805,7 @@ where
 
     // FSM-failure detection AFTER `poll_transmit`: the FSM checks its own
     // deadline inside `poll_transmit` and transitions to `Failed(Timeout)` if
-    // elapsed (yielding nothing). Mirror it into `BridgePhase::Failed` + retire
+    // elapsed (yielding nothing). Mirror it into `LinkState::Failed` + retire
     // atomically so the next tick reaps a fully-retired bridge.
     let fsm_failed = self
       .stream
@@ -839,7 +839,7 @@ where
     Ok(())
   }
 
-  /// `true` once the bridge has reached a terminal [`BridgePhase`] — either
+  /// `true` once the bridge has reached a terminal [`LinkState`] — either
   /// `BothClosed` (clean: both halves retired) or `Failed` (any failure path).
   /// The coordinator then stops pumping and runs [`Self::drain_then_reap`].
   ///
@@ -853,14 +853,14 @@ where
   pub(crate) fn is_terminal(&self) -> bool {
     matches!(
       self.phase,
-      StreamPhase::Established(BridgePhase::BothClosed | BridgePhase::Failed(_))
+      BridgePhase::Established(LinkState::BothClosed | LinkState::Failed(_))
     )
   }
 
   /// Test-only: expose the bridge phase.
   #[cfg(test)]
   #[inline(always)]
-  pub(crate) fn phase_ref(&self) -> &StreamPhase {
+  pub(crate) fn phase_ref(&self) -> &BridgePhase {
     &self.phase
   }
 
@@ -981,7 +981,7 @@ where
   /// for a transport whose close is out of band — see [`Self::pending_eof`]).
   pub(crate) fn handle_transport_data(&mut self, data: &[u8], now: Instant) -> Result<(), ()> {
     // Terminal-ingress stop. A bridge that has reached a terminal
-    // [`BridgePhase`] — `BothClosed` (clean reap pending) or `Failed(_)`
+    // [`LinkState`] — `BothClosed` (clean reap pending) or `Failed(_)`
     // (any failure transition, e.g. an [`BridgeFailure::EncryptionPolicyChanged`]
     // on a runtime [`super::StreamEndpoint::set_encryption_options`] update) —
     // refuses further inbound bytes. Without this guard, network reads
@@ -1305,7 +1305,7 @@ where
       }
     }
 
-    // Recv-half retirement is structurally guaranteed by [`BridgePhase`]:
+    // Recv-half retirement is structurally guaranteed by [`LinkState`]:
     //   * `BothClosed` — `observe_recv_fin` already fired on the clean EOF.
     //   * `Failed(_)` — the failure transition retired the send half and
     //     discarded buffered inbound plaintext; the read side is retired by
@@ -1317,7 +1317,7 @@ where
     let id = self.stream.as_ref().expect("stream is Some").id();
     let fsm_failed = self.stream.as_ref().expect("stream is Some").is_failed();
     let notice = match (&self.phase, fsm_failed) {
-      (StreamPhase::Established(BridgePhase::Failed(reason)), _) => {
+      (BridgePhase::Established(LinkState::Failed(reason)), _) => {
         let err = match reason {
           BridgeFailure::Timeout => "exchange deadline elapsed".to_string(),
           BridgeFailure::Transport(s) => format!("transport: {s}"),
@@ -1346,7 +1346,7 @@ where
   /// with the **same** handling as [`Self::drain_then_reap`] — but **without**
   /// the post-loop lifecycle notice.
   ///
-  /// Gated on `BridgePhase::RecvClosed`: a decoded frame's side effects
+  /// Gated on `LinkState::RecvClosed`: a decoded frame's side effects
   /// (`PushPullRequestReceived`, `ReliablePingAcked`, `UserDataReceived`, …)
   /// queue on dispatch BEFORE the stream proves there are no trailing bytes.
   /// Holding the commit until the recv half observes the clean EOF means an
@@ -1360,10 +1360,7 @@ where
   where
     G: rand::Rng,
   {
-    if !matches!(
-      self.phase,
-      StreamPhase::Established(BridgePhase::RecvClosed)
-    ) {
+    if !matches!(self.phase, BridgePhase::Established(LinkState::RecvClosed)) {
       return;
     }
     while let Some(ev) = self

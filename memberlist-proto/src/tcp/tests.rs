@@ -2261,7 +2261,7 @@ fn with_encryption_builder_propagates_to_live_bridges() {
 ///     drains into `out_transmit`;
 /// (3) operator publishes an enabled policy;
 /// (4) natural drain loop MUST observe NO bytes for the affected
-///     exchange, AND the bridge MUST be in `BridgePhase::Failed`.
+///     exchange, AND the bridge MUST be in `LinkState::Failed`.
 ///
 /// Mutation gate: if `StreamBridge::set_encryption` does NOT `fail` the
 /// bridge on insecure transport, the bridge keeps running and lets the
