@@ -26,7 +26,7 @@ use crate::FxHashMap;
 use std::vec::Vec;
 
 pub use crate::event::ExchangeId;
-use crate::streams::{bridge::StreamBridge, transport::StreamTransport};
+use crate::streams::bridge::StreamBridge;
 
 /// The in-flight bridge map. Accessor-only.
 pub(crate) struct StreamConns<I, A, R> {
@@ -34,20 +34,7 @@ pub(crate) struct StreamConns<I, A, R> {
   next: u64,
 }
 
-impl<I, A, R> StreamConns<I, A, R>
-where
-  R: StreamTransport,
-  I: crate::Id,
-  A: crate::Data
-    + crate::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-{
+impl<I, A, R> StreamConns<I, A, R> {
   pub(crate) fn new() -> Self {
     Self {
       bridges: FxHashMap::default(),
