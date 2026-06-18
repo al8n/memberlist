@@ -1472,20 +1472,12 @@ impl<I, R> QuicEndpoint<I, R> {
   }
 }
 
-// Methods that drive the inner `Endpoint` membership machine, encode wire
-// types, or run the bridge pump/reap tick — all needing full node identity.
+// Membership-machine forwarders and wire encoders that need full node identity
+// but never draw the gossip RNG.
 impl<I, R> QuicEndpoint<I, R>
 where
-  R: Rng,
   I: crate::Id,
 {
-  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
-  /// [`Endpoint::start_scheduling`].
-  #[inline]
-  pub fn start_scheduling(&mut self, now: Instant) {
-    self.ep.start_scheduling(now);
-  }
-
   /// Update the local node's metadata. The new value is gossiped
   /// through the standard alive-broadcast path.
   ///
@@ -1552,21 +1544,6 @@ where
     self.ep.start_probe(now)
   }
 
-  /// Seed an `Alive` state on the inner membership endpoint (typical
-  /// bootstrap path: a harness teaching the coordinator about a known
-  /// peer without going through a join push/pull).
-  ///
-  /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
-  pub fn handle_alive(
-    &mut self,
-    from: SocketAddr,
-    alive: crate::typed::Alive<I, SocketAddr>,
-    at: Instant,
-  ) {
-    self.last_now = Some(at);
-    self.ep.handle_alive(from, alive, at);
-  }
-
   /// Inject a `Suspect` event on the inner membership endpoint
   /// (test-harness path; a real driver gets Suspect via SWIM probe
   /// timeouts or peer gossip).
@@ -1586,6 +1563,293 @@ where
   pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
     self.last_now = Some(now);
     self.ep.leave(now)
+  }
+
+  /// Initiate a direct application-level ping to `node`. Returns
+  /// `Ok(`[`crate::PingId`]`)` — the correlation token the driver parks a
+  /// waiter on, resolved by [`crate::event::Event::PingCompleted`] /
+  /// [`crate::event::Event::PingFailed`] — or `Err(NotRunning)` once the node
+  /// has left. Forwards to the inner membership [`Endpoint`].
+  ///
+  /// `ping` only queues a UDP gossip datagram (via `pending_transmits`) — it
+  /// does not touch QUIC bridge state — so it is safe to call without a
+  /// preceding `service_dials` / `flush_outbound`.
+  // No last_now update: ping only enqueues a packet transmit; it touches no dial/bridge state that poll_timeout must immediately re-examine.
+  #[inline]
+  pub fn ping(
+    &mut self,
+    node: crate::Node<I, SocketAddr>,
+    now: Instant,
+  ) -> Result<crate::PingId, crate::error::Error> {
+    self.ep.ping(node, now)
+  }
+
+  /// Enqueue one or more directed unreliable user messages to `to`. Forwards
+  /// to the inner membership [`Endpoint`]. Like `ping`, only touches the
+  /// gossip `pending_transmits` queue, drained by `poll_memberlist_transmit`.
+  ///
+  /// Returns `Err` if any payload exceeds the configured `gossip_mtu` ceiling.
+  #[inline]
+  pub fn send_user_packets(
+    &mut self,
+    to: SocketAddr,
+    payloads: &[Bytes],
+  ) -> Result<(), crate::error::Error> {
+    self.ep.send_user_packets(to, payloads)
+  }
+
+  fn service_dials(&mut self, now: Instant) {
+    // Sieve any DialRequested newly emitted by the inner endpoint into the
+    // private `dial_pending` deque, then drain that deque as the sole input.
+    // Non-`DialRequested` events stay in the inner endpoint's queue for the
+    // public `poll_event()` to observe.
+    self.sieve_dial_events();
+    let pending = core::mem::take(&mut self.dial_pending);
+    for entry in pending {
+      // Decompose AND mark attempted BEFORE the open attempt: if this
+      // attempt requeues (handshake-blocked or credit-exhausted), the
+      // re-pushed entry carries `attempted = true` so `poll_timeout` no
+      // longer emits an immediate-due wake for it (the connection's own
+      // `poll_timeout` and the entry's `deadline` drive the next service
+      // tick; immediately re-firing would busy-loop a still-handshaking
+      // connection).
+      let PendingDial {
+        id,
+        peer,
+        deadline,
+        attempted: _,
+      } = entry;
+      // Retire the intent without opening anything on the pooled
+      // connection if its own deadline has already elapsed.
+      //
+      // `quinn_proto::Streams::open(Dir::Bi)` inserts BOTH send AND recv
+      // state for the new bidi stream. Letting `open` run for an expired
+      // intent has no legitimate downstream consumer: `Endpoint::dial_succeeded`
+      // (frozen) drops any intent whose deadline has elapsed and returns
+      // `None`, so we would synthesise a fresh bidi stream on the pooled
+      // connection that no `Bridge` ever owns and whose recv half is
+      // unreachable. Resetting only the send half afterwards leaves the
+      // recv half orphaned. The deadline pre-check routes the expired
+      // intent through the FSM's `dial_failed` path BEFORE either half
+      // is created, so no orphan state can exist.
+      if now >= deadline {
+        // Discard the staged kind and peer (the bridge was never
+        // created, so the ExchangeCompleted reap path will never
+        // observe this id) and surface a `Failed` completion for a
+        // UserMessage or PushPull dial so the parked reliable-send /
+        // join waiter resolves. Leaving entries stranded would leak
+        // memory across every pre-deadline-expired dial. Matches the
+        // pre-bridge-creation failure paths below.
+        self.retire_failed_dial(
+          id,
+          crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
+          now,
+        );
+        continue;
+      }
+      // The membership address `peer` IS the wire `SocketAddr` (the
+      // coordinator pins `A = SocketAddr` internally); the TLS verification
+      // identity for this dial is resolved per-peer via the closure on
+      // `QuicOptions` (default mode is cluster-uniform — the same string
+      // for every peer — but operators with per-peer SAN certs supply a
+      // closure that maps each `SocketAddr` to its expected identity).
+      let addr = peer;
+      let sni_arc = self.cfg.sni_for(&addr);
+      match self.conns.get_or_dial(
+        &mut self.quinn,
+        now,
+        self.cfg.client().clone(),
+        addr,
+        &sni_arc,
+      ) {
+        Ok(ch) => {
+          if let Some(e) = self.conns.get_mut(ch) {
+            match e.conn_mut().streams().open(Dir::Bi) {
+              Some(sid) => match self.ep.dial_succeeded(id, now) {
+                Some(stream) => {
+                  let reliable_max = self.ep.max_stream_frame_size();
+                  self.bridges.insert(
+                    stream.id(),
+                    Bridge::new(
+                      stream,
+                      ch,
+                      sid,
+                      #[cfg(compression)]
+                      self.compression,
+                      #[cfg(encryption)]
+                      self.encryption.clone(),
+                      reliable_max,
+                      self.label.clone(),
+                      self.skip_inbound_label_check,
+                      true,
+                    ),
+                  );
+                }
+                None => {
+                  // Defense-in-depth: the deadline pre-check above
+                  // normally retires the intent before this branch is
+                  // reachable, but `Endpoint::dial_succeeded` is a
+                  // frozen API that may surface `None` for other
+                  // intent-invalidation reasons. `streams().open(Dir::Bi)`
+                  // already inserted BOTH send AND recv state on the
+                  // pooled connection; retiring only the send half leaves
+                  // the recv half orphaned and unreapable. Reset send +
+                  // stop recv so both halves are fully retired —
+                  // `SendStream::reset` queues RESET_STREAM and returns
+                  // `Err(ClosedStream)` harmlessly if the send half is
+                  // already gone; `RecvStream::stop` discards unread data
+                  // and queues STOP_SENDING with the same `Err(ClosedStream)`
+                  // guard.
+                  //
+                  // `retire_failed_dial` discards the staged kind/peer,
+                  // surfaces a `Failed` completion for a UserMessage /
+                  // PushPull dial (so a parked reliable-send / join
+                  // waiter resolves on this defense-in-depth path too),
+                  // and calls `dial_failed` — a no-op here because the
+                  // frozen `dial_succeeded` already consumed the intent,
+                  // but kept for uniformity with the other pre-bridge
+                  // failure sites.
+                  self.retire_failed_dial(
+                    id,
+                    crate::error::StreamError::DialFailed(
+                      "quic dial intent invalidated before bridge creation".into(),
+                    ),
+                    now,
+                  );
+                  if let Some(e) = self.conns.get_mut(ch) {
+                    let conn = e.conn_mut();
+                    // Ignoring Err: idempotent retirement —
+                    // `Err(ClosedStream)` means the half is already
+                    // gone.
+                    let _ = conn
+                      .send_stream(sid)
+                      .reset(quinn_proto::VarInt::from_u32(0));
+                    // Ignoring Err: same idempotent-retirement
+                    // semantics as the send-half reset above.
+                    let _ = conn.recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
+                  }
+                }
+              },
+              None => {
+                // `quinn_proto::Streams::open(Dir::Bi) == None` has THREE
+                // distinct causes (the call returns `None` when the
+                // connection is closed OR when `next[Bi] >= max[Bi]`):
+                //
+                //   (1) `is_handshaking() == true` — the handshake has
+                //       not finished, so the peer's initial-max-streams
+                //       credit has not been granted yet. Common path for
+                //       a fresh dial: the very first `DialRequested`
+                //       arrives the same tick the connection is created,
+                //       long before the handshake RTT completes. Requeue
+                //       onto `dial_pending` while the intent's own
+                //       deadline has not passed; the next tick retries
+                //       `open(Bi)` once the handshake completes (the
+                //       pooled connection is reused — no redial).
+                //
+                //   (2) `is_closed() == true` — the connection is
+                //       `Closed`/`Draining`/`Drained` (the closed-before-
+                //       drained pool window or a never-Established
+                //       handshake-failed cache). `dial_failed`: consume
+                //       the current intent. `get_or_dial` redials on the
+                //       next push/pull/reliable-ping/user-message intent
+                //       the application schedules (the cached closed
+                //       handle for a once-Established peer triggers an
+                //       explicit redial; a never-Established cache
+                //       prevents a fresh-handshake storm against a
+                //       genuinely-unreachable peer). The coordinator
+                //       never repeatedly opens new
+                //       handshakes against an unreachable peer inside a
+                //       single intent's deadline.
+                //
+                //   (3) Established (not handshaking, not closed) — the
+                //       peer's concurrent-bidi-stream credit
+                //       (`initial_max_streams_bidi` / runtime
+                //       `MAX_STREAMS`) is currently exhausted. A
+                //       transient backpressure state lifted by a future
+                //       `MAX_STREAMS` frame from the peer as inflight
+                //       bidi streams reap. Requeue while the intent's
+                //       own deadline has not passed — without this branch
+                //       a steady-state cluster that pins its outbound
+                //       concurrent-bidi-streams (e.g. coincident
+                //       push/pulls + a reliable-ping fallback on the same
+                //       pooled connection) would lose new reliable
+                //       exchanges to permanent `dial_failed`.
+                //
+                // Pushing back onto `dial_pending` (NOT
+                // `self.ep.requeue_event`) keeps the retry token private
+                // so an external `poll_event` drain cannot pop it.
+                let is_closed_now = self
+                  .conns
+                  .get(ch)
+                  .map(|c| c.conn_ref().is_closed())
+                  .unwrap_or(true);
+                if is_closed_now {
+                  self.retire_failed_dial(
+                    id,
+                    crate::error::StreamError::DialFailed(
+                      "quic stream open: cached connection closed".into(),
+                    ),
+                    now,
+                  );
+                } else if now < deadline {
+                  self.dial_pending.push_back(PendingDial {
+                    id,
+                    peer,
+                    deadline,
+                    attempted: true,
+                  });
+                } else {
+                  self.retire_failed_dial(
+                    id,
+                    crate::error::StreamError::DialFailed(
+                      "quic stream open deadline elapsed".into(),
+                    ),
+                    now,
+                  );
+                }
+              }
+            }
+          }
+        }
+        Err(e) => {
+          self.retire_failed_dial(
+            id,
+            crate::error::StreamError::DialFailed(e.to_string().into()),
+            now,
+          );
+        }
+      }
+    }
+  }
+}
+
+// The coordinator tick, scheduler arming, datagram/inbound handlers, and the
+// bridge pump that fan out into probe/gossip work — drawing the gossip RNG.
+impl<I, R> QuicEndpoint<I, R>
+where
+  R: Rng,
+  I: crate::Id,
+{
+  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
+  /// [`Endpoint::start_scheduling`].
+  #[inline]
+  pub fn start_scheduling(&mut self, now: Instant) {
+    self.ep.start_scheduling(now);
+  }
+
+  /// Seed an `Alive` state on the inner membership endpoint (typical
+  /// bootstrap path: a harness teaching the coordinator about a known
+  /// peer without going through a join push/pull).
+  ///
+  /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
+  pub fn handle_alive(
+    &mut self,
+    from: SocketAddr,
+    alive: crate::typed::Alive<I, SocketAddr>,
+    at: Instant,
+  ) {
+    self.last_now = Some(at);
+    self.ep.handle_alive(from, alive, at);
   }
 
   /// Pump queued quinn outbound — including datagrams just handed to
@@ -1861,39 +2125,6 @@ where
     self.service_dials(now);
     self.flush_outbound(now);
     Ok(id)
-  }
-
-  /// Initiate a direct application-level ping to `node`. Returns
-  /// `Ok(`[`crate::PingId`]`)` — the correlation token the driver parks a
-  /// waiter on, resolved by [`crate::event::Event::PingCompleted`] /
-  /// [`crate::event::Event::PingFailed`] — or `Err(NotRunning)` once the node
-  /// has left. Forwards to the inner membership [`Endpoint`].
-  ///
-  /// `ping` only queues a UDP gossip datagram (via `pending_transmits`) — it
-  /// does not touch QUIC bridge state — so it is safe to call without a
-  /// preceding `service_dials` / `flush_outbound`.
-  // No last_now update: ping only enqueues a packet transmit; it touches no dial/bridge state that poll_timeout must immediately re-examine.
-  #[inline]
-  pub fn ping(
-    &mut self,
-    node: crate::Node<I, SocketAddr>,
-    now: Instant,
-  ) -> Result<crate::PingId, crate::error::Error> {
-    self.ep.ping(node, now)
-  }
-
-  /// Enqueue one or more directed unreliable user messages to `to`. Forwards
-  /// to the inner membership [`Endpoint`]. Like `ping`, only touches the
-  /// gossip `pending_transmits` queue, drained by `poll_memberlist_transmit`.
-  ///
-  /// Returns `Err` if any payload exceeds the configured `gossip_mtu` ceiling.
-  #[inline]
-  pub fn send_user_packets(
-    &mut self,
-    to: SocketAddr,
-    payloads: &[Bytes],
-  ) -> Result<(), crate::error::Error> {
-    self.ep.send_user_packets(to, payloads)
   }
 
   /// The fixed per-tick step order (load-bearing — see module docs).
@@ -2305,230 +2536,6 @@ where
             drop(br);
             self.emit_exchange_completed(id, outcome);
           }
-        }
-      }
-    }
-  }
-
-  fn service_dials(&mut self, now: Instant) {
-    // Sieve any DialRequested newly emitted by the inner endpoint into the
-    // private `dial_pending` deque, then drain that deque as the sole input.
-    // Non-`DialRequested` events stay in the inner endpoint's queue for the
-    // public `poll_event()` to observe.
-    self.sieve_dial_events();
-    let pending = core::mem::take(&mut self.dial_pending);
-    for entry in pending {
-      // Decompose AND mark attempted BEFORE the open attempt: if this
-      // attempt requeues (handshake-blocked or credit-exhausted), the
-      // re-pushed entry carries `attempted = true` so `poll_timeout` no
-      // longer emits an immediate-due wake for it (the connection's own
-      // `poll_timeout` and the entry's `deadline` drive the next service
-      // tick; immediately re-firing would busy-loop a still-handshaking
-      // connection).
-      let PendingDial {
-        id,
-        peer,
-        deadline,
-        attempted: _,
-      } = entry;
-      // Retire the intent without opening anything on the pooled
-      // connection if its own deadline has already elapsed.
-      //
-      // `quinn_proto::Streams::open(Dir::Bi)` inserts BOTH send AND recv
-      // state for the new bidi stream. Letting `open` run for an expired
-      // intent has no legitimate downstream consumer: `Endpoint::dial_succeeded`
-      // (frozen) drops any intent whose deadline has elapsed and returns
-      // `None`, so we would synthesise a fresh bidi stream on the pooled
-      // connection that no `Bridge` ever owns and whose recv half is
-      // unreachable. Resetting only the send half afterwards leaves the
-      // recv half orphaned. The deadline pre-check routes the expired
-      // intent through the FSM's `dial_failed` path BEFORE either half
-      // is created, so no orphan state can exist.
-      if now >= deadline {
-        // Discard the staged kind and peer (the bridge was never
-        // created, so the ExchangeCompleted reap path will never
-        // observe this id) and surface a `Failed` completion for a
-        // UserMessage or PushPull dial so the parked reliable-send /
-        // join waiter resolves. Leaving entries stranded would leak
-        // memory across every pre-deadline-expired dial. Matches the
-        // pre-bridge-creation failure paths below.
-        self.retire_failed_dial(
-          id,
-          crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
-          now,
-        );
-        continue;
-      }
-      // The membership address `peer` IS the wire `SocketAddr` (the
-      // coordinator pins `A = SocketAddr` internally); the TLS verification
-      // identity for this dial is resolved per-peer via the closure on
-      // `QuicOptions` (default mode is cluster-uniform — the same string
-      // for every peer — but operators with per-peer SAN certs supply a
-      // closure that maps each `SocketAddr` to its expected identity).
-      let addr = peer;
-      let sni_arc = self.cfg.sni_for(&addr);
-      match self.conns.get_or_dial(
-        &mut self.quinn,
-        now,
-        self.cfg.client().clone(),
-        addr,
-        &sni_arc,
-      ) {
-        Ok(ch) => {
-          if let Some(e) = self.conns.get_mut(ch) {
-            match e.conn_mut().streams().open(Dir::Bi) {
-              Some(sid) => match self.ep.dial_succeeded(id, now) {
-                Some(stream) => {
-                  let reliable_max = self.ep.max_stream_frame_size();
-                  self.bridges.insert(
-                    stream.id(),
-                    Bridge::new(
-                      stream,
-                      ch,
-                      sid,
-                      #[cfg(compression)]
-                      self.compression,
-                      #[cfg(encryption)]
-                      self.encryption.clone(),
-                      reliable_max,
-                      self.label.clone(),
-                      self.skip_inbound_label_check,
-                      true,
-                    ),
-                  );
-                }
-                None => {
-                  // Defense-in-depth: the deadline pre-check above
-                  // normally retires the intent before this branch is
-                  // reachable, but `Endpoint::dial_succeeded` is a
-                  // frozen API that may surface `None` for other
-                  // intent-invalidation reasons. `streams().open(Dir::Bi)`
-                  // already inserted BOTH send AND recv state on the
-                  // pooled connection; retiring only the send half leaves
-                  // the recv half orphaned and unreapable. Reset send +
-                  // stop recv so both halves are fully retired —
-                  // `SendStream::reset` queues RESET_STREAM and returns
-                  // `Err(ClosedStream)` harmlessly if the send half is
-                  // already gone; `RecvStream::stop` discards unread data
-                  // and queues STOP_SENDING with the same `Err(ClosedStream)`
-                  // guard.
-                  //
-                  // `retire_failed_dial` discards the staged kind/peer,
-                  // surfaces a `Failed` completion for a UserMessage /
-                  // PushPull dial (so a parked reliable-send / join
-                  // waiter resolves on this defense-in-depth path too),
-                  // and calls `dial_failed` — a no-op here because the
-                  // frozen `dial_succeeded` already consumed the intent,
-                  // but kept for uniformity with the other pre-bridge
-                  // failure sites.
-                  self.retire_failed_dial(
-                    id,
-                    crate::error::StreamError::DialFailed(
-                      "quic dial intent invalidated before bridge creation".into(),
-                    ),
-                    now,
-                  );
-                  if let Some(e) = self.conns.get_mut(ch) {
-                    let conn = e.conn_mut();
-                    // Ignoring Err: idempotent retirement —
-                    // `Err(ClosedStream)` means the half is already
-                    // gone.
-                    let _ = conn
-                      .send_stream(sid)
-                      .reset(quinn_proto::VarInt::from_u32(0));
-                    // Ignoring Err: same idempotent-retirement
-                    // semantics as the send-half reset above.
-                    let _ = conn.recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
-                  }
-                }
-              },
-              None => {
-                // `quinn_proto::Streams::open(Dir::Bi) == None` has THREE
-                // distinct causes (the call returns `None` when the
-                // connection is closed OR when `next[Bi] >= max[Bi]`):
-                //
-                //   (1) `is_handshaking() == true` — the handshake has
-                //       not finished, so the peer's initial-max-streams
-                //       credit has not been granted yet. Common path for
-                //       a fresh dial: the very first `DialRequested`
-                //       arrives the same tick the connection is created,
-                //       long before the handshake RTT completes. Requeue
-                //       onto `dial_pending` while the intent's own
-                //       deadline has not passed; the next tick retries
-                //       `open(Bi)` once the handshake completes (the
-                //       pooled connection is reused — no redial).
-                //
-                //   (2) `is_closed() == true` — the connection is
-                //       `Closed`/`Draining`/`Drained` (the closed-before-
-                //       drained pool window or a never-Established
-                //       handshake-failed cache). `dial_failed`: consume
-                //       the current intent. `get_or_dial` redials on the
-                //       next push/pull/reliable-ping/user-message intent
-                //       the application schedules (the cached closed
-                //       handle for a once-Established peer triggers an
-                //       explicit redial; a never-Established cache
-                //       prevents a fresh-handshake storm against a
-                //       genuinely-unreachable peer). The coordinator
-                //       never repeatedly opens new
-                //       handshakes against an unreachable peer inside a
-                //       single intent's deadline.
-                //
-                //   (3) Established (not handshaking, not closed) — the
-                //       peer's concurrent-bidi-stream credit
-                //       (`initial_max_streams_bidi` / runtime
-                //       `MAX_STREAMS`) is currently exhausted. A
-                //       transient backpressure state lifted by a future
-                //       `MAX_STREAMS` frame from the peer as inflight
-                //       bidi streams reap. Requeue while the intent's
-                //       own deadline has not passed — without this branch
-                //       a steady-state cluster that pins its outbound
-                //       concurrent-bidi-streams (e.g. coincident
-                //       push/pulls + a reliable-ping fallback on the same
-                //       pooled connection) would lose new reliable
-                //       exchanges to permanent `dial_failed`.
-                //
-                // Pushing back onto `dial_pending` (NOT
-                // `self.ep.requeue_event`) keeps the retry token private
-                // so an external `poll_event` drain cannot pop it.
-                let is_closed_now = self
-                  .conns
-                  .get(ch)
-                  .map(|c| c.conn_ref().is_closed())
-                  .unwrap_or(true);
-                if is_closed_now {
-                  self.retire_failed_dial(
-                    id,
-                    crate::error::StreamError::DialFailed(
-                      "quic stream open: cached connection closed".into(),
-                    ),
-                    now,
-                  );
-                } else if now < deadline {
-                  self.dial_pending.push_back(PendingDial {
-                    id,
-                    peer,
-                    deadline,
-                    attempted: true,
-                  });
-                } else {
-                  self.retire_failed_dial(
-                    id,
-                    crate::error::StreamError::DialFailed(
-                      "quic stream open deadline elapsed".into(),
-                    ),
-                    now,
-                  );
-                }
-              }
-            }
-          }
-        }
-        Err(e) => {
-          self.retire_failed_dial(
-            id,
-            crate::error::StreamError::DialFailed(e.to_string().into()),
-            now,
-          );
         }
       }
     }
