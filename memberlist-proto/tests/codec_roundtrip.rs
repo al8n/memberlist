@@ -44,13 +44,6 @@ use bytes::Bytes;
   feature = "murmur3"
 ))]
 use memberlist_proto::ChecksumAlgorithm;
-#[cfg(any(
-  feature = "lz4",
-  feature = "snappy",
-  feature = "zstd",
-  feature = "brotli"
-))]
-use memberlist_proto::{CompressAlgorithm, compression::ZstdLevel};
 use memberlist_proto::{
   ChecksumOptions, CompressionOptions, EncryptionOptions, decode_incoming,
   encode_checksummed_frame, encode_compressed_frame, encode_encrypted_frame, encode_outgoing,
@@ -60,6 +53,13 @@ use memberlist_proto::{
   typed::{Ack, Alive, Message, Meta, Nack, Node, Ping, PushNodeState, PushPull, State},
   unwrap_transforms_with_encryption,
 };
+#[cfg(any(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
+use memberlist_proto::{CompressAlgorithm, compression::ZstdLevel};
 #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 use memberlist_proto::{Keyring, SecretKey};
 
