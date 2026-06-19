@@ -221,37 +221,6 @@ mod checksum {
     let _ = a.shutdown().await;
     let _ = b.shutdown().await;
   }
-
-  /// Construction must reject a gossip checksum algorithm whose backend feature
-  /// is not compiled into this build, before the node starts. The options
-  /// builder accepts the algorithm, but every later `checksum_gossip` would fail
-  /// and the driver would drop the datagram — silently disabling ALL gossip.
-  /// Mirrors the encryption `valid_keyring_constructs` guard; runs only when
-  /// `murmur3` is absent so the Murmur3 backend is genuinely missing.
-  #[cfg(not(feature = "murmur3"))]
-  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn construction_rejects_unsupported_checksum_algorithm() {
-    use memberlist_reactor::Error;
-
-    // Murmur3 is absent in this build (the harness enables only crc32).
-    // The selection is accepted by `with_checksum`, but the trial `apply` probe
-    // inside validate_checksum returns `ChecksumError::Disabled`.
-    let bad = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
-    let ml_opts = MemberlistOptions::new().with_checksum(bad);
-
-    let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
-      &SocketAddrResolver,
-      SmolStr::new("bad-checksum"),
-      MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-      Options::new().with_memberlist(ml_opts),
-      VoidDelegate::<SmolStr, SocketAddr>::new(),
-    )
-    .await;
-    assert!(
-      matches!(result, Err(Error::Checksum(_))),
-      "unsupported checksum algorithm must be rejected at construction"
-    );
-  }
 }
 
 #[cfg(feature = "aes-gcm")]

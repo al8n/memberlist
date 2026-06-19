@@ -73,9 +73,9 @@ jobs:
       - name: Format
         run: cargo fmt -p memberlist-smoltcp -p memberlist-embassy --check
       - name: Clippy
-        run: cargo clippy -p memberlist-smoltcp -p memberlist-embassy --all-targets --no-deps -- -D warnings
+        run: cargo clippy -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,aes-gcm,cidr --no-deps -- -D warnings
       - name: Test
-        run: cargo test -p memberlist-smoltcp -p memberlist-embassy
+        run: cargo test -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,aes-gcm,cidr
 
   # Execution proof: build the `memberlist-embassy-qemu` firmware and run it under
   # QEMU. The crate's `.cargo/config.toml` supplies the target, the linker script,
