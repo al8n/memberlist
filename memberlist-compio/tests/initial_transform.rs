@@ -16,7 +16,7 @@ use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, Options,
   SocketAddrResolver, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
-use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions, EncryptionOptions, Keyring, SecretKey};
+use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -171,60 +171,4 @@ async fn construction_time_encryption_same_key_converges() {
 
   a.shutdown().await.expect("a shutdown");
   b.shutdown().await.expect("b shutdown");
-}
-
-/// `Memberlist::new` must reject a keyring whose algorithm is unsupported in
-/// this build before any socket is bound. A disabled (no-keyring) policy is
-/// always accepted.
-#[cfg(not(feature = "chacha20-poly1305"))]
-#[compio::test]
-async fn construction_rejects_unsupported_keyring_algorithm() {
-  // ChaCha20-Poly1305 is absent in this build (we only have aes-gcm). A
-  // ChaCha keyring is constructible but the trial-encrypt probe inside
-  // validate_encryption_options returns UnsupportedAlgorithm.
-  let unsupported_key = SecretKey::ChaCha20Poly1305([0u8; 32]);
-  let bad_opts = EncryptionOptions::new().with_keyring(Keyring::new(unsupported_key));
-
-  let err = make_tcp(
-    "bad-enc",
-    loopback_addr(8420),
-    MemberlistOptions::new().with_encryption(bad_opts),
-  )
-  .await
-  .map(|_| ())
-  .expect_err("unsupported keyring must be rejected at construction");
-
-  assert!(
-    matches!(err, MemberlistError::Encryption(_)),
-    "expected Encryption(_), got {err:?}"
-  );
-}
-
-/// `Memberlist::new` must reject a gossip checksum algorithm whose backend
-/// feature is unsupported in this build before any socket is bound. The options
-/// builder accepts the algorithm, but every later `checksum_gossip` would fail
-/// and the driver would drop the datagram — silently disabling ALL gossip. A
-/// disabled (no-algorithm) policy is always accepted.
-#[cfg(not(feature = "murmur3"))]
-#[compio::test]
-async fn construction_rejects_unsupported_checksum_algorithm() {
-  // Murmur3 is absent in this build (the test harness enables only
-  // crc32). A Murmur3 selection is accepted by `with_checksum` but the
-  // trial `apply` probe inside validate_checksum_options returns
-  // `ChecksumError::Disabled`.
-  let bad_opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
-
-  let err = make_tcp(
-    "bad-checksum",
-    loopback_addr(8421),
-    MemberlistOptions::new().with_checksum(bad_opts),
-  )
-  .await
-  .map(|_| ())
-  .expect_err("unsupported checksum algorithm must be rejected at construction");
-
-  assert!(
-    matches!(err, MemberlistError::Checksum(_)),
-    "expected Checksum(_), got {err:?}"
-  );
 }

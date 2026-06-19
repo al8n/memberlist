@@ -43,7 +43,9 @@ fn all_variants() -> Vec<InitError> {
     InitError::RouteFamilyMismatch(sample_route()),
     InitError::Entropy,
     InitError::Endpoint(EndpointInitError::AwarenessMultiplierZero),
+    #[cfg(encryption)]
     InitError::Encryption(memberlist_proto::EncryptionError::AuthFailed),
+    #[cfg(checksum)]
     InitError::Checksum(memberlist_proto::ChecksumError::Mismatch),
     InitError::GossipMtuTooLarge(GossipMtuTooLarge {
       gossip_mtu: 70_000,
@@ -103,12 +105,14 @@ fn from_endpoint_init_error() {
   ));
 }
 
+#[cfg(encryption)]
 #[test]
 fn from_encryption_error() {
   let err: InitError = memberlist_proto::EncryptionError::NoMatchingKey.into();
   assert!(matches!(err, InitError::Encryption(_)));
 }
 
+#[cfg(checksum)]
 #[test]
 fn from_checksum_error() {
   let err: InitError = memberlist_proto::ChecksumError::Mismatch.into();
@@ -141,10 +145,12 @@ fn from_embedded_maps_each_mode() {
     InitError::from_embedded(E::Endpoint(EndpointInitError::AwarenessMultiplierZero)),
     InitError::Endpoint(_)
   ));
+  #[cfg(encryption)]
   assert!(matches!(
     InitError::from_embedded(E::Encryption(memberlist_proto::EncryptionError::AuthFailed)),
     InitError::Encryption(_)
   ));
+  #[cfg(checksum)]
   assert!(matches!(
     InitError::from_embedded(E::Checksum(memberlist_proto::ChecksumError::Mismatch)),
     InitError::Checksum(_)

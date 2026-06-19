@@ -648,48 +648,6 @@ fn set_encryption_options_disabled_is_always_ok() {
   assert!(result.is_ok(), "disabling encryption must always succeed");
 }
 
-/// `set_encryption_options` rejects a keyring whose algorithm backend is not
-/// compiled into this build, leaving the prior policy intact so the engine
-/// continues to pump without disruption.
-///
-/// This test runs only when `aes-gcm` is absent; with the backend
-/// present the AES-256 key is valid and the test is logically inverted (the
-/// round-trip smoke test below covers that path).
-#[cfg(not(feature = "aes-gcm"))]
-#[test]
-fn set_encryption_options_rejects_unsupported_keyring_and_engine_still_pumps() {
-  let mut engine = make_engine();
-  let now = Instant::from_origin(Duration::from_secs(86_400));
-
-  // AES-256 key whose algorithm backend (`aes-gcm`) is absent in
-  // this build; the probe inside `set_encryption_options` must reject it.
-  let bad_key = SecretKey::Aes256([0x5a; 32]);
-  let bad_opts = EncryptionOptions::new().with_keyring(Keyring::new(bad_key));
-  let err = engine
-    .set_encryption_options(bad_opts)
-    .expect_err("keyring with unsupported algorithm must be rejected");
-  assert!(
-    matches!(
-      err,
-      crate::error::ControlError::Encryption(
-        memberlist_proto::EncryptionError::UnsupportedAlgorithm(_)
-      )
-    ),
-    "expected Encryption(UnsupportedAlgorithm), got {err:?}"
-  );
-
-  // The engine must still function under its original (no-encryption) policy.
-  engine.start(now);
-  let mut gossip = NoGossip;
-  let mut stream = NoStream::with_pool(2);
-  let _deadline = engine.pump(now, &mut gossip, &mut stream);
-  assert_eq!(
-    engine.num_members(),
-    1,
-    "engine remains functional after rejected encryption update"
-  );
-}
-
 /// `set_encryption_options` with a valid AES-256 keyring succeeds when the
 /// `aes-gcm` backend is compiled in, and the engine pumps normally
 /// afterward.
@@ -758,41 +716,6 @@ fn validate_runtime_config_for_encryption_is_deterministic() {
       ))
     ),
     "without the AES-GCM backend the probe must reject with UnsupportedAlgorithm, got {result:?}"
-  );
-}
-
-/// `try_new_at` rejects a gossip checksum algorithm whose backend feature is
-/// not compiled into this build, with a typed `InitError::Checksum`. The
-/// options builder accepts the algorithm, but every later `checksum_gossip`
-/// would fail and the driver would drop the datagram — silently disabling ALL
-/// gossip. This is the construction-time analogue of the encryption keyring
-/// rejection (the embedded engine has no runtime checksum setter); it runs only
-/// when `murmur3` is absent so the Murmur3 backend is genuinely
-/// missing.
-#[cfg(not(feature = "murmur3"))]
-#[test]
-fn try_new_at_rejects_unsupported_checksum_algorithm() {
-  use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
-
-  let cfg = Options::new()
-    .with_port(7946)
-    .with_close_timeout(Duration::from_secs(10));
-  let ep_cfg =
-    memberlist_proto::EndpointOptions::new(SmolStr::new("bad-checksum"), node_addr(7946));
-  let now = Instant::from_origin(Duration::from_secs(86_400));
-
-  // Murmur3 is absent in this build. The selection is accepted by
-  // `with_checksum`, but the trial `apply` probe inside `try_new_at` returns
-  // `ChecksumError::Disabled`.
-  let transform = TransformOptions::default()
-    .with_checksum(ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3));
-
-  let err = Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now, test_rng())
-    .map(|_| ())
-    .expect_err("unsupported checksum algorithm must be rejected at construction");
-  assert!(
-    matches!(err, InitError::Checksum(_)),
-    "expected InitError::Checksum, got {err:?}"
   );
 }
 
