@@ -249,6 +249,7 @@ pub(crate) struct BridgeError {
   /// Exchange that failed.
   pub(crate) eid: ExchangeId,
   /// The underlying I/O error from compio.
+  #[allow(dead_code)]
   pub(crate) err: io::Error,
   /// Wall-clock instant at which the bridge observed the error. See
   /// [`BridgeBytes::received_at`] for the deadline-gate rationale.
@@ -287,6 +288,7 @@ pub(crate) struct OutboundFailReady {
   /// The exchange whose dial failed.
   pub(crate) eid: ExchangeId,
   /// The connect error.
+  #[allow(dead_code)]
   pub(crate) err: io::Error,
   /// Wall-clock instant at which the dial task observed the failure
   /// (either the connect error or the dial-timeout fire). See
