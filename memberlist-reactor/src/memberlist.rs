@@ -42,9 +42,9 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 #[cfg(feature = "quic")]
-use crate::quic_driver::QuicDriver;
+use crate::driver::quic::QuicDriver;
 #[cfg(any(feature = "tcp", feature = "tls"))]
-use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
+use crate::driver::stream::{ACCEPT_CAP, StreamDriver, accept_task};
 #[cfg(checksum)]
 use crate::transform::validate_checksum;
 #[cfg(encryption)]

@@ -18,6 +18,8 @@ mod cidr;
 mod command;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod delegate;
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
+mod driver;
 mod error;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod events;
@@ -26,14 +28,10 @@ mod memberlist;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod observation;
 mod options;
-#[cfg(feature = "quic")]
-mod quic_driver;
 mod resolver;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod shared;
 mod snapshot;
-#[cfg(any(feature = "tcp", feature = "tls"))]
-mod stream_driver;
 mod transform;
 
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
