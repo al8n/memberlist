@@ -14,13 +14,14 @@
 //! the bound port is released before `Memberlist::shutdown` returns.
 
 use std::{
+  cell::Cell,
   collections::{HashMap, HashSet},
   io,
   net::SocketAddr,
+  rc::Rc,
   sync::Arc,
 };
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::{
   buf::BufResult,
@@ -59,12 +60,11 @@ use crate::{
     },
   },
   error::{JoinAllFailed, MemberlistError, Result},
-  snapshot::MemberlistSnapshot,
+  snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
 use core::{fmt, hash::Hash, time::Duration};
 use memberlist_proto::metrics::Metrics;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Driver-side state for one outstanding synchronous-join call.
 ///
@@ -467,8 +467,8 @@ where
 ///
 /// Drives the `StreamEndpoint` until the command channel closes (all
 /// `Memberlist` handles dropped) or a [`Command::Shutdown`] is received.
-/// All mutations on the endpoint happen here; reads happen lock-free via
-/// the published snapshot.
+/// All mutations on the endpoint happen here; reads happen via the published
+/// snapshot.
 ///
 /// ## Connection lifecycle
 ///
@@ -528,13 +528,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   listener: TcpListener,
   commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, A>>,
-  events_dropped: Arc<AtomicU64>,
-  observation_dropped: Arc<AtomicU64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
-  metrics: Arc<ArcSwap<Metrics>>,
+  events_dropped: Rc<Cell<u64>>,
+  observation_dropped: Rc<Cell<u64>>,
+  snapshot: SnapshotCell<I, A>,
+  metrics: Rc<Cell<Metrics>>,
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
-  shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+  shutdown_flag: Rc<Cell<bool>>,
   driver_opts: DriverOptions,
   stream_opts: StreamTransportOptions,
   delegate: D,
@@ -610,7 +610,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // backstop in `drain_events` uses it to bound the memory large reliable
   // payloads occupy while a delegate falls behind — a count cap alone cannot,
   // since one event can own a `max_stream_frame_size` payload.
-  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+  let obs_payload_bytes = Rc::new(Cell::new(0u64));
   compio::runtime::spawn(observation_task::<I, A, D>(
     obs_rx,
     delegate,
@@ -1296,7 +1296,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   //   5. Drop the bound sockets BEFORE acking the observed shutdown
   //      caller so an immediate rebind on the same port after
   //      `shutdown.await` succeeds.
-  shutdown_flag.store(true, Ordering::Release);
+  shutdown_flag.set(true);
   while let Ok(c) = commands.try_recv() {
     let res = Err(MemberlistError::Shutdown);
     let reply: futures_channel::oneshot::Sender<Result<()>> = match c {
@@ -2444,8 +2444,8 @@ where
 async fn drain_events<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   obs_tx: &Sender<Event<I, A>>,
-  observation_dropped: &AtomicU64,
-  obs_payload_bytes: &AtomicU64,
+  observation_dropped: &Cell<u64>,
+  obs_payload_bytes: &Cell<u64>,
   obs_payload_budget: Option<u64>,
   pending: &mut PendingCommands,
 ) -> bool
@@ -2621,19 +2621,11 @@ where
     // `continue`) preserves the obs decoupling — the `ExchangeCompleted` that
     // fires a parked join/leave reply is never delayed by a backed-up delegate.
     if let (Some(budget), Some(bytes)) = (obs_payload_budget, payload_bytes) {
-      if obs_payload_bytes
-        .load(Ordering::Relaxed)
-        .saturating_add(bytes)
-        > budget
-      {
+      if obs_payload_bytes.get().saturating_add(bytes) > budget {
         yield_once().await;
       }
-      if obs_payload_bytes
-        .load(Ordering::Relaxed)
-        .saturating_add(bytes)
-        > budget
-      {
-        observation_dropped.fetch_add(1, Ordering::Relaxed);
+      if obs_payload_bytes.get().saturating_add(bytes) > budget {
+        observation_dropped.set(observation_dropped.get() + 1);
         continue;
       }
     }
@@ -2655,7 +2647,7 @@ where
         match obs_tx.try_send(ev) {
           Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
           Err(_) => {
-            observation_dropped.fetch_add(1, Ordering::Relaxed);
+            observation_dropped.set(observation_dropped.get() + 1);
           }
         }
       }
@@ -2691,8 +2683,8 @@ async fn observation_task<I, A, D>(
   obs_rx: Receiver<Event<I, A>>,
   delegate: D,
   events_tx: Sender<Event<I, A>>,
-  events_dropped: Arc<AtomicU64>,
-  obs_payload_bytes: Arc<AtomicU64>,
+  events_dropped: Rc<Cell<u64>>,
+  obs_payload_bytes: Rc<Cell<u64>>,
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id
@@ -2721,7 +2713,7 @@ async fn observation_task<I, A, D>(
     // reclaimed budget promptly. Membership / control events have no weight.
     let payload = observation_payload_bytes(&ev);
     if let Some(b) = payload {
-      obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
+      obs_payload_bytes.set(obs_payload_bytes.get() - b);
     }
     // Contain a panicking delegate hook so the task SURVIVES and keeps releasing
     // the byte-backstop reservations of still-queued events. A dead obs task
@@ -2744,7 +2736,7 @@ async fn observation_task<I, A, D>(
       .try_send(ev)
       .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
     {
-      events_dropped.fetch_add(1, Ordering::Relaxed);
+      events_dropped.set(events_dropped.get() + 1);
     }
   }
 }
@@ -2936,7 +2928,7 @@ where
 /// incarnation, and protocol versions.
 fn refresh_snapshot<I, A, R, G>(
   endpoint: &StreamEndpoint<I, A, R, G>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  snapshot: &SnapshotCell<I, A>,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -2985,7 +2977,7 @@ fn refresh_snapshot<I, A, R, G>(
     member_count,
     ep.health_score(),
   );
-  snapshot.store(Arc::new(snap));
+  *snapshot.borrow_mut() = Rc::new(snap);
 }
 
 /// As [`refresh_snapshot`], but rebuilds + stores only when the endpoint's
@@ -2994,7 +2986,7 @@ fn refresh_snapshot<I, A, R, G>(
 /// membership/health is the largest steady-state saving.
 fn refresh_snapshot_if_changed<I, A, R, G>(
   endpoint: &StreamEndpoint<I, A, R, G>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  snapshot: &SnapshotCell<I, A>,
   last_version: &mut u64,
 ) where
   I: memberlist_proto::Id
@@ -3029,7 +3021,7 @@ fn refresh_snapshot_if_changed<I, A, R, G>(
 /// real change, which is rare).
 fn refresh_metrics_if_changed<I, A, R, G>(
   endpoint: &StreamEndpoint<I, A, R, G>,
-  metrics: &Arc<ArcSwap<Metrics>>,
+  metrics: &Rc<Cell<Metrics>>,
   last: &mut Metrics,
 ) where
   I: memberlist_proto::Id
@@ -3055,7 +3047,7 @@ fn refresh_metrics_if_changed<I, A, R, G>(
   let m = *endpoint.endpoint_ref().metrics();
   if m != *last {
     *last = m;
-    metrics.store(Arc::new(m));
+    metrics.set(m);
   }
 }
 

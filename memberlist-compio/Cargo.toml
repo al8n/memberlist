@@ -58,7 +58,6 @@ compio = { workspace = true, features = [
   "io-uring",
   "polling",
 ] }
-arc-swap.workspace = true
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
 futures-channel.workspace = true

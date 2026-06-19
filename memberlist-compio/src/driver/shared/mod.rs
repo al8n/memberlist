@@ -11,7 +11,7 @@
 //! them without depending on the byte-stream plane (which is only compiled with
 //! a `tcp` / `tls-*` feature).
 
-use std::sync::atomic::AtomicU64;
+use std::cell::Cell;
 
 use memberlist_proto::event::Event;
 
@@ -120,9 +120,9 @@ pub(crate) fn observation_payload_bytes<I, A>(ev: &Event<I, A>) -> Option<u64> {
 /// Add a just-enqueued event's payload weight (if any) to the byte-backstop
 /// counter. Paired with the subtract in each driver's `observation_task` on
 /// dequeue.
-pub(crate) fn add_obs_payload(counter: &AtomicU64, bytes: Option<u64>) {
+pub(crate) fn add_obs_payload(counter: &Cell<u64>, bytes: Option<u64>) {
   if let Some(b) = bytes {
-    counter.fetch_add(b, std::sync::atomic::Ordering::Relaxed);
+    counter.set(counter.get() + b);
   }
 }
 

@@ -1,12 +1,20 @@
-//! Lock-free snapshot of memberlist state, published via arc-swap.
+//! Snapshot of memberlist state, published into a single-owner cell.
 
-use std::sync::Arc;
+use core::net::SocketAddr;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use memberlist_proto::typed::NodeState;
 
+/// The published-snapshot cell shared by the handle and the driver. Single-owner
+/// per thread (thread-per-core): the driver swaps in a fresh
+/// `Rc<MemberlistSnapshot>` after each state-affecting tick, and the handle (and
+/// the driver) read the current one. The `RefCell` is a borrow check, not a lock
+/// — handle and driver share one thread and never borrow it at overlapping times.
+pub(crate) type SnapshotCell<I, A = SocketAddr> = Rc<RefCell<Rc<MemberlistSnapshot<I, A>>>>;
+
 /// Snapshot of the memberlist's current observable state. Read via
 /// [`Memberlist::snapshot`](crate::Memberlist::snapshot). Snapshots are
-/// immutable; the driver publishes a new one (lock-free swap) after
+/// immutable; the driver publishes a new one (single-owner cell swap) after
 /// each mutation that affects the observable state.
 ///
 /// Generic over the wire id / address types `<I, A>`, mirroring the

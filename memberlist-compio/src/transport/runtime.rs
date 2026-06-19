@@ -9,15 +9,8 @@
 //! per-Transport-owned resources (gossip socket, TCP listener,
 //! stream-specific knobs, etc.) alongside.
 
-use std::{
-  net::SocketAddr,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64},
-  },
-};
+use std::{cell::Cell, net::SocketAddr, rc::Rc};
 
-use arc_swap::ArcSwap;
 use flume::{Receiver, Sender};
 
 use memberlist_proto::event::Event;
@@ -27,7 +20,7 @@ use crate::{
   delegate::{AliveDelegate, Delegate, MergeDelegate},
   driver::options::DriverOptions,
   options::MemberlistOptions,
-  snapshot::MemberlistSnapshot,
+  snapshot::SnapshotCell,
   transport::Transport,
 };
 use memberlist_proto::metrics::Metrics;
@@ -65,14 +58,14 @@ where
   pub(crate) events_tx: Sender<Event<T::Id, SocketAddr>>,
   /// Drops at the `EventStream` fan-out (slow subscriber) — recoverable
   /// membership/control gaps.
-  pub(crate) events_dropped: Arc<AtomicU64>,
+  pub(crate) events_dropped: Rc<Cell<u64>>,
   /// Drops at the observation (delegate) channel (delegate fell behind) — may
   /// include unrecoverable app-data.
-  pub(crate) observation_dropped: Arc<AtomicU64>,
-  pub(crate) snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
+  pub(crate) observation_dropped: Rc<Cell<u64>>,
+  pub(crate) snapshot: SnapshotCell<T::Id>,
   /// The machine's load-shedding counters, republished by the driver on change.
-  pub(crate) metrics: Arc<ArcSwap<Metrics>>,
-  pub(crate) shutdown_flag: Arc<AtomicBool>,
+  pub(crate) metrics: Rc<Cell<Metrics>>,
+  pub(crate) shutdown_flag: Rc<Cell<bool>>,
   pub(crate) driver_options: DriverOptions,
   pub(crate) memberlist_options: MemberlistOptions,
   /// Optional machine alive-admission predicate; `T::run` installs it into
@@ -97,11 +90,11 @@ where
     delegate: D,
     commands_rx: CommandReceiver<T>,
     events_tx: Sender<Event<T::Id, SocketAddr>>,
-    events_dropped: Arc<AtomicU64>,
-    observation_dropped: Arc<AtomicU64>,
-    snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
-    metrics: Arc<ArcSwap<Metrics>>,
-    shutdown_flag: Arc<AtomicBool>,
+    events_dropped: Rc<Cell<u64>>,
+    observation_dropped: Rc<Cell<u64>>,
+    snapshot: SnapshotCell<T::Id>,
+    metrics: Rc<Cell<Metrics>>,
+    shutdown_flag: Rc<Cell<bool>>,
     driver_options: DriverOptions,
     memberlist_options: MemberlistOptions,
     alive_delegate: Option<Box<dyn AliveDelegate<T::Id, SocketAddr>>>,

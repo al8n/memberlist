@@ -57,3 +57,19 @@ async fn tcp_two_node_join_via_new() {
   n1.shutdown().await.ok();
   n2.shutdown().await.ok();
 }
+
+// The handle is thread-per-core: its `Rc` / `Cell` / `RefCell` bookkeeping pins
+// it to the driver's thread, so `Memberlist` must stay `!Send` — it cannot be
+// moved to another thread. This fails to compile if a field is ever switched
+// back to a `Send` type (e.g. `Arc`), which would silently break that contract.
+#[test]
+fn handle_is_not_send() {
+  trait AmbiguousIfSend<A> {
+    fn check() {}
+  }
+  impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+  impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+  // Resolves only while `Memberlist` is `!Send` (one matching impl); the moment
+  // it becomes `Send`, both impls match and this is an ambiguity compile error.
+  let _ = <Memberlist<SmolStr, SocketAddr> as AmbiguousIfSend<_>>::check;
+}

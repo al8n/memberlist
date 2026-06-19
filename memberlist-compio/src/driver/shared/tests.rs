@@ -1,9 +1,9 @@
 use super::*;
 use std::{
   borrow::Cow,
-  cell::RefCell,
+  cell::{Cell, RefCell},
   net::SocketAddr,
-  sync::{Arc, atomic::Ordering},
+  sync::Arc,
 };
 
 use bytes::Bytes;
@@ -199,11 +199,11 @@ fn observation_payload_bytes_charges_only_payload_variants() {
 // `add_obs_payload` adds `Some(n)` and is a no-op on `None`.
 #[test]
 fn add_obs_payload_accumulates_some_and_skips_none() {
-  let counter = AtomicU64::new(0);
+  let counter = Cell::new(0u64);
   add_obs_payload(&counter, Some(10));
   add_obs_payload(&counter, None);
   add_obs_payload(&counter, Some(5));
-  assert_eq!(counter.load(Ordering::Relaxed), 15);
+  assert_eq!(counter.get(), 15);
 }
 
 // `yield_once` re-arms the waker and returns `Pending` exactly once, then

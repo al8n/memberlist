@@ -3,8 +3,9 @@
 //!
 //! The handle exposes a CQRS API:
 //! - **Reads** (`snapshot`, `local_node`, `alive_count`, `member_count`) are
-//!   served lock-free from an `ArcSwap<MemberlistSnapshot<I, SocketAddr>>`
-//!   the driver republishes after every state-affecting tick.
+//!   served from the single-owner `SnapshotCell` the driver republishes after
+//!   every state-affecting tick — handle and driver share one thread, so a read
+//!   is an `Rc` clone, not a lock.
 //! - **Writes** (`join`, `leave`, `update_node_metadata`,
 //!   `queue_user_broadcast`, `set_local_state`, `set_ack_payload`,
 //!   `set_compression_options`, `set_checksum_options`,
@@ -23,15 +24,14 @@
 
 use core::marker::PhantomData;
 use std::{
+  cell::{Cell, RefCell},
   net::SocketAddr,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-  },
+  rc::Rc,
+  sync::Arc,
   time::Duration,
 };
 
-use arc_swap::ArcSwap;
+use crate::snapshot::SnapshotCell;
 use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
@@ -93,9 +93,9 @@ pub struct Memberlist<I, A> {
   commands: Sender<Command<I>>,
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  snapshot: SnapshotCell<I>,
   /// The machine's load-shedding counters, read lock-free via `metrics()`.
-  metrics: Arc<ArcSwap<Metrics>>,
+  metrics: Rc<Cell<Metrics>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
   events_rx: Receiver<Event<I, SocketAddr>>,
@@ -103,15 +103,15 @@ pub struct Memberlist<I, A> {
   /// dropping the last `Arc` drops the inner [`JoinHandle`], which
   /// cancels the task. After [`Memberlist::shutdown`] the task has
   /// already exited and the cancel is a no-op.
-  driver_handle: Arc<JoinHandle<()>>,
-  /// Atomic shutdown flag — set by the driver's post-loop cleanup
+  driver_handle: Rc<JoinHandle<()>>,
+  /// Shutdown flag — set by the driver's post-loop cleanup
   /// BEFORE the cleanup drain runs. Every command-sending method on
   /// this handle (and its clones) reads the flag at entry and returns
   /// `MemberlistError::Shutdown` immediately when set, so a clone
   /// racing the driver's shutdown cleanup cannot end up with its
   /// reply-receiver hanging on a command buffered in a channel that
   /// already has its Receiver gone.
-  shutdown_flag: Arc<AtomicBool>,
+  shutdown_flag: Rc<Cell<bool>>,
   /// Teardown-completion latch. The driver task holds the matching sender and
   /// drops it only after `run` returns (all sockets closed). A `shutdown` caller
   /// that LOST the flag race awaits this before returning, so it cannot resume
@@ -126,14 +126,14 @@ pub struct Memberlist<I, A> {
   /// reconciling from the snapshot. `Disconnected` returns from the `try_send`
   /// are NOT counted (every `EventStream` dropped — "no one is subscribing" — is
   /// not a gap). See [`Self::events_dropped`].
-  events_dropped: Arc<AtomicU64>,
+  events_dropped: Rc<Cell<u64>>,
   /// Monotonic count of events dropped at the observation (delegate) channel:
   /// when it is configured `Channel::Bounded` (the default) and the delegate
   /// cannot keep up, the driver drops by count or by the payload byte backstop.
   /// A drop here means BOTH the delegate hook and the EventStream missed the
   /// event; for app-data (`UserPacket` / `RemoteStateReceived`) it is
   /// UNRECOVERABLE (absent from the snapshot). See [`Self::observation_dropped`].
-  observation_dropped: Arc<AtomicU64>,
+  observation_dropped: Rc<Cell<u64>>,
   /// Cached join deadline — the only `DriverOptions` field [`Self::join`]
   /// reads on the handle hot-path. Caching one scalar instead of the full
   /// options struct keeps the handle free of a transport-options generic.
@@ -179,8 +179,8 @@ where
   /// candidates.
   ///
   /// On return the driver task is already running. Reads (`snapshot`,
-  /// `local_node`, `alive_count`, `member_count`) are served lock-free from
-  /// the initial snapshot until the driver publishes its first refresh on
+  /// `local_node`, `alive_count`, `member_count`) are served from the initial
+  /// snapshot until the driver publishes its first refresh on
   /// entry into the loop.
   ///
   /// # Errors
@@ -372,20 +372,20 @@ where
       )
       .with_meta(initial_meta),
     );
-    let snapshot = Arc::new(ArcSwap::from_pointee(MemberlistSnapshot::new(
+    let snapshot = Rc::new(RefCell::new(Rc::new(MemberlistSnapshot::new(
       vec![local_ns.clone()],
       local_ns,
       1,
       1,
       0,
-    )));
-    let metrics = Arc::new(ArcSwap::from_pointee(Metrics::default()));
+    ))));
+    let metrics = Rc::new(Cell::new(Metrics::default()));
 
     let (commands_tx, commands_rx) = flume::unbounded();
     let (events_tx, events_rx) = flume::bounded(driver_opts.event_queue_cap());
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let events_dropped = Arc::new(AtomicU64::new(0));
-    let observation_dropped = Arc::new(AtomicU64::new(0));
+    let shutdown_flag = Rc::new(Cell::new(false));
+    let events_dropped = Rc::new(Cell::new(0u64));
+    let observation_dropped = Rc::new(Cell::new(0u64));
     let cached_join_deadline = driver_opts.join_deadline();
 
     // A CIDR policy gates the advertised address as an AliveDelegate (composed
@@ -432,7 +432,7 @@ where
       snapshot,
       metrics,
       events_rx,
-      driver_handle: Arc::new(driver_handle),
+      driver_handle: Rc::new(driver_handle),
       shutdown_flag,
       shutdown_done_rx,
       events_dropped,
@@ -449,7 +449,7 @@ where
   /// scalar copy respectively.
   #[inline]
   pub fn local_node(&self) -> Node<I, SocketAddr> {
-    let snap = self.snapshot.load();
+    let snap = self.snapshot.borrow();
     let ns = snap.local_ref();
     Node::new(ns.id_ref().cheap_clone(), ns.address_ref().cheap_clone())
   }
@@ -457,7 +457,7 @@ where
   /// The local node's id.
   #[inline]
   pub fn local_id(&self) -> I {
-    self.snapshot.load().local_ref().id_ref().cheap_clone()
+    self.snapshot.borrow().local_ref().id_ref().cheap_clone()
   }
 }
 
@@ -468,8 +468,8 @@ impl<I, A> Memberlist<I, A> {
   /// driver last published. Subsequent driver mutations do not affect the
   /// returned `Arc` — call again to observe a fresh snapshot.
   #[inline]
-  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, SocketAddr>> {
-    self.snapshot.load_full()
+  pub fn snapshot(&self) -> Rc<MemberlistSnapshot<I, SocketAddr>> {
+    self.snapshot.borrow().clone()
   }
 
   /// The machine's cumulative load-shedding counters, read lock-free. The counts
@@ -477,32 +477,32 @@ impl<I, A> Memberlist<I, A> {
   /// See [`memberlist_proto::metrics::Metrics`].
   #[inline]
   pub fn metrics(&self) -> Metrics {
-    *self.metrics.load_full()
+    self.metrics.get()
   }
 
   /// Number of alive members in the latest published snapshot.
   #[inline]
   pub fn alive_count(&self) -> usize {
-    self.snapshot.load().alive_count()
+    self.snapshot.borrow().alive_count()
   }
 
   /// Total member count (alive + suspect + dead/left, per the coordinator's
   /// `num_members` definition) in the latest published snapshot.
   #[inline]
   pub fn member_count(&self) -> usize {
-    self.snapshot.load().member_count()
+    self.snapshot.borrow().member_count()
   }
 
   /// The local node's advertised address.
   #[inline]
   pub fn advertise_address(&self) -> SocketAddr {
-    *self.snapshot.load().local_ref().address_ref()
+    *self.snapshot.borrow().local_ref().address_ref()
   }
 
   /// The local node's full state from the latest published snapshot.
   #[inline]
   pub fn local_state(&self) -> Arc<memberlist_proto::typed::NodeState<I, SocketAddr>> {
-    self.snapshot.load().local_ref().clone()
+    self.snapshot.borrow().local_ref().clone()
   }
 
   /// Look up a member by id in the latest published snapshot.
@@ -512,34 +512,34 @@ impl<I, A> Memberlist<I, A> {
   where
     I: PartialEq,
   {
-    self.snapshot.load().by_id(id).cloned()
+    self.snapshot.borrow().by_id(id).cloned()
   }
 
   /// All members currently in the alive state, from the latest published
   /// snapshot.
   #[inline]
   pub fn online_members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
-    self.snapshot.load().online_members().cloned().collect()
+    self.snapshot.borrow().online_members().cloned().collect()
   }
 
   /// Number of alive members. Equivalent to [`Self::alive_count`].
   #[inline]
   pub fn num_online_members(&self) -> usize {
-    self.snapshot.load().alive_count()
+    self.snapshot.borrow().alive_count()
   }
 
   /// All known members (alive + suspect + dead/left) from the latest
   /// published snapshot. Mirrors the legacy `Memberlist::members` name.
   #[inline]
   pub fn members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
-    self.snapshot.load().members().to_vec()
+    self.snapshot.borrow().members().to_vec()
   }
 
   /// Total member count. Equivalent to [`Self::member_count`]; mirrors the
   /// legacy `Memberlist::num_members` name.
   #[inline]
   pub fn num_members(&self) -> usize {
-    self.snapshot.load().member_count()
+    self.snapshot.borrow().member_count()
   }
 
   /// Members matching `pred`, from the latest published snapshot.
@@ -548,7 +548,7 @@ impl<I, A> Memberlist<I, A> {
     &self,
     pred: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> bool,
   ) -> Vec<Arc<memberlist_proto::typed::NodeState<I, SocketAddr>>> {
-    self.snapshot.load().members_by(pred).cloned().collect()
+    self.snapshot.borrow().members_by(pred).cloned().collect()
   }
 
   /// Count of members matching `pred`.
@@ -557,7 +557,7 @@ impl<I, A> Memberlist<I, A> {
     &self,
     pred: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> bool,
   ) -> usize {
-    self.snapshot.load().num_members_by(pred)
+    self.snapshot.borrow().num_members_by(pred)
   }
 
   /// Map-filter members, collecting all `Some` results into a `Vec`.
@@ -566,13 +566,13 @@ impl<I, A> Memberlist<I, A> {
     &self,
     f: impl FnMut(&memberlist_proto::typed::NodeState<I, SocketAddr>) -> Option<O>,
   ) -> Vec<O> {
-    self.snapshot.load().members_map_by(f)
+    self.snapshot.borrow().members_map_by(f)
   }
 
   /// The local node's Lifeguard health score (`0` = healthy; higher = worse).
   #[inline]
   pub fn health_score(&self) -> usize {
-    self.snapshot.load().health_score()
+    self.snapshot.borrow().health_score()
   }
 
   /// Synchronous join: dispatch a push/pull against each seed and wait for
@@ -634,7 +634,7 @@ impl<I, A> Memberlist<I, A> {
   where
     RES: Resolver<Address = A>,
   {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     // Empty input is a trivial caller-side request — return `Ok(0)`
@@ -692,7 +692,7 @@ impl<I, A> Memberlist<I, A> {
   where
     RES: Resolver<Address = A>,
   {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let addrs = resolve_seeds(resolver, seeds).await?;
@@ -725,7 +725,7 @@ impl<I, A> Memberlist<I, A> {
   /// but the driver could not confirm peers were notified.
   #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn leave(&self) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -744,7 +744,7 @@ impl<I, A> Memberlist<I, A> {
   /// the cluster (after [`leave`](Self::leave)): the gossip schedulers
   /// are stopped, so the update could never be disseminated.
   pub async fn update_node_metadata(&self, meta: Vec<u8>) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -767,7 +767,7 @@ impl<I, A> Memberlist<I, A> {
   /// the cluster (after [`leave`](Self::leave)): the gossip scheduler is
   /// stopped, so the broadcast could never be disseminated.
   pub async fn queue_user_broadcast(&self, data: Bytes) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -789,7 +789,7 @@ impl<I, A> Memberlist<I, A> {
   /// the cluster (after [`leave`](Self::leave)): no further push/pull
   /// exchange will carry the snapshot.
   pub async fn set_local_state(&self, state: Bytes) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -815,7 +815,7 @@ impl<I, A> Memberlist<I, A> {
   /// not stored): every probe reply would otherwise silently fail to send
   /// and peers would falsely suspect this node.
   pub async fn set_ack_payload(&self, payload: Bytes) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -840,7 +840,7 @@ impl<I, A> Memberlist<I, A> {
     )))
   )]
   pub async fn set_compression_options(&self, opts: CompressionOptions) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -875,7 +875,7 @@ impl<I, A> Memberlist<I, A> {
     )))
   )]
   pub async fn set_checksum_options(&self, opts: ChecksumOptions) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -925,7 +925,7 @@ impl<I, A> Memberlist<I, A> {
     doc(cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305")))
   )]
   pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -993,7 +993,7 @@ impl<I, A> Memberlist<I, A> {
   /// counters; their sum is the subscriber's total loss over a window.
   #[inline]
   pub fn events_dropped(&self) -> u64 {
-    self.events_dropped.load(Ordering::Relaxed)
+    self.events_dropped.get()
   }
 
   /// Monotonic count of events dropped at the observation (delegate) channel:
@@ -1017,7 +1017,7 @@ impl<I, A> Memberlist<I, A> {
   /// the cost of unbounded queue growth under a stuck handler).
   #[inline]
   pub fn observation_dropped(&self) -> u64 {
-    self.observation_dropped.load(Ordering::Relaxed)
+    self.observation_dropped.get()
   }
 
   /// Ping `node` and return the measured round-trip time. Mirrors
@@ -1028,7 +1028,7 @@ impl<I, A> Memberlist<I, A> {
   /// Requires the node to be running. Returns `Err(NotRunning)` after
   /// `leave()` and `Err(Shutdown)` after `shutdown()`.
   pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -1060,7 +1060,7 @@ impl<I, A> Memberlist<I, A> {
     to: SocketAddr,
     msgs: impl IntoIterator<Item = Bytes>,
   ) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let payloads: Vec<Bytes> = msgs.into_iter().collect();
@@ -1091,7 +1091,7 @@ impl<I, A> Memberlist<I, A> {
     to: SocketAddr,
     msgs: impl IntoIterator<Item = Bytes>,
   ) -> Result<()> {
-    if self.shutdown_flag.load(Ordering::Acquire) {
+    if self.shutdown_flag.get() {
       return Err(MemberlistError::Shutdown);
     }
     let payloads: Vec<Bytes> = msgs.into_iter().collect();
@@ -1124,7 +1124,7 @@ impl<I, A> Memberlist<I, A> {
     // is still SENT (so the driver loop tears down) only if we are the
     // first caller; otherwise the driver has already observed (or will
     // observe) a prior Shutdown command and is tearing down on its own.
-    if self.shutdown_flag.swap(true, Ordering::AcqRel) {
+    if self.shutdown_flag.replace(true) {
       // Lost the race: the winning caller owns the teardown. Await its
       // completion before returning so this caller cannot resume and rebind the
       // same port while the driver's sockets are still bound. `recv_async`

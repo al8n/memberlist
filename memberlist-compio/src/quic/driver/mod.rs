@@ -17,17 +17,15 @@
 #![cfg(feature = "quic")]
 
 use std::{
+  cell::Cell,
   collections::{HashMap, HashSet},
   io,
   net::SocketAddr,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-  },
+  rc::Rc,
+  sync::Arc,
 };
 
 use crate::QuicEndpoint;
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
@@ -56,7 +54,7 @@ use crate::{
     shared::{ExchangeId, cidr_blocks, dispatch_event_delegate},
   },
   error::{JoinAllFailed, MemberlistError, Result},
-  snapshot::MemberlistSnapshot,
+  snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
 use core::{fmt, time::Duration};
@@ -228,24 +226,24 @@ where
   /// means the delegate (and EventStream) missed the event; for app-data it is
   /// unrecoverable. (The observation task's separate EventStream-forward drops
   /// increment `events_dropped`.)
-  observation_dropped: Arc<AtomicU64>,
+  observation_dropped: Rc<Cell<u64>>,
   /// Bytes of payload-bearing events (`UserPacket` / `RemoteStateReceived`)
   /// currently queued in `obs_tx`: the driver adds on enqueue, the observation
   /// task subtracts on dequeue. Bounds the memory large reliable payloads
   /// occupy under a backed-up delegate (the count cap alone cannot).
-  obs_payload_bytes: Arc<AtomicU64>,
+  obs_payload_bytes: Rc<Cell<u64>>,
   /// Byte backstop budget for queued payload-bearing events: `Some(4 *
   /// max_stream_frame_size)` on a `Bounded` channel, `None` on `Unbounded`
   /// (which opts out of dropping).
   obs_payload_budget: Option<u64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  snapshot: SnapshotCell<I>,
   /// The endpoint snapshot version last stored into `snapshot`; the snapshot is
   /// rebuilt only when it differs (a rebuild clones every NodeState).
   last_snapshot_version: u64,
-  metrics: Arc<ArcSwap<Metrics>>,
+  metrics: Rc<Cell<Metrics>>,
   /// The load-shedding counters last stored into `metrics` (published on change).
   last_metrics: Metrics,
-  shutdown_flag: Arc<AtomicBool>,
+  shutdown_flag: Rc<Cell<bool>>,
   driver_opts: DriverOptions,
   /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
   /// gossip datagram) from a blocked source IP is dropped before the QUIC machine
@@ -318,19 +316,19 @@ where
 ///
 /// Drives the [`QuicEndpoint`] until the command channel closes (all
 /// `Memberlist` handles dropped) or a `Command::Shutdown` is received.
-/// All mutations on the endpoint happen here; reads happen lock-free
-/// via the published [`MemberlistSnapshot`].
+/// All mutations on the endpoint happen here; reads happen via the published
+/// [`MemberlistSnapshot`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn quic_driver_loop<I, D, G>(
   endpoint: QuicEndpoint<I, G>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, SocketAddr>>,
-  events_dropped: Arc<AtomicU64>,
-  observation_dropped: Arc<AtomicU64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
-  metrics: Arc<ArcSwap<Metrics>>,
-  shutdown_flag: Arc<AtomicBool>,
+  events_dropped: Rc<Cell<u64>>,
+  observation_dropped: Rc<Cell<u64>>,
+  snapshot: SnapshotCell<I>,
+  metrics: Rc<Cell<Metrics>>,
+  shutdown_flag: Rc<Cell<bool>>,
   driver_opts: DriverOptions,
   delegate: D,
   label: Option<bytes::Bytes>,
@@ -384,7 +382,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // backing the byte backstop on the surfacing path; the byte budget caps
   // queued payload bytes at four frames' worth on a `Bounded` channel, while
   // `Unbounded` opts out of dropping (budget `None`).
-  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+  let obs_payload_bytes = Rc::new(Cell::new(0u64));
   let obs_payload_budget: Option<u64> = match driver_opts.observation_channel() {
     crate::Channel::Bounded(_) => Some((endpoint.max_stream_frame_size() as u64).saturating_mul(4)),
     crate::Channel::Unbounded => None,
@@ -771,7 +769,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   //   5. Drop the bound UDP socket BEFORE acking the observed
   //      shutdown caller so an immediate rebind on the same port
   //      after `shutdown.await` succeeds.
-  state.shutdown_flag.store(true, Ordering::Release);
+  state.shutdown_flag.set(true);
   while let Ok(c) = state.commands.try_recv() {
     let res = Err(MemberlistError::Shutdown);
     let reply: futures_channel::oneshot::Sender<Result<()>> = match c {
@@ -900,8 +898,8 @@ async fn observation_task<I, D>(
   obs_rx: Receiver<Event<I, SocketAddr>>,
   delegate: D,
   events_tx: Sender<Event<I, SocketAddr>>,
-  events_dropped: Arc<AtomicU64>,
-  obs_payload_bytes: Arc<AtomicU64>,
+  events_dropped: Rc<Cell<u64>>,
+  obs_payload_bytes: Rc<Cell<u64>>,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
   I: memberlist_proto::Id
@@ -920,7 +918,7 @@ async fn observation_task<I, D>(
     // promptly. Membership / control events have no weight.
     let payload = crate::driver::shared::observation_payload_bytes(&ev);
     if let Some(b) = payload {
-      obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
+      obs_payload_bytes.set(obs_payload_bytes.get() - b);
     }
     // Contain a panicking delegate hook so the task SURVIVES and keeps releasing
     // the byte-backstop reservations of still-queued events; a dead obs task
@@ -941,7 +939,7 @@ async fn observation_task<I, D>(
       .try_send(ev)
       .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
     {
-      events_dropped.fetch_add(1, Ordering::Relaxed);
+      events_dropped.set(events_dropped.get() + 1);
     }
   }
 }
@@ -1862,21 +1860,13 @@ where
       // `ExchangeCompleted` that fires a parked join/leave reply is never
       // delayed by a backed-up delegate.
       if let (Some(budget), Some(bytes)) = (state.obs_payload_budget, payload_bytes) {
-        if state
-          .obs_payload_bytes
-          .load(Ordering::Relaxed)
-          .saturating_add(bytes)
-          > budget
-        {
+        if state.obs_payload_bytes.get().saturating_add(bytes) > budget {
           crate::driver::shared::yield_once().await;
         }
-        if state
-          .obs_payload_bytes
-          .load(Ordering::Relaxed)
-          .saturating_add(bytes)
-          > budget
-        {
-          state.observation_dropped.fetch_add(1, Ordering::Relaxed);
+        if state.obs_payload_bytes.get().saturating_add(bytes) > budget {
+          state
+            .observation_dropped
+            .set(state.observation_dropped.get() + 1);
           continue;
         }
       }
@@ -1899,7 +1889,9 @@ where
               crate::driver::shared::add_obs_payload(&state.obs_payload_bytes, payload_bytes)
             }
             Err(_) => {
-              state.observation_dropped.fetch_add(1, Ordering::Relaxed);
+              state
+                .observation_dropped
+                .set(state.observation_dropped.get() + 1);
             }
           }
         }
@@ -1995,9 +1987,9 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
   pending_leave.as_ref().map(|pl| pl.deadline)
 }
 
-/// Publish a fresh snapshot of the coordinator's observable state to
-/// `arc-swap`. Readers see the new snapshot on their next
-/// `MemberlistSnapshot::load` with no lock contention. Mirrors the
+/// Publish a fresh snapshot of the coordinator's observable state into the
+/// single-owner `SnapshotCell`. Readers on the same thread see the new
+/// snapshot on their next read. Mirrors the
 /// stream driver's `refresh_snapshot`
 /// (`memberlist-compio/src/driver.rs`); reaches the inner membership
 /// `Endpoint<I, SocketAddr>` via `QuicEndpoint::endpoint_ref()`.
@@ -2008,10 +2000,8 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 /// `Bytes`, which shares the underlying buffer). The local node entry is
 /// taken directly from the membership map so it carries the real meta,
 /// incarnation, and protocol versions.
-fn refresh_snapshot<I, G>(
-  endpoint: &QuicEndpoint<I, G>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
-) where
+fn refresh_snapshot<I, G>(endpoint: &QuicEndpoint<I, G>, snapshot: &SnapshotCell<I>)
+where
   I: memberlist_proto::Id
     + memberlist_proto::Data
     + memberlist_proto::CheapClone
@@ -2031,7 +2021,7 @@ fn refresh_snapshot<I, G>(
 /// NodeState).
 fn refresh_snapshot_if_changed<I, G>(
   endpoint: &QuicEndpoint<I, G>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  snapshot: &SnapshotCell<I>,
   last_version: &mut u64,
 ) where
   I: memberlist_proto::Id
@@ -2056,7 +2046,7 @@ fn refresh_snapshot_if_changed<I, G>(
 /// change; a cheap `Copy` compare, allocating only on a real change).
 fn refresh_metrics_if_changed<I, G>(
   endpoint: &QuicEndpoint<I, G>,
-  metrics: &Arc<ArcSwap<Metrics>>,
+  metrics: &Rc<Cell<Metrics>>,
   last: &mut Metrics,
 ) where
   I: memberlist_proto::Id
@@ -2072,13 +2062,13 @@ fn refresh_metrics_if_changed<I, G>(
   let m = endpoint.metrics();
   if m != *last {
     *last = m;
-    metrics.store(Arc::new(m));
+    metrics.set(m);
   }
 }
 
 fn refresh_snapshot_inner<I, R>(
   ep: &memberlist_proto::Endpoint<I, SocketAddr, R>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
+  snapshot: &SnapshotCell<I>,
 ) where
   I: memberlist_proto::Id
     + memberlist_proto::Data
@@ -2116,7 +2106,7 @@ fn refresh_snapshot_inner<I, R>(
     member_count,
     ep.health_score(),
   );
-  snapshot.store(Arc::new(snap));
+  *snapshot.borrow_mut() = Rc::new(snap);
 }
 
 #[cfg(test)]
