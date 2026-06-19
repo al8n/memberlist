@@ -8,7 +8,6 @@ mod delegate;
 mod driver;
 mod error;
 mod events;
-mod maybe_resolved;
 mod memberlist;
 mod options;
 mod resolver;
@@ -86,7 +85,6 @@ pub use error::{
   MemberlistError, Result,
 };
 pub use events::EventStream;
-pub use maybe_resolved::MaybeResolved;
 pub use memberlist::Memberlist;
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
@@ -103,7 +101,7 @@ pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
   )))
 )]
 pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
-pub use memberlist_proto::{Node, typed::NodeState as MemberlistNodeState};
+pub use memberlist_proto::{MaybeResolved, Node, typed::NodeState as MemberlistNodeState};
 pub use options::{MemberlistOptions, Options, OptionsParts};
 pub use resolver::{
   AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,

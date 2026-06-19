@@ -50,7 +50,7 @@ use crate::transform::validate_checksum;
 #[cfg(encryption)]
 use crate::transform::validate_encryption;
 use crate::{
-  NodeId,
+  MaybeResolved, NodeId,
   command::{
     Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
     SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
@@ -60,7 +60,7 @@ use crate::{
   events::EventStream,
   observation::observation_task,
   options::{Channel, MemberlistOptions, Options},
-  resolver::{AddressResolver, MaybeResolved},
+  resolver::AddressResolver,
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
 };

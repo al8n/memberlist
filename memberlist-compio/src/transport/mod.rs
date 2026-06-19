@@ -11,8 +11,8 @@ use core::future::Future;
 use std::net::SocketAddr;
 
 use crate::{
+  MaybeResolved,
   delegate::Delegate,
-  maybe_resolved::MaybeResolved,
   resolver::{AdvertiseAddrResolver, Resolver},
 };
 

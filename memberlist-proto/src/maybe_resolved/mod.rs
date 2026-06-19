@@ -1,20 +1,27 @@
-//! `MaybeResolved<A, R>` — caller-side input that may or may not be
-//! pre-resolved. Used by `Transport::new` (advertise address) and
-//! `Memberlist::join` / `join_many` (seeds).
+//! [`MaybeResolved`] — a caller-supplied address that may already be a wire
+//! address or may still need resolving at the driver boundary.
+//!
+//! Shared by every driver: `Transport::new` takes one for the advertise
+//! address, and the `join` family takes them for the seeds. A caller that
+//! already holds a wire [`SocketAddr`] hands in `Resolved` (resolution is
+//! skipped); otherwise it hands in `Unresolved`, which the driver passes
+//! through its configured resolver.
 
-use memberlist_proto::CheapClone;
+use crate::CheapClone;
+use core::net::SocketAddr;
 
-/// An address that may or may not be resolved.
+/// An address that is either already resolved to a wire address or still needs
+/// resolving at the driver boundary.
 ///
-/// `join`-family methods and `Transport::new` accept `MaybeResolved<A, R>` so
-/// callers can hand in either an already-resolved socket address (skip
-/// resolution) or an unresolved address (driver resolves via the supplied
-/// `Resolver`).
+/// `R` is the resolved (wire) address type; it defaults to [`SocketAddr`], the
+/// wire address every driver resolves to, so single-parameter spellings
+/// (`MaybeResolved<A>`) read terse while a driver that resolves to a different
+/// wire type can name it explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MaybeResolved<A, R> {
-  /// Already resolved — use directly.
+pub enum MaybeResolved<A, R = SocketAddr> {
+  /// Already resolved — use directly, no resolver needed.
   Resolved(R),
-  /// Needs resolution before use.
+  /// Unresolved — resolved at the driver boundary before use.
   Unresolved(A),
 }
 
@@ -49,13 +56,13 @@ impl<A, R> MaybeResolved<A, R> {
     }
   }
 
-  /// `true` if the variant is `Resolved`.
+  /// Whether this is an already-resolved wire address.
   #[inline]
   pub const fn is_resolved(&self) -> bool {
     matches!(self, Self::Resolved(_))
   }
 
-  /// `true` if the variant is `Unresolved`.
+  /// Whether this is an unresolved address awaiting the driver boundary.
   #[inline]
   pub const fn is_unresolved(&self) -> bool {
     matches!(self, Self::Unresolved(_))

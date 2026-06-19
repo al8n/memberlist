@@ -174,6 +174,7 @@ pub mod endpoint;
 pub mod error;
 pub mod event;
 mod mathf;
+pub mod maybe_resolved;
 pub mod members;
 pub mod metrics;
 pub(crate) mod probe;
@@ -247,6 +248,7 @@ pub use event::{
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use ipnet::{AddrParseError, IpNet};
+pub use maybe_resolved::MaybeResolved;
 pub use members::{LocalNodeState, Member, Members};
 pub use rand::{Rng, SeedableRng, rngs::SmallRng};
 pub use stream::{PushPullSnapshot, Stream};

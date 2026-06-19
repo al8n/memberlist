@@ -32,10 +32,9 @@ use memberlist_proto::{
 use smol_str::SmolStr;
 
 use crate::{
-  AdvertiseAddrResolver, Delegate, MemberlistError, Resolver, Result, StreamTransportOptions,
-  Transport, TransportRuntime,
+  AdvertiseAddrResolver, Delegate, MaybeResolved, MemberlistError, Resolver, Result,
+  StreamTransportOptions, Transport, TransportRuntime,
   delegate::{BoxedAlive, BoxedMerge},
-  maybe_resolved::MaybeResolved,
 };
 use core::fmt;
 use std::io::ErrorKind;

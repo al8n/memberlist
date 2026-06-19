@@ -81,13 +81,13 @@ pub use error::{GossipMtuTooLarge, InitError};
 pub use gossip_io::GossipIo;
 // Admission predicates a caller can install via `Engine::set_alive_delegate` /
 // `set_merge_delegate`.
-pub use memberlist_proto::{AliveDelegate, MergeDelegate};
+pub use memberlist_proto::{AliveDelegate, MaybeResolved, MergeDelegate};
 // CIDR peer-admission policy, installed via `Options::with_cidr_policy`.
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
 pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
-pub use resolver::{MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, ResolvedAddrs};
+pub use resolver::{MAX_RESOLVED_ADDRS_PER_SEED, ResolvedAddrs};
 pub use stream_io::{StreamIo, StreamIoError};
 #[cfg(checksum)]
 #[cfg_attr(

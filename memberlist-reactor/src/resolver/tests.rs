@@ -52,30 +52,6 @@ fn socket_addr_resolver_is_default_and_copy() {
   assert_eq!(out, vec![addr]);
 }
 
-/// `MaybeResolved` derives equality and hashing; the two variants are
-/// distinct, and `Resolved`/`Unresolved` round-trip their payloads.
-#[test]
-fn maybe_resolved_variants_are_distinct() {
-  let resolved: MaybeResolved<SocketAddr> = MaybeResolved::Resolved(sock(1));
-  let unresolved: MaybeResolved<SocketAddr> = MaybeResolved::Unresolved(sock(1));
-  assert_ne!(
-    resolved, unresolved,
-    "a resolved wire address differs from an unresolved one even at the same socket"
-  );
-  assert_eq!(resolved.clone(), MaybeResolved::Resolved(sock(1)));
-  match unresolved {
-    MaybeResolved::Unresolved(a) => assert_eq!(a, sock(1)),
-    MaybeResolved::Resolved(_) => panic!("expected the Unresolved variant"),
-  }
-
-  // Debug + Hash are derived; exercise them so the derives stay covered.
-  use std::collections::HashSet;
-  let mut set: HashSet<MaybeResolved<SocketAddr>> = HashSet::new();
-  set.insert(MaybeResolved::Resolved(sock(2)));
-  assert!(set.contains(&MaybeResolved::Resolved(sock(2))));
-  assert!(!format!("{resolved:?}").is_empty());
-}
-
 /// A custom `AddressResolver` may return several candidates (a name mapping
 /// to multiple A/AAAA records) and may report a typed error.
 #[test]

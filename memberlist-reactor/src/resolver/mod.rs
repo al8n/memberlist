@@ -34,17 +34,6 @@ pub trait AddressResolver: Send + Sync + 'static {
   ) -> impl Future<Output = Result<Vec<SocketAddr>, Self::Error>> + Send + '_;
 }
 
-/// A seed or advertise address that is either an already-resolved wire
-/// [`SocketAddr`] or an unresolved address to pass through an
-/// [`AddressResolver`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MaybeResolved<A> {
-  /// An already-resolved wire address — used verbatim, no resolver needed.
-  Resolved(SocketAddr),
-  /// An unresolved address, resolved at the boundary.
-  Unresolved(A),
-}
-
 /// An [`AddressResolver`] for callers that already hold wire [`SocketAddr`]s: it
 /// passes each address through unchanged and never fails.
 #[derive(Debug, Default, Clone, Copy)]

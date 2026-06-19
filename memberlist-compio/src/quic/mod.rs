@@ -27,9 +27,9 @@ use memberlist_proto::{config::EndpointOptions, endpoint::Endpoint};
 use smol_str::SmolStr;
 
 use crate::{
-  AdvertiseAddrResolver, Delegate, MemberlistError, Resolver, Result, Transport, TransportRuntime,
+  AdvertiseAddrResolver, Delegate, MaybeResolved, MemberlistError, Resolver, Result, Transport,
+  TransportRuntime,
   delegate::{BoxedAlive, BoxedMerge},
-  maybe_resolved::MaybeResolved,
 };
 
 /// The QUIC driver task that owns the `QuicEndpoint`, the UDP socket, and the

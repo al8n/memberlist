@@ -54,14 +54,13 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
+  EventStream, JoinAllFailed, MaybeResolved, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
     SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
     WaitForCompletionArgs,
   },
   delegate::Delegate,
-  maybe_resolved::MaybeResolved,
   resolver::{AdvertiseAddrResolver, Resolver},
   transport::{Transport, TransportRuntime},
 };

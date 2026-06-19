@@ -1,5 +1,5 @@
-//! The [`MaybeResolved`] seed/advertise form and the bounded [`ResolvedAddrs`]
-//! resolution result shared by the embedded drivers.
+//! The bounded [`ResolvedAddrs`] resolution result shared by the embedded
+//! drivers.
 
 use core::net::SocketAddr;
 /// Per-call cap on the candidate wire addresses a resolver may return for one
@@ -18,28 +18,3 @@ pub const MAX_RESOLVED_ADDRS_PER_SEED: usize = 8;
 /// The cap is part of the type, so resolution is bounded by construction — there
 /// is no owned heap buffer for a runaway resolver to grow without limit.
 pub type ResolvedAddrs = heapless::Vec<SocketAddr, MAX_RESOLVED_ADDRS_PER_SEED>;
-
-/// A seed or advertise address that is either an already-resolved wire
-/// [`SocketAddr`](core::net::SocketAddr) or an unresolved address to pass
-/// through a resolver.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MaybeResolved<A> {
-  /// An already-resolved wire address — used verbatim, no resolver needed.
-  Resolved(SocketAddr),
-  /// An unresolved address, resolved at the driver boundary.
-  Unresolved(A),
-}
-
-impl<A> MaybeResolved<A> {
-  /// Whether this is an already-resolved wire address.
-  #[inline]
-  pub const fn is_resolved(&self) -> bool {
-    matches!(self, MaybeResolved::Resolved(_))
-  }
-
-  /// Whether this is an unresolved address awaiting the driver boundary.
-  #[inline]
-  pub const fn is_unresolved(&self) -> bool {
-    matches!(self, MaybeResolved::Unresolved(_))
-  }
-}
