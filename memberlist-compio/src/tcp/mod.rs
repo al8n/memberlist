@@ -312,7 +312,7 @@ where
     let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
-    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, RawRecords, D, G>(
+    crate::driver::stream::stream_driver_loop::<Self::Id, SocketAddr, RawRecords, D, G>(
       endpoint,
       self.gossip_socket,
       self.tcp_listener,

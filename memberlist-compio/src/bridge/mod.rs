@@ -125,9 +125,9 @@ use compio::{
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 
-use crate::{
-  driver::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOut},
-  driver_shared::ExchangeId,
+use crate::driver::{
+  shared::ExchangeId,
+  stream::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOut},
 };
 
 /// Run the per-bridge byte-mover loop until a [`BridgeOut::Close`] arrives,

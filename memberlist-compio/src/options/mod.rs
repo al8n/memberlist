@@ -14,7 +14,7 @@ use memberlist_proto::{CheapClone, config::EndpointOptions, label::validate_labe
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
-  driver_options::DriverOptions,
+  driver::options::DriverOptions,
   error::{GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidOption, MemberlistError},
   transport::Transport,
 };

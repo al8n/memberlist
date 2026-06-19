@@ -25,7 +25,7 @@ use memberlist_proto::event::Event;
 use crate::{
   command::Command,
   delegate::{AliveDelegate, Delegate, MergeDelegate},
-  driver_options::DriverOptions,
+  driver::options::DriverOptions,
   options::MemberlistOptions,
   snapshot::MemberlistSnapshot,
   transport::Transport,

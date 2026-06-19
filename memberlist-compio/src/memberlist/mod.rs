@@ -172,7 +172,7 @@ where
   ///
   /// `options` bundles the per-backend transport options, the SWIM-level
   /// [`MemberlistOptions`](crate::MemberlistOptions), and the per-driver
-  /// [`DriverOptions`](crate::driver_options::DriverOptions). `delegate` is
+  /// [`DriverOptions`](crate::driver::options::DriverOptions). `delegate` is
   /// the membership hook bundle (default
   /// [`VoidDelegate`](crate::delegate::VoidDelegate) is a no-op). `resolver`
   /// resolves the (possibly-unresolved) advertise address;

@@ -5,8 +5,7 @@
 mod address;
 mod command;
 mod delegate;
-mod driver_options;
-mod driver_shared;
+mod driver;
 mod error;
 mod events;
 mod maybe_resolved;
@@ -25,12 +24,6 @@ mod transport;
   feature = "tls-rustls-aws-lc-rs"
 ))]
 mod bridge;
-#[cfg(any(
-  feature = "tcp",
-  feature = "tls-rustls-ring",
-  feature = "tls-rustls-aws-lc-rs"
-))]
-mod driver;
 
 #[cfg(feature = "tcp")]
 mod tcp;
@@ -82,7 +75,7 @@ pub use delegate::{
   AliveDelegate, ConflictDelegate, Delegate, EventDelegate, MergeDelegate, NodeDelegate,
   PingDelegate, VoidDelegate,
 };
-pub use driver_options::{
+pub use driver::options::{
   Channel, DEFAULT_BRIDGE_INBOUND_CAP, DEFAULT_BRIDGE_RECV_BUF_LEN, DEFAULT_CMD_FAIRNESS_BUDGET,
   DEFAULT_DIAL_TIMEOUT, DEFAULT_EVENT_QUEUE_CAP, DEFAULT_IDLE_WAKE_INTERVAL,
   DEFAULT_ITER_DRAIN_CAP, DEFAULT_JOIN_DEADLINE, DEFAULT_LEAVE_TIMEOUT,

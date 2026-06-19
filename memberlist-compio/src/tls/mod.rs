@@ -383,7 +383,7 @@ where
       .map(Bytes::copy_from_slice);
 
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
-    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, Labeled<TlsRecords>, D, G>(
+    crate::driver::stream::stream_driver_loop::<Self::Id, SocketAddr, Labeled<TlsRecords>, D, G>(
       endpoint,
       self.gossip_socket,
       self.tcp_listener,
