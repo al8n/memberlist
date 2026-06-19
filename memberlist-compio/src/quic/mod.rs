@@ -32,6 +32,10 @@ use crate::{
   maybe_resolved::MaybeResolved,
 };
 
+/// The QUIC driver task that owns the `QuicEndpoint`, the UDP socket, and the
+/// synchronous-join table.
+pub(crate) mod driver;
+
 /// Phantom type tag identifying the QUIC backend.
 ///
 /// `Quic` does not implement
@@ -284,7 +288,7 @@ where
     // backend is built in and this store cannot fail.
     #[cfg(checksum)]
     let _ = endpoint.set_checksum_options(*runtime.memberlist_options.checksum());
-    crate::quic_driver::quic_driver_loop::<Self::Id, D, G>(
+    driver::quic_driver_loop::<Self::Id, D, G>(
       endpoint,
       self.gossip_socket,
       runtime.commands_rx,

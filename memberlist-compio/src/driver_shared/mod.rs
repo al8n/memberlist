@@ -1,6 +1,6 @@
 //! Driver helpers shared by every transport backend's driver loop (the
 //! stream driver in [`crate::driver`] and the QUIC driver in
-//! [`crate::quic_driver`]).
+//! [`crate::quic::driver`]).
 //!
 //! These are the parts of the observation / event hand-off path that are
 //! independent of the reliable plane: the cluster-wide [`ExchangeId`] token,

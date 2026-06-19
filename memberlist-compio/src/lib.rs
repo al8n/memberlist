@@ -41,9 +41,6 @@ mod tls;
 #[cfg(feature = "quic")]
 mod quic;
 
-#[cfg(feature = "quic")]
-mod quic_driver;
-
 use rand::{
   SeedableRng,
   rngs::{StdRng, SysRng},
