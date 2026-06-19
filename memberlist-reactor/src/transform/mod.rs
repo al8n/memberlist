@@ -53,6 +53,7 @@ pub(crate) fn validate_checksum(opts: &ChecksumOptions) -> Result<(), Error> {
 /// the inline encryption callers in the driver pumps — avoids a duplicate
 /// `map_err(Error::Encryption)` at each call site.
 #[cfg(all(any(feature = "quic", feature = "tcp", feature = "tls"), encryption))]
+#[allow(dead_code)]
 pub(crate) fn encryption_err(e: EncryptionError) -> Error {
   Error::Encryption(e)
 }
