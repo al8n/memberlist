@@ -474,7 +474,7 @@ impl Network {
           // injection.
           Transmit::Compound(cmp) => {
             let (to, messages) = cmp.into_parts();
-            pending.push((to, messages));
+            pending.push((to, messages.into_vec()));
           }
         }
       }
