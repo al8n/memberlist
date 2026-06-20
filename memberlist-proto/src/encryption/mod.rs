@@ -641,9 +641,14 @@ fn chacha20poly1305_encrypt(
     aead::{AeadInPlace, KeyInit},
   };
 
+  // The cross-cipher `_` arm exists only when AES-GCM is also built in; in a
+  // ChaCha-only build the match has a single arm, so allow the lint that would
+  // otherwise push toward an irrefutable `let`.
+  #[allow(clippy::infallible_destructuring_match)]
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
     // Precheck in encrypt() guarantees this arm is never reached.
+    #[cfg(feature = "aes-gcm")]
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
   // `From<[u8; N]>` builds the key/nonce, avoiding the deprecated
@@ -670,9 +675,13 @@ fn chacha20poly1305_decrypt(
     aead::{AeadInPlace, KeyInit},
   };
 
+  // See `chacha20poly1305_encrypt`: the cross-cipher `_` arm exists only when
+  // AES-GCM is also built in, so a ChaCha-only build needs this allow.
+  #[allow(clippy::infallible_destructuring_match)]
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
     // Precheck in decrypt() guarantees this arm is never reached.
+    #[cfg(feature = "aes-gcm")]
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
   // See `chacha20poly1305_encrypt`: `From<[u8; N]>` avoids the deprecated
@@ -979,6 +988,7 @@ pub fn encode_encrypted_frame(
 /// encrypt step. An [`EncryptionError`] (e.g. a primary key whose AEAD backend
 /// was not built into this binary) is fatal to the caller — emitting plaintext
 /// on an encrypted path would silently bypass authentication.
+#[cfg(any(feature = "tcp", feature = "tls", feature = "quic"))]
 pub(crate) fn encrypt_reliable_payload(
   encryption: &EncryptionOptions,
   payload: &[u8],

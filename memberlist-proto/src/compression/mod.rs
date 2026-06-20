@@ -19,9 +19,10 @@ use std::{string::ToString, vec::Vec};
 
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
-use crate::{
-  encryption::EncryptionOptions,
-  framing::{FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms},
+#[cfg(encryption)]
+use crate::encryption::EncryptionOptions;
+use crate::framing::{
+  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
 };
 use core::fmt;
 
