@@ -1,40 +1,4 @@
-//! Executor-free `no_std` memberlist driver over [smoltcp](https://docs.rs/smoltcp).
-//!
-//! Composes smoltcp's poll-based TCP/IP stack with the memberlist SWIM machine
-//! in one synchronous super-loop the caller drives. See
-//! `docs/superpowers/specs/2026-05-30-memberlist-smoltcp-driver-design.md`.
-//!
-//! # Building for bare metal
-//!
-//! Turn the default `std` feature off and the `alloc` feature on, against a
-//! bare-metal target. The gossip RNG seed is drawn from
-//! [`getrandom`](https://docs.rs/getrandom) when no explicit seed is configured,
-//! so a bare-metal target must register a `getrandom` backend (e.g. a hardware
-//! RNG); supply one, or build with the custom-backend cfg and provide the
-//! symbol in the final binary:
-//!
-//! ```sh
-//! RUSTFLAGS='--cfg getrandom_backend="custom"' \
-//!   cargo build -p memberlist-smoltcp --no-default-features --features alloc \
-//!   --target thumbv7em-none-eabihf
-//! ```
-//!
-//! Pinning the interface seed via
-//! [`InterfaceOptions::with_random_seed`](crate::InterfaceOptions::with_random_seed)
-//! avoids the construction-time `getrandom` draw entirely — the gossip RNG then
-//! derives from it. [`Memberlist::with_rng`] instead drives the gossip schedule from
-//! a caller-supplied RNG, but smoltcp's interface seed (its TCP-stack ISN and
-//! ephemeral-port RNG) still draws `getrandom` at construction unless that seed is
-//! also pinned.
-//!
-//! Neither covers encryption, which is cross-transport — applied to gossip datagrams
-//! and, on the bare-metal plaintext reliable plane, to stream frames. Every encrypted
-//! frame draws a fresh nonce from `getrandom` at send time. The construction-time
-//! keyring probe is entropy-free (it checks only that each key's AEAD backend is
-//! compiled in and its cipher variant matches its tag), so an encrypted node
-//! constructs on a target whose nonce backend is missing or failing and then cannot
-//! encrypt outbound traffic: gossip datagrams and reliable exchanges alike fail as
-//! they are sent. Register a working `getrandom` backend before enabling encryption.
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

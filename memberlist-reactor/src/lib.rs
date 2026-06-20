@@ -1,15 +1,4 @@
-//! `memberlist-reactor` — reactor-I/O async driver for the Sans-I/O
-//! [`memberlist-proto`](memberlist_proto).
-//!
-//! Drives memberlist-proto's Sans-I/O coordinators — `StreamEndpoint`
-//! (TCP / TLS) and `QuicEndpoint` (QUIC, which embeds `quinn-proto`) — on
-//! **reactor-pattern** async runtimes (tokio, smol, ...) through the
-//! [`agnostic`] runtime abstraction, so one implementation serves every reactor
-//! runtime. Each backend runs a quinn-style `Future::poll` pump that owns its
-//! machine and the underlying sockets, while a uniform `Memberlist` handle hands
-//! commands to it through shared state + a stored waker. It is the reactor
-//! sibling of `memberlist-compio` (completion I/O); both share only
-//! `memberlist-proto`.
+#![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 

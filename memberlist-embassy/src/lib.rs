@@ -1,36 +1,4 @@
-//! Async `no_std` memberlist driver over the [embassy-net](https://docs.rs/embassy-net)
-//! network stack.
-//!
-//! Drives the transport-agnostic
-//! [`Engine`](memberlist_embedded::Engine) shared with the
-//! [`memberlist-smoltcp`](https://docs.rs/memberlist-smoltcp) driver, supplying
-//! an embassy-net link layer and an `embassy-time` clock bridge. The gossip
-//! plane runs over an embassy-net `UdpSocket`; the reliable plane (TCP) is
-//! driven over embassy-net's TCP sockets.
-//!
-//! # Building for bare metal
-//!
-//! Turn the default `std` feature off and the `alloc` feature on, against a
-//! bare-metal target. [`Memberlist::new`] seeds the gossip RNG from the platform
-//! [`getrandom`] backend (a bare-metal target must register one — e.g. a hardware
-//! RNG); [`Memberlist::new_with_rng`] instead takes a caller-seeded [`SmallRng`]
-//! (or any [`Rng`](memberlist_proto::Rng)) so the driver acquires no entropy of
-//! its own — seed it from the same authority that seeds the embassy-net stack.
-//!
-//! ```sh
-//! cargo build -p memberlist-embassy --no-default-features --features alloc \
-//!   --target thumbv7em-none-eabihf
-//! ```
-//!
-//! Neither constructor covers encryption, which is cross-transport — applied to
-//! gossip datagrams and, on embassy's plaintext reliable plane, to stream frames.
-//! Every encrypted frame draws a fresh nonce from [`getrandom`] at send time. The
-//! construction-time keyring probe is entropy-free (it checks only that each key's
-//! AEAD backend is compiled in and its cipher variant matches its tag), so an
-//! encrypted node constructs on a target whose nonce backend is missing or failing
-//! and then cannot encrypt outbound traffic: gossip datagrams and reliable
-//! exchanges alike fail as they are sent. Register a working [`getrandom`] backend
-//! before enabling encryption.
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

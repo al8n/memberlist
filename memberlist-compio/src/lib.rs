@@ -1,5 +1,4 @@
-//! Completion-based async driver for the Sans-I/O memberlist machine,
-//! powered by compio.
+#![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod address;

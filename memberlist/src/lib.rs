@@ -1,11 +1,4 @@
-//! The `memberlist` umbrella: the runtime-agnostic Sans-I/O core re-exported as
-//! [`proto`], plus each driver behind a runtime feature.
-//!
-//! Enable exactly one runtime feature (`tokio`, `smol`, `compio`, `smoltcp`,
-//! `embassy`, `embedded`, or the generic `reactor`) and select transports
-//! (`tcp`, `tls`/`tls-rustls-ring`, `quic`/`quic-rustls-ring`) plus optional
-//! `lz4`/`snappy`/`zstd`/`brotli` compression and `aes-gcm`/`chacha20-poly1305`
-//! encryption.
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
