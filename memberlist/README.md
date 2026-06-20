@@ -49,6 +49,8 @@ and `no_std` / bare-metal support.
 - **Customizable.** Bring your own `Id`, `Address`, `AddressResolver`, and delegates
   (alive / conflict / merge / event / node / ping).
 - **Observable, à la carte.** Opt into `tracing` — compiled out when unused.
+- **Config-file & CLI friendly.** Every `*Options` type optionally derives `serde` and
+  `clap`, so configuration loads from a file or maps straight onto CLI flags + env (std-only).
 
 ## The family
 
@@ -68,21 +70,21 @@ The crates split protocol logic from I/O, mirroring the `quinn` layering:
 
 ```toml
 [dependencies]
-memberlist = "0.1" # tokio runtime + tcp transport by default
+memberlist = "0.9" # tokio runtime + tcp transport by default
 ```
 
 For `smol` instead of `tokio`:
 
 ```toml
 [dependencies]
-memberlist = { version = "0.1", default-features = false, features = ["smol", "tcp"] }
+memberlist = { version = "0.9", default-features = false, features = ["smol", "tcp"] }
 ```
 
 For the `compio` (completion-based, thread-per-core) runtime:
 
 ```toml
 [dependencies]
-memberlist = { version = "0.1", default-features = false, features = ["compio", "tcp"] }
+memberlist = { version = "0.9", default-features = false, features = ["compio", "tcp"] }
 ```
 
 For bare-metal (`no_std`) targets, enable `smoltcp` (the executor-free engine) or
@@ -90,10 +92,10 @@ For bare-metal (`no_std`) targets, enable `smoltcp` (the executor-free engine) o
 
 ```toml
 [dependencies]
-memberlist = { version = "0.1", default-features = false, features = ["embassy", "tcp"] }
+memberlist = { version = "0.9", default-features = false, features = ["embassy", "tcp"] }
 ```
 
-The minimum supported Rust version (MSRV) is **1.85.0** (edition 2024).
+The minimum supported Rust version (MSRV) is **1.96.0** (edition 2024).
 
 ## Example
 
@@ -145,6 +147,8 @@ Pick **one** runtime, **one or more** transports, and any transforms you need.
 - **Compression** (gossip plane) — `lz4`, `snappy`, `zstd`, `brotli`.
 - **Encryption** (gossip plane, AEAD) — `aes-gcm`, `chacha20-poly1305`.
 - **Checksum** (gossip plane) — `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3`.
+- **Config** — `serde` (config-file round-trips) and `clap` (CLI flags + env) on the
+  `*Options` types; std-only.
 - **Other** — `cidr` (IP allow-list admission), `dns` (DNS address resolver), `getifs` (auto-detect the advertise address from local interfaces), `tracing`.
 
 QUIC and TLS reliable streams are already secure, so checksum / encryption apply only to

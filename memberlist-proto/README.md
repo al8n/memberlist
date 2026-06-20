@@ -70,17 +70,20 @@ Opt-in transforms apply on the unreliable gossip plane (none are enabled by defa
 `cidr` adds a `CidrPolicy` IP allow-list usable as an `AliveDelegate` for membership
 admission.
 
+The config `Options` types optionally derive `serde` (config-file round-trips) and `clap`
+(CLI flags + env) under the `serde` / `clap` features — both std-only.
+
 ## Installation
 
 ```toml
 [dependencies]
-memberlist-proto = "0.1"                                                # std (default)
+memberlist-proto = "0.4"                                                # std (default)
 
 # no_std + alloc, with the plain-tcp coordinator:
-memberlist-proto = { version = "0.1", default-features = false, features = ["alloc", "tcp"] }
+memberlist-proto = { version = "0.4", default-features = false, features = ["alloc", "tcp"] }
 
 # bare no_std, no allocator:
-memberlist-proto = { version = "0.1", default-features = false }
+memberlist-proto = { version = "0.4", default-features = false }
 ```
 
 ## Observability

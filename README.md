@@ -60,7 +60,7 @@ plane — TLS and QUIC reliable streams are already secure.
 
 ```toml
 [dependencies]
-memberlist = { version = "0.1", default-features = false, features = [
+memberlist = { version = "0.9", default-features = false, features = [
   # Runtime (pick one): tokio (default), smol, compio, or a no_std driver
   # (smoltcp / embassy / embedded). `reactor` = generic over an `agnostic` runtime.
   "tokio",
@@ -78,6 +78,7 @@ memberlist = { version = "0.1", default-features = false, features = [
   "aes-gcm",
 
   # Optional: cidr (IP allow-list admission), dns (DNS resolver), tracing.
+  # Config: serde + clap derive serde/clap on the *Options types (config files + CLI; std-only).
 ] }
 ```
 

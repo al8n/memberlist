@@ -78,7 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
 | `crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
+| `dns` | DNS address resolution (via `hickory-proto`) |
 | `getifs` | auto-detect the advertise address from the host's interfaces (`LocalAddrResolver`) |
+| `serde` | derive `Serialize` / `Deserialize` on the config `Options` types (config files / round-trips; std-only) |
+| `clap` | derive `clap::Args` on the config `Options` types for CLI apps (std-only) |
 | `tracing` | forward structured `tracing` spans/events from the driver and `memberlist-proto` |
 
 ## Design
