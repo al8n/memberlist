@@ -118,11 +118,11 @@ use std::{future::Future, io, time::Duration};
 
 use memberlist_proto::Instant;
 
+use crate::local_channel::{Receiver, Sender};
 use compio::{
   buf::{BufResult, IntoInner, IoBuf},
   io::{AsyncRead, AsyncWrite, util::Splittable},
 };
-use flume::{Receiver, Sender};
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 
 use crate::driver::{

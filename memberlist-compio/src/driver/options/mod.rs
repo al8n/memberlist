@@ -546,7 +546,7 @@ impl StreamTransportOptions {
   /// Validate the stream-transport knobs that would DETERMINISTICALLY break
   /// (not merely degrade) a stream backend.
   ///
-  /// Two knobs are rejected:
+  /// Three knobs are rejected:
   /// - `bridge_recv_buf_len == 0`: the per-bridge byte-mover reads into a
   ///   `vec![0u8; bridge_recv_buf_len]`, and a zero-length read returns `Ok(0)`
   ///   — which the bridge treats as peer EOF. So every TCP/TLS bridge would
@@ -557,13 +557,16 @@ impl StreamTransportOptions {
   ///   fires immediately — so every graceful close abandons (RSTs) its queued
   ///   push/pull response bytes instead of draining them, truncating reliable
   ///   exchanges. Mirrors the smoltcp driver's `ZeroCloseTimeout` rejection.
+  /// - `bridge_inbound_cap == 0`: the thread-per-core driver moves inbound bridge
+  ///   frames over a single-threaded local channel with no zero-capacity
+  ///   rendezvous path, so a zero capacity makes every `send_async` permanently
+  ///   full — the first bridge read parks forever and no reliable-stream frame
+  ///   reaches the driver.
   ///
-  /// Both are rejected fail-fast at `Transport::new` (mirroring the
+  /// These are rejected fail-fast at `Transport::new` (mirroring the
   /// reject-not-clamp `gossip_mtu` doctrine) rather than constructing `Ok` over
-  /// a silently-broken cluster. `bridge_inbound_cap == 0` (a valid flume
-  /// rendezvous channel — synchronous handoff, degraded throughput) and
-  /// `dial_timeout == 0` (a loud immediate dial-timeout failure) are NOT
-  /// rejected.
+  /// a silently-broken cluster. Only `dial_timeout == 0` (a loud immediate
+  /// dial-timeout failure) is NOT rejected.
   ///
   /// QUIC has no bridges, so this is a stream-only knob; it lives in
   /// `T::Options` and so is not reachable at `Memberlist::new` — both stream
@@ -590,6 +593,15 @@ impl StreamTransportOptions {
         "the reliable graceful-close drain timeout must be nonzero: a zero timeout fires \
            immediately, so a graceful close abandons (RSTs) queued push/pull response bytes \
            instead of draining them, truncating reliable exchanges"
+          .to_string(),
+      )));
+    }
+    if self.bridge_inbound_cap == 0 {
+      return Err(MemberlistError::InvalidOption(InvalidOption::new(
+        "bridge_inbound_cap",
+        "the per-bridge inbound queue capacity must be nonzero: the thread-per-core driver's \
+           local inbound channel has no zero-capacity rendezvous path, so a zero capacity \
+           parks every bridge read forever and no reliable-stream frame reaches the driver"
           .to_string(),
       )));
     }

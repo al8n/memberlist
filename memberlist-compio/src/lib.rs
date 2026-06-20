@@ -7,6 +7,16 @@ mod delegate;
 mod driver;
 mod error;
 mod events;
+// The `!Send` driver-local channels are used only by the transport drivers
+// (the stream bridge and the QUIC observation task), so gate the module to those
+// features — without a transport it would be unused.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs",
+  feature = "quic"
+))]
+mod local_channel;
 mod memberlist;
 mod options;
 mod resolver;

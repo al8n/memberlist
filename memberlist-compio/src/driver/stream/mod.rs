@@ -30,6 +30,8 @@ use compio::{
 use core::task::{Context, Poll, Waker};
 use flume::{Receiver, Sender};
 
+use crate::local_channel;
+
 use crate::StreamEndpoint;
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 use memberlist_proto::{
@@ -274,7 +276,7 @@ pub(crate) struct OutboundOkReady {
   /// The receive half of the bridge's pre-allocated out-channel — the
   /// driver pushed pre-handshake bytes into the matching `out_tx` while
   /// the dial was in flight.
-  pub(crate) out_rx: Receiver<BridgeOut>,
+  pub(crate) out_rx: local_channel::Receiver<BridgeOut>,
   /// The receive half of the bridge's pre-allocated cancel channel — a
   /// `StreamAction::Abort` for this exchange while the dial was in flight
   /// signals the matching `cancel_tx`, so the bridge breaks without
@@ -392,7 +394,7 @@ pub(crate) enum BridgeOut {
 /// leak post-enablement plaintext.
 struct BridgeHandle {
   /// Bytes-or-graceful-control FIFO into the bridge task.
-  out_tx: Sender<BridgeOut>,
+  out_tx: local_channel::Sender<BridgeOut>,
   /// Out-of-band hard-abort signal. Sent by the `StreamAction::Abort` arm;
   /// the bridge selects on it with priority and breaks without draining
   /// `out_tx`. A one-shot: a single send is enough to cancel.
@@ -570,7 +572,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
 {
   let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
   let (bridge_inbound_tx, bridge_inbound_rx) =
-    flume::bounded::<BridgeInbound>(stream_opts.bridge_inbound_cap());
+    local_channel::bounded::<BridgeInbound>(stream_opts.bridge_inbound_cap());
 
   // Spawn the per-driver observation task. It owns the user `Delegate`
   // and the `EventStream` sender and runs OFF this driver task: the
@@ -593,8 +595,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
   // The EventStream (`events_tx`) stays bounded best-effort.
   let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
-    crate::Channel::Unbounded => flume::unbounded::<Event<I, A>>(),
-    crate::Channel::Bounded(n) => flume::bounded::<Event<I, A>>(n),
+    crate::Channel::Unbounded => local_channel::unbounded::<Event<I, A>>(),
+    crate::Channel::Bounded(n) => local_channel::bounded::<Event<I, A>>(n),
   };
   // The two drop counters are kept distinct so a consumer can tell recoverable
   // from potentially-unrecoverable loss: the observation task increments
@@ -2122,7 +2124,7 @@ fn process_one_action(
       {
         pending_exchanges.insert(eid);
       }
-      let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+      let (out_tx, out_rx) = local_channel::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       let ready_tx = bridge_ready_tx.clone();
@@ -2443,7 +2445,7 @@ where
 /// join/leave reply that depends on it. See [`observation_task`].
 async fn drain_events<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
-  obs_tx: &Sender<Event<I, A>>,
+  obs_tx: &local_channel::Sender<Event<I, A>>,
   observation_dropped: &Cell<u64>,
   obs_payload_bytes: &Cell<u64>,
   obs_payload_budget: Option<u64>,
@@ -2641,8 +2643,8 @@ where
     // a successful enqueue, add the payload bytes to the backstop counter.
     match obs_tx.try_send(ev) {
       Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
-      Err(flume::TrySendError::Disconnected(_)) => {}
-      Err(flume::TrySendError::Full(ev)) => {
+      Err(local_channel::TrySendError::Disconnected(_)) => {}
+      Err(local_channel::TrySendError::Full(ev)) => {
         yield_once().await;
         match obs_tx.try_send(ev) {
           Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
@@ -2680,7 +2682,7 @@ where
 /// blocking. The task exits when `obs_rx` closes (the driver dropped its
 /// `obs_tx` at teardown). Mirrors the QUIC driver's `observation_task`.
 async fn observation_task<I, A, D>(
-  obs_rx: Receiver<Event<I, A>>,
+  obs_rx: local_channel::Receiver<Event<I, A>>,
   delegate: D,
   events_tx: Sender<Event<I, A>>,
   events_dropped: Rc<Cell<u64>>,
@@ -2862,8 +2864,8 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 fn fire_timeout_with_drain<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
-  bridge_inbound_rx: &Receiver<BridgeInbound>,
+  bridge_inbound_tx: &local_channel::Sender<BridgeInbound>,
+  bridge_inbound_rx: &local_channel::Receiver<BridgeInbound>,
   bridge_ready_rx: &Receiver<BridgeReady>,
   driver_opts: RuntimeOptions,
   stream_opts: StreamTransportOptions,
@@ -3057,7 +3059,7 @@ fn refresh_metrics_if_changed<I, A, R, G>(
 fn handle_bridge_ready<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &local_channel::Sender<BridgeInbound>,
   ready: BridgeReady,
   recv_buf_len: usize,
   close_timeout: Duration,
@@ -3153,7 +3155,7 @@ fn handle_accepted<I, A, R, G>(
   accepted: io::Result<(TcpStream, SocketAddr)>,
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &local_channel::Sender<BridgeInbound>,
   cidr_policy: &CidrFilter,
   stream_opts: StreamTransportOptions,
 ) -> bool
@@ -3200,7 +3202,7 @@ where
         drop(stream);
         return true;
       };
-      let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+      let (out_tx, out_rx) = local_channel::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       spawn_bridge(
@@ -3230,9 +3232,9 @@ where
 fn spawn_bridge(
   stream: TcpStream,
   eid: ExchangeId,
-  out_rx: Receiver<BridgeOut>,
+  out_rx: local_channel::Receiver<BridgeOut>,
   cancel_rx: futures_channel::oneshot::Receiver<()>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &local_channel::Sender<BridgeInbound>,
   recv_buf_len: usize,
   close_timeout: Duration,
 ) {

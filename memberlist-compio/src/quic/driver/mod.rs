@@ -29,6 +29,8 @@ use crate::QuicEndpoint;
 use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
+
+use crate::local_channel;
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_proto::{
   DatagramSendStatus, Instant, Node, UnreliableTransport,
@@ -219,7 +221,7 @@ where
   /// surfaced event here, never blocking on user observation code. An
   /// `Unbounded` channel never drops; a `Bounded(n)` channel drops the
   /// newest event when full and counts it in `observation_dropped`.
-  obs_tx: Sender<Event<I, SocketAddr>>,
+  obs_tx: local_channel::Sender<Event<I, SocketAddr>>,
   /// Observation-channel drop counter: the driver loop increments it on a
   /// `Bounded` obs-channel drop (the surfacing `try_send` below) when the
   /// delegate falls behind — by count or the payload byte backstop. A drop here
@@ -366,8 +368,8 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
   // The EventStream (`events_tx`) stays bounded best-effort.
   let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
-    crate::Channel::Unbounded => flume::unbounded::<Event<I, SocketAddr>>(),
-    crate::Channel::Bounded(n) => flume::bounded::<Event<I, SocketAddr>>(n),
+    crate::Channel::Unbounded => local_channel::unbounded::<Event<I, SocketAddr>>(),
+    crate::Channel::Bounded(n) => local_channel::bounded::<Event<I, SocketAddr>>(n),
   };
   // The two drop counters are kept distinct: the observation task increments
   // `events_dropped` on a bounded EventStream-forward drop (membership/control,
@@ -895,7 +897,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
 /// dropped its `obs_tx` at teardown). Mirrors the stream driver's
 /// `observation_task`.
 async fn observation_task<I, D>(
-  obs_rx: Receiver<Event<I, SocketAddr>>,
+  obs_rx: local_channel::Receiver<Event<I, SocketAddr>>,
   delegate: D,
   events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Rc<Cell<u64>>,
@@ -1881,8 +1883,8 @@ where
       // successful enqueue, add the payload bytes to the backstop counter.
       match state.obs_tx.try_send(ev) {
         Ok(()) => crate::driver::shared::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
-        Err(flume::TrySendError::Disconnected(_)) => {}
-        Err(flume::TrySendError::Full(ev)) => {
+        Err(local_channel::TrySendError::Disconnected(_)) => {}
+        Err(local_channel::TrySendError::Full(ev)) => {
           crate::driver::shared::yield_once().await;
           match state.obs_tx.try_send(ev) {
             Ok(()) => {

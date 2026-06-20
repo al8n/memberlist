@@ -68,9 +68,9 @@ async fn loopback_pair() -> (TcpStream, TcpStream) {
 async fn graceful_close_drains_queued_bytes_before_exit() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   let response = b"the-final-response-bytes".to_vec();
 
@@ -78,9 +78,9 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
   // disconnects with the queue already populated — the exact ordering the
   // driver produces on a `StreamAction::Close`.
   out_tx
-    .send(BridgeOut::Bytes(response.clone()))
+    .try_send(BridgeOut::Bytes(response.clone()))
     .expect("queue response bytes");
-  out_tx.send(BridgeOut::Close).expect("queue close");
+  out_tx.try_send(BridgeOut::Close).expect("queue close");
   let handle = (out_tx, cancel_tx);
 
   // A long `close_timeout` so this graceful-drain test exercises the FIFO
@@ -126,16 +126,16 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
 async fn explicit_abort_discards_queued_bytes() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   let stale = b"stale-bytes-that-must-not-reach-the-wire".to_vec();
 
   // Queue stale bytes, then fire an explicit abort. The abort must win
   // over the queued `Bytes` and break without writing them.
   out_tx
-    .send(BridgeOut::Bytes(stale))
+    .try_send(BridgeOut::Bytes(stale))
     .expect("queue stale bytes");
   cancel_tx.send(()).expect("signal explicit abort");
   // Keep `out_tx` alive so a disconnect cannot be confused for the abort:
@@ -185,9 +185,9 @@ async fn explicit_abort_discards_queued_bytes() {
 async fn explicit_abort_preempts_in_flight_write() {
   let (server, client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   // A response far larger than any kernel socket buffer: with the peer never
   // reading, its window collapses to zero and the write blocks once the
@@ -195,7 +195,7 @@ async fn explicit_abort_preempts_in_flight_write() {
   let response = vec![0xABu8; 16 * 1024 * 1024];
 
   out_tx
-    .send(BridgeOut::Bytes(response))
+    .try_send(BridgeOut::Bytes(response))
     .expect("queue oversized response");
   // Keep `out_tx` alive: the ONLY teardown signal is the explicit abort, so a
   // disconnect can never be mistaken for it. The peer (`client`) is held but
@@ -260,9 +260,9 @@ async fn explicit_abort_preempts_in_flight_write() {
 async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   let close_timeout = Duration::from_millis(300);
 
@@ -294,7 +294,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   // shape (`out_tx` and `cancel_tx` both disconnect, the response queued). No
   // cancel can ever be sent now — only `close_timeout` can reclaim the bridge.
   out_tx
-    .send(BridgeOut::Bytes(response))
+    .try_send(BridgeOut::Bytes(response))
     .expect("queue oversized response");
   drop((out_tx, cancel_tx));
 
@@ -423,9 +423,9 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
 async fn recv_forwards_peer_bytes_to_driver() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
   // Keep the out-channel alive so the ONLY teardown is the explicit abort.
   let _out_tx_kept = out_tx;
 
@@ -481,9 +481,9 @@ async fn recv_forwards_peer_bytes_to_driver() {
 async fn read_closed_mode_writes_late_response_then_closes() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   let bridge = compio::runtime::spawn(bridge_task(
     server,
@@ -522,9 +522,9 @@ async fn read_closed_mode_writes_late_response_then_closes() {
   // ordering that requires the bridge to stay alive in read-closed mode.
   let response = b"server-response-after-eof".to_vec();
   out_tx
-    .send(BridgeOut::Bytes(response.clone()))
+    .try_send(BridgeOut::Bytes(response.clone()))
     .expect("queue late response");
-  out_tx.send(BridgeOut::Close).expect("queue close");
+  out_tx.try_send(BridgeOut::Close).expect("queue close");
 
   // The peer reads the full late response, then EOF.
   let buf = vec![0u8; response.len()];
@@ -545,9 +545,9 @@ async fn read_closed_mode_writes_late_response_then_closes() {
 async fn shutdown_write_half_closes_peer_read_side() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = crate::local_channel::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = crate::local_channel::unbounded::<BridgeInbound>();
 
   let bridge = compio::runtime::spawn(bridge_task(
     server,
@@ -562,10 +562,10 @@ async fn shutdown_write_half_closes_peer_read_side() {
   // Write the push, then half-close the write side (the requester's anchor).
   let push = b"push-request".to_vec();
   out_tx
-    .send(BridgeOut::Bytes(push.clone()))
+    .try_send(BridgeOut::Bytes(push.clone()))
     .expect("queue push bytes");
   out_tx
-    .send(BridgeOut::ShutdownWrite)
+    .try_send(BridgeOut::ShutdownWrite)
     .expect("queue shutdown-write");
 
   // The peer reads the push, then sees FIN on its read side: `read_to_end`

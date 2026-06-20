@@ -281,14 +281,14 @@ fn stream_transport_options_validate() {
       .validate(),
     Err(MemberlistError::InvalidOption(_))
   ));
-  // A zero inbound cap (valid rendezvous) and a zero dial timeout (loud) are
-  // NOT rejected.
-  assert!(
+  // A zero inbound cap deadlocks the local inbound channel (no rendezvous path).
+  assert!(matches!(
     StreamTransportOptions::new()
       .with_bridge_inbound_cap(0)
-      .validate()
-      .is_ok()
-  );
+      .validate(),
+    Err(MemberlistError::InvalidOption(_))
+  ));
+  // A zero dial timeout (a loud immediate failure) is NOT rejected.
   assert!(
     StreamTransportOptions::new()
       .with_dial_timeout(Duration::ZERO)
