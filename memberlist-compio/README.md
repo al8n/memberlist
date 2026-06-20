@@ -29,7 +29,7 @@ facade instead.
 
 ```toml
 [dependencies]
-memberlist-compio = "0.0.1"
+memberlist-compio = "0.1"
 ```
 
 ## Example

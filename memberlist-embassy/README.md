@@ -31,7 +31,7 @@ tasks.
 
 ```toml
 [dependencies]
-memberlist-embassy = { version = "0.0.1", default-features = false, features = ["alloc"] }
+memberlist-embassy = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
 ## Example

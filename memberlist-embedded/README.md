@@ -50,7 +50,7 @@ IP allow-list usable as an `AliveDelegate`.
 
 ```toml
 [dependencies]
-memberlist-embedded = { version = "0.0.1", default-features = false, features = ["alloc"] }
+memberlist-embedded = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
 ## The memberlist family

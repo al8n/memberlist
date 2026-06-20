@@ -85,11 +85,11 @@ tracing = "0.1"
 viewit = "0.1.5"
 
 memberlist-proto = { version = "0.4", path = "memberlist-proto", default-features = false }
-memberlist-reactor = { version = "0.0.1", path = "memberlist-reactor", default-features = false }
-memberlist-compio = { version = "0.0.1", path = "memberlist-compio", default-features = false }
-memberlist-smoltcp = { version = "0.0.1", path = "memberlist-smoltcp", default-features = false }
-memberlist-embedded = { version = "0.0.1", path = "memberlist-embedded", default-features = false }
-memberlist-embassy = { version = "0.0.1", path = "memberlist-embassy", default-features = false }
+memberlist-reactor = { version = "0.1", path = "memberlist-reactor", default-features = false }
+memberlist-compio = { version = "0.1", path = "memberlist-compio", default-features = false }
+memberlist-smoltcp = { version = "0.1", path = "memberlist-smoltcp", default-features = false }
+memberlist-embedded = { version = "0.1", path = "memberlist-embedded", default-features = false }
+memberlist-embassy = { version = "0.1", path = "memberlist-embassy", default-features = false }
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"

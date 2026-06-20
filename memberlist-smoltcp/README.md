@@ -32,7 +32,7 @@ per-packet heap traffic on the hot path. For an async embedded driver, see
 
 ```toml
 [dependencies]
-memberlist-smoltcp = { version = "0.0.1", default-features = false, features = ["alloc"] }
+memberlist-smoltcp = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
 ## Example

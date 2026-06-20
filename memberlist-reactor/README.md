@@ -31,7 +31,7 @@ runtime for you.
 
 ```toml
 [dependencies]
-memberlist-reactor = "0.0.1"
+memberlist-reactor = "0.1"
 ```
 
 ## Example
