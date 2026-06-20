@@ -948,6 +948,7 @@ where
   ///
   /// [`EncryptionOptions`]: crate::EncryptionOptions
   #[cfg(all(test, feature = "aes-gcm"))]
+  #[allow(dead_code)]
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }
@@ -961,6 +962,7 @@ where
   /// without requiring a real quinn connection. Lets label-unit tests drive
   /// the validation state machine directly.
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn push_recv_and_classify(
     &mut self,
     bytes: &[u8],
@@ -989,18 +991,21 @@ where
 
   /// Test-only: `true` once the inbound label latch is set.
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn inbound_label_validated(&self) -> bool {
     self.inbound_label_validated
   }
 
   /// Test-only: `true` once the outbound label frame has been staged.
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn outbound_label_written(&self) -> bool {
     self.outbound_label_written
   }
 
   /// Test-only: the bytes currently staged in `pending_out`.
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn pending_out_bytes(&self) -> &[u8] {
     &self.pending_out
   }

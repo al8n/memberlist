@@ -3,10 +3,15 @@ use super::*;
 #[test]
 fn algorithm_tag_roundtrip() {
   for algo in [
+    #[cfg(feature = "crc32")]
     ChecksumAlgorithm::Crc32,
+    #[cfg(feature = "xxhash32")]
     ChecksumAlgorithm::XxHash32,
+    #[cfg(feature = "xxhash64")]
     ChecksumAlgorithm::XxHash64,
+    #[cfg(feature = "xxhash3")]
     ChecksumAlgorithm::XxHash3,
+    #[cfg(feature = "murmur3")]
     ChecksumAlgorithm::Murmur3,
   ] {
     assert_eq!(ChecksumAlgorithm::from_tag(algo.tag()), algo);
@@ -18,10 +23,15 @@ fn algorithm_tags_have_pinned_numeric_values() {
   // The numeric tags are a stable wire contract: a frame checksummed by one
   // node must verify on a peer built with a different backend set, so the
   // tag numbering may never silently drift.
+  #[cfg(feature = "crc32")]
   assert_eq!(ChecksumAlgorithm::Crc32.tag(), 1);
+  #[cfg(feature = "xxhash32")]
   assert_eq!(ChecksumAlgorithm::XxHash32.tag(), 2);
+  #[cfg(feature = "xxhash64")]
   assert_eq!(ChecksumAlgorithm::XxHash64.tag(), 3);
+  #[cfg(feature = "xxhash3")]
   assert_eq!(ChecksumAlgorithm::XxHash3.tag(), 4);
+  #[cfg(feature = "murmur3")]
   assert_eq!(ChecksumAlgorithm::Murmur3.tag(), 5);
 }
 
@@ -41,10 +51,15 @@ fn unrecognized_tag_is_unknown() {
 
 #[test]
 fn digest_sizes_are_pinned() {
+  #[cfg(feature = "crc32")]
   assert_eq!(ChecksumAlgorithm::Crc32.digest_size(), 4);
+  #[cfg(feature = "xxhash32")]
   assert_eq!(ChecksumAlgorithm::XxHash32.digest_size(), 4);
+  #[cfg(feature = "xxhash64")]
   assert_eq!(ChecksumAlgorithm::XxHash64.digest_size(), 8);
+  #[cfg(feature = "xxhash3")]
   assert_eq!(ChecksumAlgorithm::XxHash3.digest_size(), 8);
+  #[cfg(feature = "murmur3")]
   assert_eq!(ChecksumAlgorithm::Murmur3.digest_size(), 4);
   assert_eq!(ChecksumAlgorithm::Unknown(9).digest_size(), 0);
 }
@@ -171,6 +186,7 @@ fn default_is_the_first_built_in_backend() {
 #[test]
 fn checksum_error_display_strings_are_nonempty() {
   let cases = [
+    #[cfg(feature = "crc32")]
     ChecksumError::Disabled(ChecksumAlgorithm::Crc32),
     ChecksumError::UnknownAlgorithm(9),
     ChecksumError::Mismatch,
@@ -182,10 +198,15 @@ fn checksum_error_display_strings_are_nonempty() {
 
 #[test]
 fn algorithm_display_matches_tags() {
+  #[cfg(feature = "crc32")]
   assert_eq!(ChecksumAlgorithm::Crc32.to_string(), "crc32");
+  #[cfg(feature = "xxhash32")]
   assert_eq!(ChecksumAlgorithm::XxHash32.to_string(), "xxhash32");
+  #[cfg(feature = "xxhash64")]
   assert_eq!(ChecksumAlgorithm::XxHash64.to_string(), "xxhash64");
+  #[cfg(feature = "xxhash3")]
   assert_eq!(ChecksumAlgorithm::XxHash3.to_string(), "xxhash3");
+  #[cfg(feature = "murmur3")]
   assert_eq!(ChecksumAlgorithm::Murmur3.to_string(), "murmur3");
   assert_eq!(ChecksumAlgorithm::Unknown(7).to_string(), "unknown(7)");
 }

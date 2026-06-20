@@ -2432,7 +2432,7 @@ fn fsm_deadline_during_outbound_await_reaps_atomically_retired() {
   }
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(all(feature = "lz4", encryption))]
 fn build_test_quic_endpoint_with_compression(
   compression: crate::CompressionOptions,
 ) -> QuicEndpoint<SmolStr> {
@@ -2445,7 +2445,7 @@ fn build_test_quic_endpoint_with_compression(
   QuicEndpoint::<SmolStr>::with_compression(ep, qc, compression)
 }
 
-#[cfg(all(test, feature = "quic", feature = "lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4", encryption))]
 #[test]
 fn quic_endpoint_gossip_compression_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -2464,7 +2464,7 @@ fn quic_endpoint_gossip_compression_roundtrips() {
   assert_eq!(back, datagram);
 }
 
-#[cfg(all(test, feature = "quic", feature = "lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4", encryption))]
 #[test]
 fn quic_endpoint_over_mtu_compressed_gossip_is_rejected() {
   // A wrapper whose orig_len exceeds the gossip MTU cannot be produced by
@@ -2485,7 +2485,7 @@ fn quic_endpoint_over_mtu_compressed_gossip_is_rejected() {
   );
 }
 
-#[cfg(all(test, feature = "quic", feature = "lz4"))]
+#[cfg(all(test, feature = "quic", feature = "lz4", encryption))]
 #[test]
 fn quic_endpoint_compressed_gossip_never_inflates() {
   use crate::{CompressAlgorithm, CompressionOptions};

@@ -320,6 +320,7 @@ fn k_b() -> SecretKey {
 }
 
 #[cfg(feature = "chacha20-poly1305")]
+#[allow(dead_code)]
 fn k_c() -> SecretKey {
   SecretKey::ChaCha20Poly1305([0xCC; 32])
 }

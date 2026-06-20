@@ -860,6 +860,7 @@ where
 
   /// Test-only: expose the bridge phase.
   #[cfg(test)]
+  #[allow(dead_code)]
   #[inline(always)]
   pub(crate) fn phase_ref(&self) -> &BridgePhase {
     &self.phase
@@ -868,18 +869,21 @@ where
   /// Test-only: expose whether no `Stream` has been minted yet (pre-promote
   /// window).
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn stream_is_none(&self) -> bool {
     self.stream.is_none()
   }
 
   /// Test-only: expose whether a `Stream` has been minted (post-promote).
   #[cfg(all(test, feature = "tls"))]
+  #[allow(dead_code)]
   pub(crate) fn stream_is_some(&self) -> bool {
     self.stream.is_some()
   }
 
   /// Test-only: expose the snapshotted exchange deadline for assertions.
   #[cfg(all(test, feature = "tls"))]
+  #[allow(dead_code)]
   pub(crate) fn deadline(&self) -> Instant {
     self.deadline
   }
@@ -897,6 +901,7 @@ where
   /// (always `true` for a raw-passthrough record layer; may be non-empty for a
   /// TLS bridge that retained a ciphertext tail).
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn pending_inbound_is_empty(&self) -> bool {
     self.pending_inbound.is_empty()
   }
@@ -904,6 +909,7 @@ where
   /// Test-only: expose the pre-promote out-of-band FIN latch (asserted by the
   /// plain-TCP bridge tests, whose FIN is the only close anchor).
   #[cfg(all(test, feature = "tcp"))]
+  #[allow(dead_code)]
   pub(crate) fn pending_eof(&self) -> bool {
     self.pending_eof
   }
@@ -912,6 +918,7 @@ where
   /// `stream.as_ref().and_then(|s| s.is_failed())` for use in tests that live
   /// outside the `streams` module (where `stream` is private).
   #[cfg(test)]
+  #[allow(dead_code)]
   pub(crate) fn stream_is_failed(&self) -> Option<&crate::error::StreamError> {
     self.stream.as_ref().and_then(|s| s.is_failed())
   }
@@ -938,6 +945,7 @@ where
   ///
   /// [`EncryptionOptions`]: crate::EncryptionOptions
   #[cfg(all(test, any(feature = "tls", feature = "tcp"), feature = "aes-gcm"))]
+  #[allow(dead_code)]
   pub(crate) fn encryption_for_test(&self) -> &crate::EncryptionOptions {
     &self.encryption
   }

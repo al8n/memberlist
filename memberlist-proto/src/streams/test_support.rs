@@ -24,6 +24,7 @@ pub(crate) fn test_peer_to_socket() -> Box<dyn Fn(&SocketAddr) -> SocketAddr + S
 
 /// Reliable-unit ceiling for bridge test pairs — `EndpointOptions` default
 /// `max_stream_frame_size`, generous above every frame these tests exchange.
+#[allow(dead_code)]
 pub(crate) const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
 
 /// IPv4 loopback `SocketAddr` on the given port.
@@ -33,6 +34,7 @@ pub(crate) fn addr(port: u16) -> SocketAddr {
 
 /// Wrap a cluster-label string into the `Option<Vec<u8>>` shape the TCP
 /// records layer expects.
+#[allow(dead_code)]
 pub(crate) fn label(s: &str) -> Option<Vec<u8>> {
   Some(s.as_bytes().to_vec())
 }
@@ -98,6 +100,7 @@ where
 }
 
 /// Render a `BridgePhase` as a static string label for diagnostics.
+#[allow(dead_code)]
 pub(crate) fn phase_label(p: &BridgePhase) -> &'static str {
   use crate::bridge_phase::LinkState;
   match p {
