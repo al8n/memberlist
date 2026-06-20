@@ -78,8 +78,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 | `tcp` | plain TCP reliable streams + UDP gossip |
 | `tls` + `tls-rustls-ring` / `tls-rustls-aws-lc-rs` | TLS-over-TCP via `rustls` |
 | `quic` + `quic-rustls-ring` / `quic-rustls-aws-lc-rs` | QUIC reliable streams + datagrams |
-| `lz4` / `-snappy` / `-zstd` / `-brotli` | gossip-plane compression |
-| `aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
+| `lz4` / `-snappy` / `-zstd` / `-brotli` | compression (gossip + reliable) |
+| `aes-gcm` / `-chacha20-poly1305` | AEAD encryption (gossip + plain-TCP reliable) |
 | `crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
 | `dns` | DNS address resolution (via `hickory-proto`) |

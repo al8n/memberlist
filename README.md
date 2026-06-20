@@ -54,9 +54,10 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
 memberlist = "0.9" # tokio runtime + tcp transport by default
 ```
 
-Pick **one** runtime, **one or more** transports, and any gossip-plane transforms.
-Checksum / compression / encryption apply only to the unreliable gossip (UDP / datagram)
-plane — TLS and QUIC reliable streams are already secure.
+Pick **one** runtime, **one or more** transports, and any transforms. Compression
+applies on both planes; AEAD encryption applies on the gossip plane and on plain-TCP
+reliable streams (TLS and QUIC reliable streams are already secure, so it is skipped
+there); checksum applies on the unreliable gossip (UDP / datagram) plane only.
 
 ```toml
 [dependencies]
@@ -72,9 +73,9 @@ memberlist = { version = "0.9", default-features = false, features = [
 
   # Gossip-plane checksum: crc32 / xxhash64 / xxhash32 / xxhash3 / murmur3.
   "crc32",
-  # Gossip-plane compression: lz4 / snappy / zstd / brotli.
+  # Compression (both planes): lz4 / snappy / zstd / brotli.
   "lz4",
-  # Gossip-plane encryption (AEAD): aes-gcm / chacha20-poly1305.
+  # AEAD encryption (gossip + plain-TCP reliable): aes-gcm / chacha20-poly1305.
   "aes-gcm",
 
   # Optional: cidr (IP allow-list admission), dns (DNS resolver), tracing.

@@ -59,13 +59,13 @@ plane and the unreliable gossip plane:
 | `tls` + a backend (`tls-rustls-ring`, `tls-rustls-aws-lc-rs`, …) | rustls-over-TCP, with the record layer inside the coordinator |
 | `quic` + a backend (`quic-rustls-ring`, `quic-aws-lc-rs`, …) | quinn-proto streams + datagrams |
 
-Opt-in transforms apply on the unreliable gossip plane (none are enabled by default):
+Opt-in transforms (none are enabled by default):
 
-| Kind | Features |
-|------|----------|
-| Checksum | `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3` |
-| Compression | `lz4`, `snappy`, `zstd`, `brotli` |
-| Encryption (AEAD) | `aes-gcm`, `chacha20-poly1305` |
+| Kind | Features | Plane |
+|------|----------|-------|
+| Checksum | `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3` | gossip only |
+| Compression | `lz4`, `snappy`, `zstd`, `brotli` | gossip + reliable |
+| Encryption (AEAD) | `aes-gcm`, `chacha20-poly1305` | gossip + plain-TCP reliable |
 
 `cidr` adds a `CidrPolicy` IP allow-list usable as an `AliveDelegate` for membership
 admission.

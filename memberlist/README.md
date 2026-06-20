@@ -144,15 +144,16 @@ Pick **one** runtime, **one or more** transports, and any transforms you need.
 - **Transports** — `tcp` *(default)*; `tls` + a backend (`tls-rustls-ring`,
   `tls-rustls-aws-lc-rs`); `quic` + a backend (`quic-rustls-ring`,
   `quic-rustls-aws-lc-rs`).
-- **Compression** (gossip plane) — `lz4`, `snappy`, `zstd`, `brotli`.
-- **Encryption** (gossip plane, AEAD) — `aes-gcm`, `chacha20-poly1305`.
+- **Compression** (both planes) — `lz4`, `snappy`, `zstd`, `brotli`.
+- **Encryption** (gossip + plain-TCP reliable, AEAD) — `aes-gcm`, `chacha20-poly1305`.
 - **Checksum** (gossip plane) — `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3`.
 - **Config** — `serde` (config-file round-trips) and `clap` (CLI flags + env) on the
   `*Options` types; std-only.
 - **Other** — `cidr` (IP allow-list admission), `dns` (DNS address resolver), `getifs` (auto-detect the advertise address from local interfaces), `tracing`.
 
-QUIC and TLS reliable streams are already secure, so checksum / encryption apply only to
-the unreliable gossip plane.
+Compression applies on both planes; AEAD encryption applies on the gossip plane and on
+plain-TCP reliable streams (QUIC and TLS reliable streams are already secure, so it is
+skipped there); checksum applies on the gossip plane only.
 
 ## Observability
 

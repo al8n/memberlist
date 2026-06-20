@@ -64,8 +64,8 @@ A complete, runnable wiring (two nodes joining on an emulated Cortex-M) lives in
 |---------|-------------|
 | `std` *(default)* | host builds and the test harness |
 | `alloc` | `no_std` with a global allocator (bare metal) — build with `--no-default-features --features alloc` |
-| `lz4` / `-snappy` / `-zstd` / `-brotli` | gossip-plane compression |
-| `aes-gcm` / `-chacha20-poly1305` | gossip-plane AEAD encryption |
+| `lz4` / `-snappy` / `-zstd` / `-brotli` | compression (gossip + reliable) |
+| `aes-gcm` / `-chacha20-poly1305` | AEAD encryption (gossip + plain-TCP reliable) |
 | `crc32` / `-xxhash64` / … | gossip-plane checksum |
 | `cidr` | IP allow-list admission |
 

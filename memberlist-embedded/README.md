@@ -41,10 +41,11 @@ than this core directly.
 Build bare-metal with `--no-default-features --features alloc`. The protocol state lives
 in slab-backed pools, so there is no per-packet heap traffic on the hot path.
 
-Opt-in transforms (apply on the unreliable gossip plane): `lz4` /
-`-snappy` / `-zstd` / `-brotli`, `crc32` / `-xxhash64` / `-xxhash32` /
-`-xxhash3` / `-murmur3`, and `aes-gcm` / `-chacha20-poly1305`. `cidr` adds an
-IP allow-list usable as an `AliveDelegate`.
+Opt-in transforms (none enabled by default): `lz4` / `-snappy` / `-zstd` /
+`-brotli` compression and `aes-gcm` / `-chacha20-poly1305` AEAD encryption apply
+on both the gossip and (plain-TCP) reliable planes; `crc32` / `-xxhash64` /
+`-xxhash32` / `-xxhash3` / `-murmur3` checksum is gossip-plane only. `cidr` adds
+an IP allow-list usable as an `AliveDelegate`.
 
 ## Installation
 
