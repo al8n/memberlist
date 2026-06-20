@@ -20,7 +20,6 @@
 mod bridge;
 #[cfg(test)]
 mod conn;
-mod options;
 mod records;
 
 pub use records::RawRecords;
