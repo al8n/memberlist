@@ -822,7 +822,10 @@ fn drain_then_reap_clean_bothclosed_emits_stream_closed() {
 /// `StreamCommand::Close`.
 struct RejectAllMerges;
 impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerges {
-  fn notify_merge(&self, _peers: &[crate::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(
+    &self,
+    _peers: crate::MaybeOwned<'_, [crate::typed::NodeState<SmolStr, SocketAddr>]>,
+  ) -> bool {
     false
   }
 }

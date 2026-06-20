@@ -101,7 +101,9 @@ pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
   )))
 )]
 pub use memberlist_proto::{ChecksumAlgorithm, ChecksumOptions};
-pub use memberlist_proto::{MaybeResolved, Node, typed::NodeState as MemberlistNodeState};
+pub use memberlist_proto::{
+  MaybeOwned, MaybeResolved, Node, typed::NodeState as MemberlistNodeState,
+};
 pub use options::{MemberlistOptions, Options, OptionsParts};
 pub use resolver::{
   AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,

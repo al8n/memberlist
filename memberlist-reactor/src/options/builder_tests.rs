@@ -177,7 +177,10 @@ fn options_into_parts_carries_admission_delegates() {
   }
   struct AllowMerge;
   impl MergeDelegate<SmolStr, SocketAddr> for AllowMerge {
-    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+    fn notify_merge(
+      &self,
+      _peers: memberlist_proto::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+    ) -> bool {
       true
     }
   }
@@ -204,7 +207,7 @@ fn options_into_parts_carries_admission_delegates() {
     "the installed alive predicate denies admission"
   );
   assert!(
-    merge.notify_merge(std::slice::from_ref(&node)),
+    merge.notify_merge(std::slice::from_ref(&node).into()),
     "the installed merge predicate allows the merge"
   );
 }

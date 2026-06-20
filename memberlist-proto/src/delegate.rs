@@ -17,7 +17,7 @@
 
 use std::boxed::Box;
 
-use crate::typed::NodeState;
+use crate::{maybe_owned::MaybeOwned, typed::NodeState};
 
 /// Filters inbound Alive messages. Returning `false` ignores the alive so
 /// the node is not considered a peer — the Sans-I/O analog of Go
@@ -49,6 +49,9 @@ where
 /// `NotifyMerge` on the join flag only (`net.go:1280`, `if join`) and so still
 /// merges a rejected peer's state on anti-entropy.
 pub trait MergeDelegate<I, A>: Send + Sync + 'static {
-  /// `true` to proceed with the merge, `false` to cancel it.
-  fn notify_merge(&self, peers: &[NodeState<I, A>]) -> bool;
+  /// `true` to proceed with the merge, `false` to cancel it. `peers` is a
+  /// [`MaybeOwned`] slice the caller already owns: borrow it (`&peers` /
+  /// `peers.iter()`) for a predicate, or take it for free with
+  /// [`into_owned`](MaybeOwned::into_owned) if the delegate keeps the peer view.
+  fn notify_merge(&self, peers: MaybeOwned<'_, [NodeState<I, A>]>) -> bool;
 }

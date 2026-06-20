@@ -480,7 +480,10 @@ fn cidr_blocked_unreliable_send_emits_no_datagram() {
 fn custom_merge_delegate_installs_and_engine_still_pumps() {
   struct RejectAllMerges;
   impl MergeDelegate<SmolStr, SocketAddr> for RejectAllMerges {
-    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+    fn notify_merge(
+      &self,
+      _peers: crate::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+    ) -> bool {
       false
     }
   }

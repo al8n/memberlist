@@ -180,6 +180,7 @@ pub mod endpoint;
 pub mod error;
 pub mod event;
 mod mathf;
+pub mod maybe_owned;
 pub mod maybe_resolved;
 pub mod members;
 pub mod metrics;
@@ -254,6 +255,7 @@ pub use event::{
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use ipnet::{AddrParseError, IpNet};
+pub use maybe_owned::MaybeOwned;
 pub use maybe_resolved::MaybeResolved;
 pub use members::{LocalNodeState, Member, Members};
 pub use rand::{Rng, SeedableRng, rngs::SmallRng};

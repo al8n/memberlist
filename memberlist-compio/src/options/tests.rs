@@ -505,7 +505,10 @@ fn options_admission_delegates_and_into_parts() {
     }
   }
   impl MergeDelegate<smol_str::SmolStr, SocketAddr> for AdmitAll {
-    fn notify_merge(&self, _peers: &[NodeState<smol_str::SmolStr, SocketAddr>]) -> bool {
+    fn notify_merge(
+      &self,
+      _peers: crate::MaybeOwned<'_, [NodeState<smol_str::SmolStr, SocketAddr>]>,
+    ) -> bool {
       true
     }
   }

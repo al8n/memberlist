@@ -91,7 +91,7 @@ where
   I: 'static,
   A: 'static,
 {
-  fn notify_merge(&self, peers: &[NodeState<I, A>]) -> bool {
+  fn notify_merge(&self, peers: memberlist_proto::MaybeOwned<'_, [NodeState<I, A>]>) -> bool {
     self.0.notify_merge(peers)
   }
 }

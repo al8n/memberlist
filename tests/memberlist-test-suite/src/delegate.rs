@@ -99,7 +99,10 @@ impl RejectMerge {
 }
 
 impl MergeDelegate<SmolStr, SocketAddr> for RejectMerge {
-  fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(
+    &self,
+    _peers: memberlist_proto::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+  ) -> bool {
     self.invoked.store(true, Ordering::SeqCst);
     false
   }

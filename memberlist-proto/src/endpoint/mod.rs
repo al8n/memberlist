@@ -6,7 +6,7 @@ use core::{marker::PhantomData, time::Duration};
 use std::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 
 use crate::{
-  CheapClone, Data, FxHashMap, FxHashSet, Id, Node,
+  CheapClone, Data, FxHashMap, FxHashSet, Id, MaybeOwned, Node,
   typed::{
     Ack, Alive, Dead, IndirectPing, Message, Meta, Nack, NodeState, Ping, PushNodeState, PushPull,
     State, Suspect,
@@ -1477,7 +1477,7 @@ where
   fn merge_admitted(&self, states: &[PushNodeState<I, A>]) -> bool {
     match &self.merge_delegate {
       None => true,
-      Some(d) => d.notify_merge(&Self::merge_peers_view(states)),
+      Some(d) => d.notify_merge(MaybeOwned::from(Self::merge_peers_view(states))),
     }
   }
 

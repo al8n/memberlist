@@ -102,7 +102,10 @@ struct PolicyMergeDelegate {
 }
 
 impl MergeDelegate<SmolStr, SocketAddr> for PolicyMergeDelegate {
-  fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(
+    &self,
+    _peers: memberlist_proto::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+  ) -> bool {
     self.accept
   }
 }

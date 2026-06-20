@@ -70,7 +70,8 @@ pub use resolver::{Resolver, SocketAddrResolver};
 // and its bound are the return type a custom `Resolver` must produce, so they are
 // part of this crate's public resolver API.
 pub use memberlist_embedded::{
-  AliveDelegate, MAX_RESOLVED_ADDRS_PER_SEED, MaybeResolved, MergeDelegate, ResolvedAddrs,
+  AliveDelegate, MAX_RESOLVED_ADDRS_PER_SEED, MaybeOwned, MaybeResolved, MergeDelegate,
+  ResolvedAddrs,
 };
 // `ControlError` is the encryption key-rotation error; it exists in the shared
 // core only when an encryption backend is built in.

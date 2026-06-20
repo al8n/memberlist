@@ -949,7 +949,10 @@ fn inbound_push_pull_admission_rejected_fails_bridge() {
   /// Vetoes every merge.
   struct RejectAll;
   impl MergeDelegate<SmolStr, SocketAddr> for RejectAll {
-    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+    fn notify_merge(
+      &self,
+      _peers: crate::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+    ) -> bool {
       false
     }
   }
@@ -1457,7 +1460,10 @@ fn drain_then_reap_close_arm_rejects_inbound_merge() {
   /// Vetoes every merge.
   struct RejectAll;
   impl MergeDelegate<SmolStr, SocketAddr> for RejectAll {
-    fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+    fn notify_merge(
+      &self,
+      _peers: crate::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+    ) -> bool {
       false
     }
   }

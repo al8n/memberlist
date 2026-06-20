@@ -123,7 +123,10 @@ type RecordingMemberlist = memberlist_compio::Memberlist<SmolStr, SocketAddr>;
 struct RejectMerge;
 
 impl MergeDelegate<SmolStr, SocketAddr> for RejectMerge {
-  fn notify_merge(&self, _peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(
+    &self,
+    _peers: memberlist_compio::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>,
+  ) -> bool {
     false
   }
 }

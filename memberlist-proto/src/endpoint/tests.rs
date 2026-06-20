@@ -722,7 +722,7 @@ struct RejectAllMerge {
   seen: std::sync::Mutex<Vec<SmolStr>>,
 }
 impl MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
-  fn notify_merge(&self, peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(&self, peers: crate::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>) -> bool {
     *self.seen.lock().unwrap() = peers.iter().map(|p| p.id_ref().clone()).collect();
     false
   }
@@ -866,7 +866,7 @@ fn merge_delegate_vetoes_refresh_push_pull() {
 /// `MergeDelegate` while the test retains a handle to inspect `seen`.
 struct ArcMerge(std::sync::Arc<RejectAllMerge>);
 impl MergeDelegate<SmolStr, SocketAddr> for ArcMerge {
-  fn notify_merge(&self, peers: &[NodeState<SmolStr, SocketAddr>]) -> bool {
+  fn notify_merge(&self, peers: crate::MaybeOwned<'_, [NodeState<SmolStr, SocketAddr>]>) -> bool {
     self.0.notify_merge(peers)
   }
 }

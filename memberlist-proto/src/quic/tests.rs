@@ -2097,7 +2097,7 @@ where
   I: 'static,
   A: 'static,
 {
-  fn notify_merge(&self, _peers: &[crate::typed::NodeState<I, A>]) -> bool {
+  fn notify_merge(&self, _peers: crate::MaybeOwned<'_, [crate::typed::NodeState<I, A>]>) -> bool {
     false
   }
 }
