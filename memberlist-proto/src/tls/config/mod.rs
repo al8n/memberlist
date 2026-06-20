@@ -89,7 +89,7 @@ impl core::str::FromStr for ClientAuthMode {
   }
 }
 
-/// The error from [`ClientAuthMode::from_str`]: the input named no known
+/// The error from [`ClientAuthMode`]'s `from_str`: the input named no known
 /// client-auth mode.
 ///
 /// Opaque — the private unit field seals construction to this module, so the

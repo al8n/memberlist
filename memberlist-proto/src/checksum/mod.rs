@@ -275,7 +275,7 @@ impl core::str::FromStr for ChecksumAlgorithm {
   }
 }
 
-/// The error from [`ChecksumAlgorithm::from_str`]: the input matched no checksum
+/// The error from [`ChecksumAlgorithm`]'s `from_str`: the input matched no checksum
 /// algorithm this build supports.
 ///
 /// Opaque — the private unit field seals construction to this module, so the

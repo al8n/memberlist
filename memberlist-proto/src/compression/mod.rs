@@ -251,7 +251,7 @@ impl core::str::FromStr for CompressAlgorithm {
   }
 }
 
-/// The error from [`CompressAlgorithm::from_str`]: the input matched no
+/// The error from [`CompressAlgorithm`]'s `from_str`: the input matched no
 /// compression algorithm this build supports.
 ///
 /// Opaque — the private unit field seals construction to this module, so the
