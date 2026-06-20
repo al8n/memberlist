@@ -35,6 +35,7 @@ use core::{
 use ipnet::IpNet;
 
 use crate::{FxHashSet, delegate::AliveDelegate, typed::NodeState};
+#[cfg(feature = "std")]
 use std::collections::HashSet;
 
 /// A Classless Inter-Domain Routing (CIDR) peer-admission allow-list.
