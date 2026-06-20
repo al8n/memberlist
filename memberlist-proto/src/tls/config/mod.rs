@@ -198,6 +198,7 @@ impl TlsConfigOptions {
 // when its value came from the command line or an env var, so an unset
 // defaulted field is a no-op on update.
 #[cfg(feature = "clap")]
+#[cfg_attr(docsrs, doc(cfg(feature = "clap")))]
 const _: () = {
   use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
 

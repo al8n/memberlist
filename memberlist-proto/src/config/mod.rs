@@ -921,6 +921,7 @@ impl<I, A> EndpointOptions<I, A> {
 // The two runtime binary fields (`initial_meta`, `initial_local_state`) are not
 // CLI-settable and default when rebuilding.
 #[cfg(feature = "clap")]
+#[cfg_attr(docsrs, doc(cfg(feature = "clap")))]
 const _: () = {
   use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
   use core::str::FromStr;
