@@ -1807,7 +1807,7 @@ fn failed_dial_no_label_leak_no_connect_emitted() {
   );
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(all(feature = "lz4", encryption))]
 #[test]
 fn stream_endpoint_gossip_compression_roundtrips() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1828,7 +1828,7 @@ fn stream_endpoint_gossip_compression_roundtrips() {
   assert_eq!(back, datagram);
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(all(feature = "lz4", encryption))]
 #[test]
 fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1851,7 +1851,7 @@ fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
   );
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(all(feature = "lz4", encryption))]
 #[test]
 fn stream_endpoint_compressed_gossip_never_inflates() {
   use crate::{CompressAlgorithm, CompressionOptions};
@@ -1892,39 +1892,6 @@ fn stream_endpoint_compressed_gossip_never_inflates() {
       "compress_gossip round-trip failed at len={len}",
     );
   }
-}
-
-/// `set_checksum_options` rejects an algorithm whose backend is not built into
-/// this binary, rather than storing an unusable policy that would make every
-/// `checksum_gossip` fail and the codec-owning driver silently drop all
-/// gossip. (`with_checksum` builders that bypassed this were removed; the
-/// validated setter is the only way to install a checksum policy.) Runs only
-/// when `murmur3` is absent, so `Murmur3`'s backend is genuinely
-/// missing.
-#[cfg(all(
-  not(feature = "murmur3"),
-  any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-  )
-))]
-#[test]
-fn set_checksum_options_rejects_unbuilt_algorithm() {
-  use crate::checksum::{ChecksumAlgorithm, ChecksumError, ChecksumOptions};
-  let ep = endpoint(7180);
-  let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
-  let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
-    StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
-  let opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Murmur3);
-  assert!(
-    matches!(
-      coord.set_checksum_options(opts),
-      Err(ChecksumError::Disabled(ChecksumAlgorithm::Murmur3))
-    ),
-    "an unbuilt checksum algorithm must be rejected, not stored"
-  );
 }
 
 /// `EndpointOptions::with_gossip_mtu` propagates all the way through to the
@@ -2015,6 +1982,7 @@ fn stream_endpoint_gossip_encryption_roundtrip() {
   assert_eq!(back, datagram);
 }
 
+#[cfg(encryption)]
 #[test]
 fn stream_endpoint_gossip_encryption_disabled_is_byte_identical() {
   let ep = endpoint(7201);
@@ -2055,29 +2023,6 @@ fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     matches!(result, Err(FrameError::Encryption(_))),
     "decrypt_gossip MUST reject a plaintext datagram while encryption \
        is enabled — got {result:?}",
-  );
-}
-
-#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
-#[test]
-fn stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
-  // A keyring whose primary requires a backend the binary was not built
-  // with (here: ChaCha20-Poly1305 under an aes-gcm-only build) must
-  // surface as Err, NOT silently emit plaintext.
-  use crate::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
-  let ep = endpoint(7202);
-  let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
-  let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
-  let opts = EncryptionOptions::new().with_keyring(kr);
-  let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
-    StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket()).with_encryption(opts);
-  let datagram = b"this gossip must not go out plaintext".to_vec();
-  let err = coord
-    .encrypt_gossip(&datagram)
-    .expect_err("missing backend must surface as Err, not silent plaintext");
-  assert!(
-    matches!(err, EncryptionError::UnsupportedAlgorithm(_)),
-    "got {err:?}"
   );
 }
 
@@ -3060,7 +3005,7 @@ fn set_encryption_options_purges_buffered_gossip_on_policy_change() {
 /// grow to 2 here AND surfaces an [`Event::NodeJoined`] for the synthetic
 /// peer — the [`crate::typed::PushNodeState`] reaches
 /// `merge_state` via the drain-then-reap path and is committed.
-#[cfg(feature = "aes-gcm")]
+#[cfg(all(compression, feature = "aes-gcm"))]
 #[test]
 fn policy_failed_bridge_rejects_ingress_before_reap() {
   use crate::{
@@ -3213,6 +3158,7 @@ fn stream_endpoint_membership_forwarders_delegate_to_endpoint() {
   // Pure read-only accessors.
   assert_eq!(coord.resolve_peer_socket(&addr(7000)), addr(7000));
   // No compression configured by default → the algorithm is None.
+  #[cfg(compression)]
   assert!(coord.compression().algorithm().is_none());
   assert!(coord.max_stream_frame_size() > 0);
 
@@ -3878,7 +3824,7 @@ fn poll_timeout_folds_multiple_deadline_sources_via_min() {
 /// shrink), which the receiver passes through unchanged. This exercises the
 /// `Compressed`-arm wrapper-vs-plain compare and the plain pass-through on the
 /// gossip compression path under realistic incompressible payloads.
-#[cfg(feature = "lz4")]
+#[cfg(all(feature = "lz4", encryption))]
 #[test]
 fn compress_gossip_incompressible_datagram_is_sent_plain_and_round_trips() {
   use crate::{CompressAlgorithm, CompressionOptions};

@@ -3,16 +3,19 @@
 //! ([`RawRecords`](records::RawRecords)).
 
 use crate::{Instant, streams::conn::StreamConns};
-use core::{net::SocketAddr, time::Duration};
+use core::net::SocketAddr;
+#[cfg(all(compression, encryption))]
+use core::time::Duration;
 use smol_str::SmolStr;
 
+#[cfg(all(compression, encryption))]
+use crate::streams::bridge::StreamBridge;
 use crate::{
   config::EndpointOptions,
   endpoint::Endpoint,
   event::PushPullKind,
   streams::{
     LabelOptions, StreamAction, StreamEndpoint,
-    bridge::StreamBridge,
     test_support::{addr, test_peer_to_socket, test_sni_provider},
   },
   tcp::records::RawRecords,
@@ -20,8 +23,10 @@ use crate::{
 
 /// A reliable-unit ceiling distinct from every other constant in play so a
 /// test asserting a bridge carries it cannot pass by coincidence.
+#[cfg(all(compression, encryption))]
 const TEST_RELIABLE_MAX: usize = 4096;
 
+#[cfg(all(compression, encryption))]
 fn a_bridge() -> StreamBridge<SmolStr, SocketAddr, RawRecords> {
   let records = RawRecords::acceptor(Some(b"c".to_vec()), false);
   StreamBridge::new(
@@ -79,6 +84,7 @@ fn allocate_is_monotonic_and_distinct() {
   assert_eq!(b.get(), a.get() + 1);
 }
 
+#[cfg(all(compression, encryption))]
 #[test]
 fn insert_then_remove_clears_the_entry() {
   let mut c: StreamConns<SmolStr, SocketAddr, RawRecords> = StreamConns::new();

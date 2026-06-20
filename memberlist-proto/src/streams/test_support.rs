@@ -4,16 +4,15 @@
 //! via `use crate::streams::test_support::*`. Gated `#[cfg(test)]` so
 //! the module has zero non-test-build footprint.
 
+#[cfg(all(compression, encryption))]
 use crate::Instant;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use smol_str::SmolStr;
 
-use crate::{
-  config::EndpointOptions,
-  endpoint::Endpoint,
-  streams::{bridge::StreamBridge, phase::BridgePhase, transport::StreamTransport},
-};
+#[cfg(all(compression, encryption))]
+use crate::streams::{bridge::StreamBridge, transport::StreamTransport};
+use crate::{config::EndpointOptions, endpoint::Endpoint, streams::phase::BridgePhase};
 
 /// Default peer-to-socket resolver for test fixtures where `A = SocketAddr` —
 /// the identity. Mirrors `test_sni_provider`'s shape (boxed closure) so test
@@ -64,6 +63,7 @@ pub(crate) fn endpoint(port: u16) -> Endpoint<SmolStr, SocketAddr> {
 /// `FD`/`FA` produce the record-layer halves — TCP supplies
 /// `RawRecords::dialer(label, false)` / `acceptor(...)`; TLS supplies
 /// `TlsRecords::client(cfg, server_name)` / `server(cfg)`.
+#[cfg(all(compression, encryption))]
 pub(crate) fn handshaking_pair<R, FD, FA>(
   deadline: Instant,
   build_dialer: FD,

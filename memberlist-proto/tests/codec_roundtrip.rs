@@ -32,6 +32,25 @@
 //! compatibility with any other implementation.
 
 #![allow(clippy::type_complexity)]
+// The cross-transform helpers reference the compression, checksum, AND encryption
+// codec APIs in one body, so the whole matrix compiles only when a backend for
+// each of the three families is built in.
+#![cfg(all(
+  any(
+    feature = "lz4",
+    feature = "snappy",
+    feature = "zstd",
+    feature = "brotli"
+  ),
+  any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3"
+  ),
+  any(feature = "aes-gcm", feature = "chacha20-poly1305")
+))]
 
 use std::net::SocketAddr;
 

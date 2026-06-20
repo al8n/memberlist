@@ -2892,6 +2892,7 @@ fn membership_pass_throughs_forward_to_inner_endpoint() {
   assert_eq!(ep.live_bridge_count(), 0);
   assert_eq!(ep.live_connections_to(peer), 0, "no connection dialed yet");
   assert_eq!(ep.unreliable_transport(), UnreliableTransport::Datagram);
+  #[cfg(compression)]
   let _ = ep.compression();
   let _ = ep.endpoint_ref();
 
@@ -3029,6 +3030,7 @@ fn set_compression_options_updates_policy_in_place() {
 /// `encryption_options` accessor reports a disabled policy, and
 /// `decrypt_gossip` on a plaintext datagram is an identity passthrough (the
 /// strict-mode entry check is gated on `encryption.is_enabled()`).
+#[cfg(encryption)]
 #[test]
 fn gossip_transforms_are_identity_when_encryption_disabled() {
   let addr: SocketAddr = "127.0.0.1:7760".parse().unwrap();

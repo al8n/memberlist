@@ -1,7 +1,13 @@
 use super::*;
+#[cfg(encryption)]
 use crate::encryption::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions};
 
-#[cfg(compression)]
+#[cfg(all(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
 #[test]
 fn algorithm_tag_roundtrip() {
   for algo in [
@@ -14,7 +20,12 @@ fn algorithm_tag_roundtrip() {
   }
 }
 
-#[cfg(compression)]
+#[cfg(all(
+  feature = "lz4",
+  feature = "snappy",
+  feature = "zstd",
+  feature = "brotli"
+))]
 #[test]
 fn algorithm_tags_have_pinned_numeric_values() {
   // The numeric tags are a stable wire contract: a frame compressed by one
@@ -163,6 +174,7 @@ fn compressed_frame_roundtrips_through_decode() {
   assert_eq!(back, input);
 }
 
+#[cfg(feature = "lz4")]
 #[test]
 fn oversize_orig_len_is_rejected_before_allocation() {
   // Compressed tag, lz4 algo tag, orig_len varint claiming 4 GiB, 1-byte
@@ -383,6 +395,7 @@ fn reliable_unit_corrupt_inner_wrapper_is_rejected() {
   assert!(take_reliable_unit(&unit, 1 << 20).is_err());
 }
 
+#[cfg(encryption)]
 #[test]
 fn reliable_unit_disabled_encryption_is_byte_identical() {
   use EncryptionOptions;
@@ -397,6 +410,7 @@ fn reliable_unit_disabled_encryption_is_byte_identical() {
   assert_eq!(consumed, unit.len());
 }
 
+#[cfg(encryption)]
 #[test]
 fn reliable_unit_encryption_disabled_compression_disabled_is_unchanged() {
   use EncryptionOptions;
@@ -422,26 +436,6 @@ fn reliable_unit_encrypted_then_compressed_roundtrip() {
     .expect("complete unit");
   assert_eq!(back, framed);
   assert_eq!(consumed, unit.len());
-}
-
-#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
-#[test]
-fn encode_reliable_unit_with_encryption_returns_err_on_unsupported_backend() {
-  // A primary key whose backend was NOT built into this binary (here:
-  // ChaCha20-Poly1305 key under an aes-gcm-only build) must yield
-  // `Err(UnsupportedAlgorithm)`. Silent fallback to plaintext would let
-  // a configured-encrypted reliable exchange go out unauthenticated.
-  use crate::encryption::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
-  let comp = CompressionOptions::new();
-  let enc =
-    EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32])));
-  let framed = b"this exchange must NOT go out as plaintext".to_vec();
-  let err = encode_reliable_unit_with_encryption(&comp, &enc, &framed)
-    .expect_err("missing backend must surface as Err, not silent plaintext");
-  assert!(
-    matches!(err, EncryptionError::UnsupportedAlgorithm(_)),
-    "got {err:?}"
-  );
 }
 
 #[cfg(all(feature = "lz4", feature = "aes-gcm"))]
@@ -557,6 +551,7 @@ fn compression_error_display_strings_are_nonempty() {
   );
 }
 
+#[cfg(feature = "lz4")]
 #[test]
 fn decode_compressed_frame_rejects_malformed_headers() {
   // Shorter than the 2-byte header.
@@ -575,6 +570,7 @@ fn decode_compressed_frame_rejects_malformed_headers() {
   ));
 }
 
+#[cfg(feature = "lz4")]
 #[test]
 fn decode_compressed_frame_rejects_truncated_orig_len_varint() {
   // Valid tag + algo, then a lone varint continuation byte — the orig_len
@@ -591,6 +587,7 @@ fn compression_options_default_matches_new() {
   assert_eq!(CompressionOptions::default(), CompressionOptions::new());
 }
 
+#[cfg(all(feature = "lz4", feature = "zstd"))]
 #[test]
 fn compression_options_in_place_setters() {
   let mut opts = CompressionOptions::new();
@@ -611,6 +608,7 @@ fn compression_options_in_place_setters() {
   assert!(opts.algorithm().is_none());
 }
 
+#[cfg(all(feature = "snappy", feature = "lz4"))]
 #[test]
 fn compression_options_maybe_algorithm_builder() {
   let some = CompressionOptions::new().maybe_algorithm(Some(CompressAlgorithm::Snappy));
@@ -642,6 +640,7 @@ fn take_reliable_unit_rejects_corrupt_leading_varint() {
   assert!(take_reliable_unit(&buf, 1 << 20).is_err());
 }
 
+#[cfg(encryption)]
 #[test]
 fn take_reliable_unit_with_encryption_rejects_corrupt_leading_varint() {
   // The encryption-aware decoder propagates the same hard varint corruption

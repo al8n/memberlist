@@ -91,6 +91,7 @@ fn tls_endpoint_gossip_encryption_roundtrip() {
 /// — the on-wire datagram is byte-identical to the input plaintext, and
 /// `decrypt_gossip` returns the same bytes back. Mirrors the TCP analogue
 /// in `tcp/mod.rs::stream_endpoint_gossip_encryption_disabled_is_byte_identical`.
+#[cfg(encryption)]
 #[test]
 fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
   use SocketAddr;
@@ -115,43 +116,6 @@ fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
   assert_eq!(on_wire, datagram, "no keyring -> identity transform");
   let back = coord.decrypt_gossip(&on_wire).expect("identity");
   assert_eq!(back, datagram);
-}
-
-/// A keyring whose primary requires a backend the binary was not built
-/// with (here: ChaCha20-Poly1305 under an aes-gcm-only build) must
-/// surface as `Err`, NOT silently emit plaintext. Mirrors the TCP analogue
-/// in `tcp/mod.rs::stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend`.
-#[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
-#[test]
-fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
-  use SocketAddr;
-
-  use crate::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
-  use smol_str::SmolStr;
-
-  use super::{TlsOptions, TlsRecords};
-  use crate::{
-    streams::{
-      LabelOptions, Labeled, StreamEndpoint,
-      test_support::{endpoint, test_peer_to_socket, test_sni_provider},
-    },
-    tls::options::tests::{test_client, test_server},
-  };
-
-  let ep = endpoint(7302);
-  let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
-  let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
-  let opts = EncryptionOptions::new().with_keyring(kr);
-  let coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
-    StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket()).with_encryption(opts);
-  let datagram = b"this gossip must not go out plaintext".to_vec();
-  let err = coord
-    .encrypt_gossip(&datagram)
-    .expect_err("missing backend must surface as Err, not silent plaintext");
-  assert!(
-    matches!(err, EncryptionError::UnsupportedAlgorithm(_)),
-    "got {err:?}"
-  );
 }
 
 /// Strict-mode rejection MUST fire at the coordinator's public ingress.

@@ -287,6 +287,7 @@ fn unwrap_loop_passes_a_non_wrapper_frame_through() {
   assert_eq!(out, inner);
 }
 
+#[cfg(compression)]
 #[test]
 fn unwrap_loop_rejects_an_unknown_algorithm_wrapper() {
   let mut frame = vec![MessageTag::Compressed as u8, 222u8];
@@ -318,6 +319,7 @@ fn multibyte_length_body_round_trips_through_fallible_encode() {
   assert!(e.to_string().contains("too large"));
 }
 
+#[cfg(encryption)]
 #[test]
 fn framing_encrypted_tag_value_is_pinned() {
   // Pinned numeric value — a change is a wire-protocol break.
@@ -329,6 +331,7 @@ fn framing_encrypted_tag_value_is_pinned() {
   );
 }
 
+#[cfg(checksum)]
 #[test]
 fn framing_checksumed_tag_value_is_pinned() {
   // Pinned numeric value — a change is a wire-protocol break.
@@ -391,6 +394,7 @@ fn unwrap_loop_strips_checksum_then_compression_in_stack_order() {
   assert_eq!(msg, sample_ping());
 }
 
+#[cfg(encryption)]
 #[test]
 fn unwrap_loop_rejects_unknown_encrypted_algorithm() {
   // A buffer led by ENCRYPTED_TAG with an unknown algorithm tag fails the
@@ -404,6 +408,7 @@ fn unwrap_loop_rejects_unknown_encrypted_algorithm() {
   assert!(matches!(err, FrameError::Encryption(_)));
 }
 
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_mode_rejects_unencrypted_plaintext_frame_at_outer_layer() {
   // Strict-mode entry check. A coordinator with a configured keyring must

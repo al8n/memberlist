@@ -27,7 +27,7 @@
 //! TLS-encrypted (plain UDP carries the unreliable gossip on a separate
 //! socket).
 
-#[cfg(test)]
+#[cfg(all(test, compression, encryption))]
 mod bridge;
 pub(crate) mod config;
 #[cfg(test)]

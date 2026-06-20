@@ -16,7 +16,7 @@
 //! construct via [`LabelOptions::new_in`] (panics on invalid label) or
 //! [`LabelOptions::try_new_in`] (checked).
 
-#[cfg(test)]
+#[cfg(all(test, compression, encryption))]
 mod bridge;
 #[cfg(test)]
 mod conn;

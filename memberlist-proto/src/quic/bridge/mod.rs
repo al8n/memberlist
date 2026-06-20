@@ -1436,5 +1436,5 @@ where
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, compression, encryption))]
 mod tests;
