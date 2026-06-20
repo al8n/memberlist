@@ -871,3 +871,85 @@ fn decode_skips_secondary_whose_algorithm_does_not_match() {
     .expect_err("no usable key: AES secondary is skipped, ChaCha primary fails auth");
   assert!(matches!(err, EncryptionError::AuthFailed), "got {err:?}");
 }
+
+#[cfg(all(feature = "serde", feature = "aes-gcm"))]
+#[test]
+fn secret_key_serde_is_tagged_base64() {
+  let key = SecretKey::Aes256([7u8; 32]);
+  let json = serde_json::to_string(&key).unwrap();
+  assert!(
+    json.contains("\"aes256\""),
+    "tagged by cipher; json = {json}"
+  );
+  assert!(
+    !json.contains('['),
+    "key is base64, not a byte array; json = {json}"
+  );
+  assert_eq!(serde_json::from_str::<SecretKey>(&json).unwrap(), key);
+}
+
+#[cfg(all(feature = "serde", feature = "aes-gcm"))]
+#[test]
+fn encryption_options_serde_roundtrip_and_default() {
+  // Empty config = the default (no keyring).
+  assert_eq!(
+    serde_json::from_str::<EncryptionOptions>("{}").unwrap(),
+    EncryptionOptions::new()
+  );
+  let keyring =
+    Keyring::with_secondaries(SecretKey::Aes128([1u8; 16]), [SecretKey::Aes256([2u8; 32])]);
+  let opts = EncryptionOptions::new().with_keyring(keyring);
+  let json = serde_json::to_string(&opts).unwrap();
+  assert_eq!(
+    serde_json::from_str::<EncryptionOptions>(&json).unwrap(),
+    opts
+  );
+}
+
+#[cfg(all(feature = "serde", feature = "aes-gcm"))]
+#[test]
+fn encryption_options_serde_rejects_unknown_field() {
+  // A misspelled `keyring` (here `key_ring`) must be rejected rather than
+  // silently ignored — silently dropping it would start the node with no
+  // encryption while the operator believes a keyring was configured.
+  let misspelled = r#"{"key_ring":{"primary":{"aes256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},"secondaries":[]}}"#;
+  assert!(serde_json::from_str::<EncryptionOptions>(misspelled).is_err());
+}
+
+#[cfg(all(feature = "clap", feature = "aes-gcm"))]
+#[test]
+fn secret_key_from_str_is_cipher_base64() {
+  use base64::Engine as _;
+  let b64 = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+  let parsed: SecretKey = format!("aes256:{b64}").parse().unwrap();
+  assert_eq!(parsed, SecretKey::Aes256([9u8; 32]));
+  // A length that does not match the named cipher is rejected.
+  assert!("aes128:AAAA".parse::<SecretKey>().is_err());
+  // An unknown cipher tag is rejected.
+  assert!("rot13:AAAA".parse::<SecretKey>().is_err());
+}
+
+#[cfg(all(feature = "clap", feature = "aes-gcm"))]
+#[test]
+fn encryption_options_clap_flattens_with_no_flags() {
+  use clap::Parser;
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    encryption: EncryptionOptions,
+  }
+
+  // The keyring is clap-skipped (no secrets on the CLI), so this parses with no
+  // flags and the keyring defaults to absent.
+  let cli = Cli::try_parse_from(["app"]).unwrap();
+  assert!(cli.encryption.keyring().is_none());
+}
+
+#[cfg(all(feature = "serde", feature = "aes-gcm"))]
+#[test]
+fn secret_key_serde_rejects_multi_cipher_map() {
+  // A map naming two ciphers is ambiguous and must be rejected outright.
+  let two = r#"{"aes128":"AAAAAAAAAAAAAAAAAAAAAA==","aes256":"AAAA"}"#;
+  assert!(serde_json::from_str::<SecretKey>(two).is_err());
+}

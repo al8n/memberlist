@@ -9,11 +9,15 @@
 //! and the peer is wrongly Suspected).
 
 mod bridge;
+#[cfg(feature = "tls")]
+mod config;
 mod conn;
 pub mod crypto;
 mod demux;
 mod transport_mode;
 
+#[cfg(feature = "tls")]
+pub use config::{QuicConfigError, QuicConfigOptions};
 pub use crypto::QuicOptions;
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 

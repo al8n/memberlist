@@ -134,7 +134,7 @@ pub struct Memberlist<I, A> {
   /// event; for app-data (`UserPacket` / `RemoteStateReceived`) it is
   /// UNRECOVERABLE (absent from the snapshot). See [`Self::observation_dropped`].
   observation_dropped: Rc<Cell<u64>>,
-  /// Cached join deadline — the only `DriverOptions` field [`Self::join`]
+  /// Cached join deadline — the only `RuntimeOptions` field [`Self::join`]
   /// reads on the handle hot-path. Caching one scalar instead of the full
   /// options struct keeps the handle free of a transport-options generic.
   cached_join_deadline: Duration,
@@ -170,8 +170,8 @@ where
   /// runtime.
   ///
   /// `options` bundles the per-backend transport options, the SWIM-level
-  /// [`MemberlistOptions`](crate::MemberlistOptions), and the per-driver
-  /// [`DriverOptions`](crate::driver::options::DriverOptions). `delegate` is
+  /// [`MemberlistOptions`](crate::MemberlistOptions), and the per-driver runtime
+  /// [`RuntimeOptions`](crate::driver::options::RuntimeOptions). `delegate` is
   /// the membership hook bundle (default
   /// [`VoidDelegate`](crate::delegate::VoidDelegate) is a no-op). `resolver`
   /// resolves the (possibly-unresolved) advertise address;
@@ -719,7 +719,7 @@ impl<I, A> Memberlist<I, A> {
   /// the notices land.
   ///
   /// The wait races the driver's `leave_timeout` (see
-  /// [`DriverOptions::with_leave_timeout`](crate::DriverOptions::with_leave_timeout)):
+  /// [`RuntimeOptions::with_leave_timeout`](crate::RuntimeOptions::with_leave_timeout)):
   /// if the flush does not complete within that budget the call returns
   /// [`MemberlistError::LeaveTimeout`] — the local node has still left,
   /// but the driver could not confirm peers were notified.

@@ -1,5 +1,5 @@
 //! Configuration: the [`Options`] umbrella plus its [`MemberlistOptions`]
-//! (SWIM-level machine knobs) and [`DriverOptions`] (reactor-driver tuning).
+//! (SWIM-level machine knobs) and [`RuntimeOptions`] (runtime tuning).
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -46,11 +46,20 @@ use crate::cidr::CidrFilter;
 /// - `skip_inbound_label_check` — when `true`, an inbound stream that presents
 ///   no label header is accepted rather than rejected. Defaults to `false`.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
   meta_max_size: Option<usize>,
   max_stream_frame_size: Option<usize>,
+  // A binary metadata payload: not a sensible config-file or CLI value, so it is
+  // left to the validating `with_initial_meta` builder and skipped by both
+  // layers (`Option<Meta>` defaults to `None` on deserialize).
+  #[cfg_attr(feature = "serde", serde(skip))]
   initial_meta: Option<Meta>,
+  // A binary push/pull state snapshot, skipped for the same reason as
+  // `initial_meta`.
+  #[cfg_attr(feature = "serde", serde(skip))]
   initial_local_state: Option<Bytes>,
   #[cfg(compression)]
   compression: CompressionOptions,
@@ -58,8 +67,218 @@ pub struct MemberlistOptions {
   checksum: ChecksumOptions,
   #[cfg(encryption)]
   encryption: EncryptionOptions,
+  // The cluster label is the only isolation between two clusters that otherwise
+  // share a transport, so it must be config/CLI-settable — but only as a
+  // VALIDATED value. A label is UTF-8 (`validate_label`), so it rides as a
+  // string: serde de/serializes it through `label_serde` (deserialize validates
+  // ≤253 bytes + UTF-8, empty → `None`; serialize renders the `Bytes` back as a
+  // `&str`), and clap parses it through `parse_label` (the same `validate_label`
+  // the `with_label` builder runs). The field stays `Option<Bytes>` so clap wraps
+  // the parsed value and an unset label is `None`.
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, with = "label_serde", skip_serializing_if = "Option::is_none")
+  )]
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
+}
+
+// `MemberlistOptions` does not derive `clap::Args` directly: clap's
+// `default_value` makes a defaulted arg appear "present" during an update, so a
+// derived `update_from_arg_matches` would reset unset fields. A `try_update_from`
+// carrying one unrelated flag would then wipe every other field — including the
+// flattened child options. Instead a private mirror derives `Args`, and the
+// public struct applies ONLY operator-supplied overrides (`value_source` =
+// command line or env), delegating each flattened child to its own
+// `update_from_arg_matches` so the same gate protects the child's fields.
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+
+  #[derive(Args)]
+  struct MemberlistOptionsCli {
+    #[arg(
+      id = "memberlist-gossip-mtu",
+      long = "memberlist-gossip-mtu",
+      env = "MEMBERLIST_GOSSIP_MTU"
+    )]
+    gossip_mtu: Option<usize>,
+    #[arg(
+      id = "memberlist-meta-max-size",
+      long = "memberlist-meta-max-size",
+      env = "MEMBERLIST_META_MAX_SIZE"
+    )]
+    meta_max_size: Option<usize>,
+    #[arg(
+      id = "memberlist-max-stream-frame-size",
+      long = "memberlist-max-stream-frame-size",
+      env = "MEMBERLIST_MAX_STREAM_FRAME_SIZE"
+    )]
+    max_stream_frame_size: Option<usize>,
+    #[cfg(compression)]
+    #[command(flatten)]
+    compression: CompressionOptions,
+    #[cfg(checksum)]
+    #[command(flatten)]
+    checksum: ChecksumOptions,
+    #[cfg(encryption)]
+    #[command(flatten)]
+    encryption: EncryptionOptions,
+    #[arg(
+      id = "memberlist-label",
+      long = "memberlist-label",
+      env = "MEMBERLIST_LABEL",
+      value_parser = parse_label,
+    )]
+    label: Option<Bytes>,
+    #[arg(
+      id = "memberlist-skip-inbound-label-check",
+      long = "memberlist-skip-inbound-label-check",
+      env = "MEMBERLIST_SKIP_INBOUND_LABEL_CHECK"
+    )]
+    skip_inbound_label_check: bool,
+  }
+
+  impl From<MemberlistOptionsCli> for MemberlistOptions {
+    fn from(c: MemberlistOptionsCli) -> Self {
+      Self {
+        gossip_mtu: c.gossip_mtu,
+        meta_max_size: c.meta_max_size,
+        max_stream_frame_size: c.max_stream_frame_size,
+        initial_meta: None,
+        initial_local_state: None,
+        #[cfg(compression)]
+        compression: c.compression,
+        #[cfg(checksum)]
+        checksum: c.checksum,
+        #[cfg(encryption)]
+        encryption: c.encryption,
+        label: c.label,
+        skip_inbound_label_check: c.skip_inbound_label_check,
+      }
+    }
+  }
+
+  impl Args for MemberlistOptions {
+    fn augment_args(cmd: Command) -> Command {
+      MemberlistOptionsCli::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      MemberlistOptionsCli::augment_args_for_update(cmd)
+    }
+  }
+
+  impl FromArgMatches for MemberlistOptions {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      MemberlistOptionsCli::from_arg_matches(m).map(Into::into)
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides — args whose value came from the
+      // command line or an env var, not a clap default. The `Option` and label
+      // fields have no clap default, so the gate is a no-op when they are unset
+      // and re-applies them when supplied; the `skip_inbound_label_check` bool is
+      // gated the same way.
+      macro_rules! take {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            if let Some(v) = m.get_one::<$ty>($id) {
+              self.$field = v.clone();
+            }
+          }
+        };
+      }
+      macro_rules! take_opt {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            self.$field = m.get_one::<$ty>($id).cloned();
+          }
+        };
+      }
+      take_opt!("memberlist-gossip-mtu", gossip_mtu, usize);
+      take_opt!("memberlist-meta-max-size", meta_max_size, usize);
+      take_opt!(
+        "memberlist-max-stream-frame-size",
+        max_stream_frame_size,
+        usize
+      );
+      take_opt!("memberlist-label", label, Bytes);
+      take!(
+        "memberlist-skip-inbound-label-check",
+        skip_inbound_label_check,
+        bool
+      );
+      // Each flattened child applies its own operator-supplied overrides through
+      // its own `value_source` gate, so an unrelated parent flag never resets a
+      // child's fields.
+      #[cfg(compression)]
+      self.compression.update_from_arg_matches(m)?;
+      #[cfg(checksum)]
+      self.checksum.update_from_arg_matches(m)?;
+      #[cfg(encryption)]
+      self.encryption.update_from_arg_matches(m)?;
+      Ok(())
+    }
+  }
+};
+
+/// Parse a cluster label from a CLI flag / env var, running the SAME
+/// [`validate_label`] the [`with_label`](MemberlistOptions::with_label) builder
+/// enforces (≤253 bytes, valid UTF-8). An empty string normalizes to "no label"
+/// (`None` once clap wraps it), matching the builder's empty-slice handling.
+#[cfg(feature = "clap")]
+fn parse_label(s: &str) -> Result<Bytes, String> {
+  if s.is_empty() {
+    return Ok(Bytes::new());
+  }
+  validate_label(s.as_bytes()).map_err(|e| e.to_string())?;
+  Ok(Bytes::copy_from_slice(s.as_bytes()))
+}
+
+/// Serde shim for the `label: Option<Bytes>` field. A label is UTF-8, so it
+/// rides as an `Option<String>`: deserialize validates it through the SAME
+/// [`validate_label`] the builder runs (rejecting a >253-byte or non-UTF-8 label
+/// with a serde error) and normalizes an empty / absent value to `None`;
+/// serialize renders the stored `Bytes` back as a `&str`.
+#[cfg(feature = "serde")]
+mod label_serde {
+  use super::{Bytes, validate_label};
+  use serde::{Deserialize, Deserializer, Serializer};
+
+  pub(super) fn serialize<S>(label: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    match label {
+      // The stored bytes are validated UTF-8, so this never fails.
+      Some(bytes) => serializer.serialize_some(
+        core::str::from_utf8(bytes)
+          .map_err(|_| serde::ser::Error::custom("stored cluster label is not valid UTF-8"))?,
+      ),
+      None => serializer.serialize_none(),
+    }
+  }
+
+  pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Bytes>, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let Some(label) = Option::<String>::deserialize(deserializer)? else {
+      return Ok(None);
+    };
+    if label.is_empty() {
+      return Ok(None);
+    }
+    validate_label(label.as_bytes()).map_err(serde::de::Error::custom)?;
+    Ok(Some(Bytes::from(label.into_bytes())))
+  }
 }
 
 impl MemberlistOptions {
@@ -278,9 +497,19 @@ impl MemberlistOptions {
 #[cfg(test)]
 mod label_tests;
 
+/// The default bounded observation-channel capacity.
+pub const DEFAULT_OBSERVATION_CHANNEL_CAPACITY: usize = 1024;
+
 /// Capacity policy for the bounded observation channel carrying machine
 /// [`Event`](memberlist_proto::Event)s to the observation task.
+///
+/// As a config value or CLI flag the policy parses from a string
+/// ([`Channel::from_str`]): `"unbounded"` selects [`Channel::Unbounded`], and a
+/// bare unsigned integer selects [`Channel::Bounded`] of that capacity (`"1024"`
+/// → `Bounded(1024)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Channel {
   /// A bounded channel of the given capacity; when full, the driver yields and
   /// retries rather than blocking the pump, dropping only as a last resort.
@@ -292,11 +521,61 @@ pub enum Channel {
 
 impl Default for Channel {
   fn default() -> Self {
-    Self::Bounded(1024)
+    Self::Bounded(DEFAULT_OBSERVATION_CHANNEL_CAPACITY)
   }
 }
 
-/// Reactor-driver tuning.
+impl core::fmt::Display for Channel {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Bounded(capacity) => write!(f, "{capacity}"),
+      Self::Unbounded => f.write_str("unbounded"),
+    }
+  }
+}
+
+/// Parse a [`Channel`] from a string — a config value or CLI flag.
+/// `"unbounded"` is [`Channel::Unbounded`]; a bare unsigned integer is
+/// [`Channel::Bounded`] of that capacity. Any other input is a
+/// [`ParseChannelError`].
+impl core::str::FromStr for Channel {
+  type Err = ParseChannelError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    if s == "unbounded" {
+      return Ok(Self::Unbounded);
+    }
+    s.parse::<usize>()
+      .map(Self::Bounded)
+      .map_err(|_| ParseChannelError(()))
+  }
+}
+
+/// The error from [`Channel::from_str`]: the input was neither `"unbounded"`
+/// nor a bare unsigned integer.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid observation channel (expected \"unbounded\" or an unsigned integer capacity)")]
+pub struct ParseChannelError(());
+
+/// The default membership `EventStream` capacity.
+pub const DEFAULT_EVENT_STREAM_CAPACITY: usize = 1024;
+
+/// The default per-poll gossip-recv fairness bound.
+pub const DEFAULT_RECV_BATCH: usize = 64;
+
+/// The default per-poll transmit-drain fairness bound.
+pub const DEFAULT_TRANSMIT_BATCH: usize = 64;
+
+/// The default join deadline.
+pub const DEFAULT_JOIN_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The default per-bridge graceful-drain write bound.
+pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Runtime tuning.
 ///
 /// The reactor driver wakes via shared state + a stored waker rather than a
 /// command channel, so it has no command-fairness or completion-peek knobs. What
@@ -304,23 +583,144 @@ impl Default for Channel {
 /// capacity, the per-poll work bounds that keep the pump fair under a gossip
 /// flood, and the default join deadline.
 #[derive(Debug, Clone)]
-pub struct DriverOptions {
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
+pub struct RuntimeOptions {
   observation_channel: Channel,
   event_stream_capacity: usize,
   recv_batch: usize,
   transmit_batch: usize,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   join_deadline: Duration,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   close_timeout: Duration,
 }
 
-impl Default for DriverOptions {
+// `RuntimeOptions` does not derive `clap::Args` directly: clap's `default_value`
+// makes every defaulted arg appear "present" during an update, so a derived
+// `update_from_arg_matches` would reset unset fields to their defaults. A
+// `try_update_from` carrying one unrelated flag would then wipe every other
+// field. Instead a private mirror derives `Args`, and the public struct applies
+// ONLY operator-supplied overrides (`value_source` = command line or env).
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+
+  #[derive(Args)]
+  struct RuntimeOptionsCli {
+    #[arg(
+      id = "runtime-observation-channel",
+      long = "runtime-observation-channel",
+      env = "MEMBERLIST_RUNTIME_OBSERVATION_CHANNEL",
+      default_value = "1024"
+    )]
+    observation_channel: Channel,
+    #[arg(
+      id = "runtime-event-stream-capacity",
+      long = "runtime-event-stream-capacity",
+      env = "MEMBERLIST_RUNTIME_EVENT_STREAM_CAPACITY",
+      default_value_t = DEFAULT_EVENT_STREAM_CAPACITY
+    )]
+    event_stream_capacity: usize,
+    #[arg(
+      id = "runtime-recv-batch",
+      long = "runtime-recv-batch",
+      env = "MEMBERLIST_RUNTIME_RECV_BATCH",
+      default_value_t = DEFAULT_RECV_BATCH
+    )]
+    recv_batch: usize,
+    #[arg(
+      id = "runtime-transmit-batch",
+      long = "runtime-transmit-batch",
+      env = "MEMBERLIST_RUNTIME_TRANSMIT_BATCH",
+      default_value_t = DEFAULT_TRANSMIT_BATCH
+    )]
+    transmit_batch: usize,
+    #[arg(
+      id = "runtime-join-deadline",
+      long = "runtime-join-deadline",
+      env = "MEMBERLIST_RUNTIME_JOIN_DEADLINE",
+      value_parser = humantime::parse_duration,
+      default_value = "10s"
+    )]
+    join_deadline: Duration,
+    #[arg(
+      id = "runtime-close-timeout",
+      long = "runtime-close-timeout",
+      env = "MEMBERLIST_RUNTIME_CLOSE_TIMEOUT",
+      value_parser = humantime::parse_duration,
+      default_value = "10s"
+    )]
+    close_timeout: Duration,
+  }
+
+  impl From<RuntimeOptionsCli> for RuntimeOptions {
+    fn from(c: RuntimeOptionsCli) -> Self {
+      Self {
+        observation_channel: c.observation_channel,
+        event_stream_capacity: c.event_stream_capacity,
+        recv_batch: c.recv_batch,
+        transmit_batch: c.transmit_batch,
+        join_deadline: c.join_deadline,
+        close_timeout: c.close_timeout,
+      }
+    }
+  }
+
+  impl Args for RuntimeOptions {
+    fn augment_args(cmd: Command) -> Command {
+      RuntimeOptionsCli::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      RuntimeOptionsCli::augment_args_for_update(cmd)
+    }
+  }
+
+  impl FromArgMatches for RuntimeOptions {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      RuntimeOptionsCli::from_arg_matches(m).map(Into::into)
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides — args whose value came from the
+      // command line or an env var, not a clap default. A bare derived update
+      // treats every `default_value` arg as present and would reset unset fields.
+      macro_rules! take {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            if let Some(v) = m.get_one::<$ty>($id) {
+              self.$field = v.clone();
+            }
+          }
+        };
+      }
+      take!("runtime-observation-channel", observation_channel, Channel);
+      take!(
+        "runtime-event-stream-capacity",
+        event_stream_capacity,
+        usize
+      );
+      take!("runtime-recv-batch", recv_batch, usize);
+      take!("runtime-transmit-batch", transmit_batch, usize);
+      take!("runtime-join-deadline", join_deadline, Duration);
+      take!("runtime-close-timeout", close_timeout, Duration);
+      Ok(())
+    }
+  }
+};
+
+impl Default for RuntimeOptions {
   fn default() -> Self {
     Self {
       observation_channel: Channel::default(),
-      event_stream_capacity: 1024,
-      recv_batch: 64,
-      transmit_batch: 64,
-      join_deadline: Duration::from_secs(10),
+      event_stream_capacity: DEFAULT_EVENT_STREAM_CAPACITY,
+      recv_batch: DEFAULT_RECV_BATCH,
+      transmit_batch: DEFAULT_TRANSMIT_BATCH,
+      join_deadline: DEFAULT_JOIN_DEADLINE,
       // Bound a per-bridge graceful-drain write. After a graceful
       // `StreamAction::Close` the bridge has no remaining cancel path, so a
       // peer that stopped reading would otherwise wedge the drain `write_all`
@@ -328,13 +728,13 @@ impl Default for DriverOptions {
       // that makes progress never trips this; only a write stalled for the
       // full duration is abandoned and the bridge torn down (RST). 10s mirrors
       // the smoltcp driver's `Config::close_timeout`.
-      close_timeout: Duration::from_secs(10),
+      close_timeout: DEFAULT_CLOSE_TIMEOUT,
     }
   }
 }
 
-impl DriverOptions {
-  /// Driver options with default tuning.
+impl RuntimeOptions {
+  /// Runtime options with default tuning.
   #[must_use]
   pub fn new() -> Self {
     Self::default()
@@ -427,13 +827,13 @@ impl DriverOptions {
 }
 
 /// The full configuration for a `Memberlist`: SWIM-level [`MemberlistOptions`],
-/// reactor [`DriverOptions`], and the optional synchronous admission delegates.
+/// runtime [`RuntimeOptions`], and the optional synchronous admission delegates.
 ///
 /// The transport backend and the address resolver are supplied to the
 /// constructor, not here.
 pub struct Options<I> {
   memberlist: MemberlistOptions,
-  driver: DriverOptions,
+  runtime: RuntimeOptions,
   alive_delegate: Option<Box<dyn AliveDelegate<I, SocketAddr>>>,
   merge_delegate: Option<Box<dyn MergeDelegate<I, SocketAddr>>>,
   /// CIDR peer-admission policy. `()` when the `cidr` feature is off; otherwise
@@ -445,7 +845,7 @@ impl<I> Default for Options<I> {
   fn default() -> Self {
     Self {
       memberlist: MemberlistOptions::default(),
-      driver: DriverOptions::default(),
+      runtime: RuntimeOptions::default(),
       alive_delegate: None,
       merge_delegate: None,
       cidr_policy: Default::default(),
@@ -467,10 +867,10 @@ impl<I> Options<I> {
     self
   }
 
-  /// Sets the reactor-driver options.
+  /// Sets the runtime options.
   #[must_use]
-  pub fn with_driver(mut self, opts: DriverOptions) -> Self {
-    self.driver = opts;
+  pub fn with_runtime(mut self, opts: RuntimeOptions) -> Self {
+    self.runtime = opts;
     self
   }
 
@@ -508,14 +908,14 @@ impl<I> Options<I> {
     &self.memberlist
   }
 
-  /// The reactor-driver options.
+  /// The runtime options.
   #[must_use]
-  pub const fn driver(&self) -> &DriverOptions {
-    &self.driver
+  pub const fn runtime(&self) -> &RuntimeOptions {
+    &self.runtime
   }
 
   /// Decomposes the options into their parts for the backend constructor: the
-  /// SWIM options, the driver options, the optional admission delegates, and the
+  /// SWIM options, the runtime options, the optional admission delegates, and the
   /// CIDR policy carrier (`()` when the `cidr` feature is off).
   #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
   #[allow(clippy::type_complexity)]
@@ -523,14 +923,14 @@ impl<I> Options<I> {
     self,
   ) -> (
     MemberlistOptions,
-    DriverOptions,
+    RuntimeOptions,
     Option<Box<dyn AliveDelegate<I, SocketAddr>>>,
     Option<Box<dyn MergeDelegate<I, SocketAddr>>>,
     CidrFilter,
   ) {
     (
       self.memberlist,
-      self.driver,
+      self.runtime,
       self.alive_delegate,
       self.merge_delegate,
       self.cidr_policy,

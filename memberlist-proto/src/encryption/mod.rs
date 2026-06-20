@@ -152,6 +152,138 @@ impl fmt::Debug for SecretKey {
   }
 }
 
+// Config (serde / clap) support. A key is a tagged base64 string —
+// `{"aes256": "<base64>"}` — so a config file or key file carries the cipher
+// alongside the bytes (a 32-byte key is ambiguous between AES-256 and
+// ChaCha20-Poly1305). The redacting `Debug` is unchanged; only an explicit serde
+// write emits the bytes, and the parse error carries no key material.
+#[cfg(any(feature = "serde", feature = "clap"))]
+const _: () = {
+  impl SecretKey {
+    /// The lowercase cipher tag (`"aes128"`, …) naming this key's variant in its
+    /// config / key-file form.
+    #[cfg(feature = "serde")]
+    pub(crate) fn cipher_tag(&self) -> &'static str {
+      match self {
+        #[cfg(feature = "aes-gcm")]
+        Self::Aes128(_) => "aes128",
+        #[cfg(feature = "aes-gcm")]
+        Self::Aes192(_) => "aes192",
+        #[cfg(feature = "aes-gcm")]
+        Self::Aes256(_) => "aes256",
+        #[cfg(feature = "chacha20-poly1305")]
+        Self::ChaCha20Poly1305(_) => "chacha20_poly1305",
+      }
+    }
+
+    /// Build a key from its `(cipher_tag, base64)` config form. The decoded byte
+    /// length must match the cipher the tag names; a mismatch, an unknown tag, or
+    /// a cipher this build lacks is a [`ParseSecretKeyError`].
+    pub(crate) fn from_tag_base64(tag: &str, b64: &str) -> Result<Self, ParseSecretKeyError> {
+      use base64::Engine as _;
+      let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|_| ParseSecretKeyError(()))?;
+      let key = match tag {
+        #[cfg(feature = "aes-gcm")]
+        "aes128" => Self::Aes128(
+          bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ParseSecretKeyError(()))?,
+        ),
+        #[cfg(feature = "aes-gcm")]
+        "aes192" => Self::Aes192(
+          bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ParseSecretKeyError(()))?,
+        ),
+        #[cfg(feature = "aes-gcm")]
+        "aes256" => Self::Aes256(
+          bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ParseSecretKeyError(()))?,
+        ),
+        #[cfg(feature = "chacha20-poly1305")]
+        "chacha20_poly1305" => Self::ChaCha20Poly1305(
+          bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ParseSecretKeyError(()))?,
+        ),
+        _ => return Err(ParseSecretKeyError(())),
+      };
+      Ok(key)
+    }
+  }
+
+  // Parse a key from a `cipher:base64` string — the content of a key file.
+  impl core::str::FromStr for SecretKey {
+    type Err = ParseSecretKeyError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+      let (tag, b64) = s.trim().split_once(':').ok_or(ParseSecretKeyError(()))?;
+      Self::from_tag_base64(tag, b64)
+    }
+  }
+};
+
+/// The error from parsing a [`SecretKey`] from its `cipher:base64` config /
+/// key-file form.
+///
+/// Opaque — the private unit field seals construction to this module and keeps
+/// the error from carrying any key material; it can gain non-secret detail later
+/// without a breaking change.
+#[cfg(any(feature = "serde", feature = "clap"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid secret key (expected cipher:base64 with a key length matching the cipher)")]
+pub struct ParseSecretKeyError(());
+
+#[cfg(feature = "serde")]
+const _: () = {
+  impl serde::Serialize for SecretKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+      use base64::Engine as _;
+      use serde::ser::SerializeMap as _;
+      let encoded = base64::engine::general_purpose::STANDARD.encode(self.as_bytes());
+      let mut map = serializer.serialize_map(Some(1))?;
+      map.serialize_entry(self.cipher_tag(), &encoded)?;
+      map.end()
+    }
+  }
+
+  impl<'de> serde::Deserialize<'de> for SecretKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+      struct KeyVisitor;
+      impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+        type Value = SecretKey;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+          f.write_str("a single-entry map of cipher tag to base64 key")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+          self,
+          mut map: A,
+        ) -> Result<SecretKey, A::Error> {
+          let entry: Option<(std::string::String, std::string::String)> = map.next_entry()?;
+          let (tag, b64) =
+            entry.ok_or_else(|| serde::de::Error::custom("expected a cipher:base64 entry"))?;
+          if map
+            .next_entry::<std::string::String, std::string::String>()?
+            .is_some()
+          {
+            return Err(serde::de::Error::custom(
+              "a secret key must name exactly one cipher",
+            ));
+          }
+          SecretKey::from_tag_base64(&tag, &b64).map_err(serde::de::Error::custom)
+        }
+      }
+      deserializer.deserialize_map(KeyVisitor)
+    }
+  }
+};
+
 impl SecretKey {
   /// The AEAD algorithm this key drives.
   #[inline(always)]
@@ -583,6 +715,8 @@ pub enum KeyringError {
 /// which is correct — outbound traffic uses the primary, and a change in
 /// which key is primary is a policy change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct Keyring {
   primary: SecretKey,
   secondaries: Vec<SecretKey>,
@@ -690,7 +824,16 @@ impl Keyring {
 /// return an insecure-transport reapply would tear down every live
 /// reliable exchange for no security gain.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct EncryptionOptions {
+  // Secret keys are never CLI flags (they would leak into `ps` / shell history),
+  // so the keyring is clap-skipped: configure it from a config file (serde, as a
+  // tagged-base64 keyring) or programmatically. A `--encryption-key-file <PATH>`
+  // loader (read a `cipher:base64` key file via `SecretKey::from_str`) is a
+  // planned follow-up.
+  #[cfg_attr(feature = "clap", arg(skip))]
   keyring: Option<Keyring>,
 }
 

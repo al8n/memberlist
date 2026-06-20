@@ -46,6 +46,15 @@ dns = ["dep:hickory-proto", "dep:resolv-conf"]
 # Auto-detect the advertise address from the host's own interfaces (via `getifs`).
 getifs = ["dep:getifs", "dep:iprfc"]
 
+# Optional config layering on the driver `*Options` types. `serde` adds gated
+# Serialize/Deserialize (config files, round-trip); `clap` adds gated
+# `clap::Args` derives (CLI flags + env vars). Both leave the default build
+# untouched. `serde` uses `humantime-serde` for the `Duration` fields and
+# forwards the machine's `serde` (the composed `*Options` carry their own
+# derives); `clap` is std-only and uses `humantime` to parse `Duration` flags.
+serde = ["dep:serde", "dep:humantime-serde", "memberlist-proto/serde"]
+clap = ["dep:clap", "dep:humantime", "memberlist-proto/clap"]
+
 [dependencies]
 memberlist-proto = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
@@ -69,9 +78,14 @@ hickory-proto = { workspace = true, optional = true, default-features = false, f
 resolv-conf = { workspace = true, optional = true }
 getifs = { workspace = true, optional = true }
 iprfc = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+humantime = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 
 [dev-dependencies]
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
+serde_json.workspace = true
 agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
 smol_str.workspace = true
 futures-util = { workspace = true, default-features = false, features = [

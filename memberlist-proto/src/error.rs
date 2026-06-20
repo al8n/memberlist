@@ -119,6 +119,73 @@ pub enum EndpointInitError {
   /// zero multiplier is rejected rather than constructing an unusable tracker.
   #[error("awareness_max_multiplier must be >= 1")]
   AwarenessMultiplierZero,
+  /// `EndpointOptions::gossip_mtu` is below
+  /// [`GOSSIP_MTU_MIN`](crate::config::GOSSIP_MTU_MIN), so the mandatory
+  /// single-datagram control packets (probe Ping / Ack / self-Alive) cannot fit
+  /// and normal probes would be deterministically rejected → false suspicion.
+  /// Raise `with_gossip_mtu`.
+  #[error(
+    "gossip_mtu ({} bytes) is below the minimum ({} bytes) for the mandatory control packets",
+    .0.configured(),
+    .0.bound()
+  )]
+  #[from(skip)]
+  GossipMtuTooSmall(GossipMtuBound),
+  /// `EndpointOptions::gossip_mtu` exceeds
+  /// [`MAX_GOSSIP_MTU`](crate::config::MAX_GOSSIP_MTU), the maximum UDP datagram
+  /// payload, so a gossip packet could never fit one datagram. Lower
+  /// `with_gossip_mtu`.
+  #[error(
+    "gossip_mtu ({} bytes) exceeds the maximum UDP datagram payload ({} bytes)",
+    .0.configured(),
+    .0.bound()
+  )]
+  #[from(skip)]
+  GossipMtuTooLarge(GossipMtuBound),
+  /// `EndpointOptions::max_stream_frame_size` is 0 or above the u32 wire limit.
+  /// A zero ceiling rejects every reliable frame (no push/pull, no reliable user
+  /// message); reliable frame lengths are u32-encoded, so a ceiling above that
+  /// is unreachable as a receive gate and a locally-built frame above it would
+  /// fail to encode. Set it within `1..=u32::MAX`.
+  #[error("max_stream_frame_size ({0}) must be in 1..=u32::MAX")]
+  #[from(skip)]
+  InvalidMaxStreamFrameSize(usize),
+  /// `EndpointOptions::initial_local_state` is too large to travel in a single
+  /// reliable PushPull frame under the configured `max_stream_frame_size` (less
+  /// the membership-state reserve), so every join / anti-entropy exchange
+  /// carrying it would be rejected by the reliable-frame gate, silently blocking
+  /// application-state propagation. Shrink the snapshot or raise
+  /// `with_max_stream_frame_size`.
+  #[error(
+    "initial_local_state's framed PushPull ({} bytes) exceeds the frame budget ({} bytes)",
+    .0.size(),
+    .0.limit()
+  )]
+  #[from(skip)]
+  LocalStateExceedsFrame(SizeExceeded),
+  /// The local node's identity — its id or advertise address — cannot be encoded
+  /// on the compact wire layout (e.g. a scoped or flow-labelled IPv6 `SocketAddr`,
+  /// whose nonzero `scope_id` / `flowinfo` the compact encoder rejects), so the
+  /// node could not encode the mandatory control packets it must broadcast about
+  /// itself (self-`Alive`, probe `Ping`). Use a wire-representable advertise
+  /// address.
+  #[error(
+    "the local node's identity is not wire-encodable, so its mandatory control packets (self-Alive / Ping) are unsendable"
+  )]
+  UnencodableLocalIdentity,
+  /// `EndpointOptions::max_stream_frame_size` is too small to carry the local
+  /// node's minimal push/pull frame — its own state sized for the worst-case
+  /// meta the node could ever broadcast (its `meta_max_size` ceiling) — so every
+  /// join / anti-entropy exchange would be rejected by the receiver's
+  /// frame-length gate, leaving the node unable to complete membership exchange.
+  /// Raise `with_max_stream_frame_size`.
+  #[error(
+    "the local node's minimal push/pull frame ({} bytes) exceeds max_stream_frame_size ({} bytes)",
+    .0.size(),
+    .0.limit()
+  )]
+  #[from(skip)]
+  MaxStreamFrameSizeTooSmall(SizeExceeded),
 }
 
 /// Payload for [`EndpointInitError::MetaTooLarge`]: the configured
@@ -149,6 +216,37 @@ impl MetaTooLarge {
   #[inline(always)]
   pub const fn max(&self) -> usize {
     self.max
+  }
+}
+
+/// Payload for [`EndpointInitError::GossipMtuTooSmall`] /
+/// [`EndpointInitError::GossipMtuTooLarge`]: the configured `gossip_mtu` and the
+/// bound it violated, both in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GossipMtuBound {
+  /// The configured `gossip_mtu` in bytes.
+  configured: usize,
+  /// The bound it violated — the floor for `TooSmall`, the ceiling for `TooLarge`.
+  bound: usize,
+}
+
+impl GossipMtuBound {
+  /// Build from the configured `gossip_mtu` and the violated bound, both in bytes.
+  #[inline(always)]
+  pub const fn new(configured: usize, bound: usize) -> Self {
+    Self { configured, bound }
+  }
+
+  /// The configured `gossip_mtu` in bytes.
+  #[inline(always)]
+  pub const fn configured(&self) -> usize {
+    self.configured
+  }
+
+  /// The bound it violated, in bytes.
+  #[inline(always)]
+  pub const fn bound(&self) -> usize {
+    self.bound
   }
 }
 

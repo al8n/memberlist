@@ -59,7 +59,7 @@ use crate::{
   error::Error,
   events::EventStream,
   observation::observation_task,
-  options::{Channel, MemberlistOptions, Options},
+  options::{Channel, MemberlistOptions, Options, RuntimeOptions},
   resolver::AddressResolver,
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
@@ -746,10 +746,25 @@ where
     // transport boundary (the driver's recv source guard below) and membership
     // admission (the peer's self-advertised address).
     let alive = crate::cidr::compose_alive(&cidr_policy, alive);
-    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet
-    // before the endpoint is built: a near-MTU gossip packet above the ceiling
-    // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
+    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet (or is
+    // below the mandatory-control-packet floor) before the endpoint is built: a
+    // near-MTU gossip packet above the ceiling would be deterministically
+    // unsendable, and a too-small one cannot carry the mandatory probes. Mirrors
+    // compio / embedded / smoltcp.
     validate_gossip_mtu(&ml_opts)?;
+    // Reject a zero or above-u32 `max_stream_frame_size`: a zero ceiling rejects
+    // every reliable frame (no push/pull, no reliable user data) and an
+    // above-u32 ceiling is unreachable as a receive gate while letting a local
+    // frame fail to encode. Mirrors compio / embedded / smoltcp.
+    validate_max_stream_frame_size(&ml_opts)?;
+    // Reject a `gossip_mtu` too small to carry this node's OWN mandatory control
+    // packets, built from the ACTUAL local id and resolved advertise address (the
+    // fixed floor above ignores the unbounded id size). This also validates the
+    // advertise address's wire-encodability. Mirrors compio / embedded / smoltcp.
+    validate_gossip_mtu_for_identity::<I>(&local_id, &bound, &ml_opts)?;
+    // Reject a runtime knob that would deterministically break the driver (a
+    // Bounded(0) observation channel), before any task is spawned.
+    validate_runtime_options(&drv_opts)?;
     #[cfg(encryption)]
     validate_encryption(ml_opts.encryption())?;
     // Reject a gossip checksum algorithm whose backend feature is absent: the
@@ -761,7 +776,7 @@ where
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
-    let mut ep = Endpoint::new(cfg, rng);
+    let mut ep = Endpoint::try_new(cfg, rng)?;
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -1111,10 +1126,25 @@ where
     if drv_opts.close_timeout().is_zero() {
       return Err(Error::ZeroCloseTimeout);
     }
-    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet
-    // before the endpoint is built: a near-MTU gossip packet above the ceiling
-    // would be deterministically unsendable. Mirrors compio / embedded / smoltcp.
+    // Reject a gossip_mtu whose on-wire datagram cannot fit one UDP packet (or is
+    // below the mandatory-control-packet floor) before the endpoint is built: a
+    // near-MTU gossip packet above the ceiling would be deterministically
+    // unsendable, and a too-small one cannot carry the mandatory probes. Mirrors
+    // compio / embedded / smoltcp.
     validate_gossip_mtu(&ml_opts)?;
+    // Reject a zero or above-u32 `max_stream_frame_size`: a zero ceiling rejects
+    // every reliable frame (no push/pull, no reliable user data) and an
+    // above-u32 ceiling is unreachable as a receive gate while letting a local
+    // frame fail to encode. Mirrors compio / embedded / smoltcp.
+    validate_max_stream_frame_size(&ml_opts)?;
+    // Reject a `gossip_mtu` too small to carry this node's OWN mandatory control
+    // packets, built from the ACTUAL local id and resolved advertise address (the
+    // fixed floor above ignores the unbounded id size). This also validates the
+    // advertise address's wire-encodability. Mirrors compio / embedded / smoltcp.
+    validate_gossip_mtu_for_identity::<I>(&local_id, &bound, &ml_opts)?;
+    // Reject a runtime knob that would deterministically break the driver (a
+    // Bounded(0) observation channel), before any task is spawned.
+    validate_runtime_options(&drv_opts)?;
     // Validate the encryption configuration before the endpoint is built, so an
     // unusable keyring surfaces as a typed construction error rather than silently
     // discarding every encrypted gossip datagram at runtime.
@@ -1129,7 +1159,7 @@ where
     validate_checksum(ml_opts.checksum())?;
 
     let cfg = apply_memberlist_options(EndpointOptions::new(local_id, bound), &ml_opts);
-    let mut ep = Endpoint::new(cfg, rng);
+    let mut ep = Endpoint::try_new(cfg, rng)?;
     if let Some(ad) = alive {
       ep.set_alive_delegate(BoxedAlive(ad));
     }
@@ -1288,24 +1318,221 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 const GOSSIP_MTU_MAX: usize =
   UDP_PAYLOAD_MAX - ENCRYPTED_WRAPPER_OVERHEAD - CHECKSUMED_WRAPPER_OVERHEAD;
 
-/// Reject a configured `gossip_mtu` whose on-wire datagram cannot fit one UDP
-/// packet.
+/// The lower bound on the plaintext `gossip_mtu`. A gossip packet is the
+/// transport for the SWIM protocol's mandatory single-datagram control messages
+/// — the probe `Ping`, its `Ack` reply, and a minimal self-`Alive`. Each is
+/// emitted as ONE UDP datagram with no split point, and when compression OR
+/// encryption is enabled the receive side caps the decompressed/decrypted
+/// plaintext at `gossip_mtu`, so a `gossip_mtu` below the largest mandatory
+/// control packet makes normal probes deterministically rejected → false
+/// suspicion. 512 is a conservative floor far below the machine default (1400),
+/// matching the codebase's small-but-functional size anchor (the compio /
+/// embedded / smoltcp drivers and the proto `DEFAULT_META_MAX_SIZE`). Reject
+/// (don't clamp) so the operator learns and fixes the misconfiguration.
+const GOSSIP_MTU_MIN: usize = 512;
+
+/// Validate the configured `gossip_mtu` against the hard UDP datagram ceiling and
+/// the mandatory-control-packet floor.
 ///
 /// A gossip packet (probe ack, gossip-disseminated Alive / user broadcast) is
 /// sent as ONE UDP datagram, so a `gossip_mtu` whose near-MTU wire datagram —
 /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD` —
 /// exceeds [`UDP_PAYLOAD_MAX`] is an impossible configuration: such packets would
 /// be deterministically unsendable and peers would falsely suspect this node.
-/// Reject it (rather than silently clamping) so the operator learns and fixes it,
-/// mirroring the compio / embedded / smoltcp drivers' reject-not-clamp doctrine.
-/// An unset `gossip_mtu` keeps the machine default, which sits well under the
-/// ceiling.
+/// Symmetrically, a `gossip_mtu` below [`GOSSIP_MTU_MIN`] cannot carry the
+/// mandatory single-datagram control packets the protocol always emits — normal
+/// probes would be rejected on the receive side, again producing false suspicion.
+/// Reject both (rather than silently clamping) so the operator learns and fixes
+/// it, mirroring the compio / embedded / smoltcp drivers' reject-not-clamp
+/// doctrine. An unset `gossip_mtu` keeps the machine default, which sits well
+/// between the floor and the ceiling.
 fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), Error> {
-  if let Some(mtu) = opts.gossip_mtu()
-    && mtu > GOSSIP_MTU_MAX
-  {
-    return Err(Error::InvalidGossipMtu(
-      crate::error::InvalidGossipMtu::new(mtu, GOSSIP_MTU_MAX),
+  if let Some(mtu) = opts.gossip_mtu() {
+    if mtu > GOSSIP_MTU_MAX {
+      return Err(Error::InvalidGossipMtu(
+        crate::error::InvalidGossipMtu::new(mtu, GOSSIP_MTU_MAX),
+      ));
+    }
+    if mtu < GOSSIP_MTU_MIN {
+      return Err(Error::GossipMtuTooSmall(
+        crate::error::GossipMtuTooSmall::new(mtu, GOSSIP_MTU_MIN),
+      ));
+    }
+  }
+  Ok(())
+}
+
+/// Validate a configured `max_stream_frame_size` against the wire envelope.
+///
+/// The reliable-stream frame ceiling bounds the declared length of every
+/// push/pull and large-user-message frame a receiver will accept. Two bounds are
+/// enforced fail-fast at construction (mirroring the reject-not-clamp `gossip_mtu`
+/// doctrine) rather than constructing an `Ok` node that later silently fails:
+///
+/// - Zero rejects EVERY reliable frame, so the node could never complete a
+///   push/pull (join, periodic anti-entropy) nor receive any reliable user
+///   message — a deterministically broken node.
+/// - Above `u32::MAX` is rejected: reliable frame lengths are `u32`-encoded on
+///   the wire, so a ceiling above the wire envelope is unreachable as a receive
+///   gate and lets a locally-built frame whose body lands in `(u32::MAX, cap]`
+///   fail to encode at runtime.
+///
+/// An unset `max_stream_frame_size` keeps the machine default, which sits well
+/// within both bounds.
+fn validate_max_stream_frame_size(opts: &MemberlistOptions) -> Result<(), Error> {
+  let Some(size) = opts.max_stream_frame_size() else {
+    return Ok(());
+  };
+  if size == 0 {
+    return Err(Error::InvalidOption(crate::error::InvalidOption::new(
+      "max_stream_frame_size",
+      "the reliable-stream frame ceiling must be nonzero: a zero ceiling rejects every \
+         reliable frame, so the node can never complete a push/pull (join / anti-entropy) or \
+         receive a reliable user message"
+        .to_string(),
+    )));
+  }
+  // Reliable frame lengths are u32 on the wire; a cap above that is unreachable
+  // as a receive gate and would let a local frame above u32::MAX fail to encode.
+  if size > u32::MAX as usize {
+    return Err(Error::InvalidOption(crate::error::InvalidOption::new(
+      "max_stream_frame_size",
+      format!(
+        "the reliable-stream frame ceiling must not exceed the u32 wire limit ({}): reliable \
+           frame lengths are u32-encoded, so a larger cap is unreachable as a receive gate and a \
+           locally-built frame above it would fail to encode",
+        u32::MAX
+      ),
+    )));
+  }
+  Ok(())
+}
+
+/// Reject the [`RuntimeOptions`] knobs that would DETERMINISTICALLY break the
+/// driver rather than merely degrade it, fail-fast before any socket is bound.
+///
+/// - `observation_channel == Channel::Bounded(0)`: a zero-capacity rendezvous
+///   the driver's non-blocking `try_send` can never deposit into, so the
+///   delegate would observe nothing. Mirrors the compio driver's guard.
+///
+/// The per-poll work bounds (`recv_batch` / `transmit_batch`) are NOT rejected
+/// at zero: the driver clamps each to at least 1 at its use site, so a zero
+/// value behaves as 1 rather than wedging the loop. `event_stream_capacity == 0`
+/// is also accepted — a zero-capacity `EventStream` channel is a best-effort
+/// rendezvous the observation task `try_send`s into and drops on a miss, which
+/// degrades the subscriber stream without breaking the node (the admission
+/// delegate still fires).
+pub(crate) fn validate_runtime_options(opts: &RuntimeOptions) -> Result<(), Error> {
+  if let Channel::Bounded(0) = opts.observation_channel() {
+    return Err(Error::InvalidOption(crate::error::InvalidOption::new(
+      "observation_channel",
+      "a Bounded(0) observation channel is a zero-capacity rendezvous: the driver's \
+         non-blocking try_send can never deposit an event into it, so the delegate would \
+         observe nothing; use Channel::Unbounded or Bounded(n) with n >= 1"
+        .to_string(),
+    )));
+  }
+  Ok(())
+}
+
+/// Validate the effective `gossip_mtu` against the IDENTITY-AWARE
+/// mandatory-control-packet floor — the fixed [`GOSSIP_MTU_MIN`] floor in
+/// [`validate_gossip_mtu`] ignores the local id size, but `I` is unbounded
+/// (`SmolStr`/`String`), so a node whose own mandatory single-datagram control
+/// packets — built from its ACTUAL local id — exceed the gossip budget would have
+/// those packets silently unsendable / never gossiped and peers would falsely
+/// suspect it.
+///
+/// The mandatory single-datagram control packets are encoded with the actual
+/// `local_id`, the ACTUAL resolved `advertise_addr` for the LOCAL node, and the
+/// widest sequence/incarnation varint (`u32::MAX`): a direct `Ping` carrying the
+/// LOCAL node and a worst-case max-size IPv6 PEER target, a self-`Alive` carrying
+/// the LOCAL node + the ACTUAL configured initial meta, and an empty-payload
+/// `Ack`. Each is encoded through the PUBLIC codec ([`encode_outgoing`]) — the
+/// same plain-frame bytes the machine charges against `gossip_mtu`. Because the
+/// LOCAL node carries the ACTUAL advertise address, this also validates that
+/// address's wire-encodability: the compact `SocketAddrV6` encoder REJECTS a
+/// nonzero `scope_id`/`flowinfo`, so a node advertising such an address would
+/// otherwise construct `Ok` and then fail to encode EVERY local-node-bearing
+/// packet at runtime; the worst-case peer target is always encodable, so the only
+/// possible encode failure here is the local advertise address, rejected with
+/// [`Error::InvalidAdvertise`]. When encoding succeeds, the largest required
+/// plaintext is compared against the effective `gossip_mtu` (the override, or
+/// [`DEFAULT_GOSSIP_MTU`](memberlist_proto::config::DEFAULT_GOSSIP_MTU) when
+/// unset); over-budget is rejected with [`Error::GossipMtuTooSmall`].
+///
+/// Called immediately after the advertise address is resolved (the first point
+/// the resolved local id AND advertise address are available), before any driver
+/// task is spawned. Mirrors the compio / embedded / smoltcp drivers.
+fn validate_gossip_mtu_for_identity<I>(
+  local_id: &I,
+  advertise_addr: &SocketAddr,
+  opts: &MemberlistOptions,
+) -> Result<(), Error>
+where
+  I: memberlist_proto::Data + memberlist_proto::CheapClone,
+{
+  use memberlist_proto::{
+    CheapClone, Node,
+    codec::{EncodeOptions, encode_outgoing},
+    typed::{Ack, Alive, Message, Ping},
+  };
+
+  let budget = opts
+    .gossip_mtu()
+    .unwrap_or(memberlist_proto::config::DEFAULT_GOSSIP_MTU);
+
+  // The LOCAL node carries the node's ACTUAL resolved advertise address: every
+  // mandatory packet below is one the node really emits about itself, so its size
+  // — and its wire-encodability — is validated against the real config.
+  let local_node = Node::new(local_id.cheap_clone(), *advertise_addr);
+
+  // Worst-case PEER target for the probe Ping: the largest address the `Data`
+  // codec emits (an IPv6 `SocketAddr`). `flowinfo`/`scope_id` are zero — the only
+  // form the compact wire encoder accepts — so this peer is always encodable and
+  // never the source of an encode failure here; it only keeps the size bound
+  // conservative for the largest possible target address.
+  let worst_peer_addr = SocketAddr::V6(std::net::SocketAddrV6::new(
+    std::net::Ipv6Addr::new(
+      0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+    ),
+    u16::MAX,
+    0,
+    0,
+  ));
+  let worst_peer = Node::new(local_id.cheap_clone(), worst_peer_addr);
+
+  // The self-Alive carries the ACTUAL configured initial meta (empty when unset)
+  // — the meta the node actually broadcasts at join.
+  let alive_meta = opts.initial_meta().cloned().unwrap_or_default();
+
+  let mandatory: [Message<I, SocketAddr>; 3] = [
+    Message::Ping(Ping::new(
+      u32::MAX,
+      local_node.cheap_clone(),
+      worst_peer.cheap_clone(),
+    )),
+    Message::Alive(Alive::new(u32::MAX, local_node.cheap_clone()).with_meta(alive_meta)),
+    Message::Ack(Ack::new(u32::MAX)),
+  ];
+
+  let mut required = 0usize;
+  for msg in &mandatory {
+    // The peer target is always wire-encodable; the only address that can make a
+    // local-node-bearing packet fail to encode is the LOCAL advertise address
+    // (e.g. a scoped/flow-labelled IPv6 the compact `SocketAddrV6` encoder
+    // rejects). Surface that as a clear advertise-address rejection rather than
+    // the generic mtu floor, so the operator sees the real cause.
+    let len = match encode_outgoing(msg, &EncodeOptions::default()) {
+      Ok(bytes) => bytes.len(),
+      Err(_) => return Err(Error::InvalidAdvertise(*advertise_addr)),
+    };
+    required = required.max(len);
+  }
+
+  if required > budget {
+    return Err(Error::GossipMtuTooSmall(
+      crate::error::GossipMtuTooSmall::new(budget, required),
     ));
   }
   Ok(())

@@ -14,7 +14,7 @@ use memberlist_proto::{CheapClone, config::EndpointOptions, label::validate_labe
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
-  driver::options::DriverOptions,
+  driver::options::RuntimeOptions,
   error::{GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidOption, MemberlistError},
   transport::Transport,
 };
@@ -67,11 +67,21 @@ use memberlist_proto::config::{DEFAULT_MAX_STREAM_FRAME_SIZE, DEFAULT_META_MAX_S
 /// - `skip_inbound_label_check` — when `true`, an inbound stream that presents
 ///   no label header is accepted rather than rejected. Defaults to `false`.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
   meta_max_size: Option<usize>,
   max_stream_frame_size: Option<usize>,
+  // `Meta` is an opaque binary payload with no string form and no serde impl,
+  // so it is neither a config-file field nor a CLI flag: configure it
+  // programmatically via `with_initial_meta`.
+  #[cfg_attr(feature = "serde", serde(skip))]
   initial_meta: Option<Meta>,
+  // The initial push/pull application-state snapshot is opaque bytes — not a
+  // sensible CLI flag or config-file value; set it programmatically via
+  // `with_initial_local_state`.
+  #[cfg_attr(feature = "serde", serde(skip))]
   initial_local_state: Option<Bytes>,
   #[cfg(compression)]
   compression: CompressionOptions,
@@ -79,8 +89,72 @@ pub struct MemberlistOptions {
   checksum: ChecksumOptions,
   #[cfg(encryption)]
   encryption: EncryptionOptions,
+  // The cluster label is the only isolation between two clusters that otherwise
+  // share a transport, so it must be config/CLI-settable — but only as a
+  // VALIDATED value. A label is UTF-8 (`validate_label`), so it rides as a
+  // string: serde de/serializes it through `label_serde` (deserialize validates
+  // ≤253 bytes + UTF-8, empty → `None`; serialize renders the `Bytes` back as a
+  // `&str`), and clap parses it through `parse_label` (the same `validate_label`
+  // the `with_label` builder runs). The field stays `Option<Bytes>` so clap wraps
+  // the parsed value and an unset label is `None`.
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, with = "label_serde", skip_serializing_if = "Option::is_none")
+  )]
   label: Option<Bytes>,
   skip_inbound_label_check: bool,
+}
+
+/// Parse a cluster label from a CLI flag / env var, running the SAME
+/// [`validate_label`] the [`with_label`](MemberlistOptions::with_label) builder
+/// enforces (≤253 bytes, valid UTF-8). An empty string normalizes to "no label"
+/// (`None` once clap wraps it), matching the builder's empty-slice handling.
+#[cfg(feature = "clap")]
+fn parse_label(s: &str) -> Result<Bytes, String> {
+  if s.is_empty() {
+    return Ok(Bytes::new());
+  }
+  validate_label(s.as_bytes()).map_err(|e| e.to_string())?;
+  Ok(Bytes::copy_from_slice(s.as_bytes()))
+}
+
+/// Serde shim for the `label: Option<Bytes>` field. A label is UTF-8, so it
+/// rides as an `Option<String>`: deserialize validates it through the SAME
+/// [`validate_label`] the builder runs (rejecting a >253-byte or non-UTF-8 label
+/// with a serde error) and normalizes an empty / absent value to `None`;
+/// serialize renders the stored `Bytes` back as a `&str`.
+#[cfg(feature = "serde")]
+mod label_serde {
+  use super::{Bytes, validate_label};
+  use serde::{Deserialize, Deserializer, Serializer};
+
+  pub(super) fn serialize<S>(label: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    match label {
+      // The stored bytes are validated UTF-8, so this never fails.
+      Some(bytes) => serializer.serialize_some(
+        core::str::from_utf8(bytes)
+          .map_err(|_| serde::ser::Error::custom("stored cluster label is not valid UTF-8"))?,
+      ),
+      None => serializer.serialize_none(),
+    }
+  }
+
+  pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Bytes>, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let Some(label) = Option::<String>::deserialize(deserializer)? else {
+      return Ok(None);
+    };
+    if label.is_empty() {
+      return Ok(None);
+    }
+    validate_label(label.as_bytes()).map_err(serde::de::Error::custom)?;
+    Ok(Some(Bytes::from(label.into_bytes())))
+  }
 }
 
 impl MemberlistOptions {
@@ -352,6 +426,157 @@ impl MemberlistOptions {
   }
 }
 
+// `clap::Args` is NOT derived on `MemberlistOptions`. A derived
+// `update_from_arg_matches` treats every `default_value` arg as present even
+// when the operator did not pass it, so a partial `try_update_from` carrying
+// one unrelated flag would reset the defaulted `skip_inbound_label_check` (and,
+// through the flattened children, their defaulted knobs) back to their
+// defaults. A private mirror carries this struct's OWN `#[arg(...)]` fields and
+// derives `Args`; the flattened children (`CompressionOptions` /
+// `ChecksumOptions` / `EncryptionOptions`) are composed by delegating to their
+// own `Args` / `FromArgMatches`. On update, only the args whose value came from
+// the command line or an env var are applied, and each child's
+// `update_from_arg_matches` (which is itself value-source-correct) is invoked
+// so its fields follow the same rule.
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+
+  #[derive(Args)]
+  struct MemberlistOptionsCli {
+    #[arg(
+      id = "memberlist-gossip-mtu",
+      long = "memberlist-gossip-mtu",
+      env = "MEMBERLIST_GOSSIP_MTU"
+    )]
+    gossip_mtu: Option<usize>,
+    #[arg(
+      id = "memberlist-meta-max-size",
+      long = "memberlist-meta-max-size",
+      env = "MEMBERLIST_META_MAX_SIZE"
+    )]
+    meta_max_size: Option<usize>,
+    #[arg(
+      id = "memberlist-max-stream-frame-size",
+      long = "memberlist-max-stream-frame-size",
+      env = "MEMBERLIST_MAX_STREAM_FRAME_SIZE"
+    )]
+    max_stream_frame_size: Option<usize>,
+    #[arg(
+      id = "memberlist-label",
+      long = "memberlist-label",
+      env = "MEMBERLIST_LABEL",
+      value_parser = parse_label,
+    )]
+    label: Option<Bytes>,
+    #[arg(
+      id = "memberlist-skip-inbound-label-check",
+      long = "memberlist-skip-inbound-label-check",
+      env = "MEMBERLIST_SKIP_INBOUND_LABEL_CHECK",
+      default_value_t = false
+    )]
+    skip_inbound_label_check: bool,
+  }
+
+  impl Args for MemberlistOptions {
+    fn augment_args(cmd: Command) -> Command {
+      let cmd = MemberlistOptionsCli::augment_args(cmd);
+      #[cfg(compression)]
+      let cmd = CompressionOptions::augment_args(cmd);
+      #[cfg(checksum)]
+      let cmd = ChecksumOptions::augment_args(cmd);
+      #[cfg(encryption)]
+      let cmd = EncryptionOptions::augment_args(cmd);
+      cmd
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      let cmd = MemberlistOptionsCli::augment_args_for_update(cmd);
+      #[cfg(compression)]
+      let cmd = CompressionOptions::augment_args_for_update(cmd);
+      #[cfg(checksum)]
+      let cmd = ChecksumOptions::augment_args_for_update(cmd);
+      #[cfg(encryption)]
+      let cmd = EncryptionOptions::augment_args_for_update(cmd);
+      cmd
+    }
+  }
+
+  impl FromArgMatches for MemberlistOptions {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      let own = MemberlistOptionsCli::from_arg_matches(m)?;
+      Ok(Self {
+        gossip_mtu: own.gossip_mtu,
+        meta_max_size: own.meta_max_size,
+        max_stream_frame_size: own.max_stream_frame_size,
+        // The opaque binary fields are not CLI-settable; they default here and
+        // are configured programmatically via the builders.
+        initial_meta: None,
+        initial_local_state: None,
+        #[cfg(compression)]
+        compression: CompressionOptions::from_arg_matches(m)?,
+        #[cfg(checksum)]
+        checksum: ChecksumOptions::from_arg_matches(m)?,
+        #[cfg(encryption)]
+        encryption: EncryptionOptions::from_arg_matches(m)?,
+        label: own.label,
+        skip_inbound_label_check: own.skip_inbound_label_check,
+      })
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides for this struct's own args —
+      // those whose value came from the command line or an env var. An unset
+      // arg is a no-op, so the existing value (including a builder-set one)
+      // survives a partial update.
+      macro_rules! take_opt {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            self.$field = m.get_one::<$ty>($id).cloned();
+          }
+        };
+      }
+      macro_rules! take {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            if let Some(v) = m.get_one::<$ty>($id) {
+              self.$field = v.clone();
+            }
+          }
+        };
+      }
+      take_opt!("memberlist-gossip-mtu", gossip_mtu, usize);
+      take_opt!("memberlist-meta-max-size", meta_max_size, usize);
+      take_opt!(
+        "memberlist-max-stream-frame-size",
+        max_stream_frame_size,
+        usize
+      );
+      take_opt!("memberlist-label", label, Bytes);
+      take!(
+        "memberlist-skip-inbound-label-check",
+        skip_inbound_label_check,
+        bool
+      );
+      // Delegate each flattened child to its own value-source-correct update so
+      // an unrelated parent flag never resets a child's defaulted knob.
+      #[cfg(compression)]
+      self.compression.update_from_arg_matches(m)?;
+      #[cfg(checksum)]
+      self.checksum.update_from_arg_matches(m)?;
+      #[cfg(encryption)]
+      self.encryption.update_from_arg_matches(m)?;
+      Ok(())
+    }
+  }
+};
+
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
 /// encryption backend; with none the gossip frame goes out unencrypted, so the
@@ -451,7 +676,7 @@ pub(crate) fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), Member
   Ok(())
 }
 
-/// Validate the generic-free [`DriverOptions`] knobs that would
+/// Validate the generic-free [`RuntimeOptions`] knobs that would
 /// DETERMINISTICALLY break (not merely degrade) the driver loop.
 ///
 /// Rejected fail-fast (mirroring the reject-not-clamp `gossip_mtu` doctrine)
@@ -485,7 +710,7 @@ pub(crate) fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), Member
 /// Called from `Memberlist::new` before the transport is constructed so the
 /// misconfiguration fails fast, before any socket is bound; every backend
 /// (TCP/TLS/QUIC) routes through that single path.
-pub(crate) fn validate_driver_options(opts: &DriverOptions) -> Result<(), MemberlistError> {
+pub(crate) fn validate_driver_options(opts: &RuntimeOptions) -> Result<(), MemberlistError> {
   if opts.idle_wake_interval().is_zero() {
     return Err(MemberlistError::InvalidOption(InvalidOption::new(
       "idle_wake_interval",
@@ -1072,7 +1297,7 @@ pub(crate) fn apply_memberlist_options<I, A>(
 pub type OptionsParts<T> = (
   <T as Transport>::Options,
   MemberlistOptions,
-  DriverOptions,
+  RuntimeOptions,
   Option<Box<dyn AliveDelegate<<T as Transport>::Id, SocketAddr>>>,
   Option<Box<dyn MergeDelegate<<T as Transport>::Id, SocketAddr>>>,
 );
@@ -1080,8 +1305,8 @@ pub type OptionsParts<T> = (
 /// Per-`Memberlist` umbrella options bundle.
 ///
 /// Holds the per-backend transport options (`T::Options`), the SWIM-protocol
-/// options (`MemberlistOptions`), the per-driver tuning knobs
-/// (`DriverOptions`), and the optional machine admission predicates
+/// options (`MemberlistOptions`), the per-driver runtime tuning knobs
+/// (`RuntimeOptions`), and the optional machine admission predicates
 /// (`AliveDelegate` / `MergeDelegate`).
 ///
 /// Admission predicates are the machine's `Send + Sync` Sans-I/O traits,
@@ -1095,7 +1320,7 @@ where
 {
   transport: T::Options,
   memberlist: MemberlistOptions,
-  driver: DriverOptions,
+  runtime: RuntimeOptions,
   alive_delegate: Option<Box<dyn AliveDelegate<T::Id, SocketAddr>>>,
   merge_delegate: Option<Box<dyn MergeDelegate<T::Id, SocketAddr>>>,
   #[cfg(feature = "cidr")]
@@ -1113,7 +1338,7 @@ where
     Self {
       transport,
       memberlist: MemberlistOptions::default(),
-      driver: DriverOptions::default(),
+      runtime: RuntimeOptions::default(),
       alive_delegate: None,
       merge_delegate: None,
       #[cfg(feature = "cidr")]
@@ -1129,11 +1354,11 @@ where
     self
   }
 
-  /// Builder: replace the driver tuning options.
+  /// Builder: replace the runtime tuning options.
   #[must_use]
   #[inline]
-  pub fn with_driver(mut self, opts: DriverOptions) -> Self {
-    self.driver = opts;
+  pub fn with_runtime(mut self, opts: RuntimeOptions) -> Self {
+    self.runtime = opts;
     self
   }
 
@@ -1189,10 +1414,10 @@ where
     &self.memberlist
   }
 
-  /// Borrow the driver tuning options.
+  /// Borrow the runtime tuning options.
   #[inline]
-  pub const fn driver(&self) -> &DriverOptions {
-    &self.driver
+  pub const fn runtime(&self) -> &RuntimeOptions {
+    &self.runtime
   }
 
   /// Destructure into the parts. Used by `Memberlist::new` to fan out
@@ -1203,7 +1428,7 @@ where
     (
       self.transport,
       self.memberlist,
-      self.driver,
+      self.runtime,
       self.alive_delegate,
       self.merge_delegate,
     )

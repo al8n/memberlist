@@ -1,6 +1,6 @@
-//! Per-`Memberlist` driver tuning knobs.
+//! Per-`Memberlist` runtime tuning knobs.
 //!
-//! [`DriverOptions`] carries the generic-free driver knobs. Per-backend
+//! [`RuntimeOptions`] carries the generic-free runtime knobs. Per-backend
 //! knobs live on each backend's `*TransportOptions` struct, folded into
 //! [`Options<T>`](crate::Options) by `Options::new(T::Options)`.
 //!
@@ -89,7 +89,14 @@ pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// `Bounded(0)` is rejected at construction: a zero-capacity channel is a
 /// rendezvous that the driver's non-blocking send can never deposit into, so
 /// the delegate would observe nothing.
+///
+/// As a config value (serde / CLI) it is open-vocabulary: `Unbounded` is the
+/// bare string `"unbounded"`, `Bounded(n)` is `{"bounded": n}` under serde and
+/// `bounded:n` on the CLI (via [`FromStr`](core::str::FromStr) /
+/// [`Display`](core::fmt::Display)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Channel {
   /// Never drop; the channel grows without bound (see the type-level docs
   /// for the slow-delegate memory risk).
@@ -99,6 +106,43 @@ pub enum Channel {
   /// separately in `events_dropped` — see the type-level docs).
   Bounded(usize),
 }
+
+impl core::fmt::Display for Channel {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Unbounded => f.write_str("unbounded"),
+      Self::Bounded(n) => write!(f, "bounded:{n}"),
+    }
+  }
+}
+
+/// Parse a [`Channel`] from its string form — `"unbounded"` or `"bounded:<n>"`
+/// — for a config value or a CLI flag. The inverse of [`Channel`]'s `Display`;
+/// unconditional (not gated on `clap`) so any caller can use it.
+impl core::str::FromStr for Channel {
+  type Err = ParseChannelError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    if s.eq_ignore_ascii_case("unbounded") {
+      return Ok(Self::Unbounded);
+    }
+    let cap = s
+      .strip_prefix("bounded:")
+      .or_else(|| s.strip_prefix("bounded="))
+      .ok_or(ParseChannelError(()))?;
+    let n = cap.parse::<usize>().map_err(|_| ParseChannelError(()))?;
+    Ok(Self::Bounded(n))
+  }
+}
+
+/// The error from [`Channel::from_str`]: the input was neither `"unbounded"`
+/// nor a `"bounded:<n>"` with a valid capacity.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid observation channel (expected `unbounded` or `bounded:<n>`)")]
+pub struct ParseChannelError(());
 
 /// Default delegate observation channel: [`Channel::Bounded`] at 1024 events.
 ///
@@ -110,22 +154,169 @@ pub enum Channel {
 /// into [`Channel::Unbounded`].
 pub const DEFAULT_OBSERVATION_CHANNEL: Channel = Channel::Bounded(1024);
 
-/// Per-`Memberlist` driver tuning knobs. Generic-free; per-backend knobs
+/// Per-`Memberlist` runtime tuning knobs. Generic-free; per-backend knobs
 /// live on each backend's `*TransportOptions` struct, folded into
 /// `Options<T>` by `Options::new(T::Options)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DriverOptions {
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
+pub struct RuntimeOptions {
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   join_deadline: Duration,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   leave_timeout: Duration,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   idle_wake_interval: Duration,
   iter_drain_cap: usize,
   cmd_fairness_budget: usize,
   event_queue_cap: usize,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   peek_budget: Duration,
   observation_channel: Channel,
 }
 
-impl DriverOptions {
+// `clap::Args` is NOT derived on `RuntimeOptions`. The derived
+// `update_from_arg_matches` treats every `default_value` / `default_value_t`
+// arg as present even when the operator did not pass it, so a partial
+// `try_update_from` carrying one unrelated flag would reset every other
+// defaulted knob to its default. A private mirror carries the `#[arg(...)]`
+// attributes and derives `Args`; `RuntimeOptions` delegates its `Args` /
+// `FromArgMatches` to the mirror and, on update, applies ONLY the args whose
+// value came from the command line or an env var.
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+
+  #[derive(Args)]
+  struct RuntimeOptionsCli {
+    #[arg(
+      id = "runtime-join-deadline",
+      long = "runtime-join-deadline",
+      env = "MEMBERLIST_RUNTIME_JOIN_DEADLINE",
+      value_parser = humantime::parse_duration,
+      // The humantime spelling of DEFAULT_JOIN_DEADLINE (Duration has no
+      // Display, so clap's default must be a string the value_parser accepts).
+      default_value = "10s",
+    )]
+    join_deadline: Duration,
+    #[arg(
+      id = "runtime-leave-timeout",
+      long = "runtime-leave-timeout",
+      env = "MEMBERLIST_RUNTIME_LEAVE_TIMEOUT",
+      value_parser = humantime::parse_duration,
+      // The humantime spelling of DEFAULT_LEAVE_TIMEOUT.
+      default_value = "5s",
+    )]
+    leave_timeout: Duration,
+    #[arg(
+      id = "runtime-idle-wake-interval",
+      long = "runtime-idle-wake-interval",
+      env = "MEMBERLIST_RUNTIME_IDLE_WAKE_INTERVAL",
+      value_parser = humantime::parse_duration,
+      // The humantime spelling of DEFAULT_IDLE_WAKE_INTERVAL.
+      default_value = "60s",
+    )]
+    idle_wake_interval: Duration,
+    #[arg(
+      id = "runtime-iter-drain-cap",
+      long = "runtime-iter-drain-cap",
+      env = "MEMBERLIST_RUNTIME_ITER_DRAIN_CAP",
+      default_value_t = DEFAULT_ITER_DRAIN_CAP,
+    )]
+    iter_drain_cap: usize,
+    #[arg(
+      id = "runtime-cmd-fairness-budget",
+      long = "runtime-cmd-fairness-budget",
+      env = "MEMBERLIST_RUNTIME_CMD_FAIRNESS_BUDGET",
+      default_value_t = DEFAULT_CMD_FAIRNESS_BUDGET,
+    )]
+    cmd_fairness_budget: usize,
+    #[arg(
+      id = "runtime-event-queue-cap",
+      long = "runtime-event-queue-cap",
+      env = "MEMBERLIST_RUNTIME_EVENT_QUEUE_CAP",
+      default_value_t = DEFAULT_EVENT_QUEUE_CAP,
+    )]
+    event_queue_cap: usize,
+    #[arg(
+      id = "runtime-peek-budget",
+      long = "runtime-peek-budget",
+      env = "MEMBERLIST_RUNTIME_PEEK_BUDGET",
+      value_parser = humantime::parse_duration,
+      // The humantime spelling of DEFAULT_PEEK_BUDGET.
+      default_value = "1ms",
+    )]
+    peek_budget: Duration,
+    #[arg(
+      id = "runtime-observation-channel",
+      long = "runtime-observation-channel",
+      env = "MEMBERLIST_RUNTIME_OBSERVATION_CHANNEL",
+      default_value_t = DEFAULT_OBSERVATION_CHANNEL,
+    )]
+    observation_channel: Channel,
+  }
+
+  impl From<RuntimeOptionsCli> for RuntimeOptions {
+    fn from(c: RuntimeOptionsCli) -> Self {
+      Self {
+        join_deadline: c.join_deadline,
+        leave_timeout: c.leave_timeout,
+        idle_wake_interval: c.idle_wake_interval,
+        iter_drain_cap: c.iter_drain_cap,
+        cmd_fairness_budget: c.cmd_fairness_budget,
+        event_queue_cap: c.event_queue_cap,
+        peek_budget: c.peek_budget,
+        observation_channel: c.observation_channel,
+      }
+    }
+  }
+
+  impl Args for RuntimeOptions {
+    fn augment_args(cmd: Command) -> Command {
+      RuntimeOptionsCli::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      RuntimeOptionsCli::augment_args_for_update(cmd)
+    }
+  }
+
+  impl FromArgMatches for RuntimeOptions {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      RuntimeOptionsCli::from_arg_matches(m).map(Into::into)
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides — args whose value came from the
+      // command line or an env var, not a clap default. A bare derived update
+      // treats every `default_value` arg as present and would reset unset
+      // fields.
+      macro_rules! take {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            if let Some(v) = m.get_one::<$ty>($id) {
+              self.$field = v.clone();
+            }
+          }
+        };
+      }
+      take!("runtime-join-deadline", join_deadline, Duration);
+      take!("runtime-leave-timeout", leave_timeout, Duration);
+      take!("runtime-idle-wake-interval", idle_wake_interval, Duration);
+      take!("runtime-iter-drain-cap", iter_drain_cap, usize);
+      take!("runtime-cmd-fairness-budget", cmd_fairness_budget, usize);
+      take!("runtime-event-queue-cap", event_queue_cap, usize);
+      take!("runtime-peek-budget", peek_budget, Duration);
+      take!("runtime-observation-channel", observation_channel, Channel);
+      Ok(())
+    }
+  }
+};
+
+impl RuntimeOptions {
   /// Construct from the canonical base defaults.
   #[inline]
   pub const fn new() -> Self {
@@ -259,7 +450,7 @@ impl DriverOptions {
   }
 }
 
-impl Default for DriverOptions {
+impl Default for RuntimeOptions {
   #[inline]
   fn default() -> Self {
     Self::new()

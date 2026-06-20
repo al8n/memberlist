@@ -521,6 +521,133 @@ async fn gossip_mtu_above_ceiling_is_rejected() {
   }
 }
 
+/// A `gossip_mtu` below the mandatory-control-packet floor (e.g. 1 byte) is
+/// rejected at construction with the typed `Error::GossipMtuTooSmall`, carrying
+/// the configured value and the required minimum — reactor parity with compio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_mtu_below_floor_is_rejected() {
+  use memberlist_reactor::Error;
+
+  let ml_opts = MemberlistOptions::new().with_gossip_mtu(1);
+
+  let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new("mtu-tiny"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .map(|_| ());
+  match result {
+    Err(Error::GossipMtuTooSmall(e)) => {
+      assert_eq!(e.configured(), 1, "carries the configured gossip_mtu");
+      assert!(e.minimum() >= 512, "carries the control-packet floor");
+    }
+    other => panic!("expected Err(GossipMtuTooSmall), got {other:?}"),
+  }
+}
+
+/// A zero `max_stream_frame_size` rejects every reliable frame, so it is rejected
+/// at construction with the typed `Error::InvalidOption` naming the knob —
+/// reactor parity with compio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_stream_frame_size_zero_is_rejected() {
+  use memberlist_reactor::Error;
+
+  let ml_opts = MemberlistOptions::new().with_max_stream_frame_size(0);
+
+  let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new("frame-zero"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .map(|_| ());
+  match result {
+    Err(Error::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "max_stream_frame_size",
+        "names the rejected knob"
+      );
+    }
+    other => panic!("expected Err(InvalidOption), got {other:?}"),
+  }
+}
+
+/// A `max_stream_frame_size` above the `u32` wire limit is unreachable as a
+/// receive gate, so it is rejected at construction with `Error::InvalidOption`
+/// naming the knob — reactor parity with compio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_stream_frame_size_above_u32_is_rejected() {
+  use memberlist_reactor::Error;
+
+  let over = (u32::MAX as usize) + 1;
+  let ml_opts = MemberlistOptions::new().with_max_stream_frame_size(over);
+
+  let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new("frame-over"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .map(|_| ());
+  match result {
+    Err(Error::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "max_stream_frame_size",
+        "names the rejected knob"
+      );
+    }
+    other => panic!("expected Err(InvalidOption), got {other:?}"),
+  }
+}
+
+/// A `gossip_mtu` that passes the fixed floor but is too small to carry THIS
+/// node's own mandatory control packets (built from the actual id and advertise
+/// address) is rejected at construction with `Error::GossipMtuTooSmall`, whose
+/// `minimum` reflects the identity-aware required size — reactor parity with
+/// compio's identity-aware floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_mtu_below_identity_floor_is_rejected() {
+  use memberlist_reactor::Error;
+
+  // A long node id whose mandatory Ping (two Nodes carrying this id) frames
+  // larger than this just-at-the-fixed-floor budget.
+  let long_id = "x".repeat(1024);
+  let ml_opts = MemberlistOptions::new().with_gossip_mtu(512);
+
+  let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new(long_id),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .map(|_| ());
+  match result {
+    Err(Error::GossipMtuTooSmall(e)) => {
+      assert_eq!(
+        e.configured(),
+        512,
+        "carries the effective gossip_mtu budget"
+      );
+      assert!(
+        e.minimum() > 512,
+        "the identity-aware required size exceeds the budget"
+      );
+    }
+    other => panic!("expected Err(GossipMtuTooSmall), got {other:?}"),
+  }
+}
+
 /// Over-long (>253 byte) and non-UTF-8 labels must be rejected at the setter
 /// with `Error::InvalidLabel`, not at construction and not via a panic.
 #[test]
@@ -675,4 +802,38 @@ async fn tcp_label_isolates_reliable_plane() {
   let _ = a.shutdown().await;
   let _ = a2.shutdown().await;
   let _ = b.shutdown().await;
+}
+
+/// An oversized `initial_local_state` is rejected by the construction gate and
+/// surfaced as `Err`, not a panic from the public async constructor — the
+/// reactor now drives the machine through the fallible `Endpoint::try_new`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_initial_local_state_is_rejected_not_panic() {
+  use memberlist_reactor::{EndpointInitError, Error};
+
+  // A frame cap just above the 1 MiB membership reserve leaves a tiny budget; an
+  // 8 KiB snapshot's framed PushPull overflows it.
+  let snapshot = bytes::Bytes::from(vec![0u8; 8 * 1024]);
+  let ml_opts = MemberlistOptions::new()
+    .with_max_stream_frame_size(1024 * 1024 + 1024)
+    .with_initial_local_state(snapshot);
+
+  let result = Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new("snap-big"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_memberlist(ml_opts),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .map(|_| ());
+  assert!(
+    matches!(
+      result,
+      Err(Error::EndpointInit(
+        EndpointInitError::LocalStateExceedsFrame(_)
+      ))
+    ),
+    "an oversized initial_local_state must return Err, not panic; got {result:?}"
+  );
 }

@@ -53,7 +53,7 @@ use crate::{
   command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
-    options::{DriverOptions, StreamTransportOptions},
+    options::{RuntimeOptions, StreamTransportOptions},
     shared::{
       ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, observation_payload_bytes,
       yield_once,
@@ -535,7 +535,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
   shutdown_flag: Rc<Cell<bool>>,
-  driver_opts: DriverOptions,
+  driver_opts: RuntimeOptions,
   stream_opts: StreamTransportOptions,
   delegate: D,
   // Cluster label applied to both gossip encode and decode: outbound gossip
@@ -581,7 +581,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // advancement — and therefore from delaying a parked join/leave reply
   // that depends on a follow-up input the driver's arms must still
   // service. The `obs_tx` queue is sized per
-  // [`DriverOptions::observation_channel`] (default [`Channel::Bounded`]).
+  // [`RuntimeOptions::observation_channel`] (default [`Channel::Bounded`]).
   // The `Delegate` carries the two application-data hooks (`notify_user_msg`
   // from `UserPacket`, `merge_remote_state` from `RemoteStateReceived`) whose
   // payloads are absent from `MemberlistSnapshot` and thus unrecoverable from
@@ -2865,7 +2865,7 @@ fn fire_timeout_with_drain<I, A, R, G>(
   bridge_inbound_tx: &Sender<BridgeInbound>,
   bridge_inbound_rx: &Receiver<BridgeInbound>,
   bridge_ready_rx: &Receiver<BridgeReady>,
-  driver_opts: DriverOptions,
+  driver_opts: RuntimeOptions,
   stream_opts: StreamTransportOptions,
 ) -> bool
 where

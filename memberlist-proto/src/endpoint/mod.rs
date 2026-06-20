@@ -23,7 +23,7 @@ use crate::{
   broadcast::{BroadcastQueue, MemberlistBroadcast},
   config::EndpointOptions,
   delegate::{AliveDelegate, MergeDelegate},
-  error::{EndpointInitError, Error, MetaTooLarge, SizeExceeded},
+  error::{EndpointInitError, Error, GossipMtuBound, MetaTooLarge, SizeExceeded},
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
     PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse, Transmit,
@@ -104,8 +104,30 @@ where
   I: Data,
   A: Data,
 {
-  // Minimal framed PushPull for just this snapshot: empty membership states,
-  // snapshot as `user_data`. `join` does not change the framed length.
+  local_state_snapshot_overage::<I, A>(snapshot, max_stream_frame_size)
+    .map_err(Error::LocalStateExceedsFrame)
+}
+
+/// The shared size check behind [`validate_local_state_snapshot`] and the
+/// construction-time `initial_local_state` gate: charge the snapshot's minimal
+/// framed PushPull (empty membership states, snapshot as `user_data`; `join`
+/// does not change the framed length) and return the [`SizeExceeded`] payload
+/// when it overflows the `max_stream_frame_size - LOCAL_STATE_FRAME_BUDGET`
+/// budget, so each caller can wrap it in its own error type.
+fn local_state_snapshot_overage<I, A>(
+  snapshot: &Bytes,
+  max_stream_frame_size: usize,
+) -> Result<(), SizeExceeded>
+where
+  I: Data,
+  A: Data,
+{
+  // An empty snapshot carries no application state — there is nothing to size
+  // against the budget, so a node with no snapshot (or one clearing it) must
+  // succeed under any frame cap, including one below the membership reserve.
+  if snapshot.is_empty() {
+    return Ok(());
+  }
   let candidate: PushPull<I, A> =
     PushPull::new(true, core::iter::empty()).with_user_data(snapshot.cheap_clone());
   let encoded_len = crate::wire::encode_message::<I, A>(&Message::PushPull(candidate))
@@ -113,10 +135,7 @@ where
     .len();
   let budget = max_stream_frame_size.saturating_sub(LOCAL_STATE_FRAME_BUDGET);
   if encoded_len > budget {
-    return Err(Error::LocalStateExceedsFrame(SizeExceeded::new(
-      encoded_len,
-      budget,
-    )));
+    return Err(SizeExceeded::new(encoded_len, budget));
   }
   Ok(())
 }
@@ -978,10 +997,101 @@ where
     if cfg.awareness_max_multiplier() == 0 {
       return Err(EndpointInitError::AwarenessMultiplierZero);
     }
+    // The gossip MTU must hold the mandatory single-datagram control packets
+    // (floor) and fit one UDP datagram (raw ceiling), and the reliable-frame
+    // ceiling must be a nonzero value within the u32 wire limit. A driver layers
+    // its own tighter, transform-aware bounds on top; these are the machine's
+    // backstop for the direct (driver-less) config path.
+    let gossip_mtu = cfg.gossip_mtu();
+    if gossip_mtu < crate::config::GOSSIP_MTU_MIN {
+      return Err(EndpointInitError::GossipMtuTooSmall(GossipMtuBound::new(
+        gossip_mtu,
+        crate::config::GOSSIP_MTU_MIN,
+      )));
+    }
+    if gossip_mtu > crate::config::MAX_GOSSIP_MTU {
+      return Err(EndpointInitError::GossipMtuTooLarge(GossipMtuBound::new(
+        gossip_mtu,
+        crate::config::MAX_GOSSIP_MTU,
+      )));
+    }
+    let max_stream_frame_size = cfg.max_stream_frame_size();
+    if max_stream_frame_size == 0 || max_stream_frame_size > u32::MAX as usize {
+      return Err(EndpointInitError::InvalidMaxStreamFrameSize(
+        max_stream_frame_size,
+      ));
+    }
     let local_node = Node::new(
       cfg.local_id_ref().cheap_clone(),
       cfg.advertise_addr_ref().cheap_clone(),
     );
+    // Identity-aware gossip-MTU floor: the gossip MTU must hold the largest of
+    // the mandatory single-datagram control packets the node emits about itself
+    // — the probe `Ping`, its `Ack`, and a minimal self-`Alive` carrying the
+    // configured `initial_meta`. Node ids are unbounded, so a long `local_id` or
+    // a large meta can push these past the constant floor while still nominally
+    // valid; encoding them against the configured identity catches that. The
+    // probe `Ping`'s peer slot reuses the local node — the dominant cost, a long
+    // `local_id`, appears in both slots regardless of the peer's concrete address.
+    {
+      let mandatory: [Message<I, A>; 3] = [
+        Message::Ping(Ping::new(
+          u32::MAX,
+          local_node.cheap_clone(),
+          local_node.cheap_clone(),
+        )),
+        Message::Alive(
+          Alive::new(u32::MAX, local_node.cheap_clone())
+            .with_meta(cfg.initial_meta_ref().cheap_clone()),
+        ),
+        Message::Ack(Ack::new(u32::MAX)),
+      ];
+      let mut required = 0usize;
+      for msg in &mandatory {
+        // A mandatory local-node packet that cannot be encoded means the node
+        // could never broadcast its own membership (e.g. a scoped / flow-labelled
+        // IPv6 advertise address the compact encoder rejects) — reject the
+        // identity rather than construct a silently-undiscoverable node.
+        let bytes = crate::codec::encode_outgoing(msg, &crate::codec::EncodeOptions::default())
+          .map_err(|_| EndpointInitError::UnencodableLocalIdentity)?;
+        required = required.max(bytes.len());
+      }
+      if gossip_mtu < required {
+        return Err(EndpointInitError::GossipMtuTooSmall(GossipMtuBound::new(
+          gossip_mtu, required,
+        )));
+      }
+
+      // Identity-aware reliable-frame floor: the node's own state is the minimum
+      // any join / anti-entropy PushPull carries. Size it for the WORST-CASE meta
+      // the node could ever broadcast — its `meta_max_size` ceiling (capped at
+      // the wire `Meta::MAX_SIZE`), not just `initial_meta`, since `update_meta`
+      // admits any later metadata up to that cap — and a worst-case incarnation.
+      // A `max_stream_frame_size` below it has every join / anti-entropy frame
+      // rejected by the receiver's frame-length gate.
+      let meta_cap = cfg.meta_max_size().min(Meta::MAX_SIZE);
+      let worst_case_meta = Meta::try_from(Bytes::from(vec![0u8; meta_cap])).unwrap_or_default();
+      let minimal_push_pull: Message<I, A> = Message::PushPull(PushPull::new(
+        true,
+        core::iter::once(
+          PushNodeState::new(
+            u32::MAX,
+            cfg.local_id_ref().cheap_clone(),
+            cfg.advertise_addr_ref().cheap_clone(),
+            State::Alive,
+          )
+          .with_meta(worst_case_meta),
+        ),
+      ));
+      let frame =
+        crate::codec::encode_outgoing(&minimal_push_pull, &crate::codec::EncodeOptions::default())
+          .map_err(|_| EndpointInitError::UnencodableLocalIdentity)?;
+      if frame.len() > max_stream_frame_size {
+        return Err(EndpointInitError::MaxStreamFrameSizeTooSmall(
+          SizeExceeded::new(frame.len(), max_stream_frame_size),
+        ));
+      }
+    }
     let mut members = Members::new(local_node);
     let awareness = Awareness::new(cfg.awareness_max_multiplier());
     let broadcast = BroadcastQueue::<I, MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
@@ -1003,6 +1113,12 @@ where
     let _ = members.insert(Member::new(local_state.clone()));
 
     let local_state_snapshot = cfg.initial_local_state_bytes();
+    // The configured initial snapshot must fit a single reliable PushPull frame
+    // under `max_stream_frame_size` — the same budget the runtime setter
+    // enforces — or every join / anti-entropy exchange carrying it is rejected
+    // by the reliable-frame gate, silently blocking application-state propagation.
+    local_state_snapshot_overage::<I, A>(&local_state_snapshot, max_stream_frame_size)
+      .map_err(EndpointInitError::LocalStateExceedsFrame)?;
     let initial_incarnation = cfg.initial_incarnation();
 
     let mut endpoint = Self {

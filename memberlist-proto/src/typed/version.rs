@@ -2,6 +2,11 @@
 #[derive(
   Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
 )]
+#[cfg_attr(
+  feature = "serde",
+  derive(serde::Serialize, serde::Deserialize),
+  serde(into = "u8", from = "u8")
+)]
 #[non_exhaustive]
 pub enum DelegateVersion {
   /// Version 1
@@ -34,6 +39,11 @@ impl From<DelegateVersion> for u8 {
 /// Protocol version
 #[derive(
   Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
+)]
+#[cfg_attr(
+  feature = "serde",
+  derive(serde::Serialize, serde::Deserialize),
+  serde(into = "u8", from = "u8")
 )]
 #[non_exhaustive]
 pub enum ProtocolVersion {

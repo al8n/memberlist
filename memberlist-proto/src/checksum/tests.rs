@@ -318,3 +318,60 @@ fn checksum_outcome_equality() {
   );
   assert_ne!(ChecksumOutput::Plain, ChecksumOutput::Checksumed(vec![1]));
 }
+
+#[cfg(all(feature = "serde", feature = "crc32"))]
+#[test]
+fn checksum_options_serde_roundtrip_and_partial() {
+  // An empty config deserializes to the full default (no algorithm).
+  assert_eq!(
+    serde_json::from_str::<ChecksumOptions>("{}").unwrap(),
+    ChecksumOptions::new()
+  );
+  // A configured algorithm round-trips and serializes as its snake_case name.
+  let opts = ChecksumOptions::new().with_algorithm(ChecksumAlgorithm::Crc32);
+  let json = serde_json::to_string(&opts).unwrap();
+  assert!(json.contains("crc32"), "json = {json}");
+  assert_eq!(
+    serde_json::from_str::<ChecksumOptions>(&json).unwrap(),
+    opts
+  );
+}
+
+#[cfg(all(feature = "serde", feature = "crc32"))]
+#[test]
+fn checksum_options_serde_rejects_unknown_field() {
+  // A misspelled `algorithm` field must be rejected, not silently dropped —
+  // otherwise the checksum knob would stay disabled with no warning.
+  assert!(serde_json::from_str::<ChecksumOptions>(r#"{"algorith":"crc32"}"#).is_err());
+}
+
+#[cfg(all(feature = "clap", feature = "crc32"))]
+#[test]
+fn checksum_options_clap_parses_and_wires_env() {
+  use clap::{CommandFactory, Parser};
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    checksum: ChecksumOptions,
+  }
+
+  // The CLI flag parses through the algorithm's `FromStr`.
+  let cli = Cli::try_parse_from(["app", "--checksum-algorithm", "crc32"]).unwrap();
+  assert_eq!(cli.checksum.algorithm(), Some(ChecksumAlgorithm::Crc32));
+  // Unspecified stays the default.
+  assert_eq!(
+    Cli::try_parse_from(["app"]).unwrap().checksum.algorithm(),
+    None
+  );
+  // The env var is wired — assert via command introspection, never `set_var`.
+  let cmd = Cli::command();
+  let arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "checksum-algorithm")
+    .expect("checksum-algorithm arg is registered");
+  assert_eq!(
+    arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_CHECKSUM_ALGORITHM")
+  );
+}

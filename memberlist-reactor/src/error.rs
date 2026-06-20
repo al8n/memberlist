@@ -71,6 +71,90 @@ impl std::fmt::Display for InvalidGossipMtu {
   }
 }
 
+/// Payload for [`Error::GossipMtuTooSmall`]: the configured `gossip_mtu` is below
+/// the floor needed to carry the mandatory single-datagram control packets (probe
+/// Ping / Ack / minimal self-Alive) the SWIM protocol always emits. Carries the
+/// configured value and the required minimum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GossipMtuTooSmall {
+  configured: usize,
+  minimum: usize,
+}
+
+impl GossipMtuTooSmall {
+  /// Build a new payload from the configured `gossip_mtu` and the minimum.
+  #[inline]
+  pub(crate) fn new(configured: usize, minimum: usize) -> Self {
+    Self {
+      configured,
+      minimum,
+    }
+  }
+
+  /// The configured `gossip_mtu` that was rejected.
+  #[inline]
+  pub fn configured(&self) -> usize {
+    self.configured
+  }
+
+  /// The required minimum `gossip_mtu` — the floor that fits the mandatory
+  /// single-datagram control packets the protocol always emits.
+  #[inline]
+  pub fn minimum(&self) -> usize {
+    self.minimum
+  }
+}
+
+impl std::fmt::Display for GossipMtuTooSmall {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "gossip_mtu {} is below the minimum of {} bytes required to carry the mandatory \
+       single-datagram control packets (probe Ping / Ack / a minimal self-Alive); a \
+       smaller gossip_mtu would make normal probes exceed the plaintext gossip ceiling, \
+       so peers would reject them and falsely suspect this node",
+      self.configured, self.minimum,
+    )
+  }
+}
+
+/// Payload for [`Error::InvalidOption`]: an operator-set tuning knob was given a
+/// value that would DETERMINISTICALLY break the node — an
+/// accept-then-silently-fail configuration the constructor rejects rather than
+/// honoring. Carries the knob name and a human-readable reason describing why the
+/// value is invalid.
+#[derive(Debug, Clone)]
+pub struct InvalidOption {
+  option: &'static str,
+  reason: String,
+}
+
+impl InvalidOption {
+  /// Build a new payload from the rejected knob name and the reason.
+  #[inline]
+  pub(crate) fn new(option: &'static str, reason: String) -> Self {
+    Self { option, reason }
+  }
+
+  /// The name of the tuning knob whose value was rejected.
+  #[inline]
+  pub fn option(&self) -> &'static str {
+    self.option
+  }
+
+  /// The reason the value would deterministically break the node.
+  #[inline]
+  pub fn reason(&self) -> &str {
+    &self.reason
+  }
+}
+
+impl std::fmt::Display for InvalidOption {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "invalid {} option: {}", self.option, self.reason)
+  }
+}
+
 /// An error from a `memberlist-reactor` operation.
 ///
 /// Grows as the driver is built out (transport / machine variants are added
@@ -134,6 +218,13 @@ pub enum Error {
   #[error(transparent)]
   Proto(#[from] memberlist_proto::Error),
 
+  /// The Sans-I/O endpoint rejected the resolved configuration at construction —
+  /// an out-of-range gossip MTU or reliable-frame size, an oversized initial
+  /// meta or local-state snapshot, or a wire-unencodable local identity.
+  /// Surfaced from the constructor instead of unwinding from it.
+  #[error(transparent)]
+  EndpointInit(#[from] memberlist_proto::EndpointInitError),
+
   /// The supplied node metadata exceeds the wire ceiling
   /// ([`Meta::MAX_SIZE`](memberlist_proto::typed::Meta::MAX_SIZE)) and was
   /// rejected before any coordinator mutation.
@@ -191,6 +282,29 @@ pub enum Error {
   /// Rejected at construction, mirroring the compio / embedded / smoltcp drivers.
   #[error("{0}")]
   InvalidGossipMtu(InvalidGossipMtu),
+
+  /// The configured `gossip_mtu` is below the floor needed to carry the
+  /// mandatory single-datagram control packets (probe Ping / Ack / a minimal
+  /// self-Alive) the SWIM protocol always emits. A `gossip_mtu` smaller than the
+  /// largest such packet would make normal probes exceed the plaintext gossip
+  /// ceiling on the receive side, so peers would reject them and falsely suspect
+  /// this node. Returned by the constructor (fail-fast, before any driver task
+  /// is spawned) so the misconfiguration is surfaced rather than producing
+  /// silently-rejected probes. Mirrors the compio / embedded / smoltcp drivers.
+  #[error("{0}")]
+  GossipMtuTooSmall(GossipMtuTooSmall),
+
+  /// An operator-set tuning knob was given a value that would
+  /// DETERMINISTICALLY break the node rather than merely degrade it — an
+  /// accept-then-silently-fail configuration. Currently rejects a
+  /// `max_stream_frame_size` of zero (rejects every reliable frame, so the node
+  /// could never complete a push/pull or receive a reliable user message) or one
+  /// above the `u32` wire limit (unreachable as a receive gate; a locally-built
+  /// frame above it would fail to encode). Rejected fail-fast at construction so
+  /// the misconfiguration is surfaced rather than producing a silently-broken
+  /// node. Mirrors the compio / embedded / smoltcp drivers.
+  #[error("{0}")]
+  InvalidOption(InvalidOption),
 
   /// The cluster label supplied to
   /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)

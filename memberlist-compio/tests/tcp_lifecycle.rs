@@ -16,8 +16,8 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, DriverOptions, EventDelegate, FirstAddrResolver, MaybeResolved,
-  Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, StreamTransportOptions,
+  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
+  NodeDelegate, Options, PingDelegate, RuntimeOptions, SocketAddrResolver, StreamTransportOptions,
   TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
@@ -1615,7 +1615,7 @@ async fn zero_idle_wake_interval_is_rejected() {
       .with_local_id(SmolStr::new("zero-idle-wake"))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
-  .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::ZERO));
+  .with_runtime(RuntimeOptions::new().with_idle_wake_interval(Duration::ZERO));
   let res = Memberlist::new(
     bad,
     VoidDelegate::default(),
@@ -1646,7 +1646,7 @@ async fn zero_idle_wake_interval_is_rejected() {
       .with_local_id(SmolStr::new("nonzero-idle-wake"))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
   )
-  .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::from_secs(30)));
+  .with_runtime(RuntimeOptions::new().with_idle_wake_interval(Duration::from_secs(30)));
   let ok = Memberlist::new(
     good,
     VoidDelegate::default(),

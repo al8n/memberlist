@@ -19,6 +19,25 @@ use bytes::Bytes;
 /// `Packet` is bounded directly by it.
 pub const DEFAULT_GOSSIP_MTU: usize = 1400;
 
+/// The hard upper bound on [`EndpointOptions::gossip_mtu`]: 65507 bytes, the
+/// maximum IPv4 UDP datagram payload (65535 − 20 B IP − 8 B UDP headers). A
+/// gossip packet is one UDP datagram, so a plaintext `gossip_mtu` above this
+/// could never fit the wire. This is the transport-agnostic raw ceiling the
+/// machine enforces at construction; a driver that wraps the datagram (checksum
+/// / encryption) enforces its own tighter ceiling that also subtracts that
+/// overhead.
+pub const MAX_GOSSIP_MTU: usize = 65507;
+
+/// The lower bound on [`EndpointOptions::gossip_mtu`]: 512 bytes. A gossip
+/// packet carries SWIM's mandatory single-datagram control messages — the probe
+/// `Ping`, its `Ack`, and a minimal self-`Alive` — each emitted as one UDP
+/// datagram with no split point, so a `gossip_mtu` below the largest of them
+/// makes normal probes deterministically rejected → false suspicion. 512 covers
+/// the framed mandatory packets (~8 B Ack, ~28 B Alive, ~70 B Ping over IPv6)
+/// with generous headroom and sits far below the 1400-byte default. Rejected,
+/// not clamped, so the operator learns and fixes the misconfiguration.
+pub const GOSSIP_MTU_MIN: usize = 512;
+
 /// Default value for [`EndpointOptions::meta_max_size`]: 512 bytes —
 /// the legacy memberlist limit, retained as the default to ease
 /// migration from Go memberlist clusters. The absolute upper bound
@@ -51,25 +70,216 @@ pub const DEFAULT_ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// relay state a peer can induce.
 pub const DEFAULT_MAX_INDIRECT_FORWARDS: usize = 256;
 
+// Per-field default values. Each is the single source of truth for one
+// field's default: `new()` builds the struct from these, the serde
+// `default = "…"` attributes fill missing config-file fields with them, and the
+// clap mirror reuses the scalar/bool/binary ones. The `Duration` and version
+// defaults additionally appear as `default_value` strings on the clap mirror —
+// kept in sync with these by the round-trip tests.
+
+#[inline]
+fn default_initial_meta() -> Meta {
+  Meta::empty()
+}
+
+#[inline]
+fn default_initial_local_state() -> Bytes {
+  Bytes::new()
+}
+
+#[inline]
+const fn default_suspicion_mult() -> u32 {
+  4
+}
+
+#[inline]
+const fn default_suspicion_max_timeout_mult() -> u32 {
+  6
+}
+
+#[inline]
+const fn default_probe_interval() -> Duration {
+  Duration::from_secs(1)
+}
+
+#[inline]
+const fn default_gossip_to_the_dead_time() -> Duration {
+  Duration::from_secs(30)
+}
+
+#[inline]
+const fn default_dead_node_reclaim_time() -> Duration {
+  Duration::ZERO
+}
+
+#[inline]
+const fn default_awareness_max_multiplier() -> u32 {
+  8
+}
+
+#[inline]
+const fn default_indirect_checks() -> u32 {
+  3
+}
+
+#[inline]
+const fn default_max_indirect_forwards() -> usize {
+  DEFAULT_MAX_INDIRECT_FORWARDS
+}
+
+#[inline]
+const fn default_max_members() -> Option<usize> {
+  None
+}
+
+#[inline]
+const fn default_ack_payload_to_members_only() -> bool {
+  false
+}
+
+#[inline]
+const fn default_max_inbound_streams() -> Option<usize> {
+  None
+}
+
+#[inline]
+const fn default_probe_timeout() -> Duration {
+  Duration::from_millis(500)
+}
+
+#[inline]
+const fn default_stream_timeout() -> Duration {
+  Duration::from_secs(10)
+}
+
+#[inline]
+const fn default_max_stream_frame_size() -> usize {
+  DEFAULT_MAX_STREAM_FRAME_SIZE
+}
+
+#[inline]
+const fn default_gossip_mtu() -> usize {
+  DEFAULT_GOSSIP_MTU
+}
+
+#[inline]
+const fn default_gossip_interval() -> Duration {
+  Duration::from_millis(200)
+}
+
+#[inline]
+const fn default_gossip_nodes() -> usize {
+  3
+}
+
+#[inline]
+const fn default_meta_max_size() -> usize {
+  DEFAULT_META_MAX_SIZE
+}
+
+#[inline]
+const fn default_accept_handshake_deadline() -> Duration {
+  DEFAULT_ACCEPT_HANDSHAKE_DEADLINE
+}
+
+#[inline]
+const fn default_push_pull_interval() -> Duration {
+  Duration::from_secs(30)
+}
+
+#[inline]
+const fn default_retransmit_mult() -> u32 {
+  4
+}
+
+#[inline]
+const fn default_protocol_version() -> ProtocolVersion {
+  ProtocolVersion::V1
+}
+
+#[inline]
+const fn default_delegate_version() -> DelegateVersion {
+  DelegateVersion::V1
+}
+
+#[inline]
+const fn default_initial_incarnation() -> u32 {
+  1
+}
+
+/// Deserialize and validate `initial_incarnation` against the same `u32::MAX / 2`
+/// bound `with_initial_incarnation` asserts, so a config value cannot seed an
+/// out-of-range incarnation that later wraps on a refute / update bump.
+#[cfg(feature = "serde")]
+fn deserialize_initial_incarnation<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let value = <u32 as serde::Deserialize>::deserialize(deserializer)?;
+  if value > u32::MAX / 2 {
+    return Err(serde::de::Error::custom(
+      "initial_incarnation must be at most u32::MAX / 2",
+    ));
+  }
+  Ok(value)
+}
+
 /// Construction-time settings for [`Endpoint`](crate::endpoint::Endpoint).
+///
+/// `serde` serializes every value knob (the `Duration` fields render as a
+/// humantime string via `humantime-serde`); `local_id` / `advertise_addr` are
+/// required (no default), and the two runtime binary fields (`initial_meta`,
+/// `initial_local_state`) are skipped — they default to empty and are populated
+/// at runtime, not from a config file.
+///
+/// `clap` exposes every value knob as a CLI flag + `MEMBERLIST_*` env var via a
+/// private mirror that carries the `FromStr` bounds `local_id` / `advertise_addr`
+/// need; the two binary fields are not CLI-settable.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct EndpointOptions<I, A> {
   local_id: I,
   advertise_addr: A,
+  #[cfg_attr(feature = "serde", serde(skip, default = "default_initial_meta"))]
   initial_meta: Meta,
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip, default = "default_initial_local_state")
+  )]
   initial_local_state: Bytes,
+  #[cfg_attr(feature = "serde", serde(default = "default_suspicion_mult"))]
   suspicion_mult: u32,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_suspicion_max_timeout_mult")
+  )]
   suspicion_max_timeout_mult: u32,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_probe_interval", with = "humantime_serde")
+  )]
   probe_interval: Duration,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_gossip_to_the_dead_time", with = "humantime_serde")
+  )]
   gossip_to_the_dead_time: Duration,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_dead_node_reclaim_time", with = "humantime_serde")
+  )]
   dead_node_reclaim_time: Duration,
+  #[cfg_attr(feature = "serde", serde(default = "default_awareness_max_multiplier"))]
   awareness_max_multiplier: u32,
+  #[cfg_attr(feature = "serde", serde(default = "default_indirect_checks"))]
   indirect_checks: u32,
   /// Hard cap on concurrent indirect-ping relays this node tracks on behalf of
   /// other probers. A fresh IndirectPing is dropped (no forwarded Ping, no
   /// registry/forward state, no Nack-on-expiry) when the cap is reached, so a
   /// peer cannot grow this node's relay state without bound. Default
   /// [`DEFAULT_MAX_INDIRECT_FORWARDS`].
+  #[cfg_attr(feature = "serde", serde(default = "default_max_indirect_forwards"))]
   max_indirect_forwards: usize,
   /// Optional admission ceiling on total cluster membership. When `Some(n)`, an
   /// Alive for a NEW id is rejected once the node already tracks `n` members, so
@@ -77,12 +287,17 @@ pub struct EndpointOptions<I, A> {
   /// per-member structure (timers, broadcast queue, O(n) scans) — without bound.
   /// `None` (the default) preserves unlimited open-join. Existing members and
   /// state transitions of known ids are never rejected.
+  #[cfg_attr(feature = "serde", serde(default = "default_max_members"))]
   max_members: Option<usize>,
   /// When `true`, the optional ack payload (set via `Endpoint::set_ack_payload`)
   /// is attached to an outgoing Ack ONLY when the Ping's source id is a known
   /// member; an Ack to an unknown (e.g. spoofed-source) Ping carries no payload.
   /// Bounds the byte amplification a spoofed Ping can elicit toward a victim.
   /// Default `false` (the payload is always attached, matching upstream).
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_ack_payload_to_members_only")
+  )]
   ack_payload_to_members_only: bool,
   /// Optional ceiling on concurrently accepted INBOUND reliable-stream
   /// exchanges. When `Some(n)`, a fresh inbound connection beyond `n` live
@@ -90,10 +305,19 @@ pub struct EndpointOptions<I, A> {
   /// grow inbound bridge state — each pins up to ~3x `max_stream_frame_size`
   /// transiently — without bound. `None` (the default) is unlimited. Outbound
   /// (self-initiated) exchanges are never gated by this.
+  #[cfg_attr(feature = "serde", serde(default = "default_max_inbound_streams"))]
   max_inbound_streams: Option<usize>,
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_probe_timeout", with = "humantime_serde")
+  )]
   probe_timeout: Duration,
   /// Deadline for a complete stream exchange (dial + request + response).
   /// Default: 10 seconds. Used for push/pull, reliable ping, and user messages.
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_stream_timeout", with = "humantime_serde")
+  )]
   stream_timeout: Duration,
   /// Hard cap on a single inbound reliable-stream frame
   /// (`[tag][varint len][body]`). A frame whose declared total exceeds
@@ -101,6 +325,7 @@ pub struct EndpointOptions<I, A> {
   /// the body is buffered — so a peer cannot exhaust memory by declaring a
   /// huge length and dribbling bytes. Default: 64 MiB (generous enough for
   /// a very large push/pull snapshot; tune up for huge clusters).
+  #[cfg_attr(feature = "serde", serde(default = "default_max_stream_frame_size"))]
   max_stream_frame_size: usize,
   /// Maximum plaintext byte size for an outbound gossip datagram, before
   /// any codec-layer transform (compression and/or encryption) is applied.
@@ -115,11 +340,17 @@ pub struct EndpointOptions<I, A> {
   /// path's UDP-safe ceiling.
   ///
   /// Parallel to [`Self::max_stream_frame_size`] (the reliable-path bound).
+  #[cfg_attr(feature = "serde", serde(default = "default_gossip_mtu"))]
   gossip_mtu: usize,
   /// How often to gossip broadcasts to `gossip_nodes` random peers.
   /// `Duration::ZERO` disables gossip. Default: 200 ms (LAN).
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_gossip_interval", with = "humantime_serde")
+  )]
   gossip_interval: Duration,
   /// Number of random peers selected per gossip round. Default: 3.
+  #[cfg_attr(feature = "serde", serde(default = "default_gossip_nodes"))]
   gossip_nodes: usize,
   /// Per-endpoint cap on the LOCAL node's `Meta` byte length.
   /// Enforced at [`Self::with_initial_meta`] construction-time (via
@@ -136,19 +367,41 @@ pub struct EndpointOptions<I, A> {
   /// its OWN meta-broadcast size, not to refuse peers with larger
   /// metas; refusing peers would cause silent cluster
   /// fragmentation that hides bootstrap / config-skew failures.
+  #[cfg_attr(feature = "serde", serde(default = "default_meta_max_size"))]
   meta_max_size: usize,
   /// Deadline for a server-side bridge's `Handshaking` step (label
   /// validation for plain TCP; TLS handshake for TLS records). A
   /// peer that connects but never sends the label / completes the
   /// handshake within this window is reaped as failed. Default
   /// [`DEFAULT_ACCEPT_HANDSHAKE_DEADLINE`] (10 s).
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      default = "default_accept_handshake_deadline",
+      with = "humantime_serde"
+    )
+  )]
   accept_handshake_deadline: Duration,
   /// How often to run a full push/pull anti-entropy exchange with one
   /// random peer. `Duration::ZERO` disables push/pull. Default: 30 s (LAN).
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_push_pull_interval", with = "humantime_serde")
+  )]
   push_pull_interval: Duration,
+  #[cfg_attr(feature = "serde", serde(default = "default_retransmit_mult"))]
   retransmit_mult: u32,
+  #[cfg_attr(feature = "serde", serde(default = "default_protocol_version"))]
   protocol_version: ProtocolVersion,
+  #[cfg_attr(feature = "serde", serde(default = "default_delegate_version"))]
   delegate_version: DelegateVersion,
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      default = "default_initial_incarnation",
+      deserialize_with = "deserialize_initial_incarnation"
+    )
+  )]
   initial_incarnation: u32,
 }
 
@@ -158,32 +411,32 @@ impl<I, A> EndpointOptions<I, A> {
     Self {
       local_id,
       advertise_addr,
-      initial_meta: Meta::empty(),
-      initial_local_state: Bytes::new(),
-      suspicion_mult: 4,
-      suspicion_max_timeout_mult: 6,
-      probe_interval: Duration::from_secs(1),
-      gossip_to_the_dead_time: Duration::from_secs(30),
-      dead_node_reclaim_time: Duration::ZERO,
-      awareness_max_multiplier: 8,
-      indirect_checks: 3,
-      max_indirect_forwards: DEFAULT_MAX_INDIRECT_FORWARDS,
-      max_members: None,
-      ack_payload_to_members_only: false,
-      max_inbound_streams: None,
-      probe_timeout: Duration::from_millis(500),
-      stream_timeout: Duration::from_secs(10),
-      max_stream_frame_size: DEFAULT_MAX_STREAM_FRAME_SIZE,
-      gossip_mtu: DEFAULT_GOSSIP_MTU,
-      gossip_interval: Duration::from_millis(200),
-      gossip_nodes: 3,
-      meta_max_size: DEFAULT_META_MAX_SIZE,
-      accept_handshake_deadline: DEFAULT_ACCEPT_HANDSHAKE_DEADLINE,
-      push_pull_interval: Duration::from_secs(30),
-      retransmit_mult: 4,
-      protocol_version: ProtocolVersion::V1,
-      delegate_version: DelegateVersion::V1,
-      initial_incarnation: 1,
+      initial_meta: default_initial_meta(),
+      initial_local_state: default_initial_local_state(),
+      suspicion_mult: default_suspicion_mult(),
+      suspicion_max_timeout_mult: default_suspicion_max_timeout_mult(),
+      probe_interval: default_probe_interval(),
+      gossip_to_the_dead_time: default_gossip_to_the_dead_time(),
+      dead_node_reclaim_time: default_dead_node_reclaim_time(),
+      awareness_max_multiplier: default_awareness_max_multiplier(),
+      indirect_checks: default_indirect_checks(),
+      max_indirect_forwards: default_max_indirect_forwards(),
+      max_members: default_max_members(),
+      ack_payload_to_members_only: default_ack_payload_to_members_only(),
+      max_inbound_streams: default_max_inbound_streams(),
+      probe_timeout: default_probe_timeout(),
+      stream_timeout: default_stream_timeout(),
+      max_stream_frame_size: default_max_stream_frame_size(),
+      gossip_mtu: default_gossip_mtu(),
+      gossip_interval: default_gossip_interval(),
+      gossip_nodes: default_gossip_nodes(),
+      meta_max_size: default_meta_max_size(),
+      accept_handshake_deadline: default_accept_handshake_deadline(),
+      push_pull_interval: default_push_pull_interval(),
+      retransmit_mult: default_retransmit_mult(),
+      protocol_version: default_protocol_version(),
+      delegate_version: default_delegate_version(),
+      initial_incarnation: default_initial_incarnation(),
     }
   }
 
@@ -658,6 +911,393 @@ impl<I, A> EndpointOptions<I, A> {
     self.delegate_version
   }
 }
+
+// `clap::Args` cannot derive directly on `EndpointOptions<I, A>`: `clap`'s
+// `value_parser!` cannot resolve a parser for an unbounded generic, and adding
+// an `I: FromStr` / `A: FromStr` bound on the struct itself would cascade those
+// bounds onto the whole machine. Instead a private mirror carries the parse
+// bounds and derives `Args`; `EndpointOptions` delegates its `Args` /
+// `FromArgMatches` to the mirror and rebuilds itself from the parsed mirror.
+// The two runtime binary fields (`initial_meta`, `initial_local_state`) are not
+// CLI-settable and default when rebuilding.
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+  use core::str::FromStr;
+
+  fn parse_protocol_version(s: &str) -> Result<ProtocolVersion, core::num::ParseIntError> {
+    s.parse::<u8>().map(ProtocolVersion::from)
+  }
+
+  fn parse_delegate_version(s: &str) -> Result<DelegateVersion, core::num::ParseIntError> {
+    s.parse::<u8>().map(DelegateVersion::from)
+  }
+
+  #[derive(Args)]
+  struct EndpointOptionsCli<I, A>
+  where
+    I: FromStr + Clone + Send + Sync + 'static,
+    <I as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+    A: FromStr + Clone + Send + Sync + 'static,
+    <A as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+  {
+    #[arg(
+      id = "endpoint-local-id",
+      long = "local-id",
+      env = "MEMBERLIST_LOCAL_ID"
+    )]
+    local_id: I,
+    #[arg(
+      id = "endpoint-advertise-addr",
+      long = "advertise-addr",
+      env = "MEMBERLIST_ADVERTISE_ADDR"
+    )]
+    advertise_addr: A,
+    #[arg(
+      id = "endpoint-suspicion-mult",
+      long = "suspicion-mult",
+      env = "MEMBERLIST_SUSPICION_MULT",
+      default_value_t = default_suspicion_mult()
+    )]
+    suspicion_mult: u32,
+    #[arg(
+      id = "endpoint-suspicion-max-timeout-mult",
+      long = "suspicion-max-timeout-mult",
+      env = "MEMBERLIST_SUSPICION_MAX_TIMEOUT_MULT",
+      default_value_t = default_suspicion_max_timeout_mult()
+    )]
+    suspicion_max_timeout_mult: u32,
+    #[arg(
+      id = "endpoint-probe-interval",
+      long = "probe-interval",
+      env = "MEMBERLIST_PROBE_INTERVAL",
+      value_parser = humantime::parse_duration,
+      default_value = "1s"
+    )]
+    probe_interval: Duration,
+    #[arg(
+      id = "endpoint-gossip-to-the-dead-time",
+      long = "gossip-to-the-dead-time",
+      env = "MEMBERLIST_GOSSIP_TO_THE_DEAD_TIME",
+      value_parser = humantime::parse_duration,
+      default_value = "30s"
+    )]
+    gossip_to_the_dead_time: Duration,
+    #[arg(
+      id = "endpoint-dead-node-reclaim-time",
+      long = "dead-node-reclaim-time",
+      env = "MEMBERLIST_DEAD_NODE_RECLAIM_TIME",
+      value_parser = humantime::parse_duration,
+      default_value = "0s"
+    )]
+    dead_node_reclaim_time: Duration,
+    #[arg(
+      id = "endpoint-awareness-max-multiplier",
+      long = "awareness-max-multiplier",
+      env = "MEMBERLIST_AWARENESS_MAX_MULTIPLIER",
+      default_value_t = default_awareness_max_multiplier()
+    )]
+    awareness_max_multiplier: u32,
+    #[arg(
+      id = "endpoint-indirect-checks",
+      long = "indirect-checks",
+      env = "MEMBERLIST_INDIRECT_CHECKS",
+      default_value_t = default_indirect_checks()
+    )]
+    indirect_checks: u32,
+    #[arg(
+      id = "endpoint-max-indirect-forwards",
+      long = "max-indirect-forwards",
+      env = "MEMBERLIST_MAX_INDIRECT_FORWARDS",
+      default_value_t = default_max_indirect_forwards()
+    )]
+    max_indirect_forwards: usize,
+    #[arg(
+      id = "endpoint-max-members",
+      long = "max-members",
+      env = "MEMBERLIST_MAX_MEMBERS"
+    )]
+    max_members: Option<usize>,
+    #[arg(
+      id = "endpoint-ack-payload-to-members-only",
+      long = "ack-payload-to-members-only",
+      env = "MEMBERLIST_ACK_PAYLOAD_TO_MEMBERS_ONLY",
+      default_value_t = default_ack_payload_to_members_only()
+    )]
+    ack_payload_to_members_only: bool,
+    #[arg(
+      id = "endpoint-max-inbound-streams",
+      long = "max-inbound-streams",
+      env = "MEMBERLIST_MAX_INBOUND_STREAMS"
+    )]
+    max_inbound_streams: Option<usize>,
+    #[arg(
+      id = "endpoint-probe-timeout",
+      long = "probe-timeout",
+      env = "MEMBERLIST_PROBE_TIMEOUT",
+      value_parser = humantime::parse_duration,
+      default_value = "500ms"
+    )]
+    probe_timeout: Duration,
+    #[arg(
+      id = "endpoint-stream-timeout",
+      long = "stream-timeout",
+      env = "MEMBERLIST_STREAM_TIMEOUT",
+      value_parser = humantime::parse_duration,
+      default_value = "10s"
+    )]
+    stream_timeout: Duration,
+    #[arg(
+      id = "endpoint-max-stream-frame-size",
+      long = "max-stream-frame-size",
+      env = "MEMBERLIST_MAX_STREAM_FRAME_SIZE",
+      default_value_t = default_max_stream_frame_size()
+    )]
+    max_stream_frame_size: usize,
+    #[arg(
+      id = "endpoint-gossip-mtu",
+      long = "gossip-mtu",
+      env = "MEMBERLIST_GOSSIP_MTU",
+      default_value_t = default_gossip_mtu()
+    )]
+    gossip_mtu: usize,
+    #[arg(
+      id = "endpoint-gossip-interval",
+      long = "gossip-interval",
+      env = "MEMBERLIST_GOSSIP_INTERVAL",
+      value_parser = humantime::parse_duration,
+      default_value = "200ms"
+    )]
+    gossip_interval: Duration,
+    #[arg(
+      id = "endpoint-gossip-nodes",
+      long = "gossip-nodes",
+      env = "MEMBERLIST_GOSSIP_NODES",
+      default_value_t = default_gossip_nodes()
+    )]
+    gossip_nodes: usize,
+    #[arg(
+      id = "endpoint-meta-max-size",
+      long = "meta-max-size",
+      env = "MEMBERLIST_META_MAX_SIZE",
+      default_value_t = default_meta_max_size()
+    )]
+    meta_max_size: usize,
+    #[arg(
+      id = "endpoint-accept-handshake-deadline",
+      long = "accept-handshake-deadline",
+      env = "MEMBERLIST_ACCEPT_HANDSHAKE_DEADLINE",
+      value_parser = humantime::parse_duration,
+      default_value = "10s"
+    )]
+    accept_handshake_deadline: Duration,
+    #[arg(
+      id = "endpoint-push-pull-interval",
+      long = "push-pull-interval",
+      env = "MEMBERLIST_PUSH_PULL_INTERVAL",
+      value_parser = humantime::parse_duration,
+      default_value = "30s"
+    )]
+    push_pull_interval: Duration,
+    #[arg(
+      id = "endpoint-retransmit-mult",
+      long = "retransmit-mult",
+      env = "MEMBERLIST_RETRANSMIT_MULT",
+      default_value_t = default_retransmit_mult()
+    )]
+    retransmit_mult: u32,
+    #[arg(
+      id = "endpoint-protocol-version",
+      long = "protocol-version",
+      env = "MEMBERLIST_PROTOCOL_VERSION",
+      value_parser = parse_protocol_version,
+      default_value = "1"
+    )]
+    protocol_version: ProtocolVersion,
+    #[arg(
+      id = "endpoint-delegate-version",
+      long = "delegate-version",
+      env = "MEMBERLIST_DELEGATE_VERSION",
+      value_parser = parse_delegate_version,
+      default_value = "1"
+    )]
+    delegate_version: DelegateVersion,
+    #[arg(
+      id = "endpoint-initial-incarnation",
+      long = "initial-incarnation",
+      env = "MEMBERLIST_INITIAL_INCARNATION",
+      default_value_t = default_initial_incarnation(),
+      value_parser = clap::value_parser!(u32).range(..=(u32::MAX as i64 / 2))
+    )]
+    initial_incarnation: u32,
+  }
+
+  impl<I, A> From<EndpointOptionsCli<I, A>> for EndpointOptions<I, A>
+  where
+    I: FromStr + Clone + Send + Sync + 'static,
+    <I as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+    A: FromStr + Clone + Send + Sync + 'static,
+    <A as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+  {
+    fn from(c: EndpointOptionsCli<I, A>) -> Self {
+      Self {
+        local_id: c.local_id,
+        advertise_addr: c.advertise_addr,
+        initial_meta: default_initial_meta(),
+        initial_local_state: default_initial_local_state(),
+        suspicion_mult: c.suspicion_mult,
+        suspicion_max_timeout_mult: c.suspicion_max_timeout_mult,
+        probe_interval: c.probe_interval,
+        gossip_to_the_dead_time: c.gossip_to_the_dead_time,
+        dead_node_reclaim_time: c.dead_node_reclaim_time,
+        awareness_max_multiplier: c.awareness_max_multiplier,
+        indirect_checks: c.indirect_checks,
+        max_indirect_forwards: c.max_indirect_forwards,
+        max_members: c.max_members,
+        ack_payload_to_members_only: c.ack_payload_to_members_only,
+        max_inbound_streams: c.max_inbound_streams,
+        probe_timeout: c.probe_timeout,
+        stream_timeout: c.stream_timeout,
+        max_stream_frame_size: c.max_stream_frame_size,
+        gossip_mtu: c.gossip_mtu,
+        gossip_interval: c.gossip_interval,
+        gossip_nodes: c.gossip_nodes,
+        meta_max_size: c.meta_max_size,
+        accept_handshake_deadline: c.accept_handshake_deadline,
+        push_pull_interval: c.push_pull_interval,
+        retransmit_mult: c.retransmit_mult,
+        protocol_version: c.protocol_version,
+        delegate_version: c.delegate_version,
+        initial_incarnation: c.initial_incarnation,
+      }
+    }
+  }
+
+  impl<I, A> Args for EndpointOptions<I, A>
+  where
+    I: FromStr + Clone + Send + Sync + 'static,
+    <I as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+    A: FromStr + Clone + Send + Sync + 'static,
+    <A as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+  {
+    fn augment_args(cmd: Command) -> Command {
+      EndpointOptionsCli::<I, A>::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      EndpointOptionsCli::<I, A>::augment_args_for_update(cmd)
+    }
+  }
+
+  impl<I, A> FromArgMatches for EndpointOptions<I, A>
+  where
+    I: FromStr + Clone + Send + Sync + 'static,
+    <I as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+    A: FromStr + Clone + Send + Sync + 'static,
+    <A as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+  {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      EndpointOptionsCli::<I, A>::from_arg_matches(m).map(Into::into)
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides — args whose value came from the
+      // command line or an env var, not a clap default. A bare derived update
+      // treats every `default_value` arg as present and would reset unset fields;
+      // the mirror-skipped `initial_meta` / `initial_local_state` are not touched
+      // here, so they survive too.
+      macro_rules! take {
+        ($id:literal, $field:ident, $ty:ty) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            if let Some(v) = m.get_one::<$ty>($id) {
+              self.$field = v.clone();
+            }
+          }
+        };
+      }
+      macro_rules! take_opt {
+        ($id:literal, $field:ident) => {
+          if matches!(
+            m.value_source($id),
+            Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+          ) {
+            self.$field = m.get_one::<usize>($id).copied();
+          }
+        };
+      }
+      take!("endpoint-local-id", local_id, I);
+      take!("endpoint-advertise-addr", advertise_addr, A);
+      take!("endpoint-suspicion-mult", suspicion_mult, u32);
+      take!(
+        "endpoint-suspicion-max-timeout-mult",
+        suspicion_max_timeout_mult,
+        u32
+      );
+      take!("endpoint-probe-interval", probe_interval, Duration);
+      take!(
+        "endpoint-gossip-to-the-dead-time",
+        gossip_to_the_dead_time,
+        Duration
+      );
+      take!(
+        "endpoint-dead-node-reclaim-time",
+        dead_node_reclaim_time,
+        Duration
+      );
+      take!(
+        "endpoint-awareness-max-multiplier",
+        awareness_max_multiplier,
+        u32
+      );
+      take!("endpoint-indirect-checks", indirect_checks, u32);
+      take!(
+        "endpoint-max-indirect-forwards",
+        max_indirect_forwards,
+        usize
+      );
+      take_opt!("endpoint-max-members", max_members);
+      take!(
+        "endpoint-ack-payload-to-members-only",
+        ack_payload_to_members_only,
+        bool
+      );
+      take_opt!("endpoint-max-inbound-streams", max_inbound_streams);
+      take!("endpoint-probe-timeout", probe_timeout, Duration);
+      take!("endpoint-stream-timeout", stream_timeout, Duration);
+      take!(
+        "endpoint-max-stream-frame-size",
+        max_stream_frame_size,
+        usize
+      );
+      take!("endpoint-gossip-mtu", gossip_mtu, usize);
+      take!("endpoint-gossip-interval", gossip_interval, Duration);
+      take!("endpoint-gossip-nodes", gossip_nodes, usize);
+      take!("endpoint-meta-max-size", meta_max_size, usize);
+      take!(
+        "endpoint-accept-handshake-deadline",
+        accept_handshake_deadline,
+        Duration
+      );
+      take!("endpoint-push-pull-interval", push_pull_interval, Duration);
+      take!("endpoint-retransmit-mult", retransmit_mult, u32);
+      take!(
+        "endpoint-protocol-version",
+        protocol_version,
+        ProtocolVersion
+      );
+      take!(
+        "endpoint-delegate-version",
+        delegate_version,
+        DelegateVersion
+      );
+      take!("endpoint-initial-incarnation", initial_incarnation, u32);
+      Ok(())
+    }
+  }
+};
 
 #[cfg(test)]
 mod tests;

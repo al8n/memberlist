@@ -1411,3 +1411,64 @@ async fn bridge_write_error_tears_down() {
     .expect("bridge tears down on a write error to a dropped peer, not hang")
     .expect("bridge task exits cleanly");
 }
+
+/// A `recv_batch` of 0 is clamped to 1 at construction. Without the clamp the
+/// gossip-recv and inbound-transport loops would do no work yet still set `more`
+/// (the `recv_n == recv_batch` self-wake arms), pegging the executor in a
+/// busy-loop that never receives gossip or bridge data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recv_batch_zero_clamps_to_one() {
+  let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind gossip socket");
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("drv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
+  let endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+    ep,
+    LabelOptions::new_in(None, ()),
+    Box::new(|_| None),
+    Box::new(|a: &SocketAddr| *a),
+  );
+  let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
+  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+  let (obs_tx, _obs_rx) = flume::bounded(16);
+  let (accepted_tx, accepted_rx) = flume::bounded(ACCEPT_CAP);
+  let (accept_shutdown_tx, accept_shutdown_rx) = flume::bounded(1);
+  let listener = <TokioNet as Net>::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("bind accept listener");
+  let accept_join = TokioRuntime::spawn(accept_task::<SmolStr, _>(
+    listener,
+    accepted_tx,
+    accept_shutdown_rx,
+    shared.clone(),
+  ));
+  let driver = StreamDriver::<SmolStr, TokioRuntime, RawRecords>::new(
+    endpoint,
+    socket,
+    shared,
+    0, // recv_batch
+    8, // transmit_batch
+    obs_tx,
+    obs_payload_bytes,
+    None,
+    accepted_rx,
+    accept_shutdown_tx,
+    accept_join,
+    Duration::from_secs(60),
+    None,
+    #[cfg(feature = "cidr")]
+    None,
+    #[cfg(not(feature = "cidr"))]
+    (),
+  );
+  assert_eq!(
+    driver.recv_batch, 1,
+    "a recv_batch of 0 must be clamped to 1 to avoid a receive busy-loop"
+  );
+}

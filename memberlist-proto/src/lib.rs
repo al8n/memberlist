@@ -130,6 +130,9 @@ mod quic;
 #[cfg(feature = "quic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use quic::{DatagramSendStatus, QuicEndpoint, QuicOptions, UnreliableTransport};
+#[cfg(all(feature = "quic", feature = "tls"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "quic", feature = "tls"))))]
+pub use quic::{QuicConfigError, QuicConfigOptions};
 
 #[cfg(feature = "tls")]
 mod tls;
@@ -138,7 +141,10 @@ mod tls;
 pub use streams::TlsEndpoint;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
-pub use tls::{TlsOptions, TlsRecords};
+pub use tls::{
+  ClientAuthMode, ParseClientAuthModeError, TlsConfigError, TlsConfigOptions, TlsOptions,
+  TlsRecords,
+};
 
 #[cfg(feature = "tcp")]
 mod tcp;

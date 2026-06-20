@@ -27,6 +27,11 @@ use core::fmt;
 
 /// Compression level for zstd. The backend accepts levels 1–22; the default is 3
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]
+#[cfg_attr(
+  feature = "serde",
+  derive(serde::Serialize, serde::Deserialize),
+  serde(into = "u8", try_from = "u8")
+)]
 #[repr(u8)]
 #[cfg(feature = "zstd")]
 #[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
@@ -112,11 +117,47 @@ const _: () = {
   }
 };
 
+#[cfg(feature = "zstd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+impl From<ZstdLevel> for u8 {
+  #[inline]
+  fn from(level: ZstdLevel) -> Self {
+    level as u8
+  }
+}
+
+#[cfg(feature = "zstd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+impl TryFrom<u8> for ZstdLevel {
+  type Error = InvalidZstdLevel;
+
+  #[inline]
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    Self::try_from_u8(value).ok_or(InvalidZstdLevel(()))
+  }
+}
+
+/// The error from [`ZstdLevel`]'s `TryFrom<u8>`: the byte was outside the valid
+/// 1 to 22 zstd level range.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[cfg(feature = "zstd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid zstd level (expected 1 to 22)")]
+pub struct InvalidZstdLevel(());
+
 /// Identifies the compression backend a compressed frame
 /// was produced with. Each backend is opt-in behind its own feature; a node
 /// that decodes a tag it was not built with yields [`CompressAlgorithm::Unknown`]
 /// and fails the decode cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant, Unwrap, TryUnwrap)]
+#[cfg_attr(
+  feature = "serde",
+  derive(serde::Serialize, serde::Deserialize),
+  serde(rename_all = "snake_case")
+)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum CompressAlgorithm {
@@ -185,6 +226,39 @@ impl CompressAlgorithm {
     }
   }
 }
+
+/// Parse a [`CompressAlgorithm`] from its lowercase name (`"zstd"`, `"lz4"`,
+/// `"snappy"`, `"brotli"`) — a config value, CLI flag, or any string input. The
+/// name maps to the algorithm; `zstd`'s compression *level* stays a config-file
+/// field (`{"zstd": 3}`) or a builder call, so a bare `"zstd"` is the default
+/// level. Only algorithms compiled into this build are accepted; an unrecognized
+/// name is a [`ParseCompressAlgorithmError`].
+impl core::str::FromStr for CompressAlgorithm {
+  type Err = ParseCompressAlgorithmError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Ok(match s {
+      #[cfg(feature = "zstd")]
+      "zstd" => Self::Zstd(ZstdLevel::default()),
+      #[cfg(feature = "lz4")]
+      "lz4" => Self::Lz4,
+      #[cfg(feature = "snappy")]
+      "snappy" => Self::Snappy,
+      #[cfg(feature = "brotli")]
+      "brotli" => Self::Brotli,
+      _ => return Err(ParseCompressAlgorithmError(())),
+    })
+  }
+}
+
+/// The error from [`CompressAlgorithm::from_str`]: the input matched no
+/// compression algorithm this build supports.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unknown or unsupported compression algorithm")]
+pub struct ParseCompressAlgorithmError(());
 
 /// Default brotli quality — a balanced ratio/CPU choice. Sender-side only.
 #[cfg(feature = "brotli")]
@@ -444,7 +518,7 @@ pub fn apply_compression(
 }
 
 /// The default size threshold below which a payload is not compressed.
-const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
+pub const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
 
 /// Transport-agnostic compression configuration handed to each coordinator at
 /// construction. Zero `pub` fields — accessor-only.
@@ -453,6 +527,8 @@ const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
 /// is the default: every payload is left uncompressed and the codec paths
 /// reduce to identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct CompressionOptions {
   algorithm: Option<CompressAlgorithm>,
   threshold: usize,
@@ -552,6 +628,82 @@ impl CompressionOptions {
     }
   }
 }
+
+// `clap::Args` is delegated to a private mirror rather than derived on the
+// public struct: `threshold` carries a `default_value_t`, and a derived
+// `update_from_arg_matches` treats every defaulted arg as present, so a
+// `try_update_from` carrying one unrelated flag would reset `threshold` (and
+// any other defaulted field) back to its default. The manual
+// `update_from_arg_matches` applies a field only when its value came from the
+// command line or an env var, so an unset defaulted field is a no-op on update.
+#[cfg(feature = "clap")]
+const _: () = {
+  use clap::{ArgMatches, Args, Command, Error, FromArgMatches, parser::ValueSource};
+
+  #[derive(Args)]
+  struct CompressionOptionsCli {
+    #[arg(
+      id = "compression-algorithm",
+      long = "compression-algorithm",
+      env = "MEMBERLIST_COMPRESSION_ALGORITHM"
+    )]
+    algorithm: Option<CompressAlgorithm>,
+    #[arg(
+      id = "compression-threshold",
+      long = "compression-threshold",
+      env = "MEMBERLIST_COMPRESSION_THRESHOLD",
+      default_value_t = DEFAULT_COMPRESSION_THRESHOLD
+    )]
+    threshold: usize,
+  }
+
+  impl From<CompressionOptionsCli> for CompressionOptions {
+    fn from(c: CompressionOptionsCli) -> Self {
+      Self {
+        algorithm: c.algorithm,
+        threshold: c.threshold,
+      }
+    }
+  }
+
+  impl Args for CompressionOptions {
+    fn augment_args(cmd: Command) -> Command {
+      CompressionOptionsCli::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+      CompressionOptionsCli::augment_args_for_update(cmd)
+    }
+  }
+
+  impl FromArgMatches for CompressionOptions {
+    fn from_arg_matches(m: &ArgMatches) -> Result<Self, Error> {
+      CompressionOptionsCli::from_arg_matches(m).map(Into::into)
+    }
+
+    fn update_from_arg_matches(&mut self, m: &ArgMatches) -> Result<(), Error> {
+      // Apply ONLY operator-supplied overrides — args whose value came from the
+      // command line or an env var, not a clap default.
+      let supplied = |id: &str| {
+        matches!(
+          m.value_source(id),
+          Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+        )
+      };
+      if supplied("compression-algorithm") {
+        self.algorithm = m
+          .get_one::<CompressAlgorithm>("compression-algorithm")
+          .copied();
+      }
+      if supplied("compression-threshold") {
+        if let Some(v) = m.get_one::<usize>("compression-threshold") {
+          self.threshold = *v;
+        }
+      }
+      Ok(())
+    }
+  }
+};
 
 /// The one-byte wrapper tag that prefixes every compressed frame
 /// ([`MessageTag::Compressed`]).

@@ -50,14 +50,14 @@ impl Transport for MockTransport {
 fn options_construction_and_accessors() {
   let opts: Options<MockTransport> = Options::new(());
   let _t: &() = opts.transport();
-  let _d: &DriverOptions = opts.driver();
+  let _d: &RuntimeOptions = opts.runtime();
   let _m: &MemberlistOptions = opts.memberlist();
 }
 
 #[test]
 fn options_builder_chain() {
   let opts: Options<MockTransport> = Options::new(())
-    .with_driver(DriverOptions::new())
+    .with_runtime(RuntimeOptions::new())
     .with_memberlist(MemberlistOptions::new());
   let _ = opts.transport(); // Unused: binding only to suppress unused-value lint
 }
@@ -66,14 +66,14 @@ fn options_builder_chain() {
 fn validate_driver_options_rejects_deterministic_break_knobs() {
   use core::time::Duration;
   // Baseline (all defaults) is accepted.
-  assert!(validate_driver_options(&DriverOptions::new()).is_ok());
+  assert!(validate_driver_options(&RuntimeOptions::new()).is_ok());
 
   // The four deterministic-break knobs are each rejected at zero.
   let breaks = [
-    DriverOptions::new().with_idle_wake_interval(Duration::ZERO),
-    DriverOptions::new().with_cmd_fairness_budget(0),
-    DriverOptions::new().with_peek_budget(Duration::ZERO),
-    DriverOptions::new().with_observation_channel(crate::Channel::Bounded(0)),
+    RuntimeOptions::new().with_idle_wake_interval(Duration::ZERO),
+    RuntimeOptions::new().with_cmd_fairness_budget(0),
+    RuntimeOptions::new().with_peek_budget(Duration::ZERO),
+    RuntimeOptions::new().with_observation_channel(crate::Channel::Bounded(0)),
   ];
   for opts in breaks {
     assert!(
@@ -87,11 +87,11 @@ fn validate_driver_options_rejects_deterministic_break_knobs() {
 
   // Degrade-but-function knobs at zero, and a positive bounded channel,
   // are accepted.
-  assert!(validate_driver_options(&DriverOptions::new().with_iter_drain_cap(0)).is_ok());
-  assert!(validate_driver_options(&DriverOptions::new().with_event_queue_cap(0)).is_ok());
+  assert!(validate_driver_options(&RuntimeOptions::new().with_iter_drain_cap(0)).is_ok());
+  assert!(validate_driver_options(&RuntimeOptions::new().with_event_queue_cap(0)).is_ok());
   assert!(
     validate_driver_options(
-      &DriverOptions::new().with_observation_channel(crate::Channel::Bounded(16))
+      &RuntimeOptions::new().with_observation_channel(crate::Channel::Bounded(16))
     )
     .is_ok()
   );
@@ -101,18 +101,18 @@ fn validate_driver_options_rejects_deterministic_break_knobs() {
 fn observation_channel_round_trips() {
   // Bounded by default (safe against remote-driven OOM).
   assert_eq!(
-    DriverOptions::new().observation_channel(),
+    RuntimeOptions::new().observation_channel(),
     crate::Channel::Bounded(1024)
   );
   // Explicit opt-in to never-drop, and an explicit smaller bound, round-trip.
   assert_eq!(
-    DriverOptions::new()
+    RuntimeOptions::new()
       .with_observation_channel(crate::Channel::Unbounded)
       .observation_channel(),
     crate::Channel::Unbounded
   );
   assert_eq!(
-    DriverOptions::new()
+    RuntimeOptions::new()
       .with_observation_channel(crate::Channel::Bounded(8))
       .observation_channel(),
     crate::Channel::Bounded(8)
@@ -511,22 +511,22 @@ fn options_admission_delegates_and_into_parts() {
   }
 
   let custom_ml = MemberlistOptions::new().with_gossip_mtu(1234);
-  let custom_driver = DriverOptions::new().with_iter_drain_cap(7);
+  let custom_runtime = RuntimeOptions::new().with_iter_drain_cap(7);
   let opts: Options<MockTransport> = Options::new(())
     .with_memberlist(custom_ml)
-    .with_driver(custom_driver)
+    .with_runtime(custom_runtime)
     .with_alive_delegate(AdmitAll)
     .with_merge_delegate(AdmitAll);
 
   // Accessors reflect the installed sub-options.
   assert_eq!(opts.memberlist().gossip_mtu(), Some(1234));
-  assert_eq!(opts.driver().iter_drain_cap(), 7);
+  assert_eq!(opts.runtime().iter_drain_cap(), 7);
 
   // `into_parts` hands back the transport opts, both sub-options, and the
   // two installed predicates.
-  let (_transport, ml, driver, alive, merge) = opts.into_parts();
+  let (_transport, ml, runtime, alive, merge) = opts.into_parts();
   assert_eq!(ml.gossip_mtu(), Some(1234));
-  assert_eq!(driver.iter_drain_cap(), 7);
+  assert_eq!(runtime.iter_drain_cap(), 7);
   assert!(alive.is_some(), "alive predicate was installed");
   assert!(merge.is_some(), "merge predicate was installed");
 }
@@ -534,7 +534,7 @@ fn options_admission_delegates_and_into_parts() {
 #[test]
 fn options_into_parts_defaults_have_no_delegates() {
   let opts: Options<MockTransport> = Options::new(());
-  let (_transport, _ml, _driver, alive, merge) = opts.into_parts();
+  let (_transport, _ml, _runtime, alive, merge) = opts.into_parts();
   assert!(alive.is_none(), "no alive predicate by default");
   assert!(merge.is_none(), "no merge predicate by default");
 }
@@ -626,4 +626,259 @@ fn validate_encryption_options_accepts_usable_policies() {
     validate_encryption_options(&mixed).is_ok(),
     "a mixed ring whose every key's backend is compiled in must validate"
   );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn memberlist_options_serde_round_trip_and_partial() {
+  // An empty config deserializes to the full default.
+  assert_eq!(
+    serde_json::from_str::<MemberlistOptions>("{}")
+      .unwrap()
+      .gossip_mtu(),
+    MemberlistOptions::new().gossip_mtu()
+  );
+  // A round-trip preserves the serde-able scalar overrides. The opaque
+  // `initial_meta` / `initial_local_state` / `label` fields are serde-skipped
+  // (no string/JSON form), so they are not part of the wire shape.
+  let opts = MemberlistOptions::new()
+    .with_gossip_mtu(1500)
+    .with_meta_max_size(256)
+    .with_max_stream_frame_size(4096)
+    .with_skip_inbound_label_check(true);
+  let json = serde_json::to_string(&opts).unwrap();
+  let back: MemberlistOptions = serde_json::from_str(&json).unwrap();
+  assert_eq!(back.gossip_mtu(), Some(1500));
+  assert_eq!(back.meta_max_size(), Some(256));
+  assert_eq!(back.max_stream_frame_size(), Some(4096));
+  assert!(back.skip_inbound_label_check());
+  // A partial config overrides one field and defaults the rest.
+  let partial: MemberlistOptions = serde_json::from_str(r#"{"gossip_mtu": 1234}"#).unwrap();
+  assert_eq!(partial.gossip_mtu(), Some(1234));
+  assert_eq!(partial.meta_max_size(), None);
+  assert!(!partial.skip_inbound_label_check());
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn memberlist_options_serde_rejects_unknown_field() {
+  // A misspelled knob (`gosip_mtu` for `gossip_mtu`) must be rejected rather
+  // than silently dropped — a typo'd field would otherwise leave that knob at
+  // its default with no warning.
+  assert!(serde_json::from_str::<MemberlistOptions>(r#"{"gosip_mtu": 1234}"#).is_err());
+}
+
+#[cfg(feature = "clap")]
+#[test]
+fn memberlist_options_clap_parses_and_wires_env() {
+  use clap::{CommandFactory, Parser};
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    memberlist: MemberlistOptions,
+  }
+
+  // The `Option<usize>` and `bool` flags parse; the opaque fields have none.
+  let cli = Cli::try_parse_from([
+    "app",
+    "--memberlist-gossip-mtu",
+    "1500",
+    "--memberlist-skip-inbound-label-check",
+  ])
+  .unwrap();
+  assert_eq!(cli.memberlist.gossip_mtu(), Some(1500));
+  assert!(cli.memberlist.skip_inbound_label_check());
+  // Unspecified leaves the gossip-mtu override unset.
+  assert_eq!(
+    Cli::try_parse_from(["app"])
+      .unwrap()
+      .memberlist
+      .gossip_mtu(),
+    None
+  );
+  // The env var is wired — assert via command introspection, never `set_var`.
+  let cmd = Cli::command();
+  let arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "memberlist-gossip-mtu")
+    .expect("memberlist-gossip-mtu arg is registered");
+  assert_eq!(
+    arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_GOSSIP_MTU")
+  );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn memberlist_options_label_serde_round_trips() {
+  // A configured label round-trips as a string and is actually set.
+  let opts = MemberlistOptions::new()
+    .with_label(Some(b"cluster-x".to_vec()))
+    .expect("valid label");
+  let json = serde_json::to_string(&opts).unwrap();
+  let back: MemberlistOptions = serde_json::from_str(&json).unwrap();
+  assert_eq!(back.label(), Some(b"cluster-x".as_slice()));
+
+  // A config carrying a label sets it (the accessor is `Some`, not `None`).
+  let from_cfg: MemberlistOptions = serde_json::from_str(r#"{"label": "prod"}"#).unwrap();
+  assert_eq!(from_cfg.label(), Some(b"prod".as_slice()));
+
+  // An absent or empty label normalizes to no label.
+  assert_eq!(
+    serde_json::from_str::<MemberlistOptions>("{}")
+      .unwrap()
+      .label(),
+    None
+  );
+  assert_eq!(
+    serde_json::from_str::<MemberlistOptions>(r#"{"label": ""}"#)
+      .unwrap()
+      .label(),
+    None
+  );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn memberlist_options_label_serde_rejects_too_long() {
+  // A >253-byte label is rejected on deserialize rather than silently dropped.
+  let long = "x".repeat(254);
+  let json = format!(r#"{{"label": "{long}"}}"#);
+  assert!(
+    serde_json::from_str::<MemberlistOptions>(&json).is_err(),
+    "a label exceeding 253 bytes must be rejected by serde"
+  );
+}
+
+#[cfg(feature = "clap")]
+#[test]
+fn memberlist_options_label_clap_parses_and_rejects_too_long() {
+  use clap::{CommandFactory, Parser};
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    memberlist: MemberlistOptions,
+  }
+
+  // A valid label parses and is set.
+  let cli = Cli::try_parse_from(["app", "--memberlist-label", "cluster-x"]).unwrap();
+  assert_eq!(cli.memberlist.label(), Some(b"cluster-x".as_slice()));
+
+  // A >253-byte label is rejected by the value parser.
+  let long = "x".repeat(254);
+  assert!(
+    Cli::try_parse_from(["app", "--memberlist-label", &long]).is_err(),
+    "a label exceeding 253 bytes must be rejected by clap"
+  );
+
+  // The env var is wired.
+  let cmd = Cli::command();
+  let arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "memberlist-label")
+    .expect("memberlist-label arg is registered");
+  assert_eq!(
+    arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_LABEL")
+  );
+}
+
+// A partial `try_update_from` carrying one unrelated flag must NOT reset the
+// defaulted own field (`skip_inbound_label_check`) nor — through the flattened
+// children — a child's seeded knob. clap's `default_value` makes an unset arg
+// look "present" in update mode; the value-source gate in the manual
+// `update_from_arg_matches` (and the delegation to each child's own
+// value-source-correct update) is what keeps seeded values alive across the
+// update.
+#[cfg(feature = "clap")]
+#[test]
+fn memberlist_options_partial_update_preserves_unset_fields() {
+  use clap::Parser;
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    o: MemberlistOptions,
+  }
+
+  // Seed a non-default value on the defaulted own field and on an unset
+  // `Option` field, plus a child knob (compression algorithm), then run a
+  // partial update supplying ONE unrelated own flag.
+  let seeded = MemberlistOptions::new()
+    .with_skip_inbound_label_check(true)
+    .with_meta_max_size(4242);
+  #[cfg(compression)]
+  let seeded = seeded.with_compression(
+    CompressionOptions::new().with_algorithm(memberlist_proto::CompressAlgorithm::Lz4),
+  );
+  let mut cli = Cli { o: seeded };
+
+  cli
+    .try_update_from(["app", "--memberlist-gossip-mtu", "1500"])
+    .expect("partial update parses");
+
+  // The supplied flag is applied.
+  assert_eq!(cli.o.gossip_mtu(), Some(1500));
+  // The defaulted own field SURVIVES the partial update (the bug under test).
+  assert!(
+    cli.o.skip_inbound_label_check(),
+    "skip_inbound_label_check must survive an unrelated partial update"
+  );
+  // The seeded `Option` field survives too.
+  assert_eq!(cli.o.meta_max_size(), Some(4242));
+  // The seeded child knob survives the partial parent update.
+  #[cfg(compression)]
+  assert_eq!(
+    cli.o.compression().algorithm(),
+    Some(memberlist_proto::CompressAlgorithm::Lz4),
+    "a flattened child's seeded knob must survive a partial parent update"
+  );
+}
+
+// An explicit override on update IS applied — both an own defaulted field and a
+// flattened child field.
+#[cfg(feature = "clap")]
+#[test]
+fn memberlist_options_update_applies_explicit_override() {
+  use clap::Parser;
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    o: MemberlistOptions,
+  }
+
+  // Seed the defaulted flag at its default (false), then supply it on update:
+  // the SetTrue flag flips it to true, proving the explicit override is applied
+  // through the value-source gate.
+  let mut cli = Cli {
+    o: MemberlistOptions::new(),
+  };
+  cli
+    .try_update_from([
+      "app",
+      "--memberlist-skip-inbound-label-check",
+      "--memberlist-gossip-mtu",
+      "1600",
+    ])
+    .expect("explicit override parses");
+  assert!(cli.o.skip_inbound_label_check());
+  assert_eq!(cli.o.gossip_mtu(), Some(1600));
+
+  // A child flag supplied on update is applied via the delegated child update.
+  #[cfg(compression)]
+  {
+    let mut cli = Cli {
+      o: MemberlistOptions::new(),
+    };
+    cli
+      .try_update_from(["app", "--compression-algorithm", "lz4"])
+      .expect("child override parses");
+    assert_eq!(
+      cli.o.compression().algorithm(),
+      Some(memberlist_proto::CompressAlgorithm::Lz4)
+    );
+  }
 }

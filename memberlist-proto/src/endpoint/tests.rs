@@ -3811,16 +3811,18 @@ fn oversize_or_overflowing_stream_frame_is_rejected_without_buffering() {
 }
 
 /// The wire framing length is a u32 by protocol, so a declared body length
-/// beyond u32::MAX is malformed REGARDLESS of `max_stream_frame_size`. Even
-/// with the cap configured absurdly high (above 4 GiB), a
-/// terminal-overflowing varint must be rejected here — not passed through to
-/// the u32 wire decoder where it would wrap and desync framing.
+/// beyond u32::MAX is malformed REGARDLESS of `max_stream_frame_size`. Even at
+/// the largest cap the machine accepts (u32::MAX — a larger one is rejected at
+/// construction as an unreachable receive gate), a terminal-overflowing varint
+/// must be rejected at decode — not cast to u32 where it would wrap to a small
+/// in-cap length and desync framing.
 #[test]
-fn over_u32_frame_length_rejected_even_with_huge_cap() {
-  // Cap well above u32::MAX so a cap-only check would not catch a ~2^32
-  // declared length — the u32 wire limit must be enforced independently.
+fn over_u32_frame_length_rejected_even_with_max_cap() {
+  // Cap at the u32 ceiling (the largest the machine accepts). A ~2^32 declared
+  // length overflows the u32 wire decode and must be rejected there before any
+  // cast — a wrap to 0 would otherwise pass the cap and desync framing.
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new_seeded(cfg().with_max_stream_frame_size(usize::MAX));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(u32::MAX as usize));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -3855,7 +3857,7 @@ fn handle_data_bounds_input_buf_before_append() {
   // (a) Oversize declared frame + a large body in ONE handle_data call.
   // tag=8 + varint(4096) + 4096 body bytes, all delivered together.
   let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap).with_meta_max_size(16));
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0).expect("node is running");
@@ -3875,7 +3877,7 @@ fn handle_data_bounds_input_buf_before_append() {
   // (b) A valid small frame followed by a large trailing blob in the SAME
   // call. The append-time bound rejects before buffering the trailing.
   let mut e2: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap).with_meta_max_size(16));
   let mut s2 = e2.accept_stream(peer, t0).expect("node is running");
   let ping = Ping::new(
     1,
@@ -3903,7 +3905,7 @@ fn handle_data_bounds_input_buf_before_append() {
 
   // Sanity: a within-cap delivery still works.
   let mut e3: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap));
+    Endpoint::new_seeded(cfg().with_max_stream_frame_size(cap).with_meta_max_size(16));
   let mut s3 = e3.accept_stream(peer, t0).expect("node is running");
   let ping3 = Ping::new(
     2,
@@ -7628,6 +7630,127 @@ fn try_new_at_rejects_zero_awareness_multiplier() {
   assert!(
     matches!(res, Err(EndpointInitError::AwarenessMultiplierZero)),
     "a zero awareness multiplier must be rejected, not panic"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_gossip_mtu_below_floor() {
+  let c = cfg().with_gossip_mtu(1);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::GossipMtuTooSmall(_))),
+    "a gossip_mtu below the mandatory-control-packet floor must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_gossip_mtu_above_udp_ceiling() {
+  let c = cfg().with_gossip_mtu(crate::config::MAX_GOSSIP_MTU + 1);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::GossipMtuTooLarge(_))),
+    "a gossip_mtu above the UDP datagram ceiling must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_zero_max_stream_frame_size() {
+  let c = cfg().with_max_stream_frame_size(0);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::InvalidMaxStreamFrameSize(0))),
+    "a zero max_stream_frame_size must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_max_stream_frame_size_above_u32() {
+  let c = cfg().with_max_stream_frame_size(u32::MAX as usize + 1);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::InvalidMaxStreamFrameSize(_))),
+    "a max_stream_frame_size above the u32 wire limit must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_accepts_default_gossip_and_frame() {
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(cfg(), t0);
+  assert!(
+    res.is_ok(),
+    "the default gossip_mtu and frame ceiling must construct cleanly"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_gossip_mtu_below_identity_floor() {
+  // A long local_id inflates the mandatory control packets past the configured
+  // gossip_mtu even though that value clears the constant 512 floor.
+  let long_id = SmolStr::new("n".repeat(1500));
+  let c = EndpointOptions::new(
+    long_id,
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+  )
+  .with_gossip_mtu(1400);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::GossipMtuTooSmall(_))),
+    "a gossip_mtu too small for a long local_id's control packets must be rejected"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_oversized_initial_local_state() {
+  // A frame cap just above the 1 MiB reserve leaves a tiny budget; a snapshot
+  // whose framed PushPull exceeds it must be rejected at construction, matching
+  // the runtime set_local_state_snapshot setter.
+  let snapshot = Bytes::from(vec![0u8; 8 * 1024]);
+  let c = cfg()
+    .with_max_stream_frame_size(LOCAL_STATE_FRAME_BUDGET + 1024)
+    .with_initial_local_state(snapshot);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::LocalStateExceedsFrame(_))),
+    "an initial_local_state too large for the frame budget must be rejected at construction"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_unencodable_local_advertise_addr() {
+  // A scoped IPv6 advertise address (nonzero scope_id) is not representable on
+  // the compact wire layout, so the node could not broadcast its own membership.
+  let scoped = SocketAddr::V6(core::net::SocketAddrV6::new(
+    core::net::Ipv6Addr::LOCALHOST,
+    7000,
+    0,
+    7,
+  ));
+  let c = EndpointOptions::new(SmolStr::new("local"), scoped);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::UnencodableLocalIdentity)),
+    "a scoped IPv6 advertise address must be rejected at construction"
+  );
+}
+
+#[test]
+fn try_new_at_rejects_tiny_max_stream_frame_size() {
+  // A frame cap of 1 passes the 0 / u32 range check but cannot carry the local
+  // node's minimal push/pull frame, so membership exchange could never complete.
+  let c = cfg().with_max_stream_frame_size(1);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+  let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);
+  assert!(
+    matches!(res, Err(EndpointInitError::MaxStreamFrameSizeTooSmall(_))),
+    "a max_stream_frame_size too small for the minimal push/pull frame must be rejected"
   );
 }
 

@@ -775,3 +775,113 @@ fn encode_reliable_unit_with_encryption_falls_back_to_plain_compression() {
   assert_eq!(back, framed);
   assert_eq!(consumed, unit.len());
 }
+
+#[cfg(all(feature = "serde", feature = "zstd", feature = "lz4"))]
+#[test]
+fn compression_options_serde_roundtrip_and_partial() {
+  // Empty config = the full default (no algorithm, default threshold).
+  assert_eq!(
+    serde_json::from_str::<CompressionOptions>("{}").unwrap(),
+    CompressionOptions::new()
+  );
+  // A unit algorithm serializes as a bare snake_case name.
+  let lz4 = CompressionOptions::new().with_algorithm(CompressAlgorithm::Lz4);
+  let json = serde_json::to_string(&lz4).unwrap();
+  assert!(json.contains("\"lz4\""), "json = {json}");
+  assert_eq!(
+    serde_json::from_str::<CompressionOptions>(&json).unwrap(),
+    lz4
+  );
+  // The zstd variant carries its level as a NUMBER: {"zstd":3}.
+  let zstd =
+    CompressionOptions::new().with_algorithm(CompressAlgorithm::Zstd(ZstdLevel::default()));
+  let json = serde_json::to_string(&zstd).unwrap();
+  assert!(
+    json.contains("\"zstd\":3"),
+    "level must serialize as a number; json = {json}"
+  );
+  assert_eq!(
+    serde_json::from_str::<CompressionOptions>(&json).unwrap(),
+    zstd
+  );
+  // A partial config fills the rest from the default.
+  let partial: CompressionOptions = serde_json::from_str(r#"{"threshold":99}"#).unwrap();
+  assert_eq!(partial.threshold(), 99);
+  assert_eq!(partial.algorithm(), None);
+}
+
+#[cfg(all(feature = "clap", feature = "zstd", feature = "lz4"))]
+#[test]
+fn compression_options_clap_parses_and_wires_env() {
+  use clap::{CommandFactory, Parser};
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    compression: CompressionOptions,
+  }
+
+  let cli = Cli::try_parse_from([
+    "app",
+    "--compression-algorithm",
+    "zstd",
+    "--compression-threshold",
+    "2048",
+  ])
+  .unwrap();
+  assert_eq!(
+    cli.compression.algorithm(),
+    Some(CompressAlgorithm::Zstd(ZstdLevel::default()))
+  );
+  assert_eq!(cli.compression.threshold(), 2048);
+  // Unspecified: default threshold, no algorithm.
+  let def = Cli::try_parse_from(["app"]).unwrap();
+  assert_eq!(def.compression.algorithm(), None);
+  assert_eq!(def.compression.threshold(), DEFAULT_COMPRESSION_THRESHOLD);
+  // Env wired — introspect the command, never `set_var`.
+  let cmd = Cli::command();
+  let arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "compression-algorithm")
+    .expect("compression-algorithm arg is registered");
+  assert_eq!(
+    arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_COMPRESSION_ALGORITHM")
+  );
+}
+
+#[cfg(all(feature = "clap", feature = "lz4"))]
+#[test]
+fn compression_options_clap_partial_update_preserves_threshold() {
+  use clap::Parser;
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    compression: CompressionOptions,
+  }
+
+  // A base with a NON-default threshold and a selected algorithm.
+  let mut cli = Cli {
+    compression: CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(4096),
+  };
+
+  // An update carrying NO override must leave both fields untouched — the
+  // defaulted `threshold` must not snap back to DEFAULT_COMPRESSION_THRESHOLD.
+  cli.try_update_from(["app"]).expect("empty update succeeds");
+  assert_eq!(
+    cli.compression.threshold(),
+    4096,
+    "non-default threshold must survive a partial update"
+  );
+  assert_eq!(cli.compression.algorithm(), Some(CompressAlgorithm::Lz4));
+
+  // An explicit override of the same field IS applied.
+  cli
+    .try_update_from(["app", "--compression-threshold", "256"])
+    .expect("override update succeeds");
+  assert_eq!(cli.compression.threshold(), 256);
+  assert_eq!(cli.compression.algorithm(), Some(CompressAlgorithm::Lz4));
+}

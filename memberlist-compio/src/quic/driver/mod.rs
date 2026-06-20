@@ -50,7 +50,7 @@ use crate::{
   command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
-    options::DriverOptions,
+    options::RuntimeOptions,
     shared::{ExchangeId, cidr_blocks, dispatch_event_delegate},
   },
   error::{JoinAllFailed, MemberlistError, Result},
@@ -215,7 +215,7 @@ where
   label: Option<bytes::Bytes>,
   /// Hand-off channel to the per-driver observation task (delegate
   /// dispatch + EventStream forward), sized per
-  /// [`DriverOptions::observation_channel`]. The driver `try_send`s every
+  /// [`RuntimeOptions::observation_channel`]. The driver `try_send`s every
   /// surfaced event here, never blocking on user observation code. An
   /// `Unbounded` channel never drops; a `Bounded(n)` channel drops the
   /// newest event when full and counts it in `observation_dropped`.
@@ -244,7 +244,7 @@ where
   /// The load-shedding counters last stored into `metrics` (published on change).
   last_metrics: Metrics,
   shutdown_flag: Rc<Cell<bool>>,
-  driver_opts: DriverOptions,
+  driver_opts: RuntimeOptions,
   /// Driver-level CIDR transport-source filter: a UDP packet (QUIC handshake or
   /// gossip datagram) from a blocked source IP is dropped before the QUIC machine
   /// sees it, so a blocked peer completes no handshake. `()` without the `cidr`
@@ -329,7 +329,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   snapshot: SnapshotCell<I>,
   metrics: Rc<Cell<Metrics>>,
   shutdown_flag: Rc<Cell<bool>>,
-  driver_opts: DriverOptions,
+  driver_opts: RuntimeOptions,
   delegate: D,
   label: Option<bytes::Bytes>,
   cidr_policy: CidrFilter,
@@ -354,7 +354,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // protocol advancement — and therefore from delaying a parked
   // join/leave reply that depends on a follow-up inbound datagram the
   // driver's recv arm must still service. The `obs_tx` queue is sized per
-  // [`DriverOptions::observation_channel`] (default [`Channel::Bounded`]).
+  // [`RuntimeOptions::observation_channel`] (default [`Channel::Bounded`]).
   // The `Delegate` carries the two application-data hooks (`notify_user_msg`
   // from `UserPacket`, `merge_remote_state` from `RemoteStateReceived`) whose
   // payloads are absent from `MemberlistSnapshot` and thus unrecoverable from

@@ -18,7 +18,7 @@ use memberlist_proto::event::Event;
 use crate::{
   command::Command,
   delegate::{AliveDelegate, Delegate, MergeDelegate},
-  driver::options::DriverOptions,
+  driver::options::RuntimeOptions,
   options::MemberlistOptions,
   snapshot::SnapshotCell,
   transport::Transport,
@@ -66,7 +66,7 @@ where
   /// The machine's load-shedding counters, republished by the driver on change.
   pub(crate) metrics: Rc<Cell<Metrics>>,
   pub(crate) shutdown_flag: Rc<Cell<bool>>,
-  pub(crate) driver_options: DriverOptions,
+  pub(crate) driver_options: RuntimeOptions,
   pub(crate) memberlist_options: MemberlistOptions,
   /// Optional machine alive-admission predicate; `T::run` installs it into
   /// the `Endpoint`. `None` admits all.
@@ -95,7 +95,7 @@ where
     snapshot: SnapshotCell<T::Id>,
     metrics: Rc<Cell<Metrics>>,
     shutdown_flag: Rc<Cell<bool>>,
-    driver_options: DriverOptions,
+    driver_options: RuntimeOptions,
     memberlist_options: MemberlistOptions,
     alive_delegate: Option<Box<dyn AliveDelegate<T::Id, SocketAddr>>>,
     merge_delegate: Option<Box<dyn MergeDelegate<T::Id, SocketAddr>>>,

@@ -64,9 +64,13 @@ pub(crate) fn gossip_rng() -> Result<StdRng, crate::Error> {
   StdRng::try_from_rng(&mut SysRng).map_err(|e| crate::Error::Entropy(std::io::Error::other(e)))
 }
 
-pub use error::Error;
-pub use memberlist_proto::{LabelError, MaybeResolved};
-pub use options::{Channel, DriverOptions, MemberlistOptions, Options};
+pub use error::{Error, GossipMtuTooSmall, InvalidGossipMtu, InvalidOption};
+pub use memberlist_proto::{EndpointInitError, LabelError, MaybeResolved};
+pub use options::{
+  Channel, DEFAULT_CLOSE_TIMEOUT, DEFAULT_EVENT_STREAM_CAPACITY, DEFAULT_JOIN_DEADLINE,
+  DEFAULT_OBSERVATION_CHANNEL_CAPACITY, DEFAULT_RECV_BATCH, DEFAULT_TRANSMIT_BATCH,
+  MemberlistOptions, Options, ParseChannelError, RuntimeOptions,
+};
 pub use resolver::{AddressResolver, SocketAddrResolver};
 #[cfg(feature = "getifs")]
 #[cfg_attr(docsrs, doc(cfg(feature = "getifs")))]

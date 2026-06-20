@@ -33,9 +33,9 @@ use std::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use memberlist_compio::{
-  Channel, ConflictDelegate, Delegate, DriverOptions, EventDelegate, FirstAddrResolver,
-  MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate,
-  Options, PingDelegate, SocketAddrResolver, TcpTransport, TcpTransportOptions,
+  Channel, ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
+  MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate, Options, PingDelegate,
+  RuntimeOptions, SocketAddrResolver, TcpTransport, TcpTransportOptions,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -690,7 +690,7 @@ async fn bounded_observation_channel_drops_and_counts_under_stalled_delegate() {
       .with_local_id(SmolStr::new("bc-node"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
-  .with_driver(DriverOptions::new().with_observation_channel(Channel::Bounded(4)));
+  .with_runtime(RuntimeOptions::new().with_observation_channel(Channel::Bounded(4)));
   let node = StallingMemberlist::new(
     opts,
     StallingDelegate,
@@ -778,7 +778,7 @@ async fn bounded_observation_channel_does_not_drop_valid_burst_for_fast_delegate
       .with_local_id(SmolStr::new("burst-node"))
       .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
   )
-  .with_driver(DriverOptions::new().with_observation_channel(Channel::Bounded(2)));
+  .with_runtime(RuntimeOptions::new().with_observation_channel(Channel::Bounded(2)));
   let node = Memberlist::new(
     opts,
     memberlist_compio::VoidDelegate::default(),

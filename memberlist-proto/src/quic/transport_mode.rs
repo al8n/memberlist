@@ -17,6 +17,9 @@ use derive_more::{Display, IsVariant};
 /// interop guarantee — a `Datagram`-mode peer never emits a datagram a
 /// `Udp`-mode node would silently swallow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, IsVariant, Display)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[display("{}", self.as_str())]
 pub enum UnreliableTransport {
   /// QUIC datagrams over the per-peer connection — encrypted + attested. The
@@ -47,6 +50,30 @@ impl UnreliableTransport {
     }
   }
 }
+
+/// Parse an [`UnreliableTransport`] from its lowercase name (`"datagram"` /
+/// `"udp"`) — the inverse of [`UnreliableTransport::as_str`], usable as a config
+/// value or CLI value parser independent of `clap`.
+impl core::str::FromStr for UnreliableTransport {
+  type Err = ParseUnreliableTransportError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Ok(match s {
+      "datagram" => Self::Datagram,
+      "udp" => Self::Udp,
+      _ => return Err(ParseUnreliableTransportError(())),
+    })
+  }
+}
+
+/// The error from [`UnreliableTransport::from_str`]: the input named no known
+/// transport mode.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unknown unreliable transport (expected \"datagram\" or \"udp\")")]
+pub struct ParseUnreliableTransportError(());
 
 /// Result of offering one unreliable datagram to the connection pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IsVariant, Display)]

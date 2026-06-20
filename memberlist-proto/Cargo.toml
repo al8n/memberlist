@@ -64,6 +64,15 @@ std = [
 alloc = ["cheap-clone/alloc", "varing/alloc", "rand/alloc"]
 tracing = ["dep:tracing"]
 
+# Optional config layering on the `*Options` types. `serde` adds gated
+# Serialize/Deserialize (config files, round-trip); `clap` adds gated
+# `clap::Args` derives (CLI flags + env vars). Both leave the default build
+# untouched. Both pull `std`: `clap` is std-only, and `serde` uses
+# `humantime-serde` for the `Duration` fields (a no_std `humantime` is a future
+# crate — until then the config serde layer is std-only).
+serde = ["std", "dep:serde", "serde/std", "dep:humantime-serde", "dep:base64", "bytes/serde", "smol_str/serde"]
+clap = ["std", "dep:clap", "dep:base64", "dep:humantime"]
+
 # Composed QUIC + memberlist Sans-I/O coordinator. Crypto-backend-agnostic:
 # the caller supplies the `quinn_proto` `EndpointConfig` / `ServerConfig` /
 # `ClientConfig`, built with whatever crypto backend they choose. Enable a
@@ -93,7 +102,7 @@ quic-platform-verifier = ["quic", "quinn-proto/platform-verifier"]
 # the rustls `ServerConfig` / `ClientConfig`, built with whatever crypto
 # backend they choose. Enable a backend pass-through below (e.g.
 # `tls-rustls-ring`) to pull a provider into the dependency graph.
-tls = ["std", "dep:rustls", "dep:rustls-pki-types"]
+tls = ["std", "dep:rustls", "dep:rustls-pki-types", "dep:rustls-pemfile"]
 tls-rustls-ring = ["tls", "rustls/ring", "quinn-proto?/rustls-ring"]
 tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs", "quinn-proto?/rustls-aws-lc-rs"]
 tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips", "quinn-proto?/rustls-aws-lc-rs-fips"]
@@ -165,7 +174,13 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
 ], optional = true }
 rustls-pki-types = { version = "1", default-features = false, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 ipnet = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+humantime = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 
 # Wire types, codec, and framing.
 buffa = { version = "0.7", default-features = false }
@@ -210,6 +225,7 @@ buffa-build = "0.7"
 [dev-dependencies]
 criterion = "0.8"
 proptest = "1"
+serde_json.workspace = true
 # Naming the concrete `Message<SmolStr, SocketAddr>` payload types in benches.
 bytes = { workspace = true, features = ["std"] }
 smol_str = { workspace = true, features = ["std"] }

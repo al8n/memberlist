@@ -16,7 +16,7 @@ use std::{
 use agnostic::tokio::TokioRuntime;
 use futures_util::StreamExt;
 use memberlist_reactor::{
-  Delegate, DriverOptions, Error, Event, MaybeResolved, Memberlist, NodeState, Options,
+  Delegate, Error, Event, MaybeResolved, Memberlist, NodeState, Options, RuntimeOptions,
   SocketAddrResolver, VoidDelegate,
 };
 use smol_str::SmolStr;
@@ -211,7 +211,7 @@ async fn zero_close_timeout_is_rejected() {
     &SocketAddrResolver,
     SmolStr::new("zero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::ZERO)),
+    Options::new().with_runtime(RuntimeOptions::new().with_close_timeout(Duration::ZERO)),
     VoidDelegate::<SmolStr, SocketAddr>::new(),
   )
   .await;
@@ -225,7 +225,7 @@ async fn zero_close_timeout_is_rejected() {
     &SocketAddrResolver,
     SmolStr::new("nonzero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::from_secs(10))),
+    Options::new().with_runtime(RuntimeOptions::new().with_close_timeout(Duration::from_secs(10))),
     VoidDelegate::<SmolStr, SocketAddr>::new(),
   )
   .await

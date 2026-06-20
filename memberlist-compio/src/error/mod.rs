@@ -228,7 +228,7 @@ impl fmt::Display for InvalidAdvertiseAddr {
 }
 
 /// Payload for [`MemberlistError::InvalidOption`]: an operator-set tuning knob
-/// ([`DriverOptions`](crate::DriverOptions) /
+/// ([`RuntimeOptions`](crate::RuntimeOptions) /
 /// [`StreamTransportOptions`](crate::StreamTransportOptions)) was given a value
 /// that would DETERMINISTICALLY break the node — an accept-then-silently-fail
 /// configuration the constructor rejects rather than honoring. Carries the
@@ -412,7 +412,7 @@ pub enum MemberlistError {
   InvalidAdvertiseAddr(InvalidAdvertiseAddr),
 
   /// An operator-set driver / stream-transport tuning knob
-  /// ([`DriverOptions`](crate::DriverOptions) /
+  /// ([`RuntimeOptions`](crate::RuntimeOptions) /
   /// [`StreamTransportOptions`](crate::StreamTransportOptions)) was given a
   /// value that would DETERMINISTICALLY break the node rather than merely
   /// degrade it — an accept-then-silently-fail configuration. Two such knobs

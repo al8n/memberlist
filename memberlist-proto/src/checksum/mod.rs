@@ -20,6 +20,8 @@ use core::fmt;
 /// opt-in behind its own feature; a node that is handed a tag it was not built
 /// with yields [`ChecksumAlgorithm::Unknown`] and fails the operation cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum ChecksumAlgorithm {
@@ -249,6 +251,39 @@ impl fmt::Display for ChecksumAlgorithm {
   }
 }
 
+/// Parse a [`ChecksumAlgorithm`] from its lowercase name (`"crc32"`,
+/// `"xxhash32"`, …) — a config value, CLI flag, or any string input. Only the
+/// algorithms compiled into this build are accepted; an unrecognized name is a
+/// [`ParseChecksumAlgorithmError`].
+impl core::str::FromStr for ChecksumAlgorithm {
+  type Err = ParseChecksumAlgorithmError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Ok(match s {
+      #[cfg(feature = "crc32")]
+      "crc32" => Self::Crc32,
+      #[cfg(feature = "xxhash32")]
+      "xxhash32" => Self::XxHash32,
+      #[cfg(feature = "xxhash64")]
+      "xxhash64" => Self::XxHash64,
+      #[cfg(feature = "xxhash3")]
+      "xxhash3" => Self::XxHash3,
+      #[cfg(feature = "murmur3")]
+      "murmur3" => Self::Murmur3,
+      _ => return Err(ParseChecksumAlgorithmError(())),
+    })
+  }
+}
+
+/// The error from [`ChecksumAlgorithm::from_str`]: the input matched no checksum
+/// algorithm this build supports.
+///
+/// Opaque — the private unit field seals construction to this module, so the
+/// error can gain detail later without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unknown or unsupported checksum algorithm")]
+pub struct ParseChecksumAlgorithmError(());
+
 /// Compute the checksum of `payload` under `algo`. A pure transform — no I/O.
 ///
 /// Returns [`ChecksumError::Disabled`] when the algorithm is recognized but its
@@ -429,9 +464,26 @@ pub enum ChecksumOutput {
 /// default: every payload is left unwrapped and the codec paths reduce to
 /// identity (the operator opts in by selecting an algorithm). Mirrors
 /// [`crate::CompressionOptions`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ChecksumOptions {
+  #[cfg_attr(
+    feature = "clap",
+    arg(
+      id = "checksum-algorithm",
+      long = "checksum-algorithm",
+      env = "MEMBERLIST_CHECKSUM_ALGORITHM"
+    )
+  )]
   algorithm: Option<ChecksumAlgorithm>,
+}
+
+impl Default for ChecksumOptions {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl ChecksumOptions {

@@ -29,6 +29,7 @@
 
 #[cfg(test)]
 mod bridge;
+pub(crate) mod config;
 #[cfg(test)]
 mod conn;
 mod options;
@@ -40,6 +41,7 @@ use rustls::pki_types::ServerName;
 
 use crate::streams::transport::{Intake, StreamTransport};
 
+pub use config::{ClientAuthMode, ParseClientAuthModeError, TlsConfigError, TlsConfigOptions};
 pub use options::TlsOptions;
 pub use records::TlsRecords;
 

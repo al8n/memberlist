@@ -559,7 +559,12 @@ where
       dial_rx,
       dial_tx,
       recv_buf: vec![0u8; buf_len],
-      recv_batch,
+      // Clamp to at least 1: a 0 batch would do no receive work yet still set
+      // `more` (the `== recv_batch` self-wake arms in both the gossip-recv and
+      // inbound-transport loops), pegging the executor in a busy-loop that never
+      // receives gossip or bridge data. `recv_batch == 0` therefore behaves as 1.
+      // Mirrors the QUIC driver's construction-time clamp.
+      recv_batch: recv_batch.max(1),
       transmit_batch,
       timer: None,
       timer_deadline: None,

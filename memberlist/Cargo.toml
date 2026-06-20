@@ -42,6 +42,22 @@ default = ["tokio", "tcp"]
 alloc = ["memberlist-proto/alloc"]
 std = ["alloc", "memberlist-proto/std"]
 
+# Config-options serde + clap, propagated to proto + whichever std drivers are
+# enabled. std-only (clap is std-only; the `Duration` fields use humantime-serde).
+# The no_std drivers (smoltcp / embassy / embedded) are intentionally excluded.
+serde = [
+  "std",
+  "memberlist-proto/serde",
+  "memberlist-reactor?/serde",
+  "memberlist-compio?/serde",
+]
+clap = [
+  "std",
+  "memberlist-proto/clap",
+  "memberlist-reactor?/clap",
+  "memberlist-compio?/clap",
+]
+
 # driver selection
 reactor = ["dep:memberlist-reactor", "std"]
 tokio = [

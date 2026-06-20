@@ -18,7 +18,7 @@ use std::{
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
 use memberlist_reactor::{
-  DriverOptions, Error, MaybeResolved, Memberlist, MemberlistOptions, Options, SocketAddrResolver,
+  Error, MaybeResolved, Memberlist, MemberlistOptions, Options, RuntimeOptions, SocketAddrResolver,
   TlsOptions, VoidDelegate,
 };
 use rustls::RootCertStore;
@@ -152,7 +152,7 @@ async fn zero_close_timeout_is_rejected() {
     &SocketAddrResolver,
     SmolStr::new("tls-zero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::ZERO)),
+    Options::new().with_runtime(RuntimeOptions::new().with_close_timeout(Duration::ZERO)),
     VoidDelegate::<SmolStr, SocketAddr>::new(),
     support::self_trusted_tls_options(),
     |_: &SocketAddr| Some("localhost".to_string()),
@@ -168,7 +168,7 @@ async fn zero_close_timeout_is_rejected() {
     &SocketAddrResolver,
     SmolStr::new("tls-nonzero-close"),
     MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
-    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::from_secs(10))),
+    Options::new().with_runtime(RuntimeOptions::new().with_close_timeout(Duration::from_secs(10))),
     VoidDelegate::<SmolStr, SocketAddr>::new(),
     support::self_trusted_tls_options(),
     |_: &SocketAddr| Some("localhost".to_string()),

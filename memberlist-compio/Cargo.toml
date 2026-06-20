@@ -16,6 +16,16 @@ tcp = ["memberlist-proto/tcp"]
 # Emit `tracing` spans around the public driver operations and forward the
 # machine's `tracing` feature.
 tracing = ["dep:tracing", "memberlist-proto/tracing"]
+
+# Optional config layering on the user-facing `*Options` types. `serde` adds
+# gated Serialize/Deserialize (config files, round-trip); `clap` adds gated
+# `clap::Args` derives (CLI flags + env vars). Both leave the default build
+# untouched. `serde` uses `humantime-serde` for the `Duration` fields and pulls
+# the proto serde layer for the composed compression / checksum / encryption
+# sub-options; `clap` uses `humantime` to parse the `Duration` flags. compio is
+# std-only, so neither needs a `std` passthrough.
+serde = ["dep:serde", "dep:humantime-serde", "memberlist-proto/serde"]
+clap = ["dep:clap", "dep:humantime", "memberlist-proto/clap"]
 tls-rustls-ring = ["memberlist-proto/tls-rustls-ring", "compio/rustls"]
 tls-rustls-aws-lc-rs = ["memberlist-proto/tls-rustls-aws-lc-rs"]
 quic = ["memberlist-proto/quic"]
@@ -67,6 +77,10 @@ futures-util = { workspace = true, default-features = false, features = [
 ] }
 thiserror.workspace = true
 tracing = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+humantime = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 hickory-proto = { workspace = true, optional = true, default-features = false, features = [
   "std",
 ] }
@@ -76,6 +90,7 @@ iprfc = { workspace = true, optional = true }
 
 [dev-dependencies]
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
+serde_json.workspace = true
 rcgen = "0.14"
 ring = "0.17"
 rustls = { version = "0.23", features = ["ring"] }
