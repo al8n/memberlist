@@ -7,6 +7,7 @@ use std::{string::String, vec::Vec};
 use crate::typed::{Message, NodeState, PushNodeState};
 use bytes::Bytes;
 use core::time::Duration;
+use smallvec_wrapper::TinyVec;
 
 /// A coordinator-allocated handle for one in-flight reliable exchange,
 /// stable across the `Handshaking → Established` promotion (unlike
@@ -306,14 +307,14 @@ impl<I, A> PacketTransmit<I, A> {
 #[derive(Debug)]
 pub struct CompoundTransmit<I, A> {
   to: A,
-  messages: Vec<Message<I, A>>,
+  messages: TinyVec<Message<I, A>>,
 }
 
 impl<I, A> CompoundTransmit<I, A> {
   /// Construct a new compound-transmit directive. Panics if `messages.len() < 2`
   /// (single-message sends use [`PacketTransmit`]).
   #[inline(always)]
-  pub fn new(to: A, messages: Vec<Message<I, A>>) -> Self {
+  pub fn new(to: A, messages: TinyVec<Message<I, A>>) -> Self {
     assert!(
       messages.len() >= 2,
       "CompoundTransmit requires >= 2 messages"
@@ -335,7 +336,7 @@ impl<I, A> CompoundTransmit<I, A> {
 
   /// Consume and return the (destination, messages) pair.
   #[inline(always)]
-  pub fn into_parts(self) -> (A, Vec<Message<I, A>>) {
+  pub fn into_parts(self) -> (A, TinyVec<Message<I, A>>) {
     (self.to, self.messages)
   }
 }

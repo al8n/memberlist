@@ -1574,10 +1574,7 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
 // suppressing the Lifeguard health penalty for a genuinely-unanswered
 // indirect probe.
 
-fn nacked_by_addrs(
-  e: &Endpoint<SmolStr, SocketAddr>,
-  seq: u32,
-) -> smallvec::SmallVec<[SocketAddr; 4]> {
+fn nacked_by_addrs(e: &Endpoint<SmolStr, SocketAddr>, seq: u32) -> SmallVec<SocketAddr> {
   match &e.probes.get(&seq).expect("probe present").phase {
     ProbePhase::AwaitingIndirect(AwaitingIndirect { nacked_by, .. }) => nacked_by.clone(),
     other => panic!("expected AwaitingIndirect, got {other:?}"),
@@ -1589,7 +1586,7 @@ fn indirect_probe_at(
   seq: u32,
   sent_at: Instant,
   failure_deadline: Instant,
-  indirect_peers: smallvec::SmallVec<[SocketAddr; 4]>,
+  indirect_peers: SmallVec<SocketAddr>,
 ) {
   let target = e
     .members
@@ -1610,7 +1607,7 @@ fn indirect_probe_at(
       phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         indirect_peers,
-        nacked_by: smallvec::SmallVec::new(),
+        nacked_by: SmallVec::new(),
         reliable_stream_id: None,
         deadline: failure_deadline,
       }),
@@ -1630,7 +1627,7 @@ fn handle_nack_counts_distinct_indirect_responders() {
     7,
     t0,
     t0 + Duration::from_secs(1),
-    smallvec::SmallVec::from_iter([p1, p2]),
+    SmallVec::from_iter([p1, p2]),
   );
 
   e.handle_nack(p1, Nack::new(7), t0 + Duration::from_millis(10));
@@ -1653,7 +1650,7 @@ fn handle_nack_dedupes_repeated_nack_from_same_responder() {
     7,
     t0,
     t0 + Duration::from_secs(1),
-    smallvec::SmallVec::from_iter([p1, p2]),
+    SmallVec::from_iter([p1, p2]),
   );
 
   for _ in 0..5 {
@@ -1677,7 +1674,7 @@ fn handle_nack_rejects_nack_from_unsolicited_peer() {
     7,
     t0,
     t0 + Duration::from_secs(1),
-    smallvec::SmallVec::from_iter([p1]),
+    SmallVec::from_iter([p1]),
   );
 
   // A node we never IndirectPing'd guesses the seq and Nacks.
@@ -1696,7 +1693,7 @@ fn handle_nack_rejects_late_nack_after_failure_deadline() {
   let p1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7101);
   let t0 = Instant::now();
   let deadline = t0 + Duration::from_secs(1);
-  indirect_probe_at(&mut e, 7, t0, deadline, smallvec::SmallVec::from_iter([p1]));
+  indirect_probe_at(&mut e, 7, t0, deadline, SmallVec::from_iter([p1]));
 
   // Exactly at the failure deadline is already too late (symmetric to the
   // ack cutoff): the probe terminates at this instant.
@@ -1724,13 +1721,7 @@ fn nack_flood_from_one_peer_does_not_suppress_awareness_penalty() {
   let p2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7102);
   let t0 = Instant::now();
   let deadline = t0 + Duration::from_secs(1);
-  indirect_probe_at(
-    &mut e,
-    7,
-    t0,
-    deadline,
-    smallvec::SmallVec::from_iter([p1, p2]),
-  );
+  indirect_probe_at(&mut e, 7, t0, deadline, SmallVec::from_iter([p1, p2]));
   let initial_score = e.health_score();
 
   for _ in 0..5 {
@@ -2685,10 +2676,10 @@ fn probe_with_suspect_target_piggybacks_suspect_message() {
     let mut saw_ping_to_bob = false;
     let mut saw_suspect_about_bob = false;
     while let Some(tx) = e.poll_transmit() {
-      let (to, msgs): (SocketAddr, Vec<Message<SmolStr, SocketAddr>>) = match tx {
+      let (to, msgs): (SocketAddr, TinyVec<Message<SmolStr, SocketAddr>>) = match tx {
         Transmit::Packet(p) => {
           let (to, message) = p.into_parts();
-          (to, vec![message])
+          (to, TinyVec::from_iter([message]))
         }
         Transmit::Compound(cmp) => cmp.into_parts(),
       };
@@ -4067,8 +4058,8 @@ fn reliable_ping_ack_drives_probe_success() {
       failure_deadline: now + Duration::from_secs(5),
       phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
-        indirect_peers: smallvec::SmallVec::new(),
-        nacked_by: smallvec::SmallVec::new(),
+        indirect_peers: SmallVec::new(),
+        nacked_by: SmallVec::new(),
         reliable_stream_id: Some(stream_id),
         deadline: now + Duration::from_secs(5),
       }),
@@ -4347,8 +4338,8 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
       failure_deadline: deadline,
       phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
-        indirect_peers: smallvec::SmallVec::new(),
-        nacked_by: smallvec::SmallVec::new(),
+        indirect_peers: SmallVec::new(),
+        nacked_by: SmallVec::new(),
         reliable_stream_id: Some(stream_id),
         deadline,
       }),

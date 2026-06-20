@@ -28,6 +28,7 @@ use memberlist_proto::{
 };
 
 use hashbrown::HashMap;
+use smallvec_wrapper::MediumVec;
 
 use crate::{
   GossipIo, InitError, Options, StreamIo, TransformOptions,
@@ -1580,7 +1581,7 @@ where
       Progress(usize),
     }
 
-    let mut actions: std::vec::Vec<(ExchangeId, ClosingAction<C>)> = std::vec::Vec::new();
+    let mut actions: MediumVec<(ExchangeId, ClosingAction<C>)> = MediumVec::new();
     for (&eid, conn) in self.plane.connections.iter() {
       if conn.state != ConnState::Closing {
         continue;
@@ -1695,7 +1696,7 @@ where
     //
     // Collect the active (eid, handle) pairs first so the `connections` borrow is released
     // before the mutable `stream` access inside the loop.
-    let pairs: std::vec::Vec<_> = self
+    let pairs: MediumVec<_> = self
       .plane
       .connections
       .iter()
@@ -1765,7 +1766,7 @@ where
   where
     S: StreamIo<Conn = C>,
   {
-    let promote: std::vec::Vec<ExchangeId> = self
+    let promote: MediumVec<ExchangeId> = self
       .plane
       .connections
       .iter()
@@ -1821,7 +1822,7 @@ where
     // Collect the connections ready to emit their FIN: `fin_pending` set, in
     // `Established`, socket fully drained and acknowledged, `out` empty. The
     // `connections` borrow is released before the mutation below.
-    let ready: std::vec::Vec<_> = self
+    let ready: MediumVec<_> = self
       .plane
       .connections
       .iter()
@@ -2316,7 +2317,7 @@ where
   {
     // Collect the waiting dials oldest-first. The borrow of `connections` is
     // released before the dial loop mutates the plane.
-    let mut waiting: std::vec::Vec<(ExchangeId, SocketAddr)> = self
+    let mut waiting: MediumVec<(ExchangeId, SocketAddr)> = self
       .plane
       .connections
       .iter()
@@ -2527,7 +2528,7 @@ where
     // Collect the active (eid, handle) pairs first to avoid holding a `&connections`
     // borrow across the mutable `stream` + `endpoint` calls. PendingDial connections (no
     // slot) contribute no pair.
-    let pairs: std::vec::Vec<_> = self
+    let pairs: MediumVec<_> = self
       .plane
       .connections
       .iter()

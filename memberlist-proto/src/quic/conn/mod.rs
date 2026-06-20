@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use quinn_proto::{Connection, ConnectionEvent, ConnectionHandle, Endpoint as QuinnEndpoint};
 use slab::Slab;
+use smallvec_wrapper::MediumVec;
 
 pub(crate) struct ConnEntry {
   conn: Connection,
@@ -317,7 +318,7 @@ impl ConnTable {
   }
 
   /// Snapshot of all live connection handles, for driver polling loops.
-  pub(crate) fn iter_handles(&self) -> Vec<ConnectionHandle> {
+  pub(crate) fn iter_handles(&self) -> MediumVec<ConnectionHandle> {
     self
       .conns
       .iter()

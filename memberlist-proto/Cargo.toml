@@ -165,6 +165,7 @@ rustc-hash = { version = "2", default-features = false }
 hashbrown.workspace = true
 libm = { version = "0.2", default-features = false }
 smallvec.workspace = true
+smallvec-wrapper = { workspace = true, default-features = false }
 smol_str.workspace = true
 thiserror.workspace = true
 tracing = { workspace = true, optional = true }

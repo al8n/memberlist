@@ -63,6 +63,7 @@ memberlist-proto = { workspace = true, default-features = false, features = [
 ] }
 getrandom.workspace = true
 bytes.workspace = true
+smallvec-wrapper = { workspace = true, default-features = false }
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }

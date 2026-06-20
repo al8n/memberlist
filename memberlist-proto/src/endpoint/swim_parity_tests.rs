@@ -1394,10 +1394,10 @@ fn gossiped_alive_ids(e: &mut Endpoint<SmolStr, SocketAddr>, now: Instant) -> Ve
   e.handle_timeout(now);
   let mut ids = Vec::new();
   while let Some(tx) = e.poll_transmit() {
-    let msgs: Vec<Message<SmolStr, SocketAddr>> = match tx {
+    let msgs: TinyVec<Message<SmolStr, SocketAddr>> = match tx {
       Transmit::Packet(p) => {
         let (_, m) = p.into_parts();
-        vec![m]
+        TinyVec::from_iter([m])
       }
       Transmit::Compound(c) => {
         let (_, m) = c.into_parts();

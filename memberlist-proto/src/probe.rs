@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::{event::StreamId, typed::NodeState};
 
-use smallvec::SmallVec;
+use smallvec_wrapper::SmallVec;
 
 /// Source of a probe — distinguishes failure-detection probes (default) from
 /// application-level pings issued via `Endpoint::ping`.
@@ -101,14 +101,14 @@ pub(crate) struct AwaitingIndirect<A> {
   /// mark the indirect probe answered. The Nack's transport source address
   /// is the only responder identity available, so the allowlist is keyed
   /// by address, not id.
-  pub(crate) indirect_peers: SmallVec<[A; 4]>,
+  pub(crate) indirect_peers: SmallVec<A>,
   /// Distinct indirect peers (by source address) that have returned a
   /// Nack within the deadline. `len()` is the effective nack count; a
   /// duplicate or late (>= `failure_deadline`) Nack is ignored so it
   /// cannot inflate the count and suppress the Lifeguard health penalty
   /// (`probe_terminate_failure` computes severity from
   /// `expected_nacks - nacked_by.len()`).
-  pub(crate) nacked_by: SmallVec<[A; 4]>,
+  pub(crate) nacked_by: SmallVec<A>,
   /// The reliable-ping fallback stream opened **concurrently** with the
   /// indirect fan-out (mirrors memberlist-core spawning the TCP ping
   /// alongside the indirect pings, bounded by the same deadline).

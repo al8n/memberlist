@@ -15,6 +15,7 @@ use crate::{
 use bytes::Bytes;
 use derive_more::IsVariant;
 use rand::{Rng, RngExt, rngs::SmallRng, seq::IteratorRandom};
+use smallvec_wrapper::{SmallVec, TinyVec};
 
 use crate::{
   AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
@@ -2041,7 +2042,7 @@ where
       [one] => self.send_user_packet(to, one.cheap_clone()),
       many => {
         let mut assembled = COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN;
-        let mut msgs = Vec::with_capacity(many.len());
+        let mut msgs = TinyVec::new();
         for p in many {
           let m = Message::UserData(p.cheap_clone());
           let part_len = crate::wire::encode_message::<I, A>(&m)
@@ -2179,7 +2180,7 @@ where
     // size (same u32-varint upper bounds as the gossip budget) fits the
     // configured `gossip_mtu`; otherwise split into two Packets in
     // Ping-then-Suspect order. Never emit an unsendable over-MTU compound.
-    let mut probe_msgs: Vec<Message<I, A>> = Vec::with_capacity(2);
+    let mut probe_msgs: TinyVec<Message<I, A>> = TinyVec::new();
     probe_msgs.push(Message::Ping(ping));
 
     let target_state = self.members.get(&target_id).map(|m| m.state_ref().state());
@@ -3208,7 +3209,7 @@ where
     // deriving `expected_nacks` from the resolved set keeps the Lifeguard
     // severity (`expected_nacks - nacked_by.len()`) exact even if that
     // invariant ever weakened.
-    let chosen_resolved: smallvec::SmallVec<[(I, A); 4]> = chosen
+    let chosen_resolved: SmallVec<(I, A)> = chosen
       .iter()
       .filter_map(|id| {
         self
@@ -3217,7 +3218,7 @@ where
           .map(|m| (id.cheap_clone(), m.state_ref().address_ref().cheap_clone()))
       })
       .collect();
-    let indirect_peers: smallvec::SmallVec<[A; 4]> = chosen_resolved
+    let indirect_peers: SmallVec<A> = chosen_resolved
       .iter()
       .map(|(_, addr)| addr.cheap_clone())
       .collect();
@@ -3276,7 +3277,7 @@ where
       probe.phase = ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         indirect_peers,
-        nacked_by: smallvec::SmallVec::new(),
+        nacked_by: SmallVec::new(),
         reliable_stream_id,
         deadline: cumulative_deadline,
       });
@@ -3499,7 +3500,7 @@ where
           .pending_transmits
           .push_back(Transmit::Compound(CompoundTransmit::new(
             to.cheap_clone(),
-            all_broadcasts.clone(),
+            all_broadcasts.iter().cloned().collect::<TinyVec<_>>(),
           ))),
       }
     }
@@ -3809,7 +3810,7 @@ where
 }
 
 /// Pick up to `k` items uniformly at random from `pool` using `rng`.
-fn pick_random<T, R>(pool: &[T], k: usize, rng: &mut R) -> Vec<T>
+fn pick_random<T, R>(pool: &[T], k: usize, rng: &mut R) -> SmallVec<T>
 where
   T: Clone,
   R: Rng,

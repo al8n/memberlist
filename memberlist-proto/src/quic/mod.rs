@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
 use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
+use smallvec_wrapper::{MediumVec, SmallVec};
 
 use crate::{
   endpoint::Endpoint,
@@ -1889,7 +1890,7 @@ where
   /// what moves those bytes into the quinn send stream so they emerge on
   /// the next [`Self::collect_transmits`].
   fn pump_bridges(&mut self, now: Instant) {
-    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
+    let ids: MediumVec<StreamId> = self.bridges.keys().copied().collect();
     for id in &ids {
       // Split borrow: take the bridge out, operate, put back (or reap).
       if let Some(mut br) = self.bridges.remove(id) {
@@ -2512,7 +2513,7 @@ where
         // to `Failed(ConnectionLost)` so the `StreamErrored` lifecycle
         // notice inside `drain_then_reap` carries the connection-loss
         // attribution.
-        let ids: Vec<StreamId> = self
+        let ids: SmallVec<StreamId> = self
           .bridges
           .iter()
           .filter(|(_, b)| b.ch() == ch)

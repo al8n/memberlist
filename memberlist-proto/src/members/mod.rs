@@ -11,7 +11,7 @@ use crate::{
 use cheap_clone::CheapClone;
 use indexmap::IndexMap;
 use rand::{Rng, RngExt};
-use smallvec::SmallVec;
+use smallvec_wrapper::LargeVec;
 
 use crate::{Instant, suspicion::Suspicion};
 
@@ -186,7 +186,7 @@ impl<I, A> Member<I, A> {
 }
 
 /// Cluster membership: every peer the local node has ever heard of, plus the
-/// local node itself. Backed by a `SmallVec<Member>` for cache-friendly iteration
+/// local node itself. Backed by a `LargeVec<Member>` for cache-friendly iteration
 /// and an `IndexMap<I, usize>` for O(1) lookup-by-id; the `usize` value is the
 /// index of the member in the vector.
 ///
@@ -196,7 +196,7 @@ impl<I, A> Member<I, A> {
 #[derive(Debug)]
 pub struct Members<I, A> {
   local: Node<I, A>,
-  nodes: SmallVec<[Member<I, A>; 16]>,
+  nodes: LargeVec<Member<I, A>>,
   node_map: IndexMap<I, usize, rustc_hash::FxBuildHasher>,
 }
 
@@ -207,7 +207,7 @@ impl<I, A> Members<I, A> {
   pub fn new(local: Node<I, A>) -> Self {
     Self {
       local,
-      nodes: SmallVec::new(),
+      nodes: LargeVec::new(),
       node_map: IndexMap::default(),
     }
   }

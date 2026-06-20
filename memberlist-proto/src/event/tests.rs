@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
+use smallvec_wrapper::TinyVec;
 use smol_str::SmolStr;
 
 use super::{
@@ -60,7 +61,7 @@ fn packet_and_compound_transmit_round_trip() {
   assert_eq!(to, addr(1));
   assert!(matches!(m, Message::Ack(_)));
 
-  let ct = CompoundTransmit::new(addr(2), std::vec![ack_msg(1), ack_msg(2)]);
+  let ct = CompoundTransmit::new(addr(2), TinyVec::from_iter([ack_msg(1), ack_msg(2)]));
   assert_eq!(ct.to_ref(), &addr(2));
   assert_eq!(ct.messages_slice().len(), 2);
   let (to, msgs) = ct.into_parts();
@@ -73,7 +74,7 @@ fn transmit_enum_wraps_packet_and_compound() {
   let packet = Transmit::Packet(PacketTransmit::new(addr(1), ack_msg(1)));
   let compound = Transmit::Compound(CompoundTransmit::new(
     addr(2),
-    std::vec![ack_msg(1), ack_msg(2)],
+    TinyVec::from_iter([ack_msg(1), ack_msg(2)]),
   ));
   assert!(matches!(packet, Transmit::Packet(_)));
   assert!(matches!(compound, Transmit::Compound(_)));
@@ -117,7 +118,8 @@ fn exchange_id_from_stream_id_preserves_raw_value() {
 
 #[test]
 fn compound_transmit_requires_two_messages() {
-  let result = std::panic::catch_unwind(|| CompoundTransmit::new(addr(1), std::vec![ack_msg(1)]));
+  let result =
+    std::panic::catch_unwind(|| CompoundTransmit::new(addr(1), TinyVec::from_iter([ack_msg(1)])));
   assert!(
     result.is_err(),
     "CompoundTransmit with a single message must panic"
