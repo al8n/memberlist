@@ -986,12 +986,12 @@ where
   }
 }
 
-// Reliable-plane operations keyed by the connection handle `C` (Copy for the
-// borrow-free pool lookups, Eq + Hash for the map).
+// Construction and reliable-plane diagnostics — the connection handle `C` is
+// only stored (never moved by value or used to key a map here), so these need
+// node identity alone.
 impl<I, C, R> Engine<I, C, R>
 where
   I: memberlist_proto::Id,
-  C: Copy + Eq + Hash,
 {
   /// Construct an engine, panicking on a misconfiguration.
   ///
@@ -1192,7 +1192,17 @@ where
   pub fn pending_dial_count(&self) -> usize {
     self.plane.pending_dial_count()
   }
+}
 
+// Reliable-plane lifecycle helpers that move the connection handle `C` by value
+// (into the pool, the listener slot, and the `StreamIo` socket calls), so they
+// need `C: Copy`. The two that also key the `closing` map (`teardown`,
+// `flush_closing`) add `C: Eq + Hash` method-locally.
+impl<I, C, R> Engine<I, C, R>
+where
+  I: memberlist_proto::Id,
+  C: Copy,
+{
   /// Reclaim gracefully-closing connections that have finished closing or whose
   /// close has exceeded `cfg.close_timeout`.
   ///
@@ -1445,6 +1455,8 @@ where
   fn teardown<S>(&mut self, eid: ExchangeId, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
+    // Keys the `closing` map when parking an in-flight FIN.
+    C: Eq + Hash,
   {
     // Inspect the connection WITHOUT removing it: a graceful close that still has
     // bytes to deliver must stay mapped (transition to `Closing`) so the egress pump
@@ -1568,6 +1580,8 @@ where
   fn flush_closing<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
+    // Keys the `closing` map when parking an in-flight FIN.
+    C: Eq + Hash,
   {
     // Classify each Closing connection without holding the `connections` borrow across
     // the mutating socket / pool / closing-map calls below.

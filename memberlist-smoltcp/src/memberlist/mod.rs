@@ -726,9 +726,11 @@ impl<I, A, D, R> Memberlist<I, A, D, R> {
   }
 }
 
-// Membership operations that drive the embedded engine each `poll` — joining,
-// gossip, queries, and config — all needing full node identity.
-impl<I, A, D, R: Rng> Memberlist<I, A, D, R>
+// Membership operations that drive the embedded engine — construction, the
+// `&self` reads over the live machine, and the `&mut self` ops that do not draw
+// from the gossip RNG. All need full node identity; none draws randomness, so
+// none needs `R: Rng` (the engine's matching blocks require only `I: Id`).
+impl<I, A, D, R> Memberlist<I, A, D, R>
 where
   I: memberlist_proto::Id,
 {
@@ -1230,29 +1232,6 @@ where
     self.engine.poll_event()
   }
 
-  /// Arm the SWIM scheduler at `now`. Call once before the first `poll`.
-  ///
-  /// Forwards to the engine, which arms the probe, gossip, and push-pull periodic
-  /// timers so `poll_timeout` returns a finite deadline on the very next call.
-  pub fn start(&mut self, now: Instant) {
-    self.engine.start(now);
-  }
-
-  /// Seed a statically-known peer as Alive, bootstrapping membership without
-  /// the TCP push-pull join path.
-  ///
-  /// Builds a synthetic `Alive` message for `id` at `peer` (incarnation 1)
-  /// and feeds it into the machine, exactly as if the node had been learned
-  /// through gossip. Useful for static embedded clusters and for tests that skip
-  /// the join phase.
-  ///
-  /// A non-routable `peer` (unspecified/multicast/broadcast IP or port 0) is
-  /// dropped by the engine: it could only be stored as a member no node can send
-  /// a useful packet to.
-  pub fn inject_alive(&mut self, id: I, peer: SocketAddr, now: Instant) {
-    self.engine.inject_alive(id, peer, now);
-  }
-
   /// Whether `id` is currently Alive from this node's perspective.
   ///
   /// Returns `false` for unknown ids or ids in any non-Alive state.
@@ -1495,38 +1474,6 @@ where
     self.engine.send_many(to, payloads)
   }
 
-  /// Initiate a reliable TCP user-message delivery to `to`.
-  ///
-  /// The payload is encoded and sent over a dedicated TCP stream. Returns a
-  /// [`StreamId`] token. Completion surfaces as
-  /// `Event::ExchangeCompleted { kind: ExchangeKind::UserMessage, .. }` via
-  /// `poll_event()` after subsequent `poll` ticks.
-  ///
-  /// The smoltcp poll loop services the resulting `DialRequested` generically —
-  /// the same `Connect` path used for join push/pull — so no additional driver
-  /// changes are needed to carry user messages over TCP.
-  ///
-  /// Callers that want non-blocking fire-and-forget should retain the
-  /// `StreamId` for debugging only; the poll loop and machine handle the full
-  /// dial → handshake → send → FIN → teardown lifecycle.
-  ///
-  /// **Reliable exchanges share a single listener, so a peer accepts inbound
-  /// reliable streams one at a time.** To send multiple reliable messages to
-  /// the same peer, issue them sequentially: call `send_reliable`, drive `poll`
-  /// until the matching `Event::ExchangeCompleted { kind: UserMessage }` arrives
-  /// via `poll_event`, then send the next. Concurrent reliable streams to one
-  /// peer would collide at the listener (the second SYN is RST'd during the
-  /// first's handshake).
-  #[inline]
-  pub fn send_reliable(
-    &mut self,
-    to: SocketAddr,
-    payload: bytes::Bytes,
-    now: Instant,
-  ) -> Result<StreamId, memberlist_proto::Error> {
-    self.engine.send_reliable(to, payload, now)
-  }
-
   /// Record intent to join the cluster via these seed addresses.
   ///
   /// Each seed is first resolved through `resolver`: a
@@ -1623,6 +1570,71 @@ where
   #[inline]
   pub fn is_joined(&self) -> bool {
     self.engine.is_joined()
+  }
+}
+
+// Operations that draw from the gossip RNG — the SWIM scheduler arm, the
+// synthetic-`Alive` inject, the reliable dial, and the per-tick `poll` (whose
+// engine `pump` runs the randomized probe/gossip schedule). These forward to the
+// engine's `R: Rng` blocks, so they alone carry the bound.
+impl<I, A, D, R> Memberlist<I, A, D, R>
+where
+  I: memberlist_proto::Id,
+  R: Rng,
+{
+  /// Arm the SWIM scheduler at `now`. Call once before the first `poll`.
+  ///
+  /// Forwards to the engine, which arms the probe, gossip, and push-pull periodic
+  /// timers so `poll_timeout` returns a finite deadline on the very next call.
+  pub fn start(&mut self, now: Instant) {
+    self.engine.start(now);
+  }
+
+  /// Seed a statically-known peer as Alive, bootstrapping membership without
+  /// the TCP push-pull join path.
+  ///
+  /// Builds a synthetic `Alive` message for `id` at `peer` (incarnation 1)
+  /// and feeds it into the machine, exactly as if the node had been learned
+  /// through gossip. Useful for static embedded clusters and for tests that skip
+  /// the join phase.
+  ///
+  /// A non-routable `peer` (unspecified/multicast/broadcast IP or port 0) is
+  /// dropped by the engine: it could only be stored as a member no node can send
+  /// a useful packet to.
+  pub fn inject_alive(&mut self, id: I, peer: SocketAddr, now: Instant) {
+    self.engine.inject_alive(id, peer, now);
+  }
+
+  /// Initiate a reliable TCP user-message delivery to `to`.
+  ///
+  /// The payload is encoded and sent over a dedicated TCP stream. Returns a
+  /// [`StreamId`] token. Completion surfaces as
+  /// `Event::ExchangeCompleted { kind: ExchangeKind::UserMessage, .. }` via
+  /// `poll_event()` after subsequent `poll` ticks.
+  ///
+  /// The smoltcp poll loop services the resulting `DialRequested` generically —
+  /// the same `Connect` path used for join push/pull — so no additional driver
+  /// changes are needed to carry user messages over TCP.
+  ///
+  /// Callers that want non-blocking fire-and-forget should retain the
+  /// `StreamId` for debugging only; the poll loop and machine handle the full
+  /// dial → handshake → send → FIN → teardown lifecycle.
+  ///
+  /// **Reliable exchanges share a single listener, so a peer accepts inbound
+  /// reliable streams one at a time.** To send multiple reliable messages to
+  /// the same peer, issue them sequentially: call `send_reliable`, drive `poll`
+  /// until the matching `Event::ExchangeCompleted { kind: UserMessage }` arrives
+  /// via `poll_event`, then send the next. Concurrent reliable streams to one
+  /// peer would collide at the listener (the second SYN is RST'd during the
+  /// first's handshake).
+  #[inline]
+  pub fn send_reliable(
+    &mut self,
+    to: SocketAddr,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, memberlist_proto::Error> {
+    self.engine.send_reliable(to, payload, now)
   }
 
   /// Advance both the smoltcp stack and the memberlist state machine once.

@@ -362,9 +362,7 @@ fn build_transform<I, T, G>(
   label: &Option<Bytes>,
 ) -> Arc<TransformCtx>
 where
-  I: NodeId,
   T: StreamTransport,
-  G: rand::Rng,
 {
   Arc::new(TransformCtx {
     // `compression`/`checksum` accessors return `&Options`; copy out (both are
@@ -384,10 +382,17 @@ where
 /// dropped, or a `Shutdown` command).
 pub(crate) struct StreamDriver<I, R, T, G = rand::rngs::StdRng>
 where
-  I: NodeId,
+  // Structurally required (§8 intrinsic exception): `socket`, `accept_join`,
+  // `dial_rx` and the timer field name `<R::Net as Net>::UdpSocket`,
+  // `<R::Spawner as AsyncSpawner>::JoinHandle`, `DialStatus<R>` (itself
+  // `where R: Runtime`), and `R::Sleep` — none well-formed without this.
   R: Runtime,
+  // Structurally required (§8 intrinsic exception): `endpoint` names
+  // `StreamEndpoint<I, SocketAddr, T, G>`, whose own struct declares
+  // `where R: StreamTransport` over this `T`, so the field type needs it.
+  // `I: NodeId` and `G: rand::Rng` are NOT field-structural (the inner
+  // `Endpoint<I, A, G>` is unbounded), so they live on the impls instead.
   T: StreamTransport,
-  G: rand::Rng,
 {
   endpoint: StreamEndpoint<I, SocketAddr, T, G>,
   /// Unreliable gossip datagrams (the reliable exchanges run over TCP bridges).
@@ -504,7 +509,6 @@ where
   I: NodeId,
   R: Runtime,
   T: StreamTransport,
-  G: rand::Rng,
 {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
@@ -626,7 +630,13 @@ where
   }
 
   /// Applies one handle command to the machine.
-  fn dispatch(&mut self, cmd: Command<I>, now: Instant) {
+  // `G: rand::Rng` only here among the methods: `start_push_pull` /
+  // `start_user_message` draw the endpoint's gossip RNG; the non-scheduling
+  // methods (spawn/obs/timer/account) carry no such bound.
+  fn dispatch(&mut self, cmd: Command<I>, now: Instant)
+  where
+    G: rand::Rng,
+  {
     match cmd {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
@@ -1098,7 +1108,12 @@ where
   /// Applies one stream action: open a dial, half-close a bridge's write, or tear
   /// a bridge down. A `dispatch` wait join captures its own exchanges' `Connect`
   /// ids synchronously, so this only sets up the bridge.
-  fn handle_stream_action(&mut self, action: StreamAction) {
+  // `G: rand::Rng`: the CIDR-blocked `Connect` arm calls `handle_dial_failed`,
+  // which drives the endpoint's gossip RNG.
+  fn handle_stream_action(&mut self, action: StreamAction)
+  where
+    G: rand::Rng,
+  {
     match action {
       StreamAction::Connect(info) => {
         let eid = info.id();
@@ -1151,7 +1166,12 @@ where
   /// Drains each machine surface up to `transmit_batch` items in one pass.
   /// Returns `(worked, more)`: whether any surface produced work (republish the
   /// snapshot) and whether any surface hit its cap with work left (self-wake).
-  fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool) {
+  // `G: rand::Rng`: the inbound-gossip pass feeds `handle_packet`, which drives
+  // the endpoint's gossip RNG.
+  fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool)
+  where
+    G: rand::Rng,
+  {
     let now = Instant::now();
     let budget = self.transmit_batch.max(1);
     let mut worked = false;
@@ -1333,6 +1353,9 @@ where
   I: NodeId,
   R: Runtime,
   T: StreamTransport,
+  // `poll` drives the endpoint's RNG (handle_timeout / handle_packet /
+  // handle_transport_* / snapshot_of); a trait-method body cannot carry its own
+  // `where`, so the bound stays on the impl.
   G: rand::Rng + Unpin,
 {
   type Output = ();

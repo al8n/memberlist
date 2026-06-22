@@ -18,7 +18,7 @@ use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use memberlist_embedded::Engine;
 use memberlist_proto::{
-  Rng, SmallRng,
+  SmallRng,
   event::{Event, PingId, StreamId},
 };
 
@@ -97,7 +97,7 @@ pub(crate) struct Shared<I, R = SmallRng> {
 /// observation channel) rather than growing memory without bound.
 const APP_EVENTS_CAP: usize = 1024;
 
-impl<I, R: Rng> Shared<I, R>
+impl<I, R> Shared<I, R>
 where
   I: memberlist_proto::Id,
 {
@@ -243,7 +243,7 @@ where
 /// learned at least one peer. Kept here so the handle and any future caller share
 /// one definition of "joined".
 #[inline]
-pub(crate) fn is_joined<I, R: Rng>(shared: &Shared<I, R>) -> bool
+pub(crate) fn is_joined<I, R>(shared: &Shared<I, R>) -> bool
 where
   I: memberlist_proto::Id,
 {
@@ -252,7 +252,7 @@ where
 
 /// The local advertised address — used by the handle's convenience forwards.
 #[inline]
-pub(crate) fn advertise_address<I, R: Rng>(shared: &Shared<I, R>) -> SocketAddr
+pub(crate) fn advertise_address<I, R>(shared: &Shared<I, R>) -> SocketAddr
 where
   I: memberlist_proto::Id,
 {

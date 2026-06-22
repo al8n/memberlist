@@ -66,7 +66,6 @@ pub use resolver::{AddressResolver, SocketAddrResolver};
 pub use resolver::{LocalAddrResolver, LocalAddrScope, local_advertise};
 pub use snapshot::MemberlistSnapshot;
 
-use core::fmt;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 #[cfg_attr(
   docsrs,
@@ -142,28 +141,6 @@ pub use memberlist_proto::{Node, typed::NodeState};
 /// The node-identity bound shared across the driver and handle — everything the
 /// machine's `Endpoint<I, _>` requires of the identity type `I`. A blanket impl
 /// covers every type that satisfies the bounds, so users never implement it.
-pub trait NodeId:
-  memberlist_proto::Id
-  + memberlist_proto::Data
-  + memberlist_proto::CheapClone
-  + fmt::Debug
-  + fmt::Display
-  + Send
-  + Sync
-  + Unpin
-  + 'static
-{
-}
+pub trait NodeId: memberlist_proto::Id + memberlist_proto::Data + Send + Sync + Unpin {}
 
-impl<T> NodeId for T where
-  T: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + Unpin
-    + 'static
-{
-}
+impl<T> NodeId for T where T: memberlist_proto::Id + memberlist_proto::Data + Send + Sync + Unpin {}
