@@ -58,6 +58,26 @@ fn client_auth_mode_str_round_trip() {
   assert_eq!(ClientAuthMode::default(), ClientAuthMode::ClusterCa);
 }
 
+#[test]
+fn config_options_accessors_reflect_construction() {
+  // The path + auth accessors are otherwise only reached behind the serde / clap
+  // feature gates; assert them directly so they hold without either feature.
+  let opts = TlsConfigOptions::new(
+    PathBuf::from("/etc/node.pem"),
+    PathBuf::from("/etc/node.key"),
+    PathBuf::from("/etc/ca.pem"),
+  );
+  assert_eq!(opts.cert_file(), &PathBuf::from("/etc/node.pem"));
+  assert_eq!(opts.key_file(), &PathBuf::from("/etc/node.key"));
+  assert_eq!(opts.ca_file(), &PathBuf::from("/etc/ca.pem"));
+  // `new` installs the default (mutual TLS) auth mode.
+  assert_eq!(opts.client_auth(), ClientAuthMode::ClusterCa);
+
+  // The builder override is observable through the accessor.
+  let opts = opts.with_client_auth(ClientAuthMode::TrustedNetwork);
+  assert_eq!(opts.client_auth(), ClientAuthMode::TrustedNetwork);
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn client_auth_mode_serde_kebab_case() {

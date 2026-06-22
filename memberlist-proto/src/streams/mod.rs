@@ -63,6 +63,8 @@ pub(crate) mod labeled;
 pub(crate) mod phase;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 pub(crate) mod transport;
 
 pub use action::{ConnectInfo, ExchangeRef, StreamAction};

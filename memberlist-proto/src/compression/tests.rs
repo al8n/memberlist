@@ -849,6 +849,108 @@ fn compression_options_clap_parses_and_wires_env() {
   );
 }
 
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_level_every_level_tag_roundtrips_and_packs_to_u8() {
+  // Every 1..=22 tag must decode back to its `Zstd(level)` variant, and the
+  // level's numeric value is its own wire tag (the level IS the algorithm tag
+  // for zstd). A `From<ZstdLevel>` to `u8` and `TryFrom<u8>` round-trip the
+  // same byte.
+  for tag in 1u8..=22 {
+    let algo = CompressAlgorithm::from_tag(tag);
+    let level = algo.try_unwrap_zstd().expect("1..=22 decodes to Zstd");
+    assert_eq!(algo.tag(), tag);
+    assert_eq!(u8::from(level), tag);
+    assert_eq!(ZstdLevel::try_from(tag).expect("valid level"), level);
+  }
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_level_out_of_range_is_rejected() {
+  // The level range is 1..=22; 0 and anything above 22 are not levels.
+  for bad in [0u8, 23, 24, 100, 255] {
+    assert_eq!(ZstdLevel::try_from(bad), Err(InvalidZstdLevel(())));
+  }
+  assert!(!InvalidZstdLevel(()).to_string().is_empty());
+}
+
+#[test]
+fn compress_algorithm_from_str_parses_built_in_names_and_rejects_others() {
+  use core::str::FromStr as _;
+
+  #[cfg(feature = "zstd")]
+  assert_eq!(
+    CompressAlgorithm::from_str("zstd").unwrap(),
+    CompressAlgorithm::Zstd(ZstdLevel::default())
+  );
+  #[cfg(feature = "lz4")]
+  assert_eq!(
+    CompressAlgorithm::from_str("lz4").unwrap(),
+    CompressAlgorithm::Lz4
+  );
+  #[cfg(feature = "snappy")]
+  assert_eq!(
+    CompressAlgorithm::from_str("snappy").unwrap(),
+    CompressAlgorithm::Snappy
+  );
+  #[cfg(feature = "brotli")]
+  assert_eq!(
+    CompressAlgorithm::from_str("brotli").unwrap(),
+    CompressAlgorithm::Brotli
+  );
+  // An unrecognized name is a parse error, and the digit form of zstd's level
+  // is not a name (the level rides in the config, not the name string).
+  assert_eq!(
+    CompressAlgorithm::from_str("gzip"),
+    Err(ParseCompressAlgorithmError(()))
+  );
+  assert_eq!(
+    CompressAlgorithm::from_str(""),
+    Err(ParseCompressAlgorithmError(()))
+  );
+  assert!(!ParseCompressAlgorithmError(()).to_string().is_empty());
+}
+
+#[cfg(encryption)]
+#[test]
+fn take_reliable_unit_with_encryption_truncated_leading_varint_returns_none() {
+  // A truncated (or empty) leading unit_len varint is "need more bytes", not a
+  // corruption: the encryption-aware decoder yields `None` so the caller waits.
+  use EncryptionOptions;
+  let enc = EncryptionOptions::new();
+  // A lone varint continuation byte cannot complete the unit_len.
+  assert!(
+    take_reliable_unit_with_encryption(&[0x80], &enc, 1 << 20)
+      .expect("incomplete varint is not an error")
+      .is_none()
+  );
+  assert!(
+    take_reliable_unit_with_encryption(&[], &enc, 1 << 20)
+      .expect("empty buffer is not an error")
+      .is_none()
+  );
+}
+
+#[cfg(encryption)]
+#[test]
+fn take_reliable_unit_with_encryption_incomplete_body_returns_none() {
+  // The leading varint completes and passes the bomb-guard, but fewer than
+  // `unit_len` body bytes have arrived: the decoder waits (`None`) rather than
+  // unwrapping a partial frame.
+  use EncryptionOptions;
+  let comp = CompressionOptions::new();
+  let enc = EncryptionOptions::new();
+  let framed = b"the quick brown fox jumps over the lazy dog".repeat(4);
+  let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+  let partial = &unit[..unit.len() - 1];
+  assert!(
+    take_reliable_unit_with_encryption(partial, &enc, 1 << 20)
+      .expect("a short body is not an error")
+      .is_none()
+  );
+}
+
 #[cfg(all(feature = "clap", feature = "lz4"))]
 #[test]
 fn compression_options_clap_partial_update_preserves_threshold() {
