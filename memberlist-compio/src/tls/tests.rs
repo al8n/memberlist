@@ -104,6 +104,51 @@ async fn new_with_resolved_advertise_skips_resolver() {
   let _: &SocketAddr = t.advertise_address();
 }
 
+/// The `TlsTransportOptions` getters reflect what the builders set, including
+/// the SNI provider closure and the TLS options bundle. The pre-build state is
+/// `None` for the required fields (the arms `new()`'s `ok_or_else` checks).
+#[test]
+fn options_accessors_reflect_builders() {
+  let addr: SocketAddr = "127.0.0.1:7946".parse().unwrap();
+  // Default options: required fields unset, but the SNI provider has a default
+  // (`localhost`) so `sni_provider()` returns a live closure even before build.
+  let empty = TlsTransportOptions::<smol_str::SmolStr, SocketAddr>::new();
+  assert!(empty.local_id().is_none());
+  assert!(empty.advertise_addr().is_none());
+  assert!(empty.tls_options().is_none());
+  assert!(empty.stream().validate().is_ok());
+  assert_eq!((empty.sni_provider())(&addr), Some("localhost".to_string()));
+
+  let opts = TlsTransportOptions::<smol_str::SmolStr, SocketAddr>::new()
+    .with_local_id(smol_str::SmolStr::new("acc-node"))
+    .with_advertise_addr(MaybeResolved::Resolved(addr))
+    .with_tls_options(test_tls_options())
+    .with_sni_provider(Box::new(|_| Some("peer.example".to_string())));
+  assert_eq!(opts.local_id().map(|s| s.as_str()), Some("acc-node"));
+  match opts.advertise_addr() {
+    Some(MaybeResolved::Resolved(s)) => assert_eq!(*s, addr),
+    other => panic!("expected a resolved advertise addr, got {other:?}"),
+  }
+  assert!(opts.tls_options().is_some());
+  // The custom SNI provider overrides the default for every peer.
+  assert_eq!(
+    (opts.sni_provider())(&addr),
+    Some("peer.example".to_string())
+  );
+}
+
+/// `Default` is the `new()` state: required fields `None`, default SNI provider
+/// installed.
+#[test]
+fn default_matches_new() {
+  let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+  let d = TlsTransportOptions::<smol_str::SmolStr, SocketAddr>::default();
+  assert!(d.local_id().is_none());
+  assert!(d.advertise_addr().is_none());
+  assert!(d.tls_options().is_none());
+  assert_eq!((d.sni_provider())(&addr), Some("localhost".to_string()));
+}
+
 /// `new` rejects a missing `local_id` with `InvalidInput` BEFORE any
 /// resolution or socket bind — the field is required.
 #[compio::test]

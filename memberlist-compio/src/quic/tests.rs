@@ -86,6 +86,38 @@ async fn new_with_resolved_advertise_skips_resolver() {
   let _: &SocketAddr = t.advertise_address();
 }
 
+/// The `QuicTransportOptions` getters reflect what the builders set; the
+/// pre-build state is `None` for every required field (the arms `new()`'s
+/// `ok_or_else` checks).
+#[test]
+fn options_accessors_reflect_builders() {
+  let empty = QuicTransportOptions::<SmolStr, SocketAddr>::new();
+  assert!(empty.local_id().is_none());
+  assert!(empty.advertise_addr().is_none());
+  assert!(empty.quic_config().is_none());
+
+  let addr: SocketAddr = "127.0.0.1:7946".parse().unwrap();
+  let opts = QuicTransportOptions::<SmolStr, SocketAddr>::new()
+    .with_local_id(SmolStr::new("acc-node"))
+    .with_advertise_addr(MaybeResolved::Resolved(addr))
+    .with_quic_config(default_test_quic_config());
+  assert_eq!(opts.local_id().map(|s| s.as_str()), Some("acc-node"));
+  match opts.advertise_addr() {
+    Some(MaybeResolved::Resolved(s)) => assert_eq!(*s, addr),
+    other => panic!("expected a resolved advertise addr, got {other:?}"),
+  }
+  assert!(opts.quic_config().is_some());
+}
+
+/// `Default` is the `new()` all-`None` state.
+#[test]
+fn default_matches_new() {
+  let d = QuicTransportOptions::<SmolStr, SocketAddr>::default();
+  assert!(d.local_id().is_none());
+  assert!(d.advertise_addr().is_none());
+  assert!(d.quic_config().is_none());
+}
+
 /// `new` rejects a missing `local_id` with `InvalidInput` BEFORE any
 /// resolution or socket bind — the field is required.
 #[compio::test]
