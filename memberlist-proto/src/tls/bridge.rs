@@ -1000,3 +1000,187 @@ fn tls_bridge_reliable_skips_encryption_when_is_secure() {
     "a TLS bridge zeroes the EncryptionOptions regardless of caller intent"
   );
 }
+
+/// `fail_connection_lost` on an `Active` TLS bridge — a mid-exchange transport
+/// RESET / I/O error reported by the driver after the wire was established —
+/// transitions to `Failed(ConnectionLost)` and the terminal reap routes its
+/// lifecycle notice through the `BridgeFailure::ConnectionLost` reason-string
+/// arm. The notice maps to no public `Event`, so a freshly-promoted server with
+/// no decoded frame reaps cleanly. (The pre-FIN event-discard branch of `fail`
+/// — `phase ∉ RecvClosed/BothClosed` — is shared `streams::bridge` code covered
+/// on the plain-TCP side, where a passthrough record layer can deliver a
+/// dispatched request frame WITHOUT a trailing peer close; a TLS request pump
+/// always rides its `close_notify` along, so the server reaches `RecvClosed`
+/// rather than staying `Active` with an unauthorized frame.)
+#[test]
+fn fail_connection_lost_then_reaps_errored() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7700), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  assert!(matches!(
+    server.phase_ref(),
+    BridgePhase::Established(LinkState::Active)
+  ));
+
+  // The driver reports the connection dropped mid-exchange.
+  server.fail_connection_lost();
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::ConnectionLost))
+    ),
+    "a mid-exchange transport loss maps to Failed(ConnectionLost), got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(server.is_terminal());
+
+  // The terminal reap drains the (empty) event queue and builds the lifecycle
+  // notice through the ConnectionLost reason-string arm. The notice maps to no
+  // public Event.
+  server.drain_then_reap(&mut ep_s, now);
+  assert!(
+    ep_s.poll_event().is_none(),
+    "a ConnectionLost StreamErrored notice maps to no public Event"
+  );
+  // The unused `client` still proves the handshake completed both ways.
+  assert!(!client.is_handshaking());
+}
+
+/// First failure wins: a `fail_connection_lost` following a prior
+/// `Failed(Decode)` does NOT overwrite the original cause — `fail`'s leading
+/// `Failed(_) => return` guard makes the transition sticky.
+#[test]
+fn fail_connection_lost_is_sticky_over_prior_failure() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  // Promote an inbound stream awaiting its first frame, then a mid-frame
+  // read == 0 fails the bridge Decode (truncation → PeerClosed).
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7710), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  let res = server.handle_transport_data(&[], now);
+  assert!(res.is_err());
+  assert!(matches!(
+    server.phase_ref(),
+    BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
+  ));
+
+  // A later transport-loss report must not clobber the first cause.
+  server.fail_connection_lost();
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
+    ),
+    "the first failure cause is sticky — ConnectionLost must not overwrite \
+       Decode, got {:?}",
+    phase_label(server.phase_ref())
+  );
+}
+
+/// `fail_dial_retired` on a PROMOTED TLS bridge holding a `Stream` builds the
+/// `StreamErrored` lifecycle notice through the `BridgeFailure::DialRetired`
+/// reason-string arm. The notice maps to no public `Event`, so the observable
+/// contract is a clean terminal reap.
+#[test]
+fn drain_then_reap_dial_retired_routes_errored_notice() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  // Promote an outbound user message so a `Stream` is present for the arm.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7720)));
+  let sid = ep_c
+    .start_user_message(addr(7000), Bytes::from_static(b"hi"), now)
+    .expect("issued while running");
+  let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+  client.promote(c_stream);
+  // Drain the outbound DialRequested so the post-reap assertion sees only
+  // events the reap itself produces.
+  while ep_c.poll_event().is_some() {}
+
+  client.fail_dial_retired();
+  assert!(
+    matches!(
+      client.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::DialRetired))
+    ),
+    "bridge is Failed(DialRetired), got {:?}",
+    phase_label(client.phase_ref())
+  );
+
+  client.drain_then_reap(&mut ep_c, now);
+  assert!(client.is_terminal());
+  assert!(
+    ep_c.poll_event().is_none(),
+    "a DialRetired StreamErrored notice maps to no public Event"
+  );
+  // The unused `server` still proves the handshake completed both ways.
+  assert!(!server.is_handshaking());
+}
+
+/// On the SECURE TLS record layer (`TlsRecords::is_secure() == true`) a runtime
+/// encryption-policy change FORCE-DISABLES the stored encryption and leaves the
+/// bridge RUNNING — the reliable path is already protected by TLS, and the
+/// on-wire bytes are TLS records (no plaintext-leak path), so no failure
+/// cascade is owed. This is the secure-transport mirror of the plain-TCP
+/// `set_encryption_fails_insecure_bridge_then_reaps_errored` (which fails the
+/// bridge). Driven on a LIVE promoted bridge via the runtime `set_encryption`
+/// path (distinct from the construction-time force-disable covered by
+/// `tls_bridge_reliable_skips_encryption_when_is_secure`).
+#[cfg(feature = "aes-gcm")]
+#[test]
+fn set_encryption_force_disables_secure_bridge_without_failing() {
+  use crate::{EncryptionOptions, Keyring, SecretKey};
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7730), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  assert!(matches!(
+    server.phase_ref(),
+    BridgePhase::Established(LinkState::Active)
+  ));
+
+  // Hand the live bridge a (would-be) ENABLED policy. On TLS it is force-
+  // disabled and the bridge stays Active — no EncryptionPolicyChanged failure.
+  server.set_encryption(
+    EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32]))),
+  );
+  assert!(
+    !server.encryption_for_test().is_enabled(),
+    "a TLS bridge force-disables encryption on a runtime policy change"
+  );
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Active)
+    ),
+    "a TLS bridge stays RUNNING after a policy change (no leak path), got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(
+    !server.is_terminal(),
+    "the secure bridge is not failed by the policy change"
+  );
+  // The unused `client` still proves the handshake completed both ways.
+  assert!(!client.is_handshaking());
+}

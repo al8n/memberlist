@@ -2252,3 +2252,285 @@ fn drain_then_reap_fsm_failed_notice_arm() {
     "the FSM-failed notice arm must not surface application user data"
   );
 }
+
+/// `take_reliable_unit`'s varint-decode `Err(e)` arm (the
+/// non-`Incomplete`/non-`Empty` case): a `[unit_len]` prefix whose 5th LEB128
+/// byte exceeds `0x0f` overflows a `u32`, so `decode_varint_u32` returns
+/// `FrameError::VarintOverflow` rather than `Incomplete`. `take_reliable_unit`
+/// propagates it through its leading varint match (NOT the over-ceiling
+/// `FrameTooLarge` branch, which only fires for a well-formed length), and
+/// `pump_in`'s unit loop turns the `Err` into the decode-fail retire path.
+///
+/// This is a DISTINCT path from `pump_in_over_ceiling_unit_len_fails_decode`:
+/// that test forges a well-formed `u32::MAX` (`[ff ff ff ff 0f]`) that decodes
+/// cleanly and is then rejected by the ceiling check; here the varint itself
+/// is malformed and is rejected at decode time.
+#[test]
+fn pump_in_overflowing_unit_len_varint_fails_decode() {
+  let mut pair = RawQuicPair::handshaked();
+  let sid = pair.client_open_bi();
+  // A 5-byte LEB128 whose final byte (`0x10 > 0x0f`) overflows a u32 — the
+  // exact shape `decode_varint_u32` rejects with `VarintOverflow`.
+  pair.client_write(sid, &[0x80, 0x80, 0x80, 0x80, 0x10]);
+  pair.client_finish(sid);
+
+  let server_sid = pair.server_accept_bi();
+  let mut ep = make_server_endpoint();
+  let mut bridge = pair.server_bridge(&mut ep, server_sid);
+
+  let mut result = Ok(());
+  for _ in 0..50 {
+    result = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+    if result.is_err() {
+      break;
+    }
+    pair.ferry();
+  }
+  assert_eq!(
+    result,
+    Err(()),
+    "an overflowing unit_len varint must fail pump_in via the decode-fail retire path"
+  );
+  assert!(
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
+    "an overflowing unit_len varint terminalizes the bridge as Failed(Decode) — got {:?}",
+    bridge.phase
+  );
+}
+
+/// `pump_out`'s `pending_out` flush error arm (the non-`Blocked`
+/// `Err(e)` branch: idempotent RESET + STOP, `pending_out.clear()`,
+/// `fail(Transport)`): a staged back-pressured tail is flushed onto a send half
+/// that has already been RESET, so `SendStream::write` returns
+/// `WriteError::ClosedStream` (a non-`Blocked`, non-recoverable write error).
+/// The bridge retires both halves and terminalizes `Failed(Transport)`.
+///
+/// A local reset is the deterministic, timing-free producer of a non-`Blocked`
+/// write error: a peer `STOP_SENDING` only surfaces as `WriteError::Stopped`
+/// after the connection has processed the frame, whereas a local reset
+/// transitions the send half to `ResetSent` (`!is_writable()`) synchronously.
+#[test]
+fn pump_out_pending_flush_write_error_fails_transport() {
+  let mut pair = RawQuicPair::handshaked();
+  // The server opens a bidi (live send half) for the dialer bridge to flush on.
+  let server_open_sid = {
+    let e = pair
+      .server_conns
+      .get_mut(pair.server_ch)
+      .expect("server connection present");
+    e.conn_mut()
+      .streams()
+      .open(Dir::Bi)
+      .expect("server opens a bidi")
+  };
+  let mut ep = make_server_endpoint();
+  let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
+  // Stage a back-pressured tail so the leading `pending_out` flush runs.
+  bridge.pending_out.extend_from_slice(b"flush-me");
+
+  // RESET the bridge's send half out from under it, so the flush write returns
+  // `WriteError::ClosedStream`.
+  {
+    let e = pair
+      .server_conns
+      .get_mut(pair.server_ch)
+      .expect("server connection present");
+    // Ignoring Err: `reset` only errors if the half is already gone.
+    let _ = e
+      .conn_mut()
+      .send_stream(server_open_sid)
+      .reset(VarInt::from_u32(0));
+  }
+
+  let result = bridge.pump_out(&mut pair.server_conns, Instant::from_std(pair.now));
+  assert_eq!(
+    result,
+    Err(()),
+    "a pending_out flush onto a reset send half must fail pump_out via the \
+       non-Blocked write-error retire path"
+  );
+  assert!(
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
+    "a closed send half terminalizes the bridge as Failed(Transport) — got {:?}",
+    bridge.phase
+  );
+  assert!(
+    bridge.pending_out.is_empty(),
+    "the write-error retire must clear pending_out so no further bytes are written"
+  );
+}
+
+/// Build an OUTBOUND one-way `UserMessage` bridge over the server's open bidi
+/// `sid`. The inner FSM is `OutboundSendingRequest(UserMessage)` with the
+/// encoded message already in its `output_buf`, so the first `pump_out` gather
+/// loop yields the message bytes (and flips the FSM to `Done`).
+fn server_outbound_user_bridge(
+  pair: &RawQuicPair,
+  ep: &mut Endpoint<SmolStr, SocketAddr>,
+  sid: QuicSid,
+  payload: bytes::Bytes,
+) -> Bridge<SmolStr, SocketAddr> {
+  let now = Instant::from_std(pair.now);
+  let id = ep
+    .start_user_message(CLIENT_ADDR, payload, now)
+    .expect("a running endpoint starts the user-message dial");
+  let stream = ep
+    .dial_succeeded(id, now)
+    .expect("the dial promotes the intent to an outbound stream");
+  Bridge::new(
+    stream,
+    pair.server_ch,
+    sid,
+    crate::CompressionOptions::new(),
+    crate::EncryptionOptions::new(),
+    ep.max_stream_frame_size(),
+    None,
+    false,
+    true,
+  )
+}
+
+/// `pump_out`'s gathered-unit write loop error arm (the non-`Blocked`
+/// `Err(e)` branch inside the `while off < unit.len()` loop: idempotent RESET +
+/// STOP, `pending_out.clear()`, `fail(Transport)`): an OUTBOUND one-way
+/// `UserMessage` bridge whose FSM holds the message bytes (`poll_transmit`
+/// yields them) writes that freshly gathered unit onto a send half that has
+/// already been RESET, so the unit's `SendStream::write` returns
+/// `WriteError::ClosedStream`. This is the gather-loop twin of the
+/// `pending_out`-flush write-error arm — `pending_out` is empty here so the
+/// gather path (not the flush path) is the one that writes.
+#[test]
+fn pump_out_unit_write_error_fails_transport() {
+  let mut pair = RawQuicPair::handshaked();
+  // The server opens a bidi (live send half) for the outbound bridge to write.
+  let server_open_sid = {
+    let e = pair
+      .server_conns
+      .get_mut(pair.server_ch)
+      .expect("server connection present");
+    e.conn_mut()
+      .streams()
+      .open(Dir::Bi)
+      .expect("server opens a bidi")
+  };
+  let mut ep = make_server_endpoint();
+  let mut bridge = server_outbound_user_bridge(
+    &pair,
+    &mut ep,
+    server_open_sid,
+    bytes::Bytes::from_static(b"one-way user payload"),
+  );
+  assert!(
+    bridge.pending_out.is_empty(),
+    "a fresh outbound user-message bridge has no staged pending_out tail"
+  );
+
+  // RESET the bridge's send half so the gathered-unit write returns
+  // `WriteError::ClosedStream`.
+  {
+    let e = pair
+      .server_conns
+      .get_mut(pair.server_ch)
+      .expect("server connection present");
+    // Ignoring Err: `reset` only errors if the half is already gone.
+    let _ = e
+      .conn_mut()
+      .send_stream(server_open_sid)
+      .reset(VarInt::from_u32(0));
+  }
+
+  let result = bridge.pump_out(&mut pair.server_conns, Instant::from_std(pair.now));
+  assert_eq!(
+    result,
+    Err(()),
+    "writing a gathered user-message unit onto a reset send half must fail \
+       pump_out via the unit-write-loop's non-Blocked error retire"
+  );
+  assert!(
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
+    "a closed send half terminalizes the bridge as Failed(Transport) — got {:?}",
+    bridge.phase
+  );
+  assert!(
+    bridge.pending_out.is_empty(),
+    "the unit-write-error retire must clear pending_out"
+  );
+}
+
+/// `pump_out`'s bridge-level flush-deadline arm (`now >= self.deadline &&
+/// self.stream.is_done() && !self.is_terminal()`): a `Done` one-way
+/// `UserMessage` stream whose bytes are fully gathered but cannot flush their
+/// `pending_out` tail (the peer withholds flow-control credit) has NO FSM
+/// deadline authority left — `poll_timeout` returns `None` on a `Done` stream —
+/// so the pre-write FSM-deadline check never fires. The bridge-level deadline
+/// arm abandons it: RESET + STOP + `fatal`, `Failed(Timeout)`, WITHOUT writing
+/// the post-deadline tail.
+#[test]
+fn pump_out_done_stream_unflushed_tail_past_deadline_fails_timeout() {
+  // A tiny per-stream receive window so the encoded message cannot fully
+  // flush — its tail is retained in `pending_out` while the stream goes `Done`.
+  const WINDOW: u32 = 16;
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.stream_receive_window(VarInt::from_u32(WINDOW));
+  let mut pair = RawQuicPair::handshaked_with_transport(transport);
+  let server_open_sid = {
+    let e = pair
+      .server_conns
+      .get_mut(pair.server_ch)
+      .expect("server connection present");
+    e.conn_mut()
+      .streams()
+      .open(Dir::Bi)
+      .expect("server opens a bidi")
+  };
+  let mut ep = make_server_endpoint();
+  // A payload several windows long so the one-way send cannot fully flush.
+  let payload = bytes::Bytes::from(b"the quick brown fox jumps over the lazy dog. ".repeat(8));
+  let mut bridge = server_outbound_user_bridge(&pair, &mut ep, server_open_sid, payload);
+
+  // Pump the message out against the saturated window: the gather loop yields
+  // the message, the FSM reaches `Done`, but the write blocks partway and the
+  // remainder is retained in `pending_out`. Pump BEFORE the deadline so this
+  // staging step itself never trips the deadline arms. Ferry so the peer reads
+  // a little (granting just enough credit for the FSM to flip Done) but the
+  // window stays too small to drain the whole unit.
+  let now = Instant::from_std(pair.now);
+  for _ in 0..20 {
+    // Ignoring Err: a flow-control block returns Ok; the staging assertions are
+    // below.
+    let _ = bridge.pump_out(&mut pair.server_conns, now);
+    if bridge.stream.is_done() && !bridge.pending_out.is_empty() {
+      break;
+    }
+  }
+  assert!(
+    bridge.stream.is_done(),
+    "the inner one-way stream must reach Done after poll_transmit gathers its bytes"
+  );
+  assert!(
+    !bridge.pending_out.is_empty(),
+    "the tiny window must leave an unflushed message tail in pending_out"
+  );
+  assert!(
+    !bridge.is_terminal(),
+    "a Done stream with a retained tail is not yet terminal — exactly the gap the \
+       bridge-level flush deadline guards"
+  );
+
+  // Now pump PAST the bridge deadline: the FSM has no deadline authority (Done),
+  // so only the bridge-level `is_done() && !is_terminal()` arm can fire.
+  let past = bridge.deadline + Duration::from_secs(1);
+  let result = bridge.pump_out(&mut pair.server_conns, past);
+  assert_eq!(
+    result,
+    Err(()),
+    "a Done stream with an unflushed tail past the bridge deadline must fail pump_out \
+       via the bridge-level flush-deadline arm"
+  );
+  assert!(
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Timeout)),
+    "the bridge-level flush-deadline arm terminalizes the bridge as Failed(Timeout) — \
+       got {:?}",
+    bridge.phase
+  );
+}

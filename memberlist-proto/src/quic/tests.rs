@@ -58,6 +58,20 @@ fn make_endpoint_udp(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<S
   QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
 }
 
+/// A `MergeDelegate` that rejects every inbound merge, driving
+/// `Endpoint::handle_stream_event(PushPullRequestReceived{Join})` to return
+/// `StreamCommand::Close` — the coordinator-level twin of the bridge module's
+/// `RejectAllMerges`.
+struct RejectAllMergesQuic;
+impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMergesQuic {
+  fn notify_merge(
+    &self,
+    _peers: crate::MaybeOwned<'_, [crate::typed::NodeState<SmolStr, SocketAddr>]>,
+  ) -> bool {
+    false
+  }
+}
+
 #[test]
 fn quic_endpoint_type_is_constructible_signature() {
   // Behavioural coverage is the sim harness (needs a virtual clock + a
@@ -3636,5 +3650,182 @@ fn peer_acked_fin_routes_to_bridge_via_finished_arm() {
        once A ACKs B's reply FIN — clean_reaped = {clean_reaped}, \
        ever_failed = {ever_failed}. A clean reap is reachable only through that \
        arm; every other terminus is a `Failed(_)` phase."
+  );
+}
+
+/// `route_datagram_event`'s `DatagramEvent::Response` arm: a long-header QUIC
+/// packet carrying an UNSUPPORTED version drives quinn-proto's
+/// `Endpoint::handle` to emit a Version Negotiation response (a stateless
+/// `DatagramEvent::Response`, not a connection event). Because the coordinator
+/// also installs a server config (its endpoints accept inbound dials), the
+/// `Response` is produced and the arm surfaces it on the driver-facing `out`
+/// queue. A Version Negotiation packet is uniquely identifiable on the wire by
+/// its zero version field.
+#[test]
+fn handle_udp_unsupported_version_emits_version_negotiation_response() {
+  let self_addr: SocketAddr = "127.0.0.1:8021".parse().unwrap();
+  let peer: SocketAddr = "127.0.0.1:8022".parse().unwrap();
+  let now = Instant::now();
+  let mut ep = make_endpoint("self", self_addr, now);
+
+  // A minimal QUIC long header with an unsupported (reserved-greasing) version.
+  // Layout: [first][version u32][dcid_len][dcid..][scid_len][scid..].
+  // `0xC0` = LONG_HEADER_FORM | FIXED_BIT (grease_quic_bit is forced off, so the
+  // fixed bit must be set). The version `0x0a1a2a3a` is a reserved greasing
+  // value quinn never supports, so the long-header decoder returns
+  // `UnsupportedVersion` BEFORE the long-header type or payload length matter.
+  let packet: &[u8] = &[
+    0xC0, // long header + fixed bit
+    0x0a, 0x1a, 0x2a, 0x3a, // unsupported version
+    0x04, 0xde, 0xad, 0xbe, 0xef, // dcid len + dcid
+    0x04, 0xca, 0xfe, 0xba, 0xbe, // scid len + scid
+  ];
+  assert_eq!(
+    super::classify(packet),
+    super::Class::Quic,
+    "a long-header packet (bit 0x80 set) must classify as Quic so handle_udp \
+       feeds it to quinn"
+  );
+
+  ep.handle_udp(peer, packet, now);
+
+  // The Response arm pushed the Version Negotiation packet onto `out` destined
+  // for the source. It is identified by a zero version field (bytes 1..5).
+  let mut saw_version_negotiation = false;
+  while let Some((to, bytes)) = ep.poll_transmit() {
+    if to == peer && bytes.len() >= 5 && bytes[1..5] == [0, 0, 0, 0] {
+      saw_version_negotiation = true;
+    }
+  }
+  assert!(
+    saw_version_negotiation,
+    "an unsupported-version long-header packet must surface a Version \
+       Negotiation response (zero version field) through the \
+       DatagramEvent::Response arm"
+  );
+}
+
+/// `set_encryption_options`'s per-bridge fan-out loop body (`for bridge in
+/// self.bridges.values_mut() { bridge.set_encryption(...) }`): a real
+/// push/pull exchange leaves A holding at least one live reliable bridge; a
+/// subsequent policy CHANGE (not a no-op reapply) iterates that bridge. The
+/// per-bridge `set_encryption` is a force-disable no-op on QUIC (quinn already
+/// encrypts the stream), but the loop body itself must execute over a non-empty
+/// bridge map — exactly the fan-out the plain-stream coordinator performs.
+#[cfg(feature = "aes-gcm")]
+#[test]
+fn set_encryption_options_fans_out_over_live_bridges() {
+  use crate::{EncryptionOptions, Keyring, SecretKey};
+
+  let a_addr: SocketAddr = "127.0.0.1:8031".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8032".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Drive a real A->B push/pull until A holds at least one live reliable bridge
+  // (the proven ferry pattern). A's outbound bridge exists for the duration of
+  // the exchange.
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+  let mut had_bridge = false;
+  for _ in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    if a.live_bridge_count() >= 1 {
+      had_bridge = true;
+      break;
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+  }
+  assert!(
+    had_bridge,
+    "A must hold a live reliable bridge mid-exchange for the fan-out to iterate"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    1,
+    "precondition: exactly one live bridge for the fan-out loop to visit"
+  );
+
+  // A real policy change (disabled -> enabled keyring) takes the fan-out path,
+  // iterating the live bridge's `set_encryption` (a force-disable no-op on
+  // QUIC) and then publishing the new gossip-plane policy.
+  a.set_encryption_options(
+    EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x22; 32]))),
+  );
+  assert!(
+    a.encryption_options().is_enabled(),
+    "the changed encryption policy must be in effect after the fan-out"
+  );
+}
+
+/// `pump_bridges`'s post-`drain_payload_only` terminality re-check + Close
+/// reap (the `bridges_terminalized_via_close_command` arm): a real A->B
+/// push/pull JOIN against a B whose merge delegate REJECTS every merge drives
+/// B's responder bridge through `StreamCommand::Close`. `drain_payload_only`
+/// flips it terminal (`Failed(AdmissionClosed)`) and the re-check then
+/// `drain_then_reap`s + reaps it in the SAME tick, emitting an
+/// `ExchangeCompleted`. Without the re-check the bridge would hold the quinn
+/// bidi until its exchange deadline.
+#[test]
+fn rejected_merge_terminalizes_responder_bridge_via_pump_bridges_close_arm() {
+  let a_addr: SocketAddr = "127.0.0.1:8041".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8042".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  // B rejects every inbound merge: its FSM turns the inbound JOIN PushPull into
+  // a `StreamCommand::Close` that `pump_bridges` reaps via its Close arm.
+  b.endpoint_mut().set_merge_delegate(RejectAllMergesQuic);
+
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+
+  // Drive the exchange. B accepts the inbound bidi, decodes the JOIN request,
+  // the rejecting delegate returns Close, and B's `pump_bridges` terminalizes +
+  // reaps the responder bridge via the post-drain re-check. The observable is
+  // that B's `bridges_terminalized_via_close_command` counter increments.
+  let mut closed_via_arm = false;
+  for _ in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.counters.bridges_terminalized_via_close_command > 0 {
+      closed_via_arm = true;
+      break;
+    }
+  }
+  assert!(
+    closed_via_arm,
+    "B's responder bridge MUST terminalize + reap via `pump_bridges`'s \
+       post-drain_payload_only Close re-check once the rejecting merge delegate \
+       returns StreamCommand::Close — the counter stays at zero without that arm"
+  );
+  // The Close-reaped bridge must not leak: B holds no live bridge afterward.
+  assert_eq!(
+    b.live_bridge_count(),
+    0,
+    "the Close arm must reap B's responder bridge in the same tick (no leak)"
   );
 }
