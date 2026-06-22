@@ -1472,3 +1472,102 @@ async fn recv_batch_zero_clamps_to_one() {
     "a recv_batch of 0 must be clamped to 1 to avoid a receive busy-loop"
   );
 }
+
+/// `dispatch` of `SetChecksumOptions` on a RUNNING node validates the policy and
+/// replies `Ok(())` — the success arm the post-leave `NotRunning` lifecycle test
+/// never reaches. A backend-backed algorithm (`crc32`) is accepted because its
+/// feature is built in.
+#[cfg(feature = "crc32")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_set_checksum_running_replies_ok() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  driver.dispatch(
+    Command::SetChecksumOptions(SetChecksumOptionsCmd {
+      opts: ChecksumOptions::new().with_algorithm(memberlist_proto::ChecksumAlgorithm::Crc32),
+      reply: tx,
+    }),
+    Instant::now(),
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "a built-in checksum algorithm is accepted on a running node"
+  );
+}
+
+/// `dispatch` of `UpdateNodeMetadata` on a RUNNING node builds the validated
+/// `Meta` and replies `Ok(())` (the running success arm; the lifecycle test only
+/// covers the post-leave `NotRunning` rejection).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_update_metadata_running_replies_ok() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  driver.dispatch(
+    Command::UpdateNodeMetadata(UpdateNodeMetadataCmd {
+      meta: b"role=web".to_vec(),
+      reply: tx,
+    }),
+    Instant::now(),
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "an in-cap metadata update is applied on a running node"
+  );
+}
+
+/// `dispatch` of `QueueUserBroadcast` on a RUNNING node queues the datagram and
+/// replies `Ok(())` (the running success arm).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_queue_user_broadcast_running_replies_ok() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  driver.dispatch(
+    Command::QueueUserBroadcast(QueueUserBroadcastCmd {
+      data: Bytes::from_static(b"hello-cluster"),
+      reply: tx,
+    }),
+    Instant::now(),
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "an in-MTU user broadcast is queued on a running node"
+  );
+}
+
+/// `dispatch` of `SetLocalState` on a RUNNING node stores the push/pull snapshot
+/// and replies `Ok(())` (the running success arm).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_set_local_state_running_replies_ok() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  driver.dispatch(
+    Command::SetLocalState(SetLocalStateCmd {
+      state: Bytes::from_static(b"app-snapshot"),
+      reply: tx,
+    }),
+    Instant::now(),
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "an in-budget local-state snapshot is stored on a running node"
+  );
+}
+
+/// `dispatch` of `SetAckPayload` on a RUNNING node stores the probe-ack payload
+/// and replies `Ok(())` (the running success arm).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_set_ack_payload_running_replies_ok() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  driver.dispatch(
+    Command::SetAckPayload(SetAckPayloadCmd {
+      payload: Bytes::from_static(b"ack-extra"),
+      reply: tx,
+    }),
+    Instant::now(),
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "an in-budget ack payload is stored on a running node"
+  );
+}

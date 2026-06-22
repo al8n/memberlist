@@ -674,3 +674,54 @@ fn limited_broadcast_eq_and_ord_helpers() {
   assert!(probe == &a);
   assert!(probe != &c);
 }
+
+#[test]
+fn transmit_range_on_empty_queue_is_zero_zero() {
+  // The `take_*` paths early-return before calling `transmit_range`, so the
+  // empty-queue arm (`q.first()`/`q.last()` are None) is exercised directly.
+  let q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
+  assert_eq!(q.transmit_range(), (0, 0));
+
+  // A populated queue takes the `(Some, Some)` arm: min and max transmit counts.
+  let mut q2 = BroadcastQueue::new(3);
+  q2.queue_broadcast(bcast("a", "x", Arc::new(AtomicUsize::new(0))));
+  assert_eq!(q2.transmit_range(), (0, 0), "a fresh entry has 0 transmits");
+}
+
+#[test]
+fn insert_into_mirrors_id_bearing_entry_into_map() {
+  // `insert_into`'s `if let Some(id)` arm mirrors an id-bearing broadcast into
+  // `m`; the post-insert block leaves `m` and `q` in lockstep.
+  let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
+  q.queue_broadcast(bcast("peer", "x", Arc::new(AtomicUsize::new(0))));
+  assert_eq!(q.q.len(), 1);
+  assert_eq!(q.m.len(), 1, "the id-bearing entry is mirrored into m");
+  assert!(q.m.contains_key("peer"));
+
+  // A reinsertion (transmits bumped, below ceiling) re-mirrors the same id.
+  assert_eq!(q.take_broadcasts(99, 0, 64), vec!["x".to_string()]);
+  assert_eq!(q.q.len(), 1, "reinserted below the retransmit ceiling");
+  assert_eq!(q.m.len(), 1, "the reinserted id is mirrored again");
+  assert!(q.m.contains_key("peer"));
+}
+
+#[test]
+fn prune_to_empty_resets_id_gen() {
+  // Pruning every entry takes `prune`'s post-loop empty-queue arm, resetting
+  // the id generator so it does not grow unboundedly across cluster lifetime.
+  let mut q = BroadcastQueue::new(3);
+  let f = Arc::new(AtomicUsize::new(0));
+  q.queue_broadcast(bcast("a", "x", f.clone()));
+  q.queue_broadcast(bcast("b", "y", f.clone()));
+  assert!(q.id_gen > 0, "ids were allocated");
+
+  q.prune(0);
+  assert!(q.is_empty(), "max_retain 0 drops every entry");
+  assert_eq!(
+    f.load(Ordering::SeqCst),
+    2,
+    "each pruned entry is finished()"
+  );
+  assert_eq!(q.id_gen, 0, "an emptied queue resets the id generator");
+  assert!(q.m.is_empty(), "the id map is drained alongside the queue");
+}

@@ -366,6 +366,79 @@ fn checksum_options_serde_rejects_unknown_field() {
   assert!(serde_json::from_str::<ChecksumOptions>(r#"{"algorith":"crc32"}"#).is_err());
 }
 
+#[cfg(checksum)]
+#[test]
+fn digest_len_matches_algorithm_size_and_is_never_empty() {
+  // A real digest reports the algorithm's `digest_size` as its `len`, and is
+  // never empty — only an `Unknown` algorithm would be zero-length, and that
+  // path errors before a digest is ever constructed.
+  let algo = ChecksumAlgorithm::default();
+  let d = digest(algo, b"some payload bytes").expect("default backend is built in");
+  assert_eq!(d.len(), algo.digest_size());
+  assert!(d.len() == 4 || d.len() == 8);
+  assert!(!d.is_empty());
+  assert_eq!(d.len(), d.as_bytes().len());
+}
+
+#[test]
+fn checksum_algorithm_from_str_parses_built_in_names_and_rejects_others() {
+  use core::str::FromStr as _;
+
+  #[cfg(feature = "crc32")]
+  assert_eq!(
+    ChecksumAlgorithm::from_str("crc32").unwrap(),
+    ChecksumAlgorithm::Crc32
+  );
+  #[cfg(feature = "xxhash32")]
+  assert_eq!(
+    ChecksumAlgorithm::from_str("xxhash32").unwrap(),
+    ChecksumAlgorithm::XxHash32
+  );
+  #[cfg(feature = "xxhash64")]
+  assert_eq!(
+    ChecksumAlgorithm::from_str("xxhash64").unwrap(),
+    ChecksumAlgorithm::XxHash64
+  );
+  #[cfg(feature = "xxhash3")]
+  assert_eq!(
+    ChecksumAlgorithm::from_str("xxhash3").unwrap(),
+    ChecksumAlgorithm::XxHash3
+  );
+  #[cfg(feature = "murmur3")]
+  assert_eq!(
+    ChecksumAlgorithm::from_str("murmur3").unwrap(),
+    ChecksumAlgorithm::Murmur3
+  );
+  // An unrecognized name is a parse error.
+  assert_eq!(
+    ChecksumAlgorithm::from_str("sha256"),
+    Err(ParseChecksumAlgorithmError(()))
+  );
+  assert_eq!(
+    ChecksumAlgorithm::from_str(""),
+    Err(ParseChecksumAlgorithmError(()))
+  );
+  assert!(!ParseChecksumAlgorithmError(()).to_string().is_empty());
+}
+
+#[cfg(checksum)]
+#[test]
+fn checksum_options_apply_wraps_and_roundtrips_through_decode() {
+  // With an algorithm configured, `apply` returns a `Checksumed` frame whose
+  // wrapper round-trips back to the original payload through the decoder.
+  let algo = ChecksumAlgorithm::default();
+  let opts = ChecksumOptions::new().with_algorithm(algo);
+  let payload = b"the quick brown fox jumps over the lazy dog".repeat(4);
+  let frame = match opts.apply(&payload).expect("backend is built in") {
+    ChecksumOutput::Checksumed(f) => f,
+    ChecksumOutput::Plain => panic!("a configured algorithm must wrap"),
+  };
+  assert_eq!(frame[0], CHECKSUMED_TAG);
+  assert_eq!(frame[1], algo.tag());
+  let back = decode_checksummed_frame(&frame).expect("decode");
+  assert_eq!(back, &payload[..]);
+}
+
 #[cfg(all(feature = "clap", feature = "crc32"))]
 #[test]
 fn checksum_options_clap_parses_and_wires_env() {

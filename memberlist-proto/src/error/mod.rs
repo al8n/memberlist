@@ -285,3 +285,6 @@ pub enum StreamError {
   #[error("peer closed stream unexpectedly")]
   PeerClosed,
 }
+
+#[cfg(test)]
+mod tests;

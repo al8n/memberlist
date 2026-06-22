@@ -102,3 +102,6 @@ impl DatagramSendStatus {
     }
   }
 }
+
+#[cfg(test)]
+mod tests;

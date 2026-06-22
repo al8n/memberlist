@@ -104,3 +104,6 @@ impl<T> From<Vec<T>> for MaybeOwned<'_, [T]> {
     Self::Owned(vec.into_boxed_slice())
   }
 }
+
+#[cfg(test)]
+mod tests;

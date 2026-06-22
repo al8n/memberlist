@@ -42,6 +42,58 @@ fn write_self_signed(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
   (cert_path, key_path, ca_path)
 }
 
+#[test]
+fn config_options_accessors_reflect_construction() {
+  // These accessors are otherwise only reached behind the serde / clap feature
+  // gates; assert them directly so they hold without either feature.
+  let opts = QuicConfigOptions::new(
+    PathBuf::from("/etc/node.pem"),
+    PathBuf::from("/etc/node.key"),
+    PathBuf::from("/etc/ca.pem"),
+  );
+  assert_eq!(opts.cert_file(), &PathBuf::from("/etc/node.pem"));
+  assert_eq!(opts.key_file(), &PathBuf::from("/etc/node.key"));
+  assert_eq!(opts.ca_file(), &PathBuf::from("/etc/ca.pem"));
+  // `new` installs the documented defaults.
+  assert_eq!(opts.client_auth(), ClientAuthMode::ClusterCa);
+  assert_eq!(opts.max_idle_timeout(), None);
+  assert_eq!(opts.keep_alive_interval(), None);
+  assert_eq!(opts.unreliable_transport(), UnreliableTransport::Datagram);
+
+  // Every builder override is observable through its accessor.
+  let opts = opts
+    .with_client_auth(ClientAuthMode::TrustedNetwork)
+    .with_max_idle_timeout(Some(Duration::from_secs(20)))
+    .with_keep_alive_interval(Some(Duration::from_secs(5)))
+    .with_unreliable_transport(UnreliableTransport::Udp);
+  assert_eq!(opts.client_auth(), ClientAuthMode::TrustedNetwork);
+  assert_eq!(opts.max_idle_timeout(), Some(Duration::from_secs(20)));
+  assert_eq!(opts.keep_alive_interval(), Some(Duration::from_secs(5)));
+  assert_eq!(opts.unreliable_transport(), UnreliableTransport::Udp);
+}
+
+#[test]
+fn build_installs_configured_server_name() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  // `with_server_name` flows through `build` into `QuicOptions::new`, which
+  // installs it as the cluster-uniform SNI returned for every peer.
+  let opts = QuicConfigOptions::new(cert, key, ca).with_server_name("peer.example");
+  let cfg = opts.build().expect("build should succeed");
+  let peer = "203.0.113.7:7946".parse().unwrap();
+  assert_eq!(&*cfg.sni_for(&peer), "peer.example");
+
+  // The default name is installed when `with_server_name` is not called.
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+  let cfg = QuicConfigOptions::new(cert, key, ca)
+    .build()
+    .expect("build should succeed");
+  assert_eq!(&*cfg.sni_for(&peer), "localhost");
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn quic_config_options_serde_round_trip() {
