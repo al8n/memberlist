@@ -72,9 +72,11 @@ pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng> {
   pub(crate) free: Vec<SlotId>,
 }
 
-impl<I, const N: usize, R: Rng> Runner<'_, I, N, R>
+impl<I, const N: usize, R> Runner<'_, I, N, R>
 where
   I: memberlist_proto::Id,
+  // `run` drives `pump_loop`, whose `Engine::pump` draws from the gossip RNG.
+  R: Rng,
 {
   /// Drive the node forever: pump the engine and run the `N` workers concurrently.
   ///
@@ -131,7 +133,7 @@ where
 
 /// The engine-pump half of [`Runner::run`]: re-pump on each wake and resolve
 /// parked handle ops from the drained events.
-async fn pump_loop<I, R: Rng>(
+async fn pump_loop<I, R>(
   shared: &Shared<I, R>,
   udp: &UdpSocket<'_>,
   mailboxes: &[RefCell<Mailbox>],
@@ -140,6 +142,8 @@ async fn pump_loop<I, R: Rng>(
 ) -> !
 where
   I: memberlist_proto::Id,
+  // `Engine::pump` drives the gossip scheduler, which draws from the RNG.
+  R: Rng,
 {
   loop {
     let now = time::now();

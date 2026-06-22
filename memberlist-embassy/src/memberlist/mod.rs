@@ -153,7 +153,7 @@ pub struct Memberlist<I, A, R = SmallRng> {
   _a: PhantomData<fn(A)>,
 }
 
-impl<I, A, R: Rng> Clone for Memberlist<I, A, R>
+impl<I, A, R> Clone for Memberlist<I, A, R>
 where
   I: memberlist_proto::Id,
 {
@@ -252,7 +252,7 @@ where
   }
 }
 
-impl<I, A, R: Rng> Memberlist<I, A, R>
+impl<I, A, R> Memberlist<I, A, R>
 where
   I: memberlist_proto::Id,
 {
@@ -311,6 +311,8 @@ where
   ) -> Result<(Self, Runner<'a, I, N, R>), InitError>
   where
     Res: AddressResolver<Address = A>,
+    // Arming the SWIM scheduler (`Engine::start`, below) draws from the gossip RNG.
+    R: Rng,
   {
     // Run the deterministic local-config guards (pool sizing, bridge rings, the
     // socket-timeout range) before resolving the advertise address, so an
@@ -648,7 +650,11 @@ where
   /// `Connect`), so overlapping or out-of-order completions — concurrent sends, or
   /// sends to different peers finishing in any order — each resolve their own
   /// caller, never by arrival order.
-  pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError> {
+  pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError>
+  where
+    // Dispatching a reliable exchange schedules gossip work that draws from the RNG.
+    R: Rng,
+  {
     let now = time::now();
     let sid: StreamId = self
       .shared
@@ -836,7 +842,11 @@ where
 
   /// Seed a statically-known peer as Alive (bootstrap membership without the TCP
   /// push-pull join path). A non-routable peer is dropped by the engine.
-  pub fn inject_alive(&self, id: I, peer: SocketAddr) {
+  pub fn inject_alive(&self, id: I, peer: SocketAddr)
+  where
+    // Injecting an Alive peer schedules gossip work that draws from the RNG.
+    R: Rng,
+  {
     let now = time::now();
     self.shared.engine.borrow_mut().inject_alive(id, peer, now);
     self.shared.wake_pump();
