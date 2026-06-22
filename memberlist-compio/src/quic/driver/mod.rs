@@ -59,7 +59,7 @@ use crate::{
   snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
-use core::{fmt, time::Duration};
+use core::time::Duration;
 use memberlist_proto::metrics::Metrics;
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
@@ -204,10 +204,7 @@ struct PendingUserSend {
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
-struct QuicDriverState<I, G = rand::rngs::StdRng>
-where
-  G: rand::Rng,
-{
+struct QuicDriverState<I, G = rand::rngs::StdRng> {
   endpoint: QuicEndpoint<I, G>,
   udp_socket: UdpSocket,
   commands: Receiver<Command<I>>,
@@ -297,15 +294,7 @@ where
 /// `gossip_recv_buf_len`.
 fn gossip_recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  G: rand::Rng,
+  I: memberlist_proto::Id,
 {
   endpoint
     .gossip_mtu()
@@ -337,14 +326,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   cidr_policy: CidrFilter,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
   G: rand::Rng + Unpin,
 {
   // Spawn the per-driver observation task. It owns the user `Delegate`
@@ -904,14 +886,7 @@ async fn observation_task<I, D>(
   obs_payload_bytes: Rc<Cell<u64>>,
 ) where
   D: Delegate<Id = I, Address = SocketAddr>,
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
 {
   while let Some(ev) = obs_rx.recv().await {
     // App-data events carry the only large payloads. Measure this event for the
@@ -978,14 +953,7 @@ async fn dispatch_command<I, G>(
   cmd: Command<I>,
   now: Instant,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
   G: rand::Rng,
 {
   match cmd {
@@ -1408,14 +1376,7 @@ async fn fire_timeout_with_drain<I, G>(
   recv_buf_len: usize,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
   G: rand::Rng,
 {
   let mut dirty = false;
@@ -1508,14 +1469,7 @@ where
 /// same socket without codec wrap.
 async fn drain_actions<I, G>(state: &mut QuicDriverState<I, G>) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
   G: rand::Rng,
 {
   let mut any_progress = false;
@@ -2004,15 +1958,7 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 /// incarnation, and protocol versions.
 fn refresh_snapshot<I, G>(endpoint: &QuicEndpoint<I, G>, snapshot: &SnapshotCell<I>)
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  G: rand::Rng,
+  I: memberlist_proto::Id,
 {
   let ep = endpoint.endpoint_ref();
   refresh_snapshot_inner::<I, _>(ep, snapshot);
@@ -2026,15 +1972,7 @@ fn refresh_snapshot_if_changed<I, G>(
   snapshot: &SnapshotCell<I>,
   last_version: &mut u64,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  G: rand::Rng,
+  I: memberlist_proto::Id,
 {
   let ep = endpoint.endpoint_ref();
   let v = ep.snapshot_version();
@@ -2051,15 +1989,7 @@ fn refresh_metrics_if_changed<I, G>(
   metrics: &Rc<Cell<Metrics>>,
   last: &mut Metrics,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  G: rand::Rng,
+  I: memberlist_proto::Id,
 {
   let m = endpoint.metrics();
   if m != *last {
@@ -2072,15 +2002,7 @@ fn refresh_snapshot_inner<I, R>(
   ep: &memberlist_proto::Endpoint<I, SocketAddr, R>,
   snapshot: &SnapshotCell<I>,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  R: rand::Rng,
+  I: memberlist_proto::Id,
 {
   // Build a snapshot-local NodeState for each member with the FSM-tracked
   // liveness state (`member_liveness`) rather than the wire-protocol state

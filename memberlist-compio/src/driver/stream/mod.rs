@@ -65,7 +65,7 @@ use crate::{
   snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
-use core::{fmt, hash::Hash, time::Duration};
+use core::time::Duration;
 use memberlist_proto::metrics::Metrics;
 
 /// Driver-side state for one outstanding synchronous-join call.
@@ -438,25 +438,7 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 /// silently truncated by the kernel.
 fn gossip_recv_buf_len<I, A, R, G>(endpoint: &StreamEndpoint<I, A, R, G>) -> usize
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   endpoint
     .gossip_mtu()
@@ -549,24 +531,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   cidr_policy: CidrFilter,
 ) where
   D: Delegate<Id = I, Address = A>,
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + From<SocketAddr>
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
   R: StreamTransport,
   G: rand::Rng + Unpin,
 {
@@ -1440,24 +1406,8 @@ async fn dispatch_command<I, A, R, G>(
   cmd: Command<I>,
   now: Instant,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + From<SocketAddr>
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -1916,23 +1866,8 @@ fn dispatch_bridge_inbound<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   inbound: BridgeInbound,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -1999,24 +1934,8 @@ fn dispatch_gossip<I, A, R, G>(
   now: Instant,
   label: Option<Bytes>,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + From<SocketAddr>
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -2244,25 +2163,7 @@ fn drain_actions<I, A, R, G>(
   cidr_policy: &CidrFilter,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let mut progress = false;
   while let Some(action) = endpoint.poll_action() {
@@ -2299,25 +2200,7 @@ fn drain_transport_transmits<I, A, R, G>(
   bridges: &HashMap<ExchangeId, BridgeHandle>,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let mut progress = false;
   while let Some((eid, _peer, bytes)) = endpoint.poll_transport_transmit() {
@@ -2353,25 +2236,9 @@ async fn drain_transmits<I, A, R, G>(
   label: Option<Bytes>,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let encode_opts = EncodeOptions::new(label);
   let mut progress = false;
@@ -2462,25 +2329,7 @@ async fn drain_events<I, A, R, G>(
   pending: &mut PendingCommands,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let mut drained = false;
 
@@ -2699,23 +2548,6 @@ async fn observation_task<I, A, D>(
   obs_payload_bytes: Rc<Cell<u64>>,
 ) where
   D: Delegate<Id = I, Address = A>,
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
 {
   while let Some(ev) = obs_rx.recv().await {
     // App-data events (`UserPacket` / `RemoteStateReceived`) carry the only
@@ -2881,23 +2713,8 @@ fn fire_timeout_with_drain<I, A, R, G>(
   stream_opts: StreamTransportOptions,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -2942,25 +2759,9 @@ fn refresh_snapshot<I, A, R, G>(
   endpoint: &StreamEndpoint<I, A, R, G>,
   snapshot: &SnapshotCell<I, A>,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let ep = endpoint.endpoint_ref();
   // Build a snapshot-local NodeState for each member with the FSM-tracked
@@ -3001,25 +2802,9 @@ fn refresh_snapshot_if_changed<I, A, R, G>(
   snapshot: &SnapshotCell<I, A>,
   last_version: &mut u64,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let v = endpoint.endpoint_ref().snapshot_version();
   if v != *last_version {
@@ -3036,25 +2821,7 @@ fn refresh_metrics_if_changed<I, A, R, G>(
   metrics: &Rc<Cell<Metrics>>,
   last: &mut Metrics,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   let m = *endpoint.endpoint_ref().metrics();
   if m != *last {
@@ -3074,23 +2841,8 @@ fn handle_bridge_ready<I, A, R, G>(
   recv_buf_len: usize,
   close_timeout: Duration,
 ) where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -3170,26 +2922,9 @@ fn handle_accepted<I, A, R, G>(
   stream_opts: StreamTransportOptions,
 ) -> bool
 where
-  I: memberlist_proto::Id
-    + memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + fmt::Debug
-    + fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_proto::Data
-    + memberlist_proto::CheapClone
-    + Eq
-    + Hash
-    + fmt::Debug
-    + fmt::Display
-    + From<SocketAddr>
-    + Send
-    + Sync
-    + 'static,
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
   R: StreamTransport,
-  G: rand::Rng,
 {
   match accepted {
     // CIDR: reject a reliable connection from a blocked peer at the boundary

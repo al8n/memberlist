@@ -1246,7 +1246,14 @@ where
       _r: PhantomData,
     })
   }
+}
 
+/// Identity accessors: these read the local node from the published snapshot and
+/// need only a cheap id-clone, not the full [`NodeId`] the constructors require.
+impl<I, A, R> Memberlist<I, A, R>
+where
+  I: memberlist_proto::CheapClone,
+{
   /// This node's own identity and advertised address.
   #[must_use]
   pub fn local(&self) -> Node<I, SocketAddr> {

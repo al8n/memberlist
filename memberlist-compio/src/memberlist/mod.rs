@@ -441,7 +441,14 @@ where
       _a: PhantomData,
     })
   }
+}
 
+/// Identity accessors: served from the published snapshot with only a cheap
+/// id-clone, not the `Data` + `'static` the constructors require.
+impl<I, A> Memberlist<I, A>
+where
+  I: CheapClone,
+{
   /// The local node, taken from the latest published snapshot.
   ///
   /// Cheap clone via [`CheapClone`] on both `I` and `SocketAddr` — for
