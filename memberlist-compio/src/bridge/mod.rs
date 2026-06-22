@@ -122,8 +122,8 @@ use compio::{
   buf::{BufResult, IntoInner, IoBuf},
   io::{AsyncRead, AsyncWrite, util::Splittable},
 };
-use flume::{Receiver, Sender};
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
+use lochan::mpsc::{Receiver, Sender};
 
 use crate::driver::{
   shared::ExchangeId,
@@ -164,7 +164,7 @@ use crate::driver::{
 pub(crate) async fn bridge_task<S>(
   stream: S,
   eid: ExchangeId,
-  out_rx: Receiver<BridgeOut>,
+  mut out_rx: Receiver<BridgeOut>,
   cancel_rx: futures_channel::oneshot::Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   recv_buf_len: usize,
@@ -210,7 +210,7 @@ pub(crate) async fn bridge_task<S>(
       // server side writes its response AFTER the request EOF).
       // Exits on a hard abort (`cancel_rx`), `Close`, sender drop, or
       // the next write error.
-      let out_fut = out_rx.recv_async();
+      let out_fut = out_rx.recv();
       pin_mut!(out_fut);
       select_biased! {
         // Cancel first: ONLY an explicit abort can resolve this future now
@@ -220,7 +220,7 @@ pub(crate) async fn bridge_task<S>(
         // SOLELY by the `out_rx` arm's `Close`/`Err` path.
         () = &mut cancel_fut => break,
         out_msg = out_fut => match out_msg {
-          Ok(BridgeOut::Bytes(bytes)) => {
+          Some(BridgeOut::Bytes(bytes)) => {
             if write_closed {
               // Discard bytes after a half-close — the machine guarantees
               // it stops queueing for this exchange after `ShutdownWrite`,
@@ -247,7 +247,7 @@ pub(crate) async fn bridge_task<S>(
                   // Ignoring Err: shutdown race — driver-side receiver may
                   // be gone if the driver is tearing down.
                   let _ = inbound_tx
-                    .send_async(BridgeInbound::Error(BridgeError {
+                    .send(BridgeInbound::Error(BridgeError {
                       eid,
                       err,
                       received_at: Instant::now(),
@@ -258,7 +258,7 @@ pub(crate) async fn bridge_task<S>(
               }
             }
           }
-          Ok(BridgeOut::ShutdownWrite) => {
+          Some(BridgeOut::ShutdownWrite) => {
             if !write_closed {
               // Ignoring Err: a shutdown on a socket the peer FIN'd is
               // non-actionable.
@@ -266,7 +266,7 @@ pub(crate) async fn bridge_task<S>(
               write_closed = true;
             }
           }
-          Ok(BridgeOut::Close) | Err(_) => {
+          Some(BridgeOut::Close) | None => {
             // Graceful teardown (explicit `Close` or the handle-drop
             // disconnect). No EOF send here — the read-EOF transition in
             // the both-halves-live arm already sent one. Just exit.
@@ -280,7 +280,7 @@ pub(crate) async fn bridge_task<S>(
     // Both-halves-live mode: select between a hard abort, out_rx, and read.
     let buf = vec![0u8; recv_buf_len];
     let recv_fut = read_half.read(buf).fuse();
-    let out_fut = out_rx.recv_async();
+    let out_fut = out_rx.recv();
     pin_mut!(recv_fut, out_fut);
 
     select_biased! {
@@ -294,7 +294,7 @@ pub(crate) async fn bridge_task<S>(
       // path.
       () = &mut cancel_fut => break,
       out_msg = out_fut => match out_msg {
-        Ok(BridgeOut::Bytes(bytes)) => {
+        Some(BridgeOut::Bytes(bytes)) => {
           if write_closed {
             continue;
           }
@@ -312,7 +312,7 @@ pub(crate) async fn bridge_task<S>(
               if let Err(err) = res {
                 // Ignoring Err: shutdown-race reasoning.
                 let _ = inbound_tx
-                  .send_async(BridgeInbound::Error(BridgeError {
+                  .send(BridgeInbound::Error(BridgeError {
                     eid,
                     err,
                     received_at: Instant::now(),
@@ -323,7 +323,7 @@ pub(crate) async fn bridge_task<S>(
             }
           }
         }
-        Ok(BridgeOut::ShutdownWrite) => {
+        Some(BridgeOut::ShutdownWrite) => {
           if !write_closed {
             // Ignoring Err: a shutdown on a socket the peer FIN'd is
             // non-actionable; the read half observes the same condition
@@ -332,22 +332,22 @@ pub(crate) async fn bridge_task<S>(
             write_closed = true;
           }
         }
-        Ok(BridgeOut::Close) => {
+        Some(BridgeOut::Close) => {
           // Ignoring Err: shutdown-race reasoning.
           let _ = inbound_tx
-            .send_async(BridgeInbound::Eof(BridgeEof {
+            .send(BridgeInbound::Eof(BridgeEof {
               eid,
               received_at: Instant::now(),
             }))
             .await;
           break;
         }
-        Err(_) => {
+        None => {
           // Driver dropped the out-channel sender — treat as clean
           // close.
           // Ignoring Err: shutdown-race reasoning.
           let _ = inbound_tx
-            .send_async(BridgeInbound::Eof(BridgeEof {
+            .send(BridgeInbound::Eof(BridgeEof {
               eid,
               received_at: Instant::now(),
             }))
@@ -372,7 +372,7 @@ pub(crate) async fn bridge_task<S>(
             // for the local response).
             // Ignoring Err: shutdown-race reasoning.
             let _ = inbound_tx
-              .send_async(BridgeInbound::Eof(BridgeEof { eid, received_at }))
+              .send(BridgeInbound::Eof(BridgeEof { eid, received_at }))
               .await;
             read_closed = true;
           }
@@ -382,7 +382,7 @@ pub(crate) async fn bridge_task<S>(
             let bytes = buf[..n].to_vec();
             // Ignoring Err: shutdown-race reasoning.
             let _ = inbound_tx
-              .send_async(BridgeInbound::Bytes(BridgeBytes {
+              .send(BridgeInbound::Bytes(BridgeBytes {
                 eid,
                 bytes,
                 received_at,
@@ -392,7 +392,7 @@ pub(crate) async fn bridge_task<S>(
           Err(err) => {
             // Ignoring Err: shutdown-race reasoning.
             let _ = inbound_tx
-              .send_async(BridgeInbound::Error(BridgeError {
+              .send(BridgeInbound::Error(BridgeError {
                 eid,
                 err,
                 received_at,

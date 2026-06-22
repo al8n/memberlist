@@ -70,6 +70,7 @@ compio = { workspace = true, features = [
 ] }
 bytes = { workspace = true, features = ["std"] }
 flume = { workspace = true, default-features = false, features = ["async"] }
+lochan.workspace = true
 futures-channel.workspace = true
 futures-util = { workspace = true, default-features = false, features = [
   "std",

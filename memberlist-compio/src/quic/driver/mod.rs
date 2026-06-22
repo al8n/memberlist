@@ -29,7 +29,9 @@ use crate::QuicEndpoint;
 use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use flume::{Receiver, Sender};
+
 use futures_util::{FutureExt, pin_mut, select_biased};
+use lochan::mpsc;
 use memberlist_proto::{
   DatagramSendStatus, Instant, Node, UnreliableTransport,
   codec::{
@@ -219,7 +221,7 @@ where
   /// surfaced event here, never blocking on user observation code. An
   /// `Unbounded` channel never drops; a `Bounded(n)` channel drops the
   /// newest event when full and counts it in `observation_dropped`.
-  obs_tx: Sender<Event<I, SocketAddr>>,
+  obs_tx: mpsc::Sender<Event<I, SocketAddr>>,
   /// Observation-channel drop counter: the driver loop increments it on a
   /// `Bounded` obs-channel drop (the surfacing `try_send` below) when the
   /// delegate falls behind — by count or the payload byte backstop. A drop here
@@ -366,8 +368,8 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
   // The EventStream (`events_tx`) stays bounded best-effort.
   let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
-    crate::Channel::Unbounded => flume::unbounded::<Event<I, SocketAddr>>(),
-    crate::Channel::Bounded(n) => flume::bounded::<Event<I, SocketAddr>>(n),
+    crate::Channel::Unbounded => mpsc::unbounded::<Event<I, SocketAddr>>(),
+    crate::Channel::Bounded(n) => mpsc::bounded::<Event<I, SocketAddr>>(n),
   };
   // The two drop counters are kept distinct: the observation task increments
   // `events_dropped` on a bounded EventStream-forward drop (membership/control,
@@ -895,7 +897,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
 /// dropped its `obs_tx` at teardown). Mirrors the stream driver's
 /// `observation_task`.
 async fn observation_task<I, D>(
-  obs_rx: Receiver<Event<I, SocketAddr>>,
+  mut obs_rx: mpsc::Receiver<Event<I, SocketAddr>>,
   delegate: D,
   events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Rc<Cell<u64>>,
@@ -911,7 +913,7 @@ async fn observation_task<I, D>(
     + Sync
     + 'static,
 {
-  while let Ok(ev) = obs_rx.recv_async().await {
+  while let Some(ev) = obs_rx.recv().await {
     // App-data events carry the only large payloads. Measure this event for the
     // byte backstop and free the budget it occupied before the (possibly slow)
     // delegate hook, so the driver's enqueue side sees the reclaimed budget
@@ -1881,8 +1883,8 @@ where
       // successful enqueue, add the payload bytes to the backstop counter.
       match state.obs_tx.try_send(ev) {
         Ok(()) => crate::driver::shared::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
-        Err(flume::TrySendError::Disconnected(_)) => {}
-        Err(flume::TrySendError::Full(ev)) => {
+        Err(mpsc::TrySendError::Closed(_)) => {}
+        Err(mpsc::TrySendError::Full(ev)) => {
           crate::driver::shared::yield_once().await;
           match state.obs_tx.try_send(ev) {
             Ok(()) => {

@@ -30,6 +30,8 @@ use compio::{
 use core::task::{Context, Poll, Waker};
 use flume::{Receiver, Sender};
 
+use lochan::mpsc;
+
 use crate::StreamEndpoint;
 use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 use memberlist_proto::{
@@ -274,7 +276,7 @@ pub(crate) struct OutboundOkReady {
   /// The receive half of the bridge's pre-allocated out-channel — the
   /// driver pushed pre-handshake bytes into the matching `out_tx` while
   /// the dial was in flight.
-  pub(crate) out_rx: Receiver<BridgeOut>,
+  pub(crate) out_rx: mpsc::Receiver<BridgeOut>,
   /// The receive half of the bridge's pre-allocated cancel channel — a
   /// `StreamAction::Abort` for this exchange while the dial was in flight
   /// signals the matching `cancel_tx`, so the bridge breaks without
@@ -392,7 +394,7 @@ pub(crate) enum BridgeOut {
 /// leak post-enablement plaintext.
 struct BridgeHandle {
   /// Bytes-or-graceful-control FIFO into the bridge task.
-  out_tx: Sender<BridgeOut>,
+  out_tx: mpsc::Sender<BridgeOut>,
   /// Out-of-band hard-abort signal. Sent by the `StreamAction::Abort` arm;
   /// the bridge selects on it with priority and breaks without draining
   /// `out_tx`. A one-shot: a single send is enough to cancel.
@@ -569,8 +571,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   G: rand::Rng + Unpin,
 {
   let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
-  let (bridge_inbound_tx, bridge_inbound_rx) =
-    flume::bounded::<BridgeInbound>(stream_opts.bridge_inbound_cap());
+  let (bridge_inbound_tx, mut bridge_inbound_rx) =
+    mpsc::bounded::<BridgeInbound>(stream_opts.bridge_inbound_cap());
 
   // Spawn the per-driver observation task. It owns the user `Delegate`
   // and the `EventStream` sender and runs OFF this driver task: the
@@ -593,8 +595,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
   // The EventStream (`events_tx`) stays bounded best-effort.
   let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
-    crate::Channel::Unbounded => flume::unbounded::<Event<I, A>>(),
-    crate::Channel::Bounded(n) => flume::bounded::<Event<I, A>>(n),
+    crate::Channel::Unbounded => mpsc::unbounded::<Event<I, A>>(),
+    crate::Channel::Bounded(n) => mpsc::bounded::<Event<I, A>>(n),
   };
   // The two drop counters are kept distinct so a consumer can tell recoverable
   // from potentially-unrecoverable loss: the observation task increments
@@ -966,7 +968,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         &mut endpoint,
         &mut bridges,
         &bridge_inbound_tx,
-        &bridge_inbound_rx,
+        &mut bridge_inbound_rx,
         &bridge_ready_rx,
         driver_opts,
         stream_opts,
@@ -1056,10 +1058,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     let recv_buf = vec![0u8; recv_buf_len];
     let recv_fut = gossip_socket.recv_from(recv_buf).fuse();
     let cmd_fut = commands.recv_async().fuse();
-    let bridge_in_fut = bridge_inbound_rx.recv_async().fuse();
     let ready_fut = bridge_ready_rx.recv_async().fuse();
     let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
-    pin_mut!(recv_fut, cmd_fut, bridge_in_fut, ready_fut, timer_fut);
+    pin_mut!(recv_fut, cmd_fut, ready_fut, timer_fut);
+    // `bridge_inbound_rx` (lochan, `&mut self` recv) is recv'd INLINE in its select arm
+    // below (not pre-pinned), so the `&mut` borrow ends the instant the select resolves —
+    // letting the post-select `fire_timeout_with_drain` take `&mut` to `try_recv`-drain it.
+    // The timer arm only records `timer_fired`; the drain runs after the select.
+    // (`bridge_ready_rx` is a `flume` channel — `&self`, no impedance — so it stays the
+    // pre-pinned `ready_fut`.)
+    let mut timer_fired = false;
 
     // Arm priority (top → bottom; `select_biased!` resolves the first
     // ready arm in source order):
@@ -1113,26 +1121,14 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         }
       }
       _ = timer_fut => {
-        // `select_biased!` orders `timer_fut` ahead of both
-        // `ready_fut` and `bridge_in_fut`, so a completion that
-        // became ready BEFORE the deadline (its `received_at`
-        // already pre-deadline) but raced the timer-fire would
-        // otherwise lose to `handle_timeout` and surface as
-        // `ExchangeCompleted(Failed)` despite the success being
-        // queued. The shared `fire_timeout_with_drain` helper drains
-        // every already-arrived completion (no cap), re-polls the
-        // deadline, and fires `handle_timeout` only if still past.
-        if fire_timeout_with_drain::<I, A, R, G>(
-          &mut endpoint,
-          &mut bridges,
-          &bridge_inbound_tx,
-          &bridge_inbound_rx,
-          &bridge_ready_rx,
-          driver_opts,
-          stream_opts,
-        ) {
-          dirty = true;
-        }
+        // `select_biased!` orders `timer_fut` ahead of both the `ready` and
+        // `bridge_in` arms, so a completion that became ready BEFORE the deadline (its
+        // `received_at` already pre-deadline) but raced the timer-fire would otherwise
+        // lose to `handle_timeout` and surface as `ExchangeCompleted(Failed)` despite
+        // the success being queued. The actual drain + `handle_timeout` is deferred to
+        // `timer_fired` after the select, so it can `&mut`-drain the receivers the
+        // inline recv arms borrow during the select.
+        timer_fired = true;
       }
       accepted = accept_fut.as_mut() => {
         // A connection that landed while the select was parked. Ready accepts
@@ -1198,17 +1194,33 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         // while the loop is alive — this catch-all preserves the arm
         // shape without a hot-path branch.
       }
-      bi = bridge_in_fut => {
-        if let Ok(inbound) = bi {
+      bi = bridge_inbound_rx.recv() => {
+        if let Some(inbound) = bi {
           dispatch_bridge_inbound::<I, A, R, G>(&mut endpoint, inbound);
           dirty = true;
         }
-        // Ignoring Err: the bridge inbound channel's producers are the
-        // per-bridge byte-mover tasks; an error here means every
-        // bridge has dropped its sender. Subsequent iterations will
-        // either receive more bridge events (if a fresh bridge is
-        // spawned) or wake on other arms.
+        // Ignoring None: the bridge inbound channel's producers are the
+        // per-bridge byte-mover tasks; `None` means every bridge has
+        // dropped its sender. Subsequent iterations will either receive
+        // more bridge events (if a fresh bridge is spawned) or wake on
+        // other arms.
       }
+    }
+
+    // Past-due deadline, deferred from the timer arm so it can `&mut`-drain the bridge
+    // receivers that the inline recv arms held during the select.
+    if timer_fired
+      && fire_timeout_with_drain::<I, A, R, G>(
+        &mut endpoint,
+        &mut bridges,
+        &bridge_inbound_tx,
+        &mut bridge_inbound_rx,
+        &bridge_ready_rx,
+        driver_opts,
+        stream_opts,
+      )
+    {
+      dirty = true;
     }
 
     // Drain every outbound surface in the documented order from
@@ -2122,7 +2134,7 @@ fn process_one_action(
       {
         pending_exchanges.insert(eid);
       }
-      let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+      let (out_tx, out_rx) = mpsc::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       let ready_tx = bridge_ready_tx.clone();
@@ -2443,7 +2455,7 @@ where
 /// join/leave reply that depends on it. See [`observation_task`].
 async fn drain_events<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
-  obs_tx: &Sender<Event<I, A>>,
+  obs_tx: &mpsc::Sender<Event<I, A>>,
   observation_dropped: &Cell<u64>,
   obs_payload_bytes: &Cell<u64>,
   obs_payload_budget: Option<u64>,
@@ -2641,8 +2653,8 @@ where
     // a successful enqueue, add the payload bytes to the backstop counter.
     match obs_tx.try_send(ev) {
       Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
-      Err(flume::TrySendError::Disconnected(_)) => {}
-      Err(flume::TrySendError::Full(ev)) => {
+      Err(mpsc::TrySendError::Closed(_)) => {}
+      Err(mpsc::TrySendError::Full(ev)) => {
         yield_once().await;
         match obs_tx.try_send(ev) {
           Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
@@ -2680,7 +2692,7 @@ where
 /// blocking. The task exits when `obs_rx` closes (the driver dropped its
 /// `obs_tx` at teardown). Mirrors the QUIC driver's `observation_task`.
 async fn observation_task<I, A, D>(
-  obs_rx: Receiver<Event<I, A>>,
+  mut obs_rx: mpsc::Receiver<Event<I, A>>,
   delegate: D,
   events_tx: Sender<Event<I, A>>,
   events_dropped: Rc<Cell<u64>>,
@@ -2705,7 +2717,7 @@ async fn observation_task<I, A, D>(
     + Sync
     + 'static,
 {
-  while let Ok(ev) = obs_rx.recv_async().await {
+  while let Some(ev) = obs_rx.recv().await {
     // App-data events (`UserPacket` / `RemoteStateReceived`) carry the only
     // large payloads. Measure this event for the byte backstop and free the
     // budget it occupied as soon as it leaves the channel — before the
@@ -2862,8 +2874,8 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 fn fire_timeout_with_drain<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
-  bridge_inbound_rx: &Receiver<BridgeInbound>,
+  bridge_inbound_tx: &mpsc::Sender<BridgeInbound>,
+  bridge_inbound_rx: &mut mpsc::Receiver<BridgeInbound>,
   bridge_ready_rx: &Receiver<BridgeReady>,
   driver_opts: RuntimeOptions,
   stream_opts: StreamTransportOptions,
@@ -3057,7 +3069,7 @@ fn refresh_metrics_if_changed<I, A, R, G>(
 fn handle_bridge_ready<I, A, R, G>(
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &mpsc::Sender<BridgeInbound>,
   ready: BridgeReady,
   recv_buf_len: usize,
   close_timeout: Duration,
@@ -3153,7 +3165,7 @@ fn handle_accepted<I, A, R, G>(
   accepted: io::Result<(TcpStream, SocketAddr)>,
   endpoint: &mut StreamEndpoint<I, A, R, G>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &mpsc::Sender<BridgeInbound>,
   cidr_policy: &CidrFilter,
   stream_opts: StreamTransportOptions,
 ) -> bool
@@ -3200,7 +3212,7 @@ where
         drop(stream);
         return true;
       };
-      let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+      let (out_tx, out_rx) = mpsc::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
       bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       spawn_bridge(
@@ -3230,9 +3242,9 @@ where
 fn spawn_bridge(
   stream: TcpStream,
   eid: ExchangeId,
-  out_rx: Receiver<BridgeOut>,
+  out_rx: mpsc::Receiver<BridgeOut>,
   cancel_rx: futures_channel::oneshot::Receiver<()>,
-  bridge_inbound_tx: &Sender<BridgeInbound>,
+  bridge_inbound_tx: &mpsc::Sender<BridgeInbound>,
   recv_buf_len: usize,
   close_timeout: Duration,
 ) {
