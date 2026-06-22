@@ -68,9 +68,9 @@ async fn loopback_pair() -> (TcpStream, TcpStream) {
 async fn graceful_close_drains_queued_bytes_before_exit() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let response = b"the-final-response-bytes".to_vec();
 
@@ -78,9 +78,9 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
   // disconnects with the queue already populated — the exact ordering the
   // driver produces on a `StreamAction::Close`.
   out_tx
-    .send(BridgeOut::Bytes(response.clone()))
+    .try_send(BridgeOut::Bytes(response.clone()))
     .expect("queue response bytes");
-  out_tx.send(BridgeOut::Close).expect("queue close");
+  out_tx.try_send(BridgeOut::Close).expect("queue close");
   let handle = (out_tx, cancel_tx);
 
   // A long `close_timeout` so this graceful-drain test exercises the FIFO
@@ -126,16 +126,16 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
 async fn explicit_abort_discards_queued_bytes() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let stale = b"stale-bytes-that-must-not-reach-the-wire".to_vec();
 
   // Queue stale bytes, then fire an explicit abort. The abort must win
   // over the queued `Bytes` and break without writing them.
   out_tx
-    .send(BridgeOut::Bytes(stale))
+    .try_send(BridgeOut::Bytes(stale))
     .expect("queue stale bytes");
   cancel_tx.send(()).expect("signal explicit abort");
   // Keep `out_tx` alive so a disconnect cannot be confused for the abort:
@@ -185,9 +185,9 @@ async fn explicit_abort_discards_queued_bytes() {
 async fn explicit_abort_preempts_in_flight_write() {
   let (server, client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   // A response far larger than any kernel socket buffer: with the peer never
   // reading, its window collapses to zero and the write blocks once the
@@ -195,7 +195,7 @@ async fn explicit_abort_preempts_in_flight_write() {
   let response = vec![0xABu8; 16 * 1024 * 1024];
 
   out_tx
-    .send(BridgeOut::Bytes(response))
+    .try_send(BridgeOut::Bytes(response))
     .expect("queue oversized response");
   // Keep `out_tx` alive: the ONLY teardown signal is the explicit abort, so a
   // disconnect can never be mistaken for it. The peer (`client`) is held but
@@ -260,9 +260,9 @@ async fn explicit_abort_preempts_in_flight_write() {
 async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let close_timeout = Duration::from_millis(300);
 
@@ -294,7 +294,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   // shape (`out_tx` and `cancel_tx` both disconnect, the response queued). No
   // cancel can ever be sent now — only `close_timeout` can reclaim the bridge.
   out_tx
-    .send(BridgeOut::Bytes(response))
+    .try_send(BridgeOut::Bytes(response))
     .expect("queue oversized response");
   drop((out_tx, cancel_tx));
 
@@ -423,9 +423,9 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
 async fn recv_forwards_peer_bytes_to_driver() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
   // Keep the out-channel alive so the ONLY teardown is the explicit abort.
   let _out_tx_kept = out_tx;
 
@@ -449,7 +449,7 @@ async fn recv_forwards_peer_bytes_to_driver() {
 
   // The forwarded bytes carry this bridge's eid and match what was sent.
   let first = inbound_rx
-    .recv_async()
+    .recv()
     .await
     .expect("bridge forwards the request bytes");
   match first {
@@ -481,9 +481,9 @@ async fn recv_forwards_peer_bytes_to_driver() {
 async fn read_closed_mode_writes_late_response_then_closes() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let bridge = compio::runtime::spawn(bridge_task(
     server,
@@ -505,11 +505,8 @@ async fn read_closed_mode_writes_late_response_then_closes() {
   client.shutdown().await.expect("peer half-closes");
 
   // Drain the request bytes, then assert the EOF marker (the `Ok(0)` arm).
-  let _bytes = inbound_rx.recv_async().await.expect("request bytes");
-  let eof = inbound_rx
-    .recv_async()
-    .await
-    .expect("eof after the peer FIN");
+  let _bytes = inbound_rx.recv().await.expect("request bytes");
+  let eof = inbound_rx.recv().await.expect("eof after the peer FIN");
   match eof {
     BridgeInbound::Eof(BridgeEof { eid: got_eid, .. }) => {
       assert_eq!(got_eid, eid, "EOF carries the bridge's eid");
@@ -522,9 +519,9 @@ async fn read_closed_mode_writes_late_response_then_closes() {
   // ordering that requires the bridge to stay alive in read-closed mode.
   let response = b"server-response-after-eof".to_vec();
   out_tx
-    .send(BridgeOut::Bytes(response.clone()))
+    .try_send(BridgeOut::Bytes(response.clone()))
     .expect("queue late response");
-  out_tx.send(BridgeOut::Close).expect("queue close");
+  out_tx.try_send(BridgeOut::Close).expect("queue close");
 
   // The peer reads the full late response, then EOF.
   let buf = vec![0u8; response.len()];
@@ -545,9 +542,9 @@ async fn read_closed_mode_writes_late_response_then_closes() {
 async fn shutdown_write_half_closes_peer_read_side() {
   let (server, mut client) = loopback_pair().await;
   let eid = fresh_eid();
-  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let bridge = compio::runtime::spawn(bridge_task(
     server,
@@ -562,10 +559,10 @@ async fn shutdown_write_half_closes_peer_read_side() {
   // Write the push, then half-close the write side (the requester's anchor).
   let push = b"push-request".to_vec();
   out_tx
-    .send(BridgeOut::Bytes(push.clone()))
+    .try_send(BridgeOut::Bytes(push.clone()))
     .expect("queue push bytes");
   out_tx
-    .send(BridgeOut::ShutdownWrite)
+    .try_send(BridgeOut::ShutdownWrite)
     .expect("queue shutdown-write");
 
   // The peer reads the push, then sees FIN on its read side: `read_to_end`
@@ -620,4 +617,234 @@ async fn explicit_abort_preempts_stalled_write() {
     matches!(outcome, WriteStatus::Aborted),
     "an explicit abort must preempt a stalled write immediately"
   );
+}
+
+/// A stream whose write half always fails and whose read half blocks forever —
+/// drives the byte-mover's write-error arm without racing a peer FIN.
+struct FailingStream;
+
+impl Splittable for FailingStream {
+  type ReadHalf = BlockingRead;
+  type WriteHalf = FailingWrite;
+  fn split(self) -> (BlockingRead, FailingWrite) {
+    (BlockingRead, FailingWrite)
+  }
+}
+
+struct BlockingRead;
+
+impl AsyncRead for BlockingRead {
+  async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+    compio::time::sleep(Duration::from_secs(3600)).await;
+    BufResult(Ok(0), buf)
+  }
+}
+
+struct FailingWrite;
+
+impl AsyncWrite for FailingWrite {
+  async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+    BufResult(
+      Err(io::Error::new(io::ErrorKind::BrokenPipe, "peer reset")),
+      buf,
+    )
+  }
+
+  async fn flush(&mut self) -> io::Result<()> {
+    Ok(())
+  }
+
+  async fn shutdown(&mut self) -> io::Result<()> {
+    Ok(())
+  }
+}
+
+/// A write that fails surfaces a `BridgeInbound::Error` to the driver rather than
+/// a silent drop — the byte-mover's `WriteStatus::Wrote(Err)` arm. The read half
+/// blocks so the queued `Bytes` write is the sole resolved arm.
+#[compio::test]
+async fn write_failure_surfaces_bridge_error() {
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
+  let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+
+  let bridge = compio::runtime::spawn(bridge_task(
+    FailingStream,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    64,
+    Duration::from_secs(60),
+  ));
+
+  out_tx
+    .try_send(BridgeOut::Bytes(b"will-fail".to_vec()))
+    .expect("queue bytes for the failing write");
+
+  let got = inbound_rx
+    .recv()
+    .await
+    .expect("the failed write surfaces an Error");
+  match got {
+    BridgeInbound::Error(BridgeError { eid: got_eid, .. }) => {
+      assert_eq!(got_eid, eid, "the error carries the bridge's eid");
+    }
+    BridgeInbound::Bytes(_) => panic!("expected Error, got Bytes"),
+    BridgeInbound::Eof(_) => panic!("expected Error, got Eof"),
+  }
+
+  bridge.await.expect("bridge exits after the write error");
+}
+
+/// Dropping the out-channel sender WITHOUT a `Close` resolves `out_rx.recv()` to
+/// `None`, which the both-halves-live `None` arm maps to a clean `Eof` then exit
+/// — the handle-drop disconnect path.
+#[compio::test]
+async fn out_sender_drop_without_close_sends_eof() {
+  // Keep `_client` alive so the read half blocks (no peer FIN) and the `None`
+  // arm — not the read-EOF arm — is what resolves.
+  let (server, _client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
+  let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+
+  let bridge = compio::runtime::spawn(bridge_task(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    64,
+    Duration::from_secs(60),
+  ));
+
+  drop(out_tx);
+
+  let got = inbound_rx
+    .recv()
+    .await
+    .expect("the out-sender drop surfaces an Eof");
+  match got {
+    BridgeInbound::Eof(BridgeEof { eid: got_eid, .. }) => {
+      assert_eq!(got_eid, eid, "the eof carries the bridge's eid");
+    }
+    BridgeInbound::Bytes(_) => panic!("expected Eof, got Bytes"),
+    BridgeInbound::Error(_) => panic!("expected Eof, got Error"),
+  }
+
+  bridge
+    .await
+    .expect("bridge exits after the out-sender drop");
+}
+
+/// A stream whose read half immediately FINs (the bridge enters read-closed mode)
+/// and whose write half then fails — exercises the read-closed write-error arm.
+struct FinThenFailStream;
+
+impl Splittable for FinThenFailStream {
+  type ReadHalf = FinRead;
+  type WriteHalf = FailingWrite;
+  fn split(self) -> (FinRead, FailingWrite) {
+    (FinRead, FailingWrite)
+  }
+}
+
+struct FinRead;
+
+impl AsyncRead for FinRead {
+  async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+    BufResult(Ok(0), buf)
+  }
+}
+
+/// A FIN flips the bridge into read-closed mode; a late response whose write then
+/// fails surfaces a `BridgeInbound::Error` from the read-closed write-error arm
+/// (distinct from the both-halves-live one).
+#[compio::test]
+async fn read_closed_write_failure_surfaces_error() {
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
+  let (_cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+
+  let bridge = compio::runtime::spawn(bridge_task(
+    FinThenFailStream,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    64,
+    Duration::from_secs(60),
+  ));
+
+  // The immediate FIN surfaces an Eof and enters read-closed mode.
+  let eof = inbound_rx.recv().await.expect("eof from the FIN");
+  match eof {
+    BridgeInbound::Eof(_) => {}
+    BridgeInbound::Bytes(_) => panic!("expected Eof, got Bytes"),
+    BridgeInbound::Error(_) => panic!("expected Eof, got Error"),
+  }
+
+  // A late response now: the read-closed write fails → Error.
+  out_tx
+    .try_send(BridgeOut::Bytes(b"late-response".to_vec()))
+    .expect("queue late response");
+  let err = inbound_rx
+    .recv()
+    .await
+    .expect("error from the failed read-closed write");
+  match err {
+    BridgeInbound::Error(BridgeError { eid: got, .. }) => {
+      assert_eq!(got, eid, "the error carries the bridge's eid");
+    }
+    BridgeInbound::Bytes(_) => panic!("expected Error, got Bytes"),
+    BridgeInbound::Eof(_) => panic!("expected Error, got Eof"),
+  }
+
+  bridge
+    .await
+    .expect("bridge exits after the read-closed write error");
+}
+
+/// `ShutdownWrite` flips the write-closed gate; a subsequent `Bytes` is discarded
+/// (the both-halves-live `if write_closed { continue }` guard) rather than written
+/// — the machine's post-half-close defensive drop.
+#[compio::test]
+async fn bytes_after_shutdown_write_are_discarded() {
+  let (server, mut client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+
+  let bridge = compio::runtime::spawn(bridge_task(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    64,
+    Duration::from_secs(60),
+  ));
+
+  out_tx
+    .try_send(BridgeOut::ShutdownWrite)
+    .expect("queue shutdown-write");
+  out_tx
+    .try_send(BridgeOut::Bytes(b"discarded".to_vec()))
+    .expect("queue bytes that must be discarded");
+
+  // The peer's read side sees FIN (the half-close), never the discarded bytes.
+  let BufResult(res, _) = client.read(vec![0u8; 32]).await;
+  assert_eq!(
+    res.expect("peer reads after the half-close"),
+    0,
+    "peer observes FIN, not the discarded post-ShutdownWrite bytes"
+  );
+
+  cancel_tx.send(()).expect("abort to tear down");
+  bridge.await.expect("bridge exits on the abort");
 }

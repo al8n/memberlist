@@ -64,6 +64,7 @@ indexmap = { version = "2", default-features = false }
 ipnet = { version = "2", default-features = false }
 getifs = "0.6"
 iprfc = "0.2"
+lochan = "0.1"
 getrandom = "0.4"
 metrics = "0.24"
 paste = "1"
