@@ -157,6 +157,7 @@ where
           match datagram_conn.recv_datagram().await {
             Ok(bytes) => {
               let start = <T::Runtime as RuntimeLite>::now();
+              #[cfg(feature = "metrics")]
               let len = bytes.len();
               if let Err(e) = datagram_packet_tx
                 .send(Packet::new(remote_addr, start, bytes))
