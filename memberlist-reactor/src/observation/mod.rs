@@ -13,21 +13,10 @@ use std::{
 
 use flume::{Receiver, Sender, TrySendError};
 use futures_util::FutureExt;
+pub(crate) use memberlist_driver::observation_payload_bytes;
 use memberlist_proto::{CheapClone, event::Event};
 
 use crate::{NodeId, delegate::Delegate, shared::Shared};
-
-/// The application-payload byte count of an event (`UserPacket` /
-/// `RemoteStateReceived`) — used by the obs-channel byte backstop and to route
-/// app-data to the delegate only (never the event stream, which cannot
-/// reconstruct payloads). `None` for membership / control events.
-pub(crate) fn observation_payload_bytes<I, A>(ev: &Event<I, A>) -> Option<u64> {
-  match ev {
-    Event::UserPacket(p) => Some(p.data_ref().len() as u64),
-    Event::RemoteStateReceived(r) => Some(r.user_data_ref().len() as u64),
-    _ => None,
-  }
-}
 
 /// Dispatches one event to its matching [`Delegate`] hook. Control-only events
 /// (`LeftCluster` / `DecodeError` / `DialRequested` / `ExchangeCompleted`) have
