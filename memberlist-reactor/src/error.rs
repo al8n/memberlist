@@ -2,6 +2,8 @@
 
 use std::net::SocketAddr;
 
+pub use memberlist_driver::error::{GossipMtuTooSmall, InvalidOption};
+
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
 /// encryption backend; with none the gossip frame goes out unencrypted, so the
@@ -68,90 +70,6 @@ impl std::fmt::Display for InvalidGossipMtu {
       self.ceiling + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD,
       ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD,
     )
-  }
-}
-
-/// Payload for [`Error::GossipMtuTooSmall`]: the configured `gossip_mtu` is below
-/// the floor needed to carry the mandatory single-datagram control packets (probe
-/// Ping / Ack / minimal self-Alive) the SWIM protocol always emits. Carries the
-/// configured value and the required minimum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GossipMtuTooSmall {
-  configured: usize,
-  minimum: usize,
-}
-
-impl GossipMtuTooSmall {
-  /// Build a new payload from the configured `gossip_mtu` and the minimum.
-  #[inline]
-  pub(crate) fn new(configured: usize, minimum: usize) -> Self {
-    Self {
-      configured,
-      minimum,
-    }
-  }
-
-  /// The configured `gossip_mtu` that was rejected.
-  #[inline]
-  pub fn configured(&self) -> usize {
-    self.configured
-  }
-
-  /// The required minimum `gossip_mtu` — the floor that fits the mandatory
-  /// single-datagram control packets the protocol always emits.
-  #[inline]
-  pub fn minimum(&self) -> usize {
-    self.minimum
-  }
-}
-
-impl std::fmt::Display for GossipMtuTooSmall {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      f,
-      "gossip_mtu {} is below the minimum of {} bytes required to carry the mandatory \
-       single-datagram control packets (probe Ping / Ack / a minimal self-Alive); a \
-       smaller gossip_mtu would make normal probes exceed the plaintext gossip ceiling, \
-       so peers would reject them and falsely suspect this node",
-      self.configured, self.minimum,
-    )
-  }
-}
-
-/// Payload for [`Error::InvalidOption`]: an operator-set tuning knob was given a
-/// value that would DETERMINISTICALLY break the node — an
-/// accept-then-silently-fail configuration the constructor rejects rather than
-/// honoring. Carries the knob name and a human-readable reason describing why the
-/// value is invalid.
-#[derive(Debug, Clone)]
-pub struct InvalidOption {
-  option: &'static str,
-  reason: String,
-}
-
-impl InvalidOption {
-  /// Build a new payload from the rejected knob name and the reason.
-  #[inline]
-  pub(crate) fn new(option: &'static str, reason: String) -> Self {
-    Self { option, reason }
-  }
-
-  /// The name of the tuning knob whose value was rejected.
-  #[inline]
-  pub fn option(&self) -> &'static str {
-    self.option
-  }
-
-  /// The reason the value would deterministically break the node.
-  #[inline]
-  pub fn reason(&self) -> &str {
-    &self.reason
-  }
-}
-
-impl std::fmt::Display for InvalidOption {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "invalid {} option: {}", self.option, self.reason)
   }
 }
 
