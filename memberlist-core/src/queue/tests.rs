@@ -282,7 +282,7 @@ async fn test_transmit_limited_get_broadcasts_limit() {
   assert_eq!(
     4,
     q.inner.lock().await.id_gen,
-    "id generator doesn't reset until empty"
+    "id generator is monotonic, never resets on drain"
   );
 
   let partial = q.get_broadcasts(80).await;
@@ -290,25 +290,25 @@ async fn test_transmit_limited_get_broadcasts_limit() {
   assert_eq!(
     4,
     q.inner.lock().await.id_gen,
-    "id generator doesn't reset until empty"
+    "id generator is monotonic, never resets on drain"
   );
 
   // Only two not expired
   let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 2);
   assert_eq!(
-    0,
+    4,
     q.inner.lock().await.id_gen,
-    "id generator resets on empty"
+    "id generator is monotonic, never resets on drain"
   );
 
   // Should get nothing
   let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 0);
   assert_eq!(
-    0,
+    4,
     q.inner.lock().await.id_gen,
-    "id generator resets on empty"
+    "id generator is monotonic, never resets on drain"
   );
 }
 

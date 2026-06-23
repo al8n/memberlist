@@ -14,6 +14,10 @@ use crate::{broadcast::Broadcast, proto::TinyVec, util::retransmit_limit};
 struct Inner<B: Broadcast> {
   q: BTreeSet<LimitedBroadcast<B>>,
   m: HashMap<B::Id, LimitedBroadcast<B>>,
+  /// Monotonic broadcast-id source; never reset back to a prior value. The id is part of the
+  /// `(transmits, msg_len, id)` queue key, so reusing an id collides a new broadcast with a
+  /// still-queued same-length one and the second `insert` is silently dropped. `reset()` may
+  /// zero it only because it also clears the queue, leaving nothing to collide with.
   id_gen: u64,
 }
 
@@ -22,12 +26,6 @@ impl<B: Broadcast> Inner<B> {
     self.q.remove(item);
     if let Some(id) = item.broadcast.id() {
       self.m.remove(id);
-    }
-
-    if self.q.is_empty() {
-      // At idle there's no reason to let the id generator keep going
-      // indefinitely.
-      self.id_gen = 0;
     }
   }
 
@@ -253,12 +251,6 @@ impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
       inner
         .q
         .retain(|item| !lb.broadcast.invalidates(&item.broadcast));
-
-      if inner.q.is_empty() {
-        // At idle there's no reason to let the id generator keep going
-        // indefinitely.
-        inner.id_gen = 0;
-      }
     }
 
     // Append to the relevant queue.
