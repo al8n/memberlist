@@ -2,6 +2,7 @@
 members = [
   "memberlist",
   "memberlist-proto",
+  "memberlist-driver",
   "memberlist-compio",
   "memberlist-embedded",
   "memberlist-reactor",
@@ -86,6 +87,7 @@ tracing = "0.1"
 viewit = "0.1.5"
 
 memberlist-proto = { version = "0.4", path = "memberlist-proto", default-features = false }
+memberlist-driver = { version = "0.1", path = "memberlist-driver", default-features = false }
 memberlist-reactor = { version = "0.1", path = "memberlist-reactor", default-features = false }
 memberlist-compio = { version = "0.1", path = "memberlist-compio", default-features = false }
 memberlist-smoltcp = { version = "0.1", path = "memberlist-smoltcp", default-features = false }

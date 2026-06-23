@@ -57,6 +57,7 @@ clap = ["dep:clap", "dep:humantime", "memberlist-proto/clap"]
 
 [dependencies]
 memberlist-proto = { workspace = true, features = ["std"] }
+memberlist-driver = { workspace = true }
 rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
 agnostic = { workspace = true, features = ["net"] }
 agnostic-lite.workspace = true
