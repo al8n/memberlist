@@ -21,7 +21,7 @@ use crate::{
   AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
   ack::AckRegistry,
   awareness::Awareness,
-  broadcast::{BroadcastQueue, MemberlistBroadcast},
+  broadcast::{BroadcastQueue, BytesBroadcast, MemberlistBroadcast, NoId, UserBroadcasts},
   config::EndpointOptions,
   delegate::{AliveDelegate, MergeDelegate},
   error::{EndpointInitError, Error, GossipMtuBound, MetaTooLarge, SizeExceeded},
@@ -287,8 +287,11 @@ pub struct Endpoint<I, A, R = SmallRng> {
   reliable_pings_disabled: FxHashSet<I>,
 
   // App-pushed user-data ride-along queue (legacy NodeDelegate::broadcast_messages
-  // analog). The gossip scheduler drains it via drain_user_broadcasts.
-  user_broadcasts: VecDeque<Bytes>,
+  // analog). The gossip scheduler drains it via drain_user_broadcasts. Each
+  // payload is retransmit-counted across `retransmit_mult * ceil(log10(N+1))`
+  // gossip rounds, not sent once. Default 1 tier; an embedder can configure N
+  // priority tiers (tier 0 highest) via `EndpointOptions::with_user_broadcast_tiers`.
+  user_broadcasts: UserBroadcasts<NoId, BytesBroadcast>,
 
   // ── Scheduler deadlines ───────────────────────────────────────────────────
   // Set at `new` time with random stagger. `None` means the scheduler is
@@ -720,9 +723,10 @@ impl<I, A, R> Endpoint<I, A, R> {
     self.local_state_snapshot.clone()
   }
 
-  /// Number of user-data payloads currently queued for piggyback gossip.
+  /// Number of user-data payloads currently queued for piggyback gossip,
+  /// summed across all priority tiers.
   pub fn user_broadcast_queue_len(&self) -> usize {
-    self.user_broadcasts.len()
+    self.user_broadcasts.num_queued()
   }
 
   /// Conservative upper bound on the bytes a single drained user payload of
@@ -737,33 +741,35 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// + protobuf `data` length varint (u32 LEB128 ≤ 5)
   ///   = 17 in the unbounded worst case.
   ///
-  /// 11 is still a SOUND conservative charge for every *admissible* payload:
-  /// a payload is only drained when `L + USER_PART_OVERHEAD <= user_budget`,
-  /// and `user_budget <= compound_budget = 1400 - (COMPOUND_TAG_LEN +
-  /// COMPOUND_MAX_COUNT_PREFIX_LEN) = 1394`, so any drained payload has
-  /// `L <= 1383`. At that size every length varint above is ≤ 2 bytes, so
-  /// the *true* assembled-part overhead is at most `2 + 1 + 2 + 1 + 2 = 8
-  /// <= 11`. Do NOT "tighten" this toward 8 — the 8 only holds under the
-  /// `L <= 1383` admission bound proven here; the conservative 11 keeps the
-  /// constant correct without depending on that derivation at the call site.
+  /// 11 is a SOUND conservative charge for every *admissible* payload at any
+  /// configured `gossip_mtu`. A payload is only drained when `L +
+  /// USER_PART_OVERHEAD <= user_budget <= compound_budget = gossip_mtu -
+  /// (COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)`. Since `gossip_mtu <=
+  /// MAX_GOSSIP_MTU` (65507), an admissible `L` and each of the three length
+  /// values framing it stay under `2^21`, so every length varint above is ≤ 3
+  /// bytes and the true assembled-part overhead is at most `3 + 1 + 3 + 1 + 3 =
+  /// 11`. (At the default 1400 MTU `L <= 1383`, the varints are ≤ 2 bytes and the
+  /// true overhead is only 8.) Do NOT "tighten" toward 8 — that bound holds only
+  /// at small MTUs; 11 stays correct up to `MAX_GOSSIP_MTU`.
   const USER_PART_OVERHEAD: usize = COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
 
-  /// Drain user-data payloads up to `limit` total bytes,
-  /// in FIFO order. Used by the gossip scheduler. Returns the drained
-  /// payloads. Bytes that don't fit remain in the queue.
-  pub(crate) fn drain_user_broadcasts(&mut self, limit: usize) -> Vec<Bytes> {
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    while let Some(front) = self.user_broadcasts.front() {
-      let next_len = front.len().saturating_add(Self::USER_PART_OVERHEAD);
-      if used.saturating_add(next_len) > limit {
-        break;
-      }
-      let bytes = self.user_broadcasts.pop_front().expect("just peeked");
-      used += next_len;
-      out.push(bytes);
-    }
-    out
+  /// Drain user-data payloads up to `limit` total bytes, in priority-tier then
+  /// retransmit order. Used by the gossip scheduler. Returns the drained
+  /// payloads and the total bytes the selection charged (each payload's length
+  /// plus [`USER_PART_OVERHEAD`](Self::USER_PART_OVERHEAD)). Each selected
+  /// payload's retransmit counter is bumped and it is dropped once it reaches
+  /// `retransmit_mult * ceil(log10(num_nodes + 1))`; payloads that don't fit
+  /// remain in the queue for a later tick. `num_nodes` is the tracked member
+  /// count (`members.len()`, including retained Dead/Left until reaped — the
+  /// memberlist-core retransmit basis), recomputed per drain.
+  pub(crate) fn drain_user_broadcasts(
+    &mut self,
+    num_nodes: u32,
+    limit: usize,
+  ) -> (Vec<Bytes>, usize) {
+    self
+      .user_broadcasts
+      .take_broadcasts_measured(num_nodes, Self::USER_PART_OVERHEAD, limit)
   }
 
   fn allocate_seq(&mut self) -> u32 {
@@ -1096,6 +1102,8 @@ where
     let mut members = Members::new(local_node);
     let awareness = Awareness::new(cfg.awareness_max_multiplier());
     let broadcast = BroadcastQueue::<I, MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
+    let user_broadcasts =
+      UserBroadcasts::new(cfg.user_broadcast_tiers().into(), cfg.retransmit_mult());
 
     // Insert the local node as Alive.
     let local_node_state = NodeState::new(
@@ -1148,7 +1156,7 @@ where
       pending_stream_intents: FxHashMap::default(),
       ack_payload: Bytes::new(),
       reliable_pings_disabled: FxHashSet::default(),
-      user_broadcasts: VecDeque::new(),
+      user_broadcasts,
       next_probe: None,
       next_gossip: None,
       next_pushpull: None,
@@ -1958,46 +1966,93 @@ where
     Ok(())
   }
 
+  /// Reject the broadcast if it is leaving/left, or if `data` would not fit a
+  /// compound part of the gossip datagram; otherwise `Ok`. Shared fail-fast
+  /// guard for the `queue_user_broadcast*` setters.
+  fn check_user_broadcast(&self, data: &Bytes) -> Result<(), crate::error::Error> {
+    // Reject once leaving/left, like update_meta: a node that has begun tearing
+    // down rejects further config mutations rather than report a false success.
+    self.ensure_running()?;
+    // Gate on the compound-part budget — the inverse of "will the gossip tier
+    // walk ever select this payload". The drain charges `data.len() +
+    // USER_PART_OVERHEAD` against the compound budget (`gossip_mtu - compound
+    // header`), so a payload is sendable iff `data.len() <= compound_budget -
+    // USER_PART_OVERHEAD`; reject a larger one here rather than store bytes no
+    // tick can ship. `BytesBroadcast::encoded_len == data.len()`, so charge the
+    // length directly, off the stable `gossip_mtu`, not a per-tick budget.
+    let limit = self
+      .gossip_mtu()
+      .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)
+      .saturating_sub(Self::USER_PART_OVERHEAD);
+    let len = data.len();
+    if len > limit {
+      return Err(crate::error::Error::UserBroadcastExceedsMtu(
+        crate::error::SizeExceeded::new(len, limit),
+      ));
+    }
+    Ok(())
+  }
+
   /// Queue an opaque user-data payload to ride along with outgoing gossip
-  /// packets. Each payload is FIFO-delivered: the gossip scheduler pops
-  /// payloads from the front of the queue and packs as many as fit in each
-  /// outgoing packet.
+  /// packets. The payload is retransmit-counted: the gossip scheduler emits it
+  /// across `retransmit_mult * ceil(log10(N + 1))` gossip rounds (epidemic
+  /// dissemination), prioritizing freshly-queued payloads, then drops it. This
+  /// is the highest-priority tier (rank `0`); see
+  /// [`queue_user_broadcast_ranked`](Self::queue_user_broadcast_ranked) for
+  /// lower-priority tiers.
   ///
   /// Replaces legacy `NodeDelegate::broadcast_messages`. Unlike the legacy
   /// callback (which was pulled by the gossip scheduler each round), our
   /// API is push-based — the application enqueues bytes ahead of time.
   ///
-  /// A payload whose lone framed `UserData` packet would exceed the gossip
-  /// packet budget ([`gossip_mtu`](EndpointOptions::gossip_mtu)) is rejected
-  /// with [`Error::UserBroadcastExceedsMtu`](crate::error::Error::UserBroadcastExceedsMtu)
-  /// and NOT stored: such a payload is deterministically untransmittable (it
-  /// cannot be gossiped even alone), so storing it would falsely report
-  /// success and leave bytes queued until a gossip tick discards them.
-  /// Mirrors the fail-fast [`set_ack_payload`](Self::set_ack_payload) cap.
+  /// A payload whose raw `data.len()` exceeds the gossip compound-part budget
+  /// ([`gossip_mtu`](EndpointOptions::gossip_mtu) minus the compound header and a
+  /// conservative per-part framing overhead) is rejected with
+  /// [`Error::UserBroadcastExceedsMtu`](crate::error::Error::UserBroadcastExceedsMtu)
+  /// and NOT stored: the gossip drain selects user broadcasts through the
+  /// compound-part tier walk, so an over-budget payload is never selected and
+  /// would otherwise sit queued forever. A *selected* payload is emitted as a lone
+  /// [`Transmit::Packet`] when it is the tick's only message, or a
+  /// [`Transmit::Compound`] part when several share the datagram. This is a
+  /// *selection* budget, not a physical wire limit — the conservative overhead can
+  /// reject a payload that would still fit a lone `gossip_mtu` datagram; route
+  /// larger payloads over the directed / reliable-stream path. Mirrors the
+  /// fail-fast [`set_ack_payload`](Self::set_ack_payload) cap.
   ///
   /// **No automatic dedup:** the application is responsible for tracking
   /// which broadcasts are still relevant. To bound queue growth, check
   /// `user_broadcast_queue_len()` and avoid pushing if too many are pending.
   pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
-    // Reject once leaving/left, like update_meta: a node that has begun tearing
-    // down rejects further config mutations rather than report a false success.
-    self.ensure_running()?;
-    // Charge the exact framed size of the lone `UserData` packet that would
-    // carry this payload — the same `encode_message` idiom the gossip
-    // scheduler uses for its lone-payload fit check. A payload whose lone
-    // frame already exceeds the gossip budget can never be gossiped even
-    // alone, so reject it here rather than store bytes the scheduler would
-    // only discard at the next tick.
-    let encoded_len = crate::wire::encode_message::<I, A>(&Message::UserData(data.cheap_clone()))
-      .map(|b| b.len())
-      .unwrap_or(usize::MAX);
-    let budget = self.gossip_mtu();
-    if encoded_len > budget {
-      return Err(crate::error::Error::UserBroadcastExceedsMtu(
-        crate::error::SizeExceeded::new(encoded_len, budget),
-      ));
-    }
-    self.user_broadcasts.push_back(data);
+    self.check_user_broadcast(&data)?;
+    self
+      .user_broadcasts
+      .queue_ranked(0, BytesBroadcast::new(data));
+    Ok(())
+  }
+
+  /// As [`queue_user_broadcast`](Self::queue_user_broadcast), but enqueues at
+  /// priority `rank` (`0` = highest). A rank at or beyond the configured tier
+  /// count ([`with_user_broadcast_tiers`](EndpointOptions::with_user_broadcast_tiers),
+  /// default 1) saturates to the lowest tier — a larger rank is demoted, never
+  /// promoted.
+  ///
+  /// **Strict priority, no cross-tier fairness.** Higher tiers drain fully before
+  /// lower ones under the shared gossip budget, so under sustained higher-priority
+  /// traffic that fills the per-tick budget, lower-priority payloads are deferred
+  /// indefinitely and do NOT advance their retransmit counters — those ranks have
+  /// **no eventual-delivery guarantee**. Intentional; mirrors Go serf's strict
+  /// intent > query > event queues. Tiers are unbounded by default; observe depth
+  /// via [`user_broadcast_queue_len`](Self::user_broadcast_queue_len) and bound it
+  /// embedder-side if a high tier can be flooded.
+  pub fn queue_user_broadcast_ranked(
+    &mut self,
+    rank: u8,
+    data: Bytes,
+  ) -> Result<(), crate::error::Error> {
+    self.check_user_broadcast(&data)?;
+    self
+      .user_broadcasts
+      .queue_ranked(rank as usize, BytesBroadcast::new(data));
     Ok(())
   }
 
@@ -2794,6 +2849,10 @@ where
     // flush and delay `LeftCluster`. Clearing here leaves the dead-self fan-out
     // below as the only content of `pending_transmits`.
     self.pending_transmits.clear();
+    // Drains the user-broadcast queue so a left node stops gossiping stale user
+    // data: the gossip scheduler is shut down above, so any payload still queued
+    // via `queue_user_broadcast*` would never be drained again.
+    self.user_broadcasts.reset();
     for to in live_peers {
       self
         .pending_transmits
@@ -3330,12 +3389,13 @@ where
   /// Drains pending membership broadcasts (via [`BroadcastQueue::take_broadcasts`])
   /// and queued user payloads (via [`Self::drain_user_broadcasts`]), picks up to
   /// `gossip_nodes` random Alive/Suspect peers (excluding the local node), and
-  /// emits one [`Transmit::Packet`] per (target, message) pair. The scheduler
-  /// deadline is always advanced by `gossip_interval`, even when no broadcasts
-  /// are queued.
+  /// emits one datagram per target — a [`Transmit::Packet`] for a single message
+  /// or a [`Transmit::Compound`] when several messages share the datagram. The
+  /// scheduler deadline is always advanced by `gossip_interval`, even when no
+  /// broadcasts are queued.
   ///
-  /// Packet-size limit is `1400` bytes — just under a typical 1500-byte Ethernet
-  /// MTU, keeping gossip packets UDP-safe.
+  /// Datagrams are sized to the configured gossip MTU (`gossip_mtu`), keeping
+  /// gossip packets UDP-safe.
   fn fire_gossip_scheduler(&mut self, now: Instant) {
     let Some(deadline) = self.next_gossip else {
       return;
@@ -3387,101 +3447,91 @@ where
       return;
     }
 
-    // Drain pending membership broadcasts (respects per-broadcast retransmit
-    // limit and the configured gossip-MTU sub-budget).
-    //
-    // The selected set is emitted as ONE compound datagram when >= 2, so
-    // reserve the compound header (tag + count varint) from the
+    // The selected membership set is emitted as ONE compound datagram when
+    // >= 2, so reserve the compound header (tag + count varint) from the
     // sub-MTU ceiling and charge each message the per-part inner-length
     // varint (conservative u32 upper bounds — never an over-MTU datagram).
-    // `bytesAvail = gossip_mtu - compoundHeader` is passed to
-    // `take_broadcasts` together with the per-part overhead.
-    let compound_budget = self
-      .gossip_mtu()
-      .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN);
-    let (membership_broadcasts, membership_used) = self.broadcast.take_broadcasts_measured(
-      num_nodes,
-      COMPOUND_MAX_PART_PREFIX_LEN,
-      compound_budget,
-    );
+    // `bytesAvail = gossip_mtu - compoundHeader` is the compound budget.
+    let gossip_mtu = self.gossip_mtu();
+    let compound_budget =
+      gossip_mtu.saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN);
 
-    // SWIM-priority assembly of the gossip datagram. Three regimes:
+    // Membership top-item preemption (runs BEFORE the compound drain).
     //
-    // (a) the compound-budget membership drain selected >= 1 message:
-    //     fill the residual of the SAME compound_budget with user data
-    //     (membership and user broadcasts share one bytes_avail), so the
-    //     assembled compound stays within ONE MTU. membership_used is
-    //     recomputed exactly as take_broadcasts charged it (encoded
-    //     plain-frame length + the per-part inner_len varint).
+    // The membership queue is id-deduplicated only PER node, so a near-MTU
+    // `Alive`/`Suspect`/`Dead` for one node coexists with smaller updates for
+    // others. The compound drain selects by `(transmits asc, msg_len desc, id
+    // desc)` but SKIPS any item too large for a compound part, so under cross-node
+    // churn it could keep shipping the smaller items while the near-MTU item is
+    // never selected — zero sends, never disseminated. A node's own state MUST
+    // disseminate (membership broadcasts have no enqueue gate to reject them, the
+    // way oversized user payloads do), so when the first SENDABLE item (the first
+    // the drain would pick, skipping any over-MTU head) does NOT fit a compound
+    // part (`len + per-part overhead > compound_budget`) yet fits a lone datagram
+    // (`len <= gossip_mtu`), lone-send exactly that one as a byte-identical
+    // `Packet` and defer user data this tick (SWIM priority — best-effort user
+    // gossip cannot starve a membership update; deferred user broadcasts wait, no
+    // loss). This test is the exact inverse of "the compound drain can select this
+    // top item", capturing precisely the case the compound drain strands.
     //
-    // (b) the compound drain selected nothing, but a near-MTU membership
-    //     broadcast (plain frame > compound_budget - per-part overhead yet
-    //     <= MTU) is stranded: rescue exactly ONE as a lone byte-identical
-    //     Packet, BEFORE touching user data. SWIM dissemination outranks
-    //     best-effort user gossip, so continuous user traffic must not
-    //     starve a valid membership update — user broadcasts wait for the
-    //     next tick (best-effort, FIFO intact, no loss).
-    //
-    // (c) no membership this tick (none fit the compound budget, none
-    //     fits a lone Packet): user broadcasts get the full
-    //     compound_budget; if even that drains nothing, a lone near-MTU
-    //     user payload is rescued as a Packet and an un-gossipable head
-    //     (> any single datagram) is dropped so it cannot head-of-line-
-    //     block the FIFO forever (best-effort gossip; the pure machine
-    //     does not log). A fitting message is never permanently stranded,
-    //     and a lone message ships as its own datagram.
-    let all_broadcasts: Vec<Message<I, A>> = if !membership_broadcasts.is_empty() {
-      // `membership_used` came back from `take_broadcasts_measured` (the bytes it
-      // charged: each message's encoded plain-frame length + the per-part
-      // varint), so the selected messages are NOT re-encoded here.
-      // take_broadcasts guarantees membership_used <= compound_budget;
-      // saturating_sub defends a contract break into an empty user budget
-      // rather than a wrapped (usize::MAX) one that re-opens the Critical.
-      let user_budget = compound_budget.saturating_sub(membership_used);
-      let mut v = membership_broadcasts;
-      v.extend(
-        self
-          .drain_user_broadcasts(user_budget)
-          .into_iter()
-          .map(Message::UserData),
-      );
-      v
-    } else if let Some(m) = self
+    // It does NOT guarantee the near-MTU item its full retransmit ceiling: once
+    // lone-sent it is at a higher transmit count and correctly yields to fresher
+    // (lower-transmit) updates on later ticks (Go's `Less` ordering) — pinning it
+    // would invert that freshness invariant and starve fresh updates. Push-pull
+    // anti-entropy is the backstop for any gossip-deferred membership state; this
+    // only guarantees the item is never PERMANENTLY skipped (zero sends) by
+    // smaller coexisting items. `peek_first_sendable_encoded_len` skips over-MTU
+    // heads (those disseminate only via push-pull), and `take_one_broadcast(..,
+    // gossip_mtu)` below selects that same first sendable item.
+    let membership_top_is_near_mtu = self
       .broadcast
-      .take_one_broadcast(num_nodes, self.gossip_mtu())
-    {
-      // Exactly ONE membership message ⇒ lone byte-identical Packet; user
-      // broadcasts are intentionally NOT drained this tick (SWIM priority
-      // — continuous user traffic cannot starve a membership update).
-      vec![m]
-    } else {
-      // No membership this tick ⇒ user data may use the full
-      // compound_budget (membership_used == 0). drain_user_broadcasts
-      // charges each payload its assembled compound-part size; a >= 2
-      // result is a budgeted compound, exactly 1 a Packet.
-      let mut v: Vec<Message<I, A>> = self
-        .drain_user_broadcasts(compound_budget)
-        .into_iter()
-        .map(Message::UserData)
-        .collect();
-      if v.is_empty() {
-        // Lone near-MTU user payload: charged the compound per-part
-        // overhead it never fits the compound-reduced budget, yet a single
-        // one is a valid plain Packet <= MTU. Emit one if it fits a
-        // datagram; drop one that can never fit ANY datagram so it cannot
-        // head-of-line-block the FIFO forever.
-        while let Some(payload) = self.user_broadcasts.front().cloned() {
-          let frame_len = crate::wire::encode_message::<I, A>(&Message::UserData(payload.clone()))
-            .map(|b| b.len())
-            .unwrap_or(usize::MAX);
-          self.user_broadcasts.pop_front();
-          if frame_len <= self.gossip_mtu() {
-            v.push(Message::UserData(payload));
-            break; // exactly one ⇒ emitted as a byte-identical Packet
-          }
-        }
+      .peek_first_sendable_encoded_len(gossip_mtu)
+      .is_some_and(|len| len + COMPOUND_MAX_PART_PREFIX_LEN > compound_budget);
+
+    // SWIM-priority assembly of the gossip datagram:
+    //
+    // - near-MTU top membership item: lone byte-identical `Packet`, user data
+    //   deferred this tick.
+    //
+    // - otherwise the compound-budget membership drain runs. When it selects
+    //   >= 1, user data fills the residual of the SAME compound_budget (membership
+    //   and user broadcasts share one bytes_avail) so the compound stays within
+    //   ONE MTU; `membership_used` is exactly what `take_broadcasts` charged, so
+    //   the selected messages are NOT re-encoded. When it selects nothing, user
+    //   data owns the full compound_budget. Every queued user payload passed the
+    //   compound-part enqueue gate, so each selected payload fits; >= 2 assemble
+    //   as a compound, exactly 1 a plain frame.
+    let all_broadcasts: Vec<Message<I, A>> = if membership_top_is_near_mtu {
+      match self.broadcast.take_one_broadcast(num_nodes, gossip_mtu) {
+        // Lone byte-identical Packet; user broadcasts are intentionally NOT
+        // drained this tick (SWIM priority).
+        Some(m) => vec![m],
+        // The peek reported a sendable near-MTU item, so this re-selection under
+        // the same gossip_mtu limit always succeeds; the None arm is unreachable,
+        // falling back to an empty datagram rather than panicking.
+        None => Vec::new(),
       }
-      v
+    } else {
+      let (membership_broadcasts, membership_used) = self.broadcast.take_broadcasts_measured(
+        num_nodes,
+        COMPOUND_MAX_PART_PREFIX_LEN,
+        compound_budget,
+      );
+      if !membership_broadcasts.is_empty() {
+        // take_broadcasts guarantees membership_used <= compound_budget;
+        // saturating_sub defends a contract break into an empty user budget
+        // rather than a wrapped (usize::MAX) one.
+        let user_budget = compound_budget.saturating_sub(membership_used);
+        let mut v = membership_broadcasts;
+        // The user drain charges and reports its own bytes; only the messages
+        // are needed here (this tick's datagram is already sized by the budget).
+        let (user_msgs, _user_used) = self.drain_user_broadcasts(num_nodes, user_budget);
+        v.extend(user_msgs.into_iter().map(Message::UserData));
+        v
+      } else {
+        let (user_msgs, _used) = self.drain_user_broadcasts(num_nodes, compound_budget);
+        user_msgs.into_iter().map(Message::UserData).collect()
+      }
     };
 
     // One datagram per target by the >= 2 rule: a single message stays a
