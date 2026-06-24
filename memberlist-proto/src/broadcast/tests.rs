@@ -1,4 +1,5 @@
 use super::*;
+use bytes::Bytes;
 use core::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -109,7 +110,7 @@ fn retransmit_ceiling_finishes_broadcast() {
 /// invalidation/reset block. memberlist-core stamps it first; when a
 /// has-id replacement empties the queue and resets `id_gen = 0`, the
 /// reinserted item then carries a PRE-reset id that is inconsistent with
-/// `id_gen` (id > id_gen). That breaks the monotonic-id FIFO tiebreaker
+/// `id_gen` (id > id_gen). That breaks the monotonic-id tiebreaker
 /// and can later collide on `(transmits, msg_len, id)`, making `q.insert`
 /// a silent no-op while `m` was updated (m/q desync, dropped gossip).
 /// This test locks the invariant: every queued id stays `<= id_gen`,
@@ -512,6 +513,43 @@ fn take_one_broadcast_on_empty_queue_returns_none() {
 }
 
 #[test]
+fn peek_first_sendable_encoded_len_skips_over_limit_head() {
+  // Empty queue ⇒ None.
+  let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
+  assert_eq!(q.peek_first_sendable_encoded_len(1024), None);
+
+  // The queue orders by (transmits asc, msg_len desc, id desc), so among equal
+  // (fresh, transmits 0) items the LARGEST msg_len is first — exactly the one
+  // take_broadcasts / take_one_broadcast select first under a roomy limit. Peek
+  // must report its encoded length.
+  q.queue_broadcast(bcast("a", "aa", Arc::new(AtomicUsize::new(0)))); // 2 B
+  q.queue_broadcast(bcast("b", "bbbbbb", Arc::new(AtomicUsize::new(0)))); // 6 B
+  q.queue_broadcast(bcast("c", "cccc", Arc::new(AtomicUsize::new(0)))); // 4 B
+  assert_eq!(
+    q.peek_first_sendable_encoded_len(1024),
+    Some(6),
+    "the largest fitting fresh item (6 B) is the first sendable item"
+  );
+
+  // An over-limit head is SKIPPED: under a 5 B limit the 6 B item does not fit,
+  // so the next-largest fitting item (4 B) is reported — an untransmittable head
+  // cannot mask a sendable item behind it.
+  assert_eq!(
+    q.peek_first_sendable_encoded_len(5),
+    Some(4),
+    "the 6 B head exceeds the 5 B limit and is skipped for the 4 B item"
+  );
+
+  // It is the SAME item take_one_broadcast drains first (a roomy lone limit
+  // selects the top item, whose length the peek just reported).
+  assert_eq!(
+    q.take_one_broadcast(99, 1024),
+    Some("bbbbbb".to_string()),
+    "the drained top item is the one peek reported"
+  );
+}
+
+#[test]
 fn prune_with_max_retain_above_len_is_noop() {
   let mut q = BroadcastQueue::new(3);
   let f = Arc::new(AtomicUsize::new(0));
@@ -724,4 +762,218 @@ fn prune_to_empty_resets_id_gen() {
   );
   assert_eq!(q.id_gen, 0, "an emptied queue resets the id generator");
   assert!(q.m.is_empty(), "the id map is drained alongside the queue");
+}
+
+#[test]
+fn noid_display_and_bounds() {
+  // `NoId` must satisfy the `Broadcast::Id` bounds (Clone/Eq/Hash/Debug/Display).
+  let a = NoId;
+  let b = a;
+  assert_eq!(a, b);
+  // Display renders without panicking (placeholder glyph).
+  let _ = format!("{a}");
+  // Hashable: usable as a map key.
+  let mut set = std::collections::HashSet::new();
+  set.insert(NoId);
+  assert!(set.contains(&NoId));
+}
+
+#[test]
+fn bytes_broadcast_is_unique_and_no_id() {
+  let b = BytesBroadcast::new(Bytes::from_static(b"payload"));
+  assert!(b.is_unique(), "user broadcasts are intrinsically unique");
+  assert!(b.id().is_none(), "user broadcasts carry no invalidation id");
+  assert!(
+    !b.invalidates(&b),
+    "user broadcasts never invalidate others"
+  );
+  assert_eq!(b.message(), &Bytes::from_static(b"payload"));
+}
+
+#[test]
+fn bytes_broadcast_encoded_len_is_byte_length() {
+  // `BytesBroadcast` sizes its payload as the plain byte length (no wire
+  // encode), the natural sizing for an opaque user payload.
+  let data = Bytes::from_static(b"abcdef");
+  assert_eq!(
+    <BytesBroadcast as Broadcast>::encoded_len(&data),
+    6,
+    "encoded_len is the byte length"
+  );
+}
+
+#[test]
+fn bytes_broadcast_round_trips_through_queue_with_retransmit() {
+  // A user broadcast queued ONCE must be emitted across multiple drains
+  // (retransmit), not delivered once. For 99 nodes the ceiling is
+  // retransmit_mult(3) * ceil(log10(100)) = 3 * 2 = 6.
+  let mut q: BroadcastQueue<NoId, BytesBroadcast> = BroadcastQueue::new(3);
+  q.queue_broadcast(BytesBroadcast::new(Bytes::from_static(b"hello")));
+  let mut emitted = 0;
+  for _ in 0..6 {
+    let got = q.take_broadcasts(99, 0, 1024);
+    assert_eq!(got, vec![Bytes::from_static(b"hello")]);
+    emitted += 1;
+  }
+  assert_eq!(emitted, 6, "emitted once per drain up to the ceiling");
+  // The 6th drain reached the ceiling and evicted it.
+  assert_eq!(q.num_queued(), 0, "evicted at the retransmit ceiling");
+  // Further drains yield nothing.
+  assert!(q.take_broadcasts(99, 0, 1024).is_empty());
+}
+
+#[test]
+fn bytes_broadcast_finishes_without_panic() {
+  // `BytesBroadcast` carries no finished-callback; `finished()` is the default no-op.
+  let mut q: BroadcastQueue<NoId, BytesBroadcast> = BroadcastQueue::new(3);
+  q.queue_broadcast(BytesBroadcast::new(Bytes::from_static(b"x")));
+  q.reset();
+  assert!(q.is_empty());
+}
+
+#[test]
+fn bytes_broadcast_new_drops_without_panic() {
+  // `BytesBroadcast` carries no finished-callback; dropping it must not panic.
+  let b = BytesBroadcast::new(Bytes::from_static(b"x"));
+  drop(b);
+}
+
+#[test]
+fn take_broadcasts_measured_admits_empty_payload_at_exact_overhead() {
+  // `BytesBroadcast::encoded_len` is the raw byte length, so an empty payload has
+  // length 0 and is admissible (`0 + overhead <= limit`). The drain guard must
+  // keep searching when `free == overhead` — exiting there would skip the empty
+  // payload forever, never selecting or retransmit-counting it.
+  let mut q: BroadcastQueue<NoId, BytesBroadcast> = BroadcastQueue::new(3);
+  q.queue_broadcast(BytesBroadcast::new(Bytes::new())); // encoded_len 0
+  let overhead = 11usize;
+  // num_nodes=10 ⇒ retransmit ceiling 6, so a selected payload stays queued
+  // (transmits 0→1) — proving it was selected + retransmit-counted, not skipped.
+  let (msgs, used) = q.take_broadcasts_measured(10, overhead, overhead);
+  assert_eq!(
+    msgs.len(),
+    1,
+    "the empty payload fits exactly at limit == overhead and must be selected"
+  );
+  assert!(msgs[0].is_empty());
+  assert_eq!(
+    used, overhead,
+    "charged exactly the overhead for a 0-length body"
+  );
+  assert_eq!(
+    q.num_queued(),
+    1,
+    "selected + retransmit-counted (ceiling 6 not reached), still queued"
+  );
+}
+
+#[test]
+fn user_broadcasts_single_tier_matches_one_queue() {
+  let mut u = UserBroadcasts::<NoId, BytesBroadcast>::single(3);
+  assert!(u.is_empty());
+  u.queue_ranked(0, BytesBroadcast::new(Bytes::from_static(b"a")));
+  assert_eq!(u.num_queued(), 1);
+  let (msgs, used) = u.take_broadcasts_measured(99, 0, 1024);
+  assert_eq!(msgs, vec![Bytes::from_static(b"a")]);
+  assert_eq!(used, 1, "one byte charged, no overhead");
+}
+
+#[test]
+fn user_broadcasts_drains_tiers_in_priority_order_under_shrinking_budget() {
+  // 3 tiers; rank 0 = highest priority drained first. Each tier holds one
+  // 4-byte message. num_nodes=0 ⇒ retransmit ceiling 0 ⇒ each message is
+  // evicted after one emission, isolating the priority ordering from
+  // retransmit reinsertion. A budget of 4 fits exactly ONE message, so only
+  // tier 0 (highest priority) drains; tiers 1 and 2 are starved this round.
+  let mut u =
+    UserBroadcasts::<NoId, BytesBroadcast>::new(core::num::NonZeroUsize::new(3).unwrap(), 3);
+  u.queue_ranked(0, BytesBroadcast::new(Bytes::from_static(b"aaaa")));
+  u.queue_ranked(1, BytesBroadcast::new(Bytes::from_static(b"bbbb")));
+  u.queue_ranked(2, BytesBroadcast::new(Bytes::from_static(b"cccc")));
+  assert_eq!(u.num_queued(), 3);
+
+  let (msgs, used) = u.take_broadcasts_measured(0, 0, 4);
+  assert_eq!(
+    msgs,
+    vec![Bytes::from_static(b"aaaa")],
+    "only the highest-priority tier (0) fits the 4-byte budget"
+  );
+  assert_eq!(used, 4);
+  assert_eq!(
+    u.num_queued(),
+    2,
+    "tier 0 emptied (ceiling 0), 1 and 2 remain"
+  );
+
+  // A roomy budget then drains the remaining tiers in priority order 1 then 2.
+  let (msgs, _used) = u.take_broadcasts_measured(0, 0, 1024);
+  assert_eq!(
+    msgs,
+    vec![Bytes::from_static(b"bbbb"), Bytes::from_static(b"cccc")],
+    "tier 1 drains before tier 2"
+  );
+  assert!(u.is_empty());
+}
+
+#[test]
+fn user_broadcasts_saturated_high_tier_defers_lower_tier_observably() {
+  // Strict priority, NO fairness: a continuously-refilled rank-0 (top) item that
+  // fills the byte budget each round preempts the rank-1 item indefinitely — by
+  // design (Go-faithful intent>query>event) — but the deferred rank-1 item stays
+  // OBSERVABLE in the queue (never silently lost). num_nodes=0 ⇒ ceiling 0 ⇒ each
+  // rank-0 emission evicts, so a fresh rank-0 is re-queued each round to keep
+  // tier 0 saturated.
+  let mut u =
+    UserBroadcasts::<NoId, BytesBroadcast>::new(core::num::NonZeroUsize::new(2).unwrap(), 3);
+  u.queue_ranked(1, BytesBroadcast::new(Bytes::from_static(b"low")));
+
+  for _ in 0..16 {
+    u.queue_ranked(0, BytesBroadcast::new(Bytes::from_static(b"aaaa")));
+    // Budget 4 fits exactly one rank-0 part; the residual for tier 1 is 0.
+    let (msgs, used) = u.take_broadcasts_measured(0, 0, 4);
+    assert_eq!(
+      msgs,
+      vec![Bytes::from_static(b"aaaa")],
+      "the saturated rank-0 tier consumes the whole budget; rank-1 is deferred"
+    );
+    assert_eq!(used, 4);
+  }
+
+  // The deferred rank-1 payload is STILL queued (observable, not lost) after the
+  // sustained rank-0 flood — strict priority gives the lower tier no
+  // eventual-delivery guarantee, but it remains visible via the queue.
+  assert_eq!(
+    u.num_queued(),
+    1,
+    "the deferred rank-1 payload remains observable in the queue"
+  );
+}
+
+#[test]
+fn user_broadcasts_queue_ranked_out_of_range_saturates_to_lowest_tier() {
+  // rank >= tier count saturates to the LOWEST tier (min(rank, len-1)).
+  // A too-large rank is a too-low priority and belongs in the lowest tier.
+  let mut u =
+    UserBroadcasts::<NoId, BytesBroadcast>::new(core::num::NonZeroUsize::new(3).unwrap(), 3);
+  // rank 99 saturates to tier index 2 (the lowest of 3 tiers).
+  u.queue_ranked(99, BytesBroadcast::new(Bytes::from_static(b"low")));
+  // A higher-priority message in tier 0 drains first.
+  u.queue_ranked(0, BytesBroadcast::new(Bytes::from_static(b"hi")));
+
+  let (msgs, _used) = u.take_broadcasts_measured(99, 0, 1024);
+  assert_eq!(
+    msgs,
+    vec![Bytes::from_static(b"hi"), Bytes::from_static(b"low")],
+    "tier 0 drains before the saturated lowest tier"
+  );
+}
+
+#[test]
+fn user_broadcasts_empty_and_num_queued() {
+  let mut u = UserBroadcasts::<NoId, BytesBroadcast>::single(3);
+  assert!(u.is_empty());
+  assert_eq!(u.num_queued(), 0);
+  let (msgs, used) = u.take_broadcasts_measured(99, 0, 1024);
+  assert!(msgs.is_empty());
+  assert_eq!(used, 0);
 }
