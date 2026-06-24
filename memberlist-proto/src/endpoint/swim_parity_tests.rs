@@ -23,6 +23,7 @@ use core::{
 use smol_str::SmolStr;
 
 use crate::{
+  Broadcast,
   event::PushPullRequestReceived,
   typed::{DelegateVersion, ProtocolVersion},
 };
@@ -1726,6 +1727,633 @@ fn reset_nodes_reaps_only_past_the_window() {
       Some(State::Alive),
       "{} must survive the reap",
       n.id_ref()
+    );
+  }
+}
+
+// ─────────────── user-data broadcast queue (retransmit + priority) ─────────
+//
+// The Endpoint's user-data slot is a retransmit-counted `UserBroadcasts`, not a
+// send-once FIFO: a payload queued once is gossiped across
+// `retransmit_mult * ceil(log10(N + 1))` rounds, membership still outranks user
+// data each tick, and (when configured with > 1 tier) higher-priority ranks
+// drain before lower ones under the shared residual budget. The scheduler is
+// driven deterministically exactly as the membership gossip tests above: arm
+// `next_gossip` and fire it with `handle_timeout`.
+
+/// Fire the armed gossip scheduler at `now` and collect every user-data payload
+/// carried in the emitted datagrams (lone `Packet` or `Compound`, both flattened).
+fn gossiped_user_payloads(e: &mut Endpoint<SmolStr, SocketAddr>, now: Instant) -> Vec<Bytes> {
+  e.next_gossip = Some(now);
+  e.handle_timeout(now);
+  let mut payloads = Vec::new();
+  while let Some(tx) = e.poll_transmit() {
+    let msgs: TinyVec<Message<SmolStr, SocketAddr>> = match tx {
+      Transmit::Packet(p) => {
+        let (_, m) = p.into_parts();
+        TinyVec::from_iter([m])
+      }
+      Transmit::Compound(c) => {
+        let (_, m) = c.into_parts();
+        m
+      }
+    };
+    for m in msgs {
+      if let Message::UserData(b) = m {
+        payloads.push(b);
+      }
+    }
+  }
+  payloads
+}
+
+/// A user broadcast queued ONCE is emitted across multiple gossip ticks (epidemic
+/// retransmit) and then stops — the central H1 fix. With the local node plus two
+/// Alive peers (N = 3) and the default `retransmit_mult` 4, the ceiling is
+/// `4 * ceil(log10(4)) = 4`, so the payload rides exactly four consecutive ticks
+/// and is gone on the fifth.
+#[test]
+fn user_broadcast_retransmits_across_ticks_then_stops() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1),
+  );
+  let p2 = node("p2", 8002);
+  let p3 = node("p3", 8003);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.process_alive(alive_of(&p3, 1), false, t0);
+  assert_eq!(e.num_members(), 3, "local plus two peers ⇒ N = 3");
+  // Isolate the user payload: drop the construction/admission membership
+  // broadcasts so each tick exercises the user-only drain regime.
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  e.queue_user_broadcast(Bytes::from_static(b"epidemic"))
+    .unwrap();
+
+  // Four ticks each emit the payload exactly once (one target ⇒ one datagram).
+  for tick in 1..=4 {
+    let got = gossiped_user_payloads(&mut e, t0);
+    assert_eq!(
+      got.as_slice(),
+      [Bytes::from_static(b"epidemic")],
+      "tick {tick}: the payload must be retransmitted"
+    );
+  }
+  // The fifth tick: the retransmit ceiling is reached, nothing more is emitted.
+  assert!(
+    gossiped_user_payloads(&mut e, t0).is_empty(),
+    "after the retransmit ceiling the payload must stop being gossiped"
+  );
+  assert_eq!(
+    e.user_broadcast_queue_len(),
+    0,
+    "the exhausted payload must leave the queue"
+  );
+}
+
+/// A user payload one byte OVER the compound-part budget — but still UNDER
+/// `gossip_mtu` — is rejected at enqueue by BOTH setters, never stored. The
+/// gossip tier walk only ever selects a payload that fits a compound part
+/// (`data.len() + USER_PART_OVERHEAD <= compound_budget`), so a larger one is
+/// the source of lone-only items the queue's freshness ordering cannot serve;
+/// gating it out at enqueue makes that starvation class impossible. The typed
+/// error's `limit` is the compound-part budget, not `gossip_mtu`.
+#[test]
+fn over_compound_part_user_broadcast_rejected_at_enqueue() {
+  use core::num::NonZeroU8;
+  // Default gossip_mtu 1400 ⇒ compound_budget 1400 - (1 + 5) = 1394 ⇒
+  // compound-part budget 1394 - USER_PART_OVERHEAD(11) = 1383. A 1384-byte
+  // payload is one over the budget yet well under gossip_mtu (its lone frame
+  // would fit a datagram), so the OLD lone-rescue accepted it; the gate now
+  // rejects it because no tier walk could ever select it.
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_user_broadcast_tiers(NonZeroU8::new(3).unwrap()));
+  let over = Bytes::from(vec![0xaa; 1384]);
+
+  match e.queue_user_broadcast(over.clone()) {
+    Err(crate::error::Error::UserBroadcastExceedsMtu(se)) => {
+      assert_eq!(se.size(), 1384, "the reported size is the payload length");
+      assert_eq!(
+        se.limit(),
+        1383,
+        "the reported limit is the compound-part budget, not gossip_mtu"
+      );
+    }
+    other => panic!("expected UserBroadcastExceedsMtu, got {other:?}"),
+  }
+  match e.queue_user_broadcast_ranked(1, over) {
+    Err(crate::error::Error::UserBroadcastExceedsMtu(se)) => {
+      assert_eq!(
+        se.limit(),
+        1383,
+        "the ranked setter gates on the same budget"
+      );
+    }
+    other => panic!("expected UserBroadcastExceedsMtu, got {other:?}"),
+  }
+  assert_eq!(
+    e.user_broadcast_queue_len(),
+    0,
+    "a rejected payload must not be stored by either setter"
+  );
+}
+
+/// A user payload at EXACTLY the compound-part budget is accepted and, through
+/// the real scheduler, retransmits across the normal
+/// `retransmit_mult * ceil(log10(N + 1))` rounds — proving the enqueue gate's
+/// boundary is inclusive and the plain cross-tier drain ships the boundary item
+/// like any other. With N = 3 and the default `retransmit_mult` 4 the ceiling is
+/// `4 * ceil(log10(4)) = 4`, so it rides exactly four ticks then stops.
+#[test]
+fn at_compound_part_budget_user_broadcast_retransmits() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1),
+  );
+  let p2 = node("p2", 8002);
+  let p3 = node("p3", 8003);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.process_alive(alive_of(&p3, 1), false, t0);
+  assert_eq!(
+    e.num_members(),
+    3,
+    "local plus two peers ⇒ N = 3, ceiling 4"
+  );
+  // Isolate the user-only drain regime (drop construction/admission membership).
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Exactly the compound-part budget (1383 at the default gossip_mtu): accepted.
+  let at_budget = Bytes::from(vec![0xbb; 1383]);
+  e.queue_user_broadcast(at_budget.clone())
+    .expect("a payload at exactly the compound-part budget is accepted");
+
+  // Four ticks each emit the payload once (one target ⇒ one datagram). A single
+  // queued payload assembles as a lone Packet under the plain cross-tier drain.
+  for tick in 1..=4 {
+    let got = gossiped_user_payloads(&mut e, t0);
+    assert_eq!(
+      got.as_slice(),
+      core::slice::from_ref(&at_budget),
+      "tick {tick}: the boundary payload must be retransmitted by the plain drain"
+    );
+  }
+  // The fifth tick: the retransmit ceiling is reached, nothing more is emitted.
+  assert!(
+    gossiped_user_payloads(&mut e, t0).is_empty(),
+    "after the retransmit ceiling the boundary payload must stop being gossiped"
+  );
+  assert_eq!(
+    e.user_broadcast_queue_len(),
+    0,
+    "the exhausted boundary payload must leave the queue"
+  );
+}
+
+/// Membership broadcasts strictly outrank user data within one tick: the
+/// membership compound drains first and the user payload fills the residual.
+/// Both ride the same datagram, membership first.
+#[test]
+fn membership_drains_before_user_in_one_tick() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1),
+  );
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  // A fresh, small membership broadcast and a small user payload both fit one
+  // datagram, so the >= 2 rule assembles a single compound carrying both.
+  e.broadcast_message(
+    SmolStr::new("zz"),
+    Message::Alive(alive_of(&node("zz", 8099), 1)),
+  );
+  e.queue_user_broadcast(Bytes::from_static(b"rider"))
+    .unwrap();
+
+  e.next_gossip = Some(t0);
+  e.handle_timeout(t0);
+  let tx = e
+    .poll_transmit()
+    .expect("one datagram for the single target");
+  let msgs: Vec<Message<SmolStr, SocketAddr>> = match tx {
+    Transmit::Compound(c) => c.into_parts().1.into_iter().collect(),
+    Transmit::Packet(p) => vec![p.into_parts().1],
+  };
+  let user_pos = msgs
+    .iter()
+    .position(|m| matches!(m, Message::UserData(_)))
+    .expect("the user payload rides the datagram");
+  let alive_pos = msgs
+    .iter()
+    .position(|m| matches!(m, Message::Alive(_)))
+    .expect("the membership Alive rides the datagram");
+  assert!(
+    alive_pos < user_pos,
+    "membership must be assembled before user data; got {msgs:?}"
+  );
+}
+
+/// Build an `Alive` for `id` whose wire frame, as the broadcast queue measures
+/// it, lands in the near-MTU window `(compound_budget - per-part, gossip_mtu]`:
+/// it does NOT fit a compound part but DOES fit a lone datagram. Grows the meta
+/// until the measured `encoded_len` reaches the window, so the construction is
+/// robust to the exact framing overhead rather than hard-coding it.
+fn near_mtu_alive(id: &str, gossip_mtu: usize) -> Message<SmolStr, SocketAddr> {
+  let compound_budget = gossip_mtu - (COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN);
+  // A frame fits a compound part iff len <= compound_budget - per-part overhead.
+  let compound_part_fit = compound_budget - COMPOUND_MAX_PART_PREFIX_LEN;
+  let measure = |meta_len: usize| -> usize {
+    let meta = Meta::try_from(vec![0xAB; meta_len]).expect("meta within Meta::MAX_SIZE");
+    let alive = alive_of(&node(id, 9000), 1).with_meta(meta);
+    let msg = Message::Alive(alive);
+    <MemberlistBroadcast<SmolStr, SocketAddr> as Broadcast>::encoded_len(&msg)
+  };
+  // Grow the meta until the frame just exceeds the compound-part fit, then it is
+  // near-MTU (still <= gossip_mtu by the loop bound). The frame grows ~1:1 with
+  // meta, so this terminates well before the MTU.
+  let mut meta_len = compound_part_fit.saturating_sub(40);
+  loop {
+    let frame = measure(meta_len);
+    assert!(
+      frame <= gossip_mtu,
+      "frame {frame} overshot gossip_mtu {gossip_mtu} before reaching the window"
+    );
+    if frame > compound_part_fit {
+      let meta = Meta::try_from(vec![0xAB; meta_len]).expect("meta within Meta::MAX_SIZE");
+      return Message::Alive(alive_of(&node(id, 9000), 1).with_meta(meta));
+    }
+    meta_len += 1;
+  }
+}
+
+/// Membership-path near-MTU cross-node starvation regression.
+///
+/// The membership queue dedups only PER node, so a near-MTU `Alive` for node
+/// "big" coexists with smaller `Alive`s for distinct other nodes. The compound
+/// drain skips the oversized top item and ships the smaller ones, so under
+/// continuous cross-node churn the near-MTU item — were the lone rescue gated on
+/// "the compound drain returned nothing" — would get ZERO sends. The top-item
+/// preemption lone-sends it as a byte-identical `Packet` whenever it is the
+/// queue's freshest (lowest-transmit) top, so it disseminates and advances.
+#[test]
+fn near_mtu_membership_broadcast_is_lone_emitted_not_starved() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1)
+      .with_gossip_mtu(gossip_mtu),
+  );
+  // One Alive peer so the gossip scheduler has a target; reset clears the
+  // construction/admission broadcasts so the queue holds only what we enqueue.
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let big_msg = near_mtu_alive("big", gossip_mtu);
+  // The near-MTU item is the queue's top and lands in the near-MTU window: it
+  // does NOT fit a compound part but DOES fit a lone datagram.
+  e.broadcast.queue_broadcast(MemberlistBroadcast::new(
+    SmolStr::new("big"),
+    big_msg.clone(),
+  ));
+  let top_len = e
+    .broadcast
+    .peek_first_sendable_encoded_len(gossip_mtu)
+    .expect("the near-MTU item is queued");
+  let compound_budget = gossip_mtu - (COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN);
+  assert!(
+    top_len + COMPOUND_MAX_PART_PREFIX_LEN > compound_budget && top_len <= gossip_mtu,
+    "the constructed item must be near-MTU: top_len {top_len}, \
+     compound_budget {compound_budget}, gossip_mtu {gossip_mtu}"
+  );
+
+  // Fire ticks; each tick first re-injects a batch of smaller, DISTINCT-node
+  // membership updates (so the compound drain always has fitting fresh items —
+  // the cross-node churn that strands the near-MTU item under the old gate),
+  // then fires gossip and records whether the near-MTU "big" Alive was emitted
+  // as a lone Packet.
+  let mut big_lone_emitted = false;
+  let mut churn_seq = 100u16;
+  for _ in 0..6 {
+    // A handful of small distinct-node Alives, each a fresh (transmits 0) item
+    // that fits a compound part — these would keep the compound drain non-empty.
+    for k in 0..4u16 {
+      let nid = format!("s{}", churn_seq + k);
+      e.broadcast.queue_broadcast(MemberlistBroadcast::new(
+        SmolStr::new(nid.clone()),
+        Message::Alive(alive_of(&node(&nid, 9100 + k), 1)),
+      ));
+    }
+    churn_seq += 4;
+
+    e.next_gossip = Some(t0);
+    e.handle_timeout(t0);
+    while let Some(tx) = e.poll_transmit() {
+      match tx {
+        Transmit::Packet(p) => {
+          let (_, m) = p.into_parts();
+          if let Message::Alive(a) = m {
+            if a.node_ref().id_ref() == &SmolStr::new("big") {
+              big_lone_emitted = true;
+            }
+          }
+        }
+        Transmit::Compound(c) => {
+          // The near-MTU item must NEVER ride a compound part (it does not fit
+          // one); if it ever appears here the preemption regressed.
+          let (_, msgs) = c.into_parts();
+          for m in msgs {
+            if let Message::Alive(a) = m {
+              assert_ne!(
+                a.node_ref().id_ref(),
+                &SmolStr::new("big"),
+                "the near-MTU Alive must be lone-sent, never a compound part"
+              );
+            }
+          }
+        }
+      }
+    }
+    if big_lone_emitted {
+      break;
+    }
+  }
+
+  assert!(
+    big_lone_emitted,
+    "the near-MTU membership Alive must be lone-emitted as a Packet (not \
+     permanently skipped while smaller distinct-node updates ship)"
+  );
+
+  // It advanced: lone-sending bumped its transmit count. Drive more ticks (no
+  // fresh churn, retransmit ceiling for N small + the big is finite) and confirm
+  // the near-MTU item eventually leaves the queue rather than lingering forever.
+  for _ in 0..40 {
+    e.next_gossip = Some(t0);
+    e.handle_timeout(t0);
+    while e.poll_transmit().is_some() {}
+  }
+  // After draining to the retransmit ceiling the near-MTU item is gone: a fresh
+  // re-enqueue is the only way to observe it again, proving it disseminated to
+  // completion rather than starving.
+  let mut big_still_queued = false;
+  // Re-enqueue under a sentinel id check: drain the queue and look for "big".
+  for m in e.drain_broadcasts() {
+    if let Message::Alive(a) = m {
+      if a.node_ref().id_ref() == &SmolStr::new("big") {
+        big_still_queued = true;
+      }
+    }
+  }
+  assert!(
+    !big_still_queued,
+    "the near-MTU item must reach its retransmit ceiling and leave the queue, \
+     not linger forever"
+  );
+}
+
+/// Construct an `Alive` whose encoded frame EXCEEDS `gossip_mtu` — untransmittable
+/// as a gossip datagram (it disseminates only via push-pull).
+fn over_mtu_alive(id: &str, gossip_mtu: usize) -> Message<SmolStr, SocketAddr> {
+  let measure = |meta_len: usize| -> usize {
+    let meta = Meta::try_from(vec![0xCD; meta_len]).expect("meta within Meta::MAX_SIZE");
+    let alive = alive_of(&node(id, 9000), 1).with_meta(meta);
+    <MemberlistBroadcast<SmolStr, SocketAddr> as Broadcast>::encoded_len(&Message::Alive(alive))
+  };
+  let mut meta_len = gossip_mtu;
+  loop {
+    if measure(meta_len) > gossip_mtu {
+      let meta = Meta::try_from(vec![0xCD; meta_len]).expect("meta within Meta::MAX_SIZE");
+      return Message::Alive(alive_of(&node(id, 9000), 1).with_meta(meta));
+    }
+    meta_len += 1;
+  }
+}
+
+/// An over-MTU membership head (untransmittable via gossip) must NOT block the
+/// lone rescue of a near-MTU item behind it: the scheduler peeks the first
+/// SENDABLE item (skipping the over-MTU head), so the near-MTU item still ships.
+#[test]
+fn over_mtu_membership_head_does_not_block_near_mtu_lone_rescue() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1)
+      .with_gossip_mtu(gossip_mtu),
+  );
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The OVER-MTU Alive is the queue head (largest ⇒ first by len-desc); a NEAR-MTU
+  // Alive for a distinct node is behind it. Peeking only the top would see the
+  // over-MTU head and fall through to the compound drain, stranding the near-MTU
+  // item; the sendable-aware peek skips the over-MTU head.
+  e.broadcast.queue_broadcast(MemberlistBroadcast::new(
+    SmolStr::new("over"),
+    over_mtu_alive("over", gossip_mtu),
+  ));
+  e.broadcast.queue_broadcast(MemberlistBroadcast::new(
+    SmolStr::new("near"),
+    near_mtu_alive("near", gossip_mtu),
+  ));
+
+  e.next_gossip = Some(t0);
+  e.handle_timeout(t0);
+  let mut near_lone = false;
+  while let Some(tx) = e.poll_transmit() {
+    match tx {
+      Transmit::Packet(p) => {
+        let (_, m) = p.into_parts();
+        if let Message::Alive(a) = m {
+          assert_ne!(
+            a.node_ref().id_ref(),
+            &SmolStr::new("over"),
+            "the over-MTU Alive must never be emitted (it fits no datagram)"
+          );
+          if a.node_ref().id_ref() == &SmolStr::new("near") {
+            near_lone = true;
+          }
+        }
+      }
+      Transmit::Compound(c) => {
+        let (_, msgs) = c.into_parts();
+        for m in msgs {
+          if let Message::Alive(a) = m {
+            assert_ne!(
+              a.node_ref().id_ref(),
+              &SmolStr::new("near"),
+              "the near-MTU Alive must be lone-sent, never a compound part"
+            );
+            assert_ne!(
+              a.node_ref().id_ref(),
+              &SmolStr::new("over"),
+              "the over-MTU Alive must never be emitted"
+            );
+          }
+        }
+      }
+    }
+  }
+  assert!(
+    near_lone,
+    "the near-MTU Alive behind the over-MTU head must be lone-emitted, not blocked"
+  );
+}
+
+/// With three priority tiers, a rank-0 payload drains before rank-1 before
+/// rank-2 through the real scheduler. A tight `gossip_mtu` makes each tick carry
+/// exactly one payload, so the drain ORDER across ticks is observable: tier 0
+/// empties first, then tier 1, then tier 2.
+#[test]
+fn ranked_user_broadcasts_drain_high_priority_first() {
+  use core::num::NonZeroU8;
+  // Size the gossip MTU so a single ~120 B payload fits a datagram but two do
+  // not share one (each is charged its compound part on the shared budget),
+  // forcing one payload per tick and exposing the cross-tier priority order.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1)
+      .with_gossip_mtu(640)
+      .with_user_broadcast_tiers(NonZeroU8::new(3).unwrap()),
+  );
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Queue out of priority order: the bottom tier first, the top tier last, so a
+  // FIFO/insertion-order drain would emit them backwards. Each payload is ~600 B
+  // so only one fits the 640 - compound-header budget per tick.
+  let big = |fill: u8| Bytes::from(vec![fill; 600]);
+  e.queue_user_broadcast_ranked(2, big(0xcc)).unwrap(); // lowest priority
+  e.queue_user_broadcast_ranked(1, big(0xbb)).unwrap();
+  e.queue_user_broadcast_ranked(0, big(0xaa)).unwrap(); // highest priority
+
+  // First emission must be the rank-0 (0xaa) payload, then rank-1, then rank-2.
+  let first = gossiped_user_payloads(&mut e, t0);
+  assert_eq!(first.len(), 1, "one payload fits the tight budget per tick");
+  assert_eq!(first[0][0], 0xaa, "rank 0 (highest priority) drains first");
+
+  // Drive ticks until each priority byte has been seen; assert 0xaa precedes
+  // 0xbb precedes 0xcc in first-emission order.
+  let mut order = vec![first[0][0]];
+  for _ in 0..12 {
+    for b in gossiped_user_payloads(&mut e, t0) {
+      let tag = b[0];
+      if !order.contains(&tag) {
+        order.push(tag);
+      }
+    }
+    if order.len() == 3 {
+      break;
+    }
+  }
+  assert_eq!(
+    order,
+    vec![0xaa, 0xbb, 0xcc],
+    "tiers must drain high-priority first: rank 0 (0xaa) → 1 (0xbb) → 2 (0xcc)"
+  );
+}
+
+/// An out-of-range rank saturates to the LOWEST tier (a larger rank number is a
+/// lower priority — saturating up never promotes). A rank-99 payload on a
+/// 3-tier endpoint lands behind a rank-0 payload.
+#[test]
+fn out_of_range_rank_saturates_to_lowest_tier() {
+  use core::num::NonZeroU8;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1)
+      .with_gossip_mtu(640)
+      .with_user_broadcast_tiers(NonZeroU8::new(3).unwrap()),
+  );
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let big = |fill: u8| Bytes::from(vec![fill; 600]);
+  e.queue_user_broadcast_ranked(99, big(0xcc)).unwrap(); // saturates to tier 2
+  e.queue_user_broadcast_ranked(0, big(0xaa)).unwrap();
+
+  let first = gossiped_user_payloads(&mut e, t0);
+  assert_eq!(first.len(), 1);
+  assert_eq!(
+    first[0][0], 0xaa,
+    "rank 0 must outrank the saturated-to-lowest rank-99 payload"
+  );
+}
+
+/// The DEFAULT single-tier path: with no `with_user_broadcast_tiers` override,
+/// `queue_user_broadcast` is retransmit-correct (emits across multiple ticks).
+/// Guards the retransmit-counted default behavior for every plain embedder.
+#[test]
+fn default_single_tier_user_broadcast_retransmits() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::from_millis(10))
+      .with_gossip_nodes(1),
+  );
+  // The default tier count is 1.
+  assert_eq!(e.cfg.user_broadcast_tiers().get(), 1);
+  let p2 = node("p2", 8002);
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&p2, 1), false, t0);
+  e.broadcast.reset();
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  e.queue_user_broadcast(Bytes::from_static(b"default"))
+    .unwrap();
+  // At least two ticks emit it (retransmit, not send-once). N = 2 (local + p2)
+  // ⇒ ceiling `4 * ceil(log10(3)) = 4`, so the first two ticks both emit.
+  for tick in 1..=2 {
+    assert_eq!(
+      gossiped_user_payloads(&mut e, t0).as_slice(),
+      [Bytes::from_static(b"default")],
+      "tick {tick}: the default-tier payload must retransmit"
     );
   }
 }

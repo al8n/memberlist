@@ -7,7 +7,7 @@
 //! State the application wants to push to the Endpoint (e.g. ack payloads,
 //! per-target reliable-ping opt-out) flows through dedicated setters.
 
-use core::time::Duration;
+use core::{num::NonZeroU8, time::Duration};
 
 use crate::typed::{DelegateVersion, Meta, ProtocolVersion};
 use bytes::Bytes;
@@ -190,6 +190,11 @@ const fn default_push_pull_interval() -> Duration {
 #[inline]
 const fn default_retransmit_mult() -> u32 {
   4
+}
+
+#[inline]
+const fn default_user_broadcast_tiers() -> NonZeroU8 {
+  NonZeroU8::MIN
 }
 
 #[inline]
@@ -391,6 +396,18 @@ pub struct EndpointOptions<I, A> {
   push_pull_interval: Duration,
   #[cfg_attr(feature = "serde", serde(default = "default_retransmit_mult"))]
   retransmit_mult: u32,
+  /// Number of independent priority tiers for the user-data broadcast queue.
+  /// Tier `0` is the highest priority and drains first under the gossip residual
+  /// budget; higher tier numbers are lower priority. The default `1` is a single
+  /// retransmit-counted `BroadcastQueue` tier (no cross-tier priority). Send order
+  /// is NOT FIFO: like Go's `TransmitLimitedQueue` it orders by `(fewest
+  /// transmits, larger size, newer id)`, so a newer or larger payload can be
+  /// gossiped — and retransmitted — ahead of an older one. An embedder that needs
+  /// ranked user gossip (e.g. intent > query > event — see the strict-priority
+  /// contract on `queue_user_broadcast_ranked`) raises this and queues via
+  /// [`Endpoint::queue_user_broadcast_ranked`](crate::endpoint::Endpoint::queue_user_broadcast_ranked).
+  #[cfg_attr(feature = "serde", serde(default = "default_user_broadcast_tiers"))]
+  user_broadcast_tiers: NonZeroU8,
   #[cfg_attr(feature = "serde", serde(default = "default_protocol_version"))]
   protocol_version: ProtocolVersion,
   #[cfg_attr(feature = "serde", serde(default = "default_delegate_version"))]
@@ -434,6 +451,7 @@ impl<I, A> EndpointOptions<I, A> {
       accept_handshake_deadline: default_accept_handshake_deadline(),
       push_pull_interval: default_push_pull_interval(),
       retransmit_mult: default_retransmit_mult(),
+      user_broadcast_tiers: default_user_broadcast_tiers(),
       protocol_version: default_protocol_version(),
       delegate_version: default_delegate_version(),
       initial_incarnation: default_initial_incarnation(),
@@ -647,6 +665,17 @@ impl<I, A> EndpointOptions<I, A> {
     self
   }
 
+  /// Builder: set the number of user-data broadcast priority tiers (default 1).
+  /// Tier `0` is the highest priority. An out-of-range rank passed to
+  /// [`Endpoint::queue_user_broadcast_ranked`](crate::endpoint::Endpoint::queue_user_broadcast_ranked)
+  /// saturates to the lowest tier.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_user_broadcast_tiers(mut self, tiers: NonZeroU8) -> Self {
+    self.user_broadcast_tiers = tiers;
+    self
+  }
+
   /// Builder: set protocol version.
   #[must_use]
   #[inline(always)]
@@ -729,6 +758,7 @@ impl<I, A> EndpointOptions<I, A> {
       accept_handshake_deadline: self.accept_handshake_deadline,
       push_pull_interval: self.push_pull_interval,
       retransmit_mult: self.retransmit_mult,
+      user_broadcast_tiers: self.user_broadcast_tiers,
       protocol_version: self.protocol_version,
       delegate_version: self.delegate_version,
       initial_incarnation: self.initial_incarnation,
@@ -897,6 +927,12 @@ impl<I, A> EndpointOptions<I, A> {
   #[inline(always)]
   pub const fn retransmit_mult(&self) -> u32 {
     self.retransmit_mult
+  }
+
+  /// Number of user-data broadcast priority tiers (default 1, tier 0 highest).
+  #[inline(always)]
+  pub const fn user_broadcast_tiers(&self) -> NonZeroU8 {
+    self.user_broadcast_tiers
   }
 
   /// Protocol version.
@@ -1108,6 +1144,13 @@ const _: () = {
     )]
     retransmit_mult: u32,
     #[arg(
+      id = "endpoint-user-broadcast-tiers",
+      long = "user-broadcast-tiers",
+      env = "MEMBERLIST_USER_BROADCAST_TIERS",
+      default_value_t = default_user_broadcast_tiers()
+    )]
+    user_broadcast_tiers: NonZeroU8,
+    #[arg(
       id = "endpoint-protocol-version",
       long = "protocol-version",
       env = "MEMBERLIST_PROTOCOL_VERSION",
@@ -1167,6 +1210,7 @@ const _: () = {
         accept_handshake_deadline: c.accept_handshake_deadline,
         push_pull_interval: c.push_pull_interval,
         retransmit_mult: c.retransmit_mult,
+        user_broadcast_tiers: c.user_broadcast_tiers,
         protocol_version: c.protocol_version,
         delegate_version: c.delegate_version,
         initial_incarnation: c.initial_incarnation,
@@ -1284,6 +1328,11 @@ const _: () = {
       );
       take!("endpoint-push-pull-interval", push_pull_interval, Duration);
       take!("endpoint-retransmit-mult", retransmit_mult, u32);
+      take!(
+        "endpoint-user-broadcast-tiers",
+        user_broadcast_tiers,
+        NonZeroU8
+      );
       take!(
         "endpoint-protocol-version",
         protocol_version,

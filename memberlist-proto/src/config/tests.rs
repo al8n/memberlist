@@ -118,6 +118,18 @@ fn max_indirect_forwards_and_ack_payload_round_trip() {
 }
 
 #[test]
+fn user_broadcast_tiers_defaults_to_one_and_round_trips() {
+  use core::num::NonZeroU8;
+  // Default is a single user-broadcast priority tier (count 1).
+  let def = EndpointOptions::<(), ()>::new((), ());
+  assert_eq!(def.user_broadcast_tiers(), NonZeroU8::MIN);
+  // The builder sets and the accessor observes a custom tier count.
+  let three =
+    EndpointOptions::<(), ()>::new((), ()).with_user_broadcast_tiers(NonZeroU8::new(3).unwrap());
+  assert_eq!(three.user_broadcast_tiers().get(), 3);
+}
+
+#[test]
 fn map_advertise_transforms_addr_and_preserves_every_other_field() {
   use core::time::Duration;
   use std::net::SocketAddr;
@@ -207,15 +219,19 @@ fn endpoint_options_serde_roundtrip_and_partial() {
   use smol_str::SmolStr;
   use std::net::SocketAddr;
 
+  use core::num::NonZeroU8;
   let addr: SocketAddr = "127.0.0.1:7946".parse().unwrap();
   let opts = EndpointOptions::<SmolStr, SocketAddr>::new(SmolStr::new("node-1"), addr)
     .with_suspicion_mult(9)
     .with_probe_interval(Duration::from_secs(2))
-    .with_max_members(Some(500));
+    .with_max_members(Some(500))
+    .with_user_broadcast_tiers(NonZeroU8::new(3).unwrap());
 
   let json = serde_json::to_string(&opts).unwrap();
   // Durations render as humantime strings, not {"secs":..,"nanos":..}.
   assert!(json.contains("\"probe_interval\":\"2s\""), "json = {json}");
+  // NonZeroU8 renders as a plain integer.
+  assert!(json.contains("\"user_broadcast_tiers\":3"), "json = {json}");
 
   let back: EndpointOptions<SmolStr, SocketAddr> = serde_json::from_str(&json).unwrap();
   assert_eq!(back.local_id_ref().as_str(), "node-1");
@@ -223,6 +239,7 @@ fn endpoint_options_serde_roundtrip_and_partial() {
   assert_eq!(back.suspicion_mult(), 9);
   assert_eq!(back.probe_interval(), Duration::from_secs(2));
   assert_eq!(back.max_members(), Some(500));
+  assert_eq!(back.user_broadcast_tiers().get(), 3);
 
   // A partial config carries the required id/addr + one knob; the rest default.
   let partial: EndpointOptions<SmolStr, SocketAddr> =
@@ -231,6 +248,7 @@ fn endpoint_options_serde_roundtrip_and_partial() {
   assert_eq!(partial.gossip_nodes(), 7);
   assert_eq!(partial.suspicion_mult(), 4);
   assert_eq!(partial.probe_interval(), Duration::from_secs(1));
+  assert_eq!(partial.user_broadcast_tiers(), NonZeroU8::MIN);
 
   // local_id / advertise_addr are required (no serde default).
   assert!(
@@ -284,6 +302,8 @@ fn endpoint_options_clap_parses_and_wires_env() {
     "1",
     "--max-members",
     "500",
+    "--user-broadcast-tiers",
+    "3",
   ])
   .unwrap();
   assert_eq!(cli.opts.local_id_ref().as_str(), "node-1");
@@ -295,6 +315,7 @@ fn endpoint_options_clap_parses_and_wires_env() {
   assert_eq!(cli.opts.probe_interval(), Duration::from_secs(2));
   assert_eq!(cli.opts.protocol_version(), ProtocolVersion::V1);
   assert_eq!(cli.opts.max_members(), Some(500));
+  assert_eq!(cli.opts.user_broadcast_tiers().get(), 3);
 
   // Unspecified knobs default; only the required id/addr are given.
   let def =
@@ -302,6 +323,7 @@ fn endpoint_options_clap_parses_and_wires_env() {
   assert_eq!(def.opts.suspicion_mult(), 4);
   assert_eq!(def.opts.gossip_nodes(), 3);
   assert_eq!(def.opts.max_members(), None);
+  assert_eq!(def.opts.user_broadcast_tiers().get(), 1);
 
   // Env wired (introspect the command; never set_var).
   let cmd = Cli::command();

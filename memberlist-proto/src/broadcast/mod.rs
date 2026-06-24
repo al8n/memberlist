@@ -2,7 +2,9 @@
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 use crate::{FxHashMap, typed::Message};
-use core::{cmp::Ordering, fmt, hash::Hash};
+use bytes::Bytes;
+use core::{cmp::Ordering, fmt, hash::Hash, num::NonZeroUsize};
+use smallvec::SmallVec;
 
 /// Computes the per-message retransmit ceiling using the formula
 /// `retransmit_mult * ceil(log10(num_nodes + 1))`.
@@ -34,6 +36,10 @@ pub trait Broadcast: fmt::Debug + Send + Sync + 'static {
   fn message(&self) -> &Self::Message;
 
   /// Encoded length of `msg` in bytes (used for fitting messages into a UDP packet).
+  ///
+  /// For byte-slice payloads this is the byte length (see
+  /// [`BytesBroadcast::encoded_len`]); for wire-format payloads it is the
+  /// encoded size (see [`MemberlistBroadcast`]).
   fn encoded_len(msg: &Self::Message) -> usize;
 
   /// Called when this broadcast hits its retransmit ceiling and is dropped
@@ -53,7 +59,7 @@ pub trait Broadcast: fmt::Debug + Send + Sync + 'static {
 struct LimitedBroadcast<B> {
   /// btree-key[0]: number of transmissions attempted so far.
   transmits: usize,
-  /// btree-key[1]: encoded length (newer/smaller items prioritized within tier).
+  /// btree-key[1]: encoded length (LARGER items drain first within a tier).
   msg_len: u64,
   /// btree-key[2]: monotonic insertion id.
   id: u64,
@@ -157,6 +163,23 @@ impl<Id, B> BroadcastQueue<Id, B> {
     self.q.is_empty()
   }
 
+  /// Encoded length of the highest-priority item that fits `mtu_limit` — the
+  /// first item [`take_one_broadcast`](Self::take_one_broadcast)`(_, mtu_limit)`
+  /// would select, or `None` if none fits.
+  ///
+  /// Ordering is `(transmits asc, msg_len desc, id desc)`, so this skips items
+  /// LONGER than `mtu_limit` (an over-MTU membership entry can only disseminate
+  /// via push-pull, never a lone datagram). The gossip scheduler peeks this so
+  /// an over-MTU queue head cannot mask a sendable item behind it.
+  #[inline]
+  pub fn peek_first_sendable_encoded_len(&self, mtu_limit: usize) -> Option<usize> {
+    self
+      .q
+      .iter()
+      .find(|item| (item.msg_len as usize) <= mtu_limit)
+      .map(|item| item.msg_len as usize)
+  }
+
   fn next_id(&mut self) -> u64 {
     if self.id_gen == u64::MAX {
       self.id_gen = 1;
@@ -216,9 +239,9 @@ where
     // `id_gen = 0`, then reinsert the already-stamped item carrying the
     // PRE-reset (anomalously high) id. That deterministically (the common
     // low-traffic case: one queued entry per node, replaced) breaks the
-    // monotonic-id FIFO tiebreaker — subsequently-queued newer items get
-    // LOWER ids and sort as "older"/higher-priority within a
-    // `(transmits, msg_len)` tier — and, once `id_gen` later climbs back
+    // monotonic-id tiebreaker — a subsequently-queued item can carry a LOWER
+    // id than an earlier one within a `(transmits, msg_len)` tier (ids are the
+    // newest-first tiebreaker) — and, once `id_gen` later climbs back
     // to a still-queued id, risks a `(transmits, msg_len, id)` collision
     // that makes `q.insert` a silent no-op while `m` was already updated
     // (m/q desync + dropped membership gossip). Allocating the id AFTER
@@ -266,7 +289,7 @@ where
   }
 
   /// Take up to `limit` bytes worth of broadcasts, prioritizing by lowest
-  /// retransmit count then largest message size then oldest id. Each chosen
+  /// retransmit count then largest message size then newest id. Each chosen
   /// broadcast's `transmits` counter is incremented; if the new value reaches
   /// `retransmit_limit(retransmit_mult, num_nodes)`, the broadcast is finished
   /// and removed.
@@ -313,10 +336,10 @@ where
 
     while transmits <= max_tr {
       let free = limit.saturating_sub(bytes_used);
-      if free <= overhead {
-        break; // not even one more (msg + overhead) can fit
+      if free < overhead {
+        break; // not even an empty (0-length) part's `overhead` charge fits
       }
-      let fit = free - overhead; // bytes available for the message's plain frame
+      let fit = free - overhead; // bytes for the plain frame (0 still admits an empty payload)
 
       // Lower bound narrows the BTree scan to items whose stored msg_len
       // is <= fit, skipping the encoded_len() call on items that
@@ -447,14 +470,13 @@ where
     }
   }
 
-  /// Drop oldest broadcasts (highest retransmit count) until the queue has
-  /// at most `max_retain` entries.
+  /// Drop the most-retransmitted broadcasts (highest retransmit count) until
+  /// the queue has at most `max_retain` entries.
   ///
   /// Not wired into the `Endpoint` today: queued broadcasts are id-deduplicated,
-  /// so the queue is already bounded by live membership (itself optionally
-  /// capped via `EndpointOptions::max_members`). This is an available helper for
-  /// a future hard queue-length ceiling; nothing currently calls it, so do not
-  /// assume the queue is bounded by anything other than the membership dedup.
+  /// so the queue is already bounded by the tracked member count (itself
+  /// optionally capped via `EndpointOptions::max_members`). Available for a
+  /// future hard queue-length ceiling; nothing currently calls it.
   pub fn prune(&mut self, max_retain: usize) {
     while self.q.len() > max_retain {
       let Some(item) = self.q.pop_last() else { break };
@@ -537,6 +559,167 @@ where
 
   fn is_unique(&self) -> bool {
     false
+  }
+}
+
+/// A zero-size [`Broadcast::Id`] for broadcasts that are never invalidation-keyed.
+///
+/// Used by [`BytesBroadcast`]: opaque user payloads carry no id, so newer ones
+/// never invalidate older ones and every broadcast coexists in the queue until
+/// its retransmit ceiling. `Display` renders a placeholder `_`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct NoId;
+
+impl fmt::Display for NoId {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("_")
+  }
+}
+
+/// A ready-made [`Broadcast`] for opaque user [`Bytes`], requiring no trait impl
+/// from the embedder.
+///
+/// Intrinsically unique ([`is_unique`](Broadcast::is_unique) is `true`): user
+/// broadcasts carry no id and never invalidate one another, so each disseminates
+/// independently.
+#[derive(Debug)]
+pub struct BytesBroadcast {
+  data: Bytes,
+}
+
+impl BytesBroadcast {
+  /// Construct a broadcast carrying `data`.
+  #[inline]
+  pub fn new(data: Bytes) -> Self {
+    Self { data }
+  }
+
+  /// The opaque payload this broadcast carries.
+  #[inline]
+  pub const fn data(&self) -> &Bytes {
+    &self.data
+  }
+}
+
+impl Broadcast for BytesBroadcast {
+  type Id = NoId;
+  type Message = Bytes;
+
+  fn id(&self) -> Option<&Self::Id> {
+    None
+  }
+
+  fn invalidates(&self, _other: &Self) -> bool {
+    false
+  }
+
+  fn message(&self) -> &Self::Message {
+    &self.data
+  }
+
+  fn encoded_len(msg: &Self::Message) -> usize {
+    msg.len()
+  }
+
+  fn is_unique(&self) -> bool {
+    true
+  }
+}
+
+/// An `N`-priority-tier composition over [`BroadcastQueue`], each tier an
+/// independent queue. Rank `0` is the **highest** priority and drains first;
+/// [`queue_ranked`](Self::queue_ranked) saturates an out-of-range rank to the
+/// lowest tier (a larger rank is a lower priority). The single-tier form
+/// ([`single`](Self::single)) is byte-identical to one `BroadcastQueue`.
+///
+/// Tiers are **strict priority, no fairness**:
+/// [`take_broadcasts_measured`](Self::take_broadcasts_measured) drains a tier
+/// fully before the next under one shrinking byte budget, so a saturated higher
+/// tier defers lower ones indefinitely (no round-robin, aging, or quota) — a
+/// flooded high tier leaves lower tiers with no eventual-delivery guarantee.
+/// Intentional; mirrors Go serf's strict intent > query > event queues.
+#[derive(Debug)]
+pub struct UserBroadcasts<Id, B> {
+  tiers: SmallVec<[BroadcastQueue<Id, B>; 1]>,
+}
+
+impl<Id, B> UserBroadcasts<Id, B> {
+  /// Construct `tiers` independent [`BroadcastQueue`]s, each with the given
+  /// retransmit multiplier. Tier `0` is the highest priority.
+  pub fn new(tiers: NonZeroUsize, retransmit_mult: u32) -> Self {
+    let mut v = SmallVec::with_capacity(tiers.get());
+    for _ in 0..tiers.get() {
+      v.push(BroadcastQueue::new(retransmit_mult));
+    }
+    Self { tiers: v }
+  }
+
+  /// Construct a single-tier queue (byte-identical to one [`BroadcastQueue`]).
+  pub fn single(retransmit_mult: u32) -> Self {
+    let mut v = SmallVec::with_capacity(1);
+    v.push(BroadcastQueue::new(retransmit_mult));
+    Self { tiers: v }
+  }
+
+  /// Total number of queued broadcasts across all tiers.
+  #[inline]
+  pub fn num_queued(&self) -> usize {
+    self.tiers.iter().map(BroadcastQueue::num_queued).sum()
+  }
+
+  /// True iff every tier is empty.
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.tiers.iter().all(BroadcastQueue::is_empty)
+  }
+}
+
+impl<Id, B> UserBroadcasts<Id, B>
+where
+  Id: Hash + core::cmp::Eq + core::clone::Clone,
+  B: Broadcast<Id = Id>,
+{
+  /// Enqueue `b` at priority `rank` (0 = highest). A rank at or beyond the tier
+  /// count saturates to the lowest tier (`min(rank, tiers - 1)`).
+  pub fn queue_ranked(&mut self, rank: usize, b: B) {
+    let last = self.tiers.len() - 1; // at least one tier by construction
+    self.tiers[rank.min(last)].queue_broadcast(b);
+  }
+
+  /// Drain every tier via [`BroadcastQueue::reset`], firing each queued
+  /// broadcast's [`finished()`](Broadcast::finished) exactly once, so nothing is
+  /// stranded without a final notification when the gossip scheduler is shut
+  /// down on leave.
+  pub fn reset(&mut self) {
+    for tier in &mut self.tiers {
+      tier.reset();
+    }
+  }
+
+  /// Drain tiers in priority order (0..N) under one shrinking byte budget,
+  /// charging each selected message `encoded_len + overhead`. Each tier is
+  /// drained with the residual budget, stopping once the budget is exhausted.
+  ///
+  /// Returns the cloned messages (in transmit order) and the total bytes the
+  /// selection charged, mirroring
+  /// [`BroadcastQueue::take_broadcasts_measured`].
+  pub fn take_broadcasts_measured(
+    &mut self,
+    num_nodes: u32,
+    overhead: usize,
+    limit: usize,
+  ) -> (Vec<B::Message>, usize) {
+    let mut msgs: Vec<B::Message> = Vec::new();
+    let mut used = 0usize;
+    for tier in &mut self.tiers {
+      if used >= limit {
+        break;
+      }
+      let (mut got, charged) = tier.take_broadcasts_measured(num_nodes, overhead, limit - used);
+      used += charged;
+      msgs.append(&mut got);
+    }
+    (msgs, used)
   }
 }
 

@@ -52,14 +52,17 @@ pub enum Error {
   )]
   LocalStateExceedsFrame(SizeExceeded),
 
-  /// A caller-supplied user-broadcast payload, once framed as a lone
-  /// `UserData` packet, would not fit a single gossip datagram. User
-  /// broadcasts ride outgoing gossip; a lone payload is emitted as one UDP
-  /// datagram, so a payload whose minimal lone frame already exceeds the
-  /// gossip packet budget is deterministically untransmittable — it can never
-  /// be gossiped and would otherwise sit queued until a gossip tick discards
-  /// it. Rejected at the setter so the payload is never stored.
-  #[error("framed user broadcast ({} bytes) exceeds the gossip packet budget ({} bytes)", _0.0, _0.1)]
+  /// A caller-supplied user-broadcast payload exceeds the gossip **compound-part
+  /// selection budget** (`gossip_mtu` minus the compound header and a conservative
+  /// per-part overhead). The gossip drain selects user payloads through the
+  /// compound-part tier walk, so an over-budget payload is never selected and
+  /// would sit queued forever; it is rejected at the setter, by raw length, so it
+  /// is never stored. (A *selected* payload is emitted as a lone packet when it is
+  /// the tick's only message, or as a compound part when several share the
+  /// datagram.) This is a *selection* budget, not a physical wire limit — the
+  /// conservative overhead can reject a payload that would still fit a lone
+  /// `gossip_mtu` datagram.
+  #[error("user broadcast payload ({} bytes) exceeds the gossip compound-part budget ({} bytes)", _0.0, _0.1)]
   UserBroadcastExceedsMtu(SizeExceeded),
 
   /// A caller-supplied directed user packet (or multi-packet compound),

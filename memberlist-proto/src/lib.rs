@@ -138,7 +138,9 @@ pub mod wire_type;
 
 pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
-pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
+pub use broadcast::{
+  Broadcast, BroadcastQueue, BytesBroadcast, MemberlistBroadcast, NoId, UserBroadcasts,
+};
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use cidr::{CidrAnd, CidrPolicy};

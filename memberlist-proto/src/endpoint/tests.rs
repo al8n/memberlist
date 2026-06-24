@@ -1058,39 +1058,48 @@ fn set_local_state_snapshot_rejects_oversized() {
 }
 
 #[test]
-fn queue_user_broadcast_appends_fifo() {
+fn queue_user_broadcast_counts_queued() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert_eq!(e.user_broadcast_queue_len(), 0);
   e.queue_user_broadcast(Bytes::from_static(b"hello"))
     .unwrap();
   e.queue_user_broadcast(Bytes::from_static(b"world"))
     .unwrap();
+  // User broadcasts carry no id and never invalidate one another, so both
+  // coexist in the queue.
   assert_eq!(e.user_broadcast_queue_len(), 2);
 }
 
 #[test]
-fn drain_user_broadcasts_respects_limit() {
+fn drain_user_broadcasts_respects_limit_and_retains_for_retransmit() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.queue_user_broadcast(Bytes::from_static(b"aaaa")).unwrap();
   e.queue_user_broadcast(Bytes::from_static(b"bbbb")).unwrap();
   e.queue_user_broadcast(Bytes::from_static(b"cccc")).unwrap();
   // Each 4 B payload is charged its assembled compound-part size:
   // 4 + USER_PART_OVERHEAD (= COMPOUND_MAX_PART_PREFIX_LEN 5 + UserData tag
-  // 1 + plain-frame body-len varint 5 = 11) = 15 B. Limit 30 => pulls the
-  // first two (15+15=30), the third (would be 45) does not fit.
-  let drained = e.drain_user_broadcasts(30);
+  // 1 + plain-frame body-len varint 5 = 11) = 15 B. Limit 30 => pulls two
+  // (15+15=30), the third (would be 45) does not fit. Within one tier the
+  // queue prioritizes freshly-queued broadcasts (newest insertion id first),
+  // so the drain yields cccc then bbbb, leaving aaaa for the next round.
+  let (drained, used) = e.drain_user_broadcasts(1, 30);
   assert_eq!(drained.len(), 2);
-  assert_eq!(drained[0].as_ref(), b"aaaa");
+  assert_eq!(drained[0].as_ref(), b"cccc");
   assert_eq!(drained[1].as_ref(), b"bbbb");
-  assert_eq!(e.user_broadcast_queue_len(), 1);
+  assert_eq!(used, 30);
+  // Unlike the old send-once queue, drained payloads are retransmit-counted:
+  // they stay queued (bumped to transmits 1) for the next round, so all three
+  // remain.
+  assert_eq!(e.user_broadcast_queue_len(), 3);
 }
 
 #[test]
 fn drain_user_broadcasts_zero_limit_returns_empty() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   e.queue_user_broadcast(Bytes::from_static(b"data")).unwrap();
-  let drained = e.drain_user_broadcasts(0);
+  let (drained, used) = e.drain_user_broadcasts(1, 0);
   assert!(drained.is_empty());
+  assert_eq!(used, 0);
   assert_eq!(e.user_broadcast_queue_len(), 1);
 }
 
@@ -6549,56 +6558,18 @@ fn gossip_membership_plus_user_compound_within_mtu() {
   }
 }
 
-/// A lone near-MTU user broadcast that is a valid standalone plain-frame
-/// datagram must be emitted as a single `Packet` — NOT permanently wedged
-/// because `drain_user_broadcasts` charges it the compound per-part
-/// overhead against the compound-reduced residual budget. 1384 B: as a
-/// compound part it is charged 1384 + 11 = 1395 > the 1394 residual
-/// (would never be sent, blocks the FIFO forever); as a lone `Packet` its
-/// wire frame is ~1390 B <= 1400 (must be sent).
-#[test]
-fn gossip_lone_near_mtu_user_broadcast_emits_packet() {
-  let (mut e, t0) = gossip_harness_one_target();
-  e.queue_user_broadcast(bytes::Bytes::from(vec![0xab_u8; 1384]))
-    .unwrap();
-  e.next_gossip = Some(t0);
-  e.handle_timeout(t0);
-
-  let txs = collect_transmits(&mut e);
-  assert_eq!(
-    txs.len(),
-    1,
-    "a lone sendable user broadcast must produce exactly one transmit, got {}",
-    txs.len()
-  );
-  match &txs[0] {
-    Transmit::Packet(p) => match p.message_ref() {
-      Message::UserData(b) => assert_eq!(
-        b.len(),
-        1384,
-        "the near-MTU user payload must ride a lone Packet"
-      ),
-      other => panic!("expected Packet(UserData(1384)), got Packet({other:?})"),
-    },
-    other => panic!("expected Packet(UserData(1384)), got {other:?}"),
-  }
-  assert_eq!(
-    e.user_broadcast_queue_len(),
-    0,
-    "the emitted user broadcast must be drained, not wedged at the FIFO front"
-  );
-}
-
-/// An un-gossipable user payload (larger than ANY single UDP datagram) is
-/// rejected at `queue_user_broadcast` rather than stored: it could never be
-/// gossiped even alone, so accepting it would falsely report success and
-/// leave it queued until a gossip tick discarded it. A valid payload queued
-/// after the rejected one is unaffected and still goes out.
+/// A user payload over the gossip compound-part budget is rejected at
+/// `queue_user_broadcast` rather than stored: the gossip drain selects user
+/// payloads only through the compound-part tier walk, so an over-budget payload
+/// is never selected, and storing it would falsely report success and leave it
+/// queued forever. (The 2000-byte payload here also exceeds `gossip_mtu`; the
+/// gate rejects on the compound-part budget regardless of lone-datagram fit.)
+/// A valid payload queued after the rejected one is unaffected and still goes out.
 #[test]
 fn gossip_oversized_user_broadcast_rejected_at_enqueue() {
   let (mut e, t0) = gossip_harness_one_target();
-  // Its lone framed `UserData` packet exceeds `gossip_mtu`, so it is
-  // deterministically untransmittable and rejected without being stored.
+  // 2000 B exceeds the compound-part budget (default 1383), so no gossip tick
+  // could ever select it; it is rejected without being stored.
   assert!(matches!(
     e.queue_user_broadcast(bytes::Bytes::from(vec![0x5a_u8; 2000])),
     Err(Error::UserBroadcastExceedsMtu(_))
@@ -6627,8 +6598,8 @@ fn gossip_oversized_user_broadcast_rejected_at_enqueue() {
   }
   assert_eq!(
     e.user_broadcast_queue_len(),
-    0,
-    "the emitted payload must leave the FIFO"
+    1,
+    "the emitted payload is retransmit-counted, so it stays queued for the next round"
   );
 }
 
@@ -6712,7 +6683,7 @@ fn gossip_lone_near_mtu_membership_broadcast_emits_packet() {
 /// non-empty and skip the membership rescue (continuous user traffic would
 /// starve the membership update indefinitely). Correct regime: rescue a
 /// stranded membership broadcast first; the user payload waits for the
-/// next tick (best-effort, FIFO intact).
+/// next tick (best-effort, deferred not dropped).
 #[test]
 fn gossip_near_mtu_membership_outranks_user_broadcast() {
   let (mut e, t0) = gossip_harness_one_target();
