@@ -55,7 +55,7 @@ jobs:
       # Cache BEFORE the build steps so the restore actually warms this run; a
       # cache placed after the test step only saves, never restores.
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
