@@ -1511,6 +1511,26 @@ where
     self.ep.queue_user_broadcast(data)
   }
 
+  /// Queue an application user-broadcast at priority `rank` (`0` = highest)
+  /// for gossip dissemination. Forwards to
+  /// [`Endpoint::queue_user_broadcast_ranked`]; see that method for the
+  /// strict-priority and rank-saturation contract.
+  #[inline]
+  pub fn queue_user_broadcast_ranked(&mut self, rank: u8, data: Bytes) -> Result<(), Error> {
+    self.ep.queue_user_broadcast_ranked(rank, data)
+  }
+
+  /// Enqueue a directed unreliable user-data packet to `to`. Forwards to
+  /// [`Endpoint::send_user_packet`]. Like `send_user_packets`, only touches
+  /// the gossip `pending_transmits` queue, drained by
+  /// `poll_memberlist_transmit`.
+  ///
+  /// Returns `Err` if the payload exceeds the configured `gossip_mtu` ceiling.
+  #[inline]
+  pub fn send_user_packet(&mut self, to: SocketAddr, data: Bytes) -> Result<(), Error> {
+    self.ep.send_user_packet(to, data)
+  }
+
   /// Set the application push-pull local-state snapshot. Forwards to the
   /// inner [`Endpoint`].
   ///

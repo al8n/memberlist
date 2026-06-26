@@ -566,6 +566,38 @@ mod tcp {
     );
   }
 
+  /// `queue_user_broadcast_ranked` enqueues at the requested priority tier and
+  /// increments the inner endpoint's user-broadcast queue length. Mirrors the
+  /// inner `Endpoint::queue_user_broadcast_ranked` contract: rank 0 is the
+  /// highest priority tier; an out-of-range rank saturates to the lowest tier
+  /// rather than being rejected.
+  #[test]
+  fn queue_user_broadcast_ranked_forwards_to_inner_endpoint() {
+    let mut coord = coord(7108);
+
+    assert_eq!(
+      coord.endpoint_ref().user_broadcast_queue_len(),
+      0,
+      "fresh coordinator has an empty broadcast queue",
+    );
+    coord
+      .queue_user_broadcast_ranked(0, Bytes::from_static(b"high-priority"))
+      .expect("in-budget payload enqueues at rank 0");
+    assert_eq!(
+      coord.endpoint_ref().user_broadcast_queue_len(),
+      1,
+      "one ranked broadcast lands in the inner endpoint's queue",
+    );
+    coord
+      .queue_user_broadcast_ranked(1, Bytes::from_static(b"lower-priority"))
+      .expect("in-budget payload enqueues at rank 1");
+    assert_eq!(
+      coord.endpoint_ref().user_broadcast_queue_len(),
+      2,
+      "both ranked broadcasts land in the inner endpoint's queue",
+    );
+  }
+
   /// A `set_compression_options` update fans the new policy out to every live
   /// bridge WITHOUT a failure cascade (compression is non-security): the bridge
   /// stays alive and adopts the new options. Drives the
