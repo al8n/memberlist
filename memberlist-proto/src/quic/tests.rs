@@ -2987,6 +2987,57 @@ fn state_setter_pass_throughs_return_ok_for_in_budget_inputs() {
     .expect("a tiny ack payload fits the gossip budget");
 }
 
+/// `queue_user_broadcast_ranked` enqueues at the requested priority tier and
+/// increments the inner endpoint's user-broadcast queue length. Mirrors the
+/// inner `Endpoint::queue_user_broadcast_ranked` contract: rank 0 is the
+/// highest priority tier; out-of-range ranks saturate to the lowest tier rather
+/// than being rejected.
+#[test]
+fn queue_user_broadcast_ranked_forwards_to_inner_endpoint() {
+  let addr: SocketAddr = "127.0.0.1:7741".parse().unwrap();
+  let now = Instant::now();
+  let mut ep = make_endpoint("self", addr, now);
+
+  assert_eq!(
+    ep.endpoint_ref().user_broadcast_queue_len(),
+    0,
+    "fresh coordinator has an empty broadcast queue",
+  );
+  ep.queue_user_broadcast_ranked(0, Bytes::from_static(b"high-priority"))
+    .expect("in-budget payload enqueues at rank 0");
+  assert_eq!(
+    ep.endpoint_ref().user_broadcast_queue_len(),
+    1,
+    "one ranked broadcast lands in the inner endpoint's queue",
+  );
+  ep.queue_user_broadcast_ranked(1, Bytes::from_static(b"lower-priority"))
+    .expect("in-budget payload enqueues at rank 1");
+  assert_eq!(
+    ep.endpoint_ref().user_broadcast_queue_len(),
+    2,
+    "both ranked broadcasts land in the inner endpoint's queue",
+  );
+}
+
+/// `send_user_packet` enqueues a single directed unreliable user packet and
+/// the transmit surfaces via `poll_memberlist_transmit`. Covers the
+/// singular-packet forwarder on `QuicEndpoint` (distinct from the plural
+/// `send_user_packets`).
+#[test]
+fn send_user_packet_enqueues_one_transmit() {
+  let addr: SocketAddr = "127.0.0.1:7742".parse().unwrap();
+  let peer: SocketAddr = "127.0.0.1:7743".parse().unwrap();
+  let now = Instant::now();
+  let mut ep = make_endpoint("self", addr, now);
+
+  ep.send_user_packet(peer, Bytes::from_static(b"hi"))
+    .expect("a small directed user packet fits the gossip MTU");
+  assert!(
+    ep.poll_memberlist_transmit().is_some(),
+    "send_user_packet must enqueue an unreliable transmit",
+  );
+}
+
 /// `leave` initiates the graceful dead-self flush on a running coordinator
 /// (returns `Ok`), and a second `leave` is the idempotent post-leave no-op.
 /// `is_running` flips to `false` after the first leave.

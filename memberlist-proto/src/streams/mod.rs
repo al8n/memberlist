@@ -1398,6 +1398,15 @@ where
     self.ep.queue_user_broadcast(data)
   }
 
+  /// Queue an application user-broadcast at priority `rank` (`0` = highest)
+  /// for gossip dissemination. Forwards to
+  /// [`Endpoint::queue_user_broadcast_ranked`]; see that method for the
+  /// strict-priority and rank-saturation contract.
+  #[inline]
+  pub fn queue_user_broadcast_ranked(&mut self, rank: u8, data: Bytes) -> Result<(), Error> {
+    self.ep.queue_user_broadcast_ranked(rank, data)
+  }
+
   /// Initiate an application ping to `node`. Forwards to
   /// [`Endpoint::ping`]; sets `last_now`. Returns the [`crate::event::PingId`]
   /// correlation token; the terminal event (`PingCompleted` / `PingFailed`)
