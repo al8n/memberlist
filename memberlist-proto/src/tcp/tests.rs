@@ -3022,6 +3022,9 @@ fn policy_failed_bridge_rejects_ingress_before_reap() {
   let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
   let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
     StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
+  // Drain the construction-time self-join (NodeJoined for the local node) so the
+  // post-failure poll below observes only ingress-derived events.
+  while coord.endpoint_mut().poll_event().is_some() {}
 
   // (1) Open a dialer push/pull under disabled encryption. `start_push_pull`
   // runs `service_dials` + `flush_outbound`, which builds the bridge,
@@ -3044,7 +3047,8 @@ fn policy_failed_bridge_rejects_ingress_before_reap() {
   while coord.poll_transport_transmit().is_some() {}
 
   // Pre-condition invariants: the bridge is alive, the local endpoint has
-  // exactly one tracked member (itself), and no Event::NodeJoined is queued.
+  // exactly one tracked member (itself), and no Event::NodeJoined is queued
+  // (the construction self-join was drained above).
   assert_eq!(
     coord.bridge_is_failed(exchange),
     Some(false),
