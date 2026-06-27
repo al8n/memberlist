@@ -1,5 +1,5 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, RefCell},
   collections::{HashMap, HashSet},
   net::{IpAddr, Ipv4Addr, SocketAddr},
   rc::Rc,
@@ -21,7 +21,9 @@ use crate::{
     Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, SetAckPayloadCmd,
     SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd, WaitForCompletionArgs,
   },
+  delegate::VoidDelegate,
   driver::options::RuntimeOptions,
+  snapshot::{MemberlistSnapshot, SnapshotCell},
 };
 use lochan::mpsc;
 
@@ -1052,4 +1054,107 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
   assert!(expired.is_none(), "an expired leave clears its slot");
   assert!(matches!(rx_a.await, Ok(Err(MemberlistError::LeaveTimeout))));
   assert!(matches!(rx_b.await, Ok(Err(MemberlistError::LeaveTimeout))));
+}
+
+/// The construction self-join must reach the `EventStream` BEFORE the driver
+/// loop parks. `Endpoint::new` queues a `NodeJoined(self)` (Go's Create-time
+/// `NotifyJoin`); the `select` loop only drains `poll_event` AFTER an arm fires,
+/// so with the periodic schedulers DISABLED the first wake would be the
+/// idle-wake interval — a fresh no-peer node would not surface its own member
+/// for ~a minute. With the loop-entry startup drain in place the self-join
+/// arrives at once, so a short timeout suffices. Runs the real
+/// `stream_driver_loop` over a loopback TCP/UDP pair with no peers.
+#[compio::test]
+async fn construction_self_join_surfaces_before_idle_wake() {
+  let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+  // Schedulers disabled: with every interval at zero the loop's only timer is
+  // the idle-wake fallback, so the self-join can surface ONLY via the startup
+  // drain — never via a probe / gossip / push-pull tick.
+  let ep = Endpoint::new(
+    EndpointOptions::new(SmolStr::new("solo"), bind)
+      .with_probe_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
+  let endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+    ep,
+    LabelOptions::new_in(None, ()),
+    Box::new(|_| None),
+    Box::new(|a: &SocketAddr| *a),
+  );
+
+  // Bootstrap the snapshot cell from the local node entry; the driver's
+  // loop-entry `refresh_snapshot` overwrites it immediately.
+  let snapshot: SnapshotCell<SmolStr> = {
+    let ep_ref = endpoint.endpoint_ref();
+    let local = ep_ref
+      .member(ep_ref.local_id_ref())
+      .expect("the local node is always a member");
+    let boot = MemberlistSnapshot::new(
+      vec![local.clone()],
+      local,
+      1,
+      ep_ref.num_members(),
+      ep_ref.health_score(),
+    );
+    Rc::new(RefCell::new(Rc::new(boot)))
+  };
+
+  let gossip_socket = compio::net::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind loopback udp");
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("bind loopback tcp");
+
+  let (commands_tx, commands_rx) = flume::unbounded::<Command<SmolStr>>();
+  let (events_tx, events_rx) =
+    flume::bounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>(1024);
+  let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
+
+  compio::runtime::spawn(super::stream_driver_loop::<
+    SmolStr,
+    SocketAddr,
+    RawRecords,
+    _,
+    _,
+  >(
+    endpoint,
+    gossip_socket,
+    listener,
+    commands_rx,
+    events_tx,
+    Rc::new(Cell::new(0u64)),
+    Rc::new(Cell::new(0u64)),
+    snapshot,
+    Rc::new(Cell::new(memberlist_proto::metrics::Metrics::default())),
+    bridge_ready_rx,
+    bridge_ready_tx,
+    Rc::new(Cell::new(false)),
+    RuntimeOptions::new(),
+    StreamTransportOptions::default(),
+    VoidDelegate::<SmolStr, SocketAddr>::default(),
+    None,
+    Default::default(),
+  ))
+  .detach();
+
+  // A short bound, FAR below the idle-wake interval: without the startup drain
+  // the loop would park until idle-wake and this would elapse.
+  let ev = compio::time::timeout(Duration::from_secs(2), events_rx.recv_async())
+    .await
+    .expect("the construction self-join surfaces before the idle-wake interval")
+    .expect("the event stream stays open");
+  match ev {
+    memberlist_proto::event::Event::NodeJoined(n) => assert_eq!(
+      n.id_ref().as_str(),
+      "solo",
+      "the first EventStream event is the local node's self-join",
+    ),
+    other => panic!("expected NodeJoined(self) as the first event, got {other:?}"),
+  }
+
+  // Signal the loop to exit so the detached task releases its sockets promptly.
+  drop(commands_tx);
 }

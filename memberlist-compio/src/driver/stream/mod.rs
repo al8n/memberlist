@@ -637,6 +637,44 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // passive inbound traffic.
   endpoint.start_scheduling(Instant::now());
 
+  // Surface the construction-time self-join BEFORE the select can park.
+  // `Endpoint::new` queues a `NodeJoined(self)` to match Go's Create-time
+  // `NotifyJoin`. The select loop only drains `poll_event` AFTER an arm fires,
+  // so with the periodic schedulers disabled (no `poll_timeout` deadline) the
+  // first wake is the idle-wake interval — a fresh no-peer node would not hand
+  // its own member to the observation task / EventStream for up to a minute.
+  // Run the same four-surface drain the loop runs after an event, once, so the
+  // self-join reaches `obs_tx` immediately. The snapshot was already published
+  // above; re-publish only if this drain changed observable state.
+  loop {
+    let did_actions = drain_actions::<I, A, R, G>(
+      &mut endpoint,
+      &mut bridges,
+      &bridge_ready_tx,
+      stream_opts,
+      &cidr_policy,
+    );
+    let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
+    let did_transmits =
+      drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
+    let did_events = drain_events(
+      &mut endpoint,
+      &obs_tx,
+      &observation_dropped,
+      &obs_payload_bytes,
+      obs_payload_budget,
+      &mut pending,
+    )
+    .await;
+    if !(did_actions || did_transports || did_transmits || did_events) {
+      break;
+    }
+  }
+  reap_pending_joins(&mut pending.joins, Instant::now()).await;
+  reap_pending_leave(&mut pending.leave, Instant::now()).await;
+  refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
+  refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
+
   // Hoist the listener-accept future ACROSS loop iterations. On a
   // completion-based backend (io_uring) `accept()` is an in-flight SQE; if it
   // were recreated each iteration like the other select arms, every wakeup on a

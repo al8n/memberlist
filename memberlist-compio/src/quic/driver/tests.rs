@@ -346,6 +346,76 @@ async fn drain_actions_obs_closed_drops_without_counting() {
   );
 }
 
+/// `Endpoint::new` queues a construction self-join (`NodeJoined(self)`, matching
+/// Go's Create-time `NotifyJoin`) and bumps `snapshot_version` 0 → 1. The driver
+/// must surface that event at startup AND must NOT republish the unchanged
+/// startup snapshot: after the loop-entry `refresh_snapshot` publishes the
+/// post-self-join state, `last_snapshot_version` is synced to it (it was
+/// initialized to 0), so the first drain sees no version change and skips the
+/// republish. Reproduces the driver's loop-entry sequence on the real helpers
+/// and asserts both halves.
+#[compio::test]
+async fn construction_self_join_surfaces_without_duplicate_snapshot_publish() {
+  let now = Instant::now();
+  let endpoint = build_endpoint("solo", addr(17760), now);
+  assert_eq!(
+    endpoint.endpoint_ref().snapshot_version(),
+    1,
+    "Endpoint::new queues the self-join and bumps snapshot_version 0 -> 1",
+  );
+
+  let udp = bind_udp().await;
+  let (mut state, mut obs_rx, _cmd_tx) = build_state(endpoint, udp, crate::Channel::Bounded(64));
+
+  // Loop-entry sequence: publish the initial snapshot, then sync
+  // `last_snapshot_version` to the post-self-join version (the fix).
+  super::refresh_snapshot::<smol_str::SmolStr, _>(&state.endpoint, &state.snapshot);
+  let published = state.snapshot.borrow().clone();
+  state.last_snapshot_version = state.endpoint.endpoint_ref().snapshot_version();
+
+  // The first (`dirty`-initialized) drain surfaces the self-join to obs.
+  let progressed = super::drain_actions::<smol_str::SmolStr, _>(&mut state).await;
+  assert!(
+    progressed,
+    "draining the construction self-join is progress"
+  );
+  match obs_rx.try_recv() {
+    Ok(memberlist_proto::event::Event::NodeJoined(n)) => {
+      assert_eq!(
+        n.id_ref().as_str(),
+        "solo",
+        "the self-join names the local node"
+      );
+    }
+    other => panic!("expected NodeJoined(self) surfaced to obs, got {other:?}"),
+  }
+
+  // The post-drain republish gate is a no-op: the version was synced, so the
+  // unchanged startup snapshot is NOT published a second time (same `Rc`).
+  super::refresh_snapshot_if_changed::<smol_str::SmolStr, _>(
+    &state.endpoint,
+    &state.snapshot,
+    &mut state.last_snapshot_version,
+  );
+  assert!(
+    std::rc::Rc::ptr_eq(&published, &state.snapshot.borrow()),
+    "the synced version skips the spurious republish",
+  );
+
+  // Contrast: a stale (0) `last_snapshot_version` forces the duplicate the fix
+  // avoids — the gate rebuilds and stores a fresh snapshot `Rc`.
+  state.last_snapshot_version = 0;
+  super::refresh_snapshot_if_changed::<smol_str::SmolStr, _>(
+    &state.endpoint,
+    &state.snapshot,
+    &mut state.last_snapshot_version,
+  );
+  assert!(
+    !std::rc::Rc::ptr_eq(&published, &state.snapshot.borrow()),
+    "a stale last_snapshot_version republishes the unchanged snapshot",
+  );
+}
+
 // ---- dispatch_command: NotRunning gates (post-leave) ----
 
 /// After `leave()` the coordinator is no longer `Running`, so every dispatch

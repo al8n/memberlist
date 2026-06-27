@@ -422,6 +422,13 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // state is available before any input arrives (mirror-symmetric with
   // the stream driver's loop-entry `refresh_snapshot`).
   refresh_snapshot::<I, G>(&state.endpoint, &state.snapshot);
+  // `Endpoint::new` bumped `snapshot_version` to 1 when it queued the
+  // construction self-join, and the publish above already reflects it. Sync
+  // `last_snapshot_version` to that post-self-join version (it was initialized
+  // to 0) so the first drain below does not see the unchanged startup snapshot
+  // as dirty and republish it — a spurious duplicate. Mirrors the stream
+  // driver, which captures the post-construction version at loop entry.
+  state.last_snapshot_version = state.endpoint.endpoint_ref().snapshot_version();
 
   let mut exit = false;
   // Tracks whether the previous iteration's inputs (cmd-fairness
@@ -431,7 +438,14 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // NEXT iter-top dirty drain — placing the drain at iter top (not
   // after the select) avoids the borrow conflict between the drain's
   // `&mut state` and the recv/cmd futures' immutable borrows.
-  let mut dirty = false;
+  //
+  // Initialized `true` so the FIRST iteration's iter-top drain surfaces the
+  // construction self-join (`NodeJoined(self)`, queued by `Endpoint::new` to
+  // match Go's Create-time `NotifyJoin`) to `obs_tx` before the select can
+  // park. Without it a no-peer node with the periodic schedulers disabled
+  // would not surface its own member until the idle-wake interval. The version
+  // sync above keeps that first drain from republishing the unchanged snapshot.
+  let mut dirty = true;
   while !exit {
     // Iter-top command fairness drain. The `cmd` select arm sits at
     // LAST priority (recv > timer > cmd) so a continuous network
