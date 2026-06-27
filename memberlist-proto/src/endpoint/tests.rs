@@ -43,6 +43,33 @@ fn new_endpoint_inserts_local_at_incarnation_1() {
 }
 
 #[test]
+fn new_endpoint_emits_self_join_as_first_event() {
+  // Mirrors Go memberlist's `NotifyJoin(localNode)` on Create: the first event
+  // a fresh endpoint surfaces is the local node's own join, carrying the local
+  // id and advertise address. Event-driven consumers (the driver EventStream,
+  // serf) depend on this self-join to learn about the local node.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let ev = e
+    .poll_event()
+    .expect("a fresh endpoint emits the local self-join");
+  match ev {
+    Event::NodeJoined(n) => {
+      assert_eq!(n.id_ref(), &SmolStr::new("local"));
+      assert_eq!(
+        n.address_ref(),
+        &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000)
+      );
+      assert_eq!(n.state(), State::Alive);
+    }
+    other => panic!("expected NodeJoined(self), got {other:?}"),
+  }
+  assert!(
+    e.poll_event().is_none(),
+    "construction emits exactly one event (the self-join)"
+  );
+}
+
+#[test]
 fn new_endpoint_is_not_leaving_or_left() {
   let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   assert!(!e.is_left());
@@ -4100,6 +4127,8 @@ fn start_user_message_encodes_user_data() {
   use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  // Drain the construction-time self-join so the DialRequested below is first.
+  while e.poll_event().is_some() {}
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let id = e
@@ -4141,6 +4170,8 @@ fn inbound_user_data_emits_user_packet_event() {
   use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  // Drain the construction-time self-join so the UserPacket below is first.
+  while e.poll_event().is_some() {}
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   let mut stream = e.accept_stream(peer, t0).expect("node is running");
@@ -6991,6 +7022,9 @@ fn node_incarnation_tracks_known_member_and_is_none_for_unknown() {
 #[test]
 fn requeue_event_pushes_to_the_back_of_the_pending_buffer() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  // Drain the construction-time self-join so the only queued event below is the
+  // peer join we generate.
+  while e.poll_event().is_some() {}
   // Generate one real event (a join), drain it, then re-enqueue it: it must
   // come back out of poll_event unchanged (FIFO push_back).
   process_alive_auto(&mut e, alive("peer", 7100, 1), false, Instant::now());

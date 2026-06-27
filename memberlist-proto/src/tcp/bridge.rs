@@ -274,6 +274,8 @@ fn label_mismatch_tears_down_with_no_stream_and_no_endpoint_events() {
   // reaps a failed-label bridge without an FSM lifecycle notice).
   let mut ep: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  // Drain the construction-time self-join; the reject path must add no events.
+  while ep.poll_event().is_some() {}
   server.drain_then_reap(&mut ep, now);
   assert!(
     ep.poll_event().is_none(),
@@ -305,6 +307,9 @@ fn dialer_bridge_rejects_mismatched_inbound_response_label() {
   );
   let mut ep_c: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
+  // Drain the construction-time self-join so the loop below observes only the
+  // exchange's own events (a DialRequested) — never a leaked peer mutation.
+  while ep_c.poll_event().is_some() {}
   let sid = ep_c.start_reliable_ping(
     SmolStr::new("srv"),
     addr(7000),
@@ -428,6 +433,8 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   // lifecycle notice is owed for a label exchange that never minted a `Stream`.
   let mut ep: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  // Drain the construction-time self-join; the timeout path must add no events.
+  while ep.poll_event().is_some() {}
   server.drain_then_reap(&mut ep, deadline);
   assert!(
     ep.poll_event().is_none(),
@@ -1422,6 +1429,9 @@ fn drain_then_reap_timeout_failed_bridge_routes_errored_notice() {
 fn drain_then_reap_decode_failed_bridge_routes_errored_notice() {
   let now = Instant::now();
   let (mut server, mut ep_s) = promoted_inbound(now, 7770);
+  // Drain the construction-time self-join; a StreamErrored notice must map to
+  // no public Event below.
+  while ep_s.poll_event().is_some() {}
 
   // Truncation: a mid-frame read == 0 fails the inbound stream Decode.
   let res = server.handle_transport_data(&[], now);

@@ -1164,6 +1164,14 @@ where
 
     // Enqueue the initial Alive broadcast so peers learn about us.
     endpoint.broadcast_alive(&local_state);
+    // Emit the local node's join as the endpoint's first event, mirroring Go
+    // memberlist's `NotifyJoin(localNode)` on Create. Go reaches it through
+    // `setAlive` -> `aliveNode(bootstrap=true)`, which inserts the local node
+    // fresh as `Dead` then transitions it `Alive` (a `Dead`->`Alive` transition
+    // fires `NotifyJoin`). The Sans-I/O path inserts the local node `Alive`
+    // directly, so emit its join explicitly here with the same `Arc<NodeState>`
+    // payload the peer-join path uses.
+    endpoint.emit_event(Event::NodeJoined(local_state.server_arc()));
     Ok(endpoint)
   }
 

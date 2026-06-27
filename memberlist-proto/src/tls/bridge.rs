@@ -676,6 +676,8 @@ fn handshake_failure_tears_down_with_no_stream_and_no_endpoint_events() {
   // reaps a failed-handshake bridge without an FSM lifecycle notice).
   let mut ep: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  // Drain the construction-time self-join; the reject path must add no events.
+  while ep.poll_event().is_some() {}
   server.drain_then_reap(&mut ep, now);
   assert!(
     ep.poll_event().is_none(),
@@ -796,6 +798,8 @@ fn handshaking_bridge_times_out_at_deadline_with_no_stream() {
   // lifecycle notice is owed for a handshake that never minted a `Stream`.
   let mut ep: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
+  // Drain the construction-time self-join; the timeout path must add no events.
+  while ep.poll_event().is_some() {}
   client.drain_then_reap(&mut ep, deadline);
   assert!(
     ep.poll_event().is_none(),

@@ -2954,6 +2954,9 @@ fn requeue_non_dial_event_round_trips_through_poll_event() {
   let addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
   let now = Instant::now();
   let mut ep = make_endpoint("self", addr, now);
+  // Drain the construction-time self-join so the requeued event is observed
+  // first below.
+  while ep.poll_event().is_some() {}
 
   // A `LeftCluster` event (application-visible unit variant, not
   // DialRequested) must round-trip back out through poll_event after a
