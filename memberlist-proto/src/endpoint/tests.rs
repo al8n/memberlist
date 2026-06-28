@@ -776,11 +776,12 @@ fn merge_delegate_vetoes_join_push_pull() {
   e.set_merge_delegate(ArcMerge(d.clone()));
 
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
     peer,
     vec![pns("carol", 7003, 1, State::Alive)],
     Bytes::new(),
     PushPullKind::Join,
+    StreamId::from_raw(1),
   ));
   let cmd = e.handle_stream_event(ev, Instant::now());
 
@@ -822,11 +823,12 @@ fn merge_delegate_vetoes_outbound_push_pull_reply() {
   e.set_merge_delegate(ArcMerge(d.clone()));
 
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new(
+  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new_with_stream_id(
     peer,
     vec![pns("carol", 7003, 1, State::Alive)],
     Bytes::new(),
     PushPullKind::Join,
+    StreamId::from_raw(1),
   ));
   let cmd = e.handle_stream_event(ev, Instant::now());
 
@@ -867,11 +869,12 @@ fn merge_delegate_vetoes_refresh_push_pull() {
   e.set_merge_delegate(ArcMerge(d.clone()));
 
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
     peer,
     vec![pns("carol", 7003, 1, State::Alive)],
     Bytes::new(),
     PushPullKind::Refresh,
+    StreamId::from_raw(1),
   ));
   let cmd = e.handle_stream_event(ev, Instant::now());
 
@@ -7435,11 +7438,12 @@ fn push_pull_reply_with_user_data_emits_remote_state_received() {
   let states = vec![pns("carol", 7003, 1, State::Alive)];
   // A non-empty user_data payload must surface as RemoteStateReceived after
   // the merge is admitted.
-  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new(
+  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new_with_stream_id(
     peer,
     states,
     Bytes::from_static(b"peer-app-state"),
     PushPullKind::Refresh,
+    StreamId::from_raw(4242),
   ));
   let cmd = e.handle_stream_event(ev, now);
   assert!(cmd.is_none(), "an outbound reply returns no command");
@@ -7460,11 +7464,12 @@ fn push_pull_request_with_user_data_emits_remote_state_received_and_response() {
   let now = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let states = vec![pns("carol", 7003, 1, State::Alive)];
-  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
     peer,
     states,
     Bytes::from_static(b"inbound-app-state"),
     PushPullKind::Refresh,
+    StreamId::from_raw(4343),
   ));
   let cmd = e.handle_stream_event(ev, now);
   assert!(
@@ -7477,6 +7482,45 @@ fn push_pull_request_with_user_data_emits_remote_state_received_and_response() {
   assert!(
     got,
     "non-empty request user_data must emit RemoteStateReceived"
+  );
+}
+
+/// `RemoteStateReceived::originating_stream_id()` for an outbound join push/pull
+/// equals the `StreamId` fed into the producing `PushPullReplyReceived` — the
+/// same id that `start_push_pull` returns for that exchange. A driver uses it to
+/// correlate the merge to the exact exchange it started, independently of the
+/// `ExchangeCompleted` terminal token (which on the `StreamEndpoint` backend is a
+/// separately-allocated coordinator id and does NOT match here by design).
+#[test]
+fn remote_state_received_carries_originating_stream_id() {
+  use bytes::Bytes;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  // The id `start_push_pull` would have returned for this outbound join.
+  let stream_id = StreamId::from_raw(9182);
+
+  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new_with_stream_id(
+    peer,
+    vec![pns("carol", 7003, 1, State::Alive)],
+    Bytes::from_static(b"peer-app-state"),
+    PushPullKind::Join,
+    stream_id,
+  ));
+  e.handle_stream_event(ev, now);
+
+  let rs = core::iter::from_fn(|| e.poll_event())
+    .find_map(|ev| match ev {
+      Event::RemoteStateReceived(r) => Some(r),
+      _ => None,
+    })
+    .expect("a non-empty join reply must emit RemoteStateReceived");
+
+  assert_eq!(
+    rs.originating_stream_id(),
+    stream_id,
+    "the merge carries the producing stream's StreamId directly"
   );
 }
 

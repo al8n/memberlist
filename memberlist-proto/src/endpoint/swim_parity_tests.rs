@@ -1620,11 +1620,12 @@ fn push_pull_merges_request_and_replies_with_local_view() {
     pns_of(&peer, 1, State::Alive),
     pns_of(&other, 1, State::Alive),
   ];
-  let req = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
+  let req = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
     *peer.addr_ref(),
     states,
     Bytes::new(),
     PushPullKind::Join,
+    StreamId::from_raw(1),
   ));
 
   let cmd = e

@@ -437,17 +437,33 @@ pub struct RemoteStateReceived<A> {
   peer: A,
   user_data: Bytes,
   join: bool,
+  /// The `StreamId` of the stream that produced this merge — for an outbound
+  /// exchange, equal to the `StreamId` that `start_push_pull` returned; for
+  /// an inbound one, the accepted stream's id. A driver correlates a received
+  /// merge to the exchange it initiated via its `start_push_pull` handle.
+  /// This is DISTINCT from `ExchangeCompleted::eid()`: on the `StreamEndpoint`
+  /// backend the terminal eid is a separate coordinator-allocated token (the
+  /// bridge predates the wire stream), so a merge and its terminal completion
+  /// are deliberately different domains there — correlate a merge to your own
+  /// `start_push_pull` `StreamId`, not to `ExchangeCompleted`.
+  originating_stream_id: StreamId,
 }
 
 impl<A> RemoteStateReceived<A> {
   /// Construct a new payload. Crate-internal: only the `Endpoint` emits this
   /// event; consumers read it through the accessors.
   #[inline(always)]
-  pub(crate) const fn new(peer: A, user_data: Bytes, join: bool) -> Self {
+  pub(crate) const fn new(
+    peer: A,
+    user_data: Bytes,
+    join: bool,
+    originating_stream_id: StreamId,
+  ) -> Self {
     Self {
       peer,
       user_data,
       join,
+      originating_stream_id,
     }
   }
 
@@ -470,7 +486,22 @@ impl<A> RemoteStateReceived<A> {
     self.join
   }
 
-  /// Consume the payload into its (peer, user_data, join) parts.
+  /// The `StreamId` of the stream that produced this merge — for an outbound
+  /// exchange, equal to the `StreamId` that `start_push_pull` returned; for
+  /// an inbound one, the accepted stream's id. A driver correlates a received
+  /// merge to the exchange it initiated via its `start_push_pull` handle.
+  /// This is DISTINCT from `ExchangeCompleted::eid()`: on the `StreamEndpoint`
+  /// backend the terminal eid is a separate coordinator-allocated token (the
+  /// bridge predates the wire stream), so a merge and its terminal completion
+  /// are deliberately different domains there — correlate a merge to your own
+  /// `start_push_pull` `StreamId`, not to `ExchangeCompleted`.
+  #[inline(always)]
+  pub const fn originating_stream_id(&self) -> StreamId {
+    self.originating_stream_id
+  }
+
+  /// Consume the payload into its (peer, user_data, join) parts. The
+  /// originating stream id is read separately via [`Self::originating_stream_id`].
   #[inline(always)]
   pub fn into_parts(self) -> (A, Bytes, bool) {
     (self.peer, self.user_data, self.join)
@@ -682,10 +713,18 @@ pub struct PushPullRequestReceived<I, A> {
   states: Vec<PushNodeState<I, A>>,
   user_data: Bytes,
   kind: PushPullKind,
+  /// The accepted (inbound) stream's [`StreamId`]; the endpoint copies it into
+  /// the resulting [`RemoteStateReceived::originating_stream_id`].
+  stream_id: StreamId,
 }
 
 impl<I, A> PushPullRequestReceived<I, A> {
-  /// Construct a new payload.
+  /// Construct a new payload for external or synthetic use. Events **produced**
+  /// by the [`Endpoint`] carry the real originating stream id set internally
+  /// via [`Self::new_with_stream_id`]; this public constructor is for callers
+  /// that assemble a payload without a real exchange (e.g. tests, external
+  /// drivers). The resulting [`Self::stream_id`] is a synthetic sentinel
+  /// (`u64::MAX`) that never correlates to a real exchange.
   #[inline(always)]
   pub const fn new(
     peer: A,
@@ -698,6 +737,27 @@ impl<I, A> PushPullRequestReceived<I, A> {
       states,
       user_data,
       kind,
+      stream_id: StreamId::from_raw(u64::MAX),
+    }
+  }
+
+  /// Crate-internal constructor used by the Stream FSM to record the real
+  /// originating stream id so the endpoint copies it into
+  /// [`RemoteStateReceived::originating_stream_id`].
+  #[inline(always)]
+  pub(crate) const fn new_with_stream_id(
+    peer: A,
+    states: Vec<PushNodeState<I, A>>,
+    user_data: Bytes,
+    kind: PushPullKind,
+    stream_id: StreamId,
+  ) -> Self {
+    Self {
+      peer,
+      states,
+      user_data,
+      kind,
+      stream_id,
     }
   }
 
@@ -725,7 +785,16 @@ impl<I, A> PushPullRequestReceived<I, A> {
     self.kind
   }
 
-  /// Consume the payload into its (peer, states, user_data, kind) parts.
+  /// The accepted stream's [`StreamId`]; the endpoint copies it into the
+  /// resulting [`RemoteStateReceived::originating_stream_id`]. Correlate a merge
+  /// to your own `start_push_pull` `StreamId`, not to [`ExchangeCompleted::eid`].
+  #[inline(always)]
+  pub const fn stream_id(&self) -> StreamId {
+    self.stream_id
+  }
+
+  /// Consume the payload into its (peer, states, user_data, kind) parts. The
+  /// originating stream id is read separately via [`Self::stream_id`].
   #[inline(always)]
   pub fn into_parts(self) -> (A, Vec<PushNodeState<I, A>>, Bytes, PushPullKind) {
     (self.peer, self.states, self.user_data, self.kind)
@@ -740,10 +809,19 @@ pub struct PushPullReplyReceived<I, A> {
   states: Vec<PushNodeState<I, A>>,
   user_data: Bytes,
   kind: PushPullKind,
+  /// The producing (outbound) stream's [`StreamId`] — the one
+  /// `start_push_pull` returned — which the endpoint copies into the resulting
+  /// [`RemoteStateReceived::originating_stream_id`].
+  stream_id: StreamId,
 }
 
 impl<I, A> PushPullReplyReceived<I, A> {
-  /// Construct a new payload.
+  /// Construct a new payload for external or synthetic use. Events **produced**
+  /// by the [`Endpoint`] carry the real originating stream id set internally
+  /// via [`Self::new_with_stream_id`]; this public constructor is for callers
+  /// that assemble a payload without a real exchange (e.g. tests, external
+  /// drivers). The resulting [`Self::stream_id`] is a synthetic sentinel
+  /// (`u64::MAX`) that never correlates to a real exchange.
   #[inline(always)]
   pub const fn new(
     peer: A,
@@ -756,6 +834,27 @@ impl<I, A> PushPullReplyReceived<I, A> {
       states,
       user_data,
       kind,
+      stream_id: StreamId::from_raw(u64::MAX),
+    }
+  }
+
+  /// Crate-internal constructor used by the Stream FSM to record the real
+  /// originating stream id so the endpoint copies it into
+  /// [`RemoteStateReceived::originating_stream_id`].
+  #[inline(always)]
+  pub(crate) const fn new_with_stream_id(
+    peer: A,
+    states: Vec<PushNodeState<I, A>>,
+    user_data: Bytes,
+    kind: PushPullKind,
+    stream_id: StreamId,
+  ) -> Self {
+    Self {
+      peer,
+      states,
+      user_data,
+      kind,
+      stream_id,
     }
   }
 
@@ -783,7 +882,17 @@ impl<I, A> PushPullReplyReceived<I, A> {
     self.kind
   }
 
-  /// Consume the payload into its (peer, states, user_data, kind) parts.
+  /// The producing stream's [`StreamId`] — the one the initiating
+  /// `start_push_pull` returned — which the endpoint copies into the resulting
+  /// [`RemoteStateReceived::originating_stream_id`]. Correlate a merge to your
+  /// own `start_push_pull` `StreamId`, not to [`ExchangeCompleted::eid`].
+  #[inline(always)]
+  pub const fn stream_id(&self) -> StreamId {
+    self.stream_id
+  }
+
+  /// Consume the payload into its (peer, states, user_data, kind) parts. The
+  /// originating stream id is read separately via [`Self::stream_id`].
   #[inline(always)]
   pub fn into_parts(self) -> (A, Vec<PushNodeState<I, A>>, Bytes, PushPullKind) {
     (self.peer, self.states, self.user_data, self.kind)
