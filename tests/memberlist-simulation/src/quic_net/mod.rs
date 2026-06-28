@@ -1338,12 +1338,16 @@ impl QuicCluster {
     }
 
     // 2. Advance to the next deadline = min(earliest queued datagram, every
-    //    coordinator's unified poll_timeout). Advancing the clock toward a
-    //    real pending deadline IS forward progress: the QUIC handshake /
-    //    push-pull needs several virtual-time round-trips, and a tick whose
-    //    only effect is producing the next flight (drained next iteration)
-    //    must NOT look quiescent — otherwise a `while c.step()` loop would
-    //    abort the exchange mid-handshake.
+    //    coordinator's unified poll_timeout). Advancing the clock moves virtual
+    //    time forward but is NOT, by itself, protocol progress: a converged
+    //    cluster keeps its periodic gossip / probe timers forever, so counting
+    //    every wake as progress would make a `while c.step()` loop spin to its
+    //    cap. Real pending work — an in-flight datagram or a still-live reliable
+    //    bridge (a handshaking dial, an active push/pull, or a reliable-ping) —
+    //    is reported below via [`has_pending_work`](Self::has_pending_work), so
+    //    a multi-round-trip QUIC handshake / push-pull never looks quiescent
+    //    mid-exchange yet a settled cluster does. (The unconsumed construction
+    //    self-join is likewise not progress.)
     let mut next: Option<Instant> = self.queue.iter().map(|d| d.deliver_at).min();
     for a in &addrs {
       if let Some(t) = self.nodes.get_mut(a).unwrap().poll_timeout() {
@@ -1356,7 +1360,6 @@ impl QuicCluster {
     };
     if next > now {
       self.clock.advance(next - now);
-      progressed = true;
     }
     let now = self.clock.now();
 
@@ -1365,19 +1368,40 @@ impl QuicCluster {
       progressed = true;
     }
 
-    // 4. Tick every node, scan events, apply the one-shot D1 hooks, then
-    //    drain again so THIS step captures the datagrams its own final tick
-    //    produced (no one-step pipeline lag → no spurious quiescence).
+    // 4. Tick every node, scan events (observation only — never a progress
+    //    signal), apply the one-shot D1 hooks, then drain again so THIS step
+    //    captures the datagrams its own final tick produced (no one-step
+    //    pipeline lag → no spurious quiescence).
     self.tick_all(now);
-    if self.scan_events() {
-      progressed = true;
-    }
+    self.scan_events();
     self.apply_reply_hooks(now);
     if self.drain_and_enqueue(&addrs, now) {
       progressed = true;
     }
 
-    progressed
+    // A step that moved no bytes THIS instant is still progress while real work
+    // remains pending (an in-flight datagram or a live reliable bridge): the
+    // exchange/handshake is unfinished. Only a step that did nothing AND has no
+    // pending work is quiescent.
+    progressed || self.has_pending_work()
+  }
+
+  /// Whether the cluster still has real protocol work pending: an in-flight
+  /// gossip datagram, a still-live reliable bridge on any node (a handshaking
+  /// dial/accept, an active push/pull, or a reliable-ping —
+  /// [`QuicEndpoint::live_bridge_count`] counts all three), or an in-progress
+  /// SWIM operation (a suspicion, a direct UDP probe waiting out its timeout
+  /// before escalating, an indirect forward, or a pending dial intent —
+  /// [`Endpoint::has_pending_operation`](memberlist_proto::Endpoint::has_pending_operation)).
+  /// The periodic gossip / probe schedule is deliberately NOT pending work: a
+  /// converged cluster holds those timers forever, so treating them as work
+  /// would never let a step loop settle.
+  fn has_pending_work(&self) -> bool {
+    !self.queue.is_empty()
+      || self
+        .nodes
+        .values()
+        .any(|n| n.live_bridge_count() > 0 || n.endpoint_ref().has_pending_operation())
   }
 
   /// One simulation tick that ADVANCES ONLY by `QuicEndpoint::poll_timeout`.
@@ -1420,7 +1444,6 @@ impl QuicCluster {
     };
     if next > now {
       self.clock.advance(next - now);
-      progressed = true;
     }
     let now = self.clock.now();
 
@@ -1432,15 +1455,17 @@ impl QuicCluster {
     // the wake was immediate-due: an unattempted `dial_pending` entry is
     // serviced here by `service_dials`.
     self.tick_all(now);
-    if self.scan_events() {
-      progressed = true;
-    }
+    self.scan_events();
     self.apply_reply_hooks(now);
     if self.drain_and_enqueue(&addrs, now) {
       progressed = true;
     }
 
-    progressed
+    // Real pending work (an in-flight datagram or a live reliable bridge) keeps
+    // the step non-quiescent even when it moved nothing this instant; a serviced
+    // dial surfaces as one or the other on the same tick. The unconsumed
+    // construction self-join does not count.
+    progressed || self.has_pending_work()
   }
 
   /// Drain every coordinator's `poll_transmit` (quinn datagrams) and
@@ -1687,13 +1712,17 @@ impl QuicCluster {
   }
 
   /// Scan every node's `poll_event`, recording Suspect / LeftCluster, then
-  /// re-queue every event (so future scans still see late ones). Returns
-  /// `true` if any event was observed. Also records the gossip-tracked
-  /// liveness so a transient Suspect is caught even without an event.
-  fn scan_events(&mut self) -> bool {
+  /// re-queue every event (so future scans still see late ones). Also records
+  /// the gossip-tracked liveness so a transient Suspect is caught even without
+  /// an event.
+  ///
+  /// This is pure observation: it does NOT signal protocol progress. Every
+  /// endpoint is constructed with a pending `NodeJoined(self)` that no scan
+  /// consumer ever drains, so counting a requeued event as progress would make
+  /// every step look non-quiescent forever.
+  fn scan_events(&mut self) {
     let now = self.clock.now();
     let addrs: Vec<SocketAddr> = self.nodes.keys().copied().collect();
-    let mut any = false;
     for host in addrs {
       // Scan the live member view, recording every peer currently Suspect
       // or Alive (a transient state later refuted/transitioned would
@@ -1740,7 +1769,6 @@ impl QuicCluster {
       let node = self.nodes.get_mut(&host).unwrap();
       let mut deferred = Vec::new();
       while let Some(ev) = node.poll_event() {
-        any = true;
         match &ev {
           Event::LeftCluster => {
             self.left.insert(host);
@@ -1760,7 +1788,6 @@ impl QuicCluster {
         node.requeue_event(ev, now);
       }
     }
-    any
   }
 
   /// Apply the one-shot D1 hooks. The tick `host` FIRST merges a peer (it

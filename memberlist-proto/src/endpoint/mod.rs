@@ -662,6 +662,31 @@ impl<I, A, R> Endpoint<I, A, R> {
     .min()
   }
 
+  /// Whether the endpoint has an in-progress SWIM operation that will, on its
+  /// own deadline, advance protocol state: an active suspicion (→ `Dead`), an
+  /// in-flight probe (a direct ping, or one escalating to the reliable-ping
+  /// fallback → ack / suspect), an outstanding indirect-probe forward (→ nack),
+  /// or a pending stream-dial intent (→ bridge / dial-failure). Returns `false`
+  /// for a non-`Running` (leaving / left) endpoint, which runs no operations.
+  ///
+  /// This is the OPERATIONAL subset of [`poll_timeout`](Self::poll_timeout): it
+  /// deliberately EXCLUDES the periodic gossip / probe / push-pull schedule,
+  /// which a Running cluster holds forever. A driver that drives a deterministic
+  /// simulation to quiescence uses it to distinguish "a SWIM operation is still
+  /// settling" (not quiescent) from "only the routine periodic timers remain"
+  /// (quiescent) — a distinction `poll_timeout` cannot make (it folds both into
+  /// one deadline), and which no other public signal exposes (a direct UDP probe
+  /// is not a reliable bridge, so the bridge count alone cannot see it).
+  pub fn has_pending_operation(&self) -> bool {
+    if self.lifecycle != Lifecycle::Running {
+      return false;
+    }
+    !self.probes.is_empty()
+      || !self.indirect_forwards.is_empty()
+      || !self.pending_stream_intents.is_empty()
+      || self.members.iter().any(|m| m.suspicion().is_some())
+  }
+
   /// Number of broadcasts currently in the gossip queue.
   pub fn broadcast_queue_len(&self) -> usize {
     self.broadcast.num_queued()
