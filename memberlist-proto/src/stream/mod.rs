@@ -709,7 +709,7 @@ where
           self
             .endpoint_events
             .push_back(EndpointEvent::PushPullReplyReceived(
-              PushPullReplyReceived::new(peer, states, user_data, pp_kind),
+              PushPullReplyReceived::new_with_stream_id(peer, states, user_data, pp_kind, self.id),
             ));
           self.phase = StreamPhase::Done;
           self.stream_events.push_back(StreamEvent::Closed);
@@ -781,7 +781,7 @@ where
             self
               .endpoint_events
               .push_back(EndpointEvent::PushPullRequestReceived(
-                PushPullRequestReceived::new(peer, states, user_data, kind),
+                PushPullRequestReceived::new_with_stream_id(peer, states, user_data, kind, self.id),
               ));
             self.phase = StreamPhase::InboundSendingResponse;
           }

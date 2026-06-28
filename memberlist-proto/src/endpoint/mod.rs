@@ -3754,6 +3754,9 @@ where
         // seed as NOT contacted. The membership merge needs only `states`;
         // `peer` and `user_data` are forwarded to the application via
         // `Event::RemoteStateReceived` once the merge is admitted.
+        // The producing stream's id is the token a driver correlates this merge
+        // with the `start_push_pull` it initiated.
+        let originating_stream_id = p.stream_id();
         let (peer, states, user_data, kind) = p.into_parts();
         // A Leaving/Left node completes the in-flight exchange — the stream
         // closes — but merges no remote membership or application state: the
@@ -3774,6 +3777,7 @@ where
             peer,
             user_data,
             kind.is_join(),
+            originating_stream_id,
           )));
         }
         None
@@ -3785,7 +3789,8 @@ where
         // the merge and reply with our state. The membership merge does not
         // consult `peer` or `user_data` at the FSM layer; once the merge is
         // admitted, a non-empty `user_data` is forwarded to the application
-        // via `Event::RemoteStateReceived`.
+        // via `Event::RemoteStateReceived`, stamped with the accepted stream's id.
+        let originating_stream_id = p.stream_id();
         let (peer, states, user_data, kind) = p.into_parts();
         // A Leaving/Left node sends no push/pull response: replying would start
         // new reliable I/O and leak our local membership/state snapshot during
@@ -3803,6 +3808,7 @@ where
             peer,
             user_data,
             kind.is_join(),
+            originating_stream_id,
           )));
         }
         let local_states: Vec<PushNodeState<I, A>> = self

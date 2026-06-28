@@ -128,18 +128,21 @@ fn compound_transmit_requires_two_messages() {
 
 #[test]
 fn remote_state_received_exposes_fields_and_parts() {
-  use super::RemoteStateReceived;
-  let rs = RemoteStateReceived::new(addr(40), Bytes::from_static(b"state"), true);
+  use super::{RemoteStateReceived, StreamId};
+  let stream_id = StreamId::from_raw(40);
+  let rs = RemoteStateReceived::new(addr(40), Bytes::from_static(b"state"), true, stream_id);
   assert_eq!(rs.peer_ref(), &addr(40));
   assert_eq!(rs.user_data_ref().as_ref(), b"state");
   assert!(rs.join());
+  // `originating_stream_id` is exposed via the accessor and NOT folded into `into_parts`.
+  assert_eq!(rs.originating_stream_id(), stream_id);
   let (peer, data, join) = rs.into_parts();
   assert_eq!(peer, addr(40));
   assert_eq!(data.as_ref(), b"state");
   assert!(join);
 
   // The non-join (refresh) construction path.
-  let refresh = RemoteStateReceived::new(addr(41), Bytes::new(), false);
+  let refresh = RemoteStateReceived::new(addr(41), Bytes::new(), false, StreamId::from_raw(41));
   assert!(!refresh.join());
 }
 
@@ -205,17 +208,19 @@ fn push_state(port: u16) -> PushNodeState<SmolStr, SocketAddr> {
 
 #[test]
 fn push_pull_request_received_exposes_fields_and_parts() {
-  use super::{PushPullKind, PushPullRequestReceived};
-  let pr = PushPullRequestReceived::new(
+  use super::{PushPullKind, PushPullRequestReceived, StreamId};
+  let pr = PushPullRequestReceived::new_with_stream_id(
     addr(70),
     std::vec![push_state(70), push_state(71)],
     Bytes::from_static(b"ud"),
     PushPullKind::Join,
+    StreamId::from_raw(70),
   );
   assert_eq!(pr.peer_ref(), &addr(70));
   assert_eq!(pr.states_slice().len(), 2);
   assert_eq!(pr.user_data_ref().as_ref(), b"ud");
   assert!(pr.kind().is_join());
+  assert_eq!(pr.stream_id(), StreamId::from_raw(70));
   let (peer, states, ud, kind) = pr.into_parts();
   assert_eq!(peer, addr(70));
   assert_eq!(states.len(), 2);
@@ -225,17 +230,19 @@ fn push_pull_request_received_exposes_fields_and_parts() {
 
 #[test]
 fn push_pull_reply_received_exposes_fields_and_parts() {
-  use super::{PushPullKind, PushPullReplyReceived};
-  let pr = PushPullReplyReceived::new(
+  use super::{PushPullKind, PushPullReplyReceived, StreamId};
+  let pr = PushPullReplyReceived::new_with_stream_id(
     addr(80),
     std::vec![push_state(80)],
     Bytes::new(),
     PushPullKind::Refresh,
+    StreamId::from_raw(80),
   );
   assert_eq!(pr.peer_ref(), &addr(80));
   assert_eq!(pr.states_slice().len(), 1);
   assert!(pr.user_data_ref().is_empty());
   assert!(!pr.kind().is_join());
+  assert_eq!(pr.stream_id(), StreamId::from_raw(80));
   let (peer, states, ud, kind) = pr.into_parts();
   assert_eq!(peer, addr(80));
   assert_eq!(states.len(), 1);
