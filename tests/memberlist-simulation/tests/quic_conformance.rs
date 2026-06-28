@@ -1657,10 +1657,12 @@ fn dial_requested_is_coordinator_internal_external_drain_does_not_orphan_dial() 
   // `DialRequested` retry token.
   let pre = c.external_poll_event_drain(a);
   assert_eq!(
-    pre, 0,
-    "external `poll_event` must see ZERO events before any step (the \
-     queued `DialRequested` must be sieved into the private `dial_pending` \
-     deque — never returned to external callers); got {pre}"
+    pre, 1,
+    "external `poll_event` must see EXACTLY the construction self-join \
+     (`NodeJoined(self)`, emitted on create to mirror Go's self-`NotifyJoin`) \
+     before any step — and NOT the queued `DialRequested`, which must be sieved \
+     into the private `dial_pending` deque rather than returned to external \
+     callers (a broken sieve would surface it as a second event); got {pre}"
   );
 
   // Mid-handshake external drains: across the first many ticks the QUIC

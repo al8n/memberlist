@@ -94,7 +94,7 @@ pub(crate) struct VirtualStream {
 pub struct Network {
   /// Endpoints keyed by their advertise address. BTreeMap gives a
   /// deterministic (address-sorted) iteration order across processes, so
-  /// `drain_transmits`/`drain_events`/`tick_all`/`process_dial_requests` drive
+  /// `drain_transmits`/`tick_all`/`process_dial_requests` drive
   /// `seq` assignment and fault-RNG consumption in the same order everywhere.
   pub(crate) endpoints: BTreeMap<SocketAddr, Endpoint<SmolStr, SocketAddr>>,
   /// Addresses of crashed (stopped) endpoints. A crashed node's endpoint
@@ -436,6 +436,20 @@ impl Network {
       .min()
   }
 
+  /// Whether any non-crashed endpoint has an in-progress SWIM operation — a
+  /// suspicion, a probe (direct or escalating), an indirect forward, or a
+  /// pending stream-dial intent. Excludes the periodic gossip / probe /
+  /// push-pull schedule (which a Running cluster holds forever), so a converged
+  /// cluster reports `false`. Used by [`Cluster::step`](crate::cluster::Cluster)
+  /// to keep a settling probe / suspicion from being mistaken for quiescence.
+  pub(crate) fn has_pending_operation(&self) -> bool {
+    self
+      .endpoints
+      .iter()
+      .filter(|(addr, _)| !self.crashed.contains(addr))
+      .any(|(_, ep)| ep.has_pending_operation())
+  }
+
   /// The next instant the simulation must wake at.
   pub(crate) fn next_deadline(&self) -> Option<Instant> {
     [
@@ -482,38 +496,6 @@ impl Network {
         self.enqueue_datagram(addr, to, messages, now);
       }
     }
-  }
-
-  /// Drain `poll_event` from every endpoint so progress is observable.
-  /// Admission (Alive / join merge) is applied inline by each host's
-  /// installed `AliveDelegate` / `MergeDelegate`; this method only needs to
-  /// re-enqueue non-`DialRequested` events so `Cluster::poll_event` callers
-  /// can still observe `NodeJoined` / `NodeLeft` / … . Returns `true` if any
-  /// event fired.
-  pub(crate) fn drain_events(&mut self, now: Instant) -> bool {
-    // `now` is reserved for future event handlers that need timestamps;
-    // today's drain path is time-agnostic.
-    let _ = now;
-    let addrs: Vec<SocketAddr> = self.endpoints.keys().copied().collect();
-    let mut any = false;
-    for addr in addrs {
-      if self.crashed.contains(&addr) {
-        continue;
-      }
-      let ep = self.endpoints.get_mut(&addr).unwrap();
-      // Re-enqueue every event (including DialRequested, which
-      // `process_dial_requests` consumes separately) so Cluster::poll_event
-      // callers can still observe NodeJoined / NodeLeft / … .
-      let mut deferred = Vec::new();
-      while let Some(ev) = ep.poll_event() {
-        any = true;
-        deferred.push(ev);
-      }
-      for ev in deferred {
-        ep.requeue_event(ev);
-      }
-    }
-    any
   }
 
   /// Fire `handle_timeout(now)` on every non-crashed endpoint.

@@ -817,8 +817,12 @@ impl TcpCluster {
     };
     if next > now {
       self.clock.advance(next - now);
-      progressed = true;
     }
+    // Advancing the clock moves virtual time forward but is NOT, by itself,
+    // protocol progress: a converged cluster keeps its periodic gossip / probe
+    // timers forever, so counting every wake as progress would make a
+    // `while c.step()` loop spin to its cap. Real pending work is reported via
+    // [`has_pending_work`](Self::has_pending_work) below.
     let now = self.clock.now();
 
     // 3. Deliver matured UDP datagrams + matured TCP chunks.
@@ -829,16 +833,38 @@ impl TcpCluster {
       progressed = true;
     }
 
-    // 4. Tick every node, scan events, drain again.
+    // 4. Tick every node, scan events (observation only — never a progress
+    //    signal), drain again.
     self.tick_all(now);
-    if self.scan_events() {
-      progressed = true;
-    }
+    self.scan_events();
     if self.drain_and_route(&addrs, now) {
       progressed = true;
     }
 
-    progressed
+    // A step that moved no bytes THIS instant is still progress while real work
+    // remains pending — an in-flight UDP datagram, an in-flight TCP
+    // byte/FIN/reset anchor, or a live reliable bridge — so a multi-tick
+    // push/pull or reliable-ping is never cut short, yet a settled cluster goes
+    // quiescent. (The unconsumed construction self-join is not progress.)
+    progressed || self.has_pending_work()
+  }
+
+  /// Whether the cluster still has real protocol work pending: an in-flight
+  /// UDP gossip datagram, an in-flight TCP byte / FIN / reset anchor, a
+  /// still-live reliable bridge on any node, or an in-progress SWIM operation
+  /// (a suspicion, a direct UDP probe waiting out its timeout before escalating,
+  /// an indirect forward, or a pending dial intent —
+  /// [`Endpoint::has_pending_operation`](memberlist_proto::Endpoint::has_pending_operation)).
+  /// The periodic gossip / probe schedule is deliberately NOT pending work: a
+  /// converged cluster holds those timers forever, so treating them as work
+  /// would never let a step loop settle.
+  fn has_pending_work(&self) -> bool {
+    self.earliest_udp_deadline().is_some()
+      || self.earliest_tcp_deadline().is_some()
+      || self
+        .nodes
+        .values()
+        .any(|n| n.live_bridge_count() > 0 || n.endpoint_ref().has_pending_operation())
   }
 
   /// Drain every coordinator's transport directives, outbound bytes, and
@@ -1450,11 +1476,15 @@ impl TcpCluster {
 
   /// Scan every node's live member view + `poll_event`, recording Suspect /
   /// Alive / Dead-or-Left / LeftCluster, then re-queue every event (so future
-  /// scans still see late ones). Returns `true` if any event was observed.
-  fn scan_events(&mut self) -> bool {
+  /// scans still see late ones).
+  ///
+  /// This is pure observation: it does NOT signal protocol progress. Every
+  /// endpoint is constructed with a pending `NodeJoined(self)` that no scan
+  /// consumer ever drains, so counting a requeued event as progress would make
+  /// every step look non-quiescent forever.
+  fn scan_events(&mut self) {
     let now = self.clock.now();
     let addrs: Vec<SocketAddr> = self.nodes.keys().copied().collect();
-    let mut any = false;
     for host in addrs {
       #[allow(clippy::type_complexity)]
       let (suspects, alives, gone): (Vec<SmolStr>, Vec<SmolStr>, Vec<SmolStr>) = {
@@ -1498,7 +1528,6 @@ impl TcpCluster {
       let node = self.nodes.get_mut(&host).unwrap();
       let mut deferred = Vec::new();
       while let Some(ev) = node.poll_event() {
-        any = true;
         if matches!(ev, Event::LeftCluster) {
           self.left.insert(host);
         }
@@ -1508,7 +1537,6 @@ impl TcpCluster {
         node.requeue_event(ev, now);
       }
     }
-    any
   }
 }
 

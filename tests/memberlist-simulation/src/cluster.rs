@@ -118,13 +118,19 @@ impl MergeDelegate<SmolStr, SocketAddr> for PolicyMergeDelegate {
 /// 1. Drain datagram transmits → enqueue datagrams.
 /// 2. Process `DialRequested` events → create `VirtualStream` pairs.
 /// 3. Pipe bytes between active virtual streams.
-/// 4. Drain remaining events (admission already applied inline by the
-///    per-host [`AliveDelegate`]/[`MergeDelegate`]).
-/// 5. Advance simulated time to the next deadline.
-/// 6. Deliver matured datagrams.
-/// 7. Fire `handle_timeout(now)` on all endpoints.
+/// 4. Advance simulated time to the next deadline.
+/// 5. Deliver matured datagrams.
+/// 6. Fire `handle_timeout(now)` on all endpoints.
 ///
-/// Returns `true` if any datagram was delivered or any event was processed.
+/// (Admission is applied inline by the per-host
+/// [`AliveDelegate`]/[`MergeDelegate`]; application events stay queued for
+/// [`poll_event`](Cluster::poll_event).)
+///
+/// Returns `true` if the step made protocol progress — a delivered datagram, a
+/// newly established or still in-flight reliable stream, or a recorded
+/// membership transition. A step that only re-observes a buffered application
+/// event (such as the unconsumed construction self-join) returns `false`, so a
+/// converged cluster is detected as quiescent.
 pub struct Cluster {
   pub(crate) net: Network,
   pub(crate) clock: Clock,
@@ -498,6 +504,21 @@ impl Cluster {
     // tick clears it.
     self.pruned_this_step.clear();
 
+    // Baseline for this step's protocol-progress accounting. A step makes
+    // protocol progress only when membership state actually advances — a
+    // delivered datagram, a newly established or in-flight reliable stream, or
+    // a recorded `(state, incarnation)` transition. The mere presence of a
+    // buffered application event must NOT count: every endpoint is constructed
+    // with a pending `NodeJoined(self)` (mirroring Go's self-`NotifyJoin`) that
+    // no simulation consumer ever drains, so treating a requeued event as
+    // progress would make every step look non-quiescent forever and force
+    // `run_until_quiescent` / the calm loop to spin to their backstop. Events
+    // stay observable via `poll_event`; they simply do not, by themselves,
+    // signal progress. `history_transitions` grows by exactly this step's
+    // recorded membership transitions (the self-join is an endpoint event, not
+    // a recorded transition, so it never appears here).
+    let transitions_before = self.history_transitions.len();
+
     // 1. Drain transmits from all endpoints → enqueue datagrams.
     self.net.drain_transmits(now);
 
@@ -525,11 +546,12 @@ impl Cluster {
       );
     }
 
-    // 4. Drain remaining non-DialRequested events (admission already applied
-    //    inline by each host's installed AliveDelegate / MergeDelegate). This
-    //    only re-enqueues events for `poll_event` observation; it mutates no
-    //    membership, so no transition is recorded.
-    let events_fired = self.net.drain_events(now);
+    // 4. Remaining non-DialRequested events (NodeJoined / NodeLeft / …) stay
+    //    queued on each endpoint for `poll_event` observation. They are NOT
+    //    drained-and-requeued here: that re-cycle was a no-op on the queue
+    //    whose only effect was reporting the perpetually-buffered construction
+    //    self-join as progress. Admission was already applied inline by each
+    //    host's installed AliveDelegate / MergeDelegate.
 
     // 5. Advance to next deadline (endpoints + active streams).
     let stream_deadline = self
@@ -551,8 +573,13 @@ impl Cluster {
       None => {
         // Same early-out as below. The stream-phase transitions were already
         // recorded per event by `step_streams_recording`, so there is nothing
-        // further to record before returning.
-        return events_fired || new_streams;
+        // further to record before returning. Progress is real protocol
+        // advancement — a new/in-flight stream, a recorded transition, or a
+        // still-settling SWIM operation — never a buffered application event.
+        return new_streams
+          || !self.streams.is_empty()
+          || self.history_transitions.len() != transitions_before
+          || self.net.has_pending_operation();
       }
     };
     if next > now {
@@ -620,7 +647,18 @@ impl Cluster {
     // the history checkers clear its baseline exactly as the post-step path did.
     self.record_transitions(&pre_tick);
 
-    events_fired || new_streams || delivered > 0
+    // Protocol progress: a delivered datagram, a newly established or still
+    // in-flight reliable stream, a recorded membership transition, or a
+    // still-settling SWIM operation (a suspicion / probe / indirect forward /
+    // pending dial intent — so a node waiting out a blocked probe is not
+    // mistaken for idle). A buffered application event (the unconsumed
+    // construction self-join) is deliberately excluded so a converged cluster
+    // goes quiescent.
+    delivered > 0
+      || new_streams
+      || !self.streams.is_empty()
+      || self.history_transitions.len() != transitions_before
+      || self.net.has_pending_operation()
   }
 
   /// Snapshot every `(observer, subject)` row's `(state, incarnation)` in
