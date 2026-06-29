@@ -528,21 +528,20 @@ fn aes_gcm_encrypt(
   plaintext: &[u8],
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-  // Import the AEAD traits from `aes-gcm`'s OWN re-export so they resolve to the
-  // exact `aead` version the cipher implements; the top-level `aead` dependency
-  // is a newer major whose `KeyInit`/`AeadInPlace` traits the cipher does not
-  // implement.
+  // Import the AEAD traits from `aes-gcm`'s OWN re-export so they always resolve
+  // to the exact `aead` version the cipher implements, never a differently
+  // versioned top-level `aead` whose `KeyInit`/`AeadInOut` traits the cipher
+  // would not implement.
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
-    aead::{AeadInPlace, KeyInit},
+    aead::{AeadInOut, KeyInit},
     aes::{Aes192, cipher::consts::U12},
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
 
-  // The owned key/nonce byte arrays convert into the cipher's `GenericArray`-backed
-  // `Key`/`Nonce` types through `From<[u8; N]>`, keeping us off the deprecated
-  // `GenericArray::from_slice` constructor (`generic-array` 0.14 nudges toward 1.x).
+  // The owned key/nonce byte arrays convert into the cipher's `Array`-backed
+  // `Key`/`Nonce` types through `From<[u8; N]>`.
   let mut buf = plaintext.to_vec();
   match key {
     #[cfg(feature = "aes-gcm")]
@@ -583,18 +582,16 @@ fn aes_gcm_decrypt(
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
   // See `aes_gcm_encrypt`: import the AEAD traits from `aes-gcm`'s own re-export
-  // so they match the `aead` version the cipher implements (not the newer
-  // top-level `aead` dependency).
+  // so they match the exact `aead` version the cipher implements.
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
-    aead::{AeadInPlace, KeyInit},
+    aead::{AeadInOut, KeyInit},
     aes::{Aes192, cipher::consts::U12},
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
 
-  // See `aes_gcm_encrypt`: `From<[u8; N]>` builds the cipher key/nonce, avoiding
-  // the deprecated `GenericArray::from_slice`.
+  // See `aes_gcm_encrypt`: `From<[u8; N]>` builds the cipher key/nonce.
   let mut buf = ciphertext.to_vec();
   match key {
     #[cfg(feature = "aes-gcm")]
@@ -638,7 +635,7 @@ fn chacha20poly1305_encrypt(
   // resolve to the `aead` version the cipher implements (see `aes_gcm_encrypt`).
   use chacha20poly1305::{
     ChaCha20Poly1305,
-    aead::{AeadInPlace, KeyInit},
+    aead::{AeadInOut, KeyInit},
   };
 
   // The cross-cipher `_` arm exists only when AES-GCM is also built in; in a
@@ -651,8 +648,7 @@ fn chacha20poly1305_encrypt(
     #[cfg(feature = "aes-gcm")]
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
-  // `From<[u8; N]>` builds the key/nonce, avoiding the deprecated
-  // `GenericArray::from_slice` (see `aes_gcm_encrypt`).
+  // `From<[u8; N]>` builds the key/nonce (see `aes_gcm_encrypt`).
   let cipher = ChaCha20Poly1305::new(&(*k).into());
   let mut buf = plaintext.to_vec();
   cipher
@@ -672,7 +668,7 @@ fn chacha20poly1305_decrypt(
   // re-export so they match the `aead` version it implements.
   use chacha20poly1305::{
     ChaCha20Poly1305,
-    aead::{AeadInPlace, KeyInit},
+    aead::{AeadInOut, KeyInit},
   };
 
   // See `chacha20poly1305_encrypt`: the cross-cipher `_` arm exists only when
@@ -684,8 +680,7 @@ fn chacha20poly1305_decrypt(
     #[cfg(feature = "aes-gcm")]
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
-  // See `chacha20poly1305_encrypt`: `From<[u8; N]>` avoids the deprecated
-  // `GenericArray::from_slice`.
+  // See `chacha20poly1305_encrypt`: `From<[u8; N]>` builds the key/nonce.
   let cipher = ChaCha20Poly1305::new(&(*k).into());
   let mut buf = ciphertext.to_vec();
   cipher
