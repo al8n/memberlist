@@ -80,7 +80,7 @@ pub use driver::options::{
   DEFAULT_OBSERVATION_CHANNEL, DEFAULT_PEEK_BUDGET, RuntimeOptions, StreamTransportOptions,
 };
 pub use error::{
-  GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidGossipMtu, InvalidOption, JoinAllFailed,
+  GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidGossipMtu, InvalidOption, JoinFailed,
   MemberlistError, Result,
 };
 pub use events::EventStream;

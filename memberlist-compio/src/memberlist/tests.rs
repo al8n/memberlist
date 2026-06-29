@@ -50,8 +50,8 @@ async fn tcp_two_node_join_via_new() {
     .await
     .expect("join n1");
   assert!(
-    contacted >= 1,
-    "expected at least one contact, got {contacted}"
+    !contacted.is_empty(),
+    "expected at least one contact, got {contacted:?}"
   );
 
   n1.shutdown().await.ok();

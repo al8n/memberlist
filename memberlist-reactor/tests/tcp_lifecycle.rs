@@ -153,7 +153,7 @@ async fn set_policy_options_after_leave_is_rejected() {
 /// After `leave()`, both the synchronous `join` (WaitForCompletion) and the
 /// fire-and-forget `join_detached` (Dispatch) funnel through the same
 /// running-node gate and are rejected with `NotRunning` rather than falsely
-/// reporting a contacted count.
+/// reporting any reached or dispatched seeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn join_after_leave_is_rejected() {
   let (a, b, a_addr) = converged_pair().await;
@@ -167,7 +167,7 @@ async fn join_after_leave_is_rejected() {
   .await
   .expect("join must not hang after leave");
   assert!(
-    matches!(res, Err(Error::NotRunning)),
+    matches!(res, Err((_, Error::NotRunning))),
     "expected NotRunning from join after leave, got {res:?}"
   );
 
@@ -255,7 +255,7 @@ async fn join_empty_seeds_is_zero_contact_success() {
     .join(&SocketAddrResolver, &[])
     .await
     .expect("empty-seed join is a no-op success");
-  assert_eq!(n, 0, "no seeds dispatched");
+  assert!(n.is_empty(), "no seeds dispatched");
   let n2 = m
     .join_detached(&SocketAddrResolver, &[])
     .await
@@ -314,7 +314,10 @@ async fn commands_after_shutdown_return_shutdown_promptly() {
   let r_enc = clone.set_encryption_options(EncryptionOptions::new()).await;
   let elapsed = start.elapsed();
 
-  assert!(matches!(r_join, Err(Error::Shutdown)), "join: {r_join:?}");
+  assert!(
+    matches!(r_join, Err((_, Error::Shutdown))),
+    "join: {r_join:?}"
+  );
   assert!(
     matches!(r_leave, Err(Error::Shutdown)),
     "leave: {r_leave:?}"

@@ -542,7 +542,7 @@ async fn dispatch_join_rejected_after_leave() {
   let cidr = allow_all();
 
   // Dispatch kind.
-  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<usize>>();
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
   let out = dispatch_one(
     &mut ep,
     Command::Join(JoinCmd {
@@ -556,12 +556,12 @@ async fn dispatch_join_rejected_after_leave() {
   .await;
   assert!(out.pending_joins.is_empty(), "no join waiter parked");
   assert!(
-    matches!(rx.await, Ok(Err(MemberlistError::NotRunning))),
+    matches!(rx.await, Ok(Err((set, MemberlistError::NotRunning))) if set.is_empty()),
     "Join(Dispatch) after leave ⇒ NotRunning",
   );
 
   // WaitForCompletion kind.
-  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<usize>>();
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
   let out = dispatch_one(
     &mut ep,
     Command::Join(JoinCmd {
@@ -577,7 +577,7 @@ async fn dispatch_join_rejected_after_leave() {
   .await;
   assert!(out.pending_joins.is_empty(), "no join waiter parked");
   assert!(
-    matches!(rx.await, Ok(Err(MemberlistError::NotRunning))),
+    matches!(rx.await, Ok(Err((set, MemberlistError::NotRunning))) if set.is_empty()),
     "Join(WaitForCompletion) after leave ⇒ NotRunning",
   );
 }
@@ -667,7 +667,7 @@ async fn dispatch_leave_while_running_parks_waiter() {
 // ---- dispatch_command: CIDR transport-source filtering ----
 
 /// A block-all CIDR policy makes `Join(Dispatch)` skip every seed: no
-/// push/pull is started, and the reply is `Ok(0)` (zero seeds contacted).
+/// push/pull is started, and the reply is `Ok(empty)` (zero seeds dispatched).
 /// Covers the `cidr_blocks(...) { continue }` skip in the Dispatch arm.
 #[cfg(feature = "cidr")]
 #[compio::test]
@@ -676,7 +676,7 @@ async fn dispatch_join_skips_cidr_blocked_seeds() {
   let mut ep = build_endpoint("a", addr(17611), now);
   let cidr = block_all();
 
-  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<usize>>();
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
   let out = dispatch_one(
     &mut ep,
     Command::Join(JoinCmd {
@@ -689,14 +689,17 @@ async fn dispatch_join_skips_cidr_blocked_seeds() {
   )
   .await;
   assert!(out.pending_joins.is_empty(), "Dispatch parks nothing");
-  assert!(
-    matches!(rx.await, Ok(Ok(0))),
-    "every seed CIDR-blocked ⇒ zero contacted",
-  );
+  match rx.await {
+    Ok(Ok(set)) => assert!(
+      set.is_empty(),
+      "every seed CIDR-blocked ⇒ nothing dispatched"
+    ),
+    other => panic!("expected Ok(empty), got {other:?}"),
+  }
 }
 
 /// A block-all CIDR policy makes `Join(WaitForCompletion)` block every seed,
-/// leaving the `pending` set empty: the arm replies `JoinAllFailed` carrying
+/// leaving the `pending` set empty: the arm replies `JoinFailed` carrying
 /// the original seed count immediately instead of parking. Covers the
 /// `if pending.is_empty()` short-circuit in the WaitForCompletion arm.
 #[cfg(feature = "cidr")]
@@ -706,7 +709,7 @@ async fn dispatch_join_wait_all_blocked_fails_immediately() {
   let mut ep = build_endpoint("a", addr(17612), now);
   let cidr = block_all();
 
-  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<usize>>();
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
   let out = dispatch_one(
     &mut ep,
     Command::Join(JoinCmd {
@@ -722,11 +725,12 @@ async fn dispatch_join_wait_all_blocked_fails_immediately() {
   .await;
   assert!(out.pending_joins.is_empty(), "no waiter parked");
   match rx.await {
-    Ok(Err(MemberlistError::JoinAllFailed(e))) => {
+    Ok(Err((set, MemberlistError::JoinFailed(e)))) => {
+      assert!(set.is_empty(), "all-failed carries an empty reached set");
       assert_eq!(e.requested(), 2, "carries the original seed count");
       assert_eq!(e.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 }
 
@@ -945,7 +949,7 @@ async fn min_pending_join_deadline_picks_the_earliest() {
       key,
       PendingJoin {
         pending: HashSet::new(),
-        contacted: 0,
+        contacted: smallvec::SmallVec::new(),
         requested: 1,
         deadline,
         reply: tx,
@@ -1038,7 +1042,7 @@ async fn reap_pending_leave_fires_only_after_the_deadline() {
 }
 
 /// `reap_pending_joins` resolves a waiter whose `pending` set is empty: zero
-/// contacts ⇒ `JoinAllFailed(requested, 0)`, any contacts ⇒ `Ok(contacted)`.
+/// contacts ⇒ `JoinFailed(requested, 0)`, any contacts ⇒ `Ok(reached_set)`.
 /// (The empty-`pending` branch is the degenerate zero-exchange
 /// `WaitForCompletion` AND the post-completion drain.)
 #[compio::test]
@@ -1046,25 +1050,29 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
   let now = Instant::now();
   let mut joins: HashMap<u64, PendingJoin> = HashMap::new();
 
-  // Waiter 1: zero contacts ⇒ JoinAllFailed carrying the requested count.
+  // Waiter 1: zero contacts ⇒ JoinFailed carrying the requested count.
   let (tx_fail, rx_fail) = futures_channel::oneshot::channel();
   joins.insert(
     1,
     PendingJoin {
       pending: HashSet::new(),
-      contacted: 0,
+      contacted: smallvec::SmallVec::new(),
       requested: 3,
       deadline: now + Duration::from_secs(60),
       reply: tx_fail,
     },
   );
-  // Waiter 2: two contacts ⇒ Ok(2).
+  // Waiter 2: two contacts ⇒ Ok(reached_set).
+  let reached: smallvec::SmallVec<[std::net::SocketAddr; 1]> = smallvec::smallvec![
+    "127.0.0.1:1".parse().unwrap(),
+    "127.0.0.1:2".parse().unwrap()
+  ];
   let (tx_ok, rx_ok) = futures_channel::oneshot::channel();
   joins.insert(
     2,
     PendingJoin {
       pending: HashSet::new(),
-      contacted: 2,
+      contacted: reached.clone(),
       requested: 2,
       deadline: now + Duration::from_secs(60),
       reply: tx_ok,
@@ -1075,14 +1083,18 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
   assert!(joins.is_empty(), "both empty-pending waiters are reaped");
 
   match rx_fail.await {
-    Ok(Err(MemberlistError::JoinAllFailed(e))) => {
+    Ok(Err((set, MemberlistError::JoinFailed(e)))) => {
+      assert!(set.is_empty(), "all-failed carries an empty reached set");
       assert_eq!(e.requested(), 3, "carries the requested seed count");
       assert_eq!(e.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
-  assert!(
-    matches!(rx_ok.await, Ok(Ok(2))),
-    "a waiter with contacts resolves Ok(contacted)",
-  );
+  match rx_ok.await {
+    Ok(Ok(set)) => assert_eq!(
+      set, reached,
+      "a waiter with contacts resolves Ok(reached_set)"
+    ),
+    other => panic!("expected Ok(reached_set), got {other:?}"),
+  }
 }

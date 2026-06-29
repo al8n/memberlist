@@ -16,7 +16,8 @@ use std::net::SocketAddr;
 
 use agnostic::tokio::TokioRuntime;
 use memberlist_reactor::{
-  CidrPolicy, MaybeResolved, Memberlist, Options, QuicOptions, SocketAddrResolver, VoidDelegate,
+  CidrPolicy, Error, MaybeResolved, Memberlist, Options, QuicOptions, RuntimeOptions,
+  SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -102,4 +103,79 @@ async fn cidr_policy_blocks_quic_reliable_send() {
   );
 
   a.shutdown().await.ok();
+}
+
+/// Partial-CIDR-blocked join: one seed CIDR-blocked (skipped before `pending`)
+/// plus one allowed-but-unreachable seed (enters `pending`, runs to deadline).
+///
+/// Regression for the bug where `JoinFailed.requested()` was derived from
+/// `pending.len()` after the CIDR filter, which undercounted the blocked seed.
+/// The correct denominator is the full resolved seed count (`addrs.len()`)
+/// captured BEFORE the CIDR filter — matching the stream driver's semantics.
+///
+/// Uses a short `join_deadline` (500 ms) so the allowed-but-unreachable seed
+/// runs to deadline quickly. Asserts `requested == 2` (both seeds counted) and
+/// `contacted == 0` (neither was reached).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cidr_policy_partial_block_join_requested_counts_all_resolved_seeds() {
+  use std::time::Duration;
+
+  let (qcfg_seed, qcfg_joiner) = shared_quic_pair();
+  // Start a real node just to obtain a bound loopback port. Its address
+  // will be CIDR-blocked by the joiner's /32 policy, so no handshake fires.
+  let seed = make_quic("cidr-partial-seed", qcfg_seed, None).await;
+  let seed_addr = seed.advertise_address();
+
+  // An unreachable loopback address (127.0.0.2, distinct from the seed's
+  // 127.0.0.1). Port 30399 is unbound, so the QUIC datagram vanishes and the
+  // exchange runs to the join deadline.
+  let unreachable_addr: SocketAddr = "127.0.0.2:30399".parse().expect("loopback 2");
+
+  // `CidrPolicy` is an allowlist. Admit ONLY the unreachable seed's IP
+  // (127.0.0.2): this BLOCKS the real seed (127.0.0.1, skipped before `pending`)
+  // and ADMITS the unreachable address (it enters `pending`, dials, and runs to
+  // the join deadline). `seed_addr` is the blocked seed in the seeds list below.
+  let policy = CidrPolicy::try_from([format!("{}/32", unreachable_addr.ip()).as_str()].as_slice())
+    .expect("valid /32 cidr");
+
+  // Build the joiner with a short join_deadline (500 ms) so the
+  // allowed-but-unreachable exchange resolves quickly.
+  let joiner = Memberlist::<SmolStr, _, TokioRuntime>::quic(
+    &SocketAddrResolver,
+    SmolStr::new("cidr-partial-joiner"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::<SmolStr>::new()
+      .with_cidr_policy(policy)
+      .with_runtime(RuntimeOptions::new().with_join_deadline(Duration::from_millis(500))),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+    qcfg_joiner,
+  )
+  .await
+  .expect("bind joiner");
+
+  // Two seeds: seed_addr is CIDR-blocked (skipped before `pending`),
+  // unreachable_addr is allowed but never responds.
+  let seeds = [
+    MaybeResolved::Resolved(seed_addr),
+    MaybeResolved::Resolved(unreachable_addr),
+  ];
+  let result = joiner.join(&SocketAddrResolver, &seeds).await;
+
+  match result {
+    Err((reached, Error::JoinFailed(jf))) => {
+      assert!(reached.is_empty(), "no peer was contacted");
+      assert_eq!(
+        jf.requested(),
+        2,
+        "requested must count ALL resolved seeds (including CIDR-blocked), \
+         got {} (expected 2)",
+        jf.requested()
+      );
+      assert_eq!(jf.contacted(), 0, "contacted must be zero");
+    }
+    other => panic!("expected JoinFailed for partial-CIDR-blocked join, got {other:?}"),
+  }
+
+  joiner.shutdown().await.ok();
+  seed.shutdown().await.ok();
 }

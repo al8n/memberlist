@@ -127,23 +127,28 @@ async fn two_node_join_converges_member_counts() {
   joiner.shutdown().await.expect("joiner shutdown");
 }
 
-/// `join_with` (the synchronous variant) returns the actually-contacted
-/// count, not the dispatched count. Against a single reachable seed it
-/// must return `Ok(1)` once `NodeJoined` for the seed lands — before
+/// `join_with` (the synchronous variant) returns the actually-reached
+/// address set, not the dispatched count. Against a single reachable seed it
+/// must return a 1-element set once `NodeJoined` for the seed lands — before
 /// `JOIN_DEADLINE` elapses.
 #[compio::test]
 async fn join_with_waits_for_actual_contact() {
   let seed = make_tcp("seed", loopback_addr(0), b"cluster-join-sync").await;
   let joiner = make_tcp("joiner", loopback_addr(0), b"cluster-join-sync").await;
 
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join should succeed against a reachable seed");
-  assert_eq!(count, 1, "one seed contacted");
+  assert_eq!(contacted.len(), 1, "one seed contacted");
+  assert_eq!(
+    contacted[0],
+    seed.advertise_address(),
+    "the reached set carries the seed address"
+  );
 
   // join returns when the seed is contacted; on return both sides
   // must already observe the cluster size of 2 (no further wait).
@@ -164,12 +169,12 @@ async fn join_with_waits_for_actual_contact() {
   joiner.shutdown().await.expect("joiner shutdown");
 }
 
-/// `join_with` against an unreachable seed must surface
-/// `MemberlistError::JoinAllFailed { requested: 1, contacted: 0 }` once
-/// the deadline elapses. The dial loop fails fast against a closed
-/// loopback port, so the call returns well before `JOIN_DEADLINE`.
+/// `join` against an unreachable seed must surface
+/// `MemberlistError::JoinFailed { requested: 1, contacted: 0 }` (with an empty
+/// reached set) once the deadline elapses. The dial loop fails fast against a
+/// closed loopback port, so the call returns well before `JOIN_DEADLINE`.
 #[compio::test]
-async fn join_with_blackhole_surfaces_join_all_failed() {
+async fn join_with_blackhole_surfaces_join_failed() {
   // 127.0.0.1 with a port that has nothing listening — connect()
   // returns ECONNREFUSED immediately on Linux/macOS loopback, so the
   // bridge enters its EOF/Error path and no NodeJoined ever fires.
@@ -178,28 +183,32 @@ async fn join_with_blackhole_surfaces_join_all_failed() {
 
   let joiner = make_tcp("joiner", loopback_addr(0), b"cluster-join-fail").await;
 
-  let err = joiner
+  let (reached, err) = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(blackhole)])
     .await
     .expect_err("join against blackhole must fail");
+  assert!(
+    reached.is_empty(),
+    "all-failed carries an empty reached set"
+  );
 
   match err {
-    MemberlistError::JoinAllFailed(payload) => {
+    MemberlistError::JoinFailed(payload) => {
       assert_eq!(payload.requested(), 1, "requested matches input seed count");
       assert_eq!(payload.contacted(), 0, "no contacts when seed is blackhole");
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   joiner.shutdown().await.expect("joiner shutdown");
 }
 
 /// A non-empty `seeds` slice whose resolver returns an empty address
-/// vector must surface as `JoinAllFailed`, NOT a silent `Ok(0)`. A
+/// vector must surface as `JoinFailed`, NOT a silent `Ok(empty)`. A
 /// service-discovery resolver that finds no endpoints for a configured
 /// service key is the canonical failure case this test guards against.
 #[compio::test]
-async fn join_with_empty_resolution_surfaces_join_all_failed() {
+async fn join_with_empty_resolution_surfaces_join_failed() {
   // This joiner resolves `String` service keys via `EmptyResolver`, so its
   // membership-input address type is `String` (not the default `HostAddr`).
   let joiner: Memberlist<SmolStr, String> = Memberlist::new(
@@ -224,13 +233,17 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
     MaybeResolved::Unresolved("svc-a".into()),
     MaybeResolved::Unresolved("svc-b".into()),
   ];
-  let err = joiner
+  let (reached, err) = joiner
     .join(&EmptyResolver, &seeds)
     .await
     .expect_err("non-empty seeds resolving to empty address list must fail");
+  assert!(
+    reached.is_empty(),
+    "all-failed carries an empty reached set"
+  );
 
   match err {
-    MemberlistError::JoinAllFailed(payload) => {
+    MemberlistError::JoinFailed(payload) => {
       assert_eq!(
         payload.requested(),
         seeds.len(),
@@ -238,17 +251,17 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
       );
       assert_eq!(payload.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
-  // Truly-empty input still short-circuits to Ok(0): no command sent,
-  // no JoinAllFailed.
+  // Truly-empty input still short-circuits to Ok(empty): no command sent,
+  // no JoinFailed.
   let empty: Vec<MaybeResolved<String, SocketAddr>> = Vec::new();
-  let count = joiner
+  let reached = joiner
     .join(&EmptyResolver, &empty)
     .await
     .expect("empty seeds returns Ok");
-  assert_eq!(count, 0);
+  assert!(reached.is_empty(), "empty input ⇒ empty reached set");
 
   joiner.shutdown().await.expect("joiner shutdown");
 }
@@ -285,14 +298,14 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   )
   .await;
 
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against 20 KiB-meta seed");
-  assert_eq!(count, 1);
+  assert_eq!(contacted.len(), 1);
 
   // Both sides converge; large UDP alive broadcasts flow at the
   // raised MTU because the per-iter recv buffer tracks the
@@ -348,14 +361,14 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   )
   .await;
 
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against larger-meta seed");
-  assert_eq!(count, 1);
+  assert_eq!(contacted.len(), 1);
   // Convergence check: both nodes must observe the cluster, proving
   // the seed's Alive landed in joiner's membership despite the
   // local cap mismatch.
@@ -378,16 +391,15 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
 /// Duplicate seed addresses must produce duplicate push/pull exchanges,
 /// each counted independently. Passing `[X, X]` to `join_with` queues
 /// two outbound exchanges; both must terminate with `Succeeded` before
-/// the call returns, and the returned count is the number of
-/// successful exchanges (2 here), not the number of distinct
-/// addresses (1).
+/// the call returns, and the returned reached set has 2 entries (one per
+/// successful exchange), not 1 (distinct addresses).
 #[compio::test]
 async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
   let seed = make_tcp("seed", loopback_addr(0), b"join-duplicate").await;
   let joiner = make_tcp("joiner", loopback_addr(0), b"join-duplicate").await;
 
   let seed_addr = seed.advertise_address();
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[
@@ -398,7 +410,8 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
     .await
     .expect("join with duplicate seeds should succeed");
   assert_eq!(
-    count, 2,
+    contacted.len(),
+    2,
     "duplicate seed counts each outbound exchange independently"
   );
 
@@ -424,7 +437,7 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   let a = make_tcp("a", loopback_addr(0), b"transitive-discover").await;
   // Bind the joiner NOW, while C still holds its port, so a later `:0` bind can
   // never be handed C's freed address after C is dropped — which would point the
-  // "closed transitive seed" at the live joiner and invalidate the count.
+  // "closed transitive seed" at the live joiner and pollute the reached set.
   let joiner = make_tcp("joiner", loopback_addr(0), b"transitive-discover").await;
 
   // Capture C's bound address before C is dropped — the joiner below
@@ -438,7 +451,7 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(c_addr)])
     .await
     .expect("a joins c");
-  assert_eq!(n, 1, "A directly contacted C");
+  assert_eq!(n.len(), 1, "A directly contacted C");
   let converged = wait_until(|| a.member_count() == 2, Duration::from_secs(2)).await;
   assert!(converged, "A did not learn C");
 
@@ -460,9 +473,11 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
     .await
     .expect("joiner contacts A even if C is unreachable");
   assert_eq!(
-    contacted, 1,
+    contacted.len(),
+    1,
     "join counted a transitively-discovered seed as contacted"
   );
+  assert_eq!(contacted[0], a_addr, "only A is in the reached set");
 
   a.shutdown().await.expect("a shutdown");
   joiner.shutdown().await.expect("joiner shutdown");
@@ -495,8 +510,8 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
   let (n1, n2) = futures_util::future::join(fut1, fut2).await;
   let n1 = n1.expect("j1 contacts seed");
   let n2 = n2.expect("j2 contacts seed");
-  assert_eq!(n1, 1, "j1 reports only its own seed contact");
-  assert_eq!(n2, 1, "j2 reports only its own seed contact");
+  assert_eq!(n1.len(), 1, "j1 reports only its own seed contact");
+  assert_eq!(n2.len(), 1, "j2 reports only its own seed contact");
 
   seed.shutdown().await.expect("seed shutdown");
   j1.shutdown().await.expect("j1 shutdown");
@@ -510,7 +525,7 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
 /// total bridge-inbound messages), the past-due path must drain every
 /// queued completion before calling `handle_timeout`; otherwise a
 /// successful response sitting behind the cap would be marked overdue
-/// and surface as `JoinAllFailed`.
+/// and surface as `JoinFailed`.
 #[compio::test]
 async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   use std::collections::HashSet;
@@ -524,7 +539,7 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   // independently; with 64 of them the bridge byte-mover tasks
   // collectively produce hundreds of BridgeInbound messages — enough
   // to test the cap-then-deadline interaction. Every call must
-  // return Ok(1) — none may surface JoinAllFailed.
+  // return a 1-element reached set — none may surface JoinFailed.
   const N: usize = 64;
   let mut futures = Vec::with_capacity(N);
   for _ in 0..N {
@@ -535,6 +550,7 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
         .join(&SocketAddrResolver, &seeds)
         .await
         .expect("each parallel join must succeed")
+        .len()
     });
   }
   let counts: Vec<usize> = futures_util::future::join_all(futures).await;
@@ -542,7 +558,7 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   assert_eq!(
     unique_counts,
     HashSet::from([1usize]),
-    "every parallel join must report Ok(1); got {counts:?}"
+    "every parallel join must report a 1-element reached set; got {counts:?}"
   );
 
   seed.shutdown().await.expect("seed shutdown");
@@ -558,7 +574,7 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
 /// coordinator membership after the bytes are processed — banner
 /// traffic never reaches that state.
 #[compio::test]
-async fn join_with_against_banner_tcp_service_surfaces_join_all_failed() {
+async fn join_with_against_banner_tcp_service_surfaces_join_failed() {
   use compio::{io::AsyncWriteExt, net::TcpListener};
 
   // Spawn a TCP listener that immediately writes a non-memberlist
@@ -582,16 +598,20 @@ async fn join_with_against_banner_tcp_service_surfaces_join_all_failed() {
 
   let joiner = make_tcp("joiner", loopback_addr(0), b"banner-trust").await;
 
-  let err = joiner
+  let (reached, err) = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(banner_addr)])
     .await
     .expect_err("join against banner service must not report contact");
+  assert!(
+    reached.is_empty(),
+    "all-failed carries an empty reached set"
+  );
   match err {
-    MemberlistError::JoinAllFailed(payload) => {
+    MemberlistError::JoinFailed(payload) => {
       assert_eq!(payload.requested(), 1);
       assert_eq!(payload.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   joiner.shutdown().await.expect("joiner shutdown");

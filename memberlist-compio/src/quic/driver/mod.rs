@@ -49,18 +49,19 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
+  command::{Command, JoinCmd, JoinKind, JoinReply, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
     options::RuntimeOptions,
-    shared::{ExchangeId, cidr_blocks, dispatch_event_delegate},
+    shared::{ExchangeId, cidr_blocks, dispatch_event_delegate, join_reply},
   },
-  error::{JoinAllFailed, MemberlistError, Result},
+  error::{JoinFailed, MemberlistError, Result},
   snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
 use core::time::Duration;
 use memberlist_proto::metrics::Metrics;
+use smallvec::SmallVec;
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
 /// capped at 65507 bytes (the IP-layer maximum once the 8-byte UDP
@@ -93,27 +94,28 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 /// Tracks the set of dispatched outbound `ExchangeId`s waiting on a
 /// terminal `Event::ExchangeCompleted` filtered to
 /// `ExchangeKind::PushPull`. When the set empties (or the deadline
-/// elapses), the driver replies on `reply` with either the success
-/// count or `JoinAllFailed`.
+/// elapses), the driver replies on `reply` with either the reached
+/// address set or `JoinFailed`.
 struct PendingJoin {
   /// Set of outbound exchange IDs this waiter dispatched and is still
   /// waiting on. An `ExchangeId` is removed when its push/pull
   /// `ExchangeCompleted` arrives; when empty, the call has fully
   /// resolved.
   pending: HashSet<ExchangeId>,
-  /// Number of dispatched outbound exchanges that terminated with
-  /// `ExchangeStatus::Succeeded`. Duplicate seeds produce duplicate
-  /// exchanges and each successful one counts independently.
-  contacted: usize,
+  /// Set of peer addresses whose dispatched outbound exchange terminated with
+  /// `ExchangeStatus::Succeeded` — the reached set the call resolves `Ok`
+  /// with. Deduplicated: a duplicate seed that succeeds on both exchanges
+  /// contributes one address.
+  contacted: SmallVec<[SocketAddr; 1]>,
   /// Total outbound-exchange count this call dispatched, used to
-  /// populate `JoinAllFailed { requested, contacted: 0 }` on a
+  /// populate `JoinFailed { requested, contacted: 0 }` on a
   /// zero-contact resolution.
   requested: usize,
   /// Wall-clock instant past which the driver replies with whatever
-  /// `contacted` it has accumulated even if `pending` is non-empty.
+  /// `contacted` set it has accumulated even if `pending` is non-empty.
   deadline: Instant,
   /// One-shot reply channel back to the caller.
-  reply: futures_channel::oneshot::Sender<Result<usize>>,
+  reply: futures_channel::oneshot::Sender<JoinReply>,
 }
 
 /// Driver-side state for the single in-flight graceful-leave operation.
@@ -796,11 +798,12 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
       Command::SendUser(cmd) => cmd.reply,
       Command::SendReliable(cmd) => cmd.reply,
       Command::Join(JoinCmd { reply, .. }) => {
-        // `Join`'s reply type is `Result<usize>`; surface the same
+        // `Join`'s reply is the address-set `JoinReply`; surface the same
         // `Shutdown` error through a separate arm so the type
-        // checker sees the right `Sender<Result<usize>>`.
+        // checker sees the right `Sender<JoinReply>`. The reached-so-far
+        // set is empty.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = reply.send(Err(MemberlistError::Shutdown));
+        let _ = reply.send(Err((SmallVec::new(), MemberlistError::Shutdown)));
         continue;
       }
       Command::Ping(cmd) => {
@@ -823,10 +826,14 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // waiter. Their reply Senders live in `pending_joins`; without
   // this drain the corresponding receivers on the caller side
   // would hang forever (the driver task is about to exit).
-  for (_, pj) in state.pending_joins.drain() {
-    // Ignoring Err: caller's reply receiver may have been dropped;
-    // nothing to surface.
-    let _ = pj.reply.send(Err(MemberlistError::Shutdown));
+  for (_, mut pj) in state.pending_joins.drain() {
+    // Ignoring Err: caller's reply receiver may have been dropped.
+    // Carry the addresses already reached before the shutdown raced
+    // this waiter — callers see the partial contacted set, not empty.
+    let _ = pj.reply.send(Err((
+      std::mem::take(&mut pj.contacted),
+      MemberlistError::Shutdown,
+    )));
   }
 
   // Reply `Err(Shutdown)` to every parked application-ping waiter whose
@@ -981,13 +988,14 @@ async fn dispatch_command<I, G>(
       // `start_push_pull` so no push/pull is enqueued. The single-task
       // driver makes the check + dispatch atomic (no lifecycle race).
       if !endpoint.is_running() {
-        // Ignoring Err: the caller may have dropped the reply receiver.
-        let _ = reply.send(Err(MemberlistError::NotRunning));
+        // Ignoring Err: the caller may have dropped the reply receiver. The
+        // reached-so-far set is empty.
+        let _ = reply.send(Err((SmallVec::new(), MemberlistError::NotRunning)));
         return;
       }
       match kind {
         JoinKind::Dispatch => {
-          let mut count: usize = 0;
+          let mut dispatched: SmallVec<[SocketAddr; 1]> = SmallVec::new();
           for addr in &addrs {
             // Skip an outbound dial to a CIDR-blocked seed: starting the QUIC
             // push/pull would open a connection and emit handshake packets to a
@@ -999,14 +1007,16 @@ async fn dispatch_command<I, G>(
             // surfaces through `poll_event` (the `NodeJoined` /
             // `DialFailed` events that the events_tx forwards to
             // subscribers). The dispatch arm tracks no per-exchange
-            // waiter state.
+            // waiter state. The dispatched set is NOT deduplicated (the
+            // fire-and-forget count is the dispatched-exchange count, so a
+            // duplicate seed contributes two), matching the stream driver.
             let _ = endpoint.start_push_pull(*addr, PushPullKind::Join, now);
-            count += 1;
+            dispatched.push(*addr);
           }
           // Ignoring Err: the caller may have dropped the reply
           // receiver (e.g. the user-facing `dispatch_join_with`
           // future was cancelled).
-          let _ = reply.send(Ok(count));
+          let _ = reply.send(Ok(dispatched));
         }
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           // Dispatch one outbound push/pull per seed; each
@@ -1024,7 +1034,14 @@ async fn dispatch_command<I, G>(
           // duplicates produce duplicate exchanges (each counted
           // independently per the call-scoped `ExchangeId` ownership
           // discipline).
-          let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
+          // The resolved seed count (one per address, duplicates included).
+          // Capture it BEFORE the CIDR filter loop consumes `addrs`: this is
+          // the denominator the caller sees in `JoinFailed`. A seed skipped by
+          // the CIDR filter never enters `pending`, so deriving `requested`
+          // from `pending.len()` would undercount the seeds actually requested.
+          // Mirrors the stream driver's `WaitForCompletion` arm.
+          let requested = addrs.len();
+          let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(requested);
           for addr in &addrs {
             // Skip a CIDR-blocked seed (see the Dispatch arm): no QUIC handshake
             // is emitted to a peer our own policy excludes.
@@ -1038,26 +1055,22 @@ async fn dispatch_command<I, G>(
             // `join_with` rejects an empty seed list before the command is sent,
             // so `addrs` is non-empty: an empty `pending` means every seed was
             // CIDR-blocked and the join contacted none of them. Reply now —
-            // parking would hang with no terminal event incoming.
+            // parking would hang with no terminal event incoming. The
+            // reached-so-far set is empty.
             // Ignoring Err: caller dropped the reply receiver.
-            let _ = reply.send(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-              addrs.len(),
-              0,
-            ))));
+            let _ = reply.send(Err((
+              SmallVec::new(),
+              MemberlistError::JoinFailed(JoinFailed::new(requested, 0)),
+            )));
             return;
           }
-          // `requested` is the number of outbound exchanges this call
-          // dispatched (one per non-blocked address, including duplicates). The
-          // public `join_with` guards against the empty-input case
-          // before sending the command, so `addrs` is non-empty here.
-          let requested = pending.len();
           let id = *next_pending_join_id;
           *next_pending_join_id = next_pending_join_id.wrapping_add(1);
           pending_joins.insert(
             id,
             PendingJoin {
               pending,
-              contacted: 0,
+              contacted: SmallVec::new(),
               requested,
               deadline,
               reply,
@@ -1712,13 +1725,19 @@ where
       {
         let eid = payload.eid();
         let succeeded = matches!(payload.outcome(), ExchangeStatus::Succeeded);
+        // QUIC driver events are `Event<I, SocketAddr>`, so the completed
+        // exchange's peer is the contacted seed address itself.
+        let peer = *payload.peer();
         let completed_key = state
           .pending_joins
           .iter_mut()
           .find_map(|(key, pj)| {
             if pj.pending.remove(&eid) {
+              // Push for each successful exchange — duplicate seeds that
+              // succeed contribute independently (matching the count
+              // semantics the join API has always had).
               if succeeded {
-                pj.contacted += 1;
+                pj.contacted.push(peer);
               }
               Some((*key, pj.pending.is_empty()))
             } else {
@@ -1733,16 +1752,9 @@ where
           // is final (the FSM emits one `ExchangeCompleted` per
           // dispatched exchange, so an empty `pending` set means every
           // outbound exchange this call dispatched has terminated). A
-          // zero-contact resolution is the same `JoinAllFailed` the
+          // zero-contact resolution is the same `JoinFailed` the
           // reaper would have produced.
-          let reply_value = if pj.contacted == 0 {
-            Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-              pj.requested,
-              0,
-            )))
-          } else {
-            Ok(pj.contacted)
-          };
+          let reply_value = join_reply(pj.contacted, pj.requested);
           // Ignoring Err: caller dropped the reply receiver (e.g. the
           // user-facing join_with future was cancelled).
           let _ = pj.reply.send(reply_value);
@@ -1903,14 +1915,7 @@ async fn reap_pending_joins(pending_joins: &mut HashMap<u64, PendingJoin>, now: 
   }
   for id in to_reap {
     if let Some(pj) = pending_joins.remove(&id) {
-      let reply_value = if pj.contacted == 0 {
-        Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-          pj.requested,
-          0,
-        )))
-      } else {
-        Ok(pj.contacted)
-      };
+      let reply_value = join_reply(pj.contacted, pj.requested);
       // Ignoring Err: caller dropped the reply receiver (e.g.
       // the user-facing join_with future was cancelled).
       let _ = pj.reply.send(reply_value);

@@ -81,12 +81,12 @@ async fn crashed_peer_is_marked_not_alive() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("b joins a");
-  assert_eq!(b_contacted, 1, "b contacts exactly one seed");
+  assert_eq!(b_contacted.len(), 1, "b contacts exactly one seed");
   let c_contacted = c
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("c joins a");
-  assert_eq!(c_contacted, 1, "c contacts exactly one seed");
+  assert_eq!(c_contacted.len(), 1, "c contacts exactly one seed");
 
   let converged = wait_until(
     || a.alive_count() == 3 && b.alive_count() == 3 && c.alive_count() == 3,

@@ -17,7 +17,8 @@ use memberlist_proto::event::Event;
 
 use crate::{delegate::Delegate, transport::runtime::CidrFilter};
 use core::task::Poll;
-use std::net::IpAddr;
+use smallvec::SmallVec;
+use std::net::{IpAddr, SocketAddr};
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
@@ -113,6 +114,24 @@ pub(crate) use memberlist_driver::observation_payload_bytes;
 pub(crate) fn add_obs_payload(counter: &Cell<u64>, bytes: Option<u64>) {
   if let Some(b) = bytes {
     counter.set(counter.get() + b);
+  }
+}
+
+/// Build a fully-resolved join's reply from its reached set and requested count.
+/// A non-empty set resolves `Ok(set)`; an empty set is the all-failed case,
+/// surfacing `JoinFailed { requested, contacted: 0 }` with an empty
+/// reached-so-far set (the partial-success slot mirrored from the serf driver).
+pub(crate) fn join_reply(
+  contacted: SmallVec<[SocketAddr; 1]>,
+  requested: usize,
+) -> crate::command::JoinReply {
+  if contacted.is_empty() {
+    Err((
+      SmallVec::new(),
+      crate::error::MemberlistError::JoinFailed(crate::error::JoinFailed::new(requested, 0)),
+    ))
+  } else {
+    Ok(contacted)
   }
 }
 

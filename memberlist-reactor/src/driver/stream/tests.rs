@@ -455,7 +455,7 @@ async fn poll_to_ready(driver: &mut StreamDriver<SmolStr, TokioRuntime, RawRecor
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_fails_parked_join() {
   let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
-  let (tx, rx) = oneshot::channel::<Result<usize, Error>>();
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
   shared.push_command(Command::Join(JoinCmd {
     addrs: vec!["127.0.0.1:9".parse::<SocketAddr>().unwrap()],
     wait: true,
@@ -464,9 +464,656 @@ async fn shutdown_fails_parked_join() {
   shared.begin_shutdown();
   poll_to_ready(&mut driver).await;
   assert!(
-    matches!(rx.await, Ok(Err(Error::Shutdown))),
+    matches!(rx.await, Ok(Err((set, Error::Shutdown))) if set.is_empty()),
     "a parked wait-join is failed with Shutdown on driver exit"
   );
+}
+
+/// Regression: the shutdown one-time teardown must drain endpoint events to
+/// quiescence before reaping `pending_joins`, so every queued
+/// `ExchangeCompleted` updates `pj.contacted` (or empties `pj.pending_eids`)
+/// before the drain supplies the final `Err` tuple.
+///
+/// Setup: `transmit_batch = 1` so one `drain_surfaces` pass processes at most 1
+/// event per surface. A `WaitForCompletion` join with 2 seeds is dispatched (both
+/// exchanges captured in `pending_eids`); the two `ExchangeCompleted(Failed)`
+/// events are injected directly via `endpoint.handle_dial_failed` so they are in
+/// the endpoint's event queue when shutdown begins, but not yet consumed.
+///
+/// Without the fix the shutdown `drain_surfaces` runs once, consuming one of the
+/// two events; the second eid stays in `pending_eids`, the join remains in
+/// `pending_joins`, and `pending_joins.drain()` sends `Err(Shutdown)`.
+///
+/// With the fix the loop continues until `more = false`, consuming both events;
+/// `account_event` sees both and empties `pending_eids`, which triggers the inline
+/// `join_reply` → `Err(JoinFailed)` path so `pending_joins` is already empty when
+/// `drain()` runs — the join reply is `JoinFailed`, not `Shutdown`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drain_events_to_quiescence_before_reaping_joins() {
+  // transmit_batch = 1: each drain_surfaces call processes at most 1 event.
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(16, None, 1, |ep| {
+    ep.start_scheduling(Instant::now());
+  })
+  .await;
+
+  // Push a WaitForCompletion join with 2 seeds.
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let addr1: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+  let addr2: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+  shared.push_command(Command::Join(JoinCmd {
+    addrs: vec![addr1, addr2],
+    wait: true,
+    reply: tx,
+  }));
+
+  // Poll once without shutdown: the driver dispatches the join, captures 2 eids
+  // in pending_joins, and spawns 2 async dial tasks. No async tasks run between
+  // this sync poll_once call and the handle_dial_failed calls below.
+  assert!(
+    poll_once(&mut driver).is_pending(),
+    "pre-shutdown poll is pending"
+  );
+
+  // Collect the pending eids from the dispatched join.
+  let eids: Vec<ExchangeId> = driver
+    .pending_joins
+    .values()
+    .flat_map(|pj| pj.pending_eids.iter().copied())
+    .collect();
+  assert_eq!(eids.len(), 2, "both seeds produced pending exchange ids");
+
+  // Fail both exchanges directly through the endpoint: this queues 2
+  // ExchangeCompleted(Failed, PushPull) events in the endpoint's event queue
+  // WITHOUT the driver having a chance to consume them yet.
+  let now = Instant::now();
+  for &eid in &eids {
+    driver.endpoint.handle_dial_failed(eid, now);
+  }
+
+  // Begin shutdown. The upcoming poll must drain all queued events before reaping
+  // pending_joins, so the join is resolved by account_event, not by the drain.
+  shared.begin_shutdown();
+  poll_to_ready(&mut driver).await;
+
+  // With the fix: both ExchangeCompleted events are consumed → pending_eids
+  // empties → join resolved inline as JoinFailed (all seeds failed).
+  // Without the fix: only 1 event consumed (transmit_batch cap) → 1 eid remains
+  // → join left in pending_joins → drain sends Err(Shutdown).
+  let reply = rx.await.expect("reply channel alive");
+  assert!(
+    matches!(reply, Err((_, Error::JoinFailed(_)))),
+    "shutdown drained events to quiescence: join resolved as JoinFailed, not Shutdown; \
+     got: {reply:?}",
+  );
+}
+
+/// Drive one outbound push/pull on `driver.endpoint` toward `seed_addr` to a real
+/// `Succeeded`, with the peer's pull response + EOF returned to the caller to
+/// queue on `inbound_rx` (rather than fed back here). Returns the dialer exchange
+/// id and the response frames the bridge "already read" but the driver has not yet
+/// consumed. The peer is a second `StreamEndpoint` standing in for the seed node;
+/// the dialer sends push + FIN up front (independent of the response), so the
+/// whole exchange can be driven without a live socket.
+fn drive_push_to_queued_response(
+  driver: &mut StreamDriver<SmolStr, TokioRuntime, RawRecords>,
+  seed_addr: SocketAddr,
+  now: Instant,
+) -> (ExchangeId, Vec<Vec<u8>>) {
+  // The peer endpoint (the seed) that produces a valid pull response.
+  let mut peer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = {
+    let ep = Endpoint::new(
+      EndpointOptions::new(SmolStr::new("seed"), seed_addr),
+      crate::gossip_rng().expect("test: OS entropy"),
+    );
+    let mut e = StreamEndpoint::new(
+      ep,
+      LabelOptions::new_in(None, ()),
+      Box::new(|_| None),
+      Box::new(|a: &SocketAddr| *a),
+    );
+    e.start_scheduling(now);
+    e
+  };
+
+  // Start the dialer's exchange and capture its `Connect` id + push frames
+  // without spawning a real dial (the round-trip is driven by hand below).
+  driver
+    .endpoint
+    .start_push_pull(seed_addr, PushPullKind::Join, now);
+  let mut eid = None;
+  let mut push: Vec<Vec<u8>> = Vec::new();
+  loop {
+    let mut progressed = false;
+    while let Some(action) = driver.endpoint.poll_action() {
+      progressed = true;
+      if let StreamAction::Connect(info) = action {
+        eid = Some(info.id());
+      }
+    }
+    while let Some((id, _peer, bytes)) = driver.endpoint.poll_transport_transmit() {
+      progressed = true;
+      if Some(id) == eid {
+        push.push(bytes.to_vec());
+      }
+    }
+    if !progressed {
+      break;
+    }
+  }
+  let eid = eid.expect("the seed's start_push_pull produced a Connect exchange id");
+
+  // Replay the dialer's push + FIN into the peer, then collect its pull response.
+  let server_eid = peer
+    .accept_connection("127.0.0.1:7400".parse().unwrap(), now)
+    .expect("the peer admits the inbound exchange");
+  for chunk in &push {
+    peer.handle_transport_data(server_eid, chunk, false, now);
+  }
+  peer.handle_transport_data(server_eid, &[], true, now); // the dialer's FIN
+  let mut response: Vec<Vec<u8>> = Vec::new();
+  loop {
+    let mut progressed = false;
+    while peer.poll_action().is_some() {
+      progressed = true;
+    }
+    while let Some((id, _peer, bytes)) = peer.poll_transport_transmit() {
+      progressed = true;
+      if id == server_eid {
+        response.push(bytes.to_vec());
+      }
+    }
+    if !progressed {
+      break;
+    }
+  }
+  assert!(
+    !response.is_empty(),
+    "the peer produced a pull response to the dialer's push"
+  );
+  (eid, response)
+}
+
+/// Regression: the shutdown one-time teardown drains the driver-side bridge
+/// channels (`inbound_rx`) into the endpoint BEFORE reaping `pending_joins`, so a
+/// seed whose final push/pull response + EOF a bridge already queued on
+/// `inbound_rx` — but the driver had not yet consumed via its normal poll path —
+/// still folds its `ExchangeCompleted(Succeeded)` into `pj.contacted`. Without the
+/// drain that reached seed is silently dropped from the `Err((reached, Shutdown))`
+/// tuple.
+///
+/// Setup: a 2-seed `WaitForCompletion` join. Seed A is driven to a real
+/// `Succeeded`, with its response + EOF queued on `inbound_rx` (NOT consumed).
+/// Seed B stays pending, so the join is not resolved inline and the shutdown reap
+/// supplies the `Err` tuple — whose reached set must contain A's address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drains_queued_inbound_completion_into_reached_before_reaping() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    endpoint.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7401".parse().unwrap();
+  let addr_b: SocketAddr = "127.0.0.1:7402".parse().unwrap();
+
+  // Seed A: drive its push/pull to a Succeeded whose response + EOF is queued on
+  // inbound_rx (the surface the shutdown branch must drain before reaping).
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+  // Queue onto the driver's own template sender (the freeze drops it, so the only
+  // remaining senders are bridge clones — none here — letting the drain
+  // disconnect). The items sit in the bounded buffer.
+  for bytes in response_a {
+    driver
+      .inbound_tx
+      .as_ref()
+      .expect("template alive")
+      .try_send(BridgeInbound::Data(BridgeData {
+        eid: eid_a,
+        bytes,
+        at: now,
+      }))
+      .expect("queue inbound response");
+  }
+  driver
+    .inbound_tx
+    .as_ref()
+    .expect("template alive")
+    .try_send(BridgeInbound::Eof(BridgeEof {
+      eid: eid_a,
+      at: now,
+    }))
+    .expect("queue inbound EOF");
+
+  // Seed B: a second exchange that never completes, so the join stays in
+  // pending_joins through the shutdown reap (and the reap supplies the Err tuple
+  // rather than account_event resolving the join inline).
+  driver
+    .endpoint
+    .start_push_pull(addr_b, PushPullKind::Join, now);
+  let mut eid_b = None;
+  while let Some(action) = driver.endpoint.poll_action() {
+    if let StreamAction::Connect(info) = action {
+      eid_b = Some(info.id());
+    }
+  }
+  let eid_b = eid_b.expect("seed B produced a Connect exchange id");
+  // Discard B's push frames — no peer reads them.
+  while driver.endpoint.poll_transport_transmit().is_some() {}
+
+  // Install the pending join awaiting both exchanges.
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  pending_eids.insert(eid_b);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 2,
+      reply: tx,
+    },
+  );
+
+  shared.begin_shutdown();
+  poll_to_ready(&mut driver).await;
+
+  // The shutdown drain consumed inbound_rx → eid_a completed Succeeded → reached
+  // contains addr_a; eid_b stayed pending → join reaped with Err((reached, Shutdown)).
+  let reply = rx.await.expect("reply channel alive");
+  match reply {
+    Err((reached, Error::Shutdown)) => assert!(
+      reached.contains(&addr_a),
+      "the already-queued inbound completion is preserved in the reached set: {reached:?}"
+    ),
+    other => panic!("expected Err((reached, Shutdown)); got {other:?}"),
+  }
+}
+
+/// The real gate: a target join's terminal peer-FIN EOF PARKED on a bridge's
+/// SATURATED `inbound_tx.send` — sitting OUTSIDE the bounded channel buffer — is
+/// still folded into the reaped reached set. The earlier snapshot-bound drain
+/// read only the buffered depth, so it dropped a parked EOF and lost that seed;
+/// the cancel-then-drain-to-disconnected protocol reads to all-senders-gone,
+/// unblocking the parked send first. Uses the driver's REAL bounded inbound
+/// channel (capacity `BRIDGE_INBOUND_CAP`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_drain_folds_parked_eof_on_saturated_handoff() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    endpoint.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7601".parse().unwrap();
+  let addr_b: SocketAddr = "127.0.0.1:7602".parse().unwrap();
+
+  // Seed A driven to SendClosed (push + FIN already sent, eid captured); its
+  // peer-FIN EOF is the completion we PARK below. Its response chunks are buffered
+  // first so the FSM reaches BothClosed when that EOF finally lands.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+
+  // Fill the bounded buffer to capacity on the driver's own template sender: A's
+  // response chunks, then fillers until `try_send` reports Full. A's terminal EOF
+  // then cannot be buffered and must PARK on a send (below).
+  //
+  // The fillers are tagged with a throwaway exchange minted from the DRIVER's own
+  // endpoint so its id is DISTINCT from A and B (`fresh_eid()` would collide with
+  // `eid_a`, since both endpoints number exchanges from zero, and the filler bytes
+  // would then corrupt A). Feeding garbage to this id is a no-op on the join.
+  driver
+    .endpoint
+    .start_push_pull("127.0.0.1:7699".parse().unwrap(), PushPullKind::Join, now);
+  let mut filler_eid = None;
+  while let Some(action) = driver.endpoint.poll_action() {
+    if let StreamAction::Connect(info) = action {
+      filler_eid = Some(info.id());
+    }
+  }
+  let filler_eid = filler_eid.expect("filler produced a Connect exchange id");
+  while driver.endpoint.poll_transport_transmit().is_some() {}
+  for bytes in response_a {
+    driver
+      .inbound_tx
+      .as_ref()
+      .expect("template alive")
+      .try_send(BridgeInbound::Data(BridgeData {
+        eid: eid_a,
+        bytes,
+        at: now,
+      }))
+      .expect("A's response fits within the bounded capacity");
+  }
+  while driver
+    .inbound_tx
+    .as_ref()
+    .expect("template alive")
+    .try_send(BridgeInbound::Data(BridgeData {
+      eid: filler_eid,
+      bytes: vec![0u8; 4],
+      at: now,
+    }))
+    .is_ok()
+  {}
+
+  // Seed B never completes, so the join survives to the reap (the reap, not an
+  // inline resolution, supplies the Err tuple).
+  driver
+    .endpoint
+    .start_push_pull(addr_b, PushPullKind::Join, now);
+  let mut eid_b = None;
+  while let Some(action) = driver.endpoint.poll_action() {
+    if let StreamAction::Connect(info) = action {
+      eid_b = Some(info.id());
+    }
+  }
+  let eid_b = eid_b.expect("seed B produced a Connect exchange id");
+  while driver.endpoint.poll_transport_transmit().is_some() {}
+
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  pending_eids.insert(eid_b);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 2,
+      reply: tx,
+    },
+  );
+
+  // A stand-in bridge PARKED on the saturated hand-off: it holds an inbound sender
+  // clone and blocks sending A's terminal EOF until the drain frees a slot —
+  // mirroring a real bridge whose peer-FIN read landed but whose `inbound_tx.send`
+  // parked. On exit it drops its clone THEN wakes the driver (the drop-then-wake a
+  // real `bridge_task` does), so the drain observes the disconnect via its
+  // `try_recv` (it deliberately holds no flume `recv_async` waker).
+  let parked_tx = driver.inbound_tx.as_ref().expect("template alive").clone();
+  let parked_shared = shared.clone();
+  let parked = TokioRuntime::spawn(async move {
+    // Ignoring Err: the receiver outlives this send until the drain consumes it.
+    let _ = parked_tx
+      .send_async(BridgeInbound::Eof(BridgeEof {
+        eid: eid_a,
+        at: now,
+      }))
+      .await;
+    drop(parked_tx);
+    parked_shared.wake_driver();
+  });
+
+  shared.begin_shutdown();
+  tokio::time::timeout(Duration::from_secs(10), poll_to_ready(&mut driver))
+    .await
+    .expect("shutdown terminates with a parked-EOF bridge");
+
+  let reply = rx.await.expect("reply channel alive");
+  match reply {
+    Err((reached, Error::Shutdown)) => assert!(
+      reached.contains(&addr_a),
+      "the peer-FIN EOF parked at the saturated hand-off was folded: {reached:?}"
+    ),
+    other => panic!("expected Err((reached, Shutdown)); got {other:?}"),
+  }
+  drop(parked);
+}
+
+/// A read-blocked bridge cancelled at the shutdown freeze (its peer never FINs,
+/// so it would block on `read`) must NOT hang shutdown. The drain reads
+/// `inbound_rx` to all-senders-gone via `try_recv` and holds no flume
+/// `recv_async` waker, so the frozen bridge's on-exit `wake_driver()` is the only
+/// thing that re-polls the driver to observe the disconnect. Without that wake
+/// `shutdown().await` would hang forever — this asserts it completes promptly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_terminates_with_silent_read_blocked_bridge() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    endpoint.start_scheduling(now);
+  })
+  .await;
+
+  // A REAL bridge over a connected socket whose PEER never writes, so the bridge
+  // read-blocks. Registered in `driver.bridges` so the shutdown freeze cancels it:
+  // dropping the handle disconnects the per-bridge out channel, the both-halves
+  // `select!`'s out arm resolves `Err`, and the bridge breaks and runs its on-exit
+  // drop(inbound_tx) + `wake_driver()`.
+  let (server, client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  driver.spawn_bridge(eid, server, out_rx, cancel_rx);
+  driver
+    .bridges
+    .insert(eid, BridgeHandle { out_tx, cancel_tx });
+
+  // A parked join awaiting a never-completing exchange, so the reap supplies the
+  // Err tuple (and proves the drain reached the reap, not merely returned).
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(fresh_eid());
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 1,
+      reply: tx,
+    },
+  );
+
+  shared.begin_shutdown();
+  // A missed wake would hang the drain forever; the bounded wait turns that into a
+  // test failure instead of a hang.
+  tokio::time::timeout(Duration::from_secs(10), poll_to_ready(&mut driver))
+    .await
+    .expect("shutdown terminates with a silent read-blocked bridge frozen at teardown");
+
+  match rx.await.expect("reply channel alive") {
+    Err((_reached, Error::Shutdown)) => {}
+    other => panic!("expected Err((reached, Shutdown)); got {other:?}"),
+  }
+
+  // Hold the peer half open until the very end so the bridge genuinely read-blocked
+  // throughout the freeze (a dropped client would FIN and unblock the read itself).
+  drop(client);
+}
+
+/// End-to-end no-fabrication regression for the real reactor shutdown path: a join
+/// seed whose pull RESPONSE is already read (queued on `inbound_rx`) but whose
+/// peer-FIN is NOT, backed by a LIVE both-halves-open bridge, must NOT be
+/// fabricated into a completion at shutdown. The reactor defers ALL bridge
+/// teardown to the post-loop freeze, which cancels reads (drops the handle → the
+/// per-bridge out channel disconnects, plus `cancel_tx`) so the bridge breaks
+/// WITHOUT a synthetic EOF. A therefore never completes and its seed is ABSENT
+/// from the reaped reached set; a graceful close-first teardown would instead emit
+/// a local EOF and fold response+EOF into a fabricated `Succeeded`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_does_not_fabricate_response_without_fin() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    endpoint.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7411".parse().unwrap();
+
+  // Seed A driven to "response ready, awaiting peer-FIN"; queue the response (NO
+  // EOF) on inbound_rx. The freeze drain folds it, leaving A awaiting the peer-FIN
+  // that never arrives.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+  for bytes in response_a {
+    driver
+      .inbound_tx
+      .as_ref()
+      .expect("template alive")
+      .try_send(BridgeInbound::Data(BridgeData {
+        eid: eid_a,
+        bytes,
+        at: now,
+      }))
+      .expect("queue inbound response");
+  }
+
+  // A LIVE both-halves-open bridge for A over a connected socket whose peer never
+  // FINs (`client` held to the end), so it read-blocks in both-halves-live mode —
+  // the state a close-first teardown would have made emit a synthetic EOF.
+  let (server, client) = loopback_pair().await;
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  driver.spawn_bridge(eid_a, server, out_rx, cancel_rx);
+  driver
+    .bridges
+    .insert(eid_a, BridgeHandle { out_tx, cancel_tx });
+
+  // A 1-seed join awaiting A, so the reap supplies the Err tuple.
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 1,
+      reply: tx,
+    },
+  );
+
+  shared.begin_shutdown();
+  tokio::time::timeout(Duration::from_secs(10), poll_to_ready(&mut driver))
+    .await
+    .expect("shutdown terminates with a live both-halves-open bridge frozen at teardown");
+
+  match rx.await.expect("reply channel alive") {
+    Err((reached, Error::Shutdown)) => assert!(
+      !reached.contains(&addr_a),
+      "A's response-without-FIN was NOT fabricated into a completion: {reached:?}"
+    ),
+    other => panic!("expected Err((reached, Shutdown)) with A absent; got {other:?}"),
+  }
+
+  // Hold the peer open through the freeze so the bridge genuinely read-blocked
+  // (a dropped client would FIN and emit a REAL EOF itself).
+  drop(client);
+}
+
+/// A peer-FIN that becomes readable only AFTER the shutdown freeze is genuinely
+/// in-flight at the freeze instant and must NOT be folded into a completion — the
+/// seed stays ABSENT from the reaped reached set. A's pull RESPONSE is delivered
+/// over the wire by a LIVE both-halves-open bridge, with the peer's FIN queued
+/// behind it; the inbound channel is saturated so the bridge is PARKED on the
+/// response hand-off when the freeze fires, leaving that FIN UNREAD. When the drain
+/// unblocks the parked send and the bridge loops back to a read, the biased-first
+/// cancel arm wins over the now-readable FIN, so no EOF is folded and A — having
+/// the response but no peer-FIN — never completes.
+///
+/// Determinism: with the fix the cancel is biased ahead of the read, so it ALWAYS
+/// wins the post-freeze poll — A is absent and shutdown completes promptly, every
+/// run. The surviving `out_tx` clone keeps the bridge's `out` arm pending, so a
+/// reverted (cancel-less, unbiased) select would instead read the readable FIN and
+/// fold an EOF, then wedge in read-closed mode awaiting the still-connected out
+/// channel — the drain would never reach Disconnected and the bounded
+/// `poll_to_ready` timeout fails the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_does_not_fabricate_readable_peer_fin_after_freeze() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    endpoint.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7421".parse().unwrap();
+
+  // Seed A driven to "response ready, awaiting peer-FIN". The bridge below delivers
+  // the response over the wire (it is NOT queued here), so A completes ONLY if the
+  // peer-FIN is later folded as an EOF.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+
+  // The peer (client) writes A's full response, then half-closes (FIN). The FIN is
+  // queued behind the response in the socket; the bridge reads the response first.
+  let (server, mut client) = loopback_pair().await;
+  for chunk in &response_a {
+    client
+      .write_all(chunk)
+      .await
+      .expect("peer writes A's response");
+  }
+  client
+    .shutdown(Shutdown::Write)
+    .expect("peer half-closes its write side (FIN behind the response)");
+
+  // Saturate the bounded inbound channel on the driver's template sender so the
+  // bridge's first response hand-off PARKS — keeping the peer-FIN unread (in-flight)
+  // at the freeze. Fillers carry a throwaway exchange id distinct from A (a
+  // `fresh_eid()` would collide with A, since both endpoints number from zero), so
+  // they are a no-op on A's join.
+  driver
+    .endpoint
+    .start_push_pull("127.0.0.1:7698".parse().unwrap(), PushPullKind::Join, now);
+  let mut filler_eid = None;
+  while let Some(action) = driver.endpoint.poll_action() {
+    if let StreamAction::Connect(info) = action {
+      filler_eid = Some(info.id());
+    }
+  }
+  let filler_eid = filler_eid.expect("filler produced a Connect exchange id");
+  while driver.endpoint.poll_transport_transmit().is_some() {}
+  while driver
+    .inbound_tx
+    .as_ref()
+    .expect("template alive")
+    .try_send(BridgeInbound::Data(BridgeData {
+      eid: filler_eid,
+      bytes: vec![0u8; 4],
+      at: now,
+    }))
+    .is_ok()
+  {}
+
+  // A LIVE bridge for A. Keep a clone of its out sender alive: the freeze drops the
+  // handle's sender, but the surviving clone keeps the bridge's `out` arm PENDING,
+  // so the ONLY post-freeze teardown signal is the cancel — exactly the read race
+  // the biased cancel arm must win over the now-readable FIN.
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let out_tx_kept = out_tx.clone();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  driver.spawn_bridge(eid_a, server, out_rx, cancel_rx);
+  driver
+    .bridges
+    .insert(eid_a, BridgeHandle { out_tx, cancel_tx });
+
+  // A 1-seed join awaiting A, so the reap supplies the Err tuple.
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 1,
+      reply: tx,
+    },
+  );
+
+  shared.begin_shutdown();
+  tokio::time::timeout(Duration::from_secs(10), poll_to_ready(&mut driver))
+    .await
+    .expect("shutdown terminates: the cancelled bridge breaks without folding the in-flight FIN");
+
+  match rx.await.expect("reply channel alive") {
+    Err((reached, Error::Shutdown)) => assert!(
+      !reached.contains(&addr_a),
+      "the peer-FIN unread at the freeze (in-flight) must NOT be folded into a completion: {reached:?}"
+    ),
+    other => panic!("expected Err((reached, Shutdown)) with A absent; got {other:?}"),
+  }
+
+  // Hold the surviving out sender and the peer's read half until the very end.
+  drop(out_tx_kept);
+  drop(client);
 }
 
 /// On shutdown, a parked application-ping is failed with `Err(Shutdown)` (the
@@ -542,7 +1189,7 @@ async fn shutdown_close_and_drain_fails_every_queued_command() {
     shared.begin_shutdown();
 
     // Distinguishable replies.
-    let (join_tx, join_rx) = oneshot::channel::<Result<usize, Error>>();
+    let (join_tx, join_rx) = oneshot::channel::<crate::command::JoinReply>();
     let (user_tx, user_rx) = oneshot::channel::<Result<(), Error>>();
     let (comp_tx, comp_rx) = oneshot::channel::<Result<(), Error>>();
     let (chk_tx, chk_rx) = oneshot::channel::<Result<(), Error>>();
@@ -615,7 +1262,7 @@ async fn shutdown_close_and_drain_fails_every_queued_command() {
     // Record any variant that `close_and_drain` failed with Shutdown this
     // attempt (a Shutdown reply on these proves the command reached
     // `close_and_drain` rather than the top-of-poll dispatch).
-    seen_join |= matches!(join_rx.await, Ok(Err(Error::Shutdown)));
+    seen_join |= matches!(join_rx.await, Ok(Err((set, Error::Shutdown))) if set.is_empty());
     seen_user |= matches!(user_rx.await, Ok(Err(Error::Shutdown)));
     seen_comp |= matches!(comp_rx.await, Ok(Err(Error::Shutdown)));
     seen_chk |= matches!(chk_rx.await, Ok(Err(Error::Shutdown)));
@@ -1130,6 +1777,94 @@ async fn explicit_abort_preempts_and_discards() {
   assert_eq!(n, 0, "explicit abort must discard queued bytes, got {n}");
 
   bridge.await.expect("bridge task exits cleanly");
+}
+
+/// The shutdown cancel must WIN over a peer-FIN that becomes readable only AFTER
+/// the freeze. This is the bridge-level proof that the both-halves-live read select
+/// breaks on cancel BEFORE folding such a FIN into a synthetic
+/// `BridgeInbound::Eof` — the exact fabrication the driver's reap would otherwise
+/// turn into a falsely-reached seed.
+///
+/// The peer sends a request then half-closes, so its FIN sits queued behind the
+/// request. A rendezvous (capacity-0) inbound channel holds the bridge PARKED on
+/// the request hand-off, so the FIN is still UNREAD when the freeze signals cancel.
+/// Receiving the request unblocks that parked send (proving an already-read
+/// hand-off COMPLETES — the send-preservation half of the barrier), after which the
+/// bridge loops back to a read with the cancel already set and the FIN now
+/// readable: the biased-first cancel arm must win, so NO EOF is ever produced.
+///
+/// `out_tx` is kept alive so the bridge's `out` arm stays pending: this is what
+/// makes the regression deterministic in BOTH directions. With the fix the biased
+/// cancel breaks the loop and the channel disconnects with no EOF; a reverted,
+/// cancel-less select would have no out-disconnect to race, so it would
+/// deterministically read the FIN and fold an EOF — which this asserts never
+/// happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_cancel_beats_readable_peer_fin_so_no_eof_is_folded() {
+  let (server, mut client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  // Rendezvous: the bridge's first inbound send PARKS until this test receives, so
+  // the bridge is held at the hand-off with the peer-FIN still unread.
+  let (inbound_tx, inbound_rx) = flume::bounded::<BridgeInbound>(0);
+  let shared = test_shared();
+
+  // The peer sends a request then half-closes (FIN). The bridge reads the request,
+  // then the FIN is readable behind it.
+  client
+    .write_all(b"request")
+    .await
+    .expect("peer writes request");
+  client
+    .shutdown(Shutdown::Write)
+    .expect("peer half-closes its write side (FIN behind the request)");
+
+  // Keep `out_tx` alive so the bridge's `out` arm stays pending (see the doc above).
+  let _out_tx_kept = out_tx;
+
+  let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    shared,
+    Duration::from_secs(60),
+  ));
+
+  // FREEZE: signal cancel while the bridge is parked on the request hand-off. The
+  // cancel does NOT preempt that in-flight send (it is awaited outside the select).
+  cancel_tx.send(()).expect("bridge alive to receive cancel");
+
+  // Unblock the parked hand-off and drain whatever the bridge produces: the request
+  // send must COMPLETE (preserved), and afterwards the bridge must break on cancel
+  // WITHOUT ever folding the readable FIN into an EOF.
+  let mut saw_eof = false;
+  loop {
+    match tokio::time::timeout(Duration::from_secs(10), inbound_rx.recv_async()).await {
+      // The preserved request bytes (the parked send completing). Keep draining.
+      Ok(Ok(BridgeInbound::Data(_))) => continue,
+      // The fabricated EOF the fix must prevent.
+      Ok(Ok(BridgeInbound::Eof(_))) => {
+        saw_eof = true;
+        break;
+      }
+      // A read error is not an EOF-fold; stop draining.
+      Ok(Ok(BridgeInbound::Error(_))) => break,
+      // The bridge dropped its sender: it broke on cancel, folding nothing.
+      Ok(Err(_)) => break,
+      // Safety net: with the fix the bridge breaks promptly, so this is unreached.
+      Err(_) => break,
+    }
+  }
+  assert!(
+    !saw_eof,
+    "the biased cancel must win over the readable peer-FIN: no fabricated EOF"
+  );
+
+  bridge.await.expect("the cancelled bridge exits cleanly");
+  drop(client);
 }
 
 /// A post-Close graceful drain whose peer STOPPED reading must be reclaimed by

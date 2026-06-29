@@ -47,15 +47,17 @@ use crate::{
   NodeId,
   cidr::{CidrFilter, cidr_blocks},
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
+    SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
-  error::Error,
+  driver::join_reply,
+  error::{Error, JoinFailed},
   observation::observation_payload_bytes,
   shared::Shared,
   snapshot::snapshot_of,
 };
 use memberlist_proto::metrics::Metrics;
+use smallvec::SmallVec;
 
 /// IP-layer UDP payload maximum; caps the per-recv buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
@@ -87,9 +89,12 @@ const OBS_OVERFLOW_MAX: usize = 1024;
 /// `stream_timeout` failure), so the set always drains — no deadline needed.
 struct PendingJoin {
   pending: HashSet<ExchangeId>,
-  contacted: usize,
+  /// Peer addresses whose dispatched exchange terminated successfully — the
+  /// reached set the call resolves `Ok` with. Each successful exchange
+  /// contributes independently (duplicate seeds yield duplicate entries).
+  contacted: SmallVec<[SocketAddr; 1]>,
   requested: usize,
-  reply: futures_channel::oneshot::Sender<Result<usize, Error>>,
+  reply: futures_channel::oneshot::Sender<JoinReply>,
 }
 
 /// An in-flight graceful leave; every joined caller's reply resolves together
@@ -245,13 +250,16 @@ where
     match cmd {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
-          // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Err(Error::NotRunning));
+          // Ignoring Err: the caller dropped its reply receiver. The
+          // reached-so-far set is empty.
+          let _ = reply.send(Err((SmallVec::new(), Error::NotRunning)));
           return;
         }
         if !wait {
-          // Dispatch: fire-and-forget; reply the dispatched count.
-          let mut count = 0usize;
+          // Dispatch: fire-and-forget; reply the dispatched seed set. The set is
+          // NOT deduplicated (the fire-and-forget count is the dispatched-exchange
+          // count, so a duplicate seed contributes two).
+          let mut dispatched: SmallVec<[SocketAddr; 1]> = SmallVec::new();
           for addr in &addrs {
             // Skip an outbound dial to a CIDR-blocked seed: starting the QUIC
             // push/pull would open a connection and emit handshake packets to a
@@ -263,15 +271,22 @@ where
             let _ = self
               .endpoint
               .start_push_pull(*addr, PushPullKind::Join, now);
-            count += 1;
+            dispatched.push(*addr);
           }
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Ok(count));
+          let _ = reply.send(Ok(dispatched));
           return;
         }
         // WaitForCompletion: track each dispatched exchange; account_event
-        // replies the contacted count once they all complete.
-        let mut pending = HashSet::with_capacity(addrs.len());
+        // replies the contacted set once they all complete.
+        //
+        // The resolved seed count (one per address, duplicates included).
+        // Capture it BEFORE the CIDR filter loop: this is the denominator the
+        // caller sees in `JoinFailed`. A seed skipped by the CIDR filter never
+        // enters `pending`, so deriving `requested` from `pending.len()` would
+        // undercount the seeds actually requested. Mirrors the stream driver.
+        let requested = addrs.len();
+        let mut pending = HashSet::with_capacity(requested);
         let mut blocked = 0usize;
         for addr in &addrs {
           // Skip a CIDR-blocked seed (see the non-wait arm): no QUIC handshake is
@@ -288,23 +303,26 @@ where
         if pending.is_empty() {
           // No exchange to wait on. If some seeds were CIDR-blocked, the join
           // contacted none of them — a bounded failure mirroring the stream
-          // driver; an empty (or fully blocked) seed set otherwise replies Ok(0).
+          // driver; an empty (or fully blocked) seed set otherwise replies
+          // Ok(empty). The reached-so-far set is empty.
           // Ignoring Err: the caller dropped its reply receiver.
           let _ = reply.send(if blocked > 0 {
-            Err(Error::JoinFailed(addrs.len()))
+            Err((
+              SmallVec::new(),
+              Error::JoinFailed(JoinFailed::new(requested, 0)),
+            ))
           } else {
-            Ok(0)
+            Ok(SmallVec::new())
           });
           return;
         }
-        let requested = pending.len();
         let id = self.next_pending_join_id;
         self.next_pending_join_id = self.next_pending_join_id.wrapping_add(1);
         self.pending_joins.insert(
           id,
           PendingJoin {
             pending,
-            contacted: 0,
+            contacted: SmallVec::new(),
             requested,
             reply,
           },
@@ -557,11 +575,17 @@ where
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::PushPull => {
         let eid = p.eid();
         let succeeded = matches!(p.outcome(), ExchangeStatus::Succeeded);
+        // Driver events are `Event<I, SocketAddr>`, so the completed exchange's
+        // peer is the contacted seed address itself.
+        let peer = *p.peer();
         let mut completed = None;
         for (key, pj) in self.pending_joins.iter_mut() {
           if pj.pending.remove(&eid) {
+            // Push for each successful exchange — duplicate seeds that succeed
+            // contribute independently (matching the count semantics the join
+            // API has always had).
             if succeeded {
-              pj.contacted += 1;
+              pj.contacted.push(peer);
             }
             if pj.pending.is_empty() {
               completed = Some(*key);
@@ -572,11 +596,7 @@ where
         if let Some(key) = completed
           && let Some(pj) = self.pending_joins.remove(&key)
         {
-          let res = if pj.contacted == 0 {
-            Err(Error::JoinFailed(pj.requested))
-          } else {
-            Ok(pj.contacted)
-          };
+          let res = join_reply(pj.contacted, pj.requested);
           // Ignoring Err: the join caller dropped its reply receiver.
           let _ = pj.reply.send(res);
         }
@@ -941,18 +961,29 @@ where
       progress = true;
     }
 
-    // Shutdown: best-effort leave, flush once, fail any parked waiters, stop.
+    // Shutdown: best-effort leave, flush to quiescence, fail any parked waiters, stop.
     if this.shared.is_shutdown() {
       // Ignoring Err: best-effort leave during shutdown.
       let _ = this.endpoint.leave(Instant::now());
-      this.drain_surfaces(cx);
+      // Drain endpoint events to quiescence before reaping pending_joins: a
+      // single drain_surfaces pass is capped at transmit_batch, so a large
+      // batch of already-queued ExchangeCompleted events would be partially
+      // skipped, leaving contacted addresses unaccounted in the Err tuple.
+      // Loop until drain_surfaces reports no remaining work.
+      loop {
+        let (_, more) = this.drain_surfaces(cx);
+        if !more {
+          break;
+        }
+      }
       // Close the command queue and fail any still-queued commands, so a handle
       // that raced the shutdown gets a reply instead of hanging.
       for cmd in this.shared.close_and_drain() {
         match cmd {
-          // Ignoring Err: the caller dropped its reply receiver.
+          // Ignoring Err: the caller dropped its reply receiver. The
+          // reached-so-far set is empty.
           Command::Join(JoinCmd { reply, .. }) => {
-            let _ = reply.send(Err(Error::Shutdown));
+            let _ = reply.send(Err((SmallVec::new(), Error::Shutdown)));
           }
           Command::Leave(LeaveCmd { reply }) => {
             let _ = reply.send(Err(Error::Shutdown));
@@ -1007,9 +1038,13 @@ where
           }
         }
       }
-      for (_, pj) in this.pending_joins.drain() {
+      for (_, mut pj) in this.pending_joins.drain() {
         // Ignoring Err: the join caller dropped its reply receiver.
-        let _ = pj.reply.send(Err(Error::Shutdown));
+        // Carry the addresses already reached before shutdown raced
+        // this waiter — callers see the partial contacted set, not empty.
+        let _ = pj
+          .reply
+          .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
       }
       if let Some(pl) = this.pending_leave.take() {
         for replier in pl.repliers {

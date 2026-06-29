@@ -116,6 +116,8 @@ impl<R: Runtime> TestCluster for ReactorTls<R> {
       .handle
       .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed)])
       .await
+      .map(|reached| reached.len())
+      .map_err(|(_, e)| e)
   }
 
   fn num_members(&self) -> usize {

@@ -3,7 +3,7 @@
 use core::fmt;
 use std::{io, net::SocketAddr};
 
-pub use memberlist_driver::error::{GossipMtuTooSmall, InvalidOption};
+pub use memberlist_driver::error::{GossipMtuTooSmall, InvalidOption, JoinFailed};
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
@@ -23,53 +23,6 @@ const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
 const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_OVERHEAD;
 #[cfg(not(checksum))]
 const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
-
-/// Payload for [`MemberlistError::JoinAllFailed`]: every dispatched
-/// outbound push/pull exchange from a synchronous
-/// [`join`](crate::Memberlist::join) terminated without
-/// `ExchangeStatus::Succeeded`, OR the per-call deadline elapsed
-/// before any exchange could succeed.
-#[derive(Debug)]
-pub struct JoinAllFailed {
-  requested: usize,
-  contacted: usize,
-}
-
-impl JoinAllFailed {
-  /// Build a new payload from the per-call seed counts.
-  #[inline]
-  pub(crate) fn new(requested: usize, contacted: usize) -> Self {
-    Self {
-      requested,
-      contacted,
-    }
-  }
-
-  /// Number of seed addresses the call requested (post-resolution).
-  #[inline]
-  pub fn requested(&self) -> usize {
-    self.requested
-  }
-
-  /// Number of seeds actually contacted before the call resolved.
-  /// Always `0` when this payload is observed inside a
-  /// [`MemberlistError::JoinAllFailed`] — the variant fires precisely
-  /// when no seed was contacted.
-  #[inline]
-  pub fn contacted(&self) -> usize {
-    self.contacted
-  }
-}
-
-impl fmt::Display for JoinAllFailed {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(
-      f,
-      "join failed: contacted {} of {} seed(s)",
-      self.contacted, self.requested
-    )
-  }
-}
 
 /// Payload for [`MemberlistError::InvalidGossipMtu`]: the configured
 /// `gossip_mtu` exceeds the largest plaintext gossip payload that can still
@@ -241,9 +194,12 @@ pub enum MemberlistError {
   /// terminating with `ExchangeStatus::Succeeded` — either every
   /// exchange terminated `Failed` (dial failure, frame/record-layer
   /// rejection, peer hung up before the response was decoded), or
-  /// the per-call deadline elapsed before any could succeed.
+  /// the per-call deadline elapsed before any could succeed. Carries
+  /// the requested-seed count and the contacted count (always `0` for
+  /// this error — a non-zero contact count resolves `Ok` with the
+  /// reached address set).
   #[error("{0}")]
-  JoinAllFailed(JoinAllFailed),
+  JoinFailed(JoinFailed),
 
   /// A graceful [`leave`](crate::Memberlist::leave) did not complete
   /// within the driver's `leave_timeout`: the machine's

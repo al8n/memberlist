@@ -148,7 +148,7 @@ mod compression {
       .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
       .await
       .expect("join with lz4 compression");
-    assert_eq!(n, 1, "one seed contacted");
+    assert_eq!(n.len(), 1, "one seed contacted");
 
     let converged = tokio::time::timeout(Duration::from_secs(10), async {
       loop {
@@ -199,7 +199,7 @@ mod checksum {
       .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
       .await
       .expect("join with crc32 checksum");
-    assert_eq!(n, 1, "one seed contacted");
+    assert_eq!(n.len(), 1, "one seed contacted");
 
     let converged = tokio::time::timeout(Duration::from_secs(10), async {
       loop {
@@ -248,7 +248,7 @@ mod encryption {
       .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
       .await
       .expect("join with encryption");
-    assert_eq!(n, 1, "one seed contacted");
+    assert_eq!(n.len(), 1, "one seed contacted");
 
     let converged = tokio::time::timeout(Duration::from_secs(10), async {
       loop {
@@ -442,7 +442,7 @@ async fn default_options_are_unchanged() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("default-options join must succeed");
-  assert_eq!(n, 1, "one seed contacted");
+  assert_eq!(n.len(), 1, "one seed contacted");
 
   let converged = tokio::time::timeout(Duration::from_secs(10), async {
     loop {

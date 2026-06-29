@@ -151,11 +151,11 @@ async fn construction_time_encryption_same_key_converges() {
   .await
   .expect("node B constructs");
 
-  let count = b
+  let contacted = b
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("encrypted join must succeed with matching keys");
-  assert_eq!(count, 1, "one seed contacted");
+  assert_eq!(contacted.len(), 1, "one seed contacted");
 
   let converged = wait_until(
     || a.member_count() == 2 && b.member_count() == 2,

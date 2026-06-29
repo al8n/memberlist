@@ -71,15 +71,17 @@ use crate::{
   NodeId, StreamEndpoint,
   cidr::{CidrFilter, cidr_blocks},
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
+    SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
-  error::Error,
+  driver::join_reply,
+  error::{Error, JoinFailed},
   observation::observation_payload_bytes,
   shared::Shared,
   snapshot::snapshot_of,
 };
 use memberlist_proto::metrics::Metrics;
+use smallvec::SmallVec;
 
 /// IP-layer UDP payload maximum; caps the per-recv gossip buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
@@ -218,9 +220,12 @@ where
 struct PendingJoin {
   /// Exchanges this join is awaiting, captured from their `Connect` at dispatch.
   pending_eids: HashSet<ExchangeId>,
-  contacted: usize,
+  /// Peer addresses whose dispatched exchange terminated successfully — the
+  /// reached set the call resolves `Ok` with. Each successful exchange
+  /// contributes independently (duplicate seeds yield duplicate entries).
+  contacted: SmallVec<[SocketAddr; 1]>,
   requested: usize,
-  reply: oneshot::Sender<Result<usize, Error>>,
+  reply: oneshot::Sender<JoinReply>,
 }
 
 /// An in-flight graceful leave; every joined caller's reply resolves together
@@ -460,14 +465,18 @@ where
   accept_join: Option<<R::Spawner as AsyncSpawner>::JoinHandle<()>>,
   /// Inbound connections from the accept task.
   accepted_rx: Receiver<(<R::Net as Net>::TcpStream, SocketAddr)>,
-  /// Inbound transport bytes/EOF from the bridge read tasks. Wrapped in `Option`
-  /// so the shutdown branch can drop it: that disconnects every live bridge's
-  /// shared `inbound_tx`, so a bridge parked on the bounded inbound hand-off send
-  /// wakes with a disconnect error and exits promptly. `Some` for the whole
-  /// running lifetime; taken once during teardown.
+  /// Inbound transport bytes/EOF from the bridge read tasks. `Some` for the whole
+  /// running lifetime and throughout the shutdown drain (which reads it to
+  /// all-senders-gone); the shutdown reap then takes it once the drain completes,
+  /// which also serves as the one-time reap guard.
   inbound_rx: Option<Receiver<BridgeInbound>>,
-  /// Cloned into each spawned bridge task to report inbound bytes/EOF.
-  inbound_tx: Sender<BridgeInbound>,
+  /// The driver's template inbound sender, cloned into each spawned bridge task to
+  /// report inbound bytes/EOF. Wrapped in `Option` so the shutdown freeze can drop
+  /// it: with the template gone, the only remaining senders are the frozen
+  /// bridges' clones, so the inbound channel reaches Disconnected exactly when the
+  /// last frozen bridge exits — the drain's terminating condition. `Some` for the
+  /// whole running lifetime (no bridge is spawned after the freeze drops it).
+  inbound_tx: Option<Sender<BridgeInbound>>,
   /// Dial completions from the dial tasks.
   dial_rx: Receiver<DialStatus<R>>,
   /// Cloned into each spawned dial task to report its outcome.
@@ -559,7 +568,7 @@ where
       accept_join: Some(accept_join),
       accepted_rx,
       inbound_rx: Some(inbound_rx),
-      inbound_tx,
+      inbound_tx: Some(inbound_tx),
       dial_rx,
       dial_tx,
       recv_buf: vec![0u8; buf_len],
@@ -605,7 +614,11 @@ where
       eid,
       out_rx,
       cancel_rx,
-      self.inbound_tx.clone(),
+      self
+        .inbound_tx
+        .as_ref()
+        .expect("a bridge is only ever spawned while the driver is running, before the shutdown freeze drops the template inbound sender")
+        .clone(),
       self.shared.clone(),
       self.close_timeout,
     ));
@@ -640,30 +653,33 @@ where
     match cmd {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
-          // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Err(Error::NotRunning));
+          // Ignoring Err: the caller dropped its reply receiver. The
+          // reached-so-far set is empty.
+          let _ = reply.send(Err((SmallVec::new(), Error::NotRunning)));
           return;
         }
         if !wait {
-          // Dispatch: fire-and-forget; reply the dispatched count.
-          let mut count = 0usize;
+          // Dispatch: fire-and-forget; reply the dispatched seed set. The set is
+          // NOT deduplicated (the fire-and-forget count is the dispatched-exchange
+          // count, so a duplicate seed contributes two).
+          let mut dispatched: SmallVec<[SocketAddr; 1]> = SmallVec::new();
           for addr in &addrs {
             // Ignoring StreamId: per-seed outcome surfaces via poll_event.
             let _ = self
               .endpoint
               .start_push_pull(*addr, PushPullKind::Join, now);
-            count += 1;
+            dispatched.push(*addr);
           }
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Ok(count));
+          let _ = reply.send(Ok(dispatched));
           return;
         }
-        // WaitForCompletion: account_event replies the contacted count once every
+        // WaitForCompletion: account_event replies the contacted set once every
         // exchange this join started completes. An empty seed list is a no-op
         // success, not a failure.
         if addrs.is_empty() {
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Ok(0));
+          let _ = reply.send(Ok(SmallVec::new()));
           return;
         }
         // Drain already-queued actions first, so a same-peer Connect from an
@@ -697,9 +713,13 @@ where
         }
         if pending_eids.is_empty() {
           // Every seed's dial failed before producing an exchange: a bounded
-          // failure rather than an indefinite wait.
+          // failure rather than an indefinite wait. The reached-so-far set is
+          // empty.
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.send(Err(Error::JoinFailed(addrs.len())));
+          let _ = reply.send(Err((
+            SmallVec::new(),
+            Error::JoinFailed(JoinFailed::new(addrs.len(), 0)),
+          )));
           return;
         }
         let id = self.next_pending_join_id;
@@ -708,7 +728,7 @@ where
           id,
           PendingJoin {
             pending_eids,
-            contacted: 0,
+            contacted: SmallVec::new(),
             requested: addrs.len(),
             reply,
           },
@@ -1021,11 +1041,17 @@ where
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::PushPull => {
         let eid = p.eid();
         let succeeded = matches!(p.outcome(), ExchangeStatus::Succeeded);
+        // Driver events are `Event<I, SocketAddr>`, so the completed exchange's
+        // peer is the contacted seed address itself.
+        let peer = *p.peer();
         let mut completed = None;
         for (key, pj) in self.pending_joins.iter_mut() {
           if pj.pending_eids.remove(&eid) {
+            // Push for each successful exchange — duplicate seeds that succeed
+            // contribute independently (matching the count semantics the join
+            // API has always had).
             if succeeded {
-              pj.contacted += 1;
+              pj.contacted.push(peer);
             }
             if pj.pending_eids.is_empty() {
               completed = Some(*key);
@@ -1036,11 +1062,7 @@ where
         if let Some(key) = completed
           && let Some(pj) = self.pending_joins.remove(&key)
         {
-          let res = if pj.contacted == 0 {
-            Err(Error::JoinFailed(pj.requested))
-          } else {
-            Ok(pj.contacted)
-          };
+          let res = join_reply(pj.contacted, pj.requested);
           // Ignoring Err: the join caller dropped its reply receiver.
           let _ = pj.reply.send(res);
         }
@@ -1372,38 +1394,145 @@ where
       progress = true;
     }
 
-    // Shutdown: best-effort leave, flush once, fail any parked waiters, preempt
-    // every in-flight reliable exchange, then await ONLY the accept task's exit
-    // before acking the caller. The completion latch promises the bind address is
-    // free — the UDP gossip socket and the TCP listener — not that every connected
-    // stream FD has closed. Dropping `this` at the very end drops the dial channel
-    // ends, so any dial task observes its send/recv error and exits.
+    // Shutdown, in ordered phases: (1) FREEZE — best-effort leave, cancel every
+    // bridge's reads, drop the template inbound sender, and release the bind
+    // sockets; (2) DRAIN the bridge inbound channel to all-senders-gone, folding
+    // every already-read completion into its join's contacted set; (3) REAP the
+    // parked joins (their reached set now exact) and fail the other waiters; then
+    // (4) await ONLY the accept task's exit before acking the caller. The
+    // completion latch promises the bind address is free — the UDP gossip socket
+    // and the TCP listener — not that every connected stream FD has closed.
+    // Dropping `this` at the very end drops the dial channel ends, so any dial task
+    // observes its send/recv error and exits.
     //
-    // The teardown is re-entrant: the one-time work (leave/flush/fail-waiters,
-    // dropping the gossip socket, signalling the accept task, and preempting the
-    // bridges) runs exactly once, guarded on `accept_shutdown_tx` still being
-    // `Some`; every shutdown poll then polls the retained `accept_join`. The accept
-    // task owns the TCP listener (its `listener` local), so the FD is released only
-    // when that task actually EXITS — not when it is merely signalled. Polling the
-    // join handle here registers the waker, so the driver re-polls when the accept
-    // task finishes; the stashed reply fires only after that, so a same-address
-    // rebind resuming from `shutdown().await` cannot race a still-open listener.
-    // The bridge tasks are preempted (each `cancel_tx` fired) but NOT awaited, so
-    // an exchange stalled on the bounded inbound hand-off cannot wedge shutdown.
+    // The teardown is re-entrant: the freeze runs once (guarded on
+    // `accept_shutdown_tx` still being `Some`); the drain reads `inbound_rx` across
+    // as many polls as it takes the frozen bridges to land their parked sends and
+    // exit, woken by each bridge's on-exit `wake_driver()`; the reap runs once when
+    // the drain disconnects (guarded on `inbound_rx` still being `Some`); every
+    // shutdown poll then polls the retained `accept_join`. The accept task owns the
+    // TCP listener
+    // (its `listener` local), so the FD is released only when that task actually
+    // EXITS — not when it is merely signalled. Polling the join handle here
+    // registers the waker, so the driver re-polls when the accept task finishes;
+    // the stashed reply fires only after that, so a same-address rebind resuming
+    // from `shutdown().await` cannot race a still-open listener. The drain unblocks
+    // the bridges' parked sends but awaits no bridge's join, so an exchange stalled
+    // on the bounded inbound hand-off cannot wedge shutdown.
     if this.shared.is_shutdown() {
+      // FREEZE (one-time). Stop every live bridge's reads WITHOUT preempting an
+      // in-flight inbound hand-off, drop the driver's template inbound sender so the
+      // channel can reach all-senders-gone, and release the bind sockets. Guarded on
+      // `accept_shutdown_tx` still being `Some`; taking it below clears the guard so
+      // this runs once.
       if this.accept_shutdown_tx.is_some() {
-        // One-time teardown: runs on the first shutdown poll only (the
-        // `accept_shutdown_tx.take()` below clears this guard).
         // Ignoring Err: best-effort leave during shutdown.
         let _ = this.endpoint.leave(Instant::now());
-        this.drain_surfaces(cx);
+        // FREEZE every live bridge. `cancel_tx.send(())` resolves each bridge's
+        // biased-first cancel arm, so a bridge about to read breaks BEFORE it can
+        // fold a racing peer-FIN into a fabricated EOF, and a bridge stalled
+        // mid-write is preempted too. Dropping the handle additionally
+        // disconnects its per-bridge out channel as a backstop. Neither preempts
+        // an `inbound_tx` send the bridge is already parked on — that send is
+        // awaited in an arm BODY, outside the select, so an already-read EOF still
+        // lands first. Each frozen bridge drops its inbound sender on exit,
+        // strictly after its parked send lands, and calls `wake_driver()` (see
+        // `bridge_task`) so the drain below is re-polled to observe disconnect.
+        for (_, handle) in this.bridges.drain() {
+          // Ignoring Err: the bridge may have already exited (cancel receiver
+          // gone); the freeze is best-effort.
+          let _ = handle.cancel_tx.send(());
+        }
+        // Drop the driver's template inbound sender: the only remaining senders are
+        // now the frozen bridges' clones, so the channel reaches Disconnected
+        // exactly when the last one exits — the drain's terminating condition.
+        this.inbound_tx = None;
+        // Release the bind sockets. Dropping `accept_shutdown_tx` cancels the
+        // accept task's pending `accept()` so it breaks its loop and drops the
+        // `listener` local — but that drop happens when the task is next scheduled,
+        // NOT here, which is why the join handle is polled below before the ack.
+        // Dropping the gossip socket closes its UDP FD synchronously (the agnostic
+        // `UdpSocket` has no async `close`, so the local going out of scope here
+        // closes the FD). Taking `accept_shutdown_tx` also clears the freeze guard.
+        drop(this.accept_shutdown_tx.take());
+        drop(this.socket.take());
+      }
+
+      // DRAIN-TO-DISCONNECTED (re-entrant), then REAP (once, when the drain
+      // completes). Fold every already-read completion (queued, or
+      // parked on a saturated hand-off the drain unblocks) into its join's
+      // contacted set BEFORE reaping, so a seed that effectively completed is not
+      // dropped from the reaped Err((reached, Shutdown)) set. The drain reads
+      // `inbound_rx` to all-senders-gone via `try_recv`; it deliberately holds NO
+      // persistent flume `recv_async` waker (a per-poll temporary would deregister
+      // on drop, and flume's own sender-drop disconnect would then wake nothing).
+      // Instead each frozen bridge calls `wake_driver()` on exit (drop-then-wake),
+      // so the last exit re-polls us to observe Disconnected. FREEZE guarantees no
+      // bridge issues a new read, so nothing refills the channel: the drain cannot
+      // spin, needs no counter, and reaching Disconnected means every parked send
+      // has landed. `inbound_rx` stays `Some` through the drain and is taken once
+      // it disconnects, which doubles as the one-time reap guard.
+      if this.inbound_rx.is_some() {
+        let drained_to_disconnect = loop {
+          let mut channel_work = false;
+          let mut hit_disconnect = false;
+          if let Some(inbound_rx) = this.inbound_rx.as_ref() {
+            loop {
+              match inbound_rx.try_recv() {
+                Ok(msg) => {
+                  match msg {
+                    BridgeInbound::Data(BridgeData { eid, bytes, at }) => {
+                      this.endpoint.handle_transport_data(eid, &bytes, false, at);
+                    }
+                    BridgeInbound::Eof(BridgeEof { eid, at }) => {
+                      this.endpoint.handle_transport_data(eid, &[], true, at);
+                    }
+                    BridgeInbound::Error(BridgeEof { eid, at }) => {
+                      this.endpoint.handle_transport_error(eid, at);
+                    }
+                  }
+                  channel_work = true;
+                }
+                Err(flume::TryRecvError::Empty) => break,
+                Err(flume::TryRecvError::Disconnected) => {
+                  hit_disconnect = true;
+                  break;
+                }
+              }
+            }
+          }
+          // Pull the resulting machine surfaces; account_event folds every terminal
+          // ExchangeCompleted into the matching pending join's contacted set. A
+          // dispatched EOF reaps its bridge and emits the completion across one or
+          // more surface passes (each bounded by transmit_batch), so keep looping
+          // while there is channel or surface work — drain_surfaces must reach
+          // QUIESCENCE before we decide, or a completion (or a second queued event)
+          // could be left unfolded.
+          let (_, surf_more) = this.drain_surfaces(cx);
+          if channel_work || surf_more {
+            continue;
+          }
+          // Quiesced: no inbound items pending and no surface backlog. If the
+          // channel has disconnected, every parked send has landed and been folded
+          // — proceed to reap. Otherwise a frozen bridge has not yet landed its
+          // parked send and exited; park, and its on-exit `wake_driver()` re-polls
+          // us.
+          break hit_disconnect;
+        };
+        if !drained_to_disconnect {
+          return Poll::Pending;
+        }
+        // The drain reached Disconnected: every already-read completion is folded.
+        // Take `inbound_rx` (the one-time reap guard), then reap below.
+        drop(this.inbound_rx.take());
         // Close the command queue and fail any still-queued commands, so a handle
         // that raced the shutdown gets a reply instead of hanging.
         for cmd in this.shared.close_and_drain() {
           match cmd {
-            // Ignoring Err: the caller dropped its reply receiver.
+            // Ignoring Err: the caller dropped its reply receiver. The
+            // reached-so-far set is empty.
             Command::Join(JoinCmd { reply, .. }) => {
-              let _ = reply.send(Err(Error::Shutdown));
+              let _ = reply.send(Err((SmallVec::new(), Error::Shutdown)));
             }
             Command::Leave(LeaveCmd { reply }) => {
               let _ = reply.send(Err(Error::Shutdown));
@@ -1458,9 +1587,13 @@ where
             }
           }
         }
-        for (_, pj) in this.pending_joins.drain() {
+        for (_, mut pj) in this.pending_joins.drain() {
           // Ignoring Err: the join caller dropped its reply receiver.
-          let _ = pj.reply.send(Err(Error::Shutdown));
+          // Carry the addresses already reached before shutdown raced
+          // this waiter — callers see the partial contacted set, not empty.
+          let _ = pj
+            .reply
+            .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
         }
         if let Some(pl) = this.pending_leave.take() {
           for replier in pl.repliers {
@@ -1476,39 +1609,6 @@ where
           // Ignoring Err: the send_reliable caller dropped its reply receiver.
           let _ = ps.reply.send(Err(Error::Shutdown));
         }
-        // Signal the accept task and release the gossip socket. Dropping
-        // `accept_shutdown_tx` cancels the accept task's pending `accept()` so it
-        // breaks its loop and drops the `listener` local — but that drop happens
-        // when the task is next scheduled, NOT here, which is why the join handle
-        // is polled below before the ack. Dropping the gossip socket closes its
-        // UDP FD synchronously (the agnostic `UdpSocket` has no async `close`, so
-        // the local going out of scope here closes the FD). Taking
-        // `accept_shutdown_tx` also clears the one-time guard.
-        drop(this.accept_shutdown_tx.take());
-        drop(this.socket.take());
-        // Preempt every in-flight reliable exchange WITHOUT awaiting it. The
-        // completion latch promises only the bind address is free, not that every
-        // connected stream FD has closed, so shutdown does not block on the bridge
-        // tasks — a bridge parked on the bounded inbound hand-off send is not
-        // cancellable, and awaiting its join would hang shutdown under inbound
-        // backpressure. Sending `cancel_tx` preempts each ACTIVE bridge even
-        // mid-write on a stalled peer, so its established stream closes at once; an
-        // exchange already past `StreamAction::Close` (handle removed, draining its
-        // tail) is not in `bridges` — its connected stream FD closes on its own,
-        // with a non-reading peer dropped after `close_timeout` of no write
-        // progress (an idle bound, not a total one). Dropping the handle also
-        // disconnects `out_tx`. A dialing
-        // exchange has no bridge task yet (its connecting FD lives in the dial
-        // task, bounded by `DIAL_TIMEOUT`). Dropping `inbound_rx` then disconnects
-        // every bridge's shared `inbound_tx`, so a bridge parked on a full inbound
-        // hand-off send wakes with a disconnect error and exits promptly instead of
-        // lingering until this driver future is finally dropped.
-        for (_, handle) in this.bridges.drain() {
-          // Ignoring Err: the bridge may have already exited (cancel receiver
-          // gone); the preemption is best-effort.
-          let _ = handle.cancel_tx.send(());
-        }
-        drop(this.inbound_rx.take());
       }
 
       // Await the accept task's exit before acking, so the TCP listener FD is
@@ -1815,9 +1915,14 @@ async fn dial_task<I, R>(
 ///   queued in `out_rx` (flushing the exchange's final response), then exits on
 ///   the `out_rx` disconnect. The `cancel_rx` disconnect does NOT preempt that
 ///   drain — it is mapped to a never-resolving future below.
-/// - An explicit `StreamAction::Abort` sends `()` on `cancel_rx` before dropping
-///   the handle. That resolves `cancel_fut`, which preempts the bridge — even a
-///   write stalled on an unresponsive peer — and discards the queued bytes.
+/// - An explicit `StreamAction::Abort` (and the shutdown freeze) sends `()` on
+///   `cancel_rx` before dropping the handle. That resolves `cancel_fut`, the
+///   biased-FIRST arm of the both-halves-live read select, so it preempts the
+///   bridge ahead of a racing read — a peer-FIN readable just after the signal
+///   is NOT read and folded into a fabricated EOF — and ahead of a write stalled
+///   on an unresponsive peer, discarding the queued bytes. A cancel-break emits
+///   no EOF; only a real `read == 0` does. An `inbound_tx` send already in flight
+///   is awaited in an arm body, not the select, so it still completes first.
 ///
 /// A graceful Close has NO remaining cancel path (the handle is gone), so a peer
 /// that sent its request+FIN and then STOPPED reading would wedge the post-Close
@@ -1889,7 +1994,48 @@ async fn bridge_task<I, R, S>(
       }
       continue;
     }
-    select! {
+    // Both halves live. Bias the shutdown/abort cancel AHEAD of the read so a
+    // freeze (`cancel_tx.send(())` then handle drop) stops this bridge's reads
+    // before a racing peer-FIN can be read and folded as a completed EOF: a FIN
+    // unread at the freeze instant is genuinely in-flight and must be ABSENT
+    // from the shutdown reached set. The `out` arm is also ahead of the read, so
+    // a graceful Close (handle drop, no cancel) tears down on the out-channel
+    // disconnect rather than a racing late read. An already-read EOF is still
+    // preserved: its `inbound_tx` send is awaited in the read arm BODY, not in
+    // this select, so once the bridge is parked on that send the cancel cannot
+    // preempt it — cancel only wins when the loop comes back to a READ.
+    select_biased! {
+      // Cancel first: ONLY an explicit abort/freeze (`cancel_tx.send(())`)
+      // resolves this future — a graceful-Close handle-drop is mapped to
+      // `pending()`. It breaks at once WITHOUT emitting any EOF; only a real
+      // `read == 0` below emits one, so a cancel-break never fabricates a seed.
+      () = &mut cancel_fut => break,
+      out = out_rx.recv_async().fuse() => match out {
+        Ok(BridgeOut::Data(bytes)) => {
+          // Tear down on an explicit abort OR a drain that makes NO progress for
+          // `close_timeout` on a non-reading peer (the graceful-Close backstop).
+          // A slow-but-reading peer resets the deadline each chunk and is not
+          // timed out.
+          if !write_closed
+            && write_cancellable::<_, R, _>(
+              &mut write_half,
+              &bytes,
+              &mut cancel_fut,
+              close_timeout,
+            )
+            .await
+          {
+            break;
+          }
+        }
+        Ok(BridgeOut::ShutdownWrite) => {
+          // Ignoring Err: half-closing a gone peer is moot.
+          let _ = write_half.close().await;
+          write_closed = true;
+        }
+        // The pump dropped the handle (Close / shutdown): tear down.
+        Err(_) => break,
+      },
       read = read_half.read(&mut buf).fuse() => match read {
         // A clean `read == 0` (peer half-closed) is a benign EOF anchor; a read
         // ERROR is a transport failure and must NOT take the benign-EOF path (it
@@ -1922,34 +2068,20 @@ async fn bridge_task<I, R, S>(
           shared.wake_driver();
         }
       },
-      out = out_rx.recv_async().fuse() => match out {
-        Ok(BridgeOut::Data(bytes)) => {
-          // Tear down on an explicit abort OR a drain that makes NO progress for
-          // `close_timeout` on a non-reading peer (the graceful-Close backstop).
-          // A slow-but-reading peer resets the deadline each chunk and is not
-          // timed out.
-          if !write_closed
-            && write_cancellable::<_, R, _>(
-              &mut write_half,
-              &bytes,
-              &mut cancel_fut,
-              close_timeout,
-            )
-            .await
-          {
-            break;
-          }
-        }
-        Ok(BridgeOut::ShutdownWrite) => {
-          // Ignoring Err: half-closing a gone peer is moot.
-          let _ = write_half.close().await;
-          write_closed = true;
-        }
-        // The pump dropped the handle (Close / shutdown): tear down.
-        Err(_) => break,
-      },
     }
   }
+  // Drop the inbound sender BEFORE waking the driver. The shutdown drain reads
+  // `inbound_rx` to all-senders-gone via `try_recv` and deliberately does NOT
+  // hold a persistent flume `recv_async` waker (a per-poll temporary registers
+  // then deregisters on drop), so flume's own last-sender disconnect wakes
+  // nothing — the driver future would never be re-polled and `shutdown().await`
+  // would hang. Dropping first, then waking, guarantees the re-polled driver
+  // observes the disconnect (the drop is release-ordered ahead of the wake). This
+  // fires on EVERY exit path — a frozen bridge's out-channel disconnect, an
+  // explicit cancel/abort, an inbound-send error, or a read/write error — which
+  // is what lets the drain reach Disconnected without awaiting any bridge join.
+  drop(inbound_tx);
+  shared.wake_driver();
   // Best-effort: ensure the OS socket is fully closed once the bridge exits.
   let _ = S::reunite(read_half, write_half).map(|s| s.shutdown(Shutdown::Both));
 }

@@ -160,7 +160,8 @@ async fn cidr_policy_on_joiner_blocks_seed_from_membership() {
     .await
     .expect("join exchange completes");
   assert_eq!(
-    contacted, 1,
+    contacted.len(),
+    1,
     "the seed was contacted (the exchange completed)"
   );
 
@@ -218,7 +219,7 @@ async fn cidr_policy_rejects_blocked_reliable_peer() {
 /// the push/pull never happens and the join FAILS. This is the discriminator
 /// against the membership-only `with_alive_delegate` path
 /// ([`cidr_policy_on_joiner_blocks_seed_from_membership`]), where the SAME joiner
-/// excludes the SAME seed yet the exchange completes (`Ok(1)`) and only the seed's
+/// excludes the SAME seed yet the exchange completes (returning a 1-element reached set) and only the seed's
 /// Alive is dropped.
 #[compio::test]
 async fn cidr_policy_blocks_joiner_outbound_dial() {

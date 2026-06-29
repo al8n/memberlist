@@ -76,7 +76,7 @@ async fn two_nodes_join_converge() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("join");
-  assert_eq!(n, 1, "one seed dispatched");
+  assert_eq!(n.len(), 1, "one seed dispatched");
 
   // Localhost RTT is sub-millisecond; 8s is far over the handshake + push/pull
   // budget. Poll the lock-free snapshot until both nodes see two members.
@@ -228,7 +228,7 @@ async fn repeated_shutdown_is_idempotent() {
 /// an unbound port never completes its handshake, so the `QuicEndpoint` retires
 /// the dial intent at its exchange deadline and (with the PushPull pre-bridge
 /// fix) emits `ExchangeCompleted(PushPull, Failed)`, which drains the waiter
-/// set and resolves the join with `JoinAllFailed`.
+/// set and resolves the join with `JoinFailed`.
 ///
 /// Wrapped in a `tokio::time::timeout` so a regression that drops the PushPull
 /// `Failed` emission (leaving the deadline-less waiter parked) fails fast here
@@ -294,7 +294,7 @@ async fn quic_datagram_gossip_two_nodes_converge() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("join");
-  assert_eq!(n, 1, "one seed dispatched");
+  assert_eq!(n.len(), 1, "one seed dispatched");
 
   // Gossip and probes travel over QUIC datagrams (the default unreliable
   // transport); both nodes must converge before the budget.
