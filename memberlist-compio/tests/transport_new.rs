@@ -133,7 +133,7 @@ async fn tcp_join_with_resolved_seed() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join resolved seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   let converged = wait_until(
     || joiner.member_count() == 2 && seed.member_count() == 2,
@@ -174,7 +174,11 @@ async fn tcp_join_with_unresolved_seed() {
     .join(&OsResolver, &[MaybeResolved::Unresolved(seed_host)])
     .await
     .expect("join unresolved seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted after resolution");
+  assert_eq!(
+    contacted.len(),
+    1,
+    "exactly one seed contacted after resolution"
+  );
 
   let converged = wait_until(
     || joiner.member_count() == 2 && seed.member_count() == 2,

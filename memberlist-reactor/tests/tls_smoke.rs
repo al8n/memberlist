@@ -94,7 +94,7 @@ async fn two_nodes_join_converge() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("join");
-  assert_eq!(n, 1, "one seed dispatched");
+  assert_eq!(n.len(), 1, "one seed dispatched");
 
   // Localhost RTT is sub-millisecond; 8s is far over the TLS handshake +
   // push/pull budget. Poll the lock-free snapshot until both see two members.

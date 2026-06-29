@@ -143,7 +143,7 @@ async fn custom_delegate_notify_join_fires_on_two_node_join() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   // `notify_join` fires on the driver thread as the NodeJoined event is
   // dispatched; allow a bounded window for the driver to drain the event
@@ -223,7 +223,7 @@ async fn alive_delegate_via_options_rejects_peer() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join contacts the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   // Give the driver a settle window to drain any push/pull + gossip, then
   // assert the rejected seed never entered the joiner's membership.

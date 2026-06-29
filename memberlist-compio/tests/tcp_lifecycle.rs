@@ -1045,7 +1045,7 @@ async fn slow_observation_delegate_does_not_delay_join_completion() {
   let contacted = joined
     .expect("join() did not return within 1.5s — a slow notify_join stalled join completion")
     .expect("join failed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
   assert!(
     elapsed < Duration::from_millis(1500),
     "join completion was delayed by the slow notify_join: {elapsed:?}",
@@ -1479,7 +1479,7 @@ async fn set_ack_payload_oversized_is_rejected() {
 /// replies `NotRunning`. Both public entry points funnel through
 /// `Command::Join`, so both `join` (WaitForCompletion) and `dispatch_join`
 /// (Dispatch) are covered. Strongly discriminating: without the gate `join`
-/// returns `Ok(usize)`.
+/// returns `Ok(<reached set>)`.
 #[compio::test]
 async fn join_after_leave_is_rejected() {
   let a = make_tcp("join-after-leave-a", loopback_addr(0)).await;
@@ -1515,7 +1515,10 @@ async fn join_after_leave_is_rejected() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
     .await;
   assert!(
-    matches!(res, Err(memberlist_compio::MemberlistError::NotRunning)),
+    matches!(
+      res,
+      Err((_, memberlist_compio::MemberlistError::NotRunning))
+    ),
     "expected NotRunning from join after leave, got {res:?}",
   );
 

@@ -53,6 +53,7 @@ memberlist-driver = { workspace = true }
 rand = { workspace = true, features = ["std", "std_rng", "sys_rng"] }
 hostaddr = { workspace = true, features = ["std", "smol_str"] }
 smol_str.workspace = true
+smallvec.workspace = true
 # Both backends select compio-driver's "fusion" driver on Linux: io_uring
 # preferred, with a transparent polling (epoll) fallback when io_uring is
 # unavailable. io_uring is the driver's native backend — its anti-starvation

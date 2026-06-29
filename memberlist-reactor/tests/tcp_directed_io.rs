@@ -696,7 +696,7 @@ async fn join_resolves_unresolved_seed_via_resolver() {
   .await
   .expect("unresolved-seed join must resolve")
   .expect("join via resolver");
-  assert_eq!(n, 1, "the resolved seed was contacted");
+  assert_eq!(n.len(), 1, "the resolved seed was contacted");
 
   let converged = tokio::time::timeout(Duration::from_secs(8), async {
     loop {
@@ -753,7 +753,8 @@ async fn join_resolver_yields_nothing_is_join_failed() {
   .await
   .expect("join must resolve");
   assert!(
-    matches!(res, Err(Error::JoinFailed(1))),
+    matches!(&res, Err((reached, Error::JoinFailed(jf)))
+      if reached.is_empty() && jf.requested() == 1 && jf.contacted() == 0),
     "a non-empty seed resolving to nothing is JoinFailed, got {res:?}"
   );
   let _ = b.shutdown().await;
@@ -800,7 +801,7 @@ async fn join_resolver_error_propagates() {
   .await
   .expect("join must resolve");
   assert!(
-    matches!(res, Err(Error::Resolve(_))),
+    matches!(res, Err((_, Error::Resolve(_)))),
     "a resolver error must surface as Error::Resolve, got {res:?}"
   );
   let _ = b.shutdown().await;

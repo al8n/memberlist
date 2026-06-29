@@ -54,7 +54,7 @@ async fn two_nodes_join_converge() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("join");
-  assert_eq!(n, 1, "one seed dispatched");
+  assert_eq!(n.len(), 1, "one seed dispatched");
 
   // Localhost RTT is sub-millisecond; 8s is far over the connect + push/pull
   // budget. Poll the lock-free snapshot until both nodes see two members.
@@ -264,8 +264,8 @@ async fn duplicate_seed_join_waits_for_both_exchanges() {
   // The same seed twice dispatches two exchanges; the join captures a distinct
   // ExchangeId for each at Connect and waits for every one to complete (the
   // machine may coalesce the redundant second contact). The point is it resolves
-  // to a valid contacted count rather than hanging or completing early.
-  let n = tokio::time::timeout(
+  // to a valid reached address set rather than hanging or completing early.
+  let reached = tokio::time::timeout(
     Duration::from_secs(8),
     b.join(
       &SocketAddrResolver,
@@ -279,8 +279,8 @@ async fn duplicate_seed_join_waits_for_both_exchanges() {
   .expect("join did not complete")
   .expect("join");
   assert!(
-    (1..=2).contains(&n),
-    "duplicate-seed join contacted count: {n}"
+    (1..=2).contains(&reached.len()),
+    "duplicate-seed join reached set: {reached:?}"
   );
 
   let _ = a.shutdown().await;
@@ -301,8 +301,14 @@ async fn concurrent_same_seed_joins_each_complete() {
     tokio::time::timeout(Duration::from_secs(8), b.join(&SocketAddrResolver, &seeds)),
     tokio::time::timeout(Duration::from_secs(8), b2.join(&SocketAddrResolver, &seeds)),
   );
-  assert!(matches!(first, Ok(Ok(n)) if n >= 1), "join 1: {first:?}");
-  assert!(matches!(second, Ok(Ok(n)) if n >= 1), "join 2: {second:?}");
+  assert!(
+    matches!(&first, Ok(Ok(n)) if !n.is_empty()),
+    "join 1: {first:?}"
+  );
+  assert!(
+    matches!(&second, Ok(Ok(n)) if !n.is_empty()),
+    "join 2: {second:?}"
+  );
 
   let _ = a.shutdown().await;
   let _ = b.shutdown().await;

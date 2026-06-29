@@ -140,7 +140,7 @@ async fn make_quic_with(
   .expect("bind quic memberlist")
 }
 
-/// `join_with` against a reachable seed returns `Ok(1)` once the
+/// `join_with` against a reachable seed returns a 1-element reached set once the
 /// outbound push/pull `ExchangeCompleted(Succeeded)` lands. Mirrors
 /// the stream driver's `join_with_waits_for_actual_contact` test
 /// (`memberlist-compio/tests/tcp_join.rs`).
@@ -167,7 +167,7 @@ async fn quic_join_with_waits_for_actual_contact() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
     .await
     .expect("join Ok");
-  assert_eq!(n, 1, "one contacted exchange");
+  assert_eq!(n.len(), 1, "one contacted exchange");
   assert!(
     a.alive_count() >= 2,
     "A did not learn about B (alive_count={})",
@@ -180,13 +180,13 @@ async fn quic_join_with_waits_for_actual_contact() {
   let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
 }
 
-/// `join_with` against an unbound loopback port surfaces
-/// `MemberlistError::JoinAllFailed { requested: 1, contacted: 0 }`
-/// after the deadline elapses. Under QUIC the dial datagram vanishes
-/// (no kernel responder to send a connection-refused back), so the
+/// `join` against an unbound loopback port surfaces
+/// `MemberlistError::JoinFailed { requested: 1, contacted: 0 }` (with an empty
+/// reached set) after the deadline elapses. Under QUIC the dial datagram
+/// vanishes (no kernel responder to send a connection-refused back), so the
 /// exchange runs to the full per-call deadline before reaping.
 #[compio::test]
-async fn quic_join_with_blackhole_surfaces_join_all_failed() {
+async fn quic_join_with_blackhole_surfaces_join_failed() {
   let qcfg = support::self_trusted_quic_config();
   // Local bind on OS-picked port 0 — A makes no inbound traffic
   // here, so the advertise-port-0 quirk that breaks two-node joins
@@ -203,11 +203,15 @@ async fn quic_join_with_blackhole_surfaces_join_all_failed() {
     )
     .await;
   match result {
-    Err(MemberlistError::JoinAllFailed(jf)) => {
+    Err((reached, MemberlistError::JoinFailed(jf))) => {
+      assert!(
+        reached.is_empty(),
+        "all-failed carries an empty reached set"
+      );
       assert_eq!(jf.requested(), 1, "one seed requested");
       assert_eq!(jf.contacted(), 0, "no contacts to a blackhole");
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   // Ignoring Err: shutdown best-effort during test teardown.
@@ -251,14 +255,14 @@ async fn quic_join_to_unreachable_seed_returns_err_not_hang() {
 }
 
 /// A non-empty `seeds` slice whose resolver returns an empty address
-/// vector must surface as `JoinAllFailed`, NOT a silent `Ok(0)`. A
+/// vector must surface as `JoinFailed`, NOT a silent `Ok(empty)`. A
 /// service-discovery resolver that finds no endpoints for a configured
 /// service key is the canonical failure case this test guards against.
 ///
 /// Uses a single-node memberlist on an OS-allocated port; no peer is needed
 /// because the failure happens before any outbound dial.
 #[compio::test]
-async fn join_with_empty_resolution_surfaces_join_all_failed() {
+async fn join_with_empty_resolution_surfaces_join_failed() {
   let qcfg = support::self_trusted_quic_config();
   // This joiner resolves `String` service keys via `EmptyResolver`, so its
   // membership-input address type is `String` (not the default `HostAddr`).
@@ -280,12 +284,16 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
     MaybeResolved::Unresolved("svc-a".into()),
     MaybeResolved::Unresolved("svc-b".into()),
   ];
-  let err = joiner
+  let (reached, err) = joiner
     .join(&EmptyResolver, &seeds)
     .await
     .expect_err("non-empty seeds resolving to empty address list must fail");
+  assert!(
+    reached.is_empty(),
+    "all-failed carries an empty reached set"
+  );
   match err {
-    MemberlistError::JoinAllFailed(payload) => {
+    MemberlistError::JoinFailed(payload) => {
       assert_eq!(
         payload.requested(),
         seeds.len(),
@@ -293,31 +301,31 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
       );
       assert_eq!(payload.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
-  // Truly-empty input still short-circuits to Ok(0): no command sent,
-  // no JoinAllFailed.
+  // Truly-empty input still short-circuits to Ok(empty): no command sent,
+  // no JoinFailed.
   let empty: Vec<MaybeResolved<String, SocketAddr>> = Vec::new();
-  let count = joiner
+  let reached = joiner
     .join(&EmptyResolver, &empty)
     .await
     .expect("empty seeds returns Ok");
-  assert_eq!(count, 0);
+  assert!(reached.is_empty(), "empty input ⇒ empty reached set");
 
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), joiner.shutdown()).await;
 }
 
-/// `join_with` against a UDP socket that swallows every datagram — the
+/// `join` against a UDP socket that swallows every datagram — the
 /// QUIC handshake never receives an Initial response, so the exchange
-/// runs to the full per-call deadline and surfaces `JoinAllFailed`.
+/// runs to the full per-call deadline and surfaces `JoinFailed`.
 ///
 /// Unlike the TCP banner test (which writes bytes the decoder rejects),
 /// here no bytes arrive at all: the `UdpSocket` binds the port so the
 /// OS does not ICMP-unreachable the datagram, but no reply is ever sent.
 #[compio::test]
-async fn join_with_against_unresponsive_udp_endpoint_surfaces_join_all_failed() {
+async fn join_with_against_unresponsive_udp_endpoint_surfaces_join_failed() {
   use compio::net::UdpSocket;
 
   let qcfg = support::self_trusted_quic_config();
@@ -332,16 +340,20 @@ async fn join_with_against_unresponsive_udp_endpoint_surfaces_join_all_failed() 
   let banner_addr = banner.local_addr().expect("banner local_addr");
   let _banner_guard = banner; // hold the binding; reads never performed
 
-  let err = joiner
+  let (reached, err) = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(banner_addr)])
     .await
     .expect_err("join against unresponsive UDP endpoint must not report contact");
+  assert!(
+    reached.is_empty(),
+    "all-failed carries an empty reached set"
+  );
   match err {
-    MemberlistError::JoinAllFailed(payload) => {
+    MemberlistError::JoinFailed(payload) => {
       assert_eq!(payload.requested(), 1);
       assert_eq!(payload.contacted(), 0);
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   // Ignoring Err: shutdown best-effort during test teardown.
@@ -380,14 +392,14 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   )
   .await;
 
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against 18 KiB-meta seed");
-  assert_eq!(count, 1);
+  assert_eq!(contacted.len(), 1);
 
   // Wider deadline than TCP: QUIC handshake latency.
   let converged = wait_until(
@@ -423,11 +435,11 @@ async fn quic_datagram_gossip_two_nodes_converge() {
 
   let b_addr = b.advertise_address();
 
-  let count = a
+  let contacted = a
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
     .await
     .expect("join Ok");
-  assert_eq!(count, 1, "one contacted exchange");
+  assert_eq!(contacted.len(), 1, "one contacted exchange");
 
   // Wider deadline than TCP: QUIC handshake latency before datagrams can flow.
   let converged = wait_until(
@@ -540,14 +552,14 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   )
   .await;
 
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[MaybeResolved::Resolved(seed.advertise_address())],
     )
     .await
     .expect("join against larger-meta seed");
-  assert_eq!(count, 1);
+  assert_eq!(contacted.len(), 1);
 
   // Wider deadline than TCP: QUIC handshake latency.
   let converged = wait_until(
@@ -571,8 +583,8 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
 /// Duplicate seed addresses must produce duplicate push/pull exchanges,
 /// each counted independently. Passing `[X, X]` to `join_with` queues
 /// two outbound exchanges; both must terminate with `Succeeded` before
-/// the call returns, and the returned count is 2 (exchanges), not 1
-/// (distinct addresses).
+/// the call returns, and the returned reached set has 2 entries (one per
+/// exchange), not 1 (distinct addresses).
 #[compio::test]
 async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
   let (qcfg_a, qcfg_b) = two_node_quic_configs();
@@ -581,7 +593,7 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
   let joiner = make_quic("joiner", qcfg_b).await;
 
   let seed_addr = seed.advertise_address();
-  let count = joiner
+  let contacted = joiner
     .join(
       &SocketAddrResolver,
       &[
@@ -592,7 +604,8 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
     .await
     .expect("join with duplicate seeds should succeed");
   assert_eq!(
-    count, 2,
+    contacted.len(),
+    2,
     "duplicate seed counts each outbound exchange independently"
   );
 
@@ -610,7 +623,7 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
 /// separately calls `join_with(&[A, C])`. A is reachable; C's port
 /// rejects QUIC handshakes (no listener). A's push/pull response merges
 /// C-as-Alive into the joiner's membership, but C's own exchange never
-/// completes. The counted result must be 1 (A only).
+/// completes. The reached set must contain 1 address (A only).
 #[compio::test]
 async fn join_with_does_not_count_transitively_discovered_seeds() {
   // Three distinct cert/key pairs so each node has its own identity,
@@ -632,7 +645,7 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   let a = make_quic("a", qcfg_a).await;
   // Bind the joiner NOW, while C still holds its port, so a later `:0` bind can
   // never be handed C's freed address after C is dropped — which would point the
-  // "closed transitive seed" at the live joiner and invalidate the count.
+  // "closed transitive seed" at the live joiner and pollute the reached set.
   let joiner = make_quic("joiner", qcfg_j).await;
 
   // Capture C's bound address before it is dropped — the joiner dials
@@ -645,7 +658,7 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(c_addr)])
     .await
     .expect("a joins c");
-  assert_eq!(n, 1, "A directly contacted C");
+  assert_eq!(n.len(), 1, "A directly contacted C");
 
   // Wider deadline than TCP: QUIC handshake latency.
   let converged = wait_until(|| a.member_count() == 2, Duration::from_secs(10)).await;
@@ -668,9 +681,11 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
     .await
     .expect("joiner contacts A even if C is unreachable");
   assert_eq!(
-    contacted, 1,
+    contacted.len(),
+    1,
     "join must not count transitively-discovered seed as contacted"
   );
+  assert_eq!(contacted[0], a_addr, "only A is in the reached set");
 
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
@@ -704,15 +719,15 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
   let j2 = make_quic("j2", qcfg_j2).await;
 
   // Two concurrent join calls to the same seed. Each must resolve to
-  // Ok(1) — its own exchange bytes — independently.
+  // a 1-element reached set — its own exchange bytes — independently.
   let seeds = [MaybeResolved::Resolved(seed.advertise_address())];
   let fut1 = j1.join(&SocketAddrResolver, &seeds);
   let fut2 = j2.join(&SocketAddrResolver, &seeds);
   let (n1, n2) = futures_util::future::join(fut1, fut2).await;
   let n1 = n1.expect("j1 contacts seed");
   let n2 = n2.expect("j2 contacts seed");
-  assert_eq!(n1, 1, "j1 reports only its own seed contact");
-  assert_eq!(n2, 1, "j2 reports only its own seed contact");
+  assert_eq!(n1.len(), 1, "j1 reports only its own seed contact");
+  assert_eq!(n2.len(), 1, "j2 reports only its own seed contact");
 
   // Ignoring Err: shutdown best-effort during test teardown.
   let _ = compio::time::timeout(Duration::from_secs(5), seed.shutdown()).await;
@@ -725,7 +740,7 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
 /// Under large in-flight push/pull volume, completed exchanges must still
 /// be reaped before the join deadline — no completion sitting behind the
 /// `ITER_DRAIN_CAP` may be incorrectly timed out. Every concurrent
-/// `join_with` call must return `Ok(1)`.
+/// `join_with` call must return a 1-element reached set.
 #[compio::test]
 async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions() {
   let (qcfg_seed, qcfg_joiner) = two_node_quic_configs();
@@ -737,7 +752,7 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
   // Issue many concurrent join calls. With 64 in-flight exchanges the
   // driver collectively processes hundreds of completion events,
   // exercising the cap-then-deadline interaction. Every call must
-  // return Ok(1).
+  // return a 1-element reached set.
   const N: usize = 64;
   let mut futures = Vec::with_capacity(N);
   for _ in 0..N {
@@ -747,6 +762,7 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
         .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
         .await
         .expect("each parallel join must succeed")
+        .len()
     });
   }
   let counts: Vec<usize> = futures_util::future::join_all(futures).await;
@@ -754,7 +770,7 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
   assert_eq!(
     unique_counts,
     HashSet::from([1usize]),
-    "every parallel join must report Ok(1); got {counts:?}"
+    "every parallel join must report a 1-element reached set; got {counts:?}"
   );
 
   // Ignoring Err: shutdown best-effort during test teardown.
@@ -769,12 +785,12 @@ async fn join_with_under_inflight_pushpull_volume_does_not_timeout_completions()
 /// trust anchor, and rejects. The TLS handshake fails inside quinn-proto,
 /// no `ExchangeCompleted(Succeeded)` is ever emitted for the dispatched
 /// exchange, and the join reaps at the per-call deadline with
-/// `MemberlistError::JoinAllFailed { requested: 1, contacted: 0 }`.
+/// `MemberlistError::JoinFailed { requested: 1, contacted: 0 }`.
 ///
 /// Both nodes bind OS-allocated ports; A dials B's real bound address.
 /// Runs for the full `DEFAULT_JOIN_DEADLINE` (~10s) before reaping.
 #[compio::test]
-async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
+async fn join_with_failing_tls_handshake_surfaces_join_failed() {
   let (cert_a, key_a) = support::generate_localhost_cert();
   let (cert_b, key_b) = support::generate_localhost_cert();
 
@@ -799,11 +815,15 @@ async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
     )
     .await;
   match result {
-    Err(MemberlistError::JoinAllFailed(jf)) => {
+    Err((reached, MemberlistError::JoinFailed(jf))) => {
+      assert!(
+        reached.is_empty(),
+        "all-failed carries an empty reached set"
+      );
       assert_eq!(jf.requested(), 1, "one seed requested");
       assert_eq!(jf.contacted(), 0, "TLS handshake failed; no contact");
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   // Ignoring Err: shutdown best-effort during test teardown.
@@ -819,13 +839,13 @@ async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
 /// No SAN matches `"localhost"`, so rustls rejects the cert before any
 /// QUIC stream opens. The exchange never emits
 /// `ExchangeCompleted(Succeeded)`, and the join reaps at deadline with
-/// `MemberlistError::JoinAllFailed { requested: 1, contacted: 0 }`.
+/// `MemberlistError::JoinFailed { requested: 1, contacted: 0 }`.
 ///
 /// A's trust store contains B's cert so the trust-chain check passes —
 /// the test isolates the SAN/SNI mismatch from the CA-mismatch failure
 /// mode exercised by the test above.
 #[compio::test]
-async fn join_with_mismatched_server_name_surfaces_join_all_failed() {
+async fn join_with_mismatched_server_name_surfaces_join_failed() {
   let (cert_a, key_a) = support::generate_localhost_cert();
   // B's cert: `"otherhost"` SAN only — no `"localhost"` SAN.
   let (cert_b, key_b) = support::generate_cert_with_sans(vec!["otherhost".into()]);
@@ -853,11 +873,15 @@ async fn join_with_mismatched_server_name_surfaces_join_all_failed() {
     )
     .await;
   match result {
-    Err(MemberlistError::JoinAllFailed(jf)) => {
+    Err((reached, MemberlistError::JoinFailed(jf))) => {
+      assert!(
+        reached.is_empty(),
+        "all-failed carries an empty reached set"
+      );
       assert_eq!(jf.requested(), 1, "one seed requested");
       assert_eq!(jf.contacted(), 0, "SAN mismatch rejected; no contact");
     }
-    other => panic!("expected JoinAllFailed, got {other:?}"),
+    other => panic!("expected JoinFailed, got {other:?}"),
   }
 
   // Ignoring Err: shutdown best-effort during test teardown.
@@ -947,7 +971,7 @@ async fn quic_compound_gossip_is_decoded_after_join() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("b joins a");
-  assert_eq!(n, 1);
+  assert_eq!(n.len(), 1);
   assert!(
     b.alive_count() >= 2,
     "B did not learn A (alive_count={})",
@@ -999,13 +1023,13 @@ async fn quic_compound_gossip_is_decoded_after_join() {
 }
 
 /// Regression (QUIC outbound push/pull-reply admission gate): a join INITIATOR
-/// whose `MergeDelegate` rejects the seed must surface `JoinAllFailed` — the
+/// whose `MergeDelegate` rejects the seed must surface `JoinFailed` — the
 /// rejected outbound reply terminalizes the exchange (the QUIC bridge fails it
 /// with `AdmissionClosed`), so a rejected merge is never counted as a contacted
 /// seed. Mirrors the TCP `rejected_merge_does_not_fire_on_reply_arm` regression
 /// on the QUIC bridge.
 #[compio::test]
-async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
+async fn quic_join_initiator_merge_rejection_surfaces_join_failed() {
   let (qcfg_seed, qcfg_joiner) = two_node_quic_configs();
 
   let seed = make_quic("rr-seed", qcfg_seed).await;
@@ -1027,7 +1051,7 @@ async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
   .expect("bind quic joiner");
 
   // The single seed's reply is rejected on the outbound arm → exchange failed →
-  // contacted 0 → `JoinAllFailed` (not a spurious success).
+  // contacted 0 → `JoinFailed` (not a spurious success).
   let result = joiner
     .join(
       &SocketAddrResolver,
@@ -1035,7 +1059,7 @@ async fn quic_join_initiator_merge_rejection_surfaces_join_all_failed() {
     )
     .await;
   assert!(
-    matches!(result, Err(MemberlistError::JoinAllFailed(_))),
+    matches!(result, Err((_, MemberlistError::JoinFailed(_)))),
     "a merge-rejected QUIC join must fail (the outbound exchange is terminalized), got {result:?}"
   );
 

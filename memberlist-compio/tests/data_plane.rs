@@ -246,7 +246,7 @@ async fn queue_user_broadcast_disseminates_to_peer() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   // The command must reach the endpoint and ack without error.
   seed
@@ -304,7 +304,7 @@ async fn set_local_state_reaches_peer_merge_remote_state() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   let saw = wait_until(
     || records_contain(&merges, b"state-A"),
@@ -332,7 +332,7 @@ async fn set_local_state_reaches_peer_merge_remote_state() {
 /// initiator carrying the state, and the seed is the rejecting receiver. A
 /// rejected merge on that arm returns `StreamCommand::Close`, so the join
 /// push/pull exchange terminates without success and `join` surfaces
-/// `JoinAllFailed` — that failure is the rejection working, not a test bug, so
+/// `JoinFailed` — that failure is the rejection working, not a test bug, so
 /// the join outcome is accepted either way. What the regression pins is the
 /// absence of any `merge_remote_state` delivery for the rejected state.
 #[compio::test]
@@ -357,7 +357,7 @@ async fn rejected_merge_does_not_fire_merge_remote_state() {
     .expect("set local state");
 
   // The rejecting inbound arm closes the stream, so the join exchange does
-  // not succeed: `join` may report `JoinAllFailed`. Either outcome is
+  // not succeed: `join` may report `JoinFailed`. Either outcome is
   // consistent with the rejection — the network contact happened, but the
   // merge (and thus the exchange) was refused. Ignoring Err: a failed join
   // is the expected effect of the rejection; the negative assertion below is
@@ -386,7 +386,7 @@ async fn rejected_merge_does_not_fire_merge_remote_state() {
 /// Regression (outbound push/pull-reply admission gate): when the join
 /// INITIATOR runs a rejecting `MergeDelegate`, receiving the seed's reply on
 /// the outbound arm must (1) terminalize the exchange as failed so `join`
-/// surfaces `JoinAllFailed` — a rejected merge is NOT a successful join — and
+/// surfaces `JoinFailed` — a rejected merge is NOT a successful join — and
 /// (2) never surface the seed's reply snapshot through `merge_remote_state`.
 ///
 /// The seed (plain `VoidDelegate` admission) merges the initiator's membership
@@ -420,12 +420,12 @@ async fn rejected_merge_does_not_fire_on_reply_arm() {
 
   // The initiator rejects the seed's reply on the outbound arm, which
   // terminalizes the exchange as failed: with a single seed, `join` must
-  // surface `JoinAllFailed` rather than a spurious success.
+  // surface `JoinFailed` rather than a spurious success.
   let result = joiner
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await;
   assert!(
-    matches!(result, Err(MemberlistError::JoinAllFailed(_))),
+    matches!(result, Err((_, MemberlistError::JoinFailed(_)))),
     "a merge-rejected join must fail (the outbound exchange is terminalized), got {result:?}"
   );
 
@@ -484,7 +484,7 @@ async fn post_join_metadata_update_disseminates() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   // Wait for both nodes to converge before mutating, so the update can only
   // reach the peer through periodic gossip (not the join exchange).
@@ -707,7 +707,7 @@ async fn bounded_observation_channel_drops_and_counts_under_stalled_delegate() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
     .expect("join the seed");
-  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert_eq!(contacted.len(), 1, "exactly one seed contacted");
 
   // Flood the node with user messages. The first wedges the observation task
   // forever; the rest pile into the bounded channel until it overflows.

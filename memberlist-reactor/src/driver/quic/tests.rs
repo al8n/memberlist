@@ -293,7 +293,7 @@ async fn flush_overflow_disconnected_reclaims_bytes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_fails_parked_join() {
   let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
-  let (tx, rx) = futures_channel::oneshot::channel::<Result<usize, Error>>();
+  let (tx, rx) = futures_channel::oneshot::channel::<crate::command::JoinReply>();
   shared.push_command(Command::Join(JoinCmd {
     addrs: vec!["127.0.0.1:9".parse::<SocketAddr>().unwrap()],
     wait: true,
@@ -302,7 +302,7 @@ async fn shutdown_fails_parked_join() {
   shared.begin_shutdown();
   assert!(poll_once(&mut driver).is_ready());
   assert!(
-    matches!(rx.await, Ok(Err(Error::Shutdown))),
+    matches!(rx.await, Ok(Err((set, Error::Shutdown))) if set.is_empty()),
     "a parked wait-join is failed with Shutdown on driver exit"
   );
 }
@@ -405,7 +405,7 @@ async fn shutdown_close_and_drain_fails_every_queued_command() {
     let (mut driver, _obs_rx, shared, _bytes) = build_driver(64, Some(1 << 20)).await;
     shared.begin_shutdown();
 
-    let (join_tx, join_rx) = futures_channel::oneshot::channel::<Result<usize, Error>>();
+    let (join_tx, join_rx) = futures_channel::oneshot::channel::<crate::command::JoinReply>();
     let (user_tx, user_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
     let (comp_tx, comp_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
     let (chk_tx, chk_rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
@@ -477,7 +477,7 @@ async fn shutdown_close_and_drain_fails_every_queued_command() {
     );
     pusher.join().expect("pusher thread joins");
 
-    seen_join |= matches!(join_rx.await, Ok(Err(Error::Shutdown)));
+    seen_join |= matches!(join_rx.await, Ok(Err((set, Error::Shutdown))) if set.is_empty());
     seen_user |= matches!(user_rx.await, Ok(Err(Error::Shutdown)));
     seen_comp |= matches!(comp_rx.await, Ok(Err(Error::Shutdown)));
     seen_chk |= matches!(chk_rx.await, Ok(Err(Error::Shutdown)));

@@ -1,7 +1,7 @@
 //! Internal command channel — user-facing Memberlist handle sends;
 //! driver task receives and dispatches.
 
-use crate::error::Result;
+use crate::error::{MemberlistError, Result};
 use bytes::Bytes;
 use futures_channel::oneshot::Sender;
 #[cfg(checksum)]
@@ -11,12 +11,37 @@ use memberlist_proto::CompressionOptions;
 #[cfg(encryption)]
 use memberlist_proto::EncryptionOptions;
 use memberlist_proto::{Instant, Node};
+use smallvec::SmallVec;
 use std::{net::SocketAddr, time::Duration};
+
+/// Address-set reply for [`Command::Join`].
+///
+/// Both join kinds reply through this single type: `Ok(set)` carries the
+/// dispatched seed set ([`JoinKind::Dispatch`]) or the contacted set
+/// ([`JoinKind::WaitForCompletion`] success); `Err((set, err))` is the
+/// partial-success tuple, surfacing the reached-so-far set alongside the error.
+/// `JoinFailed` carries an EMPTY reached set — it is the all-failed case. A
+/// `Shutdown` error, however, can carry a NON-EMPTY reached-so-far set. The tuple
+/// shape is mirrored from the serf driver.
+///
+/// The reached set is EXACT in both cases — not best-effort. A normal join's set
+/// is precisely the seeds whose push/pull `Succeeded`. A shutdown-raced join's
+/// set is ALSO precise: it is exactly the seeds the coordinator would authorize
+/// as `Succeeded` — i.e. whose peer-FIN was processed (the bridge produced the
+/// `BridgeInbound::Eof` for the exchange) — at the freeze instant. The shutdown
+/// teardown freezes every bridge's reads, then drains the bridge inbound channel
+/// to all-senders-gone, so every already-read completion is folded — whether it
+/// was queued in the channel or parked on a saturated `inbound_tx.send` — before
+/// the join is reaped. A seed whose peer-FIN had not yet been read off the socket
+/// at the freeze instant is genuinely in-flight and is correctly absent from the
+/// set.
+pub(crate) type JoinReply =
+  core::result::Result<SmallVec<[SocketAddr; 1]>, (SmallVec<[SocketAddr; 1]>, MemberlistError)>;
 
 /// Payload for [`JoinKind::WaitForCompletion`].
 pub(crate) struct WaitForCompletionArgs {
-  /// Wall-clock instant past which the driver replies with whatever success
-  /// count it has accumulated (zero successes surface as `JoinAllFailed`).
+  /// Wall-clock instant past which the driver replies with whatever contacted
+  /// set it has accumulated (an empty set surfaces as `JoinFailed`).
   pub(crate) deadline: Instant,
 }
 
@@ -24,18 +49,18 @@ pub(crate) struct WaitForCompletionArgs {
 ///
 /// The driver routes both kinds through the same start_push_pull
 /// fan-out (one outbound exchange per resolved address). The kind
-/// only affects WHEN the reply is sent and WHAT count it reports:
-/// - `Dispatch`: reply immediately with the number of push/pull
-///   exchanges queued (fire-and-forget; the caller does not wait
-///   for any exchange to terminate).
+/// only affects WHEN the reply is sent and WHAT set it reports:
+/// - `Dispatch`: reply immediately with the dispatched seed set
+///   (fire-and-forget; the caller does not wait for any exchange to
+///   terminate).
 /// - `WaitForCompletion`: reply once every dispatched exchange has
 ///   terminated (`ExchangeCompleted` observed for its `ExchangeId`
 ///   with `kind == ExchangeKind::PushPull`) OR the deadline elapses,
-///   whichever comes first. The reply carries the count of exchanges
-///   whose outcome was `ExchangeStatus::Succeeded`; zero successes
-///   surface as `JoinAllFailed`.
+///   whichever comes first. The reply carries the set of peer addresses
+///   whose exchange outcome was `ExchangeStatus::Succeeded`; an empty
+///   set surfaces as `JoinFailed`.
 pub(crate) enum JoinKind {
-  /// Reply immediately with the dispatched-exchange count.
+  /// Reply immediately with the dispatched seed set.
   Dispatch,
   /// Reply once every dispatched exchange has terminated OR the
   /// deadline expires.
@@ -48,8 +73,8 @@ pub(crate) struct JoinCmd {
   pub(crate) addrs: Vec<SocketAddr>,
   /// Dispatch semantic — see [`JoinKind`].
   pub(crate) kind: JoinKind,
-  /// One-shot reply channel for the join result.
-  pub(crate) reply: Sender<Result<usize>>,
+  /// One-shot reply channel delivering the address-set result. See [`JoinReply`].
+  pub(crate) reply: Sender<JoinReply>,
 }
 
 /// Payload for [`Command::Leave`].

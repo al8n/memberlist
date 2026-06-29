@@ -64,7 +64,7 @@ fn command_variants_construct_and_match() {
   let mk_unit = || futures_channel::oneshot::channel::<Result<()>>().0;
 
   let join = {
-    let (tx, _rx) = futures_channel::oneshot::channel::<Result<usize>>();
+    let (tx, _rx) = futures_channel::oneshot::channel::<JoinReply>();
     Command::<SmolStr>::Join(JoinCmd {
       addrs: vec![addr()],
       kind: JoinKind::Dispatch,
@@ -75,7 +75,7 @@ fn command_variants_construct_and_match() {
 
   // The WaitForCompletion kind carries a deadline payload.
   let wait_join = {
-    let (tx, _rx) = futures_channel::oneshot::channel::<Result<usize>>();
+    let (tx, _rx) = futures_channel::oneshot::channel::<JoinReply>();
     Command::<SmolStr>::Join(JoinCmd {
       addrs: Vec::new(),
       kind: JoinKind::WaitForCompletion(WaitForCompletionArgs {

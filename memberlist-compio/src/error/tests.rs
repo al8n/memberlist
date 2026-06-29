@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn join_all_failed_accessors_and_display() {
-  let payload = JoinAllFailed::new(5, 0);
+fn join_failed_accessors_and_display() {
+  let payload = JoinFailed::new(5, 0);
   assert_eq!(payload.requested(), 5);
   assert_eq!(payload.contacted(), 0);
   let shown = format!("{payload}");
@@ -73,7 +73,7 @@ fn every_variant_displays_and_debugs() {
     MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch),
     MemberlistError::Frame(memberlist_proto::FrameError::Empty),
     MemberlistError::Resolve(io::Error::other("dns")),
-    MemberlistError::JoinAllFailed(JoinAllFailed::new(3, 0)),
+    MemberlistError::JoinFailed(JoinFailed::new(3, 0)),
     MemberlistError::LeaveTimeout,
     MemberlistError::Shutdown,
     MemberlistError::NotRunning,

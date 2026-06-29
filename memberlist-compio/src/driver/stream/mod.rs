@@ -52,21 +52,22 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  command::{Command, JoinCmd, JoinKind, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
+  command::{Command, JoinCmd, JoinKind, JoinReply, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
     options::{RuntimeOptions, StreamTransportOptions},
     shared::{
-      ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, observation_payload_bytes,
-      yield_once,
+      ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, join_reply,
+      observation_payload_bytes, yield_once,
     },
   },
-  error::{JoinAllFailed, MemberlistError, Result},
+  error::{JoinFailed, MemberlistError, Result},
   snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
 use core::time::Duration;
 use memberlist_proto::metrics::Metrics;
+use smallvec::SmallVec;
 
 /// Driver-side state for one outstanding synchronous-join call.
 ///
@@ -94,19 +95,24 @@ struct PendingJoin {
   /// failure); when this set is empty (and `pending_eids` accounts
   /// for every dispatched exchange) the call has fully resolved.
   pending: HashSet<ExchangeId>,
-  /// Number of dispatched outbound exchanges that terminated with
-  /// `ExchangeStatus::Succeeded`. Duplicate seeds produce duplicate
-  /// exchanges and each successful one counts independently.
-  contacted: usize,
+  /// Maps each dispatched exchange to the seed `SocketAddr` it targets, so a
+  /// successful completion contributes the actual peer address (not the
+  /// driver's generic event address `A`) to `contacted`.
+  addr_by_eid: HashMap<ExchangeId, SocketAddr>,
+  /// Set of peer addresses whose dispatched outbound exchange terminated with
+  /// `ExchangeStatus::Succeeded` — the reached set the call resolves `Ok`
+  /// with. Deduplicated: a duplicate seed that succeeds on both exchanges
+  /// contributes one address.
+  contacted: SmallVec<[SocketAddr; 1]>,
   /// Total outbound-exchange count this call dispatched, used to
-  /// populate `JoinAllFailed { requested, contacted: 0 }` on a
+  /// populate `JoinFailed { requested, contacted: 0 }` on a
   /// zero-contact resolution.
   requested: usize,
   /// Wall-clock instant past which the driver replies with whatever
-  /// `contacted` it has accumulated even if `pending` is non-empty.
+  /// `contacted` set it has accumulated even if `pending` is non-empty.
   deadline: Instant,
   /// One-shot reply channel back to the caller.
-  reply: futures_channel::oneshot::Sender<Result<usize>>,
+  reply: futures_channel::oneshot::Sender<JoinReply>,
 }
 
 /// Driver-side state for the single in-flight graceful-leave operation.
@@ -870,7 +876,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         }
         drained_any = true;
       }
-      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      // Do NOT deadline-reap the parked joins on the shutdown path: the
+      // post-loop freeze->drain barrier is the sole owner of join reaping. It
+      // folds every already-read peer-FIN completion (queued past the drain cap
+      // or parked on a saturated hand-off) into each waiter's `contacted` set
+      // before replying, so a deadline reap here could resolve a stale
+      // `contacted` that drops a completed seed. Leave carries no
+      // barrier-folded data, so its deadline reap is unaffected.
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if drained_any {
         refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
@@ -1004,7 +1016,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
           break;
         }
       }
-      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      // Deadline join-reap is skipped once shutdown is observed: the post-loop
+      // freeze->drain barrier folds buffered/parked peer-FIN completions and
+      // reaps the joins first (a reap here could drop a completed seed).
+      if !exit {
+        reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      }
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
         refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
@@ -1046,7 +1063,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
           break;
         }
       }
-      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      // Deadline join-reap is skipped once shutdown is observed: the post-loop
+      // freeze->drain barrier folds buffered/parked peer-FIN completions and
+      // reaps the joins first (a reap here could drop a completed seed).
+      if !exit {
+        reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      }
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
       refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
@@ -1277,7 +1299,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         break;
       }
     }
-    reap_pending_joins(&mut pending.joins, Instant::now()).await;
+    // Deadline join-reap is skipped once shutdown is observed: the post-loop
+    // freeze->drain barrier folds buffered/parked peer-FIN completions and
+    // reaps the joins first (a reap here could drop a completed seed).
+    if !exit {
+      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+    }
     reap_pending_leave(&mut pending.leave, Instant::now()).await;
 
     if dirty {
@@ -1308,7 +1335,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   //      early drop the late send could buffer in the channel and
   //      its reply Sender would stay alive past driver exit; the
   //      clone's reply-receiver `await` would hang forever.
-  //   4. Signal every live bridge to close.
+  //   4. Freeze every live bridge (cancel its reads, NOT a graceful
+  //      close) and drain the inbound channel to disconnected, folding
+  //      only real already-read peer-FIN completions — never a synthetic
+  //      local EOF from a graceful close.
   //   5. Drop the bound sockets BEFORE acking the observed shutdown
   //      caller so an immediate rebind on the same port after
   //      `shutdown.await` succeeds.
@@ -1331,11 +1361,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       Command::SendUser(cmd) => cmd.reply,
       Command::SendReliable(cmd) => cmd.reply,
       Command::Join(JoinCmd { reply, .. }) => {
-        // Join's reply type is `Result<usize>`; surface the same
+        // Join's reply is the address-set `JoinReply`; surface the same
         // Shutdown error through a separate match arm so the type
-        // checker sees the right `Sender<Result<usize>>`.
+        // checker sees the right `Sender<JoinReply>`. The reached-so-far
+        // set is empty.
         // Ignoring Err: caller dropped the reply receiver.
-        let _ = reply.send(Err(MemberlistError::Shutdown));
+        let _ = reply.send(Err((SmallVec::new(), MemberlistError::Shutdown)));
         continue;
       }
       Command::Ping(cmd) => {
@@ -1353,14 +1384,49 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // fails fast (see step 3 above). After this point flume's send
   // returns `Err(SendError::Disconnected)` for every clone.
   drop(commands);
+
+  // Freeze every live bridge's reads (without preempting an in-flight inbound
+  // hand-off), drop the driver's template sender, and drain the bridge inbound
+  // channel until all senders are gone — folding every already-read completion
+  // (queued, or parked on a saturated `inbound_tx.send` the drain unblocks) into
+  // the matching pending join's `contacted` set BEFORE reaping `pending.joins`
+  // below. A response buffered past `iter_drain_cap`, or a peer-FIN EOF parked on
+  // a full hand-off when the loop exited, would otherwise be dropped and its
+  // reached seed lost from the `Err((contacted, Shutdown))` set. See the helper's
+  // doc comment for the termination + preservation argument.
+  freeze_and_drain_bridges_to_disconnected::<I, A, R, G>(
+    &mut endpoint,
+    &mut bridges,
+    bridge_inbound_tx,
+    &mut bridge_inbound_rx,
+    &bridge_ready_tx,
+    &gossip_socket,
+    label.clone(),
+    &obs_tx,
+    &observation_dropped,
+    &obs_payload_bytes,
+    obs_payload_budget,
+    &mut pending,
+    stream_opts,
+    &cidr_policy,
+  )
+  .await;
+
   // Reply Err(Shutdown) to every outstanding synchronous-join waiter.
   // Their reply Senders live in `pending.joins`; without this drain
   // the corresponding receivers on the caller side would hang
   // forever (the loop body's reap path is gone, and the driver task
-  // is about to exit).
-  for pj in pending.joins.drain(..) {
-    // Ignoring Err: caller dropped the reply receiver.
-    let _ = pj.reply.send(Err(MemberlistError::Shutdown));
+  // is about to exit). The snapshot drain above has folded every
+  // already-buffered completion into `contacted`, so the partial set
+  // carried here includes every seed that effectively completed.
+  for mut pj in pending.joins.drain(..) {
+    // Ignoring Err: caller dropped the reply receiver. Carry the addresses
+    // already reached before the shutdown raced this waiter — callers see
+    // the partial contacted set in the Err tuple, not an empty set.
+    let _ = pj.reply.send(Err((
+      std::mem::take(&mut pj.contacted),
+      MemberlistError::Shutdown,
+    )));
   }
   // Reply Err(Shutdown) to every joined graceful-leave replier whose
   // `LeftCluster` never arrived before the loop exited (e.g. a shutdown
@@ -1381,11 +1447,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     // Ignoring Err: caller dropped the reply receiver.
     let _ = ps.reply.send(Err(MemberlistError::Shutdown));
   }
-  for (_eid, handle) in bridges.drain() {
-    // Ignoring Err: the bridge may have exited already; the close
-    // notification is best-effort.
-    let _ = handle.out_tx.try_send(BridgeOut::Close);
-  }
+  // The bridges were frozen and drained to disconnect inside
+  // `freeze_and_drain_bridges_to_disconnected` above, so `bridges` is already
+  // empty here — no separate close signal is needed.
   // Drop the persistent accept future before the listener: it holds an
   // in-flight accept borrowing `listener`, so the listener cannot be moved while
   // it is alive. Cancelling a pending accept during shutdown is correct — a
@@ -1460,8 +1524,9 @@ async fn dispatch_command<I, A, R, G>(
       // `start_push_pull` so no push/pull is enqueued. The single-task
       // driver makes the check + dispatch atomic (no lifecycle race).
       if !endpoint.is_running() {
-        // Ignoring Err: the caller may have dropped the reply receiver.
-        let _ = reply.send(Err(MemberlistError::NotRunning));
+        // Ignoring Err: the caller may have dropped the reply receiver. The
+        // reached-so-far set is empty.
+        let _ = reply.send(Err((SmallVec::new(), MemberlistError::NotRunning)));
         return;
       }
       // Both `JoinKind::Dispatch` and `JoinKind::WaitForCompletion`
@@ -1477,7 +1542,7 @@ async fn dispatch_command<I, A, R, G>(
       // reliable-ping, a gossip dial).
       match kind {
         JoinKind::Dispatch => {
-          let mut count: usize = 0;
+          let mut dispatched: SmallVec<[SocketAddr; 1]> = SmallVec::new();
           for addr in addrs {
             // Ignoring StreamId return: the driver does not track
             // the per-exchange handle here — completion / failure
@@ -1499,17 +1564,17 @@ async fn dispatch_command<I, A, R, G>(
                 cidr_policy,
               );
             }
-            count += 1;
+            dispatched.push(addr);
           }
           // Ignoring Err: the caller may have dropped the reply
           // receiver (e.g. the user-facing `dispatch_join_with`
           // future was cancelled).
-          let _ = reply.send(Ok(count));
+          let _ = reply.send(Ok(dispatched));
         }
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           // The resolved seed count (one per address, duplicates included).
           // Capture it BEFORE the loop consumes `addrs`: this is the
-          // denominator the caller sees in `JoinAllFailed`. A seed that
+          // denominator the caller sees in `JoinFailed`. A seed that
           // retires before producing a `Connect` (TLS `sni_provider`
           // returns `None`, dialer construction error, or an elapsed dial
           // deadline) never enters `exchange_ids`, so deriving `requested`
@@ -1517,6 +1582,9 @@ async fn dispatch_command<I, A, R, G>(
           // actually requested.
           let requested = addrs.len();
           let mut exchange_ids: HashSet<ExchangeId> = HashSet::with_capacity(requested);
+          // Maps each captured exchange to the seed address it targets, so a
+          // success contributes the actual peer address to the reached set.
+          let mut addr_by_eid: HashMap<ExchangeId, SocketAddr> = HashMap::with_capacity(requested);
           // The `StreamId`s this join's `start_push_pull` calls returned;
           // the Connect capture is keyed on this set (not the peer) so a
           // same-peer dial flushed by the shared `service_dials` for another
@@ -1535,7 +1603,7 @@ async fn dispatch_command<I, A, R, G>(
                 bridges,
                 bridge_ready_tx,
                 stream_opts,
-                Some((&started, &mut exchange_ids)),
+                Some((&started, &mut exchange_ids, Some(&mut addr_by_eid))),
                 cidr_policy,
               );
             }
@@ -1545,15 +1613,18 @@ async fn dispatch_command<I, A, R, G>(
             // ever surface a terminal `ExchangeCompleted`. Parking would
             // idle the waiter until `deadline`; resolve now with the
             // all-failed outcome carrying the full resolved seed count
-            // (the same payload the deadline reaper would produce).
+            // (the same payload the deadline reaper would produce). The
+            // reached-so-far set is empty.
             // Ignoring Err: the caller dropped the reply receiver.
-            let _ = reply.send(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-              requested, 0,
-            ))));
+            let _ = reply.send(Err((
+              SmallVec::new(),
+              MemberlistError::JoinFailed(JoinFailed::new(requested, 0)),
+            )));
           } else {
             pending.joins.push(PendingJoin {
               pending: exchange_ids,
-              contacted: 0,
+              addr_by_eid,
+              contacted: SmallVec::new(),
               requested,
               deadline,
               reply,
@@ -1743,16 +1814,20 @@ async fn dispatch_command<I, A, R, G>(
       let _ = cmd.reply.send(res);
     }
     Command::Shutdown(ShutdownCmd { reply }) => {
-      // Drain every live bridge so the per-bridge byte movers observe
-      // the close and exit. Do NOT ack the caller here — the listener
-      // and gossip socket are still bound. Stash the reply and let the
-      // post-loop cleanup ack AFTER both sockets drop, so an immediate
-      // rebind on the same port after `shutdown.await` succeeds.
-      for (_eid, handle) in bridges.drain() {
-        // Ignoring Err: bridge may have already exited; the close
-        // signal is best-effort.
-        let _ = handle.out_tx.try_send(BridgeOut::Close);
-      }
+      // Bridge teardown is owned SOLELY by the post-loop
+      // `freeze_and_drain_bridges_to_disconnected`, which FREEZES each live
+      // bridge with `cancel_tx` (not a graceful `BridgeOut::Close`): an
+      // in-flight exchange whose peer-FIN is not yet read then breaks WITHOUT
+      // emitting an EOF, so a queued/parked response cannot fold with a
+      // synthetic LOCAL EOF into a fabricated `Succeeded` completion. Sending
+      // `BridgeOut::Close` here would make a both-halves-live bridge emit
+      // exactly that synthetic EOF (a local teardown marker, not the peer-FIN)
+      // and would empty `bridges`, leaving the freeze helper nothing to
+      // cancel. So do NOT tear bridges down here. Only stash the reply — the
+      // listener and gossip socket are still bound, so the post-loop cleanup
+      // acks AFTER both drop, letting an immediate rebind on the same port
+      // after `shutdown.await` succeed. The loop-exit flag is set at the
+      // command dispatch site.
       *shutdown_reply = Some(reply);
     }
     Command::Ping(cmd) => {
@@ -1832,7 +1907,9 @@ async fn dispatch_command<I, A, R, G>(
             bridges,
             bridge_ready_tx,
             stream_opts,
-            Some((&started, &mut exchange_ids)),
+            // A reliable user-send reports a unit success, not an address
+            // set, so it captures no per-exchange address map.
+            Some((&started, &mut exchange_ids, None)),
             cidr_policy,
           );
         }
@@ -2024,6 +2101,16 @@ fn dispatch_gossip<I, A, R, G>(
   }
 }
 
+/// Call-scoped capture threaded into [`process_one_action`] while a synchronous
+/// command's queued actions drain inline. See that function's `capture` doc for
+/// how the three elements bind a Connect's `ExchangeId` to the command that
+/// started it (and, for a join, to the seed address it targets).
+type JoinCapture<'a> = (
+  &'a HashSet<StreamId>,
+  &'a mut HashSet<ExchangeId>,
+  Option<&'a mut HashMap<ExchangeId, SocketAddr>>,
+);
+
 /// Process one [`StreamAction`].
 ///
 /// Connect: pre-allocate the bridge's out-channel and insert the
@@ -2057,12 +2144,18 @@ fn dispatch_gossip<I, A, R, G>(
 /// In the normal `drain_actions` path `capture` is `None` — actions
 /// emitted by non-`dispatch_command` sources (probe-driven push/pull
 /// fallback, teardown sweeps) have no synchronous-command ownership.
+///
+/// The optional third element is the join's `ExchangeId -> SocketAddr`
+/// map: a synchronous `join` passes `Some` so each captured exchange also
+/// records the seed address it targets, letting the call resolve `Ok`
+/// with the reached address set. A reliable user-send passes `None` (it
+/// reports a unit success, not an address set).
 fn process_one_action(
   action: StreamAction,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
-  capture: Option<(&HashSet<StreamId>, &mut HashSet<ExchangeId>)>,
+  capture: Option<JoinCapture<'_>>,
   cidr_policy: &CidrFilter,
 ) {
   match action {
@@ -2086,10 +2179,16 @@ fn process_one_action(
         }));
         return;
       }
-      if let Some((started, pending_exchanges)) = capture
+      if let Some((started, pending_exchanges, addr_by_eid)) = capture
         && started.contains(&info.stream_id())
       {
         pending_exchanges.insert(eid);
+        // A join capture also records the seed address this exchange targets,
+        // so the reached set the call resolves `Ok` with carries the actual
+        // peer addresses (not the driver's generic event address `A`).
+        if let Some(map) = addr_by_eid {
+          map.insert(eid, peer);
+        }
       }
       let (out_tx, out_rx) = mpsc::unbounded::<BridgeOut>();
       let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
@@ -2414,25 +2513,21 @@ where
       {
         let pj = &mut pending.joins[idx];
         pj.pending.remove(&eid);
-        if succeeded {
-          pj.contacted += 1;
+        // Push the contacted peer for each successful exchange — duplicate
+        // seeds that succeed contribute independently (matching the count
+        // semantics the join API has always had).
+        if succeeded && let Some(&addr) = pj.addr_by_eid.get(&eid) {
+          pj.contacted.push(addr);
         }
         if pj.pending.is_empty() {
           // Fully resolved — reply now and drop the waiter. `contacted`
           // is final (the FSM emits one `ExchangeCompleted` per
           // dispatched exchange, so an empty `pending` set means every
           // outbound exchange this call dispatched has terminated). A
-          // zero-contact resolution is the same `JoinAllFailed` the
+          // zero-contact resolution is the same `JoinFailed` the
           // reaper would have produced.
           let pj = pending.joins.swap_remove(idx);
-          let result = if pj.contacted == 0 {
-            Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-              pj.requested,
-              0,
-            )))
-          } else {
-            Ok(pj.contacted)
-          };
+          let result = join_reply(pj.contacted, pj.requested);
           // Ignoring Err: caller dropped the reply receiver (e.g. the
           // user-facing join_with future was cancelled).
           let _ = pj.reply.send(result);
@@ -2646,14 +2741,7 @@ async fn reap_pending_joins(pending_joins: &mut Vec<PendingJoin>, now: Instant) 
     let expired = now >= pending_joins[i].deadline;
     if done || expired {
       let pj = pending_joins.swap_remove(i);
-      let result = if pj.contacted == 0 {
-        Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-          pj.requested,
-          0,
-        )))
-      } else {
-        Ok(pj.contacted)
-      };
+      let result = join_reply(pj.contacted, pj.requested);
       // Ignoring Err: caller dropped the reply receiver (e.g.
       // the user-facing join_with future was cancelled).
       let _ = pj.reply.send(result);
@@ -2696,6 +2784,122 @@ async fn reap_pending_leave(pending_leave: &mut Option<PendingLeave>, now: Insta
 /// that would otherwise keep the recv arm winning the select.
 fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<Instant> {
   pending_leave.as_ref().map(|pl| pl.deadline)
+}
+
+/// Cancel-producers-first, drain-to-disconnected shutdown of the driver-side
+/// bridge inbound channel, run once in the post-loop teardown BEFORE
+/// `pending.joins` is reaped.
+///
+/// An outbound join push/pull is `Succeeded` only once the coordinator processes
+/// the peer's FIN — the `BridgeInbound::Eof` a bridge produces after its read
+/// returns `0`. At the shutdown freeze instant that EOF is either already queued
+/// in `bridge_inbound_rx` or parked on a bridge's saturated `inbound_tx.send`
+/// (the channels are bounded). Snapshotting the queue depth (the prior drain)
+/// folds the queued EOFs but DROPS a parked one, so a seed that effectively
+/// completed went missing from the reaped `Err((contacted, Shutdown))` set. This
+/// protocol folds both:
+///
+/// 1. FREEZE — cancel every live bridge's reads WITHOUT preempting an in-flight
+///    `inbound_tx.send`. `cancel_tx.send(())` resolves the bridge's hoisted
+///    cancel arm (which `select_biased!` polls ahead of the read), so a
+///    read-blocked bridge breaks at once; a bridge stalled mid-write is preempted
+///    too. A bridge parked on `inbound_tx.send` is NOT in the select — that send
+///    is awaited directly — so it lands before the bridge sees the cancel and
+///    breaks. Each bridge drops its inbound sender only on loop exit, i.e.
+///    strictly after its parked send (if any) lands.
+/// 2. DROP the driver's template `bridge_inbound_tx`: the only remaining senders
+///    are now the frozen bridges' clones, so the channel reaches all-senders-gone
+///    exactly when the last frozen bridge exits.
+/// 3. DRAIN-TO-DISCONNECTED — `recv().await` until `None`, feeding every
+///    `BridgeInbound` through the SAME `dispatch_bridge_inbound` path the live
+///    loop uses, then folding completions through the four-surface drain so each
+///    terminal `ExchangeCompleted(Succeeded)` reaches its join's `contacted` set.
+///
+/// # Termination
+///
+/// `recv().await` is single-threaded driven: yielding to the runtime lets each
+/// frozen bridge run — land its parked send, then exit and drop its clone — and
+/// `lochan`'s last-sender drop wakes the parked receiver, so `recv()` returns
+/// every landed item and finally `None`. FREEZE guarantees no bridge issues a new
+/// read, so nothing refills the channel: the drain cannot spin and needs no
+/// counter. It awaits no bridge's join handle (the drain itself unblocks the
+/// parked sends), so a bridge stalled on the bounded hand-off cannot wedge it.
+///
+/// # Preservation
+///
+/// `recv()` reports disconnect only once the queue is empty AND every sender has
+/// dropped — and a frozen bridge drops its sender only after its parked send
+/// lands — so reaching `None` means every already-read completion (queued or
+/// parked) has been dispatched. A seed whose peer-FIN had not yet been read off
+/// the socket at freeze is genuinely in-flight and correctly absent.
+#[allow(clippy::too_many_arguments)]
+async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
+  bridges: &mut HashMap<ExchangeId, BridgeHandle>,
+  bridge_inbound_tx: mpsc::Sender<BridgeInbound>,
+  bridge_inbound_rx: &mut mpsc::Receiver<BridgeInbound>,
+  bridge_ready_tx: &Sender<BridgeReady>,
+  gossip_socket: &UdpSocket,
+  label: Option<Bytes>,
+  obs_tx: &mpsc::Sender<Event<I, A>>,
+  observation_dropped: &Cell<u64>,
+  obs_payload_bytes: &Cell<u64>,
+  obs_payload_budget: Option<u64>,
+  pending: &mut PendingCommands,
+  stream_opts: StreamTransportOptions,
+  cidr_policy: &CidrFilter,
+) where
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  R: StreamTransport,
+  G: rand::Rng,
+{
+  // FREEZE every live bridge: stop its reads (the cancel arm wins the
+  // `select_biased!` over the read half) without preempting an `inbound_tx.send`
+  // it is already parked on (awaited outside the select). Dropping each handle
+  // here also drops `out_tx`, but the prioritised cancel arm breaks the bridge
+  // first, so no spurious EOF is surfaced for an exchange that never completed.
+  for (_eid, handle) in bridges.drain() {
+    // Ignoring Err: the bridge may have already exited (its cancel receiver
+    // gone); the freeze is best-effort.
+    let _ = handle.cancel_tx.send(());
+  }
+
+  // Drop the driver's template sender so the channel can reach all-senders-gone
+  // once every frozen bridge exits (the drain's terminating condition).
+  drop(bridge_inbound_tx);
+
+  // DRAIN-TO-DISCONNECTED: fold every already-read completion (queued, or parked
+  // on a saturated hand-off whose send the drain now unblocks) into its join's
+  // `contacted`. `recv()` returns `None` only once every frozen bridge has
+  // exited, having first landed its parked send.
+  while let Some(inbound) = bridge_inbound_rx.recv().await {
+    dispatch_bridge_inbound::<I, A, R, G>(endpoint, inbound);
+  }
+
+  // Drain the resulting machine surfaces to quiescence; `drain_events` folds each
+  // terminal `ExchangeCompleted(Succeeded)` into the matching waiter's
+  // `contacted` set (and replies + removes a waiter whose `pending` set just
+  // emptied). Same four surfaces, same order, as the live loop.
+  loop {
+    let did_actions =
+      drain_actions::<I, A, R, G>(endpoint, bridges, bridge_ready_tx, stream_opts, cidr_policy);
+    let did_transports = drain_transport_transmits::<I, A, R, G>(endpoint, bridges);
+    let did_transmits = drain_transmits::<I, A, R, G>(endpoint, gossip_socket, label.clone()).await;
+    let did_events = drain_events(
+      endpoint,
+      obs_tx,
+      observation_dropped,
+      obs_payload_bytes,
+      obs_payload_budget,
+      pending,
+    )
+    .await;
+
+    if !(did_actions || did_transports || did_transmits || did_events) {
+      break;
+    }
+  }
 }
 
 /// Apply the deadline-firing protocol: drain every already-queued

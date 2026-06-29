@@ -135,8 +135,8 @@ async fn cidr_policy_admits_peer_inside_allowlist() {
 
 /// A joiner whose OWN policy excludes the seed still completes the join
 /// EXCHANGE (the seed is contacted), but the seed's Alive is dropped, so the
-/// seed never enters the joiner's membership. Join accounting counts contacted
-/// exchanges, not admitted peers.
+/// seed never enters the joiner's membership. The join reached set reflects
+/// contacted exchanges, not admitted peers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cidr_policy_on_joiner_blocks_seed_from_membership() {
   // The joiner admits only 10.0.0.0/8; its loopback seed is out of policy.
@@ -152,7 +152,8 @@ async fn cidr_policy_on_joiner_blocks_seed_from_membership() {
     .await
     .expect("join exchange completes");
   assert_eq!(
-    contacted, 1,
+    contacted.len(),
+    1,
     "the seed was contacted (the exchange completed)"
   );
 

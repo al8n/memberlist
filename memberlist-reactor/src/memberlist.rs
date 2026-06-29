@@ -52,11 +52,11 @@ use crate::transform::validate_encryption;
 use crate::{
   MaybeResolved, NodeId,
   command::{
-    Command, JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-    SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
+    Command, JoinCmd, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
+    SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   delegate::Delegate,
-  error::Error,
+  error::{Error, JoinFailed},
   events::EventStream,
   observation::observation_task,
   options::{Channel, MemberlistOptions, Options, RuntimeOptions},
@@ -66,6 +66,7 @@ use crate::{
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
+use smallvec::SmallVec;
 use std::io::ErrorKind;
 
 /// Wraps a boxed `AliveDelegate` so it satisfies the `impl AliveDelegate` bound
@@ -299,14 +300,24 @@ impl<I, A, R> Memberlist<I, A, R> {
   }
 
   /// Joins the cluster by contacting `seeds` (resolved via `resolver`), waiting
-  /// for the push/pull exchanges to complete and returning the number contacted.
-  /// Errors with `JoinFailed` if seeds were dispatched but none was reached.
+  /// for the push/pull exchanges to complete and returning the set of seed
+  /// addresses actually contacted.
+  ///
+  /// On success the returned set holds the resolved seed addresses whose
+  /// dispatched exchange terminated successfully (each successful exchange
+  /// contributes independently, so a duplicate reachable seed yields two
+  /// entries). A non-empty seed list that contacts none of its seeds —
+  /// including a non-empty list resolving to zero addresses — surfaces
+  /// `Err((reached_so_far, Error::JoinFailed { requested, contacted: 0 }))`;
+  /// the `reached_so_far` set is empty (the error fires precisely when nothing
+  /// was contacted), carried for the partial-success shape mirrored from the
+  /// serf driver. An empty seed list is a trivial `Ok(empty)`.
   #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(seeds = seeds.len())))]
   pub async fn join<Res>(
     &self,
     resolver: &Res,
     seeds: &[MaybeResolved<Res::Address>],
-  ) -> Result<usize, Error>
+  ) -> Result<SmallVec<[SocketAddr; 1]>, (SmallVec<[SocketAddr; 1]>, Error)>
   where
     Res: AddressResolver<Address = A>,
   {
@@ -323,7 +334,12 @@ impl<I, A, R> Memberlist<I, A, R> {
   where
     Res: AddressResolver<Address = A>,
   {
-    self.join_inner(resolver, seeds, false).await
+    // The `wait == false` arm replies `Ok(set)` with the dispatched seed set;
+    // the fire-and-forget count is that set's length.
+    match self.join_inner(resolver, seeds, false).await {
+      Ok(dispatched) => Ok(dispatched.len()),
+      Err((_, e)) => Err(e),
+    }
   }
 
   async fn join_inner<Res>(
@@ -331,29 +347,30 @@ impl<I, A, R> Memberlist<I, A, R> {
     resolver: &Res,
     seeds: &[MaybeResolved<Res::Address>],
     wait: bool,
-  ) -> Result<usize, Error>
+  ) -> JoinReply
   where
     Res: AddressResolver<Address = A>,
   {
     if self.shared.is_shutdown() {
-      return Err(Error::Shutdown);
+      return Err((SmallVec::new(), Error::Shutdown));
     }
     let mut addrs = Vec::with_capacity(seeds.len());
     for seed in seeds {
       match seed {
         MaybeResolved::Resolved(s) => addrs.push(*s),
-        MaybeResolved::Unresolved(a) => addrs.extend(
-          resolver
-            .resolve(a)
-            .await
-            .map_err(|e| Error::Resolve(Box::new(e)))?,
-        ),
+        MaybeResolved::Unresolved(a) => match resolver.resolve(a).await {
+          Ok(resolved) => addrs.extend(resolved),
+          Err(e) => return Err((SmallVec::new(), Error::Resolve(Box::new(e)))),
+        },
       }
     }
     // A non-empty seed list resolving to zero addresses is a bootstrap failure,
-    // not a successful zero-contact join.
+    // not a successful zero-contact join. The reached-so-far set is empty.
     if !seeds.is_empty() && addrs.is_empty() {
-      return Err(Error::JoinFailed(seeds.len()));
+      return Err((
+        SmallVec::new(),
+        Error::JoinFailed(JoinFailed::new(seeds.len(), 0)),
+      ));
     }
     let (tx, rx) = futures_channel::oneshot::channel();
     if !self.shared.push_command(Command::Join(JoinCmd {
@@ -361,9 +378,12 @@ impl<I, A, R> Memberlist<I, A, R> {
       wait,
       reply: tx,
     })) {
-      return Err(Error::Shutdown);
+      return Err((SmallVec::new(), Error::Shutdown));
     }
-    rx.await.map_err(|_| Error::Shutdown)?
+    match rx.await {
+      Ok(reply) => reply,
+      Err(_) => Err((SmallVec::new(), Error::Shutdown)),
+    }
   }
 
   /// Gracefully leaves the cluster (the node stops participating).

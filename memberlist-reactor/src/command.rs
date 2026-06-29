@@ -14,6 +14,30 @@ use memberlist_proto::Node;
 
 use crate::error::Error;
 use futures_channel::oneshot::Sender;
+use smallvec::SmallVec;
+
+/// Address-set reply for [`Command::Join`].
+///
+/// A waiting join (`wait == true`) replies `Ok(set)` with the contacted seed
+/// addresses on success, or `Err((reached_so_far, err))` — the partial-success
+/// tuple mirrored from the serf driver. A fire-and-forget join (`wait == false`)
+/// replies `Ok(set)` with the dispatched seed set, whose length is the
+/// dispatched-exchange count. `JoinFailed` carries an EMPTY reached set — it is
+/// the all-failed case. A `Shutdown` error, however, can carry a NON-EMPTY
+/// reached-so-far set.
+///
+/// The reached set is EXACT in both cases — not best-effort. A normal join's set
+/// is precisely the seeds whose push/pull `Succeeded`. A shutdown-raced join's
+/// set is ALSO precise: it is exactly the seeds the coordinator would authorize
+/// as `Succeeded` — i.e. whose peer-FIN was processed (the bridge produced the
+/// `BridgeInbound::Eof` for the exchange) — at the freeze instant. The shutdown
+/// teardown freezes every bridge's reads, then drains the bridge inbound channel
+/// to all-senders-gone, so every already-read completion is folded — whether it
+/// was queued in the channel or parked on a saturated `inbound_tx.send` — before
+/// the join is reaped. A seed whose peer-FIN had not yet been read off the socket
+/// at the freeze instant is genuinely in-flight and is correctly absent from the
+/// set.
+pub(crate) type JoinReply = Result<SmallVec<[SocketAddr; 1]>, (SmallVec<[SocketAddr; 1]>, Error)>;
 
 /// A command from a `Memberlist` handle to its backend driver.
 ///
@@ -57,10 +81,11 @@ pub(crate) struct JoinCmd {
   /// Already-resolved seed addresses to contact (one push/pull each).
   pub(crate) addrs: Vec<SocketAddr>,
   /// Wait for every dispatched exchange to complete (replying the contacted
-  /// count), or reply immediately with the dispatched count.
+  /// address set), or reply immediately with the dispatched seed set.
   pub(crate) wait: bool,
-  /// Replies with the number of seeds contacted, or an error.
-  pub(crate) reply: Sender<Result<usize, Error>>,
+  /// Replies with the reached address set, or the partial-success tuple. See
+  /// [`JoinReply`].
+  pub(crate) reply: Sender<JoinReply>,
 }
 
 /// Payload of [`Command::Leave`].

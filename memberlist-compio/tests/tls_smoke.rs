@@ -457,7 +457,7 @@ async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
 
 /// A synchronous `join` whose every seed fails BEFORE a `Connect` (the TLS
 /// `sni_provider` returns `None`, so `dial_context` fails at dial setup and no
-/// exchange is ever created) must resolve `JoinAllFailed` carrying the full
+/// exchange is ever created) must resolve `JoinFailed` carrying the full
 /// resolved seed count, and must resolve PROMPTLY rather than idle until the
 /// join deadline.
 ///
@@ -498,7 +498,11 @@ async fn tls_join_all_pre_connect_failure_reports_full_seed_count() {
   .await
   .expect("join must resolve promptly, not idle until the deadline");
   match result {
-    Err(MemberlistError::JoinAllFailed(payload)) => {
+    Err((reached, MemberlistError::JoinFailed(payload))) => {
+      assert!(
+        reached.is_empty(),
+        "all-failed carries an empty reached set"
+      );
       assert_eq!(
         payload.requested(),
         2,
@@ -506,7 +510,7 @@ async fn tls_join_all_pre_connect_failure_reports_full_seed_count() {
       );
       assert_eq!(payload.contacted(), 0, "no seed was contacted");
     }
-    other => panic!("expected JoinAllFailed with requested == 2, got {other:?}"),
+    other => panic!("expected JoinFailed with requested == 2, got {other:?}"),
   }
 
   joiner.shutdown().await.expect("joiner shutdown");

@@ -53,7 +53,7 @@ pub(crate) fn gossip_rng() -> Result<StdRng, crate::Error> {
   StdRng::try_from_rng(&mut SysRng).map_err(|e| crate::Error::Entropy(std::io::Error::other(e)))
 }
 
-pub use error::{Error, GossipMtuTooSmall, InvalidGossipMtu, InvalidOption};
+pub use error::{Error, GossipMtuTooSmall, InvalidGossipMtu, InvalidOption, JoinFailed};
 pub use memberlist_proto::{EndpointInitError, LabelError, MaybeResolved};
 pub use options::{
   Channel, DEFAULT_CLOSE_TIMEOUT, DEFAULT_EVENT_STREAM_CAPACITY, DEFAULT_JOIN_DEADLINE,

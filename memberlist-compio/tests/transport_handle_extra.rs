@@ -146,7 +146,7 @@ async fn all_command_methods_after_shutdown_return_shutdown_promptly() {
   let elapsed = start.elapsed();
 
   assert!(
-    matches!(r_join, Err(MemberlistError::Shutdown)),
+    matches!(r_join, Err((_, MemberlistError::Shutdown))),
     "join: expected Shutdown, got {r_join:?}"
   );
   assert!(

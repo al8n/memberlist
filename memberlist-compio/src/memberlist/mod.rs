@@ -46,6 +46,7 @@ use memberlist_proto::{
   event::Event,
   typed::{NodeState, State},
 };
+use smallvec::SmallVec;
 
 #[cfg(checksum)]
 use crate::command::SetChecksumOptionsCmd;
@@ -54,11 +55,11 @@ use crate::command::SetCompressionOptionsCmd;
 #[cfg(encryption)]
 use crate::command::SetEncryptionOptionsCmd;
 use crate::{
-  EventStream, JoinAllFailed, MaybeResolved, MemberlistError, MemberlistSnapshot, Options, Result,
+  EventStream, JoinFailed, MaybeResolved, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
-    SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
-    WaitForCompletionArgs,
+    Command, JoinCmd, JoinKind, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd,
+    SendReliableCmd, SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd,
+    UpdateNodeMetadataCmd, WaitForCompletionArgs,
   },
   delegate::Delegate,
   resolver::{AdvertiseAddrResolver, Resolver},
@@ -592,29 +593,31 @@ impl<I, A> Memberlist<I, A> {
   /// dispatched exchange has terminated OR when the per-call deadline
   /// (`JOIN_DEADLINE`, currently 10s) elapses, whichever comes first.
   ///
-  /// The returned count is the number of dispatched exchanges that
-  /// terminated with
+  /// On success the returned set is the peer addresses actually contacted:
+  /// the resolved seed addresses whose dispatched exchange terminated with
   /// [`ExchangeStatus::Succeeded`](memberlist_proto::event::ExchangeStatus::Succeeded)
   /// — i.e. the peer's response decoded cleanly, the record layer +
   /// frame + payload all accepted, and the peer's state was merged
-  /// into membership. Each exchange counts independently, so passing
-  /// the same address twice yields two contacts on a healthy peer.
-  /// An exchange whose dial failed, whose handshake / decode rejected,
-  /// whose peer hung up before completing the push/pull, or which crossed
-  /// the FSM's per-exchange deadline before validating, does NOT count.
+  /// into membership. An exchange whose dial failed, whose handshake / decode
+  /// rejected, whose peer hung up before completing the push/pull, or which
+  /// crossed the FSM's per-exchange deadline before validating, is NOT in the
+  /// set. Each successful exchange contributes independently, so passing the
+  /// same reachable address twice yields two entries.
   ///
   /// On a non-empty input that resolved to ≥1 address, the return is:
-  /// - `Ok(n)` with `n ≥ 1` — at least one exchange terminated
-  ///   `Succeeded`.
-  /// - `Err(MemberlistError::JoinAllFailed { requested, contacted: 0 })`
+  /// - `Ok(set)` with a non-empty `set` — at least one exchange terminated
+  ///   `Succeeded`; `set` holds the reached peer addresses.
+  /// - `Err((reached_so_far, MemberlistError::JoinFailed { requested, contacted: 0 }))`
   ///   — every dispatched exchange terminated `Failed` or the deadline
   ///   elapsed before any could `Succeed` (the typical "all seeds
-  ///   unreachable" cluster-bootstrap failure).
+  ///   unreachable" cluster-bootstrap failure). The `reached_so_far` set is
+  ///   empty (the error fires precisely when nothing was contacted); it is
+  ///   the partial-success slot mirrored from the serf driver.
   ///
-  /// An empty `seeds` slice returns `Ok(0)` without dispatching a
+  /// An empty `seeds` slice returns `Ok(empty)` without dispatching a
   /// command. A non-empty slice whose resolver returns zero addresses for
   /// every entry surfaces
-  /// `Err(MemberlistError::JoinAllFailed { requested: seeds.len(), contacted: 0 })`.
+  /// `Err((empty, MemberlistError::JoinFailed { requested: seeds.len(), contacted: 0 }))`.
   ///
   /// # Cancellation
   ///
@@ -637,32 +640,35 @@ impl<I, A> Memberlist<I, A> {
     &self,
     resolver: &RES,
     seeds: &[MaybeResolved<A, SocketAddr>],
-  ) -> Result<usize>
+  ) -> core::result::Result<SmallVec<[SocketAddr; 1]>, (SmallVec<[SocketAddr; 1]>, MemberlistError)>
   where
     RES: Resolver<Address = A>,
   {
     if self.shutdown_flag.get() {
-      return Err(MemberlistError::Shutdown);
+      return Err((SmallVec::new(), MemberlistError::Shutdown));
     }
-    // Empty input is a trivial caller-side request — return `Ok(0)`
+    // Empty input is a trivial caller-side request — return `Ok(empty)`
     // without sending a command. Non-empty input that RESOLVES to zero
     // socket addresses (a service-discovery resolver that finds no
     // endpoints) must NOT collapse to a silent success: surface it as
-    // `JoinAllFailed` so a bootstrap / discovery outage is never reported
+    // `JoinFailed` so a bootstrap / discovery outage is never reported
     // as a healthy zero-contact join.
     if seeds.is_empty() {
-      return Ok(0);
+      return Ok(SmallVec::new());
     }
-    let addrs = resolve_seeds(resolver, seeds).await?;
+    let addrs = match resolve_seeds(resolver, seeds).await {
+      Ok(a) => a,
+      Err(e) => return Err((SmallVec::new(), e)),
+    };
     if addrs.is_empty() {
-      return Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
-        seeds.len(),
-        0,
-      )));
+      return Err((
+        SmallVec::new(),
+        MemberlistError::JoinFailed(JoinFailed::new(seeds.len(), 0)),
+      ));
     }
     let deadline = Instant::now() + self.cached_join_deadline;
     let (tx, rx) = futures_channel::oneshot::channel();
-    self
+    if let Err(e) = self
       .commands
       .send_async(Command::Join(JoinCmd {
         addrs,
@@ -670,8 +676,14 @@ impl<I, A> Memberlist<I, A> {
         reply: tx,
       }))
       .await
-      .map_err(|_| MemberlistError::CommandSend)?;
-    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
+    {
+      let _ = e;
+      return Err((SmallVec::new(), MemberlistError::CommandSend));
+    }
+    match rx.await {
+      Ok(reply) => reply,
+      Err(_) => Err((SmallVec::new(), MemberlistError::ReplyClosed)),
+    }
   }
 
   /// Fire-and-forget join: dispatch a push/pull against each seed and
@@ -686,7 +698,7 @@ impl<I, A> Memberlist<I, A> {
   ///
   /// Applications that want to wait for actual contact should use
   /// [`Self::join`] instead, which handles the completion accounting and
-  /// surfaces zero-contact failures as [`MemberlistError::JoinAllFailed`].
+  /// surfaces zero-contact failures as [`MemberlistError::JoinFailed`].
   /// This method exists for callers that need to enqueue work without
   /// blocking on completion — typically long-lived background
   /// re-discovery loops where the caller observes [`Self::events`]
@@ -713,7 +725,14 @@ impl<I, A> Memberlist<I, A> {
       }))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
-    rx.await.map_err(|_| MemberlistError::ReplyClosed)?
+    // The `Dispatch` arm replies `Ok(set)` with the dispatched seed set; the
+    // fire-and-forget count is that set's length. An `Err((_, e))` carries
+    // the driver-side error (e.g. `NotRunning`).
+    let reply: JoinReply = rx.await.map_err(|_| MemberlistError::ReplyClosed)?;
+    match reply {
+      Ok(dispatched) => Ok(dispatched.len()),
+      Err((_, e)) => Err(e),
+    }
   }
 
   /// Leave the cluster gracefully.

@@ -176,7 +176,7 @@ async fn quic_join_after_leave_is_rejected() {
   .await
   .expect("join must not hang after leave");
   assert!(
-    matches!(res, Err(Error::NotRunning)),
+    matches!(res, Err((_, Error::NotRunning))),
     "expected NotRunning from QUIC join after leave, got {res:?}"
   );
 
@@ -334,7 +334,7 @@ async fn quic_udp_unreliable_transport_converges() {
     .join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
     .await
     .expect("join over UDP-gossip QUIC");
-  assert_eq!(n, 1, "one seed dispatched");
+  assert_eq!(n.len(), 1, "one seed dispatched");
 
   let converged = tokio::time::timeout(Duration::from_secs(10), async {
     loop {

@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-pub use memberlist_driver::error::{GossipMtuTooSmall, InvalidOption};
+pub use memberlist_driver::error::{GossipMtuTooSmall, InvalidOption, JoinFailed};
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
@@ -100,9 +100,12 @@ pub enum Error {
   #[error("address resolution returned no addresses")]
   NoAddresses,
 
-  /// A join dispatched push/pulls to seeds but contacted none of them.
-  #[error("join contacted none of {0} seed(s)")]
-  JoinFailed(usize),
+  /// A join dispatched push/pulls to seeds but contacted none of them. Carries
+  /// the requested-seed count and the contacted count (always `0` for this
+  /// error — a non-zero contact count resolves `Ok` with the reached address
+  /// set).
+  #[error("{0}")]
+  JoinFailed(JoinFailed),
 
   /// The resolved advertise address is not a usable unicast contact
   /// (unspecified, multicast, or broadcast); peers could not reach this node.

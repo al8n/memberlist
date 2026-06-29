@@ -142,11 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // Join an existing cluster through one or more seed addresses.
+    // join returns Ok(reached_set) on success, Err((reached_so_far, error)) on failure.
     let seed: SocketAddr = "127.0.0.1:7947".parse()?;
-    node.join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed)])
-        .await?;
+    let reached = node
+        .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed)])
+        .await
+        .map_err(|(_, e)| e)?;
 
-    println!("{} members online", node.num_online_members());
+    println!("{} members online (reached {})", node.num_online_members(), reached.len());
 
     // Gracefully leave: broadcast a leave, then drain.
     node.leave().await?;

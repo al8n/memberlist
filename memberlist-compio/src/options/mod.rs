@@ -705,7 +705,7 @@ pub(crate) fn validate_gossip_mtu(opts: &MemberlistOptions) -> Result<(), Member
 /// rejected: `iter_drain_cap == 0` (the per-iteration batch cap — the `select`
 /// arms still process one inbound event per pass), `event_queue_cap == 0` (a
 /// valid flume rendezvous EventStream channel), and `join_deadline == 0` (a
-/// loud immediate `JoinAllFailed`).
+/// loud immediate `JoinFailed`).
 ///
 /// Called from `Memberlist::new` before the transport is constructed so the
 /// misconfiguration fails fast, before any socket is bound; every backend
