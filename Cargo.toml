@@ -55,7 +55,7 @@ flume = { version = "0.12", default-features = false }
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 hickory-proto = { version = "0.26", default-features = false }
-hostaddr = { version = "0.2", default-features = false }
+hostaddr = { version = "0.3", default-features = false }
 resolv-conf = { version = "0.7", default-features = false }
 derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
