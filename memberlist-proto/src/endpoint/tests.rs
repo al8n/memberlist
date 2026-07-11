@@ -889,6 +889,32 @@ fn leave_with_reserved_farewell_leads_the_drained_payloads() {
   assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
 }
 
+/// `farewell_capacity` is consistent with `leave_with`'s admission: a payload
+/// at the advertised capacity rides; anything above it is the caller's to
+/// refuse before leaving.
+#[test]
+fn farewell_capacity_matches_leave_with_admission() {
+  let t0 = Instant::now();
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  let cap = e.farewell_capacity().expect("a small id leaves room");
+  e.leave_with(t0, Some(Bytes::from(vec![0xAD_u8; cap])))
+    .expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!(
+      "a capacity-sized farewell must ride, got a bare {:?}",
+      p.message_ref()
+    ),
+  };
+  assert!(
+    matches!(&parts[0], Message::UserData(b) if b.len() == cap),
+    "the capacity-sized farewell rides first"
+  );
+  assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
+}
+
 /// An explicit farewell with an empty queue rides as `[farewell, Dead]`; and an
 /// over-budget farewell is dropped, degrading to the bare `Dead` fan-out.
 #[test]

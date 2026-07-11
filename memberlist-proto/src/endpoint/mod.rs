@@ -2833,6 +2833,36 @@ where
     self.leave_with(now, None)
   }
 
+  /// The largest encoded user payload [`leave_with`](Self::leave_with) can
+  /// reserve into the farewell compound beside this node's `Dead` part, or
+  /// `None` when the `Dead` part alone exhausts the gossip MTU.
+  ///
+  /// A layered protocol whose departure payload MUST ride the farewell checks
+  /// this BEFORE mutating any of its own leave state, so an oversized payload
+  /// is refused up front instead of silently degrading to the bare `Dead`
+  /// fan-out at leave time. Identity-aware: the bound depends on the encoded
+  /// size of this node's own id.
+  pub fn farewell_capacity(&self) -> Option<usize> {
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let dead_encoded_len = crate::wire::encode_message::<I, A>(&Message::Dead(Dead::new(
+      self.incarnation,
+      local_id.cheap_clone(),
+      local_id,
+    )))
+    .map(|b| b.len())
+    .ok()?;
+    let budget = self
+      .gossip_mtu()
+      .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)
+      .saturating_sub(dead_encoded_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN));
+    // `leave_with` charges the reserved payload its encoded `UserData` frame
+    // plus a part prefix; `USER_PART_OVERHEAD` is exactly that worst-case
+    // framing over the raw payload bytes, so subtracting it yields the largest
+    // raw payload guaranteed to fit.
+    let capacity = budget.saturating_sub(Self::USER_PART_OVERHEAD);
+    (capacity > 0).then_some(capacity)
+  }
+
   /// [`leave`](Self::leave) with an explicit farewell payload.
   ///
   /// `farewell` is a single already-encoded user frame that is RESERVED into
