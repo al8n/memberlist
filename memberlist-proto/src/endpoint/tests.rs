@@ -683,6 +683,334 @@ fn leave_is_idempotent() {
   );
 }
 
+// ───────── leave() farewell: queued user broadcasts ride the leave notice ──
+
+/// The encoded self-`Dead` `leave()` reserves before packing user payloads, for
+/// a freshly-constructed endpoint (local incarnation 1, target == from ==
+/// local id).
+fn farewell_self_dead_len(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  let local = e.local_id_ref().clone();
+  crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::Dead(Dead::new(
+    1,
+    local.clone(),
+    local,
+  )))
+  .map(|b| b.len())
+  .expect("a locally-built Dead always encodes")
+}
+
+/// The farewell drain budget `leave()` computes: the gossip MTU minus the
+/// compound header and the reserved `Dead` part.
+fn farewell_budget(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.gossip_mtu()
+    - (crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN)
+    - (farewell_self_dead_len(e) + crate::wire::COMPOUND_MAX_PART_PREFIX_LEN)
+}
+
+/// With user broadcasts queued, the dead-self fan-out to a live peer is a
+/// Compound whose parts are the user payloads followed by the `Dead` — user
+/// parts FIRST, the membership death LAST.
+#[test]
+fn leave_farewell_packs_user_broadcasts_then_dead() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  e.queue_user_broadcast(Bytes::from_static(b"intent-1"))
+    .unwrap();
+  e.queue_user_broadcast(Bytes::from_static(b"intent-2"))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(t0).expect("ok");
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => {
+      assert_eq!(c.to_ref(), &peer_addr);
+      c.into_parts().1
+    }
+    Transmit::Packet(p) => panic!(
+      "queued user data ⇒ farewell must be a compound, got a bare {:?}",
+      p.message_ref()
+    ),
+  };
+  let n = parts.len();
+  assert!(n >= 2, "at least one user part plus the Dead");
+  assert!(
+    matches!(parts.last(), Some(Message::Dead(_))),
+    "the Dead part must be LAST"
+  );
+  let user: Vec<Bytes> = parts[..n - 1]
+    .iter()
+    .map(|m| match m {
+      Message::UserData(b) => b.clone(),
+      other => panic!("every part before the Dead must be UserData, got {other:?}"),
+    })
+    .collect();
+  assert!(user.contains(&Bytes::from_static(b"intent-1")));
+  assert!(user.contains(&Bytes::from_static(b"intent-2")));
+}
+
+/// Strict priority across tiers: a rank-0 payload queued AFTER a lower-priority
+/// (rank-1) payload is selected FIRST, so it precedes the rank-1 part in the
+/// farewell compound (the `Dead` still last).
+#[test]
+fn leave_farewell_packs_higher_priority_tier_first() {
+  let opts = cfg().with_user_broadcast_tiers(core::num::NonZeroU8::new(2).unwrap());
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(opts);
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  // Lower priority queued first, higher priority second.
+  e.queue_user_broadcast_ranked(1, Bytes::from_static(b"low"))
+    .unwrap();
+  e.queue_user_broadcast_ranked(0, Bytes::from_static(b"high"))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(t0).expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+  assert!(
+    matches!(&parts[0], Message::UserData(b) if b.as_ref() == b"high"),
+    "the rank-0 payload rides first even though it was queued last"
+  );
+  assert!(
+    matches!(&parts[1], Message::UserData(b) if b.as_ref() == b"low"),
+    "the rank-1 payload follows the rank-0"
+  );
+  assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
+}
+
+/// Under same-tier crowding the within-tier order (larger encoded length first,
+/// then freshest id) picks the rider. With the earliest rank-0 payload sized
+/// largest and a budget that admits only one user part, that earliest payload
+/// is the sole rider — the later, smaller same-tier payloads are crowded out,
+/// not the priority winner.
+#[test]
+fn leave_farewell_same_tier_crowding_rides_priority_winner() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  let budget = farewell_budget(&e);
+  // `big` alone consumes enough of the farewell budget that no second user part
+  // fits; it is both the earliest and the largest same-tier payload.
+  let big = budget * 3 / 5;
+  let small = big - 8;
+  e.queue_user_broadcast(Bytes::from(vec![0xAA_u8; big]))
+    .unwrap();
+  e.queue_user_broadcast(Bytes::from(vec![0xBB_u8; small]))
+    .unwrap();
+  e.queue_user_broadcast(Bytes::from(vec![0xCC_u8; small]))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(t0).expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+  assert_eq!(
+    parts.len(),
+    2,
+    "only the largest rank-0 rides, then the Dead"
+  );
+  assert!(
+    matches!(&parts[0], Message::UserData(b) if b.len() == big),
+    "the earliest, largest rank-0 payload is the sole rider under crowding"
+  );
+  assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
+}
+
+/// Budget boundary: a payload whose assembled charge is exactly the farewell
+/// budget rides; one byte over does not (it is still enqueuable, since the
+/// enqueue gate reserves less than the farewell budget — which additionally
+/// reserves the `Dead` part — so the fan-out degrades to the bare `Dead`).
+#[test]
+fn leave_farewell_budget_boundary_rides_at_limit_not_one_over() {
+  let overhead = Endpoint::<SmolStr, SocketAddr>::USER_PART_OVERHEAD;
+  let t0 = Instant::now();
+
+  // At the budget: rides as a compound.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  let max_payload = farewell_budget(&e) - overhead;
+  e.queue_user_broadcast(Bytes::from(vec![0xAB_u8; max_payload]))
+    .unwrap();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("ok");
+  match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => {
+      let parts = c.into_parts().1;
+      assert_eq!(parts.len(), 2, "the at-budget payload plus the Dead");
+      assert!(matches!(&parts[0], Message::UserData(b) if b.len() == max_payload));
+      assert!(matches!(parts.last(), Some(Message::Dead(_))));
+    }
+    Transmit::Packet(p) => panic!(
+      "a payload at the budget must ride a compound, got a bare {:?}",
+      p.message_ref()
+    ),
+  }
+
+  // One byte over: does not ride; the fan-out is the bare Dead.
+  let mut e2: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e2, alive("peer", 7001, 1), false, t0);
+  let over = farewell_budget(&e2) - overhead + 1;
+  e2.queue_user_broadcast(Bytes::from(vec![0xCD_u8; over]))
+    .expect("one-over-budget payload is still enqueuable");
+  while e2.poll_event().is_some() {}
+  e2.leave(t0).expect("ok");
+  match e2.poll_transmit().expect("farewell transmit") {
+    Transmit::Packet(p) => assert!(
+      matches!(p.message_ref(), Message::Dead(_)),
+      "over-budget payload is dropped; the bare Dead rides"
+    ),
+    Transmit::Compound(c) => panic!(
+      "an over-budget payload must not ride; expected a bare Dead, got a compound of {} parts",
+      c.messages_slice().len()
+    ),
+  }
+}
+
+/// Empty queue: with no user broadcasts queued, each fan-out is the
+/// byte-identical bare `Packet(Dead)` — unchanged from before the farewell
+/// flush existed.
+#[test]
+fn leave_with_no_queued_broadcasts_fans_out_bare_dead() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("ok");
+  match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Packet(p) => {
+      let (to, msg) = p.into_parts();
+      assert_eq!(
+        to,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001)
+      );
+      assert!(
+        matches!(msg, Message::Dead(_)),
+        "no queued user data ⇒ a byte-identical bare Dead"
+      );
+    }
+    Transmit::Compound(c) => panic!("empty queue must stay a bare Dead packet, got {c:?}"),
+  }
+}
+
+/// A farewell Compound is ONE `pending_transmits` entry, so a single
+/// `poll_transmit` pop reaches the leave-completion boundary and emits
+/// `LeftCluster` — the one-pop-per-peer fence is unchanged by compounds.
+#[test]
+fn leave_farewell_compound_is_one_pop_for_left_cluster() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  e.queue_user_broadcast(Bytes::from_static(b"bye")).unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(t0).expect("ok");
+  // NodeLeft is immediate; LeftCluster is withheld until the farewell drains.
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    "LeftCluster must not fire before the farewell drains"
+  );
+  let tx = e.poll_transmit().expect("farewell transmit");
+  assert!(
+    matches!(tx, Transmit::Compound(_)),
+    "a queued user broadcast makes the farewell a compound"
+  );
+  assert!(
+    core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    "one pop of the compound reaches the completion boundary"
+  );
+}
+
+/// Zero live peers with a queued broadcast: leave still completes immediately
+/// (the drain is skipped when there is no fan-out), and the queued payload is
+/// dropped by the reset rather than emitted — there is no recipient.
+#[test]
+fn leave_with_queued_broadcast_but_no_live_peers_completes_immediately() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  e.queue_user_broadcast(Bytes::from_static(b"bye")).unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(Instant::now()).expect("ok");
+  assert!(e.is_left());
+  assert!(
+    core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    "a zero-live-peer leave completes immediately"
+  );
+  assert!(
+    e.poll_transmit().is_none(),
+    "no live recipient ⇒ the queued broadcast is dropped, not sent"
+  );
+}
+
+/// The farewell compound survives the codec round-trip (and at least one wire
+/// transform) with its parts in order and the `Dead` still last — the in-order
+/// consumption a layered protocol relies on to process its departure payload
+/// before the membership death.
+#[test]
+fn leave_farewell_compound_roundtrips_through_codec_in_order() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  e.queue_user_broadcast(Bytes::from_static(b"depart-a"))
+    .unwrap();
+  e.queue_user_broadcast(Bytes::from_static(b"depart-b"))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  e.leave(t0).expect("ok");
+  let parts: Vec<Message<SmolStr, SocketAddr>> = match e.poll_transmit().expect("farewell transmit")
+  {
+    Transmit::Compound(c) => c.into_parts().1.iter().cloned().collect(),
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+
+  // Plain codec round-trip preserves wire order (Dead last).
+  let encoded =
+    crate::codec::encode_outgoing_compound(&parts, &crate::codec::EncodeOptions::default())
+      .unwrap();
+  let inner =
+    crate::codec::decode_incoming(encoded, &crate::codec::DecodeOptions::default()).unwrap();
+  let decoded: Vec<Message<SmolStr, SocketAddr>> = crate::codec::parse_messages(inner).unwrap();
+  assert_eq!(decoded.len(), parts.len());
+  assert!(
+    matches!(decoded.last(), Some(Message::Dead(_))),
+    "Dead stays last after the round-trip"
+  );
+  for m in &decoded[..decoded.len() - 1] {
+    assert!(
+      matches!(m, Message::UserData(_)),
+      "user parts stay ahead of the Dead"
+    );
+  }
+
+  // The same order survives at least one wire transform (crc32 checksum wrap).
+  #[cfg(feature = "crc32")]
+  {
+    let plain =
+      crate::codec::encode_outgoing_compound(&parts, &crate::codec::EncodeOptions::default())
+        .unwrap();
+    let wrapped =
+      crate::checksum::encode_checksummed_frame(crate::checksum::ChecksumAlgorithm::Crc32, &plain)
+        .unwrap();
+    let stripped = crate::checksum::decode_checksummed_frame(&wrapped).unwrap();
+    let inner2 = crate::codec::decode_incoming(
+      Bytes::copy_from_slice(stripped),
+      &crate::codec::DecodeOptions::default(),
+    )
+    .unwrap();
+    let decoded2: Vec<Message<SmolStr, SocketAddr>> = crate::codec::parse_messages(inner2).unwrap();
+    assert!(
+      matches!(decoded2.last(), Some(Message::Dead(_))),
+      "Dead stays last through the checksum transform"
+    );
+  }
+}
+
 #[test]
 fn user_data_emits_user_packet_event() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
