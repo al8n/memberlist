@@ -998,6 +998,41 @@ fn leave_farewell_budget_boundary_rides_at_limit_not_one_over() {
   }
 }
 
+/// Degenerate budget: with the gossip MTU consumed entirely by the encoded
+/// dead-self notice, queued user broadcasts get no farewell ride,
+/// `farewell_capacity` reports `None`, and the fan-out degrades to the bare
+/// `Packet(Dead)` rather than underflowing or panicking. The identity-aware
+/// construction floor sizes the MTU against a local-node `Ping` that always
+/// out-measures the Dead plus the compound overhead, so this state is
+/// unreachable through the validated constructor — the drain arm is the
+/// machine's own backstop, and the saturated MTU is forced directly to pin it.
+#[test]
+fn leave_farewell_huge_dead_leaves_no_farewell_room() {
+  let t0 = Instant::now();
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  e.queue_user_broadcast(Bytes::from_static(b"stranded"))
+    .expect("a small user broadcast is enqueuable");
+  while e.poll_event().is_some() {}
+  e.cfg = cfg().with_gossip_mtu(farewell_self_dead_len(&e));
+  assert_eq!(
+    e.farewell_capacity(),
+    None,
+    "no admissible farewell size when the Dead fills the MTU"
+  );
+  e.leave(t0).expect("ok");
+  match e.poll_transmit().expect("fan-out transmit") {
+    Transmit::Packet(p) => assert!(
+      matches!(p.message_ref(), Message::Dead(_)),
+      "the queued broadcast gets no ride; the bare Dead fans out"
+    ),
+    Transmit::Compound(c) => panic!(
+      "the Dead alone fills the MTU; expected a bare Dead, got a compound of {} parts",
+      c.messages_slice().len()
+    ),
+  }
+}
+
 /// Empty queue: with no user broadcasts queued, each fan-out is the
 /// byte-identical bare `Packet(Dead)` — unchanged from before the farewell
 /// flush existed.
