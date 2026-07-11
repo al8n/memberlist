@@ -822,6 +822,106 @@ fn leave_farewell_same_tier_crowding_rides_priority_winner() {
   assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
 }
 
+/// An explicit farewell payload is reserved ahead of the drain: an older, larger
+/// same-tier payload that would win the fewest-transmissions-then-largest
+/// ordering cannot crowd it out. The reserved part rides FIRST in every fan-out
+/// compound; the queued crowd rides only in whatever budget remains.
+#[test]
+fn leave_with_reserves_the_farewell_ahead_of_larger_queued_payloads() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  let overhead = Endpoint::<SmolStr, SocketAddr>::USER_PART_OVERHEAD;
+  // The queued payload exactly fills the farewell budget on its own — a plain
+  // leave() would carry it — so whether it still rides after the reservation is
+  // decided purely by the explicit farewell's charge.
+  let big = farewell_budget(&e) - overhead;
+  e.queue_user_broadcast(Bytes::from(vec![0xAA_u8; big]))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  let intent = Bytes::from_static(b"leave-intent");
+  e.leave_with(t0, Some(intent.clone())).expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+  assert!(
+    matches!(&parts[0], Message::UserData(b) if b == &intent),
+    "the explicit farewell must ride FIRST, immune to the drain ordering"
+  );
+  assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
+  // The big queued payload no longer fits the residual budget after the
+  // reservation — it is dropped, not the farewell.
+  assert_eq!(
+    parts.len(),
+    2,
+    "reserved farewell plus the Dead; the crowding payload lost the residual"
+  );
+}
+
+/// A residual budget large enough for both carries the reserved farewell FIRST
+/// and the drained payload after it.
+#[test]
+fn leave_with_reserved_farewell_leads_the_drained_payloads() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  e.queue_user_broadcast(Bytes::from_static(b"queued-cargo"))
+    .unwrap();
+  while e.poll_event().is_some() {}
+
+  let intent = Bytes::from_static(b"leave-intent");
+  e.leave_with(t0, Some(intent.clone())).expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+  assert_eq!(parts.len(), 3, "farewell, the drained payload, the Dead");
+  assert!(
+    matches!(&parts[0], Message::UserData(b) if b == &intent),
+    "the explicit farewell leads"
+  );
+  assert!(
+    matches!(&parts[1], Message::UserData(b) if b.as_ref() == b"queued-cargo"),
+    "the drained payload follows the reserved farewell"
+  );
+  assert!(matches!(parts.last(), Some(Message::Dead(_))), "Dead last");
+}
+
+/// An explicit farewell with an empty queue rides as `[farewell, Dead]`; and an
+/// over-budget farewell is dropped, degrading to the bare `Dead` fan-out.
+#[test]
+fn leave_with_farewell_shapes_at_the_edges() {
+  // Empty queue: [farewell, Dead].
+  let t0 = Instant::now();
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  e.leave_with(t0, Some(Bytes::from_static(b"leave-intent")))
+    .expect("ok");
+  let parts = match e.poll_transmit().expect("farewell transmit") {
+    Transmit::Compound(c) => c.into_parts().1,
+    Transmit::Packet(p) => panic!("expected a compound, got a bare {:?}", p.message_ref()),
+  };
+  assert_eq!(parts.len(), 2, "the farewell plus the Dead");
+
+  // Over-budget farewell: dropped, bare Dead preserved.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("peer", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  let oversize = farewell_budget(&e) * 2;
+  e.leave_with(t0, Some(Bytes::from(vec![0xEE_u8; oversize])))
+    .expect("ok");
+  assert!(
+    matches!(
+      e.poll_transmit().expect("farewell transmit"),
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Dead(_))
+    ),
+    "an over-budget farewell degrades to the bare Dead"
+  );
+}
+
 /// Budget boundary: a payload whose assembled charge is exactly the farewell
 /// budget rides; one byte over does not (it is still enqueuable, since the
 /// enqueue gate reserves less than the farewell budget — which additionally

@@ -2830,6 +2830,25 @@ where
   /// Whatever does not fit that single-datagram budget is dropped, as it was
   /// before this final flush existed.
   pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
+    self.leave_with(now, None)
+  }
+
+  /// [`leave`](Self::leave) with an explicit farewell payload.
+  ///
+  /// `farewell` is a single already-encoded user frame that is RESERVED into
+  /// every farewell compound ahead of the ordinary queue drain — first user
+  /// part, before any drained payload and before the `Dead` part. The ordinary
+  /// drain selects by the gossip ordering (fewest transmissions, then largest),
+  /// so a payload queued immediately before leaving can lose the budget to an
+  /// older, larger one; a layered protocol whose departure intent MUST reach
+  /// every farewell recipient passes it here instead of (or in addition to)
+  /// queueing it. A farewell too large for the budget left by the `Dead` part
+  /// is dropped with a debug log, falling back to the ordinary fan-out.
+  pub fn leave_with(
+    &mut self,
+    now: Instant,
+    farewell: Option<Bytes>,
+  ) -> Result<(), crate::error::Error> {
     // Idempotent: a repeated leave once already Leaving/Left is a harmless
     // no-op, NOT an error. Turning shutdown retries / partially-failed
     // orchestration into an error would be a behavior regression. Do not
@@ -2912,10 +2931,31 @@ where
       )))
       .map(|b| b.len())
       .unwrap_or(usize::MAX);
-      let farewell_budget = gossip_mtu
+      let mut farewell_budget = gossip_mtu
         .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)
         .saturating_sub(dead_encoded_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN));
-      if farewell_budget == 0 {
+      // Reserve the explicit farewell FIRST: its ride must not depend on the
+      // drain's fewest-transmissions-then-largest ordering, which an older,
+      // larger tier-0 payload could otherwise win.
+      let mut reserved: Option<Bytes> = None;
+      if let Some(fw) = farewell {
+        let fw_part_len = crate::wire::encode_message::<I, A>(&Message::UserData(fw.cheap_clone()))
+          .map(|b| b.len())
+          .unwrap_or(usize::MAX);
+        let charge = fw_part_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN);
+        if charge <= farewell_budget {
+          farewell_budget -= charge;
+          reserved = Some(fw);
+        } else {
+          #[cfg(feature = "tracing")]
+          tracing::debug!(
+            gossip_mtu,
+            fw_part_len,
+            "explicit farewell payload exceeds the leave notice budget; dropped"
+          );
+        }
+      }
+      if farewell_budget == 0 && reserved.is_none() {
         // Degenerate: the Dead part alone consumes the whole gossip MTU (a
         // pathologically large node id, or a tiny configured MTU), leaving no
         // room for any user part. Fall through to the bare-Dead fan-out.
@@ -2930,7 +2970,14 @@ where
         // `num_nodes` is the tracked member count (the retransmit basis), the
         // same argument the gossip scheduler passes to this drain.
         let num_nodes = self.num_members() as u32;
-        let (payloads, _) = self.drain_user_broadcasts(num_nodes, farewell_budget);
+        let (drained, _) = self.drain_user_broadcasts(num_nodes, farewell_budget);
+        // The reserved farewell leads the user parts so a layered protocol
+        // processes the departure intent before anything else in the frame.
+        let mut payloads: Vec<Bytes> = Vec::with_capacity(drained.len() + 1);
+        if let Some(fw) = reserved {
+          payloads.push(fw);
+        }
+        payloads.extend(drained);
         // The budget reserved the Dead part and compound header, and the measured
         // drain charged each user part at least its assembled size, so the
         // assembled compound is within one gossip MTU by construction.
