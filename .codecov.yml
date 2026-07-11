@@ -12,6 +12,9 @@ coverage:
     project: # Overall project status
       default:
         target: auto
+        # Tolerate sub-0.1% run-to-run measurement jitter on unchanged files;
+        # the strict patch status below still gates uncovered new code.
+        threshold: 0.1%
         if_not_found: success
         only_pulls: false
     patch: # Status for the patch in pull requests
