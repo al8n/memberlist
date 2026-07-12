@@ -2408,34 +2408,92 @@ async fn due_timeout_force_fires_past_the_staleness_grace() {
   );
 }
 
-/// The armed-sleep arm never fires: a sleep that becomes ready is cleared and
-/// the pump self-wakes into the gated due branch (which the next poll's fresh
-/// clock sample reaches), so a deadline crossed mid-poll can never bypass the
-/// inbound-quiescence gate. With no machine deadline due, ready idle sleeps
-/// come and go without ever calling `handle_timeout` from that arm — the
-/// pump's ONLY `handle_timeout` call site is inside the gated branch — and
-/// the anchor stays untouched.
+/// The armed-sleep arm is machine-neutral: when the sleep polls Ready, the
+/// pump clears it and self-wakes — it never touches the endpoint. Entering
+/// that arm requires a STABLE future target (a machine deadline below the
+/// idle wake), else `arm_timer` replaces the staged sleep with a fresh one
+/// before it is ever polled; the schedulers supply one, and swapping the
+/// armed sleep for an elapsed one while keeping `timer_deadline` drives the
+/// arm deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ready_idle_sleep_self_wakes_without_firing() {
-  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |_| {}).await;
-  driver.idle_wake = Duration::from_millis(10);
+async fn ready_sleep_is_cleared_without_touching_the_machine() {
+  use memberlist_proto::typed::{Alive, Node, Suspect};
+  let peer_addr: SocketAddr = "127.0.0.1:39999".parse().unwrap();
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    // A suspicion timer supplies the stable machine deadline the sleep arms
+    // toward: its timeout is a fixed multiple of the probe interval,
+    // comfortably beyond this test's microsecond-scale polls. (The periodic
+    // schedulers stay OFF — their first tick is randomly staggered and can
+    // land arbitrarily close, which would flake the not-yet-due branch.)
+    let now = Instant::now();
+    endpoint.handle_alive(
+      peer_addr,
+      Alive::new(1, Node::new(SmolStr::new("suspect-peer"), peer_addr)),
+      now,
+    );
+    endpoint.handle_suspect(
+      peer_addr,
+      Suspect::new(1, SmolStr::new("suspect-peer"), SmolStr::new("drv")),
+      now,
+    );
+  })
+  .await;
+  // Keep the idle wake above the suspicion deadline so the machine deadline
+  // is the arm target — a nearer idle target recomputes fresh every poll
+  // and would replace the staged sleep.
+  driver.idle_wake = Duration::from_secs(600);
 
-  // Quiescent poll arms the idle sleep.
+  // Quiescent poll arms the sleep toward the machine deadline.
   let _ = poll_once(&mut driver);
   let armed = driver.timer_deadline;
-  assert!(armed.is_some(), "the quiescent poll arms the idle sleep");
+  let machine_deadline = driver.endpoint.poll_timeout();
+  assert_eq!(
+    armed, machine_deadline,
+    "with a machine deadline below the idle wake, the timer arms toward it"
+  );
+  let target = armed.expect("the quiescent poll arms the sleep");
 
-  // Let the armed sleep elapse, then poll with the pump still quiescent: the
-  // ready sleep is consumed (cleared or re-armed to a NEW deadline) without
-  // any due machine deadline to fire and without touching the anchor.
+  // Swap in an elapsed sleep, keeping the recorded deadline: the next poll
+  // recomputes the SAME stable target, so `arm_timer` keeps this sleep and
+  // polls it Ready — the exact shape of a deadline crossing between the
+  // fresh clock sample and the timer poll. The wait lets the zero-duration
+  // sleep pass the timer wheel's coarse (millisecond) elapse check while the
+  // suspicion deadline stays comfortably in the future.
+  driver.timer = Some(Box::pin(TokioRuntime::sleep(Duration::ZERO)));
   TokioRuntime::sleep(Duration::from_millis(20)).await;
+  assert!(
+    Instant::now() < target,
+    "precondition: the machine deadline is still in the future"
+  );
   let _ = poll_once(&mut driver);
+
+  assert!(
+    driver.timer.is_none() && driver.timer_deadline.is_none(),
+    "the ready sleep is consumed by the armed-sleep arm, not replaced"
+  );
+  assert_eq!(
+    driver.endpoint.poll_timeout(),
+    machine_deadline,
+    "the armed-sleep arm must not fire the machine timer: the deadline is \
+     untouched and fires later through the gated due branch"
+  );
   assert!(
     driver.timeout_stall_since.is_none(),
-    "a ready idle sleep with nothing due must not anchor a deferral"
+    "clearing a ready sleep must not anchor a deferral"
   );
-  assert_ne!(
-    driver.timer_deadline, armed,
-    "the elapsed sleep is consumed: cleared or re-armed to a fresh deadline"
+}
+
+/// The inbound-quiescence gate is sound only if the machine timer can fire
+/// nowhere else: every `handle_timeout` must route through the single gated
+/// decision (fresh clock sample, backlog deferral, staleness grace). Pin that
+/// structurally — the pump source carries exactly one call site, so no other
+/// arm (the ready-sleep arm in particular) can bypass the gate.
+#[test]
+fn the_pump_has_exactly_one_handle_timeout_call_site() {
+  let call_sites = include_str!("mod.rs").matches(".handle_timeout(").count();
+  assert_eq!(
+    call_sites, 1,
+    "a handle_timeout call outside the gated due branch can fire a due \
+     deadline past capped inbound backlog holding a deadline-refuting Ack"
   );
 }
