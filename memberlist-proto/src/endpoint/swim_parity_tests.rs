@@ -240,6 +240,73 @@ fn alive_node_refute() {
   );
 }
 
+/// An EQUAL-incarnation self-claim carrying different metadata is refuted —
+/// the restart shape: a node comes back with fresh state and re-installs its
+/// metadata, while a peer still gossips the pre-restart claim at the same
+/// incarnation the node has reached. The claim must not overwrite the local
+/// metadata, and the defense must queue exactly one self-Alive PAST the
+/// accused incarnation CARRYING the current metadata — the refutation
+/// broadcast itself is what disseminates the node's true state.
+#[test]
+fn alive_node_refute_equal_incarnation_carries_current_meta() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  while e.poll_event().is_some() {}
+
+  let local = Node::new(e.local_id_ref().cheap_clone(), *e.advertise_ref());
+  e.process_alive(alive_of(&local, 1), true, Instant::now());
+
+  // Install the current metadata (advances the local incarnation).
+  let mine = Meta::try_from(Bytes::from_static(b"v2")).unwrap();
+  e.update_meta(mine.cheap_clone()).unwrap();
+  // Isolate the refutation's queue effects from the retag broadcast.
+  let _ = e.drain_broadcasts();
+  while e.poll_event().is_some() {}
+  let held = e
+    .node_incarnation(e.local_id_ref())
+    .expect("local incarnation");
+
+  // A stale self-claim at the SAME incarnation with the old metadata.
+  let stale = Meta::try_from(Bytes::from_static(b"v1")).unwrap();
+  e.process_alive(
+    alive_of(&local, held).with_meta(stale),
+    false,
+    Instant::now(),
+  );
+
+  assert_eq!(
+    e.member(e.local_id_ref()).unwrap().meta_ref().as_bytes(),
+    b"v2",
+    "the stale claim must not overwrite the local metadata"
+  );
+
+  let local_id = e.local_id_ref().cheap_clone();
+  let refuted: Vec<(u32, Meta)> = e
+    .drain_broadcasts()
+    .into_iter()
+    .filter_map(|m| match m {
+      Message::Alive(a) if a.node_ref().id_ref() == &local_id => {
+        Some((a.incarnation(), a.meta_ref().cheap_clone()))
+      }
+      _ => None,
+    })
+    .collect();
+  assert_eq!(
+    refuted.len(),
+    1,
+    "exactly one refutation self-Alive should be queued, got {refuted:?}"
+  );
+  assert!(
+    refuted[0].0 > held,
+    "the refutation must lift the incarnation past the accused value, got {}",
+    refuted[0].0
+  );
+  assert_eq!(
+    refuted[0].1.as_bytes(),
+    b"v2",
+    "the refutation broadcast must carry the CURRENT metadata"
+  );
+}
+
 /// A conflicting Alive for a known id at a different address does not overwrite
 /// the tracked address/meta; it emits `NodeConflict` and enqueues nothing.
 /// Once the original entry is `Dead` and the reclaim window has elapsed, a
