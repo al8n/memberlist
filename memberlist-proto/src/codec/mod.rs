@@ -320,6 +320,11 @@ where
       other => CodecError::Frame(other),
     })?;
     let mut out = Vec::with_capacity(parts.len());
+    // Parts are flattened in wire order, and callers dispatch them in that
+    // order. This is load-bearing for layered-protocol departure classification:
+    // a farewell compound packs its user payloads (e.g. a departure intent)
+    // ahead of the `Dead` part precisely so this in-order consumption processes
+    // them before the membership death carried by the same datagram.
     for part in parts {
       // `part` is a sub-slice of `plain`; `slice_ref` shares the datagram
       // allocation O(1), so the per-part frame decodes its byte fields zero-copy

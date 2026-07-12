@@ -23,7 +23,7 @@ use std::{
   time::Duration,
 };
 
-use agnostic::{Runtime, RuntimeLite, smol::SmolRuntime, tokio::TokioRuntime};
+use agnostic::{LocalRuntimeLite, Runtime, smol::SmolRuntime, tokio::TokioRuntime};
 use bytes::Bytes;
 use memberlist_reactor::{Error, MaybeResolved, Memberlist, Options, SocketAddrResolver};
 use memberlist_test_suite::{

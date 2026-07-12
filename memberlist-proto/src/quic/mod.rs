@@ -1589,8 +1589,15 @@ where
 
   /// Begin a graceful leave; delegates to the membership endpoint.
   pub fn leave(&mut self, now: Instant) -> Result<(), Error> {
+    self.leave_with(now, None)
+  }
+
+  /// [`leave`](Self::leave) with an explicit farewell payload reserved into
+  /// every dead-self compound ahead of the ordinary queue drain (see
+  /// [`Endpoint::leave_with`](crate::Endpoint::leave_with)).
+  pub fn leave_with(&mut self, now: Instant, farewell: Option<Bytes>) -> Result<(), Error> {
     self.last_now = Some(now);
-    self.ep.leave(now)
+    self.ep.leave_with(now, farewell)
   }
 
   /// Initiate a direct application-level ping to `node`. Returns

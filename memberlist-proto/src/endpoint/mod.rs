@@ -2821,7 +2821,64 @@ where
   /// `Ok(())` return or the `NodeLeft`/state transition as completion
   /// would drop the leave notice and peers would observe a failure
   /// instead of an intentional leave.
+  ///
+  /// **Queued user broadcasts:** payloads still queued via
+  /// [`queue_user_broadcast`](Self::queue_user_broadcast) get a best-effort,
+  /// at-most-one-MTU final flush — packed into the dead-self notice to every
+  /// farewell recipient, ahead of the `Dead` part so a layered protocol
+  /// processes them before the membership death carried by the same frame.
+  /// Whatever does not fit that single-datagram budget is dropped, as it was
+  /// before this final flush existed.
   pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
+    self.leave_with(now, None)
+  }
+
+  /// The largest encoded user payload [`leave_with`](Self::leave_with) can
+  /// reserve into the farewell compound beside this node's `Dead` part, or
+  /// `None` when the `Dead` part alone exhausts the gossip MTU.
+  ///
+  /// A layered protocol whose departure payload MUST ride the farewell checks
+  /// this BEFORE mutating any of its own leave state, so an oversized payload
+  /// is refused up front instead of silently degrading to the bare `Dead`
+  /// fan-out at leave time. Identity-aware: the bound depends on the encoded
+  /// size of this node's own id.
+  pub fn farewell_capacity(&self) -> Option<usize> {
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let dead_encoded_len = crate::wire::encode_message::<I, A>(&Message::Dead(Dead::new(
+      self.incarnation,
+      local_id.cheap_clone(),
+      local_id,
+    )))
+    .map(|b| b.len())
+    .ok()?;
+    let budget = self
+      .gossip_mtu()
+      .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)
+      .saturating_sub(dead_encoded_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN));
+    // `leave_with` charges the reserved payload its encoded `UserData` frame
+    // plus a part prefix; `USER_PART_OVERHEAD` is exactly that worst-case
+    // framing over the raw payload bytes, so subtracting it yields the largest
+    // raw payload guaranteed to fit.
+    let capacity = budget.saturating_sub(Self::USER_PART_OVERHEAD);
+    (capacity > 0).then_some(capacity)
+  }
+
+  /// [`leave`](Self::leave) with an explicit farewell payload.
+  ///
+  /// `farewell` is a single already-encoded user frame that is RESERVED into
+  /// every farewell compound ahead of the ordinary queue drain — first user
+  /// part, before any drained payload and before the `Dead` part. The ordinary
+  /// drain selects by the gossip ordering (fewest transmissions, then largest),
+  /// so a payload queued immediately before leaving can lose the budget to an
+  /// older, larger one; a layered protocol whose departure intent MUST reach
+  /// every farewell recipient passes it here instead of (or in addition to)
+  /// queueing it. A farewell too large for the budget left by the `Dead` part
+  /// is dropped with a debug log, falling back to the ordinary fan-out.
+  pub fn leave_with(
+    &mut self,
+    now: Instant,
+    farewell: Option<Bytes>,
+  ) -> Result<(), crate::error::Error> {
     // Idempotent: a repeated leave once already Leaving/Left is a harmless
     // no-op, NOT an error. Turning shutdown retries / partially-failed
     // orchestration into an error would be a behavior regression. Do not
@@ -2880,23 +2937,138 @@ where
     // buffered Alive would re-advertise our pre-leave state after the dead-self
     // (a resurrection vector), and an arbitrarily long backlog would pad the
     // flush and delay `LeftCluster`. Clearing here leaves the dead-self fan-out
-    // below as the only content of `pending_transmits`.
+    // below as the only content of `pending_transmits`. The user-broadcast drain
+    // that follows repacks the fitting queued payloads INTO that fan-out, so they
+    // ride the same leave notice instead of being silently dropped by the reset.
     self.pending_transmits.clear();
-    // Drains the user-broadcast queue so a left node stops gossiping stale user
+
+    // Give queued user broadcasts a final, measured ride on the dead-self
+    // fan-out: a layered protocol that queues its departure intent immediately
+    // before calling leave() needs that payload to reach peers ATOMICALLY with
+    // the leave notice, so peers classify the departure as intentional rather
+    // than a failure. Reserve the Dead part and the compound header up front,
+    // then drain what fits using the gossip path's exact per-part charging
+    // (`USER_PART_OVERHEAD`); the reserved Dead part keeps the assembled compound
+    // within one gossip MTU. Empty when there are no live recipients, when the
+    // Dead alone exhausts the MTU, or when nothing queued fits — each falls
+    // through to the byte-identical bare-Dead fan-out below.
+    let farewell_payloads: Vec<Bytes> = if dead_self_count > 0 {
+      let gossip_mtu = self.gossip_mtu();
+      let dead_encoded_len = crate::wire::encode_message::<I, A>(&Message::Dead(Dead::new(
+        inc,
+        local_id.cheap_clone(),
+        local_id.cheap_clone(),
+      )))
+      .map(|b| b.len())
+      .unwrap_or(usize::MAX);
+      let mut farewell_budget = gossip_mtu
+        .saturating_sub(COMPOUND_TAG_LEN + COMPOUND_MAX_COUNT_PREFIX_LEN)
+        .saturating_sub(dead_encoded_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN));
+      // Reserve the explicit farewell FIRST: its ride must not depend on the
+      // drain's fewest-transmissions-then-largest ordering, which an older,
+      // larger tier-0 payload could otherwise win.
+      let mut reserved: Option<Bytes> = None;
+      if let Some(fw) = farewell {
+        let fw_part_len = crate::wire::encode_message::<I, A>(&Message::UserData(fw.cheap_clone()))
+          .map(|b| b.len())
+          .unwrap_or(usize::MAX);
+        let charge = fw_part_len.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN);
+        if charge <= farewell_budget {
+          farewell_budget -= charge;
+          reserved = Some(fw);
+        } else {
+          #[cfg(feature = "tracing")]
+          tracing::debug!(
+            gossip_mtu,
+            fw_part_len,
+            "explicit farewell payload exceeds the leave notice budget; dropped"
+          );
+        }
+      }
+      if farewell_budget == 0 && reserved.is_none() {
+        // Degenerate: the Dead part alone consumes the whole gossip MTU (a
+        // pathologically large node id, or a tiny configured MTU), leaving no
+        // room for any user part. Fall through to the bare-Dead fan-out.
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+          gossip_mtu,
+          dead_encoded_len,
+          "leave dead-self notice fills the gossip MTU; queued user broadcasts get no farewell ride"
+        );
+        Vec::new()
+      } else {
+        // `num_nodes` is the tracked member count (the retransmit basis), the
+        // same argument the gossip scheduler passes to this drain.
+        let num_nodes = self.num_members() as u32;
+        let (drained, _) = self.drain_user_broadcasts(num_nodes, farewell_budget);
+        // The reserved farewell leads the user parts so a layered protocol
+        // processes the departure intent before anything else in the frame.
+        let mut payloads: Vec<Bytes> = Vec::with_capacity(drained.len() + 1);
+        if let Some(fw) = reserved {
+          payloads.push(fw);
+        }
+        payloads.extend(drained);
+        // The budget reserved the Dead part and compound header, and the measured
+        // drain charged each user part at least its assembled size, so the
+        // assembled compound is within one gossip MTU by construction.
+        #[cfg(debug_assertions)]
+        if !payloads.is_empty() {
+          let mut assembled = COMPOUND_TAG_LEN
+            + COMPOUND_MAX_COUNT_PREFIX_LEN
+            + COMPOUND_MAX_PART_PREFIX_LEN
+            + dead_encoded_len;
+          for p in &payloads {
+            let part_len = crate::wire::encode_message::<I, A>(&Message::UserData(p.cheap_clone()))
+              .map(|b| b.len())
+              .unwrap_or(usize::MAX);
+            assembled =
+              assembled.saturating_add(COMPOUND_MAX_PART_PREFIX_LEN.saturating_add(part_len));
+          }
+          debug_assert!(
+            assembled <= gossip_mtu,
+            "farewell compound must fit the gossip MTU"
+          );
+        }
+        payloads
+      }
+    } else {
+      Vec::new()
+    };
+
+    // Reset the user-broadcast queue so a left node stops gossiping stale user
     // data: the gossip scheduler is shut down above, so any payload still queued
-    // via `queue_user_broadcast*` would never be drained again.
+    // via `queue_user_broadcast*` would never be drained again. The drain above
+    // already gave the payloads that fit a final ride, so this drops only the
+    // remainder that did not.
     self.user_broadcasts.reset();
+
     for to in live_peers {
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          to,
-          Message::Dead(Dead::new(
-            inc,
-            local_id.cheap_clone(),
-            local_id.cheap_clone(),
-          )),
-        )));
+      let dead = Message::Dead(Dead::new(
+        inc,
+        local_id.cheap_clone(),
+        local_id.cheap_clone(),
+      ));
+      if farewell_payloads.is_empty() {
+        // Byte-identical to the pre-farewell fan-out: one lone Dead plain frame
+        // per live peer.
+        self
+          .pending_transmits
+          .push_back(Transmit::Packet(PacketTransmit::new(to, dead)));
+      } else {
+        // ORDERING CONTRACT: the user parts MUST precede the Dead part so a
+        // layered protocol processes its queued payloads (e.g. a departure
+        // intent) BEFORE the membership death carried by the same frame. This
+        // deliberately inverts the gossip scheduler's membership-first packing;
+        // do not "unify" the two orderings.
+        let mut parts: TinyVec<Message<I, A>> = farewell_payloads
+          .iter()
+          .map(|p| Message::UserData(p.cheap_clone()))
+          .collect();
+        parts.push(dead);
+        self
+          .pending_transmits
+          .push_back(Transmit::Compound(CompoundTransmit::new(to, parts)));
+      }
     }
     if dead_self_count == 0 {
       // No live peers ⇒ nothing to flush ⇒ the leave is complete now.

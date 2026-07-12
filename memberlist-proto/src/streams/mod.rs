@@ -1494,6 +1494,13 @@ where
   /// the wire), and their teardown directives, are preserved so in-flight streams
   /// still close cleanly.
   pub fn leave(&mut self, now: Instant) -> Result<(), Error> {
+    self.leave_with(now, None)
+  }
+
+  /// [`leave`](Self::leave) with an explicit farewell payload reserved into
+  /// every dead-self compound ahead of the ordinary queue drain (see
+  /// [`Endpoint::leave_with`](crate::Endpoint::leave_with)).
+  pub fn leave_with(&mut self, now: Instant, farewell: Option<Bytes>) -> Result<(), Error> {
     self.last_now = Some(now);
     self.dial_pending.clear();
     self.pending_outbound_kinds.clear();
@@ -1517,7 +1524,7 @@ where
         self.cancel_exchange(eid);
       }
     }
-    self.ep.leave(now)
+    self.ep.leave_with(now, farewell)
   }
 
   /// Unified next-deadline = `min` over the membership endpoint, every bridge
