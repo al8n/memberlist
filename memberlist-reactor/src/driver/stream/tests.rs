@@ -2407,3 +2407,35 @@ async fn due_timeout_force_fires_past_the_staleness_grace() {
     "a sustained flood must not suppress the deadline past the staleness grace"
   );
 }
+
+/// The armed-sleep arm never fires: a sleep that becomes ready is cleared and
+/// the pump self-wakes into the gated due branch (which the next poll's fresh
+/// clock sample reaches), so a deadline crossed mid-poll can never bypass the
+/// inbound-quiescence gate. With no machine deadline due, ready idle sleeps
+/// come and go without ever calling `handle_timeout` from that arm — the
+/// pump's ONLY `handle_timeout` call site is inside the gated branch — and
+/// the anchor stays untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_idle_sleep_self_wakes_without_firing() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |_| {}).await;
+  driver.idle_wake = Duration::from_millis(10);
+
+  // Quiescent poll arms the idle sleep.
+  let _ = poll_once(&mut driver);
+  let armed = driver.timer_deadline;
+  assert!(armed.is_some(), "the quiescent poll arms the idle sleep");
+
+  // Let the armed sleep elapse, then poll with the pump still quiescent: the
+  // ready sleep is consumed (cleared or re-armed to a NEW deadline) without
+  // any due machine deadline to fire and without touching the anchor.
+  TokioRuntime::sleep(Duration::from_millis(20)).await;
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "a ready idle sleep with nothing due must not anchor a deferral"
+  );
+  assert_ne!(
+    driver.timer_deadline, armed,
+    "the elapsed sleep is consumed: cleared or re-armed to a fresh deadline"
+  );
+}

@@ -1849,19 +1849,25 @@ where
     // suppress failure detection past it. Outbound caps (actions, transport,
     // gossip egress) do NOT defer: outbound work cannot refute a deadline.
     let inbound_backlog = recv_capped || recv_gated || ingress_capped || inbound_capped;
+    // Sample the clock FRESH for the timeout decision: the drains above take
+    // real time, and a deadline that was in the future at poll entry may have
+    // been crossed during them — evaluating against the stale entry `now`
+    // would route that crossed deadline to the armed-sleep arm below, which
+    // must never fire.
+    let decision_now = Instant::now();
     let target = match this.endpoint.poll_timeout() {
-      Some(d) => d.min(now + this.idle_wake),
-      None => now + this.idle_wake,
+      Some(d) => d.min(decision_now + this.idle_wake),
+      None => decision_now + this.idle_wake,
     };
-    if target <= now {
+    if target <= decision_now {
       if inbound_backlog {
-        this.timeout_stall_since.get_or_insert(now);
+        this.timeout_stall_since.get_or_insert(decision_now);
       }
       let grace_elapsed = this
         .timeout_stall_since
-        .is_some_and(|t| now.saturating_duration_since(t) >= TIMEOUT_STALENESS_GRACE);
+        .is_some_and(|t| decision_now.saturating_duration_since(t) >= TIMEOUT_STALENESS_GRACE);
       if !inbound_backlog || grace_elapsed {
-        this.endpoint.handle_timeout(now);
+        this.endpoint.handle_timeout(decision_now);
         this.timeout_stall_since = None;
         progress = true;
       }
@@ -1871,14 +1877,17 @@ where
       more = true;
     } else {
       this.timeout_stall_since = None;
-      this.arm_timer(target, now);
+      this.arm_timer(target, decision_now);
       if let Some(timer) = this.timer.as_mut()
         && timer.as_mut().poll(cx).is_ready()
       {
-        this.endpoint.handle_timeout(Instant::now());
+        // The sleep elapsed at/just after arming (the deadline crossed between
+        // the fresh sample above and this poll). Do NOT fire here — every
+        // `handle_timeout` goes through the gated due branch, which the next
+        // poll's fresh sample reaches — just clear the consumed sleep and
+        // self-wake.
         this.timer = None;
         this.timer_deadline = None;
-        progress = true;
         more = true;
       }
     }
