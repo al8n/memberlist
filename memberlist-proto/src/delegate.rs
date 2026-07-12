@@ -55,3 +55,16 @@ pub trait MergeDelegate<I, A>: Send + Sync + 'static {
   /// [`into_owned`](MaybeOwned::into_owned) if the delegate keeps the peer view.
   fn notify_merge(&self, peers: MaybeOwned<'_, [NodeState<I, A>]>) -> bool;
 }
+
+/// A boxed merge delegate is itself a [`MergeDelegate`], so a driver can store
+/// or compose delegates as trait objects.
+impl<I, A> MergeDelegate<I, A> for Box<dyn MergeDelegate<I, A>>
+where
+  I: 'static,
+  A: 'static,
+{
+  #[inline]
+  fn notify_merge(&self, peers: MaybeOwned<'_, [NodeState<I, A>]>) -> bool {
+    (**self).notify_merge(peers)
+  }
+}

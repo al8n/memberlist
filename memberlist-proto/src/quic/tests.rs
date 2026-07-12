@@ -2102,6 +2102,40 @@ fn accept_error_response_path_compiles_and_counter_is_wired() {
   );
 }
 
+/// The coordinator's alive-delegate forwarder installs the machine's
+/// admission predicate: an inbound Alive for a vetoed peer never enters
+/// membership. (The predicate's semantics are pinned by the endpoint suite;
+/// this exercises the QUIC coordinator's public installation path.)
+#[test]
+fn alive_delegate_forwarder_installs_the_predicate() {
+  struct RejectAllAlive;
+  impl<I, A> crate::delegate::AliveDelegate<I, A> for RejectAllAlive
+  where
+    I: 'static,
+    A: 'static,
+  {
+    fn notify_alive(&self, _peer: &crate::typed::NodeState<I, A>) -> bool {
+      false
+    }
+  }
+
+  let now = Instant::now();
+  let mut b = make_endpoint("b", "127.0.0.1:7993".parse().unwrap(), now);
+  b.set_alive_delegate(RejectAllAlive);
+  b.endpoint_mut().process_alive(
+    crate::typed::Alive::new(
+      1,
+      crate::Node::new(SmolStr::new("vetoed"), "127.0.0.1:7994".parse().unwrap()),
+    ),
+    false,
+    now,
+  );
+  assert!(
+    b.endpoint_ref().member(&SmolStr::new("vetoed")).is_none(),
+    "the vetoed peer must not enter membership"
+  );
+}
+
 /// A `MergeDelegate` that rejects every join push/pull merge —
 /// `notify_merge -> false` exercises `Endpoint`'s admission-rejection
 /// path which returns `Some(StreamCommand::Close)` to the bridge.
@@ -2154,7 +2188,9 @@ fn rejected_join_merge_close_terminalizes_bridge_same_tick() {
   // `Endpoint::handle_stream_event(PushPullRequestReceived{kind:Join})`
   // on B's side, `merge_admitted` returns false, and the
   // `StreamCommand::Close` is routed to B's bridge.
-  b.endpoint_mut().set_merge_delegate(RejectAllMerges);
+  // Installed through the coordinator's public forwarder (not the test-only
+  // endpoint accessor), so the forwarder itself is behaviorally covered.
+  b.set_merge_delegate(RejectAllMerges);
 
   // Ignoring StreamId return: tests assert on observable side
   // effects (poll_transmit/poll_event), not the handle itself.
@@ -3841,7 +3877,11 @@ fn rejected_merge_terminalizes_responder_bridge_via_pump_bridges_close_arm() {
   let mut b = make_endpoint("b", b_addr, now);
   // B rejects every inbound merge: its FSM turns the inbound JOIN PushPull into
   // a `StreamCommand::Close` that `pump_bridges` reaps via its Close arm.
-  b.endpoint_mut().set_merge_delegate(RejectAllMergesQuic);
+  // A BOXED delegate through the public forwarder: covers both the
+  // coordinator forwarding and the Box blanket impl.
+  let boxed: Box<dyn crate::delegate::MergeDelegate<SmolStr, SocketAddr>> =
+    Box::new(RejectAllMergesQuic);
+  b.set_merge_delegate(boxed);
 
   let _ = a
     .endpoint_mut()
