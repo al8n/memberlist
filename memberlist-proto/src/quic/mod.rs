@@ -688,6 +688,28 @@ impl<I, R> QuicEndpoint<I, R> {
     &self.ep
   }
 
+  /// Install a custom peer-admission predicate. Forwards to
+  /// [`Endpoint::set_alive_delegate`]; the machine consults it inline for every
+  /// inbound Alive (gossip and join push/pull).
+  #[inline]
+  pub fn set_alive_delegate(
+    &mut self,
+    delegate: impl crate::delegate::AliveDelegate<I, SocketAddr>,
+  ) {
+    self.ep.set_alive_delegate(delegate);
+  }
+
+  /// Install a custom join-merge predicate. Forwards to
+  /// [`Endpoint::set_merge_delegate`]; the machine consults it on each join
+  /// push/pull merge.
+  #[inline]
+  pub fn set_merge_delegate(
+    &mut self,
+    delegate: impl crate::delegate::MergeDelegate<I, SocketAddr>,
+  ) {
+    self.ep.set_merge_delegate(delegate);
+  }
+
   /// The machine's load-shedding counters for this QUIC endpoint. Folds the QUIC
   /// datagram-plane ingress shed (`datagram_ingress_dropped`) into
   /// [`gossip_ingress_dropped`](crate::metrics::Metrics::gossip_ingress_dropped)
