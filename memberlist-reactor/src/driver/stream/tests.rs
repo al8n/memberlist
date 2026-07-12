@@ -2306,3 +2306,104 @@ async fn dispatch_set_ack_payload_running_replies_ok() {
     "an in-budget ack payload is stored on a running node"
   );
 }
+
+/// A DUE deadline must not fire while the gossip recv is capped: an Ack that
+/// arrived before the deadline may still be buffered behind the per-poll
+/// batch, and firing past it would suspect a live peer prematurely. The pump
+/// anchors the deferral instead (and self-wakes to drain), then fires once the
+/// inbound paths are quiescent — observable as the anchor clearing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_defers_while_recv_is_capped_then_fires_on_quiescence() {
+  // Schedulers OFF so no staggered SWIM deadline interferes; a zero idle wake
+  // makes the timer target due on EVERY poll, isolating the gate itself.
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |_| {}).await;
+  driver.idle_wake = Duration::ZERO;
+
+  // Stage a capped recv: more datagrams in the kernel than one batch
+  // (recv_batch == 8). Content is irrelevant — an unparseable datagram still
+  // counts toward the batch.
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  // Let the kernel surface the datagrams to the receiving socket.
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "a due deadline behind a capped recv batch must defer, not fire"
+  );
+
+  // Draining polls reach quiescence within a bounded number of batches; the
+  // fire on the quiescent poll clears the anchor.
+  let mut fired = false;
+  for _ in 0..16 {
+    let _ = poll_once(&mut driver);
+    if driver.timeout_stall_since.is_none() {
+      fired = true;
+      break;
+    }
+  }
+  assert!(
+    fired,
+    "once the backlog drains, the deferred deadline must fire and clear the anchor"
+  );
+}
+
+/// The deferral is bounded: a sustained flood that keeps every poll capped
+/// cannot suppress `handle_timeout` past the staleness grace — the due
+/// deadline force-fires and the anchor clears even with the backlog still
+/// standing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_force_fires_past_the_staleness_grace() {
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |_| {}).await;
+  driver.idle_wake = Duration::ZERO;
+
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+
+  // Anchor the deferral with a first capped poll.
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "the flood must anchor a deferral first"
+  );
+
+  // Keep the socket saturated past the grace, then poll: the due deadline
+  // must force-fire (anchor cleared) despite the standing backlog.
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(TIMEOUT_STALENESS_GRACE + Duration::from_millis(10)).await;
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "a sustained flood must not suppress the deadline past the staleness grace"
+  );
+}
