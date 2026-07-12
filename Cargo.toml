@@ -35,9 +35,9 @@ among = "0.2"
 arc-swap = "1"
 auto_impl = "1"
 atomic_refcell = "0.1"
-agnostic-lite = { version = "0.6", features = ["time"] }
+agnostic-lite = { version = "0.7", features = ["time"] }
 agnostic-io = { version = "0.2", default-features = false }
-agnostic = "0.10"
+agnostic = "0.11"
 async-lock = "3"
 async-channel = "2"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
@@ -55,7 +55,7 @@ flume = { version = "0.12", default-features = false }
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 hickory-proto = { version = "0.26", default-features = false }
-hostaddr = { version = "0.2", default-features = false }
+hostaddr = { version = "0.3", default-features = false }
 resolv-conf = { version = "0.7", default-features = false }
 derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
