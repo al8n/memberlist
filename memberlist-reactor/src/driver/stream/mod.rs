@@ -86,6 +86,14 @@ use smallvec::SmallVec;
 /// IP-layer UDP payload maximum; caps the per-recv gossip buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
 
+/// Wall-clock bound on deferring a DUE `handle_timeout` behind capped inbound
+/// paths. Inbound drains roughly FIFO, so the pre-deadline backlog clears
+/// within a bounded number of capped polls (microseconds at gossip datagram
+/// sizes) — the grace exists so a sustained external flood that keeps every
+/// poll capped cannot suppress failure detection, while a burst that merely
+/// truncated one batch never prematurely times out the input it buffered.
+const TIMEOUT_STALENESS_GRACE: core::time::Duration = core::time::Duration::from_millis(5);
+
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
 /// encryption backend; with none the gossip frame goes out unencrypted, so the
@@ -488,6 +496,11 @@ where
   transmit_batch: usize,
   timer: Option<Pin<Box<R::Sleep>>>,
   timer_deadline: Option<Instant>,
+  /// Anchored the first poll a DUE deadline is held back by a capped inbound
+  /// path; `handle_timeout` force-fires once
+  /// [`TIMEOUT_STALENESS_GRACE`] has elapsed since this anchor, so a
+  /// sustained inbound flood cannot suppress failure detection.
+  timeout_stall_since: Option<Instant>,
   idle_wake: Duration,
   /// No-progress (idle) bound on a bridge's post-Close graceful drain. A
   /// graceful Close has no remaining cancel path, so a non-reading peer would
@@ -581,6 +594,7 @@ where
       transmit_batch,
       timer: None,
       timer_deadline: None,
+      timeout_stall_since: None,
       idle_wake: Duration::from_secs(1),
       close_timeout,
       cidr_policy,
@@ -1190,7 +1204,44 @@ where
   /// snapshot) and whether any surface hit its cap with work left (self-wake).
   // `G: rand::Rng`: the inbound-gossip pass feeds `handle_packet`, which drives
   // the endpoint's gossip RNG.
-  fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool)
+  /// Repeatedly runs the ordered surface pass to a FIXED POINT: a later surface
+  /// can create work for an earlier one (an event answering enqueues a
+  /// transmit; a fed inbound message enqueues an event), and a single ordered
+  /// pass would report false quiescence for it. Each surface stays cap-bounded
+  /// per pass, so a hit cap ends the fixed point (`more == true`, self-wake)
+  /// rather than repeating; on `more == false` no ready machine work remains
+  /// from this poll's input. The third return is whether the INGRESS surface
+  /// specifically hit its cap — parsed gossip not yet fed to the machine —
+  /// which gates the timer below exactly like a capped socket recv.
+  fn drain_surfaces(&mut self, cx: &mut Context<'_>) -> (bool, bool, bool)
+  where
+    G: rand::Rng,
+  {
+    let mut worked = false;
+    let mut ingress_capped = false;
+    loop {
+      let (pass_worked, pass_more, pass_ingress_capped) = self.drain_surfaces_pass(cx);
+      worked |= pass_worked;
+      ingress_capped |= pass_ingress_capped;
+      if pass_more {
+        return (worked, true, ingress_capped);
+      }
+      if !pass_worked {
+        return (worked, false, ingress_capped);
+      }
+    }
+  }
+
+  /// One ordered surface pass — ingress → action → transport → gossip → event —
+  /// each capped surface draining up to the transmit budget. The event surface
+  /// is UNCAPPED (drained to empty) so a surfaced terminal
+  /// (`ExchangeCompleted` / `LeftCluster`) folded by `send_observation` is
+  /// never stranded behind a per-poll cap under a gossip flood. Sound:
+  /// `poll_event` is pump-fed (bounded per poll by the already-capped feeds
+  /// plus a `handle_timeout` burst), `send_observation` is non-blocking
+  /// (overflow + drop), and there is no event→event feedback, so the drain
+  /// terminates.
+  fn drain_surfaces_pass(&mut self, cx: &mut Context<'_>) -> (bool, bool, bool)
   where
     G: rand::Rng,
   {
@@ -1217,7 +1268,8 @@ where
       }
     }
     worked |= ingress > 0;
-    more |= ingress == budget;
+    let ingress_capped = ingress == budget;
+    more |= ingress_capped;
 
     // Stream actions: open dials, half-close, or tear down reliable exchanges.
     // Drained before transport bytes so a fresh Connect installs the bridge
@@ -1271,20 +1323,17 @@ where
     worked |= sent > 0;
     more |= sent == budget;
 
-    // Observation events: retry the overflow first, then drain up to the budget.
+    // Observation events: retry the overflow first, then drain to EMPTY (see
+    // the pass doc for why this surface is uncapped).
     self.flush_obs_overflow();
-    let mut events = 0;
-    while events < budget {
-      let Some(ev) = self.endpoint.poll_event() else {
-        break;
-      };
-      events += 1;
+    let mut events = false;
+    while let Some(ev) = self.endpoint.poll_event() {
+      events = true;
       self.send_observation(ev);
     }
-    worked |= events > 0;
-    more |= events == budget;
+    worked |= events;
 
-    (worked, more)
+    (worked, more, ingress_capped)
   }
 
   /// Retries retained overflow events into the obs channel, stopping at the first
@@ -1508,7 +1557,7 @@ where
           // while there is channel or surface work — drain_surfaces must reach
           // QUIESCENCE before we decide, or a completion (or a second queued event)
           // could be left unfolded.
-          let (_, surf_more) = this.drain_surfaces(cx);
+          let (_, surf_more, _) = this.drain_surfaces(cx);
           if channel_work || surf_more {
             continue;
           }
@@ -1686,9 +1735,8 @@ where
       progress = true;
     }
     more |= recv_gated;
-    if recv_n == this.recv_batch {
-      more = true;
-    }
+    let recv_capped = recv_n == this.recv_batch;
+    more |= recv_capped;
 
     // Accept inbound connections: register each with the machine and bridge it.
     // Aux tasks wake the driver after enqueueing, so try_recv (no waker
@@ -1777,34 +1825,69 @@ where
     if inbound_n > 0 {
       progress = true;
     }
-    if inbound_n == this.recv_batch {
-      more = true;
-    }
+    let inbound_capped = inbound_n == this.recv_batch;
+    more |= inbound_capped;
 
-    // Drain machine surfaces (bounded per surface).
-    let (drained, drain_more) = this.drain_surfaces(cx);
+    // Drain machine surfaces to a fixed point (each surface cap-bounded per
+    // pass; the event surface uncapped so terminals fold before the timer
+    // decision below).
+    let (drained, drain_more, ingress_capped) = this.drain_surfaces(cx);
     progress |= drained;
     more |= drain_more;
 
-    // Timer: fire an overdue deadline inline, else arm + poll the sleep. A fired
-    // deadline may queue transmits/events this pass did not drain.
+    // Timer, gated on INBOUND quiescence. A resolving Ack (or any
+    // deadline-refuting input) that arrived BEFORE a due deadline can still be
+    // buffered behind the per-poll caps — in the kernel socket buffer
+    // (`recv_capped`), the raw ingress buffer (`recv_gated`), the parsed-gossip
+    // surface (`ingress_capped`), or the bridge-inbound channel
+    // (`inbound_capped`). Firing `handle_timeout` past it would time out an
+    // exchange or suspect a live peer prematurely, so a due deadline DEFERS
+    // while any inbound path is capped: the `more` self-wake re-polls and each
+    // capped path drains FIFO, so the pre-deadline backlog clears within a
+    // bounded number of polls. Deferral is itself bounded by a wall-clock
+    // staleness grace — a sustained flood that keeps every poll capped cannot
+    // suppress failure detection past it. Outbound caps (actions, transport,
+    // gossip egress) do NOT defer: outbound work cannot refute a deadline.
+    let inbound_backlog = recv_capped || recv_gated || ingress_capped || inbound_capped;
+    // Sample the clock FRESH for the timeout decision: the drains above take
+    // real time, and a deadline that was in the future at poll entry may have
+    // been crossed during them — evaluating against the stale entry `now`
+    // would route that crossed deadline to the armed-sleep arm below, which
+    // must never fire.
+    let decision_now = Instant::now();
     let target = match this.endpoint.poll_timeout() {
-      Some(d) => d.min(now + this.idle_wake),
-      None => now + this.idle_wake,
+      Some(d) => d.min(decision_now + this.idle_wake),
+      None => decision_now + this.idle_wake,
     };
-    if target <= now {
-      this.endpoint.handle_timeout(now);
-      progress = true;
+    if target <= decision_now {
+      if inbound_backlog {
+        this.timeout_stall_since.get_or_insert(decision_now);
+      }
+      let grace_elapsed = this
+        .timeout_stall_since
+        .is_some_and(|t| decision_now.saturating_duration_since(t) >= TIMEOUT_STALENESS_GRACE);
+      if !inbound_backlog || grace_elapsed {
+        this.endpoint.handle_timeout(decision_now);
+        this.timeout_stall_since = None;
+        progress = true;
+      }
+      // Due (fired or deferred): self-wake either way — a fired deadline may
+      // have queued transmits/events this pass did not drain, and a deferred
+      // one needs the re-poll to drain the backlog toward quiescence.
       more = true;
     } else {
-      this.arm_timer(target, now);
+      this.timeout_stall_since = None;
+      this.arm_timer(target, decision_now);
       if let Some(timer) = this.timer.as_mut()
         && timer.as_mut().poll(cx).is_ready()
       {
-        this.endpoint.handle_timeout(Instant::now());
+        // The sleep elapsed at/just after arming (the deadline crossed between
+        // the fresh sample above and this poll). Do NOT fire here — every
+        // `handle_timeout` goes through the gated due branch, which the next
+        // poll's fresh sample reaches — just clear the consumed sleep and
+        // self-wake.
         this.timer = None;
         this.timer_deadline = None;
-        progress = true;
         more = true;
       }
     }

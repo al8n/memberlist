@@ -85,7 +85,7 @@ use std::{
 
 use memberlist_proto::{
   event::{Reliability, UserPacket},
-  typed::{NodeState, State},
+  typed::{Alive, Node, NodeState, State, Suspect},
 };
 use std::sync::atomic::AtomicBool;
 
@@ -435,6 +435,39 @@ fn poll_once(driver: &mut StreamDriver<SmolStr, TokioRuntime, RawRecords>) -> Po
   let waker = flag_waker();
   let mut cx = Context::from_waker(&waker);
   Pin::new(driver).poll(&mut cx)
+}
+
+/// Stage a suspicion timer on a fresh peer: the machine's next deadline is
+/// its suspicion timeout — a fixed multiple of the probe interval, with no
+/// random stagger — and its fire is OBSERVABLE as the peer turning `Dead`,
+/// so a test can distinguish a deferred timeout from a fired one by member
+/// state rather than by driver bookkeeping alone.
+fn stage_suspicion(
+  endpoint: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+  id: &str,
+  peer_addr: SocketAddr,
+) {
+  let now = Instant::now();
+  endpoint.handle_alive(
+    peer_addr,
+    Alive::new(1, Node::new(SmolStr::new(id), peer_addr)),
+    now,
+  );
+  endpoint.handle_suspect(
+    peer_addr,
+    Suspect::new(1, SmolStr::new(id), SmolStr::new("drv")),
+    now,
+  );
+}
+
+/// The peer's gossip-tracked liveness, straight from the machine (the
+/// wire-format `NodeState` served by `members()` fixes its state field at
+/// insertion and never reflects Suspect / Dead transitions).
+fn peer_state(driver: &StreamDriver<SmolStr, TokioRuntime, RawRecords>, id: &str) -> Option<State> {
+  driver
+    .endpoint
+    .endpoint_ref()
+    .member_liveness(&SmolStr::new(id))
 }
 
 /// Drives a shutting-down driver to `Poll::Ready`, polling it with the calling
@@ -2304,5 +2337,253 @@ async fn dispatch_set_ack_payload_running_replies_ok() {
   assert!(
     matches!(rx.await, Ok(Ok(()))),
     "an in-budget ack payload is stored on a running node"
+  );
+}
+
+/// A DUE deadline must not fire while the gossip recv is capped: an Ack that
+/// arrived before the deadline may still be buffered behind the per-poll
+/// batch, and firing past it would suspect a live peer prematurely. The pump
+/// anchors the deferral instead (and self-wakes to drain), then fires once
+/// the inbound paths are quiescent. Deferral versus firing is read off the
+/// MACHINE — a due suspicion whose fire turns the peer `Dead` — so a
+/// `handle_timeout` call that is silently dropped, or relocated to an arm the
+/// due branch never reaches, fails this test rather than merely re-shuffling
+/// driver bookkeeping.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_defers_while_recv_is_capped_then_fires_on_quiescence() {
+  // Schedulers OFF so the suspicion timer is the ONLY machine deadline.
+  let peer_addr: SocketAddr = "127.0.0.1:39998".parse().unwrap();
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    stage_suspicion(endpoint, "capped-peer", peer_addr);
+  })
+  .await;
+
+  // Let the suspicion deadline fall due while the pump is unpolled — the
+  // machine is passive, so the peer stays Suspect until a poll fires it.
+  let due_at = driver
+    .endpoint
+    .poll_timeout()
+    .expect("the staged suspicion arms a machine deadline");
+  TokioRuntime::sleep(due_at.saturating_duration_since(Instant::now()) + Duration::from_millis(20))
+    .await;
+
+  // Stage a capped recv: more datagrams in the kernel than one batch
+  // (recv_batch == 8). Content is irrelevant — an unparseable datagram still
+  // counts toward the batch.
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  // Let the kernel surface the datagrams to the receiving socket.
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "a due deadline behind a capped recv batch must defer, not fire"
+  );
+  assert_eq!(
+    peer_state(&driver, "capped-peer"),
+    Some(State::Suspect),
+    "the deferred fire must leave the machine untouched: the due suspicion \
+     has not completed while the recv batch is capped"
+  );
+
+  // Draining polls reach quiescence within a bounded number of batches; the
+  // fire on the quiescent poll completes the suspicion and clears the anchor.
+  let mut fired = false;
+  for _ in 0..16 {
+    let _ = poll_once(&mut driver);
+    if peer_state(&driver, "capped-peer") == Some(State::Dead) {
+      fired = true;
+      break;
+    }
+  }
+  assert!(
+    fired,
+    "once the backlog drains, the deferred deadline must fire: the due \
+     suspicion completes and the peer turns Dead"
+  );
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "the fire clears the deferral anchor"
+  );
+}
+
+/// The deferral is bounded: a sustained flood that keeps every poll capped
+/// cannot suppress `handle_timeout` past the staleness grace — the due
+/// deadline force-fires even with the backlog still standing, observable as
+/// the due suspicion completing (the peer turns `Dead`) with the socket
+/// still saturated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_force_fires_past_the_staleness_grace() {
+  let peer_addr: SocketAddr = "127.0.0.1:39997".parse().unwrap();
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    stage_suspicion(endpoint, "flooded-peer", peer_addr);
+  })
+  .await;
+
+  let due_at = driver
+    .endpoint
+    .poll_timeout()
+    .expect("the staged suspicion arms a machine deadline");
+  TokioRuntime::sleep(due_at.saturating_duration_since(Instant::now()) + Duration::from_millis(20))
+    .await;
+
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+
+  // Anchor the deferral with a first capped poll: the due suspicion is held.
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "the flood must anchor a deferral first"
+  );
+  assert_eq!(
+    peer_state(&driver, "flooded-peer"),
+    Some(State::Suspect),
+    "the anchored deferral must hold the due suspicion open"
+  );
+
+  // Keep the socket saturated past the grace, then poll: the due deadline
+  // must force-fire despite the standing backlog.
+  for _ in 0..24 {
+    tx.send_to(b"not-a-gossip-frame", gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(TIMEOUT_STALENESS_GRACE + Duration::from_millis(10)).await;
+  let _ = poll_once(&mut driver);
+  assert_eq!(
+    peer_state(&driver, "flooded-peer"),
+    Some(State::Dead),
+    "a sustained flood must not suppress the deadline past the staleness \
+     grace: the force-fire completes the suspicion"
+  );
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "the force-fire clears the deferral anchor"
+  );
+}
+
+/// The armed-sleep arm is machine-neutral: when the sleep polls Ready, the
+/// pump clears it and self-wakes — it never touches the endpoint. Entering
+/// that arm requires a STABLE future target (a machine deadline below the
+/// idle wake), else `arm_timer` replaces the staged sleep with a fresh one
+/// before it is ever polled; the schedulers supply one, and swapping the
+/// armed sleep for an elapsed one while keeping `timer_deadline` drives the
+/// arm deterministically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_sleep_is_cleared_without_touching_the_machine() {
+  let peer_addr: SocketAddr = "127.0.0.1:39999".parse().unwrap();
+  let (mut driver, _obs_rx, _shared, _bytes) = build_driver_with(64, None, 8, |endpoint| {
+    // A suspicion timer supplies the stable machine deadline the sleep arms
+    // toward, comfortably beyond this test's microsecond-scale polls. (The
+    // periodic schedulers stay OFF — their first tick is randomly staggered
+    // and can land arbitrarily close, which would flake the not-yet-due
+    // branch.)
+    stage_suspicion(endpoint, "suspect-peer", peer_addr);
+  })
+  .await;
+  // Keep the idle wake above the suspicion deadline so the machine deadline
+  // is the arm target — a nearer idle target recomputes fresh every poll
+  // and would replace the staged sleep.
+  driver.idle_wake = Duration::from_secs(600);
+
+  // Quiescent poll arms the sleep toward the machine deadline.
+  let _ = poll_once(&mut driver);
+  let armed = driver.timer_deadline;
+  let machine_deadline = driver.endpoint.poll_timeout();
+  assert_eq!(
+    armed, machine_deadline,
+    "with a machine deadline below the idle wake, the timer arms toward it"
+  );
+  let target = armed.expect("the quiescent poll arms the sleep");
+
+  // Swap in an elapsed sleep, keeping the recorded deadline: the next poll
+  // recomputes the SAME stable target, so `arm_timer` keeps this sleep and
+  // polls it Ready — the exact shape of a deadline crossing between the
+  // fresh clock sample and the timer poll. The wait lets the zero-duration
+  // sleep pass the timer wheel's coarse (millisecond) elapse check while the
+  // suspicion deadline stays comfortably in the future.
+  driver.timer = Some(Box::pin(TokioRuntime::sleep(Duration::ZERO)));
+  TokioRuntime::sleep(Duration::from_millis(20)).await;
+  assert!(
+    Instant::now() < target,
+    "precondition: the machine deadline is still in the future"
+  );
+  let _ = poll_once(&mut driver);
+
+  assert!(
+    driver.timer.is_none() && driver.timer_deadline.is_none(),
+    "the ready sleep is consumed by the armed-sleep arm, not replaced"
+  );
+  assert_eq!(
+    driver.endpoint.poll_timeout(),
+    machine_deadline,
+    "the armed-sleep arm must not fire the machine timer: the deadline is \
+     untouched and fires later through the gated due branch"
+  );
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "clearing a ready sleep must not anchor a deferral"
+  );
+}
+
+/// The inbound-quiescence gate is sound only if the machine timer can fire
+/// nowhere else: every `handle_timeout` must route through the single gated
+/// decision (fresh clock sample, backlog deferral, staleness grace). Pin that
+/// structurally — the pump source carries exactly one call site AND it sits
+/// inside the gated block, so the call can neither gain a sibling nor be
+/// relocated to an arm (the ready-sleep arm in particular) that bypasses the
+/// gate.
+#[test]
+fn the_pump_fires_timeouts_only_inside_the_gated_branch() {
+  let src = include_str!("mod.rs");
+  assert_eq!(
+    src.matches(".handle_timeout(").count(),
+    1,
+    "a second handle_timeout call site can fire a due deadline past capped \
+     inbound backlog holding a deadline-refuting Ack"
+  );
+  let gate = src
+    .find("if !inbound_backlog || grace_elapsed")
+    .expect("the gated due decision exists in the pump");
+  // The gated block holds straight-line statements only, so its first `}` is
+  // its closing brace; the sole call must sit between the condition and it.
+  let gate_close = gate
+    + src[gate..]
+      .find('}')
+      .expect("the gated due decision block closes");
+  let call = src
+    .find(".handle_timeout(")
+    .expect("the single call site exists");
+  assert!(
+    gate < call && call < gate_close,
+    "the sole handle_timeout call must sit inside the gated due decision — \
+     anywhere else can fire past capped inbound backlog"
   );
 }
