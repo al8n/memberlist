@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           tokeit
           mv tokeit.json loc-memberlist.json
-          for c in memberlist-proto memberlist-compio memberlist-reactor memberlist-smoltcp memberlist-embassy memberlist-embedded; do
+          for c in memberlist-proto memberlist-driver memberlist-compio memberlist-reactor memberlist-smoltcp memberlist-embassy memberlist-embedded; do
             ( cd "$c" && tokeit )
             mv "$c/tokeit.json" "loc-$c.json"
           done
@@ -60,6 +60,7 @@ jobs:
             // PATCH, so one request avoids the per-crate rate-limit storm.
             const crates = [
               'memberlist-proto',
+              'memberlist-driver',
               'memberlist-compio',
               'memberlist-reactor',
               'memberlist-smoltcp',
