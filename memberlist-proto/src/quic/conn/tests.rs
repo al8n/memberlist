@@ -27,10 +27,24 @@ fn dial_inserts_then_reuse_returns_same_handle() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   let ch2 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(ch1, ch2, "second call reuses the peer connection");
   assert_eq!(t.handle_for(&peer), Some(ch1));
@@ -43,7 +57,14 @@ fn reap_if_drained_is_false_until_drained_then_removes() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert!(
     !t.reap_if_drained(&mut client, ch),
@@ -98,7 +119,14 @@ fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Synthesize "this connection has reached Established at least once"
   // — the runtime sets this on the same tick the conn transitions out
@@ -120,7 +148,14 @@ fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
 
   // Second dial in the closed-before-drained window: MUST redial.
   let ch_redial = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_ne!(
     ch_redial, ch1,
@@ -188,7 +223,14 @@ fn closed_never_established_does_not_redial() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Do NOT seed `established_at_least_once`: this represents a
   // handshake failure (the conn never reached Established).
@@ -202,7 +244,14 @@ fn closed_never_established_does_not_redial() {
   // Second dial: MUST return the cached `ch1` so the caller's
   // `dial_failed` path fires, not a fresh redial.
   let ch_same = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(
     ch_same, ch1,
@@ -224,7 +273,14 @@ fn established_flag_sticks_via_conn_mut_lazy_tracking() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert!(!t.conns.get(ch.0).unwrap().established_at_least_once);
   // `conn_mut` on a handshaking conn: flag stays `false`. The returned
@@ -291,7 +347,14 @@ fn closed_never_established_cached_does_not_hide_live_accepted_connection() {
   // `established_at_least_once` is left false to represent a
   // handshake failure / closed-before-Established cache.
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(t.handle_for(&peer), Some(ch1));
   assert!(!t.conns.get(ch1.0).unwrap().established_at_least_once);
@@ -335,7 +398,14 @@ fn closed_never_established_cached_does_not_hide_live_accepted_connection() {
   // (5) Subsequent outbound dial returns the NEW canonical: outbound
   // exchanges ride the live accepted connection.
   let ch_after = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(
     ch_after, new_ch,
@@ -383,7 +453,14 @@ fn reap_if_drained_handle_equality_guard_idempotent_when_peers_absent() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Drive the conn through `close` to `Drained`.
   t.get_mut(ch)
@@ -440,7 +517,14 @@ fn get_or_dial_returns_cached_handle_when_peers_points_at_vacated_slab_slot() {
   assert!(t.conns.get(phantom.0).is_none(), "slab slot is vacant");
 
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .expect("get_or_dial returns the cached handle");
   assert_eq!(
     ch, phantom,
@@ -482,7 +566,14 @@ fn conn_entry_observation_accessors_on_fresh_entry() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   let e = t.get_mut(ch).unwrap();
   assert_eq!(e.peer(), peer, "entry reports the dialed peer address");
@@ -516,7 +607,14 @@ fn pending_inbound_from_excludes_local_outbound_dial() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // A freshly-dialed outbound connection is handshaking and never established;
   // it is not entered into the per-source pending index (`pending_indexed` is

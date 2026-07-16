@@ -24,6 +24,25 @@ pub(crate) enum ConnDirection {
   Inbound,
 }
 
+/// Why [`ConnTable::get_or_dial`] could not return a connection handle.
+///
+/// Both variants are terminal for the dial attempt; the caller routes the
+/// failure the same way it routes a bare dial error — retire the reliable
+/// intent through `dial_failed`, or drop a best-effort datagram.
+#[derive(Debug)]
+pub(crate) enum DialError {
+  /// quinn refused to initiate the connection, before any I/O — e.g. CIDs
+  /// exhausted or a malformed remote address.
+  Connect(quinn_proto::ConnectError),
+  /// The global `max_quic_connections` cap is already reached, so NO new
+  /// outbound connection may be created. Fires only on the no-reusable-entry
+  /// branch: reuse of an existing usable pooled connection (or of a cached
+  /// closed handle awaiting its drained-reap) returns before this check, so the
+  /// cap bounds total tracked connections without blocking traffic on an
+  /// already-pooled peer.
+  AtGlobalCap,
+}
+
 pub(crate) struct ConnEntry {
   conn: Connection,
   peer: SocketAddr,
@@ -215,6 +234,17 @@ impl ConnTable {
   /// live); this is by design — `peers[peer]` always points at the live
   /// one for new outbound exchanges, and `reap_if_drained` clears the old
   /// slab slot when its `Drained` state is reached.
+  ///
+  /// **Global connection cap covers outbound dials too.** `max_connections`
+  /// (the coordinator's `max_quic_connections`) is enforced right before a NEW
+  /// outbound `quinn.connect` commits a fresh slab slot — the no-reusable-entry
+  /// branch only. Without it, `max_quic_connections` would bound inbound
+  /// Initials while a large or attacker-influenced membership address set could
+  /// still grow the slab past the cap through reliable dials and datagram
+  /// fallbacks (both reach here). Every early-return reuse path above (a usable
+  /// pooled connection, or a cached closed-never-Established handle) returns
+  /// BEFORE the check, so reusing a slot is never blocked — only a genuinely
+  /// new connection is refused, with [`DialError::AtGlobalCap`].
   pub(crate) fn get_or_dial(
     &mut self,
     quinn: &mut QuinnEndpoint,
@@ -222,7 +252,8 @@ impl ConnTable {
     client: quinn_proto::ClientConfig,
     peer: SocketAddr,
     server_name: &str,
-  ) -> Result<ConnectionHandle, quinn_proto::ConnectError> {
+    max_connections: Option<usize>,
+  ) -> Result<ConnectionHandle, DialError> {
     if let Some(ch) = self.peers.get(&peer).copied() {
       let (reusable, was_established) = match self.conns.get(ch.0) {
         Some(e) => (!e.conn.is_closed(), e.established_at_least_once),
@@ -244,6 +275,14 @@ impl ConnTable {
       }
       self.peers.remove(&peer);
     }
+    // Global connection cap — enforced ONLY here, on the no-reusable-entry
+    // branch that is about to create a fresh slab slot. A reused connection
+    // returned above without reaching this check. `len()` counts every tracked
+    // slab entry (handshaking, established, draining), so this caps the total
+    // outbound + inbound connection population at `max_connections`.
+    if max_connections.is_some_and(|max| self.conns.len() >= max) {
+      return Err(DialError::AtGlobalCap);
+    }
     // `server_name` is the rustls verification identity for the peer's
     // cert — supplied by the driver's SNI provider so the verification
     // name is keyed on the membership address (not a hardcoded constant).
@@ -251,7 +290,9 @@ impl ConnTable {
     // `config.crypto.start_session(version, server_name, ...)`; the
     // rustls-backed `start_session` parses it via `ServerName::try_from`
     // and feeds the result to the configured `ServerCertVerifier`.
-    let (ch, conn) = quinn.connect(now.into_std(), client, peer, server_name)?;
+    let (ch, conn) = quinn
+      .connect(now.into_std(), client, peer, server_name)
+      .map_err(DialError::Connect)?;
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,

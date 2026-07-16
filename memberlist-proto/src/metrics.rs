@@ -23,13 +23,17 @@ pub struct Metrics {
   /// Inbound reliable connections refused at the optional `max_inbound_streams`
   /// ceiling (no bridge built; the driver drops the connection).
   pub inbound_streams_rejected: u64,
-  /// Inbound QUIC connection attempts (unauthenticated Initials) refused
-  /// before any per-connection state was committed, because either the global
-  /// `max_quic_connections` cap or the per-source
-  /// `max_pending_connections_per_source` cap was already reached. The Initial
-  /// is dropped (`quinn_proto::Endpoint::ignore`) and no connection-table entry
-  /// is created — a memory-exhaustion backstop against an Initial flood from
-  /// unauthenticated peers.
+  /// QUIC connections refused at a connection cap before any new
+  /// connection-table entry was committed — a memory-exhaustion backstop.
+  /// Counts both directions:
+  ///
+  /// - Inbound Initials (unauthenticated) dropped because the global
+  ///   `max_quic_connections` cap or the per-source
+  ///   `max_pending_connections_per_source` cap was already reached (the Initial
+  ///   is dropped via `quinn_proto::Endpoint::ignore`, no entry created); and
+  /// - Outbound dials (reliable exchanges and datagram fallbacks) refused
+  ///   because the global `max_quic_connections` cap was already reached, so no
+  ///   new outbound connection was created.
   pub quic_connections_rejected: u64,
   /// Indirect-probe forward requests dropped at the `max_indirect_forwards`
   /// ceiling (a relay-amplification backstop).

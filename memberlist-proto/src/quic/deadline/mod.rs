@@ -6,21 +6,21 @@
 //! O(connections + bridges + dials) minimum per call — corrupted or replayed
 //! traffic would otherwise force that scan per batch. This index keeps the
 //! minimum incrementally: each deadline source registers its next deadline
-//! under a [`TimerKey`], and `earliest` reads the live minimum in amortized
-//! O(1).
+//! under a [`TimerKey`], and `earliest` reads the live minimum in O(log n).
 //!
-//! The shape mirrors quinn-proto's own timer handling — a binary heap keyed by
-//! an instant, with stale entries discarded on pop. A push never rewrites or
-//! removes an existing heap entry, so a key whose deadline changes leaves its
-//! prior entry behind as a tombstone that [`DeadlineIndex::earliest`] discards
-//! when it surfaces at the top. [`DeadlineIndex::current`] is the authority: a
-//! heap entry is live only while it matches the `(deadline, generation)`
-//! `current` records for its key. Each pushed entry is discarded at most once,
-//! so the amortized cost of a pop-then-peek is constant.
+//! **Storage is proportional to the LIVE key count, not the update rate.**
+//! quinn resets a connection's idle deadline on every authenticated packet, so
+//! sustained valid traffic churns `Conn` deadlines. The ordered map is keyed by
+//! `(deadline, generation)`, and [`DeadlineIndex::current`] is a reverse lookup
+//! from a key to the `(deadline, generation)` it currently occupies. `set`
+//! removes a key's prior ordered entry before inserting its new one, so a key
+//! whose deadline moves never leaves a stale entry behind — the space cannot
+//! grow with the number of updates the way a lazy heap of tombstones would.
+//! Every entry in [`DeadlineIndex::by_deadline`] is therefore live, and
+//! `earliest` reads the first ordered key with no discard loop.
 
 use crate::Instant;
-use core::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use quinn_proto::ConnectionHandle;
 
@@ -51,50 +51,29 @@ pub(crate) enum TimerKey {
   ImmediateDue,
 }
 
-/// One heap entry: the `deadline` registered for `key` by the push that stamped
-/// it `generation`. Ordered by `deadline` (min-first once wrapped in
-/// [`Reverse`] at the heap), then by `generation` for a total order.
-/// `generation` is globally unique per push, so no two live entries compare
-/// equal and the `Ord`/`Eq` relation is consistent.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-struct Entry {
-  deadline: Instant,
-  generation: u64,
-  key: TimerKey,
-}
-
-impl Ord for Entry {
-  fn cmp(&self, other: &Self) -> Ordering {
-    self
-      .deadline
-      .cmp(&other.deadline)
-      .then_with(|| self.generation.cmp(&other.generation))
-  }
-}
-
-impl PartialOrd for Entry {
-  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    Some(self.cmp(other))
-  }
-}
-
-/// A min-heap of per-key deadlines with lazy invalidation, backing an
-/// amortized-O(1) `poll_timeout`. See the module docs for the invariant.
+/// An ordered per-key deadline index with no tombstones, backing an
+/// O(log n) `poll_timeout`. See the module docs for the live-storage invariant.
 pub(crate) struct DeadlineIndex {
-  /// All pushed entries, min-deadline first. Contains tombstones (entries whose
-  /// key was re-registered or removed) that `earliest` discards on pop.
-  heap: BinaryHeap<Reverse<Entry>>,
+  /// Every live key's deadline, ordered by `(deadline, generation)` so the
+  /// first entry is the global minimum. `generation` breaks ties into a total
+  /// order and distinguishes a re-registration from the entry it replaced.
+  /// Holds no stale entries: `set` removes a key's prior `(deadline,
+  /// generation)` before inserting the new one, so its length equals the number
+  /// of registered keys.
+  by_deadline: BTreeMap<(Instant, u64), TimerKey>,
   /// The authoritative current deadline for each registered key, and the
-  /// `generation` of the heap entry that carries it. A heap entry is live iff
-  /// `current[entry.key] == (entry.deadline, entry.generation)`.
+  /// `generation` under which it sits in `by_deadline`. The reverse lookup that
+  /// lets `set` find and drop a key's prior ordered entry in O(log n).
   current: HashMap<TimerKey, (Instant, u64)>,
-  /// Monotonic push counter; stamps each pushed entry so a re-registration is
-  /// distinguishable from the tombstone it supersedes.
+  /// Monotonic insertion counter; stamps each inserted entry so a
+  /// re-registration keys a distinct `by_deadline` slot from the one it
+  /// replaces even at an identical deadline instant.
   generation: u64,
-  /// Test-only count of heap entries examined by [`Self::earliest`] since the
-  /// last [`Self::reset_entities_scanned`]. Proves `poll_timeout` examines
-  /// O(1) entries rather than scanning the connection/bridge tables. Never
-  /// compiled into production builds.
+  /// Test-only count of ordered-map entries examined by [`Self::earliest`]
+  /// since the last [`Self::reset_entities_scanned`] — now O(1) per call (a
+  /// single `first_key_value`). Proves `poll_timeout` reads the index rather
+  /// than scanning the connection/bridge tables. Never compiled into
+  /// production builds.
   #[cfg(test)]
   entities_scanned: u64,
 }
@@ -102,7 +81,7 @@ pub(crate) struct DeadlineIndex {
 impl DeadlineIndex {
   pub(crate) fn new() -> Self {
     Self {
-      heap: BinaryHeap::new(),
+      by_deadline: BTreeMap::new(),
       current: HashMap::new(),
       generation: 0,
       #[cfg(test)]
@@ -113,69 +92,57 @@ impl DeadlineIndex {
   /// Register `key`'s next deadline. `Some(d)` records (or replaces) it;
   /// `None` removes it. A no-op when the key already holds exactly `d`, so
   /// re-registering an unchanged deadline neither bumps the generation nor
-  /// grows the heap — repeated polling of a stable table stays flat.
+  /// touches the map — repeated polling of a stable table stays flat. A
+  /// changed deadline drops the key's prior ordered entry before inserting the
+  /// new one, so no tombstone can accumulate under a churning flood.
   pub(crate) fn set(&mut self, key: TimerKey, deadline: Option<Instant>) {
     match deadline {
       Some(d) => {
-        // Skip when unchanged: the existing live entry already carries `d`, so
-        // pushing a duplicate would only add a tombstone to discard later.
-        if let Some((cur, _)) = self.current.get(&key) {
-          if *cur == d {
+        if let Some(&(old_d, old_gen)) = self.current.get(&key) {
+          if old_d == d {
+            // Unchanged: the existing live entry already carries `d`.
             return;
           }
+          // Drop the key's prior ordered entry so storage stays proportional to
+          // the live-key count, never the update count.
+          self.by_deadline.remove(&(old_d, old_gen));
         }
         self.generation += 1;
         let generation = self.generation;
+        self.by_deadline.insert((d, generation), key);
         self.current.insert(key, (d, generation));
-        self.heap.push(Reverse(Entry {
-          deadline: d,
-          generation,
-          key,
-        }));
       }
       None => {
-        // Drop the authority; any prior heap entry becomes a tombstone that
-        // `earliest` discards lazily when it surfaces.
-        self.current.remove(&key);
+        // Remove both the ordered entry and the authority.
+        if let Some((old_d, old_gen)) = self.current.remove(&key) {
+          self.by_deadline.remove(&(old_d, old_gen));
+        }
       }
     }
   }
 
   /// The live minimum deadline across all registered keys, or `None` when none
-  /// is registered. Discards stale heap tops (keys whose authority no longer
-  /// matches, or was removed) before reading the minimum.
+  /// is registered. Every entry is live (`set` leaves no tombstones), so this
+  /// reads the first ordered key directly — no discard loop, no table scan.
   pub(crate) fn earliest(&mut self) -> Option<Instant> {
-    loop {
-      // Copy the top out before any pop: `peek` borrows the heap, and the
-      // fields are all `Copy`.
-      let (deadline, generation, key) = match self.heap.peek() {
-        Some(Reverse(top)) => (top.deadline, top.generation, top.key),
-        None => return None,
-      };
-      #[cfg(test)]
-      {
-        self.entities_scanned += 1;
-      }
-      let live = matches!(
-        self.current.get(&key),
-        Some(&(cur_d, cur_g)) if cur_d == deadline && cur_g == generation
-      );
-      if live {
-        return Some(deadline);
-      }
-      // Tombstone: its key was re-registered or removed. Discard and continue.
-      self.heap.pop();
+    let earliest = self.by_deadline.first_key_value().map(|(&(d, _), _)| d);
+    // Count the single ordered-map examination (only when there is a live top),
+    // matching the old lazy-heap accounting for the O(1) proof.
+    #[cfg(test)]
+    if earliest.is_some() {
+      self.entities_scanned += 1;
     }
+    earliest
   }
 
-  /// Test-only heap-examination count since the last reset. See
+  /// Test-only ordered-map-examination count since the last reset. See
   /// [`Self::entities_scanned`].
   #[cfg(test)]
   pub(crate) fn entities_scanned(&self) -> u64 {
     self.entities_scanned
   }
 
-  /// Zero the test-only heap-examination count.
+  /// Zero the test-only ordered-map-examination count.
   #[cfg(test)]
   pub(crate) fn reset_entities_scanned(&mut self) {
     self.entities_scanned = 0;
@@ -186,5 +153,24 @@ impl DeadlineIndex {
   #[cfg(test)]
   pub(crate) fn live_key_count(&self) -> usize {
     self.current.len()
+  }
+
+  /// Test-only count of entries physically stored in the ordered index. Equal
+  /// to [`Self::live_key_count`] by the no-tombstone invariant; the space-bound
+  /// test asserts it stays == live keys under a churn of updates rather than
+  /// growing with the number of updates (which the old lazy-heap-of-tombstones
+  /// design did).
+  #[cfg(test)]
+  pub(crate) fn entry_count(&self) -> usize {
+    self.by_deadline.len()
+  }
+
+  /// Test-only: whether `key` currently holds a registered deadline. Lets a
+  /// regression test assert a connection-mutating datagram path registered the
+  /// affected `Conn`/`Bridge`/`Dial` key in the same pass rather than leaving
+  /// it to an unrelated later tick.
+  #[cfg(test)]
+  pub(crate) fn contains_key(&self, key: TimerKey) -> bool {
+    self.current.contains_key(&key)
   }
 }

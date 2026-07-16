@@ -510,6 +510,7 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
       a.cfg.client().clone(),
       c_addr,
       "localhost",
+      None,
     )
     .expect("fresh dial after reap succeeds");
   assert_eq!(
@@ -5100,11 +5101,13 @@ fn closed_to_drained_stateless_reset_reaps() {
   );
 }
 
-/// The per-connection bridge index [`QuicEndpoint::bridges_by_conn`] must equal
-/// the brute-force `bridges` filtered by owning connection at every step — the
-/// guard that a bridge mint or reap site missed its index maintenance. Drives a
-/// real A<->B push/pull (outbound + inbound bridges minted and reaped) plus a
-/// connection teardown, cross-checking after every servicing operation.
+/// The three incremental bridge indexes — [`QuicEndpoint::bridges_by_conn`],
+/// [`QuicEndpoint::bridge_by_conn_sid`], and
+/// [`QuicEndpoint::inbound_bridge_count`] — must each equal their brute-force
+/// fold over `bridges` at every step, the guard that a bridge mint or reap site
+/// missed its index maintenance. Drives a real A<->B push/pull (outbound +
+/// inbound bridges minted and reaped) plus a connection teardown, cross-checking
+/// after every servicing operation.
 #[test]
 fn bridges_by_conn_index_matches_bruteforce() {
   let a_addr: SocketAddr = "127.0.0.1:7930".parse().unwrap();
@@ -5135,6 +5138,24 @@ fn bridges_by_conn_index_matches_bruteforce() {
     assert_eq!(
       index, brute,
       "bridges_by_conn diverged from the brute-force filter after: {label}"
+    );
+    // bridge_by_conn_sid: the finer-grained (ch, sid) -> id reverse index.
+    let mut brute_sid: std::collections::HashMap<
+      (quinn_proto::ConnectionHandle, quinn_proto::StreamId),
+      StreamId,
+    > = std::collections::HashMap::new();
+    for (id, br) in ep.bridges.iter() {
+      brute_sid.insert((br.ch(), br.sid()), *id);
+    }
+    assert_eq!(
+      ep.bridge_by_conn_sid, brute_sid,
+      "bridge_by_conn_sid diverged from the brute-force (ch, sid) -> id map after: {label}"
+    );
+    // inbound_bridge_count: live bridges absent from pending_outbound_kinds.
+    assert_eq!(
+      ep.inbound_bridge_count(),
+      ep.inbound_bridge_count_recount(),
+      "inbound_bridge_count diverged from the brute-force filter after: {label}"
     );
   };
 
@@ -5310,8 +5331,16 @@ fn cross_connection_dial_mint_flushes_first_bytes_same_pass() {
 /// Assert the incremental [`super::DeadlineIndex`] behind
 /// [`QuicEndpoint::poll_timeout`] returns exactly what a brute-force fold of the
 /// same sources ([`QuicEndpoint::recompute_earliest_bruteforce`]) would — the
-/// guard that catches a missed `set` at any deadline-mutating site.
+/// guard that catches a missed `set` at any deadline-mutating site. Also
+/// cross-checks the incremental `unattempted_dial_count` against its brute-force
+/// recount, so a drifting counter at any `dial_pending` mutation site (which
+/// feeds the immediate-due half of the same fold) is caught here too.
 fn assert_deadline_index_matches(ep: &mut QuicEndpoint<SmolStr>, label: &str) {
+  assert_eq!(
+    ep.unattempted_dial_count(),
+    ep.unattempted_dial_recount(),
+    "unattempted_dial_count diverged from the brute-force recount after: {label}"
+  );
   let want = ep.recompute_earliest_bruteforce();
   let got = ep.poll_timeout();
   assert_eq!(
@@ -5480,8 +5509,7 @@ fn poll_timeout_scans_o1_regardless_of_connection_count() {
     "expected the server to pool most client connections; got {conn_count}"
   );
 
-  // Settle the index (discard any tombstones), then measure one poll in
-  // isolation.
+  // Settle the index, then measure one poll in isolation.
   let _ = s.poll_timeout();
   s.deadline_index.reset_entities_scanned();
   let _ = s.poll_timeout();
@@ -5495,5 +5523,334 @@ fn poll_timeout_scans_o1_regardless_of_connection_count() {
     scanned <= 4,
     "poll_timeout must examine O(1) heap entries, not scale with the \
      {conn_count} pooled connections; examined {scanned}"
+  );
+}
+
+/// A connection-level loss must reap only ITS connection's bridges, via the
+/// per-connection index, never a scan of the whole bridge table. B holds live
+/// bridges on two connections; a peer `CONNECTION_CLOSE` arriving on one of them
+/// (the datagram path) reaps that connection's bridges — the `bridge_scan_visits`
+/// counter stays bounded by that connection's bridge count, well under the total.
+///
+/// Mutation-verify: restore the global `self.bridges.iter().filter(ch)` scan (and
+/// count each examined entry) — the reap then examines every bridge in the table,
+/// so `bridge_scan_visits` climbs to the total and the `< total` assertion fails.
+#[test]
+fn connection_lost_reap_scans_only_its_own_connections_bridges() {
+  let b_addr: SocketAddr = "127.0.0.1:7690".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7691".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7692".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut c = make_endpoint("c", c_addr, now);
+
+  // Establish A -> B and C -> B (each dials B; B pools one inbound connection to
+  // each).
+  for (caddr, peer) in [(a_addr, &mut a), (c_addr, &mut c)] {
+    let _ = peer.start_push_pull(b_addr, PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = peer.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(caddr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == caddr {
+          peer.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      peer.handle_timeout(now);
+      b.handle_timeout(now);
+      if b.live_connections_to(caddr) >= 1 && !moved {
+        break;
+      }
+    }
+    assert!(
+      b.live_connections_to(caddr) >= 1,
+      "test precondition: B must pool a connection to {caddr}"
+    );
+  }
+
+  // Open FEW live outbound bridges on B's connection to A (the loss target) and
+  // MANY on B's connection to C, so the whole bridge table is much larger than
+  // A's connection's share. The peers are never ferried again, so every bridge
+  // stays live (waiting on a response) until the loss.
+  for _ in 0..2 {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  for _ in 0..6 {
+    let _ = b.start_push_pull(c_addr, PushPullKind::Refresh, now);
+  }
+  while b.poll_transmit().is_some() {}
+
+  let ch_x = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let x_bridges = b.bridges.values().filter(|br| br.ch() == ch_x).count();
+  let total_before = b.live_bridge_count();
+  assert!(
+    x_bridges >= 1,
+    "test precondition: the loss-target connection must hold at least one bridge"
+  );
+  assert!(
+    total_before > x_bridges,
+    "test precondition: the table ({total_before}) must be larger than the target \
+       connection's share ({x_bridges}) so the O(ch) vs O(total) claim is non-vacuous"
+  );
+
+  // A closes its connection to B; ferry the CONNECTION_CLOSE datagram to B. It
+  // arrives on the datagram path, so `service_connection` reaps A's connection's
+  // bridges in that pass via the per-connection index.
+  let ch_a2b = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a2b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  a.flush_outbound_transmits(now);
+  let close_dg = drain_first_datagram_to(&mut a, b_addr);
+
+  b.counters.bridge_scan_visits = 0;
+  b.handle_udp(a_addr, &close_dg, now);
+
+  let visits = b.counters.bridge_scan_visits;
+  assert!(
+    visits >= x_bridges as u64,
+    "the lost connection's {x_bridges} bridges must have been reaped (visits {visits})"
+  );
+  assert!(
+    visits < total_before as u64,
+    "the ConnectionLost reap must examine only the lost connection's bridges \
+       (O(ch)), not scan the whole {total_before}-bridge table; examined {visits}"
+  );
+}
+
+/// `poll_timeout` must answer "is any dial unattempted?" from the O(1)
+/// `unattempted_dial_count`, never by scanning `dial_pending`. With many
+/// already-attempted dials parked, repeated `poll_timeout` calls examine zero
+/// dial entries.
+///
+/// Mutation-verify: revert `refresh_immediate_due` to
+/// `dial_pending.iter().any(|d| !d.attempted)` (counting each visited entry) —
+/// the examined count then scales with the parked-dial count times the poll
+/// count and the `== 0` assertion fails.
+#[test]
+fn poll_timeout_does_not_scan_dial_pending() {
+  let n_addr: SocketAddr = "127.0.0.1:7695".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  // Anchor `last_now` (and run one empty tick) so the immediate-due term is
+  // well-defined.
+  n.handle_timeout(now);
+
+  // Park MANY already-attempted dials directly in `dial_pending` — the steady
+  // state a flooded dial queue reaches after its first service pass. Attempted
+  // entries do not contribute to `unattempted_dial_count`, so it stays 0.
+  let parked = 4096usize;
+  for i in 0..parked {
+    let peer: SocketAddr = format!("127.0.0.2:{}", 1000 + (i % 60000)).parse().unwrap();
+    n.dial_pending.push_back(super::PendingDial {
+      id: StreamId::from_raw(i as u64),
+      peer,
+      deadline: now + Duration::from_secs(30),
+      attempted: true,
+    });
+  }
+  assert_eq!(n.unattempted_dial_count(), 0);
+  assert_eq!(
+    n.unattempted_dial_recount(),
+    0,
+    "all parked dials are attempted, so the brute-force recount is 0"
+  );
+
+  // The O(1) path reads the counter and never iterates the parked dials.
+  n.counters.dial_pending_scan_visits = 0;
+  for _ in 0..16 {
+    let _ = n.poll_timeout();
+  }
+  assert_eq!(
+    n.counters.dial_pending_scan_visits, 0,
+    "poll_timeout must read unattempted_dial_count, not scan the {parked} parked \
+       dials; reverting refresh_immediate_due to a dial_pending scan makes this climb"
+  );
+
+  // Sanity: an unattempted dial DOES flip the immediate-due term on — still with
+  // no scan.
+  n.dial_pending.push_back(super::PendingDial {
+    id: StreamId::from_raw(parked as u64),
+    peer: "127.0.0.2:9999".parse().unwrap(),
+    deadline: now + Duration::from_secs(30),
+    attempted: false,
+  });
+  n.unattempted_dial_count += 1;
+  assert_eq!(n.unattempted_dial_count(), n.unattempted_dial_recount());
+  n.counters.dial_pending_scan_visits = 0;
+  let due = n.poll_timeout();
+  assert_eq!(
+    due,
+    Some(now),
+    "an unattempted dial forces an immediate-due wake at last_now"
+  );
+  assert_eq!(
+    n.counters.dial_pending_scan_visits, 0,
+    "reading the immediate-due term must still not scan dial_pending"
+  );
+}
+
+/// The global `max_quic_connections` cap must bound OUTBOUND dials too — both
+/// reliable dials and the datagram-fallback dial route through `get_or_dial`, so
+/// neither may grow the connection table past the cap.
+///
+/// Mutation-verify: remove the cap check on the new-connection branch of
+/// `get_or_dial` — the outbound dials then create a fresh connection each and the
+/// `<= cap` assertion fails.
+#[test]
+fn outbound_dials_cannot_exceed_global_connection_cap() {
+  let s_addr: SocketAddr = "127.0.0.1:7699".parse().unwrap();
+  let now = Instant::now();
+  let cap = 3usize;
+  let cfg = EndpointOptions::new(SmolStr::new("s"), s_addr);
+  let qc = test_config().with_max_quic_connections(Some(cap));
+  let mut s = make_endpoint_full(cfg, qc, s_addr, now);
+
+  // Fire cap + surplus reliable dials to DISTINCT cold peers (none answer, so
+  // each created connection stays handshaking and holds its slab slot).
+  let surplus = 3usize;
+  for i in 0..(cap + surplus) {
+    let peer: SocketAddr = format!("127.0.0.3:{}", 4000 + i).parse().unwrap();
+    let _ = s.start_push_pull(peer, PushPullKind::Join, now);
+    assert!(
+      s.conns.iter_handles().len() <= cap,
+      "outbound reliable dials must never push the table past the cap {cap}; got {} \
+         after {} dials",
+      s.conns.iter_handles().len(),
+      i + 1
+    );
+  }
+  assert_eq!(
+    s.conns.iter_handles().len(),
+    cap,
+    "the first {cap} distinct-peer dials should have filled the table exactly"
+  );
+
+  // A datagram-fallback dial to yet another cold peer is refused at the cap
+  // (best-effort NotReady) and creates no connection.
+  let dg_peer: SocketAddr = "127.0.0.3:4100".parse().unwrap();
+  let status = s.queue_unreliable_datagram(dg_peer, Bytes::from_static(b"gossip"), now);
+  assert_eq!(
+    status,
+    super::DatagramSendStatus::NotReady,
+    "a datagram-fallback dial at the cap must report NotReady"
+  );
+  assert_eq!(
+    s.live_connections_to(dg_peer),
+    0,
+    "the refused fallback dial must create no connection"
+  );
+  assert!(
+    s.conns.iter_handles().len() <= cap,
+    "the datagram-fallback dial must not exceed the cap either"
+  );
+
+  // Every dial refused at the cap (the reliable surplus + the fallback) is
+  // counted against the connection-cap metric.
+  let rejected = s.metrics().quic_connections_rejected;
+  assert!(
+    rejected >= (surplus + 1) as u64,
+    "each dial refused at the cap must be counted (>= {} expected, got {rejected})",
+    surplus + 1
+  );
+}
+
+/// A cold dial (to a peer with NO established connection) that `service_dials`
+/// attempts because a DIFFERENT connection just established must flush its
+/// Initial AND register its deadline key in that same `handle_udp` pass — even
+/// though it mints no bridge (its `open(Bi)` returns `None`, still handshaking).
+///
+/// N holds a dial to a cold peer C parked in its inner endpoint queue and is
+/// meanwhile completing a server-side handshake with A. The inbound datagram that
+/// establishes N's connection to A runs `service_connection`'s establishment
+/// branch → `service_dials`, which cold-dials C (a TOUCHED but bridge-less
+/// connection). C's Initial must appear in N's outbound queue that same pass.
+///
+/// Mutation-verify: revert step (c) to collect only minted-bridge connections —
+/// C mints no bridge, so its Initial is never flushed this pass and
+/// `flushed_to_c` stays false.
+#[test]
+fn cold_dial_touched_by_establishment_flushes_initial_same_pass() {
+  let n_addr: SocketAddr = "127.0.0.1:7710".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7711".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7712".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+  // C is never instantiated — N only ever cold-dials its address.
+
+  // Park a dial to the COLD peer C in N's INNER endpoint queue, so it is NOT
+  // serviced now. C has no established connection, so when the dial is finally
+  // attempted it CREATES a fresh handshaking connection whose `open(Bi)` returns
+  // `None` — no bridge minted, the Finding-5 touched-but-bridgeless case.
+  let _ = n
+    .endpoint_mut()
+    .start_push_pull(c_addr, PushPullKind::Join, now);
+
+  // Drive A's server-side handshake to N one inbound datagram at a time, WITHOUT
+  // n.handle_timeout (a global tick would service the parked C dial early). The
+  // datagram that establishes N's connection to A runs step (c) -> service_dials,
+  // which cold-dials C and must flush C's Initial that same pass.
+  let _ = a.start_push_pull(n_addr, PushPullKind::Join, now);
+  let mut flushed_to_c = false;
+  'outer: for _ in 0..400 {
+    let mut a_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == n_addr {
+        a_out.push(bytes.to_vec());
+      }
+    }
+    for dg in a_out {
+      n.handle_udp(a_addr, &dg, now);
+      let mut n_out: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
+      while let Some((to, bytes)) = n.poll_transmit() {
+        n_out.push((to, bytes.to_vec()));
+      }
+      if n_out.iter().any(|(to, _)| *to == c_addr) {
+        flushed_to_c = true;
+        // C's connection must also have its deadline key registered THIS pass —
+        // a cold-dial connection is not indexed by `get_or_dial`; only the
+        // touched-conns flush registers it.
+        let ch_c = n
+          .conns
+          .handle_for(&c_addr)
+          .expect("the cold dial created N's connection to C");
+        assert!(
+          n.deadline_index
+            .contains_key(super::deadline::TimerKey::Conn(ch_c)),
+          "the cold-dialed connection's deadline key must be registered the same \
+             pass its Initial is flushed"
+        );
+        break 'outer;
+      }
+      for (to, bytes) in n_out {
+        if to == a_addr {
+          a.handle_udp(n_addr, &bytes, now);
+        }
+      }
+    }
+    a.handle_timeout(now);
+  }
+
+  assert!(
+    flushed_to_c,
+    "the cold dial to C (no bridge minted) must flush its Initial to C within the \
+       single handle_udp that established N's connection to A — a touched-but-\
+       bridgeless connection must not stall until the next global tick"
   );
 }

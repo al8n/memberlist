@@ -31,7 +31,9 @@ use rand::{Rng, rngs::SmallRng};
 use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
-use quinn_proto::{ConnectionHandle, DatagramEvent, Dir, Endpoint as QuinnEndpoint};
+use quinn_proto::{
+  ConnectionHandle, DatagramEvent, Dir, Endpoint as QuinnEndpoint, StreamId as QuicSid,
+};
 use smallvec_wrapper::{MediumVec, SmallVec};
 
 use crate::{
@@ -161,6 +163,28 @@ struct PendingDial {
   attempted: bool,
 }
 
+/// What one [`QuicEndpoint::service_dials`] pass produced, for the per-datagram
+/// caller to flush and re-index its side effects in the same pass.
+///
+/// A dial does more than mint bridges: it can create a fresh connection whose
+/// `open(Bi)` returns `None` (a cold dial still handshaking, or credit
+/// exhausted), or open-and-reset a stream when a `dial_succeeded` intent was
+/// invalidated — both mutate a connection (Initial / reset bytes, a rearmed
+/// timer) WITHOUT minting a bridge. `touched_conns` lets the caller flush those
+/// connections' bytes and refresh their deadline keys the same pass rather than
+/// leaving them to an unrelated later tick. The global tick ignores this return
+/// (its own `collect_transmits` folds every connection).
+struct ServicedDials {
+  /// Machine [`StreamId`]s of the outbound bridges MINTED this pass (empty when
+  /// none opened). The caller pumps exactly these so each freshly-opened
+  /// bridge's first request bytes reach its quinn send stream.
+  minted_bridges: SmallVec<StreamId>,
+  /// Every distinct connection this pass created or mutated (whether or not it
+  /// minted a bridge on it). The caller collects each one's owed transmits and
+  /// refreshes its deadline key.
+  touched_conns: SmallVec<ConnectionHandle>,
+}
+
 /// Coordinator: `memberlist::Endpoint` (unreliable + membership) composed with
 /// `quinn_proto::Endpoint` (reliable). Pure Sans-I/O — inject `now`.
 ///
@@ -217,6 +241,26 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// brute-force `bridges` filtered by `Bridge::ch`; a `#[cfg(test)]` cross-check
   /// asserts that equality after every operation.
   bridges_by_conn: HashMap<ConnectionHandle, SmallVec<StreamId>>,
+  /// Reverse index from a bridge's `(owning ConnectionHandle, quinn StreamId)`
+  /// to its machine [`StreamId`] — the finer-grained twin of
+  /// [`Self::bridges_by_conn`]. quinn-proto's per-connection `poll()` yields
+  /// `StreamEvent::Finished`/`Stopped` keyed by the quinn `StreamId`, and quinn
+  /// sids are per-connection (two pooled peers both hold sid `0`), so routing
+  /// needs the compound `(ch, sid)` key. This lets the per-connection servicing
+  /// path resolve the owning bridge in O(1) instead of scanning all bridges.
+  /// Kept in lockstep with `bridges` at every mint and reap; a `#[cfg(test)]`
+  /// cross-check asserts it equals the brute-force `(Bridge::ch, Bridge::sid) ->
+  /// id` map after every operation.
+  bridge_by_conn_sid: HashMap<(ConnectionHandle, QuicSid), StreamId>,
+  /// Incremental count of live INBOUND (server-accepted) bridges — those absent
+  /// from [`Self::pending_outbound_kinds`], which is the coordinator's
+  /// definition of inbound. Bumped when the `accept(Dir::Bi)` loop mints an
+  /// inbound bridge, decremented when any inbound bridge is reaped, so the
+  /// cross-connection inbound-stream admission gate reads the population in O(1)
+  /// instead of filtering the whole bridge table on every peer-driven
+  /// `StreamEvent::Opened`. A `#[cfg(test)]` cross-check asserts it equals that
+  /// brute-force filter after every operation.
+  inbound_bridge_count: usize,
   /// Tags each outbound bridge's [`StreamId`] with the originating
   /// [`ExchangeKind`] so the bridge-reap path can carry that kind on
   /// the uniform [`Event::ExchangeCompleted`] terminal event. Mirrors
@@ -273,6 +317,14 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// in [`Self::poll_timeout`] as an immediate-due wake — see
   /// [`PendingDial`].
   dial_pending: VecDeque<PendingDial>,
+  /// Incremental count of entries in [`Self::dial_pending`] whose `attempted`
+  /// bit is `false`. Maintained at every `dial_pending` mutation (enqueue,
+  /// `mem::take` drain, requeue) so [`Self::refresh_immediate_due`] answers "is
+  /// any dial still unattempted?" in O(1) instead of scanning `dial_pending` on
+  /// every `poll_timeout` — which a driver re-polls per inbound receive. A
+  /// `#[cfg(test)]` cross-check asserts it equals the brute-force filter after
+  /// every operation.
+  unattempted_dial_count: usize,
   /// Most recent `now: Instant` injected by `handle_udp` / `handle_timeout` /
   /// any high-level `start_*` wrapper. Used by [`Self::poll_timeout`] as the
   /// known-past anchor for the immediate-due wake of an unattempted
@@ -443,6 +495,29 @@ struct TestCounters {
   /// per-source lookup unconditionally) makes it advance and that test fails.
   /// Never compiled into production builds.
   quic_pending_inbound_checks: u64,
+  /// Test-only count of `self.bridges` entries EXAMINED while routing a
+  /// per-connection stream event (`StreamEvent::Finished`/`Stopped`) or reaping
+  /// a lost connection's bridges inside [`QuicEndpoint::service_one_conn`].
+  /// After the incremental-index redesign these operations resolve the owning
+  /// bridge via [`QuicEndpoint::bridge_by_conn_sid`] (O(1)) or iterate only the
+  /// connection's own entries via [`QuicEndpoint::bridges_by_conn`]
+  /// (O(that connection's bridges)), so the per-datagram delta does not scale
+  /// with the total bridge population. The visit-count regression test resets
+  /// this before triggering one such event and asserts the delta stays bounded
+  /// by the addressed connection's bridge count; restoring a global
+  /// `self.bridges` scan makes it climb to the total and the test fails. Never
+  /// compiled into production builds.
+  bridge_scan_visits: u64,
+  /// Test-only negative-control counter of `dial_pending` entries EXAMINED by
+  /// [`QuicEndpoint::refresh_immediate_due`] (the `poll_timeout` hot path). The
+  /// shipped O(1) path reads [`QuicEndpoint::unattempted_dial_count`] and never
+  /// iterates `dial_pending`, so this stays `0` no matter how many dials are
+  /// parked; the Finding-3 regression test asserts that across repeated
+  /// `poll_timeout` calls. Reverting `refresh_immediate_due` to the
+  /// `dial_pending.iter().any(..)` scan (counting each visited entry) makes it
+  /// scale with the parked-dial count and the test fails. Never compiled into
+  /// production builds.
+  dial_pending_scan_visits: u64,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -491,12 +566,15 @@ impl<I, R> QuicEndpoint<I, R> {
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       bridges_by_conn: HashMap::new(),
+      bridge_by_conn_sid: HashMap::new(),
+      inbound_bridge_count: 0,
       pending_outbound_kinds: HashMap::new(),
       pending_outbound_peers: HashMap::new(),
       out: VecDeque::new(),
       mem_ingress: VecDeque::new(),
       mem_ingress_per_peer: HashMap::new(),
       dial_pending: VecDeque::new(),
+      unattempted_dial_count: 0,
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
@@ -1111,6 +1189,9 @@ impl<I, R> QuicEndpoint<I, R> {
           deadline,
           attempted: false,
         });
+        // A freshly-deposited intent is unattempted; bump the incremental count
+        // `refresh_immediate_due` reads for its immediate-due wake.
+        self.unattempted_dial_count += 1;
         // Register the intent's own deadline; the unattempted immediate-due
         // half is folded live by `refresh_immediate_due`.
         self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
@@ -1140,6 +1221,9 @@ impl<I, R> QuicEndpoint<I, R> {
             deadline,
             attempted: false,
           });
+          // A freshly-sieved intent is unattempted; bump the incremental count
+          // `refresh_immediate_due` reads for its immediate-due wake.
+          self.unattempted_dial_count += 1;
           // Register the intent's own deadline; the unattempted immediate-due
           // half is folded live by `refresh_immediate_due`.
           self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
@@ -1224,11 +1308,12 @@ impl<I, R> QuicEndpoint<I, R> {
 
   /// Recompute the immediate-due anchor key from small state: `Some(last_now)`
   /// when a freshly-sieved dial is still unattempted OR any connection holds a
-  /// deferred `ConnectionEvent` backlog, else absent. Scans only the few
-  /// pending dials and reads the O(1) `conns_with_pending_events` flag — never
-  /// the connection table — so it stays cheap on the `poll_timeout` hot path.
+  /// deferred `ConnectionEvent` backlog, else absent. Reads the O(1)
+  /// `unattempted_dial_count` and `conns_with_pending_events` flags — never
+  /// scans `dial_pending` or the connection table — so it stays cheap on the
+  /// `poll_timeout` hot path a driver re-polls per inbound receive.
   fn refresh_immediate_due(&mut self) {
-    let has_unattempted = self.dial_pending.iter().any(|d| !d.attempted);
+    let has_unattempted = self.unattempted_dial_count > 0;
     let has_pending_conn_events = !self.conns_with_pending_events.is_empty();
     let anchor = if has_unattempted || has_pending_conn_events {
       // `last_now` is `None` only before the first `handle_*` / `start_*`; the
@@ -1253,6 +1338,30 @@ impl<I, R> QuicEndpoint<I, R> {
       .and_then(|e| e.conn_mut().poll_timeout())
       .map(crate::Instant::from_std);
     self.deadline_index.set(TimerKey::Conn(ch), deadline);
+  }
+
+  /// Drop every incremental index entry a reaped bridge held: its deadline-index
+  /// [`TimerKey::Bridge`] key, its `(ch, sid)` reverse lookup in
+  /// [`Self::bridge_by_conn_sid`], its membership in the per-connection
+  /// [`Self::bridges_by_conn`], and — when it was an inbound (accepted) bridge —
+  /// one unit of [`Self::inbound_bridge_count`].
+  ///
+  /// MUST run BEFORE [`Self::emit_exchange_completed`] for the same `id`.
+  /// Inbound vs outbound is read off [`Self::pending_outbound_kinds`], which
+  /// `emit_exchange_completed` drains for an outbound bridge; an inbound
+  /// (accepted) bridge never enters that map, so `!contains_key` is the inbound
+  /// predicate — the same definition the mint-time increment uses.
+  fn deindex_reaped_bridge(&mut self, id: StreamId, ch: ConnectionHandle, sid: QuicSid) {
+    self.deadline_index.set(TimerKey::Bridge(id), None);
+    index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+    self.bridge_by_conn_sid.remove(&(ch, sid));
+    if !self.pending_outbound_kinds.contains_key(&id) {
+      debug_assert!(
+        self.inbound_bridge_count > 0,
+        "inbound_bridge_count underflow reaping inbound bridge {id:?}"
+      );
+      self.inbound_bridge_count = self.inbound_bridge_count.saturating_sub(1);
+    }
   }
 
   /// Brute-force earliest deadline — a byte-for-byte fold of the same sources
@@ -1293,6 +1402,42 @@ impl<I, R> QuicEndpoint<I, R> {
       }
     }
     best
+  }
+
+  /// Test-only: the incremental live-inbound-bridge count.
+  #[cfg(test)]
+  fn inbound_bridge_count(&self) -> usize {
+    self.inbound_bridge_count
+  }
+
+  /// Test-only brute-force recount of live INBOUND bridges — the bridges absent
+  /// from `pending_outbound_kinds`, read straight from `self.bridges`. The
+  /// invariant is `inbound_bridge_count == this recount` at all times; a missed
+  /// increment/decrement makes them diverge, so the maintenance test asserts
+  /// their equality after every mint / reap.
+  #[cfg(test)]
+  fn inbound_bridge_count_recount(&self) -> usize {
+    self
+      .bridges
+      .keys()
+      .filter(|id| !self.pending_outbound_kinds.contains_key(id))
+      .count()
+  }
+
+  /// Test-only: the incremental unattempted-pending-dial count.
+  #[cfg(test)]
+  fn unattempted_dial_count(&self) -> usize {
+    self.unattempted_dial_count
+  }
+
+  /// Test-only brute-force recount of unattempted pending dials, read straight
+  /// from `dial_pending`. The invariant is `unattempted_dial_count == this
+  /// recount` at all times; an off-by-one at any `dial_pending` mutation site
+  /// silently drops or forces an immediate-due wake, so the maintenance test
+  /// asserts their equality after every operation.
+  #[cfg(test)]
+  fn unattempted_dial_recount(&self) -> usize {
+    self.dial_pending.iter().filter(|d| !d.attempted).count()
   }
 
   /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
@@ -1644,6 +1789,9 @@ impl<I, R> QuicEndpoint<I, R> {
             deadline,
             attempted: false,
           });
+          // Keep the unattempted count exact even mid-sieve; `service_dials`
+          // resets it to 0 at its `mem::take` immediately after this call.
+          self.unattempted_dial_count += 1;
         }
         other => others.push(other),
       }
@@ -1758,10 +1906,19 @@ impl<I, R> QuicEndpoint<I, R> {
       self.cfg.client().clone(),
       peer,
       &sni_arc,
+      self.cfg.max_quic_connections(),
     ) {
       Ok(ch) => ch,
+      // The datagram-fallback dial hit the global connection cap: this new
+      // peer gets no QUIC connection. Count it against the same connection-cap
+      // metric the inbound path uses and drop the datagram (best-effort; the
+      // driver falls back to plain UDP so gossip is not starved).
+      Err(conn::DialError::AtGlobalCap) => {
+        self.ep.metrics_mut().quic_connections_rejected += 1;
+        return DatagramSendStatus::NotReady;
+      }
       // A dial that cannot even be initiated (ConnectError) — best effort.
-      Err(_) => return DatagramSendStatus::NotReady,
+      Err(conn::DialError::Connect(_)) => return DatagramSendStatus::NotReady,
     };
     // Compute the outcome, then unconditionally refresh the connection's
     // deadline key below: `get_or_dial` may have created a fresh connection and
@@ -1955,17 +2112,23 @@ where
     self.ep.send_user_packets(to, payloads)
   }
 
-  /// Attempt every parked dial and return the machine [`StreamId`]s of the
-  /// outbound bridges it MINTED this call (empty when none opened). Each bridge is
-  /// minted on the DIALED peer's pooled connection via `get_or_dial`, which may be
-  /// a connection OTHER than any one the caller is servicing — so the datagram
-  /// path uses the returned set to pump and flush exactly those bridges, wherever
-  /// they landed, without an O(all bridges) scan. Only the `dial_succeeded`
-  /// success path mints (and pushes an id); every requeue / expiry / failure path
-  /// mints nothing. The global tick ignores the return (its step 5.5 pumps all
-  /// bridges regardless).
-  fn service_dials(&mut self, now: Instant) -> SmallVec<StreamId> {
+  /// Attempt every parked dial and report both the outbound bridges it MINTED
+  /// and every connection it created or mutated this call — see
+  /// [`ServicedDials`].
+  ///
+  /// A minted bridge lands on the DIALED peer's pooled connection via
+  /// `get_or_dial`, which may be a connection OTHER than any one the caller is
+  /// servicing — so the datagram path uses `minted_bridges` to pump exactly
+  /// those bridges wherever they landed, without an O(all bridges) scan. Only
+  /// the `dial_succeeded` success path mints. `touched_conns` additionally
+  /// captures connections mutated WITHOUT minting a bridge (a cold dial whose
+  /// `open(Bi)` returns `None` and requeues; an invalidated-intent reset), so
+  /// the datagram path flushes their Initial/reset bytes and refreshes their
+  /// deadline keys the same pass. The global tick ignores the return (its
+  /// `collect_transmits` folds every connection regardless).
+  fn service_dials(&mut self, now: Instant) -> ServicedDials {
     let mut minted: SmallVec<StreamId> = SmallVec::new();
+    let mut touched_conns: SmallVec<ConnectionHandle> = SmallVec::new();
     // Sieve any DialRequested newly emitted by the inner endpoint into the
     // private `dial_pending` deque, then drain that deque as the sole input.
     // Non-`DialRequested` events stay in the inner endpoint's queue for the
@@ -1984,8 +2147,19 @@ where
         id,
         peer,
         deadline,
-        attempted: _,
+        attempted,
       } = entry;
+      // This entry left `dial_pending`: if it was still unattempted, release its
+      // unit of the incremental `unattempted_dial_count`. A branch below that
+      // requeues re-pushes with `attempted = true` (no bump), so the count
+      // reaches exactly 0 once every unattempted entry has drained and is exact
+      // on return — the O(1) source `refresh_immediate_due` reads. Reading
+      // `attempted` here (not a blanket reset) also propagates any push-site
+      // drift into the count so the cross-check catches it rather than masking
+      // it at every drain.
+      if !attempted {
+        self.unattempted_dial_count = self.unattempted_dial_count.saturating_sub(1);
+      }
       // `mem::take` removed this entry from `dial_pending`; drop its deadline
       // key. A branch that requeues re-registers it below, so after the loop
       // the `Dial` keys match the surviving intents exactly.
@@ -2032,8 +2206,17 @@ where
         self.cfg.client().clone(),
         addr,
         &sni_arc,
+        self.cfg.max_quic_connections(),
       ) {
         Ok(ch) => {
+          // Record every dialed connection as touched: `get_or_dial` may have
+          // just created it (Initial bytes queued) or the `open(Bi)` below
+          // mutates it (new stream state, or a reset on the invalidated-intent
+          // path). The datagram-path caller flushes and re-indexes each touched
+          // connection, even when no bridge is minted on it.
+          if !touched_conns.contains(&ch) {
+            touched_conns.push(ch);
+          }
           if let Some(e) = self.conns.get_mut(ch) {
             match e.conn_mut().streams().open(Dir::Bi) {
               Some(sid) => match self.ep.dial_succeeded(id, now) {
@@ -2062,6 +2245,22 @@ where
                   // pumps and flushes exactly the bridge on `ch` (which may differ
                   // from the connection it is servicing).
                   index_bridge_mint(&mut self.bridges_by_conn, ch, mid);
+                  // Mirror into the `(ch, sid)` reverse index so this
+                  // connection's `StreamEvent::Finished`/`Stopped` resolve to
+                  // this bridge in O(1).
+                  self.bridge_by_conn_sid.insert((ch, sid), mid);
+                  // `inbound_bridge_count` replicates the old accept-gate scan,
+                  // `bridges.filter(|id| !pending_outbound_kinds.contains(id))`.
+                  // A dial that reached here WITHOUT a `pending_outbound_kinds`
+                  // entry — an internally-scheduled gossip push/pull, not a
+                  // driver-parked `start_*` exchange — was counted by that scan,
+                  // so it must be counted here too, or the reap-time decrement
+                  // (same `!contains` predicate) underflows. `start_*`-dialed
+                  // bridges are already in the map and are NOT counted, on either
+                  // side. This is the same predicate `deindex_reaped_bridge` uses.
+                  if !self.pending_outbound_kinds.contains_key(&mid) {
+                    self.inbound_bridge_count += 1;
+                  }
                   minted.push(mid);
                 }
                 None => {
@@ -2190,12 +2389,28 @@ where
             }
           }
         }
-        Err(e) => {
+        Err(conn::DialError::AtGlobalCap) => {
+          // The global connection cap is reached: this new outbound peer gets
+          // no connection. Count it against the same connection-cap metric the
+          // inbound Initial path uses, and retire the intent through the
+          // standard pre-bridge failure path (a Failed ExchangeCompleted for a
+          // UserMessage / PushPull dial resolves the parked waiter).
+          self.ep.metrics_mut().quic_connections_rejected += 1;
+          self.retire_failed_dial(
+            id,
+            StreamError::DialFailed("quic connection table at capacity".into()),
+            now,
+          );
+        }
+        Err(conn::DialError::Connect(e)) => {
           self.retire_failed_dial(id, StreamError::DialFailed(e.to_string().into()), now);
         }
       }
     }
-    minted
+    ServicedDials {
+      minted_bridges: minted,
+      touched_conns,
+    }
   }
 }
 
@@ -2325,10 +2540,10 @@ where
         br.drain_then_reap(&mut self.ep, &mut self.conns, now);
         let outcome = Self::outcome_for_terminal(&br);
         let ch = br.ch();
+        let sid = br.sid();
         // Reap AFTER drain: dropping the bridge frees its slot.
         drop(br);
-        self.deadline_index.set(TimerKey::Bridge(id), None);
-        index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+        self.deindex_reaped_bridge(id, ch, sid);
         self.emit_exchange_completed(id, outcome);
       } else {
         br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -2348,9 +2563,9 @@ where
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
           let outcome = Self::outcome_for_terminal(&br);
           let ch = br.ch();
+          let sid = br.sid();
           drop(br);
-          self.deadline_index.set(TimerKey::Bridge(id), None);
-          index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+          self.deindex_reaped_bridge(id, ch, sid);
           self.emit_exchange_completed(id, outcome);
         } else {
           // Surviving bridge: refresh its deadline key before it moves back
@@ -2665,15 +2880,17 @@ where
     // transition (a corrupted packet establishes nothing), so paying
     // `service_dials` (O(pending dials)) only here keeps the flood path O(`ch`).
     //
-    // `service_dials` drains ALL parked dials, and each mints its bridge on the
-    // DIALED peer's pooled connection via `get_or_dial` — which may be a
-    // connection OTHER than `ch` (a dial parked on a different peer whose pooled
-    // connection is already established mints there). So pump exactly the set
-    // `service_dials` reports minting, and collect the connections they landed on,
-    // so every freshly-opened outbound bridge — on `ch` or elsewhere — moves its
-    // first request bytes into the quinn send stream (the pump) AND onto the `out`
-    // wire (the collect) THIS pass. Without it a strict-poll driver would sleep
-    // until the next global tick, past the bridge's first datagram — the same
+    // `service_dials` drains ALL parked dials. Each may mint a bridge on the
+    // DIALED peer's pooled connection via `get_or_dial` — a connection OTHER
+    // than `ch` (a dial parked on a different peer whose pooled connection is
+    // already established mints there) — OR merely mutate a connection without
+    // minting: a cold dial creates a fresh connection whose `open(Bi)` returns
+    // `None` (still handshaking) and requeues, and an invalidated-intent dial
+    // opens+resets a stream. So pump exactly the bridges it reports minting, then
+    // flush every connection it reports TOUCHING (minting or not) so each one's
+    // first request bytes / Initial / reset bytes reach the `out` wire AND its
+    // deadline key is registered THIS pass. Without it a strict-poll driver would
+    // sleep until the next global tick, past the first datagram — the same
     // strict-poll self-sufficiency `flush_outbound` documents. `ch` itself is
     // collected by step (d), so skip it here to avoid a redundant poll.
     let established_now = self
@@ -2682,12 +2899,13 @@ where
       .map(|e| e.established_at_least_once())
       .unwrap_or(false);
     if !established_before && established_now {
-      let minted = self.service_dials(now);
-      let mut minted_conns: SmallVec<ConnectionHandle> = SmallVec::new();
-      for mid in minted {
-        // Record the connection this bridge landed on BEFORE pumping (a pump that
-        // immediately terminalizes the bridge would drop it from the table).
-        let mint_conn = self.bridges.get(&mid).map(|br| br.ch());
+      let ServicedDials {
+        minted_bridges,
+        touched_conns,
+      } = self.service_dials(now);
+      // Pump each freshly-minted outbound bridge so its first request bytes move
+      // into its quinn send stream before its owning connection is collected.
+      for mid in minted_bridges {
         #[cfg(test)]
         {
           // A minted bridge is post-acceptance (opened after step (b)'s pump);
@@ -2700,14 +2918,14 @@ where
           }
         }
         self.pump_one_bridge(mid, now);
-        if let Some(mc) = mint_conn {
-          if mc != ch && !minted_conns.contains(&mc) {
-            minted_conns.push(mc);
-          }
-        }
       }
-      for mc in minted_conns {
-        self.collect_conn_transmits(mc, now);
+      // Flush + re-index every connection the dials touched — the minted-bridge
+      // owners AND the mutated-but-bridgeless ones (a cold-dial Initial, an
+      // invalidated-intent reset). `ch` is collected by step (d).
+      for mc in touched_conns {
+        if mc != ch {
+          self.collect_conn_transmits(mc, now);
+        }
       }
     }
     // (d) Reap `ch` if it drained this pass — a connection-level loss, or a
@@ -2883,17 +3101,13 @@ where
           // An outbound bridge is registered in `pending_outbound_kinds` for
           // the life of its exchange and an accepted (inbound) bridge never is
           // (see that field's docs), so the inbound population is exactly the
-          // bridges absent from that map. Snapshot it once and track
-          // incrementally as this loop mints — no bridge is reaped mid-loop.
+          // bridges absent from that map — tracked incrementally as
+          // `inbound_bridge_count`. Read that O(1) count instead of filtering
+          // the whole bridge table on every peer-driven `Opened` (one datagram
+          // could otherwise force an O(all bridges) fold); the mint below bumps
+          // it in place, so a later connection's accept loop this same pass sees
+          // the updated total — the cap is ACROSS all connections.
           let max_inbound = self.cfg.max_inbound_streams();
-          let mut inbound_live = match max_inbound {
-            Some(_) => self
-              .bridges
-              .keys()
-              .filter(|id| !self.pending_outbound_kinds.contains_key(id))
-              .count(),
-            None => 0,
-          };
           while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
             let peer = e.peer();
             // At the inbound ceiling: refuse this stream instead of minting a
@@ -2901,7 +3115,7 @@ where
             // releases the stream slot, and bump `inbound_streams_rejected`.
             // Ignoring Err: `ClosedStream` means the half is already gone,
             // which is the desired end state.
-            if max_inbound.is_some_and(|max| inbound_live >= max) {
+            if max_inbound.is_some_and(|max| self.inbound_bridge_count >= max) {
               self.ep.metrics_mut().inbound_streams_rejected += 1;
               let _ = e
                 .conn_mut()
@@ -2947,14 +3161,24 @@ where
                 false,
               ),
             );
-            // Mirror the mint into the per-connection bridge index (borrows only
-            // `bridges_by_conn`, disjoint from the live `e`/`self.conns` borrow).
+            // Mirror the mint into both bridge indexes (each borrows only its own
+            // field, disjoint from the live `e`/`self.conns` borrow), and bump
+            // the incremental inbound population this accept gate reads. An
+            // accepted bridge is never in `pending_outbound_kinds`, so the guard
+            // is always true here — but keeping the SAME `!contains` predicate the
+            // reap-time decrement uses makes the count provably balanced no matter
+            // how the id spaces evolve.
             index_bridge_mint(&mut self.bridges_by_conn, ch, id);
-            inbound_live += 1;
+            self.bridge_by_conn_sid.insert((ch, sid), id);
+            if !self.pending_outbound_kinds.contains_key(&id) {
+              self.inbound_bridge_count += 1;
+            }
             #[cfg(test)]
             {
-              self.counters.max_inbound_bridges_live =
-                self.counters.max_inbound_bridges_live.max(inbound_live);
+              self.counters.max_inbound_bridges_live = self
+                .counters
+                .max_inbound_bridges_live
+                .max(self.inbound_bridge_count);
             }
           }
         }
@@ -2968,18 +3192,20 @@ where
           // observable — not `SendStream::finish()`'s return.
           //
           // **Identity is the compound `(ConnectionHandle, QuicSid)`.**
-          // quinn-proto's `StreamId` is per-connection — its bottom
-          // two bits encode initiator + direction and the remaining
-          // counter is per-connection. Two pooled peer connections
-          // will both have their first bidi stream as sid `0`, so
-          // filtering by sid alone would route a Finished/Stopped
-          // from `ch_A`'s stream to a sibling bridge on `ch_B`.
-          // We're inside the per-connection `poll()` loop here, so
-          // the `ch` filter is free.
-          for br in self.bridges.values_mut() {
-            if br.ch() == ch && br.sid() == sid {
+          // quinn-proto's `StreamId` is per-connection — its bottom two bits
+          // encode initiator + direction and the remaining counter is
+          // per-connection, so two pooled peer connections both hold their
+          // first bidi stream as sid `0` and a sid-only match would misroute
+          // across connections. The `bridge_by_conn_sid` reverse index resolves
+          // the owning bridge in O(1), so a peer-driven event never scans the
+          // bridge table.
+          #[cfg(test)]
+          {
+            self.counters.bridge_scan_visits = self.counters.bridge_scan_visits.saturating_add(1);
+          }
+          if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
+            if let Some(br) = self.bridges.get_mut(&mid) {
               br.observe_send_fin();
-              break;
             }
           }
         }
@@ -3007,10 +3233,15 @@ where
             .conn_mut()
             .recv_stream(sid)
             .stop(quinn_proto::VarInt::from_u32(0));
-          for br in self.bridges.values_mut() {
-            if br.ch() == ch && br.sid() == sid {
+          // O(1) reverse-index lookup — see the `Finished` arm for why the
+          // compound `(ch, sid)` key, and never a bridge-table scan.
+          #[cfg(test)]
+          {
+            self.counters.bridge_scan_visits = self.counters.bridge_scan_visits.saturating_add(1);
+          }
+          if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
+            if let Some(br) = self.bridges.get_mut(&mid) {
               br.fail_stopped_already_retired(error_code);
-              break;
             }
           }
         }
@@ -3132,12 +3363,23 @@ where
       // to `Failed(ConnectionLost)` so the `StreamErrored` lifecycle
       // notice inside `drain_then_reap` carries the connection-loss
       // attribution.
+      // Collect this connection's bridges from the per-connection index —
+      // O(this connection's bridges), bounded by quinn's per-conn stream limit —
+      // never an O(all bridges) scan of `self.bridges`. A datagram that loses
+      // one connection therefore costs an attacker only that connection's
+      // bridges, not the whole table.
       let ids: SmallVec<StreamId> = self
-        .bridges
-        .iter()
-        .filter(|(_, b)| b.ch() == ch)
-        .map(|(id, _)| *id)
-        .collect();
+        .bridges_by_conn
+        .get(&ch)
+        .map(|ids| ids.iter().copied().collect())
+        .unwrap_or_default();
+      #[cfg(test)]
+      {
+        self.counters.bridge_scan_visits = self
+          .counters
+          .bridge_scan_visits
+          .saturating_add(ids.len() as u64);
+      }
       for id in ids {
         if let Some(mut br) = self.bridges.remove(&id) {
           br.fail_connection_lost();
@@ -3155,11 +3397,12 @@ where
           // the kind lookup + emission path matches the
           // `pump_bridges` reap.
           let outcome = Self::outcome_for_terminal(&br);
+          let sid = br.sid();
           drop(br);
-          // This bridge was reaped here rather than by a `pump_bridges` pass,
-          // so clear its deadline key and per-connection index entry at this site.
-          self.deadline_index.set(TimerKey::Bridge(id), None);
-          index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+          // Reaped here rather than by a `pump_bridges` pass, so drop this
+          // bridge's index entries (deadline key, `(ch, sid)` reverse lookup,
+          // per-connection membership, inbound count) at this site.
+          self.deindex_reaped_bridge(id, ch, sid);
           self.emit_exchange_completed(id, outcome);
         }
       }
