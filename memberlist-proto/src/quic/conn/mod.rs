@@ -42,6 +42,17 @@ pub(crate) struct ConnEntry {
   /// failure indefinitely — the existing `dial_failed` path is the right
   /// outcome).
   established_at_least_once: bool,
+  /// `true` while this entry contributes one unit to its source's
+  /// [`ConnTable::pending_inbound`] index. Set exactly once — when an INBOUND
+  /// connection is inserted by [`ConnTable::insert_accepted`] (an outbound dial
+  /// is never indexed) — and cleared exactly once, whichever comes first:
+  /// [`ConnTable::reconcile_pending_inbound`] observes it establish, or
+  /// [`ConnTable::reap_if_drained`] removes it while still un-established. It is
+  /// the single source of truth the index decrement is guarded on, so every
+  /// increment is matched by exactly one decrement (no leak, no double-count)
+  /// independent of how many servicing passes run between accept and
+  /// establishment or reap.
+  pending_indexed: bool,
   /// `ConnectionEvent`s produced by `quinn_proto::Endpoint::handle_event`
   /// during one `service_quinn` iteration on this connection, queued for
   /// delivery on the NEXT iteration of THIS connection. See
@@ -129,6 +140,14 @@ impl ConnEntry {
 pub(crate) struct ConnTable {
   conns: Slab<ConnEntry>,
   peers: HashMap<SocketAddr, ConnectionHandle>,
+  /// Per-source count of INBOUND connections that have not yet established — the
+  /// half-open population the coordinator's per-source pending cap bounds. Kept
+  /// as an index so admission is an O(1) lookup ([`Self::pending_inbound_from`])
+  /// instead of a scan of the whole connection slab: at connection-table
+  /// saturation an attacker flooding fresh-DCID Initials would otherwise force
+  /// an O(total connections) scan per rejected datagram. A source with zero
+  /// pending inbound connections has no entry (the map never stores a zero).
+  pending_inbound: HashMap<SocketAddr, usize>,
 }
 
 impl ConnTable {
@@ -136,6 +155,7 @@ impl ConnTable {
     Self {
       conns: Slab::new(),
       peers: HashMap::new(),
+      pending_inbound: HashMap::new(),
     }
   }
 
@@ -226,6 +246,9 @@ impl ConnTable {
       peer,
       direction: ConnDirection::Outbound,
       established_at_least_once: false,
+      // A local outbound dial is never counted against the peer's inbound
+      // pending allowance (see `pending_inbound_from`), so it is not indexed.
+      pending_indexed: false,
       pending_events: VecDeque::new(),
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
@@ -278,12 +301,18 @@ impl ConnTable {
       peer,
       direction: ConnDirection::Inbound,
       established_at_least_once: false,
+      // A freshly accepted inbound connection is un-established, so it enters
+      // the per-source pending index. Paired with the decrement in
+      // `reconcile_pending_inbound` (on establishment) or `reap_if_drained`
+      // (on removal while still un-established).
+      pending_indexed: true,
       pending_events: VecDeque::new(),
     });
     assert_eq!(
       slot, ch.0,
       "accepted connection slab slot must equal ConnectionHandle"
     );
+    *self.pending_inbound.entry(peer).or_insert(0) += 1;
     let existing_usable = self
       .peers
       .get(&peer)
@@ -331,11 +360,76 @@ impl ConnTable {
     // practice and no further connection-level work is owed.
     let _ = quinn.handle_event(ch, quinn_proto::EndpointEvent::drained());
     if let Some(e) = self.conns.try_remove(ch.0) {
+      // A still-indexed entry is an inbound connection removed before it ever
+      // established: release its unit of the source's pending allowance. An
+      // entry that established already had its unit released by
+      // `reconcile_pending_inbound`, so `pending_indexed` is false and this is
+      // skipped — the decrement happens exactly once.
+      if e.pending_indexed {
+        Self::release_pending_inbound(&mut self.pending_inbound, e.peer);
+      }
       if self.peers.get(&e.peer).copied() == Some(ch) {
         self.peers.remove(&e.peer);
       }
     }
     true
+  }
+
+  /// Release one unit of `peer`'s pending-inbound index. The single decrement
+  /// primitive: every caller has already confirmed the entry was indexed
+  /// (`pending_indexed`), so the source MUST have a positive count here. Removes
+  /// the map entry at zero so an idle source leaves no residue.
+  fn release_pending_inbound(pending_inbound: &mut HashMap<SocketAddr, usize>, peer: SocketAddr) {
+    match pending_inbound.get_mut(&peer) {
+      Some(count) => {
+        debug_assert!(*count > 0, "pending-inbound index underflow for {peer}");
+        *count -= 1;
+        if *count == 0 {
+          pending_inbound.remove(&peer);
+        }
+      }
+      None => debug_assert!(
+        false,
+        "pending-inbound index missing an indexed entry for {peer}"
+      ),
+    }
+  }
+
+  /// Observe whether an inbound connection has established and, if so, release
+  /// its unit of the per-source pending index exactly once. Called once per
+  /// connection per servicing pass from `service_quinn`: a still-handshaking or
+  /// never-indexed (outbound / already-released) entry is a no-op, so the index
+  /// tracks the live half-open population without a scan.
+  ///
+  /// Establishment is authoritative via the sticky `established_at_least_once`
+  /// flag (set the first tick the connection is observed
+  /// `!is_handshaking() && !is_closed()`); this forces that observation current
+  /// before reading it, so an establishment reached earlier in the same tick is
+  /// caught here rather than lingering in the index until the next pass.
+  pub(crate) fn reconcile_pending_inbound(&mut self, ch: ConnectionHandle) {
+    let released_peer = {
+      let Some(entry) = self.conns.get_mut(ch.0) else {
+        return;
+      };
+      if !entry.pending_indexed {
+        return;
+      }
+      // Only inbound connections ever enter the pending index (`insert_accepted`
+      // is the sole increment site); an outbound dial is never charged.
+      debug_assert_eq!(
+        entry.direction,
+        ConnDirection::Inbound,
+        "only inbound connections may be pending-indexed"
+      );
+      // `conn_mut()` performs the sticky establishment observation.
+      let _ = entry.conn_mut();
+      if !entry.established_at_least_once {
+        return;
+      }
+      entry.pending_indexed = false;
+      entry.peer
+    };
+    Self::release_pending_inbound(&mut self.pending_inbound, released_peer);
   }
 
   /// Total number of connections currently tracked — every slab entry,
@@ -359,19 +453,18 @@ impl ConnTable {
   ///   so neither exchange completes.
   /// - Never-established: a failed inbound handshake becomes non-handshaking but
   ///   its closed/draining slab entry lingers until [`Self::reap_if_drained`]
-  ///   frees it. It stays charged here (`!established_at_least_once`) so a source
+  ///   frees it. It stays charged here (still `pending_indexed`) so a source
   ///   cannot exceed the cap by repeatedly opening handshakes that fail — its
   ///   closed-but-undrained entries still consume the allowance. An inbound
   ///   connection that DID establish has graduated out of the half-open budget
-  ///   and is not counted.
+  ///   (its unit was released by [`Self::reconcile_pending_inbound`]) and is not
+  ///   counted.
+  ///
+  /// O(1): a direct read of the [`Self::pending_inbound`] index, not a scan of
+  /// the connection slab — so a rejected inbound Initial at connection-table
+  /// saturation cannot be amplified into O(total connections) work.
   pub(crate) fn pending_inbound_from(&self, source: &SocketAddr) -> usize {
-    self
-      .conns
-      .iter()
-      .filter(|(_, e)| {
-        e.peer == *source && e.direction == ConnDirection::Inbound && !e.established_at_least_once
-      })
-      .count()
+    self.pending_inbound.get(source).copied().unwrap_or(0)
   }
 
   /// Inbound (server-accepted) connections from `source` that have left the
@@ -391,6 +484,22 @@ impl ConnTable {
           && !e.established_at_least_once
           && !e.conn.is_handshaking()
       })
+      .count()
+  }
+
+  /// Independent recount of the connections currently indexed under `source`
+  /// (`pending_indexed`), read straight from the slab rather than the index.
+  /// The index invariant is `pending_inbound_from == this recount` for every
+  /// source at all times: a missed increment/decrement or a decrement that did
+  /// not clear the bit makes the two diverge, so the counter-maintenance test
+  /// asserts their equality after every accept / establish / reap to catch a
+  /// leak, underflow, or double-count.
+  #[cfg(test)]
+  pub(crate) fn indexed_inbound_recount(&self, source: &SocketAddr) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| e.peer == *source && e.pending_indexed)
       .count()
   }
 

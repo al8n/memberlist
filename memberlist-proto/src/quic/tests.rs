@@ -4559,3 +4559,298 @@ fn production_default_quic_config_bounds_inbound_streams() {
        unlimited — the QUIC-specific bound must not change it"
   );
 }
+
+/// The global connection cap is checked BEFORE the per-source pending-index
+/// lookup and short-circuits. An inbound Initial
+/// refused at connection-table saturation must not perform the per-source
+/// lookup at all, so a flood of fresh-DCID Initials at saturation cannot be
+/// amplified into per-datagram admission work beyond the O(1) global check.
+///
+/// B caps total connections at 1. A1 establishes the one allowed connection (its
+/// Initial passes the global check and reaches — and increments — the per-source
+/// check). A2's Initial is then over the global cap: it must be refused WITHOUT
+/// the per-source lookup, so `quic_pending_inbound_checks` does not advance while
+/// `quic_connections_rejected` does.
+///
+/// Negative control: revert to the eager `over_global || over_per_source` form
+/// (per-source computed unconditionally) — A2's Initial then performs the
+/// per-source lookup, `quic_pending_inbound_checks` advances, and the
+/// flat-counter assertion fails.
+#[test]
+fn over_global_cap_skips_per_source_pending_lookup() {
+  let a1_addr: SocketAddr = "127.0.0.1:7980".parse().unwrap();
+  let a2_addr: SocketAddr = "127.0.0.1:7981".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7982".parse().unwrap();
+  let now = Instant::now();
+  let mut a1 = make_endpoint("a1", a1_addr, now);
+  let mut a2 = make_endpoint("a2", a2_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_quic_connections(Some(1)),
+    b_addr,
+    now,
+  );
+
+  // A1 establishes the single allowed connection.
+  // Ignoring StreamId: the test asserts on counters, not handles.
+  let _ = a1.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a1.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a1_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a1_addr {
+        a1.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a1.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a1_addr) >= 1 {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a1_addr) >= 1,
+    "test precondition: B committed A1's connection (the one allowed)"
+  );
+
+  // At the global cap now. A2's over-cap Initials must be refused by the global
+  // check WITHOUT reaching the per-source lookup.
+  let checks_before = b.counters.quic_pending_inbound_checks;
+  let rejected_before = b.metrics().quic_connections_rejected;
+  // Ignoring StreamId: the test asserts on counters, not handles.
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a2.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a2_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a2_addr {
+        a2.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a2.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.metrics().quic_connections_rejected > rejected_before {
+      break;
+    }
+  }
+  assert!(
+    b.metrics().quic_connections_rejected > rejected_before,
+    "A2's over-cap Initial must be refused at the global cap"
+  );
+  assert_eq!(
+    b.counters.quic_pending_inbound_checks, checks_before,
+    "an Initial refused at the global cap must NOT perform the per-source \
+       pending lookup (global-first short-circuit); the per-source check counter \
+       advanced from {checks_before} to {}",
+    b.counters.quic_pending_inbound_checks
+  );
+}
+
+/// At per-source saturation, with a POPULATED connection table, a rejected
+/// Initial performs exactly ONE O(1) per-source index lookup
+/// and NO coordinator servicing pass. The per-source count is an indexed read,
+/// not a scan of the connection slab, so the admission decision does not scale
+/// with the number of tracked connections and does not run the O(connections +
+/// streams) tick.
+///
+/// B's per-source pending cap is 3 (global cap high). Three inbound Initials
+/// under source S plus two under other sources populate the table with five
+/// pending connections; S is then at its cap. A sixth Initial under S is
+/// refused. Across that one refused Initial the per-source check counter
+/// advances by exactly one (a single index probe) and the servicing counter
+/// does not advance at all.
+///
+/// Negative control: reverting the servicing gate (service on every `Some`)
+/// makes the servicing counter advance on the refused Initial; reverting the
+/// global/per-source structure so the per-source lookup runs more than once per
+/// Initial breaks the exact `+1` check-count assertion.
+#[test]
+fn rejected_initial_at_per_source_cap_is_one_indexed_probe_no_servicing() {
+  let b_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config()
+      .with_max_pending_connections_per_source(Some(3))
+      .with_max_quic_connections(Some(64)),
+    b_addr,
+    now,
+  );
+
+  // Source S: three distinct valid Initials (distinct DCIDs, minted by three
+  // endpoints) delivered under the same source address — three pending inbound.
+  let src_s: SocketAddr = "127.0.0.1:61000".parse().unwrap();
+  for port in [8001u16, 8002, 8003] {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut c = make_endpoint(&format!("c{port}"), addr, now);
+    // Ignoring StreamId: only c's on-wire Initial is used.
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    let init = drain_first_datagram_to(&mut c, b_addr);
+    b.handle_udp(src_s, &init, now);
+  }
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "the three Initials up to the per-source cap must all be accepted"
+  );
+
+  // Two more pending inbound from OTHER sources, so the table is populated with
+  // entries the admission decision for S must not scan.
+  for (port, src) in [(8101u16, "127.0.0.1:61101"), (8102, "127.0.0.1:61102")] {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let src: SocketAddr = src.parse().unwrap();
+    let mut c = make_endpoint(&format!("c{port}"), addr, now);
+    // Ignoring StreamId: only c's on-wire Initial is used.
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    let init = drain_first_datagram_to(&mut c, b_addr);
+    b.handle_udp(src, &init, now);
+  }
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "the five accepted Initials (three under S at the cap, two under other \
+       sources) must all be accepted; none exceeds a cap yet"
+  );
+
+  // A fourth Initial under S — that S is at its cap of 3 is proven below by this
+  // Initial being refused (had S held fewer than 3, it would be accepted).
+  // Measure
+  // the per-source check and servicing counters across ONLY this datagram.
+  let mut c = make_endpoint("c-over", "127.0.0.1:8004".parse().unwrap(), now);
+  // Ignoring StreamId: only c's on-wire Initial is used.
+  let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+  let over = drain_first_datagram_to(&mut c, b_addr);
+  let checks_before = b.counters.quic_pending_inbound_checks;
+  let servicings_before = b.counters.quic_inbound_servicings;
+  let rejected_before = b.metrics().quic_connections_rejected;
+  b.handle_udp(src_s, &over, now);
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    rejected_before + 1,
+    "the over-cap Initial under S must be refused"
+  );
+  assert_eq!(
+    b.counters.quic_pending_inbound_checks,
+    checks_before + 1,
+    "the refused Initial must perform exactly one O(1) per-source index lookup, \
+       independent of the populated table"
+  );
+  assert_eq!(
+    b.counters.quic_inbound_servicings, servicings_before,
+    "a refused Initial commits no state and must NOT run a servicing pass"
+  );
+}
+
+/// A corrupted or replayed packet carrying an ESTABLISHED live CID must NOT
+/// trigger a coordinator servicing pass. quinn routes packets by their
+/// plaintext destination CID BEFORE authentication and duplicate detection, so
+/// such a packet arrives as a `ConnectionEvent` for a LIVE handle;
+/// `Connection::handle_event` then silently discards it (AEAD authentication
+/// failure for a corrupted packet, duplicate packet number for a replay). The
+/// pre-fix code marked every live-handle `ConnectionEvent` as `Advanced` and ran
+/// the O(connections + streams) pump-and-scan, so an attacker who learned a live
+/// CID during the handshake could force that global work per flooded datagram.
+///
+/// The fix derives progress from the connection layer (a `frame_rx` delta), so a
+/// discarded packet is `Inert`. This asserts `quic_inbound_servicings` stays flat
+/// across a replayed (duplicate) packet and a corrupted (auth-failing) packet,
+/// yet still advances for the same bytes delivered genuinely.
+///
+/// Negative control: revert the `ConnectionEvent` arm to return `Advanced`
+/// unconditionally for a live handle — the replayed and corrupted packets then
+/// each service and the two flat-counter assertions fail.
+#[test]
+fn corrupted_or_replayed_packet_at_live_cid_skips_servicing() {
+  let a_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Establish a live A<->B connection (a real handshake, so B holds A's live
+  // CID that an attacker could learn on the wire).
+  // Ignoring StreamId: the test asserts on the servicing counter, not handles.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && a.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "test precondition: B holds a live connection to A"
+  );
+  // Quiesce both outbound queues so only the datagrams fed below are in play.
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+
+  // Replay: capture a fresh A->B 1-RTT datagram, deliver it once (genuine → it
+  // services), then deliver the SAME bytes again (duplicate packet number →
+  // discarded → must NOT service).
+  // Ignoring StreamId: only the captured on-wire datagram is used.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Refresh, now);
+  let replay = drain_first_datagram_to(&mut a, b_addr);
+  while a.poll_transmit().is_some() {}
+  let before_first = b.counters.quic_inbound_servicings;
+  b.handle_udp(a_addr, &replay, now);
+  assert!(
+    b.counters.quic_inbound_servicings > before_first,
+    "the first (genuine) delivery of a live-CID data packet must service"
+  );
+  while b.poll_transmit().is_some() {}
+  let before_replay = b.counters.quic_inbound_servicings;
+  b.handle_udp(a_addr, &replay, now);
+  assert_eq!(
+    b.counters.quic_inbound_servicings, before_replay,
+    "a replayed (duplicate packet number) packet at a live CID must NOT trigger \
+       a servicing pass; the counter advanced from {before_replay} to {}",
+    b.counters.quic_inbound_servicings
+  );
+
+  // Corrupt: capture another fresh A->B datagram, flip its last byte (the AEAD
+  // tag — its plaintext DCID is untouched, so it still routes to the live
+  // connection) → authentication fails → discarded → must NOT service. The same
+  // bytes uncorrupted are genuine and DO service (positive control).
+  // Ignoring StreamId: only the captured on-wire datagram is used.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Refresh, now);
+  let mut corrupt = drain_first_datagram_to(&mut a, b_addr);
+  while a.poll_transmit().is_some() {}
+  let pristine = corrupt.clone();
+  let last = corrupt.len() - 1;
+  corrupt[last] ^= 0xff;
+  let before_corrupt = b.counters.quic_inbound_servicings;
+  b.handle_udp(a_addr, &corrupt, now);
+  assert_eq!(
+    b.counters.quic_inbound_servicings, before_corrupt,
+    "a corrupted (authentication-failing) packet at a live CID must NOT trigger \
+       a servicing pass; the counter advanced from {before_corrupt} to {}",
+    b.counters.quic_inbound_servicings
+  );
+  let before_pristine = b.counters.quic_inbound_servicings;
+  b.handle_udp(a_addr, &pristine, now);
+  assert!(
+    b.counters.quic_inbound_servicings > before_pristine,
+    "the same packet delivered intact advances the connection and MUST service"
+  );
+}

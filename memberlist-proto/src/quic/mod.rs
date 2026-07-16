@@ -57,17 +57,70 @@ use std::collections::HashSet;
 /// progress: a stateless `Response` (version negotiation, retry, stateless
 /// reset), an over-cap or failed `accept`, and a `ConnectionEvent` for a handle
 /// no longer in the table are all `Some` yet commit no local connection state.
-/// Servicing on those would run an O(connections + streams) pump-and-scan per
-/// datagram driven from untrusted input, so only [`Self::Advanced`] triggers it.
+///
+/// Nor does a `ConnectionEvent` for a LIVE handle imply progress. quinn routes
+/// packets by their plaintext destination CID BEFORE authentication and
+/// duplicate detection, so `Connection::handle_event` silently discards a packet
+/// that fails AEAD authentication, replays a seen packet number, or would
+/// migrate a migration-forbidden path — none advance the connection. An attacker
+/// who learned a live CID during the handshake could otherwise flood such
+/// packets, each an O(connections + streams) pump-and-scan. Real progress is
+/// therefore derived from the connection layer (frames processed / a close
+/// transition), not from the mere presence of a `ConnectionEvent`.
+///
+/// Servicing runs an O(connections + streams) pump-and-scan per datagram driven
+/// from untrusted input, so only [`Self::Advanced`] triggers it.
 enum DatagramProgress {
-  /// A new connection was accepted (inserted) or a `ConnectionEvent` was applied
-  /// to a connection still in the table. A servicing pass MUST run.
+  /// A new connection was accepted (inserted), or a `ConnectionEvent` applied to
+  /// a live connection actually advanced it (processed protocol frames or drove
+  /// a close transition). A servicing pass MUST run.
   Advanced,
-  /// No persistent connection state changed (a stateless response, an over-cap
-  /// or failed accept, or a `ConnectionEvent` for an unknown handle). Skip the
-  /// servicing pass; any owed outbound bytes were already queued to `out` and
-  /// are flushed by `poll_transmit` independently of servicing.
+  /// No persistent connection state changed — a stateless response, an over-cap
+  /// or failed accept, a `ConnectionEvent` for an unknown handle, or a
+  /// `ConnectionEvent` for a live handle carrying a packet the connection
+  /// discarded (failed authentication, replay, or a forbidden migration). Skip
+  /// the servicing pass; any owed outbound bytes were already queued to `out`
+  /// and are flushed by `poll_transmit` independently of servicing.
   Inert,
+}
+
+/// Total received-frame count across every frame type quinn tracks. Increments
+/// only when a packet successfully decrypts, passes duplicate detection, and
+/// yields protocol frames, so its delta across a `Connection::handle_event` is
+/// exactly whether that datagram advanced the connection: a packet quinn
+/// discards (failed AEAD authentication, replayed packet number, forbidden
+/// migration) never reaches frame processing and leaves this total unchanged.
+///
+/// `FrameStats` is `#[non_exhaustive]`; a frame type a future quinn adds and this
+/// sum omits would, at worst, make a packet carrying only that frame register as
+/// inert — a deferred servicing the coordinator's `poll_timeout` safety net
+/// still wakes, never a false advance (which is what the amplification bound
+/// depends on).
+fn frame_rx_total(s: &quinn_proto::FrameStats) -> u64 {
+  s.acks
+    + s.ack_frequency
+    + s.crypto
+    + s.connection_close
+    + s.data_blocked
+    + s.datagram
+    + u64::from(s.handshake_done)
+    + s.immediate_ack
+    + s.max_data
+    + s.max_stream_data
+    + s.max_streams_bidi
+    + s.max_streams_uni
+    + s.new_connection_id
+    + s.new_token
+    + s.path_challenge
+    + s.path_response
+    + s.ping
+    + s.reset_stream
+    + s.retire_connection_id
+    + s.stream_data_blocked
+    + s.streams_blocked_bidi
+    + s.streams_blocked_uni
+    + s.stop_sending
+    + s.stream
 }
 
 /// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
@@ -377,6 +430,16 @@ struct TestCounters {
   /// off-by-one admits ceiling+1, admit-all drives it to the opened count,
   /// reject-all leaves it at 0. Never compiled into production builds.
   max_inbound_bridges_live: usize,
+  /// Test-only counter incremented once each time the `NewConnection` admission
+  /// path performs its per-source pending-index lookup — i.e. once per inbound
+  /// Initial that reached the per-source check under the global cap. The global
+  /// cap is checked FIRST and short-circuits, so an Initial refused at
+  /// connection-table saturation must NOT advance this counter. The
+  /// global-first regression test asserts it stays flat at saturation; reverting
+  /// to the eager `over_global || over_per_source` form (which computes the
+  /// per-source lookup unconditionally) makes it advance and that test fails.
+  /// Never compiled into production builds.
+  quic_pending_inbound_checks: u64,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -1183,6 +1246,16 @@ impl<I, R> QuicEndpoint<I, R> {
     self.ep.poll_transmit()
   }
 
+  /// Refuse an inbound Initial that exceeded a connection-admission cap: count
+  /// the rejection and drop it via `Endpoint::ignore`. `ignore` frees quinn's
+  /// own incoming-buffer bookkeeping for this `Incoming` (merely dropping it
+  /// would leak that) and sends nothing back, so a spoofed source gets no
+  /// reflected bytes. No `ConnTable` entry is created.
+  fn reject_incoming(&mut self, incoming: quinn_proto::Incoming) {
+    self.ep.metrics_mut().quic_connections_rejected += 1;
+    self.quinn.ignore(incoming);
+  }
+
   fn route_datagram_event(
     &mut self,
     ev: DatagramEvent,
@@ -1192,13 +1265,33 @@ impl<I, R> QuicEndpoint<I, R> {
   ) -> DatagramProgress {
     match ev {
       DatagramEvent::ConnectionEvent(ch, cev) => {
-        // Applied to a connection we still track ⇒ that connection advanced.
         // A `ConnectionEvent` for an unknown handle (already reaped) applies
         // nothing, so it made no progress.
         match self.conns.get_mut(ch) {
           Some(e) => {
+            // A live handle does NOT imply progress: quinn routed this packet by
+            // its plaintext DCID before authenticating it, and
+            // `Connection::handle_event` silently discards a packet that fails
+            // AEAD auth, replays a seen packet number, or would migrate a
+            // forbidden path. Derive real progress from the connection layer —
+            // frames processed (`frame_rx` delta) or a close transition — so an
+            // attacker flooding corrupted/replayed packets at a live CID cannot
+            // force an O(connections + streams) servicing pass per datagram. A
+            // discarded packet processes no frames and drives no close, so it is
+            // `Inert`; a close transition is peer-unforgeable (it needs a valid
+            // CONNECTION_CLOSE, which needs the session keys, or a stateless
+            // reset, which needs the secret token) and must be serviced so the
+            // connection and its bridges reap.
+            let frames_before = frame_rx_total(&e.conn_ref().stats().frame_rx);
+            let closed_before = e.conn_ref().is_closed();
             e.conn_mut().handle_event(cev);
-            DatagramProgress::Advanced
+            let advanced = frame_rx_total(&e.conn_ref().stats().frame_rx) != frames_before
+              || (e.conn_ref().is_closed() && !closed_before);
+            if advanced {
+              DatagramProgress::Advanced
+            } else {
+              DatagramProgress::Inert
+            }
           }
           None => DatagramProgress::Inert,
         }
@@ -1213,25 +1306,37 @@ impl<I, R> QuicEndpoint<I, R> {
         // caps are the additional hard bound. The global cap limits total
         // tracked connections; the per-source cap limits one address's
         // concurrent half-open handshakes so no single source can consume the
-        // global budget. Past either cap the Initial is dropped via
-        // `Endpoint::ignore` — which also frees quinn's own incoming-buffer
-        // bookkeeping for it (merely dropping the `Incoming` would leak that) —
-        // and no `ConnTable` entry is created. `ignore` sends nothing back, so a
-        // spoofed source gets no reflected bytes.
-        let over_global = self
+        // global budget. Past either cap the Initial is dropped (see
+        // `reject_incoming`) and no `ConnTable` entry is created.
+        //
+        // Global cap FIRST, short-circuiting the per-source check. At
+        // connection-table saturation an attacker floods fresh-DCID Initials;
+        // each must be refused with no per-datagram work that scales with the
+        // table. The global check is an O(1) slab-length compare, so a saturated
+        // endpoint rejects here and never reaches the per-source lookup below.
+        if self
           .cfg
           .max_quic_connections()
-          .is_some_and(|max| self.conns.len() >= max);
-        let over_per_source = self
-          .cfg
-          .max_pending_connections_per_source()
-          .is_some_and(|max| self.conns.pending_inbound_from(&from) >= max);
-        if over_global || over_per_source {
-          self.ep.metrics_mut().quic_connections_rejected += 1;
-          self.quinn.ignore(incoming);
+          .is_some_and(|max| self.conns.len() >= max)
+        {
+          self.reject_incoming(incoming);
           // The Initial was dropped and no connection-table state was committed,
           // so this datagram made no progress — no servicing pass is owed.
           return DatagramProgress::Inert;
+        }
+        // Per-source pending cap. Reached only under the global cap.
+        // `pending_inbound_from` is an O(1) index read (not a scan of the
+        // connection slab), so this too is attacker-flood-safe.
+        if let Some(max) = self.cfg.max_pending_connections_per_source() {
+          #[cfg(test)]
+          {
+            self.counters.quic_pending_inbound_checks =
+              self.counters.quic_pending_inbound_checks.saturating_add(1);
+          }
+          if self.conns.pending_inbound_from(&from) >= max {
+            self.reject_incoming(incoming);
+            return DatagramProgress::Inert;
+          }
         }
         let mut buf = Vec::new();
         match self.quinn.accept(
@@ -2758,6 +2863,13 @@ where
           }
         }
       }
+      // Release this connection's per-source pending-index unit the pass it
+      // establishes. Runs once per connection per servicing pass (after the
+      // `conn_mut()` calls above have made the sticky establishment
+      // observation), so an inbound connection that completed its handshake
+      // this pass leaves the half-open index in the same pass — a no-op for a
+      // still-handshaking, outbound, or already-released connection.
+      self.conns.reconcile_pending_inbound(ch);
     }
   }
 }
