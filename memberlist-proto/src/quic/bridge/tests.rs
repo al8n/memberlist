@@ -1431,6 +1431,78 @@ fn pump_in_truncated_unit_at_fin_fails_decode() {
   );
 }
 
+/// `pump_in` over a live quinn stream: a label header split across TWO STREAM
+/// frames of one flight validates in a SINGLE pump. The dialer's label frame is
+/// written in two pieces, each flushed as its own frame, so the server's
+/// assembler holds two separate chunks; the first is a partial label header
+/// (`classify_header` => `Incomplete`) and the second completes it. One
+/// `pump_in` must read BOTH chunks — the `Incomplete` arm has to `continue`
+/// accumulating rather than `break` the chunk loop.
+///
+/// This is the soundness precondition of the coordinator's deduplicated ready
+/// set: several coalesced readability wakes collapse into ONE pump, so a pump
+/// that stopped at the partial first chunk would strand the second with no
+/// further event to re-read it — a false `Failed(Timeout)` for a compliant peer.
+///
+/// Mutation-verify: revert the `Incomplete` arm to `break` the chunk loop — the
+/// single pump reads only the partial first chunk, `inbound_label_validated`
+/// stays false, and this assertion fails.
+#[test]
+fn split_label_header_validates_in_a_single_pump() {
+  let mut pair = RawQuicPair::handshaked();
+  let sid = pair.client_open_bi();
+
+  // Build the dialer's label frame, then deliver it in two frames whose split
+  // falls INSIDE the label bytes: the first chunk is a partial header
+  // (`Incomplete`), the second completes it.
+  let label = Bytes::from_static(b"cluster-label-that-is-split-in-two");
+  let mut frame = Vec::new();
+  encode_label_prefix(&label, &mut frame);
+  let split = frame.len() / 2;
+  assert!(
+    split > 2 && split < frame.len(),
+    "the split must land inside the label bytes so chunk 1 is a partial header"
+  );
+  // Two separate client writes, each ferried before the next, so quinn stores
+  // them as two distinct assembler chunks (a small frame never defragments).
+  pair.client_write(sid, &frame[..split]);
+  pair.ferry();
+  pair.client_write(sid, &frame[split..]);
+  pair.ferry();
+
+  // A LABELED acceptor bridge over the accepted stream: it validates the peer's
+  // label off the head of `recv_accum` before any reliable unit.
+  let server_sid = pair.server_accept_bi();
+  let mut ep = make_server_endpoint();
+  let stream = ep
+    .accept_stream(CLIENT_ADDR, Instant::from_std(pair.now))
+    .expect("node is running");
+  let mut bridge = Bridge::new(
+    stream,
+    pair.server_ch,
+    server_sid,
+    crate::CompressionOptions::new(),
+    crate::EncryptionOptions::new(),
+    ep.max_stream_frame_size(),
+    Some(label.clone()),
+    false,
+    false,
+  );
+  assert!(
+    !bridge.inbound_label_validated,
+    "an acceptor with a label starts with the inbound label unvalidated"
+  );
+
+  // ONE pump, with BOTH chunks already buffered in the assembler.
+  let _ = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+  assert!(
+    bridge.inbound_label_validated,
+    "a label split across two STREAM frames must validate within a SINGLE pump: \
+       the `Incomplete` arm must `continue` accumulating the later chunk, not \
+       `break` and strand it"
+  );
+}
+
 /// `pump_in` over a live quinn stream: the peer FINs while the bridge's FSM
 /// still expects inbound bytes (the request stream is opened and FINned with
 /// NO data). The `fin_seen && handle_data(&[]).is_err()` premature-FIN arm

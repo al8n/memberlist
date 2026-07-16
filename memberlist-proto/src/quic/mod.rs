@@ -81,6 +81,31 @@ fn index_bridge_mint<I>(
   }
 }
 
+/// Push machine stream `id` onto the pass-scoped ready-bridge queue
+/// [`QuicEndpoint::ready_bridges`] so the current servicing pass pumps it
+/// exactly once, deduplicated in O(1) by the bridge's [`Bridge::queued`] flag
+/// (set here on enqueue, cleared at pump entry). A no-op if `id` names no live
+/// bridge — a stale readiness event for a refused or already-reaped stream — or
+/// if the bridge is already queued; both are O(1).
+///
+/// A free function taking only the two disjoint index fields (never all of
+/// `self`), so a readiness trigger inside the per-connection `poll()` drain can
+/// enqueue while a `self.conns.get_mut(..)` connection borrow is still live —
+/// `bridges` and `ready_bridges` are disjoint from `conns`. Mirrors the
+/// split-borrow shape of [`index_bridge_mint`].
+fn enqueue_ready_bridge<I>(
+  bridges: &mut HashMap<StreamId, Bridge<I, SocketAddr>>,
+  ready_bridges: &mut VecDeque<StreamId>,
+  id: StreamId,
+) {
+  if let Some(br) = bridges.get_mut(&id) {
+    if !br.queued() {
+      br.set_queued(true);
+      ready_bridges.push_back(id);
+    }
+  }
+}
+
 /// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
 /// drain. quinn's `datagram_receive_buffer_size` bounds inbound BYTES but not
 /// entry COUNT (a flood of tiny or zero-length DATAGRAM frames adds ~0 bytes
@@ -237,6 +262,19 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// brute-force `bridges` filtered by `Bridge::ch`; a `#[cfg(test)]` cross-check
   /// asserts that equality after every operation.
   bridges_by_conn: HashMap<ConnectionHandle, SmallVec<StreamId>>,
+  /// Pass-scoped queue of bridges made ready THIS servicing pass — the machine
+  /// [`StreamId`]s a readiness trigger (a fresh stream mint, or a per-stream
+  /// `Readable`/`Writable`/`Finished`/`Stopped` event drained from a
+  /// connection's `poll()`) enqueued because owed work appeared. The
+  /// per-datagram [`Self::service_connection`] path drains this to pump exactly
+  /// the bridges its frames advanced, replacing an O(all bridges on the
+  /// connection) pump — so a corrupted or replayed packet, which advances no
+  /// stream state and fires no trigger, pumps none. Always drained empty before
+  /// a servicing pass returns (a scratch scheduler, never a persistent one): the
+  /// global tick's pump-all services every bridge directly and
+  /// [`Self::finalize_tick`] clears any residue. Dedup is O(1) via
+  /// [`Bridge::queued`]. See [`enqueue_ready_bridge`].
+  ready_bridges: VecDeque<StreamId>,
   /// Reverse index from a bridge's `(owning ConnectionHandle, quinn StreamId)`
   /// to its machine [`StreamId`] — the finer-grained twin of
   /// [`Self::bridges_by_conn`]. quinn-proto's per-connection `poll()` yields
@@ -467,11 +505,12 @@ struct TestCounters {
   /// Test-only counter of bridges *touched* by a servicing pass — bumped once per
   /// [`QuicEndpoint::pump_one_bridge`] entry that finds the bridge present,
   /// whether from the global `pump_bridges` loop or the per-connection
-  /// [`QuicEndpoint::pump_conn_bridges`] datagram path. Paired with
-  /// [`Self::connection_visits`] in the visit-count proofs: a datagram servicing
-  /// only its addressed connection pumps only that connection's bridges, so the
-  /// per-datagram delta does not scale with the total bridge population. Never
-  /// compiled into production builds.
+  /// [`QuicEndpoint::drain_ready_bridges`] datagram path. Paired with
+  /// [`Self::connection_visits`] in the visit-count proofs: a datagram pumps
+  /// only the bridges a readiness trigger enqueued this pass, so a corrupted or
+  /// replayed packet (which fires no trigger) pumps zero and the per-datagram
+  /// delta never scales with the total bridge population. Never compiled into
+  /// production builds.
   bridge_visits: u64,
   /// Test-only high-water mark of the concurrent INBOUND bridge population,
   /// sampled inside the `accept(Dir::Bi)` loop at each mint (so it captures the
@@ -581,6 +620,7 @@ impl<I, R> QuicEndpoint<I, R> {
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       bridges_by_conn: HashMap::new(),
+      ready_bridges: VecDeque::new(),
       bridge_by_conn_sid: HashMap::new(),
       inbound_bridge_count: 0,
       pending_outbound_kinds: HashMap::new(),
@@ -1862,6 +1902,32 @@ impl<I, R> QuicEndpoint<I, R> {
       }
     }
     self.collect_transmits(now);
+    // The global tick services every bridge directly via `pump_bridges` (which
+    // clears every `queued` flag at pump entry), so any ready-queue entries a
+    // mint trigger pushed this tick are now flag-dead; clear the pass-scoped
+    // queue so it never carries a stale id into a later pass.
+    self.ready_bridges.clear();
+    self.debug_assert_ready_drained();
+  }
+
+  /// Debug-only pass-end invariant: the pass-scoped [`Self::ready_bridges`] queue
+  /// is empty and no live bridge still carries a set [`Bridge::queued`] flag.
+  ///
+  /// Queue/flag lockstep: a trigger sets the flag only when it pushes the id, and
+  /// the flag is cleared only at pump entry — either by a queue pop-drain
+  /// ([`Self::drain_ready_bridges`]) or by the global pump-all
+  /// ([`Self::pump_bridges`], which services every bridge and so clears every
+  /// flag) — or with the bridge on reap. The queue is emptied only by a
+  /// drain-to-empty or [`Self::finalize_tick`]'s clear. Both invariants therefore
+  /// hold at the end of every servicing pass; the assert guards a future trigger
+  /// site that enqueues without a matching drain. Compiled out in release.
+  fn debug_assert_ready_drained(&self) {
+    debug_assert!(
+      self.ready_bridges.is_empty() && self.bridges.values().all(|br| !br.queued()),
+      "ready-bridge queue not fully drained at pass end: {} queued entries, any-flag-set {}",
+      self.ready_bridges.len(),
+      self.bridges.values().any(|br| br.queued()),
+    );
   }
 
   /// Move any `Event::DialRequested` currently in the inner endpoint's
@@ -2587,42 +2653,66 @@ where
     }
   }
 
-  /// Pump only connection `ch`'s bridges — the per-connection analog of
-  /// [`Self::pump_bridges`] driven from the datagram path. Reads the machine
-  /// [`StreamId`]s from [`Self::bridges_by_conn`] (O(this connection's bridges),
-  /// never an O(all bridges) filter) and runs the shared [`Self::pump_one_bridge`]
-  /// on each. A snapshot is taken first so a bridge reaped mid-loop (which mutates
-  /// `bridges_by_conn`) does not disturb the iteration.
+  /// Drain the pass-scoped ready-bridge queue [`Self::ready_bridges`]: pop each
+  /// enqueued machine [`StreamId`] and pump it exactly once via the shared
+  /// [`Self::pump_one_bridge`] (which clears its [`Bridge::queued`] flag at
+  /// entry), returning the distinct set of [`ConnectionHandle`]s whose bridges
+  /// it pumped so the caller flushes each one's owed transmits this same pass —
+  /// an outbound bridge minted by `service_dials` can ride a connection other
+  /// than the one being serviced. A since-reaped id no-ops (its
+  /// [`Self::pump_one_bridge`] finds no bridge and returns `None`).
   ///
-  /// `#[cfg(not(test))]`: test builds pump via the post-acceptance-tracking
-  /// [`Self::pump_conn_bridges_tracking`] instead, so this untracked variant is
-  /// compiled only for production — mirroring how the global tick's step (5.5)
-  /// splits `pump_bridges` from `pump_bridges_tracking_post_acceptance`.
+  /// Replaces the former all-bridges-on-`ch` pump on the datagram path: only the
+  /// bridges a readiness trigger enqueued this pass are pumped, so a corrupted or
+  /// replayed packet — which advances no stream state and fires no trigger —
+  /// pumps zero, while under valid traffic the pumped set is exactly the bridges
+  /// the arriving frames advanced.
+  ///
+  /// `#[cfg(not(test))]`: test builds drain via the post-acceptance-tracking
+  /// [`Self::drain_ready_bridges_tracking`] instead, so this untracked variant is
+  /// compiled only for production — mirroring how the global tick splits
+  /// `pump_bridges` from `pump_bridges_tracking_post_acceptance`.
   #[cfg(not(test))]
-  fn pump_conn_bridges(&mut self, ch: ConnectionHandle, now: Instant) {
-    let ids: SmallVec<StreamId> = match self.bridges_by_conn.get(&ch) {
-      Some(ids) => ids.iter().copied().collect(),
-      None => return,
-    };
-    for id in ids {
-      self.pump_one_bridge(id, now);
+  fn drain_ready_bridges(&mut self, now: Instant) -> SmallVec<ConnectionHandle> {
+    let mut pumped_conns: SmallVec<ConnectionHandle> = SmallVec::new();
+    while let Some(id) = self.ready_bridges.pop_front() {
+      if let Some(ch) = self.pump_one_bridge(id, now) {
+        if !pumped_conns.contains(&ch) {
+          pumped_conns.push(ch);
+        }
+      }
     }
+    pumped_conns
   }
 
   /// Pump one bridge `id`: its inbound + outbound halves, drain its
   /// endpoint-events into the `Endpoint`, and D1-drain-then-reap it if it turned
   /// terminal. The per-bridge body of [`Self::pump_bridges`], shared with the
-  /// per-connection [`Self::pump_conn_bridges`] so both the global tick and the
+  /// per-connection [`Self::drain_ready_bridges`] so both the global tick and the
   /// datagram path run identical bridge logic. Beyond that verbatim logic it
   /// maintains the two mandated indexes: [`Self::bridges_by_conn`] on reap and the
   /// `#[cfg(test)]` [`TestCounters::bridge_visits`] touch count.
-  fn pump_one_bridge(&mut self, id: StreamId, now: Instant) {
+  ///
+  /// Returns the bridge's owning [`ConnectionHandle`] when the bridge was present
+  /// (whether it survived or reaped), so the ready-queue drain can collect the
+  /// distinct connections it pumped and flush their transmits; `None` when `id`
+  /// named no live bridge (a stale ready-queue entry for an already-reaped
+  /// stream). Clears the bridge's [`Bridge::queued`] flag at entry: the bridge is
+  /// being serviced now, so a readiness trigger firing later this pass re-enqueues
+  /// it for owed work that appears after the pump.
+  fn pump_one_bridge(&mut self, id: StreamId, now: Instant) -> Option<ConnectionHandle> {
     // Split borrow: take the bridge out, operate, put back (or reap).
     if let Some(mut br) = self.bridges.remove(&id) {
       #[cfg(test)]
       {
         self.counters.bridge_visits = self.counters.bridge_visits.saturating_add(1);
       }
+      // Serviced now: clear the ready-queue dedup flag so a later trigger this
+      // pass can re-enqueue the bridge. The bridge's connection is invariant
+      // across the pumps below, so capture it once for the return value and the
+      // reap deindex.
+      br.set_queued(false);
+      let conn = br.ch();
       // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
       // error, so `is_terminal()` below drives the prompt reap; the
       // `#[must_use]` Results are consumed — terminality is the signal.
@@ -2635,14 +2725,13 @@ where
       if br.is_terminal() {
         br.drain_then_reap(&mut self.ep, &mut self.conns, now);
         let outcome = Self::outcome_for_terminal(&br);
-        let ch = br.ch();
         let sid = br.sid();
         // Capture the bucket back-pointer BEFORE `drop(br)` — the O(1)
         // swap_remove deindex needs it.
         let conn_slot = br.conn_slot();
         // Reap AFTER drain: dropping the bridge frees its slot.
         drop(br);
-        self.deindex_reaped_bridge(id, ch, sid, conn_slot);
+        self.deindex_reaped_bridge(id, conn, sid, conn_slot);
         self.emit_exchange_completed(id, outcome);
       } else {
         br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -2661,12 +2750,11 @@ where
           }
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
           let outcome = Self::outcome_for_terminal(&br);
-          let ch = br.ch();
           let sid = br.sid();
           // Capture the bucket back-pointer BEFORE `drop(br)`.
           let conn_slot = br.conn_slot();
           drop(br);
-          self.deindex_reaped_bridge(id, ch, sid, conn_slot);
+          self.deindex_reaped_bridge(id, conn, sid, conn_slot);
           self.emit_exchange_completed(id, outcome);
         } else {
           // Surviving bridge: refresh its deadline key before it moves back
@@ -2678,6 +2766,9 @@ where
           self.deadline_index.set(TimerKey::Bridge(id), deadline);
         }
       }
+      Some(conn)
+    } else {
+      None
     }
   }
 
@@ -2711,32 +2802,35 @@ where
     }
   }
 
-  /// Test-only per-connection variant of [`Self::pump_conn_bridges`] that
-  /// increments [`TestCounters::bridges_pumped_after_acceptance`] once for each of
-  /// `ch`'s bridges NOT in `pre_snapshot_ids`. The datagram-path analog of
-  /// [`Self::pump_bridges_tracking_post_acceptance`]: a bridge minted DURING this
-  /// `service_connection` pass (an inbound accept, or a `service_dials`
-  /// `open(Dir::Bi)` on establishment) is pumped in the same pass and counted here.
+  /// Test-only variant of [`Self::drain_ready_bridges`] that increments
+  /// [`TestCounters::bridges_pumped_after_acceptance`] once for each popped bridge
+  /// present in `self.bridges` but NOT in `pre_snapshot_ids` — i.e. minted DURING
+  /// this `service_connection` pass (an inbound accept, or a `service_dials`
+  /// `open(Dir::Bi)` on establishment) and pumped the same pass. The datagram-path
+  /// analog of [`Self::pump_bridges_tracking_post_acceptance`]; behaviour
+  /// (draining, pumping, the returned distinct connections) is otherwise identical
+  /// to the production variant.
   #[cfg(test)]
-  fn pump_conn_bridges_tracking(
+  fn drain_ready_bridges_tracking(
     &mut self,
-    ch: ConnectionHandle,
     now: Instant,
     pre_snapshot_ids: &HashSet<StreamId>,
-  ) {
-    let ids: SmallVec<StreamId> = match self.bridges_by_conn.get(&ch) {
-      Some(ids) => ids.iter().copied().collect(),
-      None => return,
-    };
-    for id in ids {
+  ) -> SmallVec<ConnectionHandle> {
+    let mut pumped_conns: SmallVec<ConnectionHandle> = SmallVec::new();
+    while let Some(id) = self.ready_bridges.pop_front() {
       if self.bridges.contains_key(&id) && !pre_snapshot_ids.contains(&id) {
         self.counters.bridges_pumped_after_acceptance = self
           .counters
           .bridges_pumped_after_acceptance
           .saturating_add(1);
       }
-      self.pump_one_bridge(id, now);
+      if let Some(ch) = self.pump_one_bridge(id, now) {
+        if !pumped_conns.contains(&ch) {
+          pumped_conns.push(ch);
+        }
+      }
     }
+    pumped_conns
   }
   /// Inbound datagram from the one UDP socket.
   ///
@@ -2966,14 +3060,22 @@ where
       .map(|e| e.established_at_least_once())
       .unwrap_or(false);
     // (a) Drive `ch`: apply its deferred feedback + timers, drain its `poll()`
-    // (accepting inbound bridges, reaping its bridges on a connection-level loss).
+    // (accepting inbound bridges, routing per-stream readiness events, reaping its
+    // bridges on a connection-level loss). Its accept loop enqueues each fresh
+    // inbound bridge (T1) and its `poll()` drain enqueues each bridge a
+    // `Readable`/`Writable`/`Finished`/`Stopped` made ready (T2–T5).
     self.service_one_conn(ch, now);
-    // (b) Pump ONLY `ch`'s bridges — including any just accepted — so their first
-    // buffered request/response bytes reach the quinn send stream this same pass.
+    // (b) Drain the ready queue: pump exactly the bridges `service_one_conn` made
+    // ready this pass — never every bridge on `ch` — so their first buffered
+    // request/response bytes reach the quinn send stream and any terminal bridge
+    // reaps the same pass. A corrupted or replayed packet fires no trigger, so
+    // this drains nothing. The drain returns the distinct connections it pumped;
+    // accumulate them (plus the dials' touched connections below) to flush after
+    // step (d).
     #[cfg(test)]
-    self.pump_conn_bridges_tracking(ch, now, &pre_service_ids);
+    let mut to_flush = self.drain_ready_bridges_tracking(now, &pre_service_ids);
     #[cfg(not(test))]
-    self.pump_conn_bridges(ch, now);
+    let mut to_flush = self.drain_ready_bridges(now);
     // (c) If `ch` established DURING this pass, attempt the dials parked on its
     // peer: a pooled push/pull or reliable-ping intent requeued while `ch` was
     // still handshaking must open its bidi the instant `ch` establishes, not wait
@@ -2987,13 +3089,13 @@ where
     // already established mints there) — OR merely mutate a connection without
     // minting: a cold dial creates a fresh connection whose `open(Bi)` returns
     // `None` (still handshaking) and requeues, and an invalidated-intent dial
-    // opens+resets a stream. So pump exactly the bridges it reports minting, then
-    // flush every connection it reports TOUCHING (minting or not) so each one's
-    // first request bytes / Initial / reset bytes reach the `out` wire AND its
-    // deadline key is registered THIS pass. Without it a strict-poll driver would
-    // sleep until the next global tick, past the first datagram — the same
-    // strict-poll self-sufficiency `flush_outbound` documents. `ch` itself is
-    // collected by step (d), so skip it here to avoid a redundant poll.
+    // opens+resets a stream. So enqueue exactly the bridges it reports minting
+    // (T1) and drain them, then flush every connection it reports TOUCHING
+    // (minting or not) so each one's first request bytes / Initial / reset bytes
+    // reach the `out` wire AND its deadline key is registered THIS pass. Without
+    // it a strict-poll driver would sleep until the next global tick, past the
+    // first datagram — the same strict-poll self-sufficiency `flush_outbound`
+    // documents. `ch` itself is collected by step (d).
     let established_now = self
       .conns
       .get(ch)
@@ -3004,28 +3106,27 @@ where
         minted_bridges,
         touched_conns,
       } = self.service_dials(now);
-      // Pump each freshly-minted outbound bridge so its first request bytes move
+      // Enqueue each freshly-minted outbound bridge (T1, outbound twin of the
+      // inbound-accept enqueue) so the drain below pumps its first request bytes
       // into its quinn send stream before its owning connection is collected.
       for mid in minted_bridges {
-        #[cfg(test)]
-        {
-          // A minted bridge is post-acceptance (opened after step (b)'s pump);
-          // bump the same counter `pump_conn_bridges_tracking` would.
-          if self.bridges.contains_key(&mid) {
-            self.counters.bridges_pumped_after_acceptance = self
-              .counters
-              .bridges_pumped_after_acceptance
-              .saturating_add(1);
-          }
+        enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+      }
+      #[cfg(test)]
+      let pumped = self.drain_ready_bridges_tracking(now, &pre_service_ids);
+      #[cfg(not(test))]
+      let pumped = self.drain_ready_bridges(now);
+      for mc in pumped {
+        if !to_flush.contains(&mc) {
+          to_flush.push(mc);
         }
-        self.pump_one_bridge(mid, now);
       }
       // Flush + re-index every connection the dials touched — the minted-bridge
       // owners AND the mutated-but-bridgeless ones (a cold-dial Initial, an
-      // invalidated-intent reset). `ch` is collected by step (d).
+      // invalidated-intent reset).
       for mc in touched_conns {
-        if mc != ch {
-          self.collect_conn_transmits(mc, now);
+        if !to_flush.contains(&mc) {
+          to_flush.push(mc);
         }
       }
     }
@@ -3042,6 +3143,18 @@ where
     } else {
       self.collect_conn_transmits(ch, now);
     }
+    // Flush every OTHER connection a pumped bridge rode or a dial touched this
+    // pass so its owed bytes reach `out` and its deadline key refreshes now; `ch`
+    // is already collected above. (`ch`'s own ready-pumped bridges ride `ch`, so
+    // step (d)'s collect covers them.)
+    for mc in to_flush {
+      if mc != ch {
+        self.collect_conn_transmits(mc, now);
+      }
+    }
+    // Pass-end invariant: the pass-scoped ready queue is drained empty and no
+    // live bridge still flags queued.
+    self.debug_assert_ready_drained();
   }
 
   /// Shared tick body. `advance_membership_time` gates step (3)
@@ -3281,6 +3394,34 @@ where
                 .max_inbound_bridges_live
                 .max(self.inbound_bridge_count);
             }
+            // T1 (inbound mint): a freshly-accepted inbound bridge already holds
+            // its first request bytes in quinn's per-stream assembler (this
+            // datagram delivered them), yet a new remote stream's first frames
+            // set only the coalesced `Opened` flag and emit no `Readable`, so no
+            // later event re-announces those bytes. Enqueue it here so the pass
+            // drain pumps the buffered request the same pass it was accepted.
+            // Disjoint from the live `e`/`self.conns` borrow — see
+            // `enqueue_ready_bridge`.
+            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, id);
+          }
+        }
+        quinn_proto::Event::Stream(quinn_proto::StreamEvent::Readable { id: sid }) => {
+          // T2 (readable): new inbound data, a peer FIN, or a peer RESET for a
+          // known stream. Resolve the owning bridge in O(1) via the `(ch, sid)`
+          // reverse index and enqueue it so the pass drain feeds the bytes
+          // through `pump_in`. A stale event for a refused/reaped stream resolves
+          // to no bridge and no-ops.
+          if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
+            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+          }
+        }
+        quinn_proto::Event::Stream(quinn_proto::StreamEvent::Writable { id: sid }) => {
+          // T3 (writable): send-side backpressure released for this stream (a
+          // MAX_STREAM_DATA raise, or a connection-window / ACK relax surfaced by
+          // `poll()`). Enqueue the owning bridge so the pass drain retries its
+          // blocked `pending_out` flush in `pump_out`.
+          if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
+            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
           }
         }
         quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {
@@ -3308,6 +3449,10 @@ where
             if let Some(br) = self.bridges.get_mut(&mid) {
               br.observe_send_fin();
             }
+            // T4: the send-FIN observation may complete `BothClosed`; enqueue so
+            // the pass drain runs the terminal check and terminalize-and-reaps
+            // this same pass rather than deferring to the bridge deadline.
+            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
           }
         }
         quinn_proto::Event::Stream(quinn_proto::StreamEvent::Stopped {
@@ -3344,6 +3489,9 @@ where
             if let Some(br) = self.bridges.get_mut(&mid) {
               br.fail_stopped_already_retired(error_code);
             }
+            // T5: the send half is now `ResetSent` and the bridge failed;
+            // enqueue so the pass drain reaps it this same pass.
+            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
           }
         }
         _ => {}

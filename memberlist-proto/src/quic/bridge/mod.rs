@@ -46,6 +46,14 @@ pub(crate) struct Bridge<I, A> {
   /// relocates this bridge into a vacated slot. Lets a reap drop the bridge from
   /// its bucket in O(1) (`swap_remove(conn_slot)`) instead of an O(bucket) scan.
   conn_slot: usize,
+  /// Ready-bridge-queue dedup flag: `true` while this bridge's machine
+  /// `StreamId` sits in the coordinator's pass-scoped ready queue awaiting a
+  /// pump. A readiness trigger pushes the id (and sets this) only when it is
+  /// clear, so repeated triggers on the same bridge in one servicing pass are
+  /// O(1) no-ops; the pump clears it at entry (whether reached by a queue
+  /// pop-drain or the global pump-all that services every bridge). Dropped with
+  /// the bridge on reap, so a reaped bridge leaves no dangling flag.
+  queued: bool,
   /// Bytes accepted by memberlist but not yet accepted by the quinn send
   /// stream because it returned `WriteError::Blocked`. Drained head-first on
   /// the next [`Bridge::pump_out`]; never discarded while non-empty.
@@ -182,6 +190,20 @@ impl<I, A> Bridge<I, A> {
   pub(crate) fn set_conn_slot(&mut self, slot: usize) {
     self.conn_slot = slot;
   }
+
+  /// Whether this bridge is currently enqueued on the coordinator's pass-scoped
+  /// ready-bridge queue — see [`Self::queued`]. Read at enqueue time so a
+  /// repeated readiness trigger deduplicates in O(1).
+  pub(crate) fn queued(&self) -> bool {
+    self.queued
+  }
+
+  /// Set or clear the ready-queue membership flag — see [`Self::queued`]. Set
+  /// by the coordinator when it pushes this bridge's id onto the ready queue,
+  /// cleared at pump entry.
+  pub(crate) fn set_queued(&mut self, queued: bool) {
+    self.queued = queued;
+  }
 }
 
 impl<I, A> Bridge<I, A>
@@ -262,6 +284,9 @@ where
       // instant this bridge is inserted into `bridges_by_conn`, before any reap
       // can consult it.
       conn_slot: 0,
+      // A freshly minted bridge is not yet on the ready queue; the coordinator
+      // enqueues it (setting the flag) at its mint trigger.
+      queued: false,
       pending_out: Vec::new(),
       sent_any: false,
       finish_called: false,
@@ -791,7 +816,22 @@ where
     }
 
     // Flush any back-pressured remainder first so stream order is preserved.
-    if !self.pending_out.is_empty() {
+    //
+    // Loop the write until the tail fully drains or the stream blocks. A single
+    // `write` can partially accept newly-restored connection-window credit and
+    // return `Ok(partial)` WITHOUT reaching `Err(WriteError::Blocked)`: quinn
+    // registers a stream for a later `StreamEvent::Writable` only when a write
+    // observes zero credit and returns `Blocked`, so a partial-accept-then-
+    // return would leave the retained tail with no future readiness wake and the
+    // bridge would stall to its exchange deadline under ordinary connection-
+    // level backpressure from a fully compliant peer. Looping guarantees the
+    // flush ends either with the tail drained (fall through to write new units)
+    // or on a `Blocked` that re-registered the stream (quinn re-emits `Writable`
+    // on the next credit release). Mirrors the gathered-unit write loop below;
+    // it terminates because a non-empty `pending_out` write returns `Ok(n >= 1)`
+    // or `Err(Blocked)` — quinn never returns `Ok(0)` for a non-empty buffer
+    // (`Send::write` returns `Err(Blocked)` on a zero stream/connection budget).
+    while !self.pending_out.is_empty() {
       match conn.send_stream(self.sid).write(&self.pending_out) {
         Ok(n) => {
           self.pending_out.drain(..n);
@@ -810,9 +850,6 @@ where
           self.fail(BridgeFailure::Transport(format!("send write: {e:?}")));
           return Err(());
         }
-      }
-      if !self.pending_out.is_empty() {
-        return Ok(());
       }
     }
 
@@ -1120,9 +1157,19 @@ where
                       }
                     }
                     LabelVerdict::Incomplete => {
-                      // Not enough bytes yet; hold recv_accum and wait for the
-                      // next chunk.
-                      break;
+                      // The label header is split: keep the partial in recv_accum
+                      // and `continue` to the NEXT chunk of THIS read rather than
+                      // abandoning the drain. Several STREAM frames can coalesce
+                      // into a single readability wake and arrive as successive
+                      // chunks of one pump; breaking here would strand the later
+                      // chunks with no further event to re-read them, stalling a
+                      // compliant peer to its exchange deadline. One pump must
+                      // consume all currently-available input or terminalize.
+                      // `continue` also skips the unit-drain below, which must
+                      // not run while the label prefix still sits at the head of
+                      // recv_accum. A FIN arriving mid-label is caught by the
+                      // trailing-partial check after the loop.
+                      continue;
                     }
                     LabelVerdict::Rejected(_) => {
                       decode_failed = true;

@@ -33,6 +33,30 @@ fn test_config() -> QuicOptions {
   test_config_with_mode(UnreliableTransport::Datagram)
 }
 
+/// Like [`test_config`] but with a SMALL connection-level `receive_window` (the
+/// binding flow-control constraint, released only via MAX_DATA/ACK) and a LARGE
+/// per-stream `stream_receive_window` (never the constraint, so no
+/// MAX_STREAM_DATA is ever sent). A peer receiving a large reliable message under
+/// this config back-pressures the sender at the CONNECTION level and drains it in
+/// window-sized MAX_DATA increments — the setup for the partial-write flush
+/// regression.
+fn test_config_small_conn_window() -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.receive_window(quinn_proto::VarInt::from_u32(16 * 1024));
+  transport.stream_receive_window(quinn_proto::VarInt::from_u32(4 * 1024 * 1024));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
 fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
   let cfg = EndpointOptions::new(SmolStr::new(id), addr);
   let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
@@ -4748,21 +4772,22 @@ fn rejected_initial_at_per_source_cap_is_one_indexed_probe_no_servicing() {
 
 /// A corrupted (AEAD-tag-flipped, DCID intact) or replayed (duplicate packet
 /// number) datagram at an established live CID is routed to that ONE connection
-/// and serviced — but only that connection and its bridges, never the whole
-/// table. Servicing a packet quinn will discard is cheap when it is bounded to
-/// the addressed connection, and it costs an attacker who learned a live CID
-/// exactly O(that connection), not the O(all connections + bridges) the global
-/// tick ran per flooded datagram before this change.
+/// and serviced — but it advances no stream state, so it fires no readiness
+/// trigger and pumps NONE of that connection's bridges: the pass-scoped ready
+/// queue drains empty. With K live bridges standing on the attacked connection,
+/// per-datagram `connection_visits` stays exactly `1` (the addressed connection)
+/// and `bridge_visits` stays exactly `0` — the pump set is precisely the bridges
+/// the datagram's frames advanced, and a discarded datagram advances none.
 ///
-/// Builds a populated server B (connections to A, C1, C2, plus one live bridge on
-/// the connection to C1) and floods B at A's live CID. Per-datagram
-/// `connection_visits` stays exactly `1` (A's connection) and `bridge_visits`
-/// stays exactly the count of A's bridges — neither scales with the table.
+/// Non-vacuity control: a genuinely-advancing datagram (a real response STREAM
+/// frame from the peer) DOES pump its bridge, so `bridge_visits` climbs above `0`
+/// — the zero above is the ready set filtering garbage, not a pump path that
+/// never runs.
 ///
-/// Negative control: restore the global tick on the datagram path — each flooded
-/// datagram then visits every connection and every bridge, so `connection_visits`
-/// climbs to the connection count and `bridge_visits` picks up C1's live bridge;
-/// both exact-count assertions fail.
+/// Negative control: pump every bridge on the addressed connection (the former
+/// all-bridges-on-`ch` pump) instead of draining the ready queue — each flooded
+/// datagram then pumps all K of A's live bridges, so `bridge_visits` climbs to K
+/// and the `== 0` assertions fail.
 #[test]
 fn corrupted_or_replayed_packet_services_only_its_connection() {
   let b_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
@@ -4809,17 +4834,6 @@ fn corrupted_or_replayed_packet_services_only_its_connection() {
     "test precondition: B must hold several connections so the O(1) claim is non-vacuous"
   );
 
-  // Hold ONE live bridge on B's connection to C1: B initiates a push/pull to the
-  // established C1 (opening an outbound bridge synchronously), and C1 is never
-  // ferried again, so the bridge stays live. It rides B's connection to C1, NOT
-  // the connection to A we flood — so a global bridge scan would visit it.
-  let _ = b.start_push_pull(c1_addr, PushPullKind::Refresh, now);
-  while b.poll_transmit().is_some() {}
-  assert!(
-    b.live_bridge_count() >= 1,
-    "test precondition: B must hold a live bridge on a non-flooded connection"
-  );
-
   let ch_a = b
     .conns
     .handle_for(&a_addr)
@@ -4827,13 +4841,37 @@ fn corrupted_or_replayed_packet_services_only_its_connection() {
   let bridges_on = |ep: &QuicEndpoint<SmolStr>, ch: quinn_proto::ConnectionHandle| {
     ep.bridges.values().filter(|br| br.ch() == ch).count()
   };
+
+  // Hold ONE live bridge on B's connection to C1 (a connection OTHER than the
+  // flooded one): B initiates a push/pull to the established C1, and C1 is never
+  // ferried, so the bridge stays live. A former all-bridges scan would visit it.
+  let _ = b.start_push_pull(c1_addr, PushPullKind::Refresh, now);
+  while b.poll_transmit().is_some() {}
+
+  // Stand K live bridges ON THE ATTACKED connection (B initiates K push/pulls to
+  // the established A, opening K outbound bidis on B's connection to A). Hold B's
+  // request datagrams to A instead of delivering them, so the bridges stay live
+  // awaiting a response — and so a genuine round below can advance them.
+  const K: usize = 3;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  let mut held_b_to_a: Vec<Vec<u8>> = Vec::new();
+  while let Some((to, bytes)) = b.poll_transmit() {
+    if to == a_addr {
+      held_b_to_a.push(bytes.to_vec());
+    }
+    // Datagrams to C1 (and any other peer) are dropped so C1's bridge stays live.
+  }
+  let live_on_a = bridges_on(&b, ch_a);
   assert!(
-    b.live_bridge_count() > bridges_on(&b, ch_a),
-    "test precondition: the live bridge must be on a connection OTHER than A's"
+    live_on_a >= 2,
+    "test precondition: the attacked connection must hold multiple live bridges so \
+       `== 0` is non-vacuous (former design would pump all {live_on_a}); got {live_on_a}"
   );
 
-  // Capture a genuine A->B 1-RTT gossip datagram (a DATAGRAM frame, so it mints
-  // no bridge on B's side and leaves A's connection bridge-free).
+  // Capture a genuine A->B 1-RTT gossip datagram (a DATAGRAM frame, so it pumps
+  // no bridge — it is unreliable, not stream data).
   let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"gossip-probe-payload"), now);
   a.flush_outbound_transmits(now);
   let pristine = drain_first_datagram_to(&mut a, b_addr);
@@ -4841,7 +4879,7 @@ fn corrupted_or_replayed_packet_services_only_its_connection() {
 
   // Corrupted flood: flip the AEAD tag (last byte); the plaintext DCID is intact,
   // so quinn routes it to B's connection-to-A and discards it on auth failure.
-  // Each such datagram services ONLY A's connection.
+  // Each such datagram services ONLY A's connection and pumps NONE of its bridges.
   let mut corrupt = pristine.clone();
   let last = corrupt.len() - 1;
   corrupt[last] ^= 0xff;
@@ -4857,15 +4895,15 @@ fn corrupted_or_replayed_packet_services_only_its_connection() {
       b.conns.iter_handles().len()
     );
     assert_eq!(
-      b.counters.bridge_visits as usize,
-      bridges_on(&b, ch_a),
-      "a corrupted datagram must pump only A's bridges, never C1's live bridge"
+      b.counters.bridge_visits, 0,
+      "a corrupted datagram advances no stream state and must pump ZERO bridges, \
+         not the {live_on_a} live bridges standing on A's connection"
     );
   }
 
   // Replayed flood: deliver the genuine datagram once (B extracts it), then
   // re-deliver the SAME bytes — a duplicate packet number quinn discards. The
-  // duplicate still services ONLY A's connection.
+  // duplicate still services ONLY A's connection and pumps no bridge.
   b.handle_udp(a_addr, &pristine, now);
   while b.poll_transmit().is_some() {}
   b.counters.connection_visits = 0;
@@ -4876,9 +4914,171 @@ fn corrupted_or_replayed_packet_services_only_its_connection() {
     "a replayed (duplicate packet number) datagram must service exactly A's connection"
   );
   assert_eq!(
-    b.counters.bridge_visits as usize,
-    bridges_on(&b, ch_a),
-    "a replayed datagram must pump only A's bridges, never C1's live bridge"
+    b.counters.bridge_visits, 0,
+    "a replayed datagram advances no stream state and must pump ZERO bridges"
+  );
+
+  // Non-vacuity: a GENUINE advancing datagram DOES pump a bridge. Deliver B's held
+  // requests to A so it accepts the inbound streams and responds, then ferry
+  // A->B; a real response STREAM frame (or a refusal STOP_SENDING) makes B's
+  // bridge readable and the ready-set drain pumps it. `bridge_visits` is reset
+  // immediately before each A->B delivery so the count reflects that datagram
+  // alone (not the per-iteration `handle_timeout` global pump).
+  for bytes in &held_b_to_a {
+    a.handle_udp(b_addr, bytes, now);
+  }
+  let mut genuine_pumped = false;
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.counters.bridge_visits = 0;
+        b.handle_udp(a_addr, &bytes, now);
+        if b.counters.bridge_visits > 0 {
+          genuine_pumped = true;
+        }
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if genuine_pumped {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    genuine_pumped,
+    "a genuinely-advancing datagram (a real response STREAM frame) must pump its \
+       bridge — `bridge_visits` climbing above 0 proves the ready set filters \
+       garbage rather than never pumping"
+  );
+}
+
+/// A reliable exchange back-pressured at the CONNECTION window — released ONLY
+/// via MAX_DATA/ACK (a partial-window release, never MAX_STREAM_DATA) — completes
+/// under a strict-poll (datagram-only) driver. The sender's `pending_out` flush
+/// must LOOP until it re-blocks so quinn re-registers the stream and re-emits
+/// `StreamEvent::Writable` on each credit release; a single write that partially
+/// accepts restored connection-window credit without re-blocking leaves the tail
+/// un-registered, no further `Writable` fires, and the strict-poll driver never
+/// re-pumps the bridge until its exchange deadline (a false Timeout).
+///
+/// A sends a message several times B's small connection `receive_window`, so the
+/// tail drains in multiple MAX_DATA increments — each needing a fresh `Writable`.
+/// B's large `stream_receive_window` guarantees the per-stream window is never
+/// the constraint, so no MAX_STREAM_DATA is ever sent: the ONLY re-wake is the
+/// connection-window `Writable`. The whole DATA phase is driven with `handle_udp`
+/// only (never `handle_timeout`), so the global pump-all cannot mask a missing
+/// `Writable`; time never advances, so the bridge deadline never fires and the
+/// exchange can only complete via the looped flush's re-registration.
+///
+/// Mutation-verify: revert `Bridge::pump_out`'s `pending_out` flush to a single
+/// write (drop the loop) — after the first partial-credit `Writable` pump the
+/// stream is no longer registered, no further `Writable` fires, and the ferry
+/// stalls with B never receiving the full message; the length assertion fails.
+#[test]
+fn connection_window_backpressured_exchange_completes_under_strict_poll() {
+  let a_addr: SocketAddr = "127.0.0.1:7982".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7983".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B advertises a small connection window (MAX_DATA-bound) but a large
+  // per-stream window (never the constraint).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window(), b_addr, now);
+
+  // Establish A -> B with a normal (timer-driven) ferry; the user-message bridge
+  // that carries the back-pressured payload is opened AFTER this, so the global
+  // pump here cannot mask the data-phase behaviour under test.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1,
+    "test precondition: A and B must be connected before the back-pressured send"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A one-way reliable message several times B's 16 KiB connection window, so its
+  // single reliable unit cannot fit the window and drains only in MAX_DATA-sized
+  // increments.
+  let payload = Bytes::from(vec![0xA7u8; 200 * 1024]);
+  let _ = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A starts a reliable user message to the established B");
+
+  // STRICT-POLL data ferry: `handle_udp` only, NEVER `handle_timeout`, and time
+  // never advances. Progress is possible only if each MAX_DATA re-emits a
+  // `Writable` that re-pumps A's blocked flush.
+  let mut b_got_len: Option<usize> = None;
+  for _ in 0..1000 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some(ev) = b.poll_event() {
+      if let Event::UserPacket(p) = ev {
+        b_got_len = Some(p.data_ref().as_ref().len());
+      }
+    }
+    while a.poll_event().is_some() {}
+    if b_got_len.is_some() {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert_eq!(
+    b_got_len,
+    Some(payload.len()),
+    "a connection-window-back-pressured reliable message must complete under a \
+       strict-poll driver via MAX_DATA-only credit: the looped `pending_out` \
+       flush re-registers the stream on each partial release so `Writable` \
+       re-pumps the bridge. A single-write flush stalls the tail (no re-wake) and \
+       B never receives the full {}-byte payload.",
+    payload.len()
   );
 }
 
@@ -5242,10 +5442,10 @@ fn bridges_by_conn_index_matches_bruteforce() {
 /// same `handle_udp` — proving the per-connection path pumps AND collects the
 /// exact set `service_dials` minted, wherever it landed.
 ///
-/// Mutation-verify: revert step (c) to pump only the just-established connection's
-/// bridges (`pump_conn_bridges(ch)`) — B's bridge is minted but never pumped or
-/// collected this pass, so no datagram to B appears until a later `handle_timeout`
-/// and `flushed_to_b` stays false.
+/// Mutation-verify: drop step (c)'s minted-bridge enqueue + ready-queue drain, so
+/// the cross-connection bridge `service_dials` minted is never pumped or collected
+/// this pass — no datagram to B appears until a later `handle_timeout` and
+/// `flushed_to_b` stays false.
 #[test]
 fn cross_connection_dial_mint_flushes_first_bytes_same_pass() {
   let n_addr: SocketAddr = "127.0.0.1:7920".parse().unwrap();
