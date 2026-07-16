@@ -37,6 +37,10 @@ use crate::{
   wire::{COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN},
 };
 
+mod deadline;
+
+use deadline::SuspicionDeadlines;
+
 #[cfg(test)]
 mod tests;
 
@@ -221,6 +225,13 @@ pub struct Endpoint<I, A, R = SmallRng> {
   /// one's token even when it reuses the same `(id, address, incarnation)`. See
   /// [`Member::generation`](crate::members::Member::generation) for the invariant.
   next_member_generation: u64,
+
+  // Incremental index of active suspicion deadlines, keyed by member id. Kept
+  // in lockstep with `members`' per-member suspicion timers (every install /
+  // confirm-accelerate / clear routes through `install_suspicion` /
+  // `clear_suspicion` / the confirm hook) so `poll_timeout` reads the earliest
+  // suspicion deadline in O(log n) instead of folding the whole member list.
+  suspicion_deadlines: SuspicionDeadlines<I>,
 
   // Lifeguard.
   awareness: Awareness,
@@ -652,6 +663,19 @@ impl<I, A, R> Endpoint<I, A, R> {
   ///
   /// Returns `None` if all three sources are empty.
   pub fn poll_timeout(&self) -> Option<Instant> {
+    // The incremental suspicion-deadline index must equal the old
+    // member-list fold at every poll. Checked before the lifecycle gate
+    // because the invariant holds in every lifecycle state (the gate hides the
+    // deadline from the driver, it does not desynchronize the index). This
+    // rides the conformance sim's per-step `poll_timeout` fold (a dev build has
+    // debug-assertions on) as millions of free oracle checks, and is compiled
+    // out entirely in release so VOPR throughput is unaffected.
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+      self.suspicion_deadlines.earliest(),
+      self.suspicion_deadline_bruteforce(),
+      "suspicion-deadline index drifted from the member-list fold",
+    );
     // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
     // indirect forwards are inert (handle_timeout fires none of them), so
     // surfacing their now-stale deadlines would spin the driver through
@@ -659,11 +683,10 @@ impl<I, A, R> Endpoint<I, A, R> {
     if self.lifecycle != Lifecycle::Running {
       return None;
     }
-    let suspicion_deadline = self
-      .members
-      .iter()
-      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
-      .min();
+    // O(log n) read of the earliest active suspicion deadline. Formerly a full
+    // `members.iter().filter_map(|m| m.suspicion()...).min()` scan — the sole
+    // Θ(cluster) term of this fold, now the incremental index minimum.
+    let suspicion_deadline = self.suspicion_deadlines.earliest();
     let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
     let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
     let intent_deadline = self
@@ -683,6 +706,24 @@ impl<I, A, R> Endpoint<I, A, R> {
     .into_iter()
     .flatten()
     .min()
+  }
+
+  /// Brute-force recomputation of the earliest active suspicion deadline by
+  /// folding the whole member list — byte-for-byte the fold the incremental
+  /// [`SuspicionDeadlines`] index replaced. The soundness oracle: the index's
+  /// [`earliest`](SuspicionDeadlines::earliest) must equal this at every poll.
+  ///
+  /// Gated on `debug_assertions` (not `test`) so it is compiled — and its
+  /// `debug_assert_eq!` in [`poll_timeout`](Self::poll_timeout) exercised —
+  /// across downstream dev builds such as the conformance simulation, while
+  /// being absent (zero cost) in release.
+  #[cfg(any(test, debug_assertions))]
+  fn suspicion_deadline_bruteforce(&self) -> Option<Instant> {
+    self
+      .members
+      .iter()
+      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
+      .min()
   }
 
   /// Whether the endpoint has an in-progress SWIM operation that will, on its
@@ -707,7 +748,10 @@ impl<I, A, R> Endpoint<I, A, R> {
     !self.probes.is_empty()
       || !self.indirect_forwards.is_empty()
       || !self.pending_stream_intents.is_empty()
-      || self.members.iter().any(|m| m.suspicion().is_some())
+      // The incremental equivalent of the old
+      // `members.iter().any(|m| m.suspicion().is_some())` scan: the index is
+      // non-empty iff at least one member carries a live suspicion.
+      || !self.suspicion_deadlines.is_empty()
   }
 
   /// Number of broadcasts currently in the gossip queue.
@@ -1207,6 +1251,10 @@ where
       rng,
       members,
       next_member_generation,
+      // No member carries a suspicion at construction (the local node is
+      // inserted Alive), so the index starts empty and is maintained by the
+      // suspicion lifecycle chokepoints thereafter.
+      suspicion_deadlines: SuspicionDeadlines::new(),
       awareness,
       broadcast,
       ack_registry: AckRegistry::new(),
@@ -1344,6 +1392,36 @@ where
     }
   }
 
+  /// Install `suspicion` on `id`'s member record and mirror its deadline into
+  /// the [`SuspicionDeadlines`] index. The single chokepoint for *arming* a
+  /// suspicion: keeping `Member::set_suspicion(Some(..))` and the index write
+  /// in one place is what lets [`poll_timeout`](Self::poll_timeout) trust the
+  /// index. A no-op if `id` is not a tracked member — callers only ever install
+  /// on a present member, but this keeps the index from indexing an absent id.
+  fn install_suspicion(&mut self, id: &I, suspicion: crate::suspicion::Suspicion<I>) {
+    let deadline = suspicion.deadline();
+    let Some(member) = self.members.get_mut(id) else {
+      return;
+    };
+    member.set_suspicion(Some(suspicion));
+    // The `&mut Member` borrow ends at its last use above; `suspicion_deadlines`
+    // is a disjoint field, so this second mutation is unambiguous.
+    self.suspicion_deadlines.set(id, Some(deadline));
+  }
+
+  /// Clear any suspicion on `id`'s member record and remove its
+  /// [`SuspicionDeadlines`] entry. The single chokepoint for *disarming* a
+  /// suspicion. The index remove is unconditional (setting `None` on an absent
+  /// id is a no-op), so the index can never retain an entry for a member whose
+  /// suspicion was cleared.
+  fn clear_suspicion(&mut self, id: &I) {
+    if let Some(member) = self.members.get_mut(id) {
+      member.set_suspicion(None);
+    }
+    // Disjoint field: the `&mut Member` borrow (if any) ends above.
+    self.suspicion_deadlines.set(id, None);
+  }
+
   /// Apply an incoming Suspect to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
@@ -1395,6 +1473,15 @@ where
         Some(s) => s.confirm(&from, now),
         None => crate::suspicion::Confirmation::Ignored,
       };
+      // Confirm-accelerate: `Suspicion::confirm` mutates the deadline in place
+      // with NO `set_suspicion` call, so neither chokepoint helper sees it — the
+      // index must be re-armed here. `Accepted` carries the freshly-pulled-in
+      // deadline for exactly this; `Ignored` (a duplicate, n >= k, or k == 0)
+      // left the deadline untouched, so no index write. Direction is irrelevant:
+      // `set` replaces the entry regardless.
+      if let crate::suspicion::Confirmation::Accepted(new_deadline) = confirmed {
+        self.suspicion_deadlines.set(&target, Some(new_deadline));
+      }
       if confirmed.is_accepted() {
         self.broadcast_message(
           target.cheap_clone(),
@@ -1424,8 +1511,10 @@ where
       0
     };
     let suspicion = crate::suspicion::Suspicion::new(from.cheap_clone(), k, min, max, now);
+    // Install: arm the suspicion and index its deadline through the chokepoint,
+    // then apply the Alive -> Suspect transition on a fresh borrow.
+    self.install_suspicion(&target, suspicion);
     let member = self.members.get_mut(&target).unwrap();
-    member.set_suspicion(Some(suspicion));
     let member_state = member.state_mut();
     member_state.set_incarnation(inc);
     member_state.set_state(State::Suspect, now);
@@ -1480,9 +1569,13 @@ where
         self.refute(inc);
         return;
       }
+      // Clear via Dead (self-leaving -> Left): disarm any suspicion through the
+      // chokepoint, then apply the Left transition on a fresh borrow. Self never
+      // carries a suspicion, so the index clear is a no-op in practice, kept
+      // unconditional for the invariant.
+      self.clear_suspicion(&target);
       {
         let m = self.members.get_mut(&target).unwrap();
-        m.set_suspicion(None);
         m.state_mut().set_incarnation(inc);
         m.state_mut().set_state(State::Left, now);
       }
@@ -1509,8 +1602,16 @@ where
       return;
     }
 
+    // Clear via Dead (remote): disarm any suspicion through the chokepoint, then
+    // apply the Dead/Left transition on a fresh borrow. This is ALSO the
+    // suspicion-expiry pop: `fire_expired_suspicions` synthesizes a Dead per
+    // expired member and routes it here, so the expired member's index entry is
+    // removed exactly once — here. None of process_dead's early-outs can skip
+    // this for a synthesized Dead (incarnation read off the member, so never
+    // stale; the member is Suspect, not Dead/Left; never self; lifecycle
+    // Running), so `fire_expired_suspicions` needs no index code of its own.
+    self.clear_suspicion(&target);
     if let Some(m) = self.members.get_mut(&target) {
-      m.set_suspicion(None);
       let current_state = m.state_mut();
       current_state.set_incarnation(inc);
       let new_state = if self_marked {
@@ -1820,6 +1921,11 @@ where
 
   /// Fire any expired suspicion timers, transitioning the peer to Dead.
   fn fire_expired_suspicions(&mut self, now: Instant) {
+    // No direct suspicion-deadline-index maintenance here: each expired member
+    // is transitioned by synthesizing a Dead and routing it through
+    // `process_dead`, whose remote-clear path removes the index entry. Removing
+    // it here too would double-remove.
+    //
     // Collect ids whose suspicion timer has expired. We do this in two
     // passes so we don't hold a borrow on members while calling
     // process_dead.
@@ -3494,14 +3600,21 @@ where
       is_new = true;
     }
 
-    // Re-fetch (insert_at_random_at may have moved indices).
+    // Re-fetch (insert_at_random_at may have moved indices). Read-only here: the
+    // suspicion clear and the state mutation below both run on fresh borrows, so
+    // every local read — incarnation, state, meta, and the protocol
+    // / delegate versions the is_local refute-guard compares — is captured up
+    // front, ending this borrow before `clear_suspicion` touches a disjoint
+    // field.
     let member = self
       .members
-      .get_mut(&alive_id)
+      .get(&alive_id)
       .expect("inserted above or pre-existing");
     let local_incarnation = member.state_ref().incarnation();
     let old_state = member.state_ref().state();
     let old_meta = member.state_ref().server_ref().meta_ref().cheap_clone();
+    let local_protocol = member.state_ref().server_ref().protocol_version();
+    let local_delegate = member.state_ref().server_ref().delegate_version();
 
     if !is_new && !updates_address && !is_local && alive_incarnation <= local_incarnation {
       return;
@@ -3511,13 +3624,18 @@ where
       return;
     }
 
-    member.set_suspicion(None);
+    // Clear via superseding Alive: a superseding Alive refutes any suspicion.
+    // Placed after the older/equal-incarnation early returns above (a
+    // non-superseding Alive returns before reaching here, correctly leaving the
+    // entry intact) and before the local-refute return below. The chokepoint
+    // clears both the member record and the index on a fresh borrow.
+    self.clear_suspicion(&alive_id);
 
     if !bootstrap && is_local {
       // Same incarnation + same server → idempotent, no-op.
       let same_meta = old_meta == alive_meta;
-      let same_pv = member.state_ref().server_ref().protocol_version() == alive_protocol;
-      let same_dv = member.state_ref().server_ref().delegate_version() == alive_delegate;
+      let same_pv = local_protocol == alive_protocol;
+      let same_dv = local_delegate == alive_delegate;
       if alive_incarnation == local_incarnation && same_meta && same_pv && same_dv {
         return;
       }
@@ -4205,6 +4323,18 @@ where
       self.bump_snapshot_version();
     }
     for id in ids_to_remove {
+      // Member removal: only Dead/Left members are reclaimed here, and every
+      // Dead/Left transition already cleared this member's suspicion (via the
+      // Dead and superseding-Alive paths), so the index entry must already be
+      // absent. The unconditional remove keeps "index keys are a subset of
+      // members with a live suspicion" independent of that theorem; the
+      // debug_assert documents and guards it.
+      #[cfg(debug_assertions)]
+      debug_assert!(
+        !self.suspicion_deadlines.contains(&id),
+        "reclaimed member still carried a live suspicion-deadline index entry",
+      );
+      self.suspicion_deadlines.set(&id, None);
       self.members.remove(&id);
     }
     // Decorrelate probe order across rounds: without a reshuffle the round-robin

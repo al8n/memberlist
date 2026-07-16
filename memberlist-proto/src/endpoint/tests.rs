@@ -10096,3 +10096,356 @@ fn indirect_helper_selection_is_uniform_over_distinct_addresses() {
     M as f64 / (M as f64 + 1.0)
   );
 }
+
+// ─── incremental suspicion-deadline index (oracle-checked) ───────────────────
+//
+// Each test asserts EXACT equality `poll_timeout() == suspicion_deadline_bruteforce()`
+// (the old member-list fold), never `<=`: a stale index returns the wrong
+// instant, which an inequality assertion would silently admit. No scheduler is
+// started and no probe / forward / intent is in flight in these tests, so the
+// suspicion minimum is the whole of `poll_timeout` and the two must match
+// exactly. `earliest() == fold` is additionally asserted directly — it holds in
+// every lifecycle state, unlike `poll_timeout`, which is gated to `None` when
+// the endpoint is not Running.
+
+/// Count of members currently carrying a live suspicion — the size the index
+/// must have, with no tombstones.
+fn live_suspicion_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.members.iter().filter(|m| m.suspicion().is_some()).count()
+}
+
+/// The always-valid half of the invariant: the index's earliest equals the
+/// member-list fold, and its storage carries exactly the live suspicions (no
+/// tombstones). Holds in every lifecycle state.
+fn assert_index_consistent(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.suspicion_deadlines.earliest(),
+    e.suspicion_deadline_bruteforce(),
+    "index earliest must equal the member-list fold",
+  );
+  let live = live_suspicion_count(e);
+  assert_eq!(
+    e.suspicion_deadlines.entry_count(),
+    live,
+    "ordered-map storage must equal the live-suspicion count (no tombstones)",
+  );
+  assert_eq!(
+    e.suspicion_deadlines.live_key_count(),
+    live,
+    "authority-map size must equal the live-suspicion count",
+  );
+}
+
+/// The Running-state half: with no probe / forward / intent / scheduler timer
+/// armed, `poll_timeout` surfaces exactly the suspicion minimum.
+fn assert_poll_is_suspicion_min(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.poll_timeout(),
+    e.suspicion_deadline_bruteforce(),
+    "poll_timeout must equal the suspicion fold when no other timer is armed",
+  );
+}
+
+/// An installed suspicion becomes the new earliest, through BOTH ingress paths
+/// — a direct `process_suspect` and a `merge_state` Suspect.
+#[test]
+fn suspicion_index_install_becomes_new_earliest_via_both_ingress_paths() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t_early = Instant::from_origin(Duration::from_secs(10));
+  let t_late = Instant::from_origin(Duration::from_secs(20));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t_early);
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, t_early);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // no suspicion yet ⇒ None
+
+  // Direct ingress: suspect carol at the LATER instant — the only suspicion so
+  // far, hence the minimum.
+  e.process_suspect(suspect("carol", "x", 1), t_late);
+  let carol_dl = e
+    .members
+    .get(&SmolStr::new("carol"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(carol_dl));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+
+  // Merge ingress: a Suspect for bob arriving through `merge_state`, stamped at
+  // the EARLIER instant, installs a smaller deadline and becomes the new
+  // earliest.
+  e.merge_state(&[pns("bob", 7001, 1, State::Suspect)], t_early);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert!(
+    bob_dl < carol_dl,
+    "bob suspected earlier ⇒ smaller deadline"
+  );
+  assert_eq!(
+    e.suspicion_deadlines.earliest(),
+    Some(bob_dl),
+    "the merge-path install is the new earliest",
+  );
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("carol")));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// A confirmation accelerating a suspicion moves the poll minimum strictly
+/// inward — the mutant an existing `<=` assertion admits. The threshold
+/// `k` (`suspicion_mult - 2`) needs `n >= suspicion_mult`, so five members give
+/// `k = 2` and the timer starts at max.
+#[test]
+fn suspicion_index_confirm_accelerate_moves_the_min() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_suspicion_mult(4)
+      .with_suspicion_max_timeout_mult(6),
+  );
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  for (i, name) in ["bob", "carol", "dave", "erin"].iter().enumerate() {
+    process_alive_auto(&mut e, alive(name, 7001 + i as u16, 1), false, t0);
+  }
+  // A (bob) and B (erin) both suspected at t0 ⇒ both start at max ⇒ equal
+  // deadlines, so the minimum is t0 + max.
+  e.process_suspect(suspect("bob", "s1", 1), t0);
+  e.process_suspect(suspect("erin", "s2", 1), t0);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+  let before = e.poll_timeout().expect("a suspicion deadline is armed");
+
+  // A distinct suspector confirms A, pulling its deadline strictly below B's.
+  e.process_suspect(suspect("bob", "s3", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  let after = e
+    .poll_timeout()
+    .expect("a suspicion deadline is still armed");
+  assert!(
+    after < before,
+    "the confirmation must pull the minimum strictly inward: {after:?} !< {before:?}",
+  );
+  assert_eq!(after, bob_dl, "the new minimum is A's accelerated deadline");
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+  assert_poll_is_suspicion_min(&e); // == oracle
+  // The in-place confirm update left no tombstone.
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 2);
+}
+
+/// A superseding Alive removes the suspicion (falls back to the next term); a
+/// non-superseding Alive leaves it — the negative half.
+#[test]
+fn suspicion_index_clear_via_alive_superseding_removes_non_superseding_leaves() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+
+  // NEGATIVE: a non-superseding Alive (incarnation <= local) returns before the
+  // clear, so the suspicion and its index entry survive.
+  e.process_alive_decided(alive("bob", 7001, 1), false, t0);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "a non-superseding Alive must not clear the suspicion",
+  );
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+
+  // POSITIVE: a superseding Alive (incarnation > local) refutes the suspicion
+  // and removes its index entry.
+  e.process_alive_decided(alive("bob", 7001, 2), false, t0);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Alive),
+    "a superseding Alive clears the suspicion",
+  );
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// A Dead clears the suspicion and removes its index entry.
+#[test]
+fn suspicion_index_clear_via_dead_removes() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_poll_is_suspicion_min(&e);
+
+  e.process_dead(dead("bob", "carol", 1), t0);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // == None
+}
+
+/// An expired suspicion (fired via `handle_timeout`) is popped, so
+/// `poll_timeout` stops returning the now-past deadline — the driver-busy-loop
+/// mutant killer.
+#[test]
+fn suspicion_index_expire_stops_returning_the_past_instant() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.poll_timeout(), Some(bob_dl));
+
+  // Fire the timer well past the deadline: the suspicion expires (→ Dead) and
+  // its index entry is popped (the remote-clear path, via the Dead synthesized
+  // by `fire_expired_suspicions`).
+  e.handle_timeout(bob_dl + Duration::from_secs(1));
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_ne!(
+    e.poll_timeout(),
+    Some(bob_dl),
+    "a fired suspicion must not remain the poll deadline (busy-loop mutant)",
+  );
+  assert_eq!(e.poll_timeout(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// Reclaiming a long-dead member via `reset_nodes` leaves no index entry (the
+/// suspicion was already cleared by the preceding Dead — the removal theorem).
+#[test]
+fn suspicion_index_reset_nodes_removal_leaves_no_entry() {
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(Duration::from_millis(1)));
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  // Dead clears the suspicion — the entry is gone BEFORE reclaim, so
+  // `reset_nodes`' debug_assert (entry already absent) holds.
+  e.process_dead(dead("bob", "carol", 1), t0);
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+
+  // Reclaim the long-dead member; removal must not resurrect an index entry.
+  e.reset_nodes(t0 + Duration::from_secs(1));
+  assert!(
+    e.member(&SmolStr::new("bob")).is_none(),
+    "the long-dead member is reclaimed",
+  );
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // == None
+}
+
+/// A leaving endpoint gates `poll_timeout` to `None`, but leave mutates no peer
+/// suspicion, so the index still tracks it underneath and still equals the fold.
+#[test]
+fn suspicion_index_leave_drain_gates_poll_but_index_tracks_underneath() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.poll_timeout(), Some(bob_dl));
+
+  e.leave(t0).expect("leave ok");
+  assert_eq!(
+    e.poll_timeout(),
+    None,
+    "a leaving endpoint reports no deadline"
+  );
+  assert!(
+    e.suspicion_deadlines.contains(&SmolStr::new("bob")),
+    "the entry lingers consistently during the drain",
+  );
+  // earliest() == fold underneath (both Some(bob_dl)); the oracle debug_assert
+  // inside poll_timeout, run above before the gate, would already have fired
+  // otherwise.
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+}
+
+/// Through install → a confirmation flood → clear → a second install → clear,
+/// storage stays exactly equal to the live-suspicion count — the no-tombstone
+/// space proof at the FSM level.
+#[test]
+fn suspicion_index_structural_churn_keeps_storage_at_live_suspicions() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_suspicion_mult(4)
+      .with_suspicion_max_timeout_mult(6),
+  );
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  for (i, name) in ["bob", "carol", "dave", "erin"].iter().enumerate() {
+    process_alive_auto(&mut e, alive(name, 7001 + i as u16, 1), false, t0);
+  }
+  assert_index_consistent(&e); // 0 live
+
+  // Install bob (1 live), then a flood of confirmations from distinct sources.
+  // Each accepted confirmation is an in-place deadline update; none may accrete
+  // a tombstone.
+  e.process_suspect(suspect("bob", "s0", 1), t0);
+  assert_index_consistent(&e);
+  for s in ["s1", "s2", "s3", "s4", "s5"] {
+    e.process_suspect(suspect("bob", s, 1), t0);
+    assert_index_consistent(&e); // entry_count == live_key_count == 1 throughout
+  }
+  assert_eq!(
+    e.suspicion_deadlines.entry_count(),
+    1,
+    "a confirmation flood must not grow storage",
+  );
+
+  // Install carol (2 live).
+  e.process_suspect(suspect("carol", "s0", 1), t0);
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 2);
+
+  // Clear bob via a superseding Alive (1 live).
+  e.process_alive_decided(alive("bob", 7001, 9), false, t0);
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 1);
+
+  // Clear carol via Dead (0 live).
+  e.process_dead(dead("carol", "z", 1), t0);
+  assert_index_consistent(&e);
+  assert!(e.suspicion_deadlines.is_empty());
+  assert_eq!(e.suspicion_deadlines.entry_count(), 0);
+  assert_poll_is_suspicion_min(&e);
+}
