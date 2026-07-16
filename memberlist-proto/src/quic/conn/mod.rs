@@ -78,6 +78,17 @@ impl ConnEntry {
     &self.conn
   }
 
+  /// Whether this connection has been observed Established at least once. The
+  /// sticky flag set lazily by [`Self::conn_mut`]; an immutable read that does
+  /// NOT itself force the observation (the caller reads the value as of the last
+  /// mutable touch). The datagram-servicing path samples it before and after
+  /// [`super::QuicEndpoint::service_one_conn`] to detect the establishment
+  /// transition that unblocks a pooled dial.
+  #[inline(always)]
+  pub(crate) fn established_at_least_once(&self) -> bool {
+    self.established_at_least_once
+  }
+
   pub(crate) fn peer(&self) -> SocketAddr {
     self.peer
   }

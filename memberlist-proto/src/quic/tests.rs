@@ -4094,27 +4094,25 @@ fn quic_accept_enforces_max_inbound_streams_admit_cap_reject_excess() {
   );
 }
 
-/// `handle_udp` MUST run a coordinator servicing pass ONLY when the datagram
-/// actually created or advanced persistent connection state. A `Some` from
-/// `quinn_proto::Endpoint::handle` does NOT imply progress: a discarded datagram
-/// (`None`), a stateless `Response` (version negotiation / retry / stateless
-/// reset — attacker-triggerable), an over-cap or failed `accept`, and a
-/// `ConnectionEvent` for an unknown handle all leave state untouched, yet the
-/// pre-fix code serviced on every `Some`. Servicing runs the O(connections +
-/// streams) pump-and-scan, so an attacker sending valid stateless or over-cap
-/// datagrams at full occupancy could force O(N) work per datagram.
+/// `handle_udp` MUST run a per-connection servicing pass ONLY when the datagram
+/// resolves to a connection. A `Some` from `quinn_proto::Endpoint::handle` does
+/// NOT: a discarded datagram (`None`), a stateless `Response` (version
+/// negotiation / retry / stateless reset — attacker-triggerable), an over-cap or
+/// failed `accept`, and a `ConnectionEvent` for an unknown handle all resolve to
+/// no connection, so `route_datagram_event` returns `None` and no
+/// `service_connection` runs.
 ///
 /// The `quic_inbound_servicings` test counter increments once per
-/// `service_quic_inbound` call. This covers three cases against a POPULATED
+/// `service_connection` call. This covers three cases against a POPULATED
 /// connection table: establishing the connection (a `NewConnection` accept plus
-/// applied `ConnectionEvent`s) DID service; an inert `None` datagram and a
+/// applied `ConnectionEvent`s) DID service; a discarded `None` datagram and a
 /// version-negotiation `Response` (both attacker-shaped) do NOT; a real datagram
-/// advancing the established connection DOES. (The over-cap case is covered by
+/// addressing the established connection DOES. (The over-cap case is covered by
 /// `quic_new_connection_refused_over_global_cap`.)
 ///
-/// Negative control: revert the gate so `service_quic_inbound` runs on every
-/// `Some` (or unconditionally) — the `Response` case (and, if unconditional, the
-/// `None` case) then advances the counter and those assertions fail.
+/// Negative control: service on every `handle` result (or unconditionally) — the
+/// `Response` case (and, if unconditional, the `None` case) then advances the
+/// counter and those assertions fail.
 #[test]
 fn inert_quic_datagram_skips_coordinator_servicing() {
   let a_addr: SocketAddr = "127.0.0.1:7942".parse().unwrap();
@@ -4339,10 +4337,10 @@ fn quic_new_connection_refused_over_global_cap() {
     "the pre-existing connection must be unaffected by the refusal"
   );
   // The refused over-cap Initials committed no state, so none triggered a
-  // servicing pass (Finding 1: `route_datagram_event` reports `Inert` for an
-  // over-cap `ignore`, so `handle_udp` skips `service_quic_inbound`). Reverting
-  // the servicing gate (service on every `Some`) would advance this counter for
-  // each over-cap Initial an attacker sends at full occupancy.
+  // servicing pass: `route_datagram_event` returns `None` for an over-cap
+  // `ignore`, so `handle_udp` runs no `service_connection`. Servicing on every
+  // `handle` result would advance this counter for each over-cap Initial an
+  // attacker sends at full occupancy.
   assert_eq!(
     b.counters.quic_inbound_servicings, servicings_before_a2,
     "an over-cap Initial is ignored before committing state and must NOT trigger \
@@ -4747,35 +4745,235 @@ fn rejected_initial_at_per_source_cap_is_one_indexed_probe_no_servicing() {
   );
 }
 
-/// A corrupted or replayed packet carrying an ESTABLISHED live CID must NOT
-/// trigger a coordinator servicing pass. quinn routes packets by their
-/// plaintext destination CID BEFORE authentication and duplicate detection, so
-/// such a packet arrives as a `ConnectionEvent` for a LIVE handle;
-/// `Connection::handle_event` then silently discards it (AEAD authentication
-/// failure for a corrupted packet, duplicate packet number for a replay). The
-/// pre-fix code marked every live-handle `ConnectionEvent` as `Advanced` and ran
-/// the O(connections + streams) pump-and-scan, so an attacker who learned a live
-/// CID during the handshake could force that global work per flooded datagram.
+/// A corrupted (AEAD-tag-flipped, DCID intact) or replayed (duplicate packet
+/// number) datagram at an established live CID is routed to that ONE connection
+/// and serviced — but only that connection and its bridges, never the whole
+/// table. Servicing a packet quinn will discard is cheap when it is bounded to
+/// the addressed connection, and it costs an attacker who learned a live CID
+/// exactly O(that connection), not the O(all connections + bridges) the global
+/// tick ran per flooded datagram before this change.
 ///
-/// The fix derives progress from the connection layer (a `frame_rx` delta), so a
-/// discarded packet is `Inert`. This asserts `quic_inbound_servicings` stays flat
-/// across a replayed (duplicate) packet and a corrupted (auth-failing) packet,
-/// yet still advances for the same bytes delivered genuinely.
+/// Builds a populated server B (connections to A, C1, C2, plus one live bridge on
+/// the connection to C1) and floods B at A's live CID. Per-datagram
+/// `connection_visits` stays exactly `1` (A's connection) and `bridge_visits`
+/// stays exactly the count of A's bridges — neither scales with the table.
 ///
-/// Negative control: revert the `ConnectionEvent` arm to return `Advanced`
-/// unconditionally for a live handle — the replayed and corrupted packets then
-/// each service and the two flat-counter assertions fail.
+/// Negative control: restore the global tick on the datagram path — each flooded
+/// datagram then visits every connection and every bridge, so `connection_visits`
+/// climbs to the connection count and `bridge_visits` picks up C1's live bridge;
+/// both exact-count assertions fail.
 #[test]
-fn corrupted_or_replayed_packet_at_live_cid_skips_servicing() {
-  let a_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
-  let b_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+fn corrupted_or_replayed_packet_services_only_its_connection() {
+  let b_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+  let c1_addr: SocketAddr = "127.0.0.1:7972".parse().unwrap();
+  let c2_addr: SocketAddr = "127.0.0.1:7973".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut c1 = make_endpoint("c1", c1_addr, now);
+  let mut c2 = make_endpoint("c2", c2_addr, now);
+
+  // Establish A, C1, C2 -> B (each dials B; B pools an inbound connection to
+  // each), giving B a multi-connection table.
+  for (caddr, c) in [(a_addr, &mut a), (c1_addr, &mut c1), (c2_addr, &mut c2)] {
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(caddr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == caddr {
+          c.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      c.handle_timeout(now);
+      b.handle_timeout(now);
+      if b.live_connections_to(caddr) >= 1 && !moved {
+        break;
+      }
+    }
+    assert!(
+      b.live_connections_to(caddr) >= 1,
+      "test precondition: B must pool a connection to {caddr}"
+    );
+  }
+  assert!(
+    b.conns.iter_handles().len() >= 3,
+    "test precondition: B must hold several connections so the O(1) claim is non-vacuous"
+  );
+
+  // Hold ONE live bridge on B's connection to C1: B initiates a push/pull to the
+  // established C1 (opening an outbound bridge synchronously), and C1 is never
+  // ferried again, so the bridge stays live. It rides B's connection to C1, NOT
+  // the connection to A we flood — so a global bridge scan would visit it.
+  let _ = b.start_push_pull(c1_addr, PushPullKind::Refresh, now);
+  while b.poll_transmit().is_some() {}
+  assert!(
+    b.live_bridge_count() >= 1,
+    "test precondition: B must hold a live bridge on a non-flooded connection"
+  );
+
+  let ch_a = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let bridges_on = |ep: &QuicEndpoint<SmolStr>, ch: quinn_proto::ConnectionHandle| {
+    ep.bridges.values().filter(|br| br.ch() == ch).count()
+  };
+  assert!(
+    b.live_bridge_count() > bridges_on(&b, ch_a),
+    "test precondition: the live bridge must be on a connection OTHER than A's"
+  );
+
+  // Capture a genuine A->B 1-RTT gossip datagram (a DATAGRAM frame, so it mints
+  // no bridge on B's side and leaves A's connection bridge-free).
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"gossip-probe-payload"), now);
+  a.flush_outbound_transmits(now);
+  let pristine = drain_first_datagram_to(&mut a, b_addr);
+  while a.poll_transmit().is_some() {}
+
+  // Corrupted flood: flip the AEAD tag (last byte); the plaintext DCID is intact,
+  // so quinn routes it to B's connection-to-A and discards it on auth failure.
+  // Each such datagram services ONLY A's connection.
+  let mut corrupt = pristine.clone();
+  let last = corrupt.len() - 1;
+  corrupt[last] ^= 0xff;
+  for _ in 0..4 {
+    b.counters.connection_visits = 0;
+    b.counters.bridge_visits = 0;
+    b.handle_udp(a_addr, &corrupt, now);
+    assert_eq!(
+      b.counters.connection_visits,
+      1,
+      "a corrupted datagram at A's live CID must service exactly A's connection, \
+         not scale with the {}-connection table",
+      b.conns.iter_handles().len()
+    );
+    assert_eq!(
+      b.counters.bridge_visits as usize,
+      bridges_on(&b, ch_a),
+      "a corrupted datagram must pump only A's bridges, never C1's live bridge"
+    );
+  }
+
+  // Replayed flood: deliver the genuine datagram once (B extracts it), then
+  // re-deliver the SAME bytes — a duplicate packet number quinn discards. The
+  // duplicate still services ONLY A's connection.
+  b.handle_udp(a_addr, &pristine, now);
+  while b.poll_transmit().is_some() {}
+  b.counters.connection_visits = 0;
+  b.counters.bridge_visits = 0;
+  b.handle_udp(a_addr, &pristine, now);
+  assert_eq!(
+    b.counters.connection_visits, 1,
+    "a replayed (duplicate packet number) datagram must service exactly A's connection"
+  );
+  assert_eq!(
+    b.counters.bridge_visits as usize,
+    bridges_on(&b, ch_a),
+    "a replayed datagram must pump only A's bridges, never C1's live bridge"
+  );
+}
+
+/// Admitting N distinct below-cap Initials is O(N) total servicing work, not
+/// O(N^2). Each accepted Initial services ONLY the freshly-accepted connection,
+/// so total `connection_visits` across every `handle_udp` is bounded by the
+/// number of datagrams fed (at most one connection touched per datagram) rather
+/// than the sum(1..N) a global-tick-per-accept would run.
+///
+/// Negative control: restore the global tick on the datagram path — the k-th
+/// datagram then services all k connections accepted so far, so total
+/// `connection_visits` grows quadratically and exceeds the datagram count.
+#[test]
+fn admitting_n_initials_is_o_n_not_o_n2() {
+  let now = Instant::now();
+  let b_addr: SocketAddr = "127.0.0.1:7980".parse().unwrap();
+  let mut b = make_endpoint("b", b_addr, now);
+
+  const N: usize = 48;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..N {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7981 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+
+  // Feed each client's handshake datagrams to B and drain B's replies back,
+  // WITHOUT ever calling `b.handle_timeout`: the global timer tick would service
+  // every connection and mask the O(N)-vs-O(N^2) distinction. B accepts and
+  // drives each handshake purely on the per-connection datagram path.
+  b.counters.connection_visits = 0;
+  let mut datagrams_to_b: u64 = 0;
+  for _ in 0..40 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(*caddr, &bytes, now);
+          datagrams_to_b += 1;
+        }
+      }
+      c.handle_timeout(now);
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(b_addr, &bytes, now);
+      }
+    }
+  }
+
+  let pooled = clients
+    .iter()
+    .filter(|(a, _)| b.live_connections_to(*a) >= 1)
+    .count();
+  assert!(
+    pooled >= N - 4,
+    "test precondition: B must pool essentially all {N} client connections; pooled {pooled}"
+  );
+  // O(1) per datagram: every inbound datagram serviced exactly its addressed
+  // connection, so total visits never exceed the datagram count.
+  assert!(
+    b.counters.connection_visits <= datagrams_to_b,
+    "admitting {N} initials must be O(N): total connection_visits {} exceeded the \
+       {datagrams_to_b} datagrams fed — the global tick is running per datagram",
+    b.counters.connection_visits
+  );
+  // Non-vacuous: each pooled connection was serviced at least once.
+  assert!(
+    b.counters.connection_visits >= pooled as u64,
+    "each accepted connection must have been serviced at least once (visits {}, pooled {pooled})",
+    b.counters.connection_visits
+  );
+}
+
+/// A stateless reset delivered to an already-Closed connection reaps its slab
+/// entry and frees its global-cap slot in the SAME servicing call — no unrelated
+/// timer. quinn routes the reset to the connection as a `ConnectionEvent`; it
+/// carries no protocol frame and the connection was already closed, so the former
+/// "authenticated progress" gate treated it as inert and skipped servicing,
+/// stranding the drained connection in the slab until an unrelated timer fired.
+/// Bounding servicing to the addressed connection instead makes the reap happen
+/// the moment the reset arrives.
+///
+/// Negative control: restore that progress gate — the reset is a no-frame event
+/// on an already-closed connection, so servicing is skipped, the connection is
+/// never `reap_if_drained`'d on this datagram, and the slab-length assertion
+/// (`len` drops to 0) fails.
+#[test]
+fn closed_to_drained_stateless_reset_reaps() {
+  let a_addr: SocketAddr = "127.0.0.1:7940".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7941".parse().unwrap();
   let now = Instant::now();
   let mut a = make_endpoint("a", a_addr, now);
   let mut b = make_endpoint("b", b_addr, now);
 
-  // Establish a live A<->B connection (a real handshake, so B holds A's live
-  // CID that an attacker could learn on the wire).
-  // Ignoring StreamId: the test asserts on the servicing counter, not handles.
+  // Establish A <-> B.
   let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..200 {
     let mut moved = false;
@@ -4793,65 +4991,319 @@ fn corrupted_or_replayed_packet_at_live_cid_skips_servicing() {
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if b.live_connections_to(a_addr) >= 1 && a.live_connections_to(b_addr) >= 1 && !moved {
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
       break;
     }
   }
   assert!(
-    b.live_connections_to(a_addr) >= 1,
-    "test precondition: B holds a live connection to A"
-  );
-  // Quiesce both outbound queues so only the datagrams fed below are in play.
-  while a.poll_transmit().is_some() {}
-  while b.poll_transmit().is_some() {}
-
-  // Replay: capture a fresh A->B 1-RTT datagram, deliver it once (genuine → it
-  // services), then deliver the SAME bytes again (duplicate packet number →
-  // discarded → must NOT service).
-  // Ignoring StreamId: only the captured on-wire datagram is used.
-  let _ = a.start_push_pull(b_addr, PushPullKind::Refresh, now);
-  let replay = drain_first_datagram_to(&mut a, b_addr);
-  while a.poll_transmit().is_some() {}
-  let before_first = b.counters.quic_inbound_servicings;
-  b.handle_udp(a_addr, &replay, now);
-  assert!(
-    b.counters.quic_inbound_servicings > before_first,
-    "the first (genuine) delivery of a live-CID data packet must service"
-  );
-  while b.poll_transmit().is_some() {}
-  let before_replay = b.counters.quic_inbound_servicings;
-  b.handle_udp(a_addr, &replay, now);
-  assert_eq!(
-    b.counters.quic_inbound_servicings, before_replay,
-    "a replayed (duplicate packet number) packet at a live CID must NOT trigger \
-       a servicing pass; the counter advanced from {before_replay} to {}",
-    b.counters.quic_inbound_servicings
+    a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1,
+    "test precondition: A and B must both hold an established connection"
   );
 
-  // Corrupt: capture another fresh A->B datagram, flip its last byte (the AEAD
-  // tag — its plaintext DCID is untouched, so it still routes to the live
-  // connection) → authentication fails → discarded → must NOT service. The same
-  // bytes uncorrupted are genuine and DO service (positive control).
-  // Ignoring StreamId: only the captured on-wire datagram is used.
-  let _ = a.start_push_pull(b_addr, PushPullKind::Refresh, now);
-  let mut corrupt = drain_first_datagram_to(&mut a, b_addr);
+  // Capture a large genuine A->B 1-RTT datagram to use later as the reset
+  // trigger (large enough that B will answer an unknown-CID packet with a
+  // stateless reset rather than dropping it).
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from(vec![0xABu8; 240]), now);
+  a.flush_outbound_transmits(now);
+  let trigger = drain_first_datagram_to(&mut a, b_addr);
   while a.poll_transmit().is_some() {}
-  let pristine = corrupt.clone();
-  let last = corrupt.len() - 1;
-  corrupt[last] ^= 0xff;
-  let before_corrupt = b.counters.quic_inbound_servicings;
-  b.handle_udp(a_addr, &corrupt, now);
-  assert_eq!(
-    b.counters.quic_inbound_servicings, before_corrupt,
-    "a corrupted (authentication-failing) packet at a live CID must NOT trigger \
-       a servicing pass; the counter advanced from {before_corrupt} to {}",
-    b.counters.quic_inbound_servicings
-  );
-  let before_pristine = b.counters.quic_inbound_servicings;
-  b.handle_udp(a_addr, &pristine, now);
+
+  // Reap B's connection to A (close it and advance B's clock to drained-reap),
+  // WITHOUT delivering B's CONNECTION_CLOSE to A — so a later unknown-CID packet
+  // makes B emit a stateless reset rather than a graceful close.
+  let ch_b = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  b.conns
+    .get_mut(ch_b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  for _ in 0..8 {
+    let due = b
+      .conns
+      .get_mut(ch_b)
+      .and_then(|e| e.conn_mut().poll_timeout());
+    match due {
+      Some(due) => b.handle_timeout(crate::Instant::from_std(due)),
+      None => b.handle_timeout(now),
+    }
+    if b.conns.handle_for(&a_addr).is_none() {
+      break;
+    }
+  }
+  while b.poll_transmit().is_some() {}
   assert!(
-    b.counters.quic_inbound_servicings > before_pristine,
-    "the same packet delivered intact advances the connection and MUST service"
+    b.conns.handle_for(&a_addr).is_none(),
+    "test precondition: B must have reaped its connection to A"
+  );
+
+  // Close A's connection to B: it is now in `Closed` (is_closed, not yet
+  // drained). This is the state the reset must drive to drained-and-reaped.
+  let ch_a = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.conns
+      .get(ch_a)
+      .map(|e| e.conn_ref().is_closed())
+      .unwrap_or(false)
+      && !a
+        .conns
+        .get(ch_a)
+        .map(|e| e.conn_ref().is_drained())
+        .unwrap_or(true),
+    "test precondition: A's connection must be Closed but not yet Drained"
+  );
+  let len_before = a.conns.iter_handles().len();
+  assert_eq!(len_before, 1, "A holds exactly its one (closed) connection");
+
+  // Feed the captured A->B packet to B (which no longer knows the CID) so B emits
+  // a stateless reset back to A.
+  b.handle_udp(a_addr, &trigger, now);
+  let mut reset: Option<Vec<u8>> = None;
+  while let Some((to, bytes)) = b.poll_transmit() {
+    if to == a_addr {
+      reset = Some(bytes.to_vec());
+    }
+  }
+  let reset = reset.expect("B must emit a stateless reset to A for the unknown-CID packet");
+
+  // Deliver the stateless reset to A on the datagram path, with NO handle_timeout:
+  // the reset arrives as a ConnectionEvent to A's (already-closed) connection,
+  // drives it to Drained, and `service_connection` reaps its slab entry in this
+  // same call.
+  let membership_before = a.membership_time_advances();
+  a.handle_udp(b_addr, &reset, now);
+  assert_eq!(
+    a.membership_time_advances(),
+    membership_before,
+    "the datagram-path reap must not advance any membership timer"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "the stateless reset must reap A's closed connection's slab entry in the same \
+       servicing call (was {len_before} before the reset)"
+  );
+  assert!(
+    a.conns.handle_for(&b_addr).is_none(),
+    "the reaped connection's peer mapping must be cleared too"
+  );
+}
+
+/// The per-connection bridge index [`QuicEndpoint::bridges_by_conn`] must equal
+/// the brute-force `bridges` filtered by owning connection at every step — the
+/// guard that a bridge mint or reap site missed its index maintenance. Drives a
+/// real A<->B push/pull (outbound + inbound bridges minted and reaped) plus a
+/// connection teardown, cross-checking after every servicing operation.
+#[test]
+fn bridges_by_conn_index_matches_bruteforce() {
+  let a_addr: SocketAddr = "127.0.0.1:7930".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7931".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  let check = |ep: &QuicEndpoint<SmolStr>, label: &str| {
+    let mut brute: std::collections::HashMap<
+      quinn_proto::ConnectionHandle,
+      std::collections::HashSet<StreamId>,
+    > = std::collections::HashMap::new();
+    for (id, br) in ep.bridges.iter() {
+      brute.entry(br.ch()).or_default().insert(*id);
+    }
+    let mut index: std::collections::HashMap<
+      quinn_proto::ConnectionHandle,
+      std::collections::HashSet<StreamId>,
+    > = std::collections::HashMap::new();
+    for (ch, ids) in ep.bridges_by_conn.iter() {
+      assert!(
+        !ids.is_empty(),
+        "bridges_by_conn must never hold an empty entry (after: {label})"
+      );
+      index.insert(*ch, ids.iter().copied().collect());
+    }
+    assert_eq!(
+      index, brute,
+      "bridges_by_conn diverged from the brute-force filter after: {label}"
+    );
+  };
+
+  check(&a, "construction (a)");
+  check(&b, "construction (b)");
+
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  check(&a, "a.start_push_pull");
+  for _ in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        check(&b, "b.handle_udp");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        check(&a, "a.handle_udp");
+      }
+    }
+    a.handle_timeout(now);
+    check(&a, "a.handle_timeout");
+    b.handle_timeout(now);
+    check(&b, "b.handle_timeout");
+  }
+
+  // Teardown: force-close A's connection and advance to drained-reap, so the
+  // connection-loss bridge reap path exercises the index too.
+  if let Some(ch) = a.conns.handle_for(&b_addr) {
+    a.conns
+      .get_mut(ch)
+      .unwrap()
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), Bytes::new());
+    for _ in 0..8 {
+      let due = a
+        .conns
+        .get_mut(ch)
+        .and_then(|e| e.conn_mut().poll_timeout());
+      match due {
+        Some(due) => a.handle_timeout(crate::Instant::from_std(due)),
+        None => a.handle_timeout(now),
+      }
+      check(&a, "a.handle_timeout(teardown)");
+      if a.conns.handle_for(&b_addr).is_none() {
+        break;
+      }
+    }
+  }
+  assert!(
+    a.bridges_by_conn.is_empty(),
+    "the index must be empty once every bridge is reaped"
+  );
+}
+
+/// A dial `service_dials` mints on a DIFFERENT connection than the one whose
+/// establishment triggered it must flush its first request bytes onto the wire in
+/// the SAME `handle_udp` pass — not stall until the next global tick.
+///
+/// N holds an established pooled connection to B (no active exchange) and a dial
+/// to B parked in its inner endpoint queue (queued via the raw endpoint so it is
+/// NOT serviced yet). N is meanwhile completing a server-side handshake with A.
+/// The inbound datagram that establishes N's connection to A runs
+/// `service_connection`'s establishment branch → `service_dials`, which opens the
+/// parked dial's bridge on N's connection to B (a connection OTHER than A's). The
+/// bridge's request datagram to B must appear in N's outbound queue within that
+/// same `handle_udp` — proving the per-connection path pumps AND collects the
+/// exact set `service_dials` minted, wherever it landed.
+///
+/// Mutation-verify: revert step (c) to pump only the just-established connection's
+/// bridges (`pump_conn_bridges(ch)`) — B's bridge is minted but never pumped or
+/// collected this pass, so no datagram to B appears until a later `handle_timeout`
+/// and `flushed_to_b` stays false.
+#[test]
+fn cross_connection_dial_mint_flushes_first_bytes_same_pass() {
+  let n_addr: SocketAddr = "127.0.0.1:7920".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7921".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7922".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Establish N -> B (N dials B) and let the push/pull settle so N holds an
+  // established pooled connection to B with no live bridge.
+  let _ = n.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && n.live_bridge_count() == 0 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: the N->B push/pull must have settled (no live bridge)"
+  );
+  // Quiesce both sides so the only later datagram to B can be the parked dial's.
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+
+  // Park a dial to B in N's INNER endpoint queue via the raw endpoint, so it is
+  // NOT serviced now — it waits for the next `service_dials`, which the A
+  // handshake completion will trigger.
+  let _ = n
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Refresh, now);
+
+  // Drive A's server-side handshake to N one inbound datagram at a time, WITHOUT
+  // calling `n.handle_timeout` (a global tick would drain the parked B dial
+  // early). After each `n.handle_udp`, look for a datagram to B in N's outbound
+  // queue: it can only appear once N's connection to A establishes and step (c)
+  // opens + flushes the parked B dial's bridge in that same pass.
+  let _ = a.start_push_pull(n_addr, PushPullKind::Join, now);
+  let mut flushed_to_b = false;
+  'outer: for _ in 0..400 {
+    let mut a_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == n_addr {
+        a_out.push(bytes.to_vec());
+      }
+    }
+    for dg in a_out {
+      n.handle_udp(a_addr, &dg, now);
+      let mut n_out: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
+      while let Some((to, bytes)) = n.poll_transmit() {
+        n_out.push((to, bytes.to_vec()));
+      }
+      if n_out.iter().any(|(to, _)| *to == b_addr) {
+        flushed_to_b = true;
+        break 'outer;
+      }
+      // Not yet established: feed N's handshake responses back to A and continue.
+      for (to, bytes) in n_out {
+        if to == a_addr {
+          a.handle_udp(n_addr, &bytes, now);
+        }
+      }
+    }
+    // A may advance its own timers; N must NOT (that would service the parked
+    // dial through the global tick, defeating the same-pass claim).
+    a.handle_timeout(now);
+  }
+
+  assert!(
+    flushed_to_b,
+    "the dial parked on N's connection to B must open AND flush its first request \
+       bytes to B within the single handle_udp that established N's connection to \
+       A — a bridge minted on a connection other than the just-established one \
+       must not stall until the next global tick"
   );
 }
 
@@ -4901,9 +5353,9 @@ fn deadline_index_matches_bruteforce_across_operations() {
   assert_deadline_index_matches(&mut a, "a.start_push_pull");
 
   // Ferry the handshake + push/pull to completion. Assert after every
-  // handle_udp (route_datagram_event: accept / Inert-conn-mutation / Advanced)
-  // and every handle_timeout (full tick: pump, service_quinn mint + conn-lost
-  // reap, service_dials, finalize reap, collect_transmits).
+  // handle_udp (route_datagram_event -> service_connection: accept, live-conn
+  // event, or no-op) and every handle_timeout (full tick: pump, service_quinn
+  // mint + conn-lost reap, service_dials, finalize reap, collect_transmits).
   for round in 0..300 {
     while let Some((to, bytes)) = a.poll_transmit() {
       if to == b_addr {

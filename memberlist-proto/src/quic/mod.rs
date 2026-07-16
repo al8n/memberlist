@@ -51,78 +51,36 @@ use std::collections::VecDeque;
 // immediate-due aggregate) and types a `#[cfg(test)]` snapshot parameter.
 use std::collections::HashSet;
 
-/// Whether routing one inbound `DatagramEvent` advanced persistent connection
-/// state — the signal [`QuicEndpoint::handle_udp`] uses to decide whether the
-/// datagram warrants a full coordinator servicing pass.
+/// Record machine stream `id` under connection `ch` in the per-connection
+/// bridge index [`QuicEndpoint::bridges_by_conn`].
 ///
-/// `quinn_proto::Endpoint::handle` returning `Some(DatagramEvent)` does NOT imply
-/// progress: a stateless `Response` (version negotiation, retry, stateless
-/// reset), an over-cap or failed `accept`, and a `ConnectionEvent` for a handle
-/// no longer in the table are all `Some` yet commit no local connection state.
-///
-/// Nor does a `ConnectionEvent` for a LIVE handle imply progress. quinn routes
-/// packets by their plaintext destination CID BEFORE authentication and
-/// duplicate detection, so `Connection::handle_event` silently discards a packet
-/// that fails AEAD authentication, replays a seen packet number, or would
-/// migrate a migration-forbidden path — none advance the connection. An attacker
-/// who learned a live CID during the handshake could otherwise flood such
-/// packets, each an O(connections + streams) pump-and-scan. Real progress is
-/// therefore derived from the connection layer (frames processed / a close
-/// transition), not from the mere presence of a `ConnectionEvent`.
-///
-/// Servicing runs an O(connections + streams) pump-and-scan per datagram driven
-/// from untrusted input, so only [`Self::Advanced`] triggers it.
-enum DatagramProgress {
-  /// A new connection was accepted (inserted), or a `ConnectionEvent` applied to
-  /// a live connection actually advanced it (processed protocol frames or drove
-  /// a close transition). A servicing pass MUST run.
-  Advanced,
-  /// No persistent connection state changed — a stateless response, an over-cap
-  /// or failed accept, a `ConnectionEvent` for an unknown handle, or a
-  /// `ConnectionEvent` for a live handle carrying a packet the connection
-  /// discarded (failed authentication, replay, or a forbidden migration). Skip
-  /// the servicing pass; any owed outbound bytes were already queued to `out`
-  /// and are flushed by `poll_transmit` independently of servicing.
-  Inert,
+/// A free function taking only the index field (never all of `self`) so a mint
+/// site can call it while a `self.conns.get_mut(..)` connection borrow is still
+/// live — the accept loop mints an inbound bridge inside the per-connection
+/// `poll()` drain, where `self.conns` is borrowed mutably.
+fn index_bridge_mint(
+  bridges_by_conn: &mut HashMap<ConnectionHandle, SmallVec<StreamId>>,
+  ch: ConnectionHandle,
+  id: StreamId,
+) {
+  bridges_by_conn.entry(ch).or_default().push(id);
 }
 
-/// Total received-frame count across every frame type quinn tracks. Increments
-/// only when a packet successfully decrypts, passes duplicate detection, and
-/// yields protocol frames, so its delta across a `Connection::handle_event` is
-/// exactly whether that datagram advanced the connection: a packet quinn
-/// discards (failed AEAD authentication, replayed packet number, forbidden
-/// migration) never reaches frame processing and leaves this total unchanged.
-///
-/// `FrameStats` is `#[non_exhaustive]`; a frame type a future quinn adds and this
-/// sum omits would, at worst, make a packet carrying only that frame register as
-/// inert — a deferred servicing the coordinator's `poll_timeout` safety net
-/// still wakes, never a false advance (which is what the amplification bound
-/// depends on).
-fn frame_rx_total(s: &quinn_proto::FrameStats) -> u64 {
-  s.acks
-    + s.ack_frequency
-    + s.crypto
-    + s.connection_close
-    + s.data_blocked
-    + s.datagram
-    + u64::from(s.handshake_done)
-    + s.immediate_ack
-    + s.max_data
-    + s.max_stream_data
-    + s.max_streams_bidi
-    + s.max_streams_uni
-    + s.new_connection_id
-    + s.new_token
-    + s.path_challenge
-    + s.path_response
-    + s.ping
-    + s.reset_stream
-    + s.retire_connection_id
-    + s.stream_data_blocked
-    + s.streams_blocked_bidi
-    + s.streams_blocked_uni
-    + s.stop_sending
-    + s.stream
+/// Drop machine stream `id` from connection `ch`'s entry in the per-connection
+/// bridge index, removing the entry entirely once it empties (so the map holds a
+/// key only while `ch` owns at least one bridge). The reap-side mirror of
+/// [`index_bridge_mint`]; a free function for the same disjoint-borrow reason.
+fn index_bridge_reap(
+  bridges_by_conn: &mut HashMap<ConnectionHandle, SmallVec<StreamId>>,
+  ch: ConnectionHandle,
+  id: StreamId,
+) {
+  if let Some(ids) = bridges_by_conn.get_mut(&ch) {
+    ids.retain(|existing| *existing != id);
+    if ids.is_empty() {
+      bridges_by_conn.remove(&ch);
+    }
+  }
 }
 
 /// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
@@ -250,6 +208,15 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   skip_inbound_label_check: bool,
   conns: ConnTable,
   bridges: HashMap<StreamId, Bridge<I, SocketAddr>>,
+  /// Per-connection index of the machine [`StreamId`]s in [`Self::bridges`],
+  /// keyed by owning [`ConnectionHandle`]. Maintained alongside every `bridges`
+  /// mint and reap so the inbound-datagram servicing path can pump exactly one
+  /// connection's bridges in O(that connection's bridges) — never an O(all
+  /// bridges) filter over the whole table. A connection with no live bridge has
+  /// no entry (the map never stores an empty vec). The index equals the
+  /// brute-force `bridges` filtered by `Bridge::ch`; a `#[cfg(test)]` cross-check
+  /// asserts that equality after every operation.
+  bridges_by_conn: HashMap<ConnectionHandle, SmallVec<StreamId>>,
   /// Tags each outbound bridge's [`StreamId`] with the originating
   /// [`ExchangeKind`] so the bridge-reap path can carry that kind on
   /// the uniform [`Event::ExchangeCompleted`] terminal event. Mirrors
@@ -370,9 +337,9 @@ struct TestCounters {
   endpoint_events_processed: u64,
   /// Test-only counter incremented once per [`Endpoint::handle_timeout`] call,
   /// i.e. once per membership-time advance. Exists ONLY for the regression test
-  /// proving a QUIC packet ingress (`service_quic_inbound`) does NOT advance
-  /// membership time — only the driver's explicit `handle_timeout` does — so a
-  /// probe Ack carried in a datagram cannot be timed out before it is decoded.
+  /// proving a QUIC packet ingress ([`QuicEndpoint::service_connection`]) does NOT
+  /// advance membership time — only the driver's explicit `handle_timeout` does —
+  /// so a probe Ack carried in a datagram cannot be timed out before it is decoded.
   /// Never compiled into production builds.
   membership_time_advances: u64,
   /// Test-only counter incremented once per bridge `drain_then_reap`'d
@@ -385,12 +352,13 @@ struct TestCounters {
   /// the inline drain to mere `mark_fatal()` leaves it at zero. Never
   /// compiled into production builds.
   bridges_reaped_on_connection_lost: u64,
-  /// Test-only counter incremented once per bridge pumped by the
-  /// post-acceptance second `pump_bridges` invocation in [`QuicEndpoint::run_tick`]
-  /// (step 5.5) / [`QuicEndpoint::flush_outbound`] that was inserted into
-  /// `self.bridges` by `service_quinn`'s `accept(Dir::Bi)` loop (step 4)
-  /// or `service_dials`'s `open(Dir::Bi)` (step 5) AFTER step (2)'s
-  /// `pump_bridges` already ran this tick. A newly-inserted inbound bridge
+  /// Test-only counter incremented once per bridge pumped post-acceptance —
+  /// by the second `pump_bridges` invocation in [`QuicEndpoint::run_tick`]
+  /// (step 5.5) / [`QuicEndpoint::flush_outbound`], OR by the per-connection
+  /// [`QuicEndpoint::service_connection`] datagram path — that was inserted into
+  /// `self.bridges` by an `accept(Dir::Bi)` loop or `service_dials`'s
+  /// `open(Dir::Bi)` DURING the same servicing pass, AFTER the pass's initial
+  /// bridge pump already ran. A newly-inserted inbound bridge
   /// carries its first buffered request data inside quinn's per-stream recv
   /// buffer (delivered by the inbound datagram `service_quinn` just
   /// ingested); a newly-opened outbound bridge carries its first request
@@ -426,19 +394,37 @@ struct TestCounters {
   /// then immediately reaping in the same tick. Never compiled into
   /// production builds.
   bridges_terminalized_via_close_command: u64,
-  /// Test-only counter incremented once per [`QuicEndpoint::service_quic_inbound`]
-  /// call — i.e. once per inbound QUIC datagram that actually created or advanced
-  /// persistent connection state. `handle_udp` runs the servicing pass ONLY when
-  /// `route_datagram_event` reports [`DatagramProgress::Advanced`]; a datagram
-  /// quinn discards (`handle` → `None`) OR one that returns `Some` but commits no
-  /// state (a stateless `Response`, an over-cap or failed `accept`, a
-  /// `ConnectionEvent` for an unknown handle → [`DatagramProgress::Inert`]) skips
-  /// it. The negative-control regression tests assert this counter does NOT
-  /// advance on an inert datagram yet DOES on a real one; reverting the gate
-  /// (servicing on every `Some`, or unconditionally) makes it advance on the
-  /// inert datagram too and those tests fail. Never compiled into production
-  /// builds.
+  /// Test-only counter incremented once per [`QuicEndpoint::service_connection`]
+  /// call — i.e. once per inbound QUIC datagram that
+  /// [`route_datagram_event`](QuicEndpoint::route_datagram_event) resolved to a
+  /// connection to service (a `NewConnection` accepted into the table, or a
+  /// `ConnectionEvent` for a live handle). A datagram quinn discards (`handle` →
+  /// `None`), a stateless `Response`, an over-cap or failed `accept`, and a
+  /// `ConnectionEvent` for an unknown handle all resolve to no connection and are
+  /// NOT counted. The negative-control regression tests assert this counter stays
+  /// flat on such datagrams yet advances on a real accept or live-connection
+  /// event; servicing on every `handle` result (or unconditionally) makes it
+  /// advance on the inert cases and those tests fail. Never compiled into
+  /// production builds.
   quic_inbound_servicings: u64,
+  /// Test-only counter of connections *touched* by a servicing pass — bumped once
+  /// per [`QuicEndpoint::service_one_conn`] entry, whether from the global
+  /// `service_quinn` loop or the per-connection [`QuicEndpoint::service_connection`]
+  /// datagram path. The visit-count proofs reset it before one `handle_udp` and
+  /// assert the per-datagram delta stays O(1) — exactly the addressed connection,
+  /// never scaling with the table size. Restoring the global tick on the datagram
+  /// path makes the delta scale with the connection count and those tests fail.
+  /// Never compiled into production builds.
+  connection_visits: u64,
+  /// Test-only counter of bridges *touched* by a servicing pass — bumped once per
+  /// [`QuicEndpoint::pump_one_bridge`] entry that finds the bridge present,
+  /// whether from the global `pump_bridges` loop or the per-connection
+  /// [`QuicEndpoint::pump_conn_bridges`] datagram path. Paired with
+  /// [`Self::connection_visits`] in the visit-count proofs: a datagram servicing
+  /// only its addressed connection pumps only that connection's bridges, so the
+  /// per-datagram delta does not scale with the total bridge population. Never
+  /// compiled into production builds.
+  bridge_visits: u64,
   /// Test-only high-water mark of the concurrent INBOUND bridge population,
   /// sampled inside the `accept(Dir::Bi)` loop at each mint (so it captures the
   /// true peak even when a short exchange accepts and reaps its bridge within the
@@ -504,6 +490,7 @@ impl<I, R> QuicEndpoint<I, R> {
       skip_inbound_label_check: false,
       conns: ConnTable::new(),
       bridges: HashMap::new(),
+      bridges_by_conn: HashMap::new(),
       pending_outbound_kinds: HashMap::new(),
       pending_outbound_peers: HashMap::new(),
       out: VecDeque::new(),
@@ -1339,49 +1326,49 @@ impl<I, R> QuicEndpoint<I, R> {
     self.quinn.ignore(incoming);
   }
 
+  /// Route one inbound `DatagramEvent` and return the [`ConnectionHandle`] the
+  /// caller must service, or `None` when the datagram addresses no connection.
+  ///
+  /// Servicing is bounded to the single addressed connection (see
+  /// [`Self::service_connection`]), so this never gates on inferred "progress":
+  /// even a packet the connection will discard (failed AEAD authentication, a
+  /// replayed packet number, a forbidden migration) is worth the O(that
+  /// connection) servicing pass, and forcing that pass costs an attacker exactly
+  /// the connection whose live CID they already know — never the whole table.
+  ///
+  /// - `ConnectionEvent` for a live handle: apply it, return `Some(ch)`.
+  /// - `ConnectionEvent` for an unknown (already-reaped) handle: `None`.
+  /// - `NewConnection` accepted into the table: `Some(ch)`; over-cap, rejected,
+  ///   or a failed `accept`: `None` (any owed close bytes are queued to `out`).
+  /// - stateless `Response`: `None` (the bytes are queued to `out`).
   fn route_datagram_event(
     &mut self,
     ev: DatagramEvent,
     from: SocketAddr,
     now: Instant,
     scratch: &[u8],
-  ) -> DatagramProgress {
+  ) -> Option<ConnectionHandle> {
     match ev {
       DatagramEvent::ConnectionEvent(ch, cev) => {
         // A `ConnectionEvent` for an unknown handle (already reaped) applies
-        // nothing, so it made no progress.
+        // nothing and addresses no live connection.
         match self.conns.get_mut(ch) {
           Some(e) => {
-            // A live handle does NOT imply progress: quinn routed this packet by
-            // its plaintext DCID before authenticating it, and
-            // `Connection::handle_event` silently discards a packet that fails
-            // AEAD auth, replays a seen packet number, or would migrate a
-            // forbidden path. Derive real progress from the connection layer —
-            // frames processed (`frame_rx` delta) or a close transition — so an
-            // attacker flooding corrupted/replayed packets at a live CID cannot
-            // force an O(connections + streams) servicing pass per datagram. A
-            // discarded packet processes no frames and drives no close, so it is
-            // `Inert`; a close transition is peer-unforgeable (it needs a valid
-            // CONNECTION_CLOSE, which needs the session keys, or a stateless
-            // reset, which needs the secret token) and must be serviced so the
-            // connection and its bridges reap.
-            let frames_before = frame_rx_total(&e.conn_ref().stats().frame_rx);
-            let closed_before = e.conn_ref().is_closed();
+            // quinn routed this packet by its plaintext DCID before
+            // authenticating it, so a live handle does not imply the packet will
+            // be accepted — `Connection::handle_event` silently discards one that
+            // fails AEAD auth, replays a seen packet number, or would migrate a
+            // forbidden path. Servicing is scoped to this one connection, so we
+            // never need to distinguish those from a genuine advance: apply the
+            // event and return `ch`. A discarded packet then costs only an
+            // O(this connection) pass; a genuine close / stateless-reset drives
+            // the connection to drained and the same pass reaps it and its
+            // bridges. `service_connection` refreshes this connection's deadline
+            // key, so no inline `set` is needed here.
             e.conn_mut().handle_event(cev);
-            let advanced = frame_rx_total(&e.conn_ref().stats().frame_rx) != frames_before
-              || (e.conn_ref().is_closed() && !closed_before);
-            // `handle_event` may have rearmed this connection's transport timer.
-            // On the `Inert` path NO servicing tick follows to refresh the
-            // deadline index via `collect_transmits`, so refresh it inline here.
-            let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
-            self.deadline_index.set(TimerKey::Conn(ch), deadline);
-            if advanced {
-              DatagramProgress::Advanced
-            } else {
-              DatagramProgress::Inert
-            }
+            Some(ch)
           }
-          None => DatagramProgress::Inert,
+          None => None,
         }
       }
       DatagramEvent::NewConnection(incoming) => {
@@ -1409,8 +1396,8 @@ impl<I, R> QuicEndpoint<I, R> {
         {
           self.reject_incoming(incoming);
           // The Initial was dropped and no connection-table state was committed,
-          // so this datagram made no progress — no servicing pass is owed.
-          return DatagramProgress::Inert;
+          // so this datagram addresses no connection.
+          return None;
         }
         // Per-source pending cap. Reached only under the global cap.
         // `pending_inbound_from` is an O(1) index read (not a scan of the
@@ -1423,7 +1410,7 @@ impl<I, R> QuicEndpoint<I, R> {
           }
           if self.conns.pending_inbound_from(&from) >= max {
             self.reject_incoming(incoming);
-            return DatagramProgress::Inert;
+            return None;
           }
         }
         let mut buf = Vec::new();
@@ -1435,13 +1422,12 @@ impl<I, R> QuicEndpoint<I, R> {
         ) {
           Ok((ch, conn)) => {
             self.conns.insert_accepted(ch, conn, from);
-            // Register the freshly-accepted connection's deadline. The servicing
-            // tick this `Advanced` triggers will refresh it again via
-            // `collect_transmits`; indexing here keeps the key present the
-            // moment the connection enters the table.
+            // Register the freshly-accepted connection's deadline the moment it
+            // enters the table; the servicing pass this accept triggers refreshes
+            // it again via `collect_conn_transmits`.
             self.index_conn(ch);
             // A new connection was committed to the table — service it.
-            DatagramProgress::Advanced
+            Some(ch)
           }
           Err(e) => {
             // quinn-proto attaches an `Option<Transmit>` to its `AcceptError`
@@ -1467,8 +1453,8 @@ impl<I, R> QuicEndpoint<I, R> {
               }
             }
             // The accept failed: only a close response (if any) was queued to
-            // `out`; no connection was created, so no servicing is owed.
-            DatagramProgress::Inert
+            // `out`; no connection was created.
+            None
           }
         }
       }
@@ -1481,8 +1467,8 @@ impl<I, R> QuicEndpoint<I, R> {
             .out
             .push_back((t.destination, Bytes::copy_from_slice(&scratch[..t.size])));
         }
-        // A stateless response committed no local connection state.
-        DatagramProgress::Inert
+        // A stateless response addresses no local connection.
+        None
       }
     }
   }
@@ -1682,27 +1668,36 @@ impl<I, R> QuicEndpoint<I, R> {
     // dead-self accounting on their inner pop, so pre-draining them into
     // `out` is fine and keeps `poll_transmit` a constant-time `pop_front`.
     for ch in self.conns.iter_handles() {
-      let Some(e) = self.conns.get_mut(ch) else {
-        continue;
-      };
-      let mut buf = Vec::new();
-      while let Some(tr) = e.conn_mut().poll_transmit(now.into_std(), 1, &mut buf) {
-        // Use the transmit's own destination (not the cached peer) so a
-        // datagram is sent to the address quinn selected — correct under
-        // path migration and consistent with the stateless `Response` arm.
-        self
-          .out
-          .push_back((tr.destination, Bytes::copy_from_slice(&buf[..tr.size])));
-        buf.clear();
-      }
-      // Refresh this connection's deadline term now that its transmit queue is
-      // drained. `collect_transmits` is the last per-tick touch of every
-      // surviving connection, so this single loop keeps every live `Conn` key
-      // current — connections mutated earlier in the tick (`service_quinn`,
-      // `service_dials`) need no separate `set`.
-      let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
-      self.deadline_index.set(TimerKey::Conn(ch), deadline);
+      self.collect_conn_transmits(ch, now);
     }
+  }
+
+  /// Drain one connection's owed outbound quinn datagrams into `out` and refresh
+  /// its deadline-index key. The per-connection body of [`Self::collect_transmits`]
+  /// — the global tick loops it over every handle; the per-datagram
+  /// [`Self::service_connection`] path calls it for the single serviced
+  /// connection so exactly that connection's transmits flush without an
+  /// O(all connections) pass.
+  fn collect_conn_transmits(&mut self, ch: ConnectionHandle, now: Instant) {
+    let Some(e) = self.conns.get_mut(ch) else {
+      return;
+    };
+    let mut buf = Vec::new();
+    while let Some(tr) = e.conn_mut().poll_transmit(now.into_std(), 1, &mut buf) {
+      // Use the transmit's own destination (not the cached peer) so a
+      // datagram is sent to the address quinn selected — correct under
+      // path migration and consistent with the stateless `Response` arm.
+      self
+        .out
+        .push_back((tr.destination, Bytes::copy_from_slice(&buf[..tr.size])));
+      buf.clear();
+    }
+    // Refresh this connection's deadline term now that its transmit queue is
+    // drained — the last touch of the connection in whichever pass called this,
+    // so the live `Conn` key is current without a separate `set` at the earlier
+    // `service_one_conn` / `service_dials` mutation sites.
+    let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
+    self.deadline_index.set(TimerKey::Conn(ch), deadline);
   }
 
   /// Which wire the unreliable path (gossip + probes) rides. Delegates to the
@@ -1730,7 +1725,7 @@ impl<I, R> QuicEndpoint<I, R> {
 
   /// Count of membership-time advances ([`Endpoint::handle_timeout`] calls).
   /// A QUIC packet ingress must NOT bump this — only the driver's explicit
-  /// `handle_timeout` may. See [`Self::service_quic_inbound`].
+  /// `handle_timeout` may. See [`Self::service_connection`].
   #[cfg(test)]
   pub(crate) fn membership_time_advances(&self) -> u64 {
     self.counters.membership_time_advances
@@ -1960,7 +1955,17 @@ where
     self.ep.send_user_packets(to, payloads)
   }
 
-  fn service_dials(&mut self, now: Instant) {
+  /// Attempt every parked dial and return the machine [`StreamId`]s of the
+  /// outbound bridges it MINTED this call (empty when none opened). Each bridge is
+  /// minted on the DIALED peer's pooled connection via `get_or_dial`, which may be
+  /// a connection OTHER than any one the caller is servicing — so the datagram
+  /// path uses the returned set to pump and flush exactly those bridges, wherever
+  /// they landed, without an O(all bridges) scan. Only the `dial_succeeded`
+  /// success path mints (and pushes an id); every requeue / expiry / failure path
+  /// mints nothing. The global tick ignores the return (its step 5.5 pumps all
+  /// bridges regardless).
+  fn service_dials(&mut self, now: Instant) -> SmallVec<StreamId> {
+    let mut minted: SmallVec<StreamId> = SmallVec::new();
     // Sieve any DialRequested newly emitted by the inner endpoint into the
     // private `dial_pending` deque, then drain that deque as the sole input.
     // Non-`DialRequested` events stay in the inner endpoint's queue for the
@@ -2034,8 +2039,9 @@ where
               Some(sid) => match self.ep.dial_succeeded(id, now) {
                 Some(stream) => {
                   let reliable_max = self.ep.max_stream_frame_size();
+                  let mid = stream.id();
                   self.bridges.insert(
-                    stream.id(),
+                    mid,
                     Bridge::new(
                       stream,
                       ch,
@@ -2050,6 +2056,13 @@ where
                       true,
                     ),
                   );
+                  // Mirror the mint into the per-connection bridge index so the
+                  // datagram path can pump this outbound bridge in O(conn), and
+                  // record it as minted this call so the datagram-path caller
+                  // pumps and flushes exactly the bridge on `ch` (which may differ
+                  // from the connection it is servicing).
+                  index_bridge_mint(&mut self.bridges_by_conn, ch, mid);
+                  minted.push(mid);
                 }
                 None => {
                   // Defense-in-depth: the deadline pre-check above
@@ -2182,6 +2195,7 @@ where
         }
       }
     }
+    minted
   }
 }
 
@@ -2257,54 +2271,95 @@ where
   /// the next [`Self::collect_transmits`].
   fn pump_bridges(&mut self, now: Instant) {
     let ids: MediumVec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      // Split borrow: take the bridge out, operate, put back (or reap).
-      if let Some(mut br) = self.bridges.remove(id) {
-        // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
-        // error, so `is_terminal()` below drives the prompt reap; the
-        // `#[must_use]` Results are consumed — terminality is the signal.
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        // Drain endpoint-events EVERY tick (not only when terminal).
-        // `drain_then_reap` also delivers the slot-gone notice (terminal
-        // only); a non-terminal stream drains its payload events with the
-        // SAME encode+load+flush but WITHOUT that notice.
+    for id in ids {
+      self.pump_one_bridge(id, now);
+    }
+  }
+
+  /// Pump only connection `ch`'s bridges — the per-connection analog of
+  /// [`Self::pump_bridges`] driven from the datagram path. Reads the machine
+  /// [`StreamId`]s from [`Self::bridges_by_conn`] (O(this connection's bridges),
+  /// never an O(all bridges) filter) and runs the shared [`Self::pump_one_bridge`]
+  /// on each. A snapshot is taken first so a bridge reaped mid-loop (which mutates
+  /// `bridges_by_conn`) does not disturb the iteration.
+  ///
+  /// `#[cfg(not(test))]`: test builds pump via the post-acceptance-tracking
+  /// [`Self::pump_conn_bridges_tracking`] instead, so this untracked variant is
+  /// compiled only for production — mirroring how the global tick's step (5.5)
+  /// splits `pump_bridges` from `pump_bridges_tracking_post_acceptance`.
+  #[cfg(not(test))]
+  fn pump_conn_bridges(&mut self, ch: ConnectionHandle, now: Instant) {
+    let ids: SmallVec<StreamId> = match self.bridges_by_conn.get(&ch) {
+      Some(ids) => ids.iter().copied().collect(),
+      None => return,
+    };
+    for id in ids {
+      self.pump_one_bridge(id, now);
+    }
+  }
+
+  /// Pump one bridge `id`: its inbound + outbound halves, drain its
+  /// endpoint-events into the `Endpoint`, and D1-drain-then-reap it if it turned
+  /// terminal. The per-bridge body of [`Self::pump_bridges`], shared with the
+  /// per-connection [`Self::pump_conn_bridges`] so both the global tick and the
+  /// datagram path run identical bridge logic. Beyond that verbatim logic it
+  /// maintains the two mandated indexes: [`Self::bridges_by_conn`] on reap and the
+  /// `#[cfg(test)]` [`TestCounters::bridge_visits`] touch count.
+  fn pump_one_bridge(&mut self, id: StreamId, now: Instant) {
+    // Split borrow: take the bridge out, operate, put back (or reap).
+    if let Some(mut br) = self.bridges.remove(&id) {
+      #[cfg(test)]
+      {
+        self.counters.bridge_visits = self.counters.bridge_visits.saturating_add(1);
+      }
+      // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
+      // error, so `is_terminal()` below drives the prompt reap; the
+      // `#[must_use]` Results are consumed — terminality is the signal.
+      let _ = br.pump_in(&mut self.conns, now);
+      let _ = br.pump_out(&mut self.conns, now);
+      // Drain endpoint-events EVERY tick (not only when terminal).
+      // `drain_then_reap` also delivers the slot-gone notice (terminal
+      // only); a non-terminal stream drains its payload events with the
+      // SAME encode+load+flush but WITHOUT that notice.
+      if br.is_terminal() {
+        br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+        let outcome = Self::outcome_for_terminal(&br);
+        let ch = br.ch();
+        // Reap AFTER drain: dropping the bridge frees its slot.
+        drop(br);
+        self.deadline_index.set(TimerKey::Bridge(id), None);
+        index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+        self.emit_exchange_completed(id, outcome);
+      } else {
+        br.drain_payload_only(&mut self.ep, &mut self.conns, now);
+        // `drain_payload_only` may flip the bridge to terminal (e.g.
+        // a `StreamCommand::Close` from an admission-rejected join sets
+        // `fatal`); re-check terminality so the bridge D1-drains and
+        // reaps in this SAME tick rather than holding the quinn bidi
+        // stream until its exchange deadline.
         if br.is_terminal() {
+          #[cfg(test)]
+          {
+            self.counters.bridges_terminalized_via_close_command = self
+              .counters
+              .bridges_terminalized_via_close_command
+              .saturating_add(1);
+          }
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
           let outcome = Self::outcome_for_terminal(&br);
-          // Reap AFTER drain: dropping the bridge frees its slot.
+          let ch = br.ch();
           drop(br);
-          self.deadline_index.set(TimerKey::Bridge(*id), None);
-          self.emit_exchange_completed(*id, outcome);
+          self.deadline_index.set(TimerKey::Bridge(id), None);
+          index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+          self.emit_exchange_completed(id, outcome);
         } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // `drain_payload_only` may flip the bridge to terminal (e.g.
-          // a `StreamCommand::Close` from an admission-rejected join sets
-          // `fatal`); re-check terminality so the bridge D1-drains and
-          // reaps in this SAME tick rather than holding the quinn bidi
-          // stream until its exchange deadline.
-          if br.is_terminal() {
-            #[cfg(test)]
-            {
-              self.counters.bridges_terminalized_via_close_command = self
-                .counters
-                .bridges_terminalized_via_close_command
-                .saturating_add(1);
-            }
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let outcome = Self::outcome_for_terminal(&br);
-            drop(br);
-            self.deadline_index.set(TimerKey::Bridge(*id), None);
-            self.emit_exchange_completed(*id, outcome);
-          } else {
-            // Surviving bridge: refresh its deadline key before it moves back
-            // into the table. This pump is the per-tick chokepoint for bridges —
-            // it runs after every mint (`service_quinn` / `service_dials`), so a
-            // freshly-minted surviving bridge is registered here.
-            let deadline = br.poll_timeout();
-            self.bridges.insert(*id, br);
-            self.deadline_index.set(TimerKey::Bridge(*id), deadline);
-          }
+          // Surviving bridge: refresh its deadline key before it moves back
+          // into the table. This pump is the per-pass chokepoint for bridges —
+          // it runs after every mint (`service_one_conn` / `service_dials`), so a
+          // freshly-minted surviving bridge is registered here.
+          let deadline = br.poll_timeout();
+          self.bridges.insert(id, br);
+          self.deadline_index.set(TimerKey::Bridge(id), deadline);
         }
       }
     }
@@ -2319,10 +2374,9 @@ where
   /// bridge — the negative-control regression test reverts the step (5.5)
   /// call site and the counter stays at zero.
   ///
-  /// The body is otherwise byte-identical to `pump_bridges`: the counter
-  /// increment is the ONLY observable difference, so production behaviour
-  /// (the second pump's effect on `self.bridges` and the inner `Endpoint`)
-  /// is unchanged.
+  /// Pumping delegates to the shared [`Self::pump_one_bridge`], so production
+  /// behaviour (the pump's effect on `self.bridges`, the inner `Endpoint`, and
+  /// the indexes) is identical; the counter increment is the only added effect.
   #[cfg(test)]
   fn pump_bridges_tracking_post_acceptance(
     &mut self,
@@ -2330,44 +2384,42 @@ where
     pre_snapshot_ids: &HashSet<StreamId>,
   ) {
     let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      if let Some(mut br) = self.bridges.remove(id) {
-        if !pre_snapshot_ids.contains(id) {
-          self.counters.bridges_pumped_after_acceptance = self
-            .counters
-            .bridges_pumped_after_acceptance
-            .saturating_add(1);
-        }
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          let outcome = Self::outcome_for_terminal(&br);
-          drop(br);
-          self.deadline_index.set(TimerKey::Bridge(*id), None);
-          self.emit_exchange_completed(*id, outcome);
-        } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
-          // re-check so this test-only variant matches production reap
-          // semantics under an admission-rejected `Close`.
-          if br.is_terminal() {
-            self.counters.bridges_terminalized_via_close_command = self
-              .counters
-              .bridges_terminalized_via_close_command
-              .saturating_add(1);
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let outcome = Self::outcome_for_terminal(&br);
-            drop(br);
-            self.deadline_index.set(TimerKey::Bridge(*id), None);
-            self.emit_exchange_completed(*id, outcome);
-          } else {
-            let deadline = br.poll_timeout();
-            self.bridges.insert(*id, br);
-            self.deadline_index.set(TimerKey::Bridge(*id), deadline);
-          }
-        }
+    for id in ids {
+      if self.bridges.contains_key(&id) && !pre_snapshot_ids.contains(&id) {
+        self.counters.bridges_pumped_after_acceptance = self
+          .counters
+          .bridges_pumped_after_acceptance
+          .saturating_add(1);
       }
+      self.pump_one_bridge(id, now);
+    }
+  }
+
+  /// Test-only per-connection variant of [`Self::pump_conn_bridges`] that
+  /// increments [`TestCounters::bridges_pumped_after_acceptance`] once for each of
+  /// `ch`'s bridges NOT in `pre_snapshot_ids`. The datagram-path analog of
+  /// [`Self::pump_bridges_tracking_post_acceptance`]: a bridge minted DURING this
+  /// `service_connection` pass (an inbound accept, or a `service_dials`
+  /// `open(Dir::Bi)` on establishment) is pumped in the same pass and counted here.
+  #[cfg(test)]
+  fn pump_conn_bridges_tracking(
+    &mut self,
+    ch: ConnectionHandle,
+    now: Instant,
+    pre_snapshot_ids: &HashSet<StreamId>,
+  ) {
+    let ids: SmallVec<StreamId> = match self.bridges_by_conn.get(&ch) {
+      Some(ids) => ids.iter().copied().collect(),
+      None => return,
+    };
+    for id in ids {
+      if self.bridges.contains_key(&id) && !pre_snapshot_ids.contains(&id) {
+        self.counters.bridges_pumped_after_acceptance = self
+          .counters
+          .bridges_pumped_after_acceptance
+          .saturating_add(1);
+      }
+      self.pump_one_bridge(id, now);
     }
   }
   /// Inbound datagram from the one UDP socket.
@@ -2391,34 +2443,24 @@ where
       Class::Quic => {
         let mut scratch = Vec::new();
         let data = BytesMut::from(datagram);
-        // Service the coordinator only when this datagram actually created or
-        // advanced persistent connection state. `Endpoint::handle` returning
-        // `None` (a discarded malformed/truncated/unmatched datagram) is skipped;
-        // but `Some(_)` alone does NOT imply progress — a stateless `Response`
-        // (version negotiation / retry / stateless reset), an over-cap or failed
-        // `accept`, and a `ConnectionEvent` for an already-reaped handle are all
-        // `Some` yet commit nothing. `route_datagram_event` reports which case
-        // occurred; only `Advanced` (a new connection inserted, or a
-        // `ConnectionEvent` applied to a live connection) runs the servicing
-        // pass. A full pass pumps every bridge and scans every connection — pure
-        // O(connections + streams) work — so gating it on real progress denies an
-        // attacker an O(N) tick per attacker-triggerable stateless or over-cap
-        // datagram at full occupancy. Skipping the pass on an inert datagram
-        // cannot strand a connection timer: `poll_timeout` folds in every
-        // connection's own `poll_timeout`, so any connection needing service for
-        // its own timer is still woken through the driver's `handle_timeout`,
-        // independent of inbound-datagram servicing. Any owed outbound bytes
-        // (a stateless response, an accept-error close) were queued to `out` by
-        // `route_datagram_event` and are drained by `poll_transmit` regardless.
+        // `Endpoint::handle` returning `None` (a discarded malformed / truncated /
+        // unmatched datagram) is skipped. When it returns an event,
+        // `route_datagram_event` resolves it to the single connection this
+        // datagram addresses — a freshly-accepted one, or a live handle a
+        // `ConnectionEvent` targets — and `service_connection` services ONLY that
+        // connection and its bridges (O(that connection), never the whole table).
+        // A stateless `Response`, an over-cap / failed `accept`, and a
+        // `ConnectionEvent` for an already-reaped handle resolve to `None`: their
+        // owed outbound bytes are already queued to `out` and drain via
+        // `poll_transmit` with no servicing pass owed. Membership time is NOT
+        // advanced here (an inbound QUIC packet may carry an undecoded probe Ack);
+        // only the driver's explicit `handle_timeout` advances it.
         if let Some(ev) = self
           .quinn
           .handle(now.into_std(), from, None, None, data, &mut scratch)
         {
-          if matches!(
-            self.route_datagram_event(ev, from, now, &scratch),
-            DatagramProgress::Advanced
-          ) {
-            self.service_quic_inbound(now);
+          if let Some(ch) = self.route_datagram_event(ev, from, now, &scratch) {
+            self.service_connection(ch, now);
           }
         }
       }
@@ -2569,28 +2611,122 @@ where
     self.tick(now, true);
   }
 
-  /// Service the composed unit after a QUIC packet ingress WITHOUT advancing
-  /// membership timers. A QUIC packet may carry application datagrams (probe
-  /// Acks, Alives) the driver has not yet decoded; firing the membership probe
-  /// or suspicion deadline here — before `service_quinn` even extracts the
-  /// datagram into `mem_ingress` and before the driver decodes it — would mark a
-  /// peer Suspect/failed even though its Ack already arrived. Membership time is
-  /// advanced ONLY by the driver's explicit `handle_timeout`, after it has
-  /// drained and decoded `mem_ingress`. This gives the QUIC datagram ingress
-  /// path the same property the plain-UDP ingress path (`handle_memberlist_udp`)
-  /// already has.
-  fn service_quic_inbound(&mut self, now: Instant) {
+  /// Service exactly the one connection `ch` an inbound datagram addressed, and
+  /// its bridges — the per-connection analog of the global `tick(now, false)`,
+  /// bounding all inbound-datagram work to O(this connection + its bridges) so a
+  /// flood at one live CID can never force an O(all connections + bridges) pass.
+  ///
+  /// Membership timers are NOT advanced here (as with the former datagram tick):
+  /// a QUIC packet may carry application datagrams (probe Acks, Alives) the driver
+  /// has not yet decoded; firing the membership probe or suspicion deadline before
+  /// the driver drains and decodes `mem_ingress` would mark a peer Suspect/failed
+  /// even though its Ack already arrived. Membership time advances ONLY through
+  /// the driver's explicit `handle_timeout`, giving the QUIC datagram ingress path
+  /// the same property the plain-UDP path (`handle_memberlist_udp`) already has.
+  ///
+  /// A connection whose own transport timer, or a bridge whose exchange deadline,
+  /// needs future service is still woken: every such deadline lives in
+  /// [`Self::deadline_index`], so `poll_timeout` folds it in and the driver's next
+  /// `handle_timeout` runs the global tick — nothing is stranded by servicing only
+  /// the addressed connection here.
+  fn service_connection(&mut self, ch: ConnectionHandle, now: Instant) {
     #[cfg(test)]
     {
       self.counters.quic_inbound_servicings =
         self.counters.quic_inbound_servicings.saturating_add(1);
     }
-    self.tick(now, false);
+    // Snapshot `ch`'s bridges so the pump after `service_one_conn` counts the
+    // ones this pass mints (inbound accepts) as post-acceptance pumps — the
+    // datagram-path twin of the global tick's step (5.5).
+    #[cfg(test)]
+    let pre_service_ids: HashSet<StreamId> = self
+      .bridges_by_conn
+      .get(&ch)
+      .map(|ids| ids.iter().copied().collect())
+      .unwrap_or_default();
+    let established_before = self
+      .conns
+      .get(ch)
+      .map(|e| e.established_at_least_once())
+      .unwrap_or(false);
+    // (a) Drive `ch`: apply its deferred feedback + timers, drain its `poll()`
+    // (accepting inbound bridges, reaping its bridges on a connection-level loss).
+    self.service_one_conn(ch, now);
+    // (b) Pump ONLY `ch`'s bridges — including any just accepted — so their first
+    // buffered request/response bytes reach the quinn send stream this same pass.
+    #[cfg(test)]
+    self.pump_conn_bridges_tracking(ch, now, &pre_service_ids);
+    #[cfg(not(test))]
+    self.pump_conn_bridges(ch, now);
+    // (c) If `ch` established DURING this pass, attempt the dials parked on its
+    // peer: a pooled push/pull or reliable-ping intent requeued while `ch` was
+    // still handshaking must open its bidi the instant `ch` establishes, not wait
+    // for the next timer tick. Establishment is a rare, non-attacker-floodable
+    // transition (a corrupted packet establishes nothing), so paying
+    // `service_dials` (O(pending dials)) only here keeps the flood path O(`ch`).
+    //
+    // `service_dials` drains ALL parked dials, and each mints its bridge on the
+    // DIALED peer's pooled connection via `get_or_dial` — which may be a
+    // connection OTHER than `ch` (a dial parked on a different peer whose pooled
+    // connection is already established mints there). So pump exactly the set
+    // `service_dials` reports minting, and collect the connections they landed on,
+    // so every freshly-opened outbound bridge — on `ch` or elsewhere — moves its
+    // first request bytes into the quinn send stream (the pump) AND onto the `out`
+    // wire (the collect) THIS pass. Without it a strict-poll driver would sleep
+    // until the next global tick, past the bridge's first datagram — the same
+    // strict-poll self-sufficiency `flush_outbound` documents. `ch` itself is
+    // collected by step (d), so skip it here to avoid a redundant poll.
+    let established_now = self
+      .conns
+      .get(ch)
+      .map(|e| e.established_at_least_once())
+      .unwrap_or(false);
+    if !established_before && established_now {
+      let minted = self.service_dials(now);
+      let mut minted_conns: SmallVec<ConnectionHandle> = SmallVec::new();
+      for mid in minted {
+        // Record the connection this bridge landed on BEFORE pumping (a pump that
+        // immediately terminalizes the bridge would drop it from the table).
+        let mint_conn = self.bridges.get(&mid).map(|br| br.ch());
+        #[cfg(test)]
+        {
+          // A minted bridge is post-acceptance (opened after step (b)'s pump);
+          // bump the same counter `pump_conn_bridges_tracking` would.
+          if self.bridges.contains_key(&mid) {
+            self.counters.bridges_pumped_after_acceptance = self
+              .counters
+              .bridges_pumped_after_acceptance
+              .saturating_add(1);
+          }
+        }
+        self.pump_one_bridge(mid, now);
+        if let Some(mc) = mint_conn {
+          if mc != ch && !minted_conns.contains(&mc) {
+            minted_conns.push(mc);
+          }
+        }
+      }
+      for mc in minted_conns {
+        self.collect_conn_transmits(mc, now);
+      }
+    }
+    // (d) Reap `ch` if it drained this pass — a connection-level loss, or a
+    // Closed→Drained stateless-reset transition delivered as a `ConnectionEvent`
+    // (which the former progress gate wrongly treated as inert, stranding the
+    // reap). Reaping frees its slab entry and its global-cap slot in this same
+    // call. Otherwise collect exactly its owed transmits and refresh its deadline
+    // key. Mirrors `finalize_tick`'s reap-then-collect ordering, scoped to `ch`.
+    if self.conns.reap_if_drained(&mut self.quinn, ch) {
+      self.deadline_index.set(TimerKey::Conn(ch), None);
+      self.conns_with_pending_events.remove(&ch);
+      self.bridges_by_conn.remove(&ch);
+    } else {
+      self.collect_conn_transmits(ch, now);
+    }
   }
 
   /// Shared tick body. `advance_membership_time` gates step (3)
-  /// (`Endpoint::handle_timeout`): true for the driver's explicit timer tick,
-  /// false for QUIC packet ingress (see `service_quic_inbound`).
+  /// (`Endpoint::handle_timeout`): true for the driver's explicit timer tick.
   fn tick(&mut self, now: Instant, advance_membership_time: bool) {
     // (1) inbound feed already done in `handle_udp` before this tick.
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
@@ -2681,345 +2817,367 @@ where
 
   fn service_quinn(&mut self, now: Instant) {
     for ch in self.conns.iter_handles() {
-      let Some(e) = self.conns.get_mut(ch) else {
-        continue;
-      };
-      // Apply this connection's one-tick-deferred feedback BEFORE any
-      // other poll on it — same shape as quinn-proto's reference async
-      // driver's per-connection channel rx, where `process_conn_events`
-      // is called once per scheduling iteration on the connection task
-      // and `Endpoint::handle_events` produces the corresponding
-      // `ConnectionEvent::Proto` messages on the SAME tick's
-      // `Endpoint::handle_event` return. Materialise into a `Vec` so
-      // the iterator releases its borrow of `e.pending_events` before
-      // the `handle_event` mutable borrow.
-      let pending: Vec<quinn_proto::ConnectionEvent> = e.take_pending_events().collect();
-      for conn_ev in pending {
-        e.conn_mut().handle_event(conn_ev);
-      }
-      e.conn_mut().handle_timeout(now.into_std());
-      let mut lost = false;
-      while let Some(ev) = e.conn_mut().poll() {
-        match ev {
-          quinn_proto::Event::ConnectionLost { .. } => {
-            // The connection (not an individual stream) failed; the per-stream
-            // pumps cannot observe this. Defer marking until the `poll()` loop
-            // ends so `e`'s mutable borrow of `conns` is dropped first.
-            lost = true;
-          }
-          quinn_proto::Event::Stream(quinn_proto::StreamEvent::Opened { dir: Dir::Bi }) => {
-            // `StreamEvent::Opened` is an idempotent signal ("one or more
-            // streams opened"), not a per-stream event, so accept until the
-            // peer's bidi backlog is drained — otherwise concurrently opened
-            // inbound exchanges are stranded with no further wake-up.
-            //
-            // Cross-connection inbound-stream cap. Each accepted bidi stream
-            // mints a Bridge that pins up to ~3x the max reliable frame size, so
-            // admission-gate every inbound bridge against the QUIC-specific
-            // `QuicOptions::max_inbound_streams` (a bounded nonzero default)
-            // BEFORE minting — the QUIC twin of the stream coordinator's
-            // `accept_connection` gate (`streams::StreamEndpoint`, which counts
-            // `exchanges.filter(|m| !m.outbound)`). The QUIC ceiling is its own
-            // option, not the shared TCP/TLS `EndpointOptions::max_inbound_streams`
-            // (which defaults to unlimited), so a default QUIC endpoint is bounded
-            // without changing TCP/TLS behaviour. This bounds inbound bridge state
-            // ACROSS all connections; quinn's per-connection
-            // `max_concurrent_bidi_streams` is a separate, per-connection limit.
-            // An outbound bridge is registered in `pending_outbound_kinds` for
-            // the life of its exchange and an accepted (inbound) bridge never is
-            // (see that field's docs), so the inbound population is exactly the
-            // bridges absent from that map. Snapshot it once and track
-            // incrementally as this loop mints — no bridge is reaped mid-loop.
-            let max_inbound = self.cfg.max_inbound_streams();
-            let mut inbound_live = match max_inbound {
-              Some(_) => self
-                .bridges
-                .keys()
-                .filter(|id| !self.pending_outbound_kinds.contains_key(id))
-                .count(),
-              None => 0,
+      self.service_one_conn(ch, now);
+    }
+  }
+
+  /// Service exactly one connection `ch`: apply its deferred feedback, drive its
+  /// timers, drain its `poll()` (accepting inbound bidi streams into bridges,
+  /// routing per-stream Finished/Stopped, reaping its bridges on a
+  /// connection-level loss), drain its endpoint-events into the `Endpoint`, and
+  /// extract its inbound datagrams. The per-connection body of
+  /// [`Self::service_quinn`], shared with the per-datagram
+  /// [`Self::service_connection`] so both the global tick and the datagram path
+  /// run identical connection logic. Beyond that verbatim logic it maintains
+  /// [`Self::bridges_by_conn`] at its bridge mint/reap sites and the
+  /// `#[cfg(test)]` [`TestCounters::connection_visits`] touch count.
+  fn service_one_conn(&mut self, ch: ConnectionHandle, now: Instant) {
+    let Some(e) = self.conns.get_mut(ch) else {
+      return;
+    };
+    #[cfg(test)]
+    {
+      self.counters.connection_visits = self.counters.connection_visits.saturating_add(1);
+    }
+    // Apply this connection's one-tick-deferred feedback BEFORE any
+    // other poll on it — same shape as quinn-proto's reference async
+    // driver's per-connection channel rx, where `process_conn_events`
+    // is called once per scheduling iteration on the connection task
+    // and `Endpoint::handle_events` produces the corresponding
+    // `ConnectionEvent::Proto` messages on the SAME tick's
+    // `Endpoint::handle_event` return. Materialise into a `Vec` so
+    // the iterator releases its borrow of `e.pending_events` before
+    // the `handle_event` mutable borrow.
+    let pending: Vec<quinn_proto::ConnectionEvent> = e.take_pending_events().collect();
+    for conn_ev in pending {
+      e.conn_mut().handle_event(conn_ev);
+    }
+    e.conn_mut().handle_timeout(now.into_std());
+    let mut lost = false;
+    while let Some(ev) = e.conn_mut().poll() {
+      match ev {
+        quinn_proto::Event::ConnectionLost { .. } => {
+          // The connection (not an individual stream) failed; the per-stream
+          // pumps cannot observe this. Defer marking until the `poll()` loop
+          // ends so `e`'s mutable borrow of `conns` is dropped first.
+          lost = true;
+        }
+        quinn_proto::Event::Stream(quinn_proto::StreamEvent::Opened { dir: Dir::Bi }) => {
+          // `StreamEvent::Opened` is an idempotent signal ("one or more
+          // streams opened"), not a per-stream event, so accept until the
+          // peer's bidi backlog is drained — otherwise concurrently opened
+          // inbound exchanges are stranded with no further wake-up.
+          //
+          // Cross-connection inbound-stream cap. Each accepted bidi stream
+          // mints a Bridge that pins up to ~3x the max reliable frame size, so
+          // admission-gate every inbound bridge against the QUIC-specific
+          // `QuicOptions::max_inbound_streams` (a bounded nonzero default)
+          // BEFORE minting — the QUIC twin of the stream coordinator's
+          // `accept_connection` gate (`streams::StreamEndpoint`, which counts
+          // `exchanges.filter(|m| !m.outbound)`). The QUIC ceiling is its own
+          // option, not the shared TCP/TLS `EndpointOptions::max_inbound_streams`
+          // (which defaults to unlimited), so a default QUIC endpoint is bounded
+          // without changing TCP/TLS behaviour. This bounds inbound bridge state
+          // ACROSS all connections; quinn's per-connection
+          // `max_concurrent_bidi_streams` is a separate, per-connection limit.
+          // An outbound bridge is registered in `pending_outbound_kinds` for
+          // the life of its exchange and an accepted (inbound) bridge never is
+          // (see that field's docs), so the inbound population is exactly the
+          // bridges absent from that map. Snapshot it once and track
+          // incrementally as this loop mints — no bridge is reaped mid-loop.
+          let max_inbound = self.cfg.max_inbound_streams();
+          let mut inbound_live = match max_inbound {
+            Some(_) => self
+              .bridges
+              .keys()
+              .filter(|id| !self.pending_outbound_kinds.contains_key(id))
+              .count(),
+            None => 0,
+          };
+          while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
+            let peer = e.peer();
+            // At the inbound ceiling: refuse this stream instead of minting a
+            // bridge. Reset both halves so the peer is notified and quinn
+            // releases the stream slot, and bump `inbound_streams_rejected`.
+            // Ignoring Err: `ClosedStream` means the half is already gone,
+            // which is the desired end state.
+            if max_inbound.is_some_and(|max| inbound_live >= max) {
+              self.ep.metrics_mut().inbound_streams_rejected += 1;
+              let _ = e
+                .conn_mut()
+                .send_stream(sid)
+                .reset(quinn_proto::VarInt::from_u32(0));
+              let _ = e
+                .conn_mut()
+                .recv_stream(sid)
+                .stop(quinn_proto::VarInt::from_u32(0));
+              continue;
+            }
+            let Some(stream) = self.ep.accept_stream(peer, now) else {
+              // Leaving/Left: admit no new inbound reliable stream. Reset both
+              // halves of the just-accepted QUIC stream so the peer is notified
+              // and the connection's stream slot is released instead of left
+              // orphaned with no Bridge to own it. Ignoring Err: `ClosedStream`
+              // means the half is already gone, which is the desired end state.
+              let _ = e
+                .conn_mut()
+                .send_stream(sid)
+                .reset(quinn_proto::VarInt::from_u32(0));
+              let _ = e
+                .conn_mut()
+                .recv_stream(sid)
+                .stop(quinn_proto::VarInt::from_u32(0));
+              continue;
             };
-            while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
-              let peer = e.peer();
-              // At the inbound ceiling: refuse this stream instead of minting a
-              // bridge. Reset both halves so the peer is notified and quinn
-              // releases the stream slot, and bump `inbound_streams_rejected`.
-              // Ignoring Err: `ClosedStream` means the half is already gone,
-              // which is the desired end state.
-              if max_inbound.is_some_and(|max| inbound_live >= max) {
-                self.ep.metrics_mut().inbound_streams_rejected += 1;
-                let _ = e
-                  .conn_mut()
-                  .send_stream(sid)
-                  .reset(quinn_proto::VarInt::from_u32(0));
-                let _ = e
-                  .conn_mut()
-                  .recv_stream(sid)
-                  .stop(quinn_proto::VarInt::from_u32(0));
-                continue;
-              }
-              let Some(stream) = self.ep.accept_stream(peer, now) else {
-                // Leaving/Left: admit no new inbound reliable stream. Reset both
-                // halves of the just-accepted QUIC stream so the peer is notified
-                // and the connection's stream slot is released instead of left
-                // orphaned with no Bridge to own it. Ignoring Err: `ClosedStream`
-                // means the half is already gone, which is the desired end state.
-                let _ = e
-                  .conn_mut()
-                  .send_stream(sid)
-                  .reset(quinn_proto::VarInt::from_u32(0));
-                let _ = e
-                  .conn_mut()
-                  .recv_stream(sid)
-                  .stop(quinn_proto::VarInt::from_u32(0));
-                continue;
-              };
-              let id = stream.id();
-              let reliable_max = self.ep.max_stream_frame_size();
-              self.bridges.insert(
-                id,
-                Bridge::new(
-                  stream,
-                  ch,
-                  sid,
-                  #[cfg(compression)]
-                  self.compression,
-                  #[cfg(encryption)]
-                  self.encryption.clone(),
-                  reliable_max,
-                  self.label.clone(),
-                  self.skip_inbound_label_check,
-                  false,
-                ),
-              );
-              inbound_live += 1;
-              #[cfg(test)]
-              {
-                self.counters.max_inbound_bridges_live =
-                  self.counters.max_inbound_bridges_live.max(inbound_live);
-              }
-            }
-          }
-          quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {
-            // Peer ack'd our FIN — quinn-proto's `SendState` for this
-            // stream has reached `DataRecvd`. Route to the owning
-            // bridge so it transitions `Active -> SendClosed` (or
-            // `RecvClosed -> BothClosed`). The bridge's terminality
-            // criterion is `LinkState::BothClosed | Failed(_)`, so
-            // this transition is the load-bearing send-half retirement
-            // observable — not `SendStream::finish()`'s return.
-            //
-            // **Identity is the compound `(ConnectionHandle, QuicSid)`.**
-            // quinn-proto's `StreamId` is per-connection — its bottom
-            // two bits encode initiator + direction and the remaining
-            // counter is per-connection. Two pooled peer connections
-            // will both have their first bidi stream as sid `0`, so
-            // filtering by sid alone would route a Finished/Stopped
-            // from `ch_A`'s stream to a sibling bridge on `ch_B`.
-            // We're inside the per-connection `poll()` loop here, so
-            // the `ch` filter is free.
-            for br in self.bridges.values_mut() {
-              if br.ch() == ch && br.sid() == sid {
-                br.observe_send_fin();
-                break;
-              }
-            }
-          }
-          quinn_proto::Event::Stream(quinn_proto::StreamEvent::Stopped {
-            id: sid,
-            error_code,
-          }) => {
-            // Peer sent STOP_SENDING for our send half. quinn already
-            // transitioned our `SendState` to `ResetSent`; we additionally
-            // retire the recv half (idempotent) so the bridge becomes
-            // recv-clean by the time its `Failed(Transport)` phase
-            // reaps. Retirement is inline on `e.conn_mut()` because we
-            // already hold the `&mut Connection` borrow for the
-            // `poll()` drain.
-            //
-            // Identity = `(ch, sid)` — see the `Finished` arm above.
-            //
-            // Ignoring Err: idempotent retirement — `Err(ClosedStream)`
-            // means the half is already gone.
-            let _ = e
-              .conn_mut()
-              .send_stream(sid)
-              .reset(quinn_proto::VarInt::from_u32(0));
-            let _ = e
-              .conn_mut()
-              .recv_stream(sid)
-              .stop(quinn_proto::VarInt::from_u32(0));
-            for br in self.bridges.values_mut() {
-              if br.ch() == ch && br.sid() == sid {
-                br.fail_stopped_already_retired(error_code);
-                break;
-              }
-            }
-          }
-          _ => {}
-        }
-      }
-      // Drain every endpoint-facing event the connection has queued and
-      // route it back through `Endpoint::handle_event`; queue any
-      // returned `ConnectionEvent` onto the SAME connection for delivery
-      // on the NEXT `service_quinn` iteration. quinn-proto's polling
-      // contract requires callers to drain all four polling methods
-      // every progress step. Omitting `poll_endpoint_events` strands
-      // `NeedIdentifiers` / `ResetToken` / `RetireConnectionId` inside
-      // the connection and breaks the endpoint flows they drive: CID
-      // issuance via `Endpoint::send_new_identifiers`, peer
-      // stateless-reset-token registration, and CID retirement.
-      // Placed after the application-event `poll()` loop above so the
-      // existing `Opened`/`ConnectionLost` handling is unchanged in
-      // observable behaviour.
-      //
-      // `EndpointEventInner::Drained` is filtered out here and forwarded
-      // only by `ConnTable::reap_if_drained`. Rationale: `quinn`'s
-      // internal `Endpoint::handle_event(Drained)` calls
-      // `self.connections.try_remove(ch.0)`, releasing quinn's slab slot.
-      // `ConnTable.conns` is a strict lockstep mirror of quinn's slab —
-      // `get_or_dial`'s `debug_assert_eq!(slot, ch.0)` enforces that the
-      // next `connect()` reuses the SAME index in both slabs. Forwarding
-      // a connection-emitted `Drained` here would release quinn's slot
-      // while our `ConnTable` still holds it; an immediately-following
-      // dial then desynchronises the two slabs. `reap_if_drained` is the
-      // sole site that pairs `quinn.handle_event(ch,
-      // EndpointEvent::drained())` with `self.conns.try_remove(ch.0)`,
-      // keeping both slabs in lockstep.
-      while let Some(ev) = e.conn_mut().poll_endpoint_events() {
-        if ev.is_drained() {
-          continue;
-        }
-        #[cfg(test)]
-        {
-          self.counters.endpoint_events_processed =
-            self.counters.endpoint_events_processed.saturating_add(1);
-        }
-        if let Some(conn_ev) = self.quinn.handle_event(ch, ev) {
-          // Queue for the NEXT iteration of this connection — see
-          // [`super::conn::ConnEntry::queue_pending_event`] for the
-          // one-tick deferral rationale and the by-construction lifetime
-          // co-location that eliminates quinn's `vacant_key()` slab-slot
-          // reuse race.
-          e.queue_pending_event(conn_ev);
-        }
-      }
-      // Snapshot this connection's deferred-backlog state after the drain-and-
-      // requeue above (the only site pending events change). Applied to the
-      // O(1) `conns_with_pending_events` index at the end of the iteration so
-      // `poll_timeout`'s immediate-due term never scans the connection table.
-      let has_pending_events_after = e.has_pending_events();
-      // Drain inbound application datagrams into the same mem_ingress the plain-
-      // UDP gossip path fills, tagged with this connection's peer. Mode-
-      // independent: a Udp-mode endpoint does not negotiate datagrams, so this is
-      // a no-op there; a Datagram-mode endpoint extracts them. Pop quinn's buffer
-      // to EMPTY (so a zero-length-frame flood cannot accumulate inside quinn),
-      // but PUSH into the coordinator queue only while this peer's STANDING share
-      // (`mem_ingress_per_peer`, maintained across the whole undrained queue) is
-      // under the per-peer budget AND the global cap is not reached — beyond
-      // either, drop and count. Bounding the standing share (not a per-pass
-      // counter) gives every peer fair access regardless of how many recv passes
-      // a driver batches before decoding, so one flooding peer cannot starve
-      // another peer's probe Ack. recv() returns an owned Bytes, so the
-      // e.conn_mut() borrow releases before the disjoint-field pushes.
-      let peer = e.peer();
-      while let Some(payload) = e.conn_mut().datagrams().recv() {
-        // Pop quinn to empty so a zero-length-frame flood cannot accumulate
-        // inside quinn; admission (per-peer + global caps, dropped+counted past
-        // either bound so one flooding peer cannot fill the shared queue and
-        // starve another peer's probe Ack) is enforced by the shared helper —
-        // the SAME bound `handle_memberlist_udp` applies, so neither source can
-        // exceed it. The three `&mut self.<field>` args are disjoint from the
-        // `self.conns` borrow `e` holds.
-        push_mem_ingress_capped(
-          &mut self.mem_ingress,
-          &mut self.mem_ingress_per_peer,
-          &mut self.datagram_ingress_dropped,
-          peer,
-          move || payload,
-        );
-      }
-      // Also reap when the connection has reached `is_drained()` even if
-      // `poll()` never yielded `Event::ConnectionLost` for it in this
-      // iteration — the kill-on-idle-timeout path
-      // (`kill(ConnectionError::TimedOut)`) and similar immediate-drain
-      // transitions set `self.error` and queue
-      // `EndpointEventInner::Drained` simultaneously; whether `poll()`
-      // surfaced the `ConnectionLost` event THIS tick depends on the
-      // internal `events` FIFO ordering. The combined `lost || is_drained()`
-      // gate catches both shapes so the strict-poll bridge-leak is closed
-      // regardless of which signal arrived first.
-      let drained = e.conn_ref().is_drained();
-      // `e` borrows `self.conns`; release it before touching `self.bridges`.
-      let _ = e;
-      if lost || drained {
-        // Mark every bridge on this connection fatal AND complete its D1
-        // drain_then_reap synchronously, in this same tick.
-        //
-        // A connection-level loss observed inside `service_quinn` (step 4)
-        // runs AFTER `pump_bridges` (step 2) and BEFORE `finalize_tick`
-        // (step 5). The freshly-fatal bridges therefore miss this tick's
-        // `pump_bridges` D1 reap; a stateless-reset / immediate-drain
-        // loss path can then have `finalize_tick` free the connection in
-        // the SAME tick — and `Bridge::poll_timeout` returns `None` for
-        // terminal bridges (it deliberately owes no future work to
-        // itself once terminal). The coordinator's unified `poll_timeout`
-        // then has no immediate-due term contributed by these bridges,
-        // so a strict-poll driver with no other peer/probe/timer due
-        // wakes never again — the terminal bridges leak forever.
-        //
-        // Coordinator-level fix: when we know a bridge is terminal
-        // because of a connection-level event, close out the D1 drain
-        // here. `fail_connection_lost()` transitions the bridge phase
-        // to `Failed(ConnectionLost)` so the `StreamErrored` lifecycle
-        // notice inside `drain_then_reap` carries the connection-loss
-        // attribution.
-        let ids: SmallVec<StreamId> = self
-          .bridges
-          .iter()
-          .filter(|(_, b)| b.ch() == ch)
-          .map(|(id, _)| *id)
-          .collect();
-        for id in ids {
-          if let Some(mut br) = self.bridges.remove(&id) {
-            br.fail_connection_lost();
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            let id = stream.id();
+            let reliable_max = self.ep.max_stream_frame_size();
+            self.bridges.insert(
+              id,
+              Bridge::new(
+                stream,
+                ch,
+                sid,
+                #[cfg(compression)]
+                self.compression,
+                #[cfg(encryption)]
+                self.encryption.clone(),
+                reliable_max,
+                self.label.clone(),
+                self.skip_inbound_label_check,
+                false,
+              ),
+            );
+            // Mirror the mint into the per-connection bridge index (borrows only
+            // `bridges_by_conn`, disjoint from the live `e`/`self.conns` borrow).
+            index_bridge_mint(&mut self.bridges_by_conn, ch, id);
+            inbound_live += 1;
             #[cfg(test)]
             {
-              self.counters.bridges_reaped_on_connection_lost = self
-                .counters
-                .bridges_reaped_on_connection_lost
-                .saturating_add(1);
+              self.counters.max_inbound_bridges_live =
+                self.counters.max_inbound_bridges_live.max(inbound_live);
             }
-            // ConnectionLost ⇒ `fail_connection_lost` set the phase to
-            // `Failed(ConnectionLost)`; outcome is unconditionally
-            // `Failed` here, but route through the shared helper so
-            // the kind lookup + emission path matches the
-            // `pump_bridges` reap.
-            let outcome = Self::outcome_for_terminal(&br);
-            drop(br);
-            // This bridge was reaped here rather than by a `pump_bridges` pass,
-            // so clear its deadline key at this site.
-            self.deadline_index.set(TimerKey::Bridge(id), None);
-            self.emit_exchange_completed(id, outcome);
           }
         }
+        quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {
+          // Peer ack'd our FIN — quinn-proto's `SendState` for this
+          // stream has reached `DataRecvd`. Route to the owning
+          // bridge so it transitions `Active -> SendClosed` (or
+          // `RecvClosed -> BothClosed`). The bridge's terminality
+          // criterion is `LinkState::BothClosed | Failed(_)`, so
+          // this transition is the load-bearing send-half retirement
+          // observable — not `SendStream::finish()`'s return.
+          //
+          // **Identity is the compound `(ConnectionHandle, QuicSid)`.**
+          // quinn-proto's `StreamId` is per-connection — its bottom
+          // two bits encode initiator + direction and the remaining
+          // counter is per-connection. Two pooled peer connections
+          // will both have their first bidi stream as sid `0`, so
+          // filtering by sid alone would route a Finished/Stopped
+          // from `ch_A`'s stream to a sibling bridge on `ch_B`.
+          // We're inside the per-connection `poll()` loop here, so
+          // the `ch` filter is free.
+          for br in self.bridges.values_mut() {
+            if br.ch() == ch && br.sid() == sid {
+              br.observe_send_fin();
+              break;
+            }
+          }
+        }
+        quinn_proto::Event::Stream(quinn_proto::StreamEvent::Stopped {
+          id: sid,
+          error_code,
+        }) => {
+          // Peer sent STOP_SENDING for our send half. quinn already
+          // transitioned our `SendState` to `ResetSent`; we additionally
+          // retire the recv half (idempotent) so the bridge becomes
+          // recv-clean by the time its `Failed(Transport)` phase
+          // reaps. Retirement is inline on `e.conn_mut()` because we
+          // already hold the `&mut Connection` borrow for the
+          // `poll()` drain.
+          //
+          // Identity = `(ch, sid)` — see the `Finished` arm above.
+          //
+          // Ignoring Err: idempotent retirement — `Err(ClosedStream)`
+          // means the half is already gone.
+          let _ = e
+            .conn_mut()
+            .send_stream(sid)
+            .reset(quinn_proto::VarInt::from_u32(0));
+          let _ = e
+            .conn_mut()
+            .recv_stream(sid)
+            .stop(quinn_proto::VarInt::from_u32(0));
+          for br in self.bridges.values_mut() {
+            if br.ch() == ch && br.sid() == sid {
+              br.fail_stopped_already_retired(error_code);
+              break;
+            }
+          }
+        }
+        _ => {}
       }
-      // Release this connection's per-source pending-index unit the pass it
-      // establishes. Runs once per connection per servicing pass (after the
-      // `conn_mut()` calls above have made the sticky establishment
-      // observation), so an inbound connection that completed its handshake
-      // this pass leaves the half-open index in the same pass — a no-op for a
-      // still-handshaking, outbound, or already-released connection.
-      self.conns.reconcile_pending_inbound(ch);
-      // Apply the deferred-backlog snapshot to the immediate-due index. A
-      // connection reaped later this tick (`finalize_tick`) is removed from the
-      // set there, so a stale membership cannot linger.
-      if has_pending_events_after {
-        self.conns_with_pending_events.insert(ch);
-      } else {
-        self.conns_with_pending_events.remove(&ch);
+    }
+    // Drain every endpoint-facing event the connection has queued and
+    // route it back through `Endpoint::handle_event`; queue any
+    // returned `ConnectionEvent` onto the SAME connection for delivery
+    // on the NEXT `service_quinn` iteration. quinn-proto's polling
+    // contract requires callers to drain all four polling methods
+    // every progress step. Omitting `poll_endpoint_events` strands
+    // `NeedIdentifiers` / `ResetToken` / `RetireConnectionId` inside
+    // the connection and breaks the endpoint flows they drive: CID
+    // issuance via `Endpoint::send_new_identifiers`, peer
+    // stateless-reset-token registration, and CID retirement.
+    // Placed after the application-event `poll()` loop above so the
+    // existing `Opened`/`ConnectionLost` handling is unchanged in
+    // observable behaviour.
+    //
+    // `EndpointEventInner::Drained` is filtered out here and forwarded
+    // only by `ConnTable::reap_if_drained`. Rationale: `quinn`'s
+    // internal `Endpoint::handle_event(Drained)` calls
+    // `self.connections.try_remove(ch.0)`, releasing quinn's slab slot.
+    // `ConnTable.conns` is a strict lockstep mirror of quinn's slab —
+    // `get_or_dial`'s `debug_assert_eq!(slot, ch.0)` enforces that the
+    // next `connect()` reuses the SAME index in both slabs. Forwarding
+    // a connection-emitted `Drained` here would release quinn's slot
+    // while our `ConnTable` still holds it; an immediately-following
+    // dial then desynchronises the two slabs. `reap_if_drained` is the
+    // sole site that pairs `quinn.handle_event(ch,
+    // EndpointEvent::drained())` with `self.conns.try_remove(ch.0)`,
+    // keeping both slabs in lockstep.
+    while let Some(ev) = e.conn_mut().poll_endpoint_events() {
+      if ev.is_drained() {
+        continue;
       }
+      #[cfg(test)]
+      {
+        self.counters.endpoint_events_processed =
+          self.counters.endpoint_events_processed.saturating_add(1);
+      }
+      if let Some(conn_ev) = self.quinn.handle_event(ch, ev) {
+        // Queue for the NEXT iteration of this connection — see
+        // [`super::conn::ConnEntry::queue_pending_event`] for the
+        // one-tick deferral rationale and the by-construction lifetime
+        // co-location that eliminates quinn's `vacant_key()` slab-slot
+        // reuse race.
+        e.queue_pending_event(conn_ev);
+      }
+    }
+    // Snapshot this connection's deferred-backlog state after the drain-and-
+    // requeue above (the only site pending events change). Applied to the
+    // O(1) `conns_with_pending_events` index at the end of the iteration so
+    // `poll_timeout`'s immediate-due term never scans the connection table.
+    let has_pending_events_after = e.has_pending_events();
+    // Drain inbound application datagrams into the same mem_ingress the plain-
+    // UDP gossip path fills, tagged with this connection's peer. Mode-
+    // independent: a Udp-mode endpoint does not negotiate datagrams, so this is
+    // a no-op there; a Datagram-mode endpoint extracts them. Pop quinn's buffer
+    // to EMPTY (so a zero-length-frame flood cannot accumulate inside quinn),
+    // but PUSH into the coordinator queue only while this peer's STANDING share
+    // (`mem_ingress_per_peer`, maintained across the whole undrained queue) is
+    // under the per-peer budget AND the global cap is not reached — beyond
+    // either, drop and count. Bounding the standing share (not a per-pass
+    // counter) gives every peer fair access regardless of how many recv passes
+    // a driver batches before decoding, so one flooding peer cannot starve
+    // another peer's probe Ack. recv() returns an owned Bytes, so the
+    // e.conn_mut() borrow releases before the disjoint-field pushes.
+    let peer = e.peer();
+    while let Some(payload) = e.conn_mut().datagrams().recv() {
+      // Pop quinn to empty so a zero-length-frame flood cannot accumulate
+      // inside quinn; admission (per-peer + global caps, dropped+counted past
+      // either bound so one flooding peer cannot fill the shared queue and
+      // starve another peer's probe Ack) is enforced by the shared helper —
+      // the SAME bound `handle_memberlist_udp` applies, so neither source can
+      // exceed it. The three `&mut self.<field>` args are disjoint from the
+      // `self.conns` borrow `e` holds.
+      push_mem_ingress_capped(
+        &mut self.mem_ingress,
+        &mut self.mem_ingress_per_peer,
+        &mut self.datagram_ingress_dropped,
+        peer,
+        move || payload,
+      );
+    }
+    // Also reap when the connection has reached `is_drained()` even if
+    // `poll()` never yielded `Event::ConnectionLost` for it in this
+    // iteration — the kill-on-idle-timeout path
+    // (`kill(ConnectionError::TimedOut)`) and similar immediate-drain
+    // transitions set `self.error` and queue
+    // `EndpointEventInner::Drained` simultaneously; whether `poll()`
+    // surfaced the `ConnectionLost` event THIS tick depends on the
+    // internal `events` FIFO ordering. The combined `lost || is_drained()`
+    // gate catches both shapes so the strict-poll bridge-leak is closed
+    // regardless of which signal arrived first.
+    let drained = e.conn_ref().is_drained();
+    // `e` borrows `self.conns`; release it before touching `self.bridges`.
+    let _ = e;
+    if lost || drained {
+      // Mark every bridge on this connection fatal AND complete its D1
+      // drain_then_reap synchronously, in this same tick.
+      //
+      // A connection-level loss observed inside `service_quinn` (step 4)
+      // runs AFTER `pump_bridges` (step 2) and BEFORE `finalize_tick`
+      // (step 5). The freshly-fatal bridges therefore miss this tick's
+      // `pump_bridges` D1 reap; a stateless-reset / immediate-drain
+      // loss path can then have `finalize_tick` free the connection in
+      // the SAME tick — and `Bridge::poll_timeout` returns `None` for
+      // terminal bridges (it deliberately owes no future work to
+      // itself once terminal). The coordinator's unified `poll_timeout`
+      // then has no immediate-due term contributed by these bridges,
+      // so a strict-poll driver with no other peer/probe/timer due
+      // wakes never again — the terminal bridges leak forever.
+      //
+      // Coordinator-level fix: when we know a bridge is terminal
+      // because of a connection-level event, close out the D1 drain
+      // here. `fail_connection_lost()` transitions the bridge phase
+      // to `Failed(ConnectionLost)` so the `StreamErrored` lifecycle
+      // notice inside `drain_then_reap` carries the connection-loss
+      // attribution.
+      let ids: SmallVec<StreamId> = self
+        .bridges
+        .iter()
+        .filter(|(_, b)| b.ch() == ch)
+        .map(|(id, _)| *id)
+        .collect();
+      for id in ids {
+        if let Some(mut br) = self.bridges.remove(&id) {
+          br.fail_connection_lost();
+          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          #[cfg(test)]
+          {
+            self.counters.bridges_reaped_on_connection_lost = self
+              .counters
+              .bridges_reaped_on_connection_lost
+              .saturating_add(1);
+          }
+          // ConnectionLost ⇒ `fail_connection_lost` set the phase to
+          // `Failed(ConnectionLost)`; outcome is unconditionally
+          // `Failed` here, but route through the shared helper so
+          // the kind lookup + emission path matches the
+          // `pump_bridges` reap.
+          let outcome = Self::outcome_for_terminal(&br);
+          drop(br);
+          // This bridge was reaped here rather than by a `pump_bridges` pass,
+          // so clear its deadline key and per-connection index entry at this site.
+          self.deadline_index.set(TimerKey::Bridge(id), None);
+          index_bridge_reap(&mut self.bridges_by_conn, ch, id);
+          self.emit_exchange_completed(id, outcome);
+        }
+      }
+    }
+    // Release this connection's per-source pending-index unit the pass it
+    // establishes. Runs once per connection per servicing pass (after the
+    // `conn_mut()` calls above have made the sticky establishment
+    // observation), so an inbound connection that completed its handshake
+    // this pass leaves the half-open index in the same pass — a no-op for a
+    // still-handshaking, outbound, or already-released connection.
+    self.conns.reconcile_pending_inbound(ch);
+    // Apply the deferred-backlog snapshot to the immediate-due index. A
+    // connection reaped later this tick (`finalize_tick`) is removed from the
+    // set there, so a stale membership cannot linger.
+    if has_pending_events_after {
+      self.conns_with_pending_events.insert(ch);
+    } else {
+      self.conns_with_pending_events.remove(&ch);
     }
   }
 }
