@@ -317,6 +317,26 @@ impl ConnTable {
     true
   }
 
+  /// Total number of connections currently tracked — every slab entry,
+  /// counting handshaking, established, and still-draining connections alike.
+  /// The global QUIC connection cap is enforced against this before an inbound
+  /// Initial commits new state.
+  pub(crate) fn len(&self) -> usize {
+    self.conns.len()
+  }
+
+  /// Number of connections from `source` still completing their handshake
+  /// (`Connection::is_handshaking()`). The per-source pending cap is enforced
+  /// against this before an unauthenticated inbound Initial commits new state,
+  /// bounding the half-open handshake state a single source address can pin.
+  pub(crate) fn pending_handshakes_from(&self, source: &SocketAddr) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| e.peer == *source && e.conn.is_handshaking())
+      .count()
+  }
+
   /// Snapshot of all live connection handles, for driver polling loops.
   pub(crate) fn iter_handles(&self) -> MediumVec<ConnectionHandle> {
     self

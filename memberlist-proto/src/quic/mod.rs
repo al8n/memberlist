@@ -18,7 +18,9 @@ mod transport_mode;
 
 #[cfg(feature = "tls")]
 pub use config::{QuicConfigError, QuicConfigOptions};
-pub use crypto::QuicOptions;
+pub use crypto::{
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_QUIC_CONNECTIONS, QuicOptions,
+};
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
 use crate::Instant;
@@ -332,6 +334,16 @@ struct TestCounters {
   /// then immediately reaping in the same tick. Never compiled into
   /// production builds.
   bridges_terminalized_via_close_command: u64,
+  /// Test-only counter incremented once per [`QuicEndpoint::service_quic_inbound`]
+  /// call — i.e. once per inbound QUIC datagram that `handle_udp` decided
+  /// actually created or advanced connection state. `handle_udp` runs the
+  /// servicing pass ONLY when `quinn_proto::Endpoint::handle` returns `Some`;
+  /// an inert datagram quinn discards (`None`) skips it. The negative-control
+  /// regression test asserts this counter does NOT advance on an inert datagram
+  /// yet DOES on a real one; reverting the gate (servicing unconditionally)
+  /// makes it advance on the inert datagram too and the test fails. Never
+  /// compiled into production builds.
+  quic_inbound_servicings: u64,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -1152,6 +1164,33 @@ impl<I, R> QuicEndpoint<I, R> {
         }
       }
       DatagramEvent::NewConnection(incoming) => {
+        // Bound connection-table growth from unauthenticated inbound Initials
+        // BEFORE any persistent per-connection state is committed. An Initial is
+        // unauthenticated (the TLS handshake has not run), so a flood — from one
+        // source with varied DCIDs, or many spoofed sources — would otherwise
+        // grow the `ConnTable` slab without bound (memory exhaustion + O(N)
+        // per-tick scans). mutual-TLS and Retry time-bound this state; these two
+        // caps are the additional hard bound. The global cap limits total
+        // tracked connections; the per-source cap limits one address's
+        // concurrent half-open handshakes so no single source can consume the
+        // global budget. Past either cap the Initial is dropped via
+        // `Endpoint::ignore` — which also frees quinn's own incoming-buffer
+        // bookkeeping for it (merely dropping the `Incoming` would leak that) —
+        // and no `ConnTable` entry is created. `ignore` sends nothing back, so a
+        // spoofed source gets no reflected bytes.
+        let over_global = self
+          .cfg
+          .max_quic_connections()
+          .is_some_and(|max| self.conns.len() >= max);
+        let over_per_source = self
+          .cfg
+          .max_pending_connections_per_source()
+          .is_some_and(|max| self.conns.pending_handshakes_from(&from) >= max);
+        if over_global || over_per_source {
+          self.ep.metrics_mut().quic_connections_rejected += 1;
+          self.quinn.ignore(incoming);
+          return;
+        }
         let mut buf = Vec::new();
         match self.quinn.accept(
           incoming,
@@ -2062,13 +2101,27 @@ where
       Class::Quic => {
         let mut scratch = Vec::new();
         let data = BytesMut::from(datagram);
+        // Service the coordinator only when quinn actually created or advanced
+        // connection state. `Endpoint::handle` returns `None` for a datagram it
+        // discards (malformed/truncated header, a non-Initial long-header or
+        // short-header packet for an unknown connection, an unmatched stateless
+        // reset): nothing was created or advanced, so a full servicing pass —
+        // which pumps every bridge and scans every connection — would be pure
+        // O(connections + streams) work per datagram driven from untrusted
+        // input. A datagram that DID advance state (`Some(_)`: a connection
+        // event, a new connection, or a stateless response) is routed AND fully
+        // serviced this tick, preserving correctness. Skipping the pass on an
+        // inert datagram cannot strand a connection timer: `poll_timeout` folds
+        // in every connection's own `poll_timeout`, so any connection needing
+        // service for its own timer is still woken through the driver's
+        // `handle_timeout`, independent of inbound-datagram servicing.
         if let Some(ev) = self
           .quinn
           .handle(now.into_std(), from, None, None, data, &mut scratch)
         {
           self.route_datagram_event(ev, from, now, &scratch);
+          self.service_quic_inbound(now);
         }
-        self.service_quic_inbound(now);
       }
       Class::Memberlist => self.handle_memberlist_udp(from, datagram),
       Class::Reject => { /* drop; DecodeError is emitted by the codec path only */ }
@@ -2228,6 +2281,11 @@ where
   /// path the same property the plain-UDP ingress path (`handle_memberlist_udp`)
   /// already has.
   fn service_quic_inbound(&mut self, now: Instant) {
+    #[cfg(test)]
+    {
+      self.counters.quic_inbound_servicings =
+        self.counters.quic_inbound_servicings.saturating_add(1);
+    }
     self.tick(now, false);
   }
 
@@ -2355,8 +2413,48 @@ where
             // streams opened"), not a per-stream event, so accept until the
             // peer's bidi backlog is drained — otherwise concurrently opened
             // inbound exchanges are stranded with no further wake-up.
+            //
+            // Cross-connection inbound-stream cap. Each accepted bidi stream
+            // mints a Bridge that pins up to ~3x the max reliable frame size, so
+            // admission-gate every inbound bridge against `max_inbound_streams`
+            // BEFORE minting — the QUIC twin of the stream coordinator's
+            // `accept_connection` gate (`streams::StreamEndpoint`, which counts
+            // `exchanges.filter(|m| !m.outbound)`). This bounds inbound bridge
+            // state ACROSS all connections; quinn's per-connection
+            // `max_concurrent_bidi_streams` is a separate, per-connection limit.
+            // An outbound bridge is registered in `pending_outbound_kinds` for
+            // the life of its exchange and an accepted (inbound) bridge never is
+            // (see that field's docs), so the inbound population is exactly the
+            // bridges absent from that map. Snapshot it once and track
+            // incrementally as this loop mints — no bridge is reaped mid-loop.
+            let max_inbound = self.ep.max_inbound_streams();
+            let mut inbound_live = match max_inbound {
+              Some(_) => self
+                .bridges
+                .keys()
+                .filter(|id| !self.pending_outbound_kinds.contains_key(id))
+                .count(),
+              None => 0,
+            };
             while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
               let peer = e.peer();
+              // At the inbound ceiling: refuse this stream instead of minting a
+              // bridge. Reset both halves so the peer is notified and quinn
+              // releases the stream slot, and bump `inbound_streams_rejected`.
+              // Ignoring Err: `ClosedStream` means the half is already gone,
+              // which is the desired end state.
+              if max_inbound.is_some_and(|max| inbound_live >= max) {
+                self.ep.metrics_mut().inbound_streams_rejected += 1;
+                let _ = e
+                  .conn_mut()
+                  .send_stream(sid)
+                  .reset(quinn_proto::VarInt::from_u32(0));
+                let _ = e
+                  .conn_mut()
+                  .recv_stream(sid)
+                  .stop(quinn_proto::VarInt::from_u32(0));
+                continue;
+              }
               let Some(stream) = self.ep.accept_stream(peer, now) else {
                 // Leaving/Left: admit no new inbound reliable stream. Reset both
                 // halves of the just-accepted QUIC stream so the peer is notified
@@ -2391,6 +2489,7 @@ where
                   false,
                 ),
               );
+              inbound_live += 1;
             }
           }
           quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {

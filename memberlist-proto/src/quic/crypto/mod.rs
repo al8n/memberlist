@@ -106,7 +106,44 @@ pub struct QuicOptions {
   /// falls back to plain UDP. The driver reads this via
   /// [`Self::unreliable_transport`] to route unreliable sends.
   unreliable_transport: UnreliableTransport,
+  /// Global ceiling on the number of QUIC connections the coordinator will
+  /// track at once (handshaking + established + still-draining), or `None` for
+  /// no bound. An unauthenticated inbound Initial is refused before it commits
+  /// connection-table state once this many connections already exist. See
+  /// [`Self::max_quic_connections`] for the default and rationale.
+  max_quic_connections: Option<usize>,
+  /// Ceiling on the number of concurrent *pending* (handshaking) QUIC
+  /// connections a single source address may hold, or `None` for no bound. An
+  /// unauthenticated inbound Initial from a source already at this many
+  /// in-flight handshakes is refused. See
+  /// [`Self::max_pending_connections_per_source`] for the default and rationale.
+  max_pending_connections_per_source: Option<usize>,
 }
+
+/// Default global QUIC connection ceiling installed by [`QuicOptions::new`].
+///
+/// The coordinator pools one QUIC connection per peer, idle-evicted by quinn's
+/// `max_idle_timeout`, so a node's steady-state connection set is bounded by its
+/// gossip/probe fan-out within one idle window — in practice far below the
+/// cluster size. `4096` leaves generous headroom for even a large LAN cluster's
+/// working set while bounding the connection-table slab (each entry owns a
+/// `quinn_proto::Connection`) to a survivable footprint against an Initial
+/// flood. Operators with an exceptional working set raise it (or pass `None`)
+/// via [`QuicOptions::with_max_quic_connections`].
+pub const DEFAULT_MAX_QUIC_CONNECTIONS: usize = 4096;
+
+/// Default per-source pending-handshake ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// A legitimate peer holds a single pooled connection per direction; transient
+/// duplicates arise only from the closed-before-drained redial window and
+/// simultaneous bidirectional dial (a small constant, and *pending* ones fewer
+/// still — typically one at a time). `16` is an order of magnitude above that
+/// legitimate maximum while capping the half-open handshake state one source
+/// address (including a spoofed one) can pin, so a single source cannot consume
+/// the global budget with half-open connections. Tunable via
+/// [`QuicOptions::with_max_pending_connections_per_source`].
+pub const DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE: usize = 16;
 
 impl QuicOptions {
   /// Build from a caller-built endpoint config, server config, client
@@ -290,7 +327,30 @@ impl QuicOptions {
       client,
       sni_provider,
       unreliable_transport,
+      max_quic_connections: Some(DEFAULT_MAX_QUIC_CONNECTIONS),
+      max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
     }
+  }
+
+  /// Override the global QUIC connection ceiling (handshaking + established +
+  /// still-draining). `None` removes the bound. Enforced against an
+  /// unauthenticated inbound Initial before any connection-table state is
+  /// committed. Defaults to [`Some`]`(`[`DEFAULT_MAX_QUIC_CONNECTIONS`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_quic_connections(mut self, max: Option<usize>) -> Self {
+    self.max_quic_connections = max;
+    self
+  }
+
+  /// Override the per-source pending-handshake ceiling. `None` removes the
+  /// bound. Enforced against an unauthenticated inbound Initial before any
+  /// connection-table state is committed. Defaults to [`Some`]`(`[`DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_pending_connections_per_source(mut self, max: Option<usize>) -> Self {
+    self.max_pending_connections_per_source = max;
+    self
   }
 
   /// Resolve the TLS verification identity for an outbound dial to `peer`.
@@ -337,6 +397,24 @@ impl QuicOptions {
   #[inline(always)]
   pub fn unreliable_transport(&self) -> UnreliableTransport {
     self.unreliable_transport
+  }
+
+  /// The global QUIC connection ceiling the coordinator enforces against
+  /// unauthenticated inbound Initials, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_CONNECTIONS`]`)`; see that constant for the
+  /// rationale.
+  #[inline(always)]
+  pub const fn max_quic_connections(&self) -> Option<usize> {
+    self.max_quic_connections
+  }
+
+  /// The per-source pending-handshake ceiling the coordinator enforces against
+  /// unauthenticated inbound Initials, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE`]`)`; see that
+  /// constant for the rationale.
+  #[inline(always)]
+  pub const fn max_pending_connections_per_source(&self) -> Option<usize> {
+    self.max_pending_connections_per_source
   }
 }
 
