@@ -259,6 +259,82 @@ fn decode_rejects_truncated_length_delimited() {
 }
 
 #[test]
+fn decode_length_delimited_rejects_len_exceeding_buffer_without_panicking() {
+  // `[len varint = u32::MAX][a few payload bytes]`. On a 64-bit host
+  // `offset + len` does not overflow usize, so this drives the same over-buffer
+  // branch a 32-bit wrap would take; decode must report BufferUnderflow, never
+  // panic or slice out of range.
+  let mut framed = std::vec![0u8; varing::encoded_u32_varint_len(u32::MAX).get()];
+  varing::encode_u32_varint_to(u32::MAX, &mut framed[..]).expect("encode length prefix");
+  framed.extend_from_slice(b"tiny");
+  let err = String::decode_length_delimited(&framed)
+    .expect_err("a declared length far past the buffer must fail to decode");
+  assert!(matches!(err, DecodeError::BufferUnderflow), "got {err:?}");
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn decode_length_delimited_len_overflow_rejected_on_32bit() {
+  // On a 32-bit target `header_len + u32::MAX` overflows usize. The checked
+  // addition must surface an error, never a wrapped end offset that would pass
+  // the `end <= src.len()` guard and panic the payload slice. The 64-bit host
+  // suite cannot reach this wrap (the sum stays in range), so it only runs on
+  // the i686 CI lane.
+  let mut framed = std::vec![0u8; varing::encoded_u32_varint_len(u32::MAX).get()];
+  varing::encode_u32_varint_to(u32::MAX, &mut framed[..]).expect("encode length prefix");
+  framed.extend_from_slice(b"tiny");
+  let err = String::decode_length_delimited(&framed)
+    .expect_err("a u32::MAX declared length must fail, never panic, on 32-bit");
+  assert!(matches!(err, DecodeError::BufferUnderflow), "got {err:?}");
+}
+
+#[test]
+fn length_delimited_field_longer_than_its_fixed_decoder_is_rejected_not_smuggled() {
+  // The declared length owns a length-delimited field's boundary. When the
+  // inner decoder is fixed-size — `[u8; 4]` always consumes 4 bytes — a length
+  // prefix declaring MORE than that must be rejected. Accepting it by advancing
+  // only the bytes the inner decoder read would leave the trailing in-region
+  // byte to be reparsed as the next field's tag, smuggling a field the sender
+  // hid inside the over-long region across the boundary.
+  //
+  // `([u8; 4], u32)`: field A (tag 1) is the fixed array, field B (tag 2) is a
+  // varint u32. A declares 5 payload bytes but carries only its 4; the 5th
+  // in-region byte is a well-formed B tag followed by a u32 payload.
+  let attack = [
+    merge(WireType::LengthDelimited, 1), // A tag: the [u8; 4] field
+    5,                                   // declares 5 payload bytes for a 4-byte array
+    10,
+    20,
+    30,
+    40,                         // the 4 bytes [u8; 4]::decode consumes
+    merge(WireType::Varint, 2), // 5th in-region byte: a valid B (u32, tag 2) tag
+    7,                          // the u32 an attacker tries to smuggle out of A's region
+  ];
+  // The 5th declared-region byte really is a well-formed next-field tag: a short
+  // read would hand it to the tuple loop and decode a spurious B = 7.
+  assert_eq!(attack[6], merge(WireType::Varint, 2));
+
+  let err = <([u8; 4], u32)>::decode(&attack).expect_err(
+    "a length prefix longer than the fixed-size inner decoder consumes must be rejected, not advanced by the short read",
+  );
+  assert!(
+    matches!(err, DecodeError::LengthDelimitedMismatch),
+    "expected LengthDelimitedMismatch with no smuggled B field, got {err:?}",
+  );
+
+  // The same rejection at the field level: `decode_length_delimited` sees the
+  // inner decoder read 4 of the declared 5 bytes and surfaces the mismatch
+  // rather than returning `Ok` short.
+  let field = &attack[1..]; // strip the tuple's A tag
+  let err = <[u8; 4]>::decode_length_delimited(field)
+    .expect_err("declared length 5 with a 4-byte [u8; 4] decoder must mismatch");
+  assert!(
+    matches!(err, DecodeError::LengthDelimitedMismatch),
+    "got {err:?}",
+  );
+}
+
+#[test]
 fn wire_type_tag_merge_split_roundtrip() {
   for ty in [
     WireType::Byte,
@@ -338,6 +414,75 @@ fn skip_rejects_unknown_wire_type() {
     matches!(err, DecodeError::UnknownWireType(_)),
     "got {err:?}"
   );
+}
+
+#[test]
+fn skip_rejects_truncated_fixed_width_and_length_delimited_fields() {
+  // A field whose declared bytes are not all present is a truncated frame.
+  // `skip` must fail closed with BufferUnderflow so the caller rejects the
+  // datagram, never clamp the advance to the buffer end and silently consume a
+  // partial field as if it were whole.
+
+  // Byte: tag present, its single payload byte absent.
+  let err = skip("t", &[merge(WireType::Byte, 5)]).expect_err("truncated byte field");
+  assert!(
+    matches!(err, DecodeError::BufferUnderflow),
+    "byte: got {err:?}"
+  );
+
+  // Fixed32: tag + only 2 of 4 payload bytes.
+  let err = skip("t", &[merge(WireType::Fixed32, 5), 0, 0]).expect_err("truncated fixed32 field");
+  assert!(
+    matches!(err, DecodeError::BufferUnderflow),
+    "fixed32: got {err:?}"
+  );
+
+  // Fixed64: tag + only 3 of 8 payload bytes.
+  let err =
+    skip("t", &[merge(WireType::Fixed64, 5), 0, 0, 0]).expect_err("truncated fixed64 field");
+  assert!(
+    matches!(err, DecodeError::BufferUnderflow),
+    "fixed64: got {err:?}"
+  );
+
+  // Length-delimited: tag + a length prefix declaring more payload than remains.
+  let err = skip(
+    "t",
+    &[
+      merge(WireType::LengthDelimited, 5),
+      8,
+      b'o',
+      b'n',
+      b'l',
+      b'y',
+      b'5',
+    ],
+  )
+  .expect_err("truncated length-delimited field");
+  assert!(
+    matches!(err, DecodeError::BufferUnderflow),
+    "length-delimited: got {err:?}"
+  );
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn skip_length_delimited_len_overflow_rejected_on_32bit() {
+  // On a 32-bit target the length-delimited skip arm computes
+  // `offset + bytes_read + length`, which overflows usize when `length` is near
+  // u32::MAX. The checked addition must surface BufferUnderflow, never a wrapped
+  // end offset that would pass the `end <= buf_len` guard and let a truncated
+  // field be treated as fully skipped. On a 64-bit host the sum stays in range
+  // and the same input is rejected by the buffer-length guard instead, so this
+  // wrap is only reachable on the i686 lane.
+  let mut buf = std::vec![merge(WireType::LengthDelimited, 5)];
+  let mut prefix = std::vec![0u8; varing::encoded_u32_varint_len(u32::MAX).get()];
+  varing::encode_u32_varint_to(u32::MAX, &mut prefix).expect("encode length prefix");
+  buf.extend_from_slice(&prefix);
+  buf.extend_from_slice(b"tiny");
+  let err =
+    skip("t", &buf).expect_err("a u32::MAX declared length must fail, never panic, on 32-bit");
+  assert!(matches!(err, DecodeError::BufferUnderflow), "got {err:?}");
 }
 
 #[test]
@@ -667,6 +812,20 @@ fn node_decode_skips_unknown_tag() {
 }
 
 #[test]
+fn node_decode_rejects_truncated_trailing_unknown_field() {
+  // A well-formed node followed by an unknown length-delimited field whose
+  // declared payload runs past the buffer. `skip` must fail closed so the
+  // truncated frame is rejected, not silently clamped-and-consumed as if it
+  // were well-formed.
+  let mut buf = small_node_bytes();
+  buf.push(merge(WireType::LengthDelimited, 5)); // unknown tag 5
+  buf.push(8); // declares an 8-byte payload ...
+  buf.extend_from_slice(b"only5"); // ... but only 5 bytes follow
+  let err = SmallNode::decode(&buf).expect_err("truncated unknown field must fail");
+  assert!(matches!(err, DecodeError::BufferUnderflow), "got {err:?}");
+}
+
+#[test]
 fn node_encode_rejects_undersized_buffers() {
   let node = Node::new(7u32, 9u32);
   // Zero-length buffer fails at the very first guard.
@@ -731,6 +890,19 @@ fn tuple_decode_skips_unknown_tag() {
   buf.extend_from_slice(&small_tuple_bytes());
   let (_, t) = <(u32, u32)>::decode(&buf).expect("unknown tag skipped");
   assert_eq!(t, (7u32, 9u32));
+}
+
+#[test]
+fn tuple_decode_rejects_truncated_trailing_unknown_field() {
+  // A well-formed tuple followed by an unknown length-delimited field whose
+  // declared payload runs past the buffer. `skip` must fail closed so the
+  // truncated frame is rejected rather than clamped-and-consumed.
+  let mut buf = small_tuple_bytes();
+  buf.push(merge(WireType::LengthDelimited, 5)); // unknown tag 5
+  buf.push(8); // declares an 8-byte payload ...
+  buf.extend_from_slice(b"only5"); // ... but only 5 bytes follow
+  let err = <(u32, u32)>::decode(&buf).expect_err("truncated unknown field must fail");
+  assert!(matches!(err, DecodeError::BufferUnderflow), "got {err:?}");
 }
 
 #[test]

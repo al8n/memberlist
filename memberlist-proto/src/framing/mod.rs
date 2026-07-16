@@ -782,7 +782,11 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<(MessageTag, &[u8], usize), Fram
     Err(e) => return Err(e),
   };
   let header_len = 1 + varint_bytes;
-  let body_end = header_len + body_len as usize;
+  // header_len + body_len may overflow usize on 32-bit targets, where a wrap
+  // below header_len would let the length guard pass and panic the body slice.
+  // Saturate an overflowing end to usize::MAX so the length guard below reports
+  // an unsatisfiable incomplete frame rather than wrapping.
+  let body_end = header_len.saturating_add(body_len as usize);
   if buf.len() < body_end {
     return Err(FrameError::Incomplete(IncompleteFrame::new(
       buf.len(),

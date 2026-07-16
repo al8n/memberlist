@@ -120,6 +120,49 @@ fn incomplete_frame_returns_error() {
   assert!(matches!(err, FrameError::Incomplete(_)));
 }
 
+#[test]
+fn decode_plain_frame_rejects_body_len_exceeding_buffer_without_panicking() {
+  // A frame that declares a ~4 GiB body but carries only a handful of bytes.
+  // On a 64-bit host `header_len + body_len` does not overflow usize, so this
+  // drives the same over-buffer branch a 32-bit wrap would otherwise take: the
+  // decoder must report Incomplete, never panic or slice out of range.
+  let mut frame = Vec::new();
+  frame.push(MessageTag::UserData as u8);
+  encode_varint_u32(u32::MAX, &mut frame); // declared body length ~4 GiB
+  frame.extend_from_slice(b"only-a-few-bytes");
+  match decode_plain_frame(&frame) {
+    Err(FrameError::Incomplete(f)) => {
+      assert_eq!(f.available(), frame.len());
+      assert!(
+        f.required() > f.available(),
+        "required {} must exceed available {}",
+        f.required(),
+        f.available()
+      );
+    }
+    other => panic!("expected Incomplete, got {other:?}"),
+  }
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn decode_plain_frame_body_len_overflow_saturates_to_incomplete_on_32bit() {
+  // On a 32-bit target `header_len + u32::MAX` overflows usize. The checked
+  // addition must surface Incomplete with a saturated `required`, never a value
+  // wrapped below header_len that would pass the length guard and panic the
+  // body slice.
+  let mut frame = Vec::new();
+  frame.push(MessageTag::UserData as u8);
+  encode_varint_u32(u32::MAX, &mut frame);
+  frame.extend_from_slice(b"body");
+  match decode_plain_frame(&frame) {
+    Err(FrameError::Incomplete(f)) => {
+      assert_eq!(f.required(), usize::MAX, "overflow must saturate required");
+    }
+    other => panic!("expected Incomplete, got {other:?}"),
+  }
+}
+
 fn sample_ping() -> AnyMessage {
   AnyMessage::Ping(Ping {
     sequence_number: Some(7),
@@ -314,9 +357,14 @@ fn multibyte_length_body_round_trips_through_fallible_encode() {
   assert_eq!(tag, MessageTag::UserData);
   assert_eq!(decoded_body, &body[..]);
   assert_eq!(consumed, frame.len());
-  // The error variant is wired for the overflow path.
-  let e = FrameError::FrameTooLarge(u32::MAX as usize + 1);
-  assert!(e.to_string().contains("too large"));
+  // The error variant is wired for the overflow path. `u32::MAX as usize + 1`
+  // only exists as a distinct value on 64-bit; on a 32-bit target
+  // `usize::MAX == u32::MAX` and the addition overflows at compile time.
+  #[cfg(target_pointer_width = "64")]
+  {
+    let e = FrameError::FrameTooLarge(u32::MAX as usize + 1);
+    assert!(e.to_string().contains("too large"));
+  }
 }
 
 #[cfg(encryption)]
@@ -538,14 +586,17 @@ fn incomplete_frame_accessors_and_display() {
 
 #[test]
 fn frame_error_display_strings_are_nonempty() {
-  let cases: [FrameError; 6] = [
+  let mut cases = vec![
     FrameError::Empty,
     FrameError::Incomplete(IncompleteFrame::new(1, 2)),
     FrameError::UnknownTag(99),
     FrameError::VarintOverflow,
     FrameError::Decode,
-    FrameError::FrameTooLarge(1 << 33),
   ];
+  // `1 << 33` only exists as a distinct usize value on 64-bit; on a 32-bit
+  // target `usize::MAX == u32::MAX` and the shift overflows at compile time.
+  #[cfg(target_pointer_width = "64")]
+  cases.push(FrameError::FrameTooLarge(1 << 33));
   for e in cases {
     assert!(!e.to_string().is_empty(), "empty display for {e:?}");
   }
