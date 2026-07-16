@@ -91,7 +91,9 @@ pub fn skip(ty: &'static str, src: &[u8]) -> Result<usize, DecodeError> {
   let src = &src[offset..];
   match wire_type {
     WireType::Varint => match varing::decode_u64_varint(src) {
-      Ok((bytes_read, _)) => Ok((offset + bytes_read.get()).min(buf_len)),
+      // varing rejects a truncated varint, so `bytes_read <= src.len()` and
+      // `offset + bytes_read <= buf_len` already holds; no clamp is needed.
+      Ok((bytes_read, _)) => Ok(offset + bytes_read.get()),
       Err(e) => Err(e.into()),
     },
     WireType::LengthDelimited => {
@@ -101,12 +103,26 @@ pub fn skip(ty: &'static str, src: &[u8]) -> Result<usize, DecodeError> {
       }
 
       match varing::decode_u32_varint(src) {
-        Ok((bytes_read, length)) => Ok((offset + bytes_read.get() + length as usize).min(buf_len)),
+        // header + declared payload may run past the buffer, or overflow usize
+        // on 32-bit. A field that is not fully present is a truncated frame and
+        // must be rejected rather than clamped-and-consumed (fail closed).
+        Ok((bytes_read, length)) => offset
+          .checked_add(bytes_read.get())
+          .and_then(|n| n.checked_add(length as usize))
+          .filter(|&end| end <= buf_len)
+          .ok_or(DecodeError::BufferUnderflow),
         Err(e) => Err(e.into()),
       }
     }
-    WireType::Byte => Ok((offset + 1).min(buf_len)),
-    WireType::Fixed32 => Ok((offset + 4).min(buf_len)),
-    WireType::Fixed64 => Ok((offset + 8).min(buf_len)),
+    // A fixed-width field whose bytes are not all present is a truncated frame.
+    WireType::Byte => (offset < buf_len)
+      .then_some(offset + 1)
+      .ok_or(DecodeError::BufferUnderflow),
+    WireType::Fixed32 => (offset + 4 <= buf_len)
+      .then_some(offset + 4)
+      .ok_or(DecodeError::BufferUnderflow),
+    WireType::Fixed64 => (offset + 8 <= buf_len)
+      .then_some(offset + 8)
+      .ok_or(DecodeError::BufferUnderflow),
   }
 }

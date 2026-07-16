@@ -120,6 +120,49 @@ fn incomplete_frame_returns_error() {
   assert!(matches!(err, FrameError::Incomplete(_)));
 }
 
+#[test]
+fn decode_plain_frame_rejects_body_len_exceeding_buffer_without_panicking() {
+  // A frame that declares a ~4 GiB body but carries only a handful of bytes.
+  // On a 64-bit host `header_len + body_len` does not overflow usize, so this
+  // drives the same over-buffer branch a 32-bit wrap would otherwise take: the
+  // decoder must report Incomplete, never panic or slice out of range.
+  let mut frame = Vec::new();
+  frame.push(MessageTag::UserData as u8);
+  encode_varint_u32(u32::MAX, &mut frame); // declared body length ~4 GiB
+  frame.extend_from_slice(b"only-a-few-bytes");
+  match decode_plain_frame(&frame) {
+    Err(FrameError::Incomplete(f)) => {
+      assert_eq!(f.available(), frame.len());
+      assert!(
+        f.required() > f.available(),
+        "required {} must exceed available {}",
+        f.required(),
+        f.available()
+      );
+    }
+    other => panic!("expected Incomplete, got {other:?}"),
+  }
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn decode_plain_frame_body_len_overflow_saturates_to_incomplete_on_32bit() {
+  // On a 32-bit target `header_len + u32::MAX` overflows usize. The checked
+  // addition must surface Incomplete with a saturated `required`, never a value
+  // wrapped below header_len that would pass the length guard and panic the
+  // body slice.
+  let mut frame = Vec::new();
+  frame.push(MessageTag::UserData as u8);
+  encode_varint_u32(u32::MAX, &mut frame);
+  frame.extend_from_slice(b"body");
+  match decode_plain_frame(&frame) {
+    Err(FrameError::Incomplete(f)) => {
+      assert_eq!(f.required(), usize::MAX, "overflow must saturate required");
+    }
+    other => panic!("expected Incomplete, got {other:?}"),
+  }
+}
+
 fn sample_ping() -> AnyMessage {
   AnyMessage::Ping(Ping {
     sequence_number: Some(7),

@@ -98,11 +98,16 @@ where
     let (offset, len) = decode_u32_varint(src)?;
     let mut offset = offset.get();
     let len = len as usize;
-    if len + offset > src.len() {
-      return Err(DecodeError::buffer_underflow());
-    }
+    // offset + len may overflow usize on 32-bit targets, where a wrap would let
+    // the bounds check pass and panic the slice. Reject an end offset that
+    // overflows usize or runs past the buffer: the declared payload is not
+    // fully present.
+    let end = match offset.checked_add(len) {
+      Some(end) if end <= src.len() => end,
+      _ => return Err(DecodeError::buffer_underflow()),
+    };
 
-    let src = &src[offset..offset + len];
+    let src = &src[offset..end];
     let (bytes_read, value) = Self::decode(src)?;
 
     #[cfg(debug_assertions)]
