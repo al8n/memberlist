@@ -3621,43 +3621,60 @@ where
     }
   }
 
-  /// AwaitingDirectAck → AwaitingIndirect: pick k random alive peers
-  /// (excluding local and the target), send IndirectPings, update FSM phase.
+  /// AwaitingDirectAck → AwaitingIndirect: pick up to `indirect_checks` random
+  /// Alive helpers by DISTINCT transport address (excluding the local advertise
+  /// address and the target's address), send one IndirectPing to each, and
+  /// update the FSM phase.
   fn probe_fan_out_indirect(&mut self, seq: u32, now: Instant) {
-    let target_id = match self.probes.get(&seq) {
-      Some(p) => p.target.id_ref().cheap_clone(),
+    let (target_id, target_addr) = match self.probes.get(&seq) {
+      Some(p) => (
+        p.target.id_ref().cheap_clone(),
+        p.target.address_ref().cheap_clone(),
+      ),
       None => return,
     };
     let local_id = self.cfg.local_id_ref().cheap_clone();
-    let candidates: Vec<I> = self
-      .members
-      .iter()
-      .filter(|m| {
-        let id = m.state_ref().id_ref();
-        id != &local_id && id != &target_id && m.state_ref().state() == State::Alive
-      })
-      .map(|m| m.state_ref().id_ref().cheap_clone())
-      .collect();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+
+    // Candidate helper pool = the DISTINCT transport addresses of Alive members,
+    // excluding the local advertise address and the target's address. Resolved
+    // ONCE here under the immutable `members` borrow, fully owned before any
+    // later `&mut self` call.
+    //
+    // memberlist-core selects helpers with `kRandomNodes` (util.go): it excludes
+    // self, the target, and non-Alive members, then dedups the sample by node
+    // Name — the unique node key. A Go node advertises a single address, so its
+    // distinct nodes are already distinct addresses. This Sans-I/O port instead
+    // admits DISTINCT ids at the SAME address, so the honest identity for helper
+    // selection here is the ADDRESS, not the id: the IndirectPing body is
+    // `local + target` (independent of the helper id); the relay
+    // `handle_indirect_ping` dedups identical in-flight forwards to at most one
+    // Nack; and both `handle_nack` and `ack_source_is_valid` key responders by
+    // address. Sampling DISTINCT ADDRESSES is therefore what preserves the
+    // configured fan-out width — two ids sharing one address must not let the
+    // sample collapse a k-helper fan-out to fewer relays — and the address-keyed
+    // Nack accounting. Excluding the local / target ADDRESS (not merely their
+    // ids) keeps an id that only aliases either endpoint out of the sample: such
+    // a "helper" would be a meaningless self-relay to our own or the probed
+    // endpoint, and its address-keyed Nack would be miscounted against a peer
+    // that by definition cannot answer.
+    let mut distinct_addrs: SmallVec<A> = SmallVec::new();
+    for m in self.members.iter() {
+      let st = m.state_ref();
+      if st.state() != State::Alive {
+        continue;
+      }
+      let addr = st.address_ref();
+      if addr == &local_addr || addr == &target_addr {
+        continue;
+      }
+      if !distinct_addrs.contains(addr) {
+        distinct_addrs.push(addr.cheap_clone());
+      }
+    }
 
     let k = self.cfg.indirect_checks() as usize;
-    let chosen = pick_random(&candidates, k, &mut self.rng);
-    // Resolve each chosen indirect peer's current source address ONCE, here
-    // (immutable `members` borrow, fully owned before any later `&mut self`
-    // call). `candidates` was just built from `members` and nothing mutates
-    // membership within this synchronous call, so `chosen_resolved.len() ==
-    // chosen.len()`. The Nack allowlist (`indirect_peers`) and `expected_nacks`
-    // are derived below from the subset whose IndirectPing actually fit the MTU
-    // and was queued, so "peers we counted a Nack from" stays exactly "peers we
-    // actually sent an IndirectPing to".
-    let chosen_resolved: SmallVec<(I, A)> = chosen
-      .iter()
-      .filter_map(|id| {
-        self
-          .members
-          .get(id)
-          .map(|m| (id.cheap_clone(), m.state_ref().address_ref().cheap_clone()))
-      })
-      .collect();
+    let chosen_addrs = pick_random(&distinct_addrs, k, &mut self.rng);
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
@@ -3667,10 +3684,10 @@ where
     // AwaitingIndirect that the next tick expires immediately rather
     // than getting a fresh window when suspicion should be MORE timely.
     // The reliable fallback is threaded this same absolute deadline.
-    let (target_arc, cumulative_deadline) = self
+    let cumulative_deadline = self
       .probes
       .get(&seq)
-      .map(|p| (p.target.cheap_clone(), p.failure_deadline()))
+      .map(|p| p.failure_deadline())
       .expect("present");
     if cumulative_deadline <= now {
       // The anchored deadline already elapsed before this (late)
@@ -3692,27 +3709,16 @@ where
     let reliable_stream_id = if self.is_reliable_ping_enabled(&target_id) {
       Some(self.start_reliable_ping(
         target_id.cheap_clone(),
-        target_arc.address_ref().cheap_clone(),
+        target_addr.cheap_clone(),
         seq,
         cumulative_deadline,
       ))
     } else {
       None
     };
-    // Fan out IndirectPing to each chosen helper, deduped by transport ADDRESS
-    // and MTU-checking every datagram.
-    //
-    // Membership does not require unique addresses, so two distinct helper ids
-    // can advertise the SAME address. The IndirectPing body is `local + target`
-    // (independent of the helper id), so a second copy to an address already
-    // sent is pure redundancy: the relay `handle_indirect_ping` dedups identical
-    // in-flight forwards (same requester/seq/target) to at most one Nack, and
-    // both `handle_nack` and `ack_source_is_valid` key responders by address, so
-    // that second copy could never yield a second Nack. Counting it would leave
-    // `expected_nacks - nacked_by.len() >= 1` even after the one distinct helper
-    // answered — falsely penalizing local awareness and letting an id pair
-    // sharing an address stretch our failure-detection deadlines. One
-    // representative per address is sufficient and correct.
+    // Fan out one IndirectPing per sampled helper address, MTU-checking every
+    // datagram. The pool is already address-distinct, so no send-side dedup is
+    // needed — each sampled address is a single relay.
     //
     // A node id is unbounded, so an IndirectPing carrying a large already-admitted
     // target id can exceed one datagram even though it is a valid lone message;
@@ -3720,22 +3726,12 @@ where
     // rather than emitted as a fragmentable, undeliverable packet. Both the Nack
     // allowlist (`indirect_peers`) and `expected_nacks` — the count the FSM waits
     // on and the source of the Lifeguard severity `expected_nacks -
-    // nacked_by.len()` — count ONLY unique addresses whose IndirectPing was
-    // actually queued: a peer we never sent to relays no Ping and returns no
-    // Nack, so counting it would make the FSM wait for a Nack that never comes
-    // and penalize our own health for a probe we never dispatched.
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let target_addr = target_arc.address_ref().cheap_clone();
-    // Collapse the chosen helpers to their distinct addresses first, so an id
-    // pair sharing one address contributes a single IndirectPing.
-    let mut unique_addrs: SmallVec<A> = SmallVec::new();
-    for (_peer_id, peer_addr) in &chosen_resolved {
-      if !unique_addrs.contains(peer_addr) {
-        unique_addrs.push(peer_addr.cheap_clone());
-      }
-    }
+    // nacked_by.len()` — count ONLY the addresses whose IndirectPing was actually
+    // queued: a peer we never sent to relays no Ping and returns no Nack, so
+    // counting it would make the FSM wait for a Nack that never comes and
+    // penalize our own health for a probe we never dispatched.
     let mut indirect_peers: SmallVec<A> = SmallVec::new();
-    for peer_addr in &unique_addrs {
+    for peer_addr in &chosen_addrs {
       let ind = IndirectPing::new(
         seq,
         Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),

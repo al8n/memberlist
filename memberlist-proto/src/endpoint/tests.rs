@@ -2269,13 +2269,198 @@ fn nack_flood_from_one_peer_does_not_suppress_awareness_penalty() {
   );
 }
 
+// ─── Indirect fan-out samples DISTINCT transport addresses ────────────────
+//
+// memberlist-core `kRandomNodes` (util.go) picks up to `indirect_checks`
+// helpers, excluding self, the target, and non-Alive members, and dedups the
+// sample by node Name — its unique key, which upstream is one-per-address. This
+// Sans-I/O port admits distinct ids at one address, so helper selection samples
+// DISTINCT ADDRESSES: the IndirectPing body is `local + target`
+// (helper-id-independent) and the relay / Nack accounting keys responders by
+// address. Sampling by address preserves the configured fan-out width and keeps
+// an id that merely aliases the local / target ADDRESS out of the pool.
+
+/// Read `(expected_nacks, indirect_peers)` from a probe now in `AwaitingIndirect`.
+fn awaiting_indirect(e: &Endpoint<SmolStr, SocketAddr>, seq: u32) -> (usize, SmallVec<SocketAddr>) {
+  match &e.probes.get(&seq).expect("probe present").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      indirect_peers,
+      ..
+    }) => (*expected_nacks, indirect_peers.clone()),
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  }
+}
+
+/// Insert an `AwaitingDirectAck` probe targeting an existing Alive member, so a
+/// direct `probe_fan_out_indirect` call exercises helper selection against the
+/// current membership. The phase is overwritten by the fan-out; `AwaitingDirectAck`
+/// is simply the realistic pre-escalation phase.
+fn insert_direct_probe(
+  e: &mut Endpoint<SmolStr, SocketAddr>,
+  seq: u32,
+  target_id: &str,
+  sent_at: Instant,
+  failure_deadline: Instant,
+) {
+  let (target, target_incarnation) = {
+    let m = e
+      .members
+      .get(&SmolStr::new(target_id))
+      .expect("target must be an existing member");
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
+  e.probes.insert(
+    seq,
+    Probe {
+      target,
+      target_incarnation,
+      sent_at,
+      kind: ProbeKind::Detection,
+      failure_deadline,
+      phase: ProbePhase::AwaitingDirectAck(AwaitingDirectAck { deadline: sent_at }),
+    },
+  );
+}
+
+/// Drain the transmit queue, returning the destination address of every queued
+/// `IndirectPing`.
+fn indirect_ping_dests(e: &mut Endpoint<SmolStr, SocketAddr>) -> Vec<SocketAddr> {
+  let mut dests = Vec::new();
+  while let Some(tx) = e.poll_transmit() {
+    if let Transmit::Packet(p) = tx {
+      if matches!(p.message_ref(), Message::IndirectPing(_)) {
+        dests.push(*p.to_ref());
+      }
+    }
+  }
+  dests
+}
+
+/// Construct an endpoint with a fixed-seed gossip RNG, so helper sampling is
+/// reproducible.
+fn seeded_endpoint(
+  cfg: EndpointOptions<SmolStr, SocketAddr>,
+  seed: u64,
+) -> Endpoint<SmolStr, SocketAddr> {
+  use rand::SeedableRng;
+  Endpoint::new(cfg, rand::rngs::SmallRng::seed_from_u64(seed))
+}
+
+#[test]
+fn indirect_fan_out_samples_distinct_addresses_preserving_width() {
+  // h1 and h2 share address A; h3 is at a distinct address B. With
+  // indirect_checks = 2 the fan-out must reach the two DISTINCT addresses
+  // {A, B} — width 2 — not collapse to a single relay because two sampled ids
+  // happened to share A. (Sampling by id first samples 2 of {h1,h2,h3}; drawing
+  // {h1,h2} then deduped to {A}, silently a 1-helper fan-out.)
+  let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5001);
+  let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5002);
+  // Seed pinned so the sample is reproducible; the ID-first predecessor draws
+  // both same-address ids here (collapsing to width 1), while address-distinct
+  // sampling always reaches {A, B}.
+  let mut e = seeded_endpoint(cfg().with_indirect_checks(2), 1);
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("h1", 5001, 1), false, t0); // @A
+  process_alive_auto(&mut e, alive("h2", 5001, 1), false, t0); // @A (aliases h1)
+  process_alive_auto(&mut e, alive("h3", 5002, 1), false, t0); // @B
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0); // target @T (distinct)
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Drop the concurrent reliable fallback so the only escalation traffic is the
+  // IndirectPings under test.
+  e.disable_reliable_ping(SmolStr::new("bob"));
+  insert_direct_probe(&mut e, 9, "bob", t0, t0 + Duration::from_secs(3600));
+  e.probe_fan_out_indirect(9, t0 + Duration::from_millis(1));
+
+  let (expected_nacks, indirect_peers) = awaiting_indirect(&e, 9);
+  assert_eq!(
+    indirect_peers.len(),
+    2,
+    "the fan-out width must be the two DISTINCT addresses, not collapsed to one"
+  );
+  assert!(
+    indirect_peers.contains(&a) && indirect_peers.contains(&b),
+    "both distinct helper addresses A and B must be reached"
+  );
+  assert_eq!(
+    expected_nacks, 2,
+    "expected_nacks == the number of distinct helper addresses reached"
+  );
+
+  let dests = indirect_ping_dests(&mut e);
+  assert_eq!(
+    dests.len(),
+    2,
+    "exactly one IndirectPing per distinct address"
+  );
+  assert!(
+    dests.contains(&a) && dests.contains(&b),
+    "one IndirectPing queued to each of A and B"
+  );
+}
+
+#[test]
+fn indirect_fan_out_never_selects_local_or_target_address_alias() {
+  // Two aliases with DISTINCT ids that a by-id exclusion would let through:
+  // `talias` advertises the TARGET's address T, `lalias` advertises the LOCAL
+  // advertise address L. Neither may be a helper — an IndirectPing to T is a
+  // self-relay to the probed endpoint (whose address-keyed Nack would be counted
+  // for a peer that by definition cannot answer), and one to L is a relay to
+  // ourselves. Only the honest helper at H is eligible.
+  //
+  // indirect_checks is high enough to sample the ENTIRE eligible pool, so a
+  // by-id predecessor (excluding only the local/target IDS) would select both
+  // aliases; the address exclusion is what keeps T and L out.
+  let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
+  let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let helper = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
+  let mut e = seeded_endpoint(cfg().with_indirect_checks(5), 0x0BAD_A11A_5C0F_FEE2);
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0); // target @T
+  process_alive_auto(&mut e, alive("talias", 7001, 1), false, t0); // distinct id @T
+  process_alive_auto(&mut e, alive("lalias", 7000, 1), false, t0); // distinct id @L (== local)
+  process_alive_auto(&mut e, alive("helper", 7003, 1), false, t0); // honest helper @H
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  e.disable_reliable_ping(SmolStr::new("bob"));
+  insert_direct_probe(&mut e, 11, "bob", t0, t0 + Duration::from_secs(3600));
+  e.probe_fan_out_indirect(11, t0 + Duration::from_millis(1));
+
+  let (_expected_nacks, indirect_peers) = awaiting_indirect(&e, 11);
+  assert!(
+    !indirect_peers.contains(&target),
+    "an id aliasing the TARGET's address must never be a helper"
+  );
+  assert!(
+    !indirect_peers.contains(&local),
+    "an id aliasing the LOCAL advertise address must never be a helper"
+  );
+  assert!(
+    indirect_peers.contains(&helper),
+    "the honest helper at a distinct address IS selected"
+  );
+
+  let dests = indirect_ping_dests(&mut e);
+  assert!(
+    !dests.contains(&target) && !dests.contains(&local),
+    "no IndirectPing is ever queued to the target or local address"
+  );
+  assert!(
+    dests.contains(&helper),
+    "the honest helper is sent an IndirectPing"
+  );
+}
+
 // ─────────────── handle_indirect_ping ────────────────────────────────────
 
 use crate::{
   delegate::MergeDelegate,
   error::{EndpointInitError, Error, StreamError},
   event::{PushPullKind, PushPullReplyReceived, PushPullRequestReceived, StreamEvent},
-  probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
+  probe::{AwaitingDirectAck, AwaitingIndirect, Probe, ProbeKind, ProbePhase},
   stream::StreamPhase,
   typed::NodeState,
 };
