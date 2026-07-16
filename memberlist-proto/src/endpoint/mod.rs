@@ -1726,9 +1726,10 @@ where
     // An Ack arriving at/after the probe's authoritative failure deadline
     // must not rescue it → route to failure. That deadline is the single
     // kind-aware, sent_at-anchored, phase-INDEPENDENT value defined by
-    // `Probe::failure_deadline` (Detection: sent_at+2*pt — direct +
-    // indirect/fallback window, also the AwaitingIndirect phase deadline;
-    // Ping: sent_at+pt — direct-only). Routing through the one source
+    // `Probe::failure_deadline` (Detection: sent_at + scale_timeout(
+    // probe_interval) — the awareness-scaled probe interval snapshotted at
+    // sent, also the AwaitingIndirect phase deadline; Ping: sent_at +
+    // probe_timeout — direct-only). Routing through the one source
     // eliminates per-phase packet-vs-timer cutoff races.
     let cutoff = match self.probes.get(&seq) {
       None => return,

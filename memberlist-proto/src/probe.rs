@@ -22,12 +22,14 @@
 //! Mirroring memberlist-core `handle_remote_failure`, when the direct ack
 //! times out the reliable ping is opened **concurrently** with the indirect
 //! fan-out and races them within the single cumulative `AwaitingIndirect`
-//! deadline (`= sent + probe_timeout`). The probe succeeds on whichever
-//! arrives first (an indirect/direct-relayed Ack OR `ReliablePingAcked`);
-//! it fails — suspecting the target — only when that one deadline elapses.
+//! deadline — `Probe::failure_deadline`, i.e. `sent +
+//! awareness.scale_timeout(probe_interval)`, the awareness-scaled SWIM
+//! period snapshotted at `sent`. The probe succeeds on whichever arrives
+//! first (an indirect/direct-relayed Ack OR `ReliablePingAcked`); it
+//! fails — suspecting the target — only when that one deadline elapses.
 //! There is deliberately no extra per-stream timeout added to a failing
 //! probe — the old serialized `AwaitingReliableFallback` phase widened
-//! the failure envelope from one probe_timeout to
+//! the failure envelope from one cumulative deadline to
 //! direct+indirect+stream_timeout.
 
 use crate::Instant;
