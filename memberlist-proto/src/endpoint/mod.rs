@@ -929,21 +929,25 @@ where
     let n = self.num_members().max(1) as f64;
     let node_scale = crate::mathf::log10(n).max(1.0);
     let interval = self.cfg.probe_interval();
-    let min_ms =
-      (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
     // `probe_interval.as_millis()` truncates a sub-millisecond interval to 0,
-    // collapsing `min` (and hence `max`) to zero — `Suspicion::new` then arms a
-    // deadline equal to `now`, an immediate false death the instant a node is
-    // suspected. Floor a nonzero interval's timeout at 1ms so a small-but-nonzero
-    // `probe_interval` still yields a positive suspicion window. Any interval
-    // >= 1ms already computes a nonzero `min` (>= interval_ms * mult * scale, all
-    // >= 1), so this floor never alters the normal path; a zero interval (probing
-    // disabled) keeps its zero timeout.
-    let min = if min_ms == 0 && !interval.is_zero() {
-      Duration::from_millis(1)
+    // which would collapse `min` (and hence `max`) to zero — `Suspicion::new`
+    // then arms a deadline equal to `now`, an immediate false death the instant
+    // a node is suspected. Floor a NONZERO interval to a 1ms minimum BEFORE it
+    // is scaled by `suspicion_mult` and the node-count scale, so the mult and
+    // scale still apply to a small-but-nonzero interval (a 500µs interval with
+    // mult 4 and node_scale 1.0 yields 4ms, not 1ms). Flooring the interval
+    // rather than the final product keeps two behaviors exact: a >= 1ms interval
+    // already has `as_millis() >= 1`, so the floor is a no-op and this path stays
+    // byte-identical to the unscaled formula; and a zero `suspicion_mult` (or a
+    // zero, probing-disabled interval) still yields a zero timeout, matching Go
+    // `suspicionTimeout` (which returns 0 when the mult or interval is 0).
+    let interval_ms = if interval.is_zero() {
+      0.0
     } else {
-      Duration::from_millis(min_ms)
+      (interval.as_millis() as f64).max(1.0)
     };
+    let min_ms = (interval_ms * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
+    let min = Duration::from_millis(min_ms);
     // `checked_mul` to degrade a pathologically-large configured product to the
     // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
     // discipline as `Awareness::scale_timeout`); unreachable for any sane config.
@@ -2346,18 +2350,20 @@ where
     true
   }
 
-  /// Queue `msg` as a lone `Packet` to `to`, but only when its wire encoding
-  /// fits the configured `gossip_mtu`. Node ids are unbounded, so a probe
-  /// `Ping` (or its buddy `Suspect`) carrying a large already-admitted peer id
-  /// can exceed the single-datagram budget even though the construction-time
-  /// self-`Ping` floor guarantees only the LOCAL identity fits. A single
-  /// message has no compound split point, so an over-MTU one is dropped rather
-  /// than emitted as a fragmentable, undeliverable datagram — the same ceiling
-  /// the compound branch enforces, mirroring the lone-`Packet` gossip path
-  /// (`len <= gossip_mtu`). The probe FSM entry is unaffected: a dropped `Ping`
-  /// simply receives no Ack and fails on its deadline, exactly as a lost UDP
-  /// datagram would.
-  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) {
+  /// Queue `msg` as a lone `Packet` to `to` when its wire encoding fits the
+  /// configured `gossip_mtu`, returning whether it was queued. Node ids are
+  /// unbounded, so a probe `Ping`, its buddy `Suspect`, or an `IndirectPing`
+  /// carrying a large already-admitted peer id can exceed the single-datagram
+  /// budget even though the construction-time self-`Ping` floor guarantees only
+  /// the LOCAL identity fits. A single message has no compound split point, so
+  /// an over-MTU one is dropped (returning `false`) rather than emitted as a
+  /// fragmentable, undeliverable datagram — the same ceiling the compound branch
+  /// enforces, mirroring the lone-`Packet` gossip path (`len <= gossip_mtu`).
+  /// The probe FSM is unaffected: a dropped direct `Ping` simply receives no Ack
+  /// and fails on its deadline, exactly as a lost UDP datagram would; a dropped
+  /// `IndirectPing` is excluded from the caller's outstanding-nack accounting so
+  /// the FSM never waits on a Nack the unreached peer cannot send.
+  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) -> bool {
     let encoded_len = crate::wire::encode_message::<I, A>(&msg)
       .expect("outbound probe message must bridge to wire form")
       .len();
@@ -2365,6 +2371,9 @@ where
       self
         .pending_transmits
         .push_back(Transmit::Packet(PacketTransmit::new(to, msg)));
+      true
+    } else {
+      false
     }
   }
 
@@ -3519,14 +3528,12 @@ where
     let chosen = pick_random(&candidates, k, &mut self.rng);
     // Resolve each chosen indirect peer's current source address ONCE, here
     // (immutable `members` borrow, fully owned before any later `&mut self`
-    // call). This single resolved list is used for BOTH the IndirectPing
-    // destinations AND the Nack allowlist, so "peers we counted a Nack
-    // from" is exactly "peers we actually pinged". `candidates` was just
-    // built from `members` and nothing mutates membership within this
-    // synchronous call, so `chosen_resolved.len() == chosen.len()`;
-    // deriving `expected_nacks` from the resolved set keeps the Lifeguard
-    // severity (`expected_nacks - nacked_by.len()`) exact even if that
-    // invariant ever weakened.
+    // call). `candidates` was just built from `members` and nothing mutates
+    // membership within this synchronous call, so `chosen_resolved.len() ==
+    // chosen.len()`. The Nack allowlist (`indirect_peers`) and `expected_nacks`
+    // are derived below from the subset whose IndirectPing actually fit the MTU
+    // and was queued, so "peers we counted a Nack from" stays exactly "peers we
+    // actually sent an IndirectPing to".
     let chosen_resolved: SmallVec<(I, A)> = chosen
       .iter()
       .filter_map(|id| {
@@ -3536,11 +3543,6 @@ where
           .map(|m| (id.cheap_clone(), m.state_ref().address_ref().cheap_clone()))
       })
       .collect();
-    let indirect_peers: SmallVec<A> = chosen_resolved
-      .iter()
-      .map(|(_, addr)| addr.cheap_clone())
-      .collect();
-    let expected_nacks = indirect_peers.len();
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
@@ -3582,12 +3584,39 @@ where
     } else {
       None
     };
+    // Fan out IndirectPing to each chosen peer, MTU-checking every datagram. A
+    // node id is unbounded, so an IndirectPing carrying a large already-admitted
+    // target id can exceed one datagram even though it is a valid lone message;
+    // such a datagram is dropped (the same ceiling the direct Ping enforces)
+    // rather than emitted as a fragmentable, undeliverable packet. Both the Nack
+    // allowlist (`indirect_peers`) and `expected_nacks` — the count the FSM waits
+    // on and the source of the Lifeguard severity `expected_nacks -
+    // nacked_by.len()` — count ONLY peers whose IndirectPing was actually queued:
+    // a peer we never sent to relays no Ping and returns no Nack, so counting it
+    // would make the FSM wait for a Nack that never comes and penalize our own
+    // health for a probe we never dispatched.
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let target_addr = target_arc.address_ref().cheap_clone();
+    let mut indirect_peers: SmallVec<A> = SmallVec::new();
+    for (_peer_id, peer_addr) in &chosen_resolved {
+      let ind = IndirectPing::new(
+        seq,
+        Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),
+        Node::new(target_id.cheap_clone(), target_addr.cheap_clone()),
+      );
+      if self.push_probe_packet_within_mtu(peer_addr.cheap_clone(), Message::IndirectPing(ind)) {
+        indirect_peers.push(peer_addr.cheap_clone());
+      }
+    }
+    let expected_nacks = indirect_peers.len();
+
     if expected_nacks == 0 && reliable_stream_id.is_none() {
-      // Nothing left to try: no eligible indirect peers AND reliable ping
-      // is disabled for this target → suspect now. With reliable ping
-      // enabled we instead race the deadline below — a 2-node /
-      // zero-indirect topology still gets the TCP fallback before the
-      // target is suspected.
+      // Nothing left to try: no IndirectPing was queued (no eligible peer, or
+      // every candidate's datagram exceeded the MTU) AND reliable ping is
+      // disabled for this target → suspect now. With reliable ping enabled we
+      // instead race the deadline — a 2-node / zero-indirect topology, or one
+      // whose indirect datagrams are all over-MTU, still gets the TCP fallback
+      // (not bound by `gossip_mtu`) before the target is suspected.
       self.probe_terminate_failure(seq, now);
       return;
     }
@@ -3599,24 +3628,6 @@ where
         reliable_stream_id,
         deadline: cumulative_deadline,
       });
-    }
-
-    // Fan out IndirectPing to each chosen peer (addresses already resolved
-    // above — the exact set recorded in `indirect_peers`).
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let target_addr = target_arc.address_ref().cheap_clone();
-    for (_peer_id, peer_addr) in &chosen_resolved {
-      let ind = IndirectPing::new(
-        seq,
-        Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),
-        Node::new(target_id.cheap_clone(), target_addr.cheap_clone()),
-      );
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          peer_addr.cheap_clone(),
-          Message::IndirectPing(ind),
-        )));
     }
   }
 

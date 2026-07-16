@@ -8604,3 +8604,162 @@ fn submillisecond_probe_interval_does_not_arm_immediate_death_suspect() {
     "bob must remain Suspect, not die immediately, under a sub-ms probe_interval"
   );
 }
+
+/// A sub-millisecond `probe_interval` is floored to a 1ms minimum BEFORE it is
+/// scaled by `suspicion_mult` and the node-count scale — the mult and scale are
+/// preserved, not discarded. For a 500µs interval, default mult 4, and two
+/// nodes (node_scale = max(1.0, log10(2)) = 1.0), the min timeout is
+/// 1ms * 4 * 1.0 = 4ms and the max is 4ms * 6 = 24ms. Flooring the final product
+/// instead would collapse this to 1ms, dropping both the mult and the scale.
+#[test]
+fn submillisecond_probe_interval_scales_suspicion_timeout_by_mult() {
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_probe_interval(Duration::from_micros(500)));
+  // Two members: local + bob → node_scale = max(1.0, log10(2)) = 1.0 exactly
+  // (the `.max(1.0)` floor makes it independent of log10 precision).
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  assert_eq!(e.num_members(), 2, "local + bob");
+
+  let (min, max) = e.suspicion_timeouts();
+  assert_eq!(
+    min,
+    Duration::from_millis(4),
+    "500µs floored to 1ms, then * mult(4) * node_scale(1.0) = 4ms — the mult must survive the floor"
+  );
+  assert_eq!(
+    max,
+    Duration::from_millis(24),
+    "max = min(4ms) * suspicion_max_timeout_mult(6) = 24ms"
+  );
+}
+
+/// `suspicion_mult == 0` (a publicly accepted value) must yield a ZERO suspicion
+/// timeout for a >= 1ms interval — unchanged from before the sub-ms fix and
+/// matching Go `suspicionTimeout` (mult 0 ⇒ 0). Flooring the sub-ms interval
+/// must NOT force this >= 1ms / zero-mult path to a 1ms minimum: with the floor
+/// applied to the interval (not the product) the zero mult keeps the product 0.
+#[test]
+fn zero_suspicion_mult_yields_zero_suspicion_timeout() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::from_secs(1))
+      .with_suspicion_mult(0),
+  );
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+
+  let (min, max) = e.suspicion_timeouts();
+  assert_eq!(
+    min,
+    Duration::ZERO,
+    "suspicion_mult == 0 with a >= 1ms interval yields a zero min timeout (unchanged, matches Go)"
+  );
+  assert_eq!(max, Duration::ZERO, "a zero min scales to a zero max");
+}
+
+/// When the direct probe escalates to the indirect fan-out, an `IndirectPing`
+/// carrying an over-MTU target id must be dropped (never emitted as an
+/// unsendable datagram), and `expected_nacks` / `indirect_peers` must count
+/// ONLY the peers whose IndirectPing was actually queued. Otherwise the FSM
+/// waits on a Nack from a helper that never received the ping, and an over-MTU
+/// datagram is emitted. bob's id alone dwarfs the MTU, so every IndirectPing is
+/// over-MTU; carol is an eligible helper. With reliable ping enabled (default)
+/// the probe stays in AwaitingIndirect racing the (unbounded) TCP fallback,
+/// with `expected_nacks == 0`.
+#[test]
+fn indirect_fan_out_drops_over_mtu_indirect_ping_and_counts_only_queued() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_mtu(gossip_mtu));
+  let t0 = Instant::now();
+  // bob's id alone dwarfs the gossip MTU, so every Ping/IndirectPing carrying
+  // bob as its target exceeds one datagram. carol is a small, Alive indirect
+  // helper (not local, not the target).
+  let big_id = "b".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Insert a Detection probe against bob directly in AwaitingDirectAck (the
+  // direct Ping MTU drop is covered elsewhere). The failure deadline sits far
+  // ahead, so the elapsed direct sub-window escalates to the indirect fan-out
+  // rather than terminating the probe outright.
+  let seq = 91u32;
+  let (target, target_incarnation) = {
+    let m = e
+      .members
+      .get(&SmolStr::new(big_id.as_str()))
+      .expect("bob admitted");
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
+  e.probes.insert(
+    seq,
+    Probe::new_direct(
+      target,
+      target_incarnation,
+      t0,
+      ProbeKind::Detection,
+      Duration::from_millis(500),
+      t0 + Duration::from_secs(100),
+    ),
+  );
+
+  // Advance past the direct sub-window (cfg probe_timeout = 500ms) but well
+  // before the failure deadline → the indirect fan-out fires.
+  e.handle_timeout(t0 + Duration::from_secs(1));
+
+  // Every emitted datagram must be within gossip_mtu, and NO IndirectPing may
+  // be queued: bob's oversized id makes each one over-MTU.
+  let mut queued_indirect = 0usize;
+  while let Some(tx) = e.poll_transmit() {
+    match tx {
+      Transmit::Packet(p) => {
+        let len = crate::wire::encode_message::<SmolStr, SocketAddr>(p.message_ref())
+          .expect("a probe message must encode")
+          .len();
+        assert!(
+          len <= gossip_mtu,
+          "the indirect fan-out emitted a {len}-byte Packet exceeding gossip_mtu {gossip_mtu}"
+        );
+        if matches!(p.message_ref(), Message::IndirectPing(_)) {
+          queued_indirect += 1;
+        }
+      }
+      Transmit::Compound(c) => panic!(
+        "the fan-out emits lone IndirectPing Packets, never a compound; got {:?}",
+        c.into_parts().1
+      ),
+    }
+  }
+  assert_eq!(
+    queued_indirect, 0,
+    "bob's oversized id makes every IndirectPing over-MTU, so none may be queued"
+  );
+
+  // The outstanding-nack accounting must equal the number actually queued (0):
+  // the probe races only the reliable-ping fallback and must NOT wait on a Nack
+  // from carol, which never received an IndirectPing.
+  match &e
+    .probes
+    .get(&seq)
+    .expect("probe remains, racing the reliable-ping fallback")
+    .phase
+  {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      indirect_peers,
+      ..
+    }) => {
+      assert_eq!(
+        *expected_nacks, queued_indirect,
+        "expected_nacks must equal the count of IndirectPings actually queued"
+      );
+      assert_eq!(*expected_nacks, 0, "no indirect ping was queued");
+      assert!(
+        indirect_peers.is_empty(),
+        "no peer received an IndirectPing, so the Nack allowlist must be empty"
+      );
+    }
+    other => panic!("probe must be AwaitingIndirect (racing the reliable fallback), got {other:?}"),
+  }
+}
