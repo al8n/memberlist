@@ -8196,7 +8196,11 @@ fn try_new_at_rejects_zero_max_stream_frame_size() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn try_new_at_rejects_max_stream_frame_size_above_u32() {
+  // `u32::MAX as usize + 1` only exists as a distinct value on 64-bit; on a
+  // 32-bit target `usize::MAX == u32::MAX`, so the addition overflows at
+  // compile time and the above-u32 case is unreachable there.
   let c = cfg().with_max_stream_frame_size(u32::MAX as usize + 1);
   let t0 = Instant::from_origin(Duration::from_secs(1));
   let res = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(c, t0);

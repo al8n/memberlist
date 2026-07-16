@@ -357,9 +357,14 @@ fn multibyte_length_body_round_trips_through_fallible_encode() {
   assert_eq!(tag, MessageTag::UserData);
   assert_eq!(decoded_body, &body[..]);
   assert_eq!(consumed, frame.len());
-  // The error variant is wired for the overflow path.
-  let e = FrameError::FrameTooLarge(u32::MAX as usize + 1);
-  assert!(e.to_string().contains("too large"));
+  // The error variant is wired for the overflow path. `u32::MAX as usize + 1`
+  // only exists as a distinct value on 64-bit; on a 32-bit target
+  // `usize::MAX == u32::MAX` and the addition overflows at compile time.
+  #[cfg(target_pointer_width = "64")]
+  {
+    let e = FrameError::FrameTooLarge(u32::MAX as usize + 1);
+    assert!(e.to_string().contains("too large"));
+  }
 }
 
 #[cfg(encryption)]
@@ -581,14 +586,17 @@ fn incomplete_frame_accessors_and_display() {
 
 #[test]
 fn frame_error_display_strings_are_nonempty() {
-  let cases: [FrameError; 6] = [
+  let mut cases = vec![
     FrameError::Empty,
     FrameError::Incomplete(IncompleteFrame::new(1, 2)),
     FrameError::UnknownTag(99),
     FrameError::VarintOverflow,
     FrameError::Decode,
-    FrameError::FrameTooLarge(1 << 33),
   ];
+  // `1 << 33` only exists as a distinct usize value on 64-bit; on a 32-bit
+  // target `usize::MAX == u32::MAX` and the shift overflows at compile time.
+  #[cfg(target_pointer_width = "64")]
+  cases.push(FrameError::FrameTooLarge(1 << 33));
   for e in cases {
     assert!(!e.to_string().is_empty(), "empty display for {e:?}");
   }
