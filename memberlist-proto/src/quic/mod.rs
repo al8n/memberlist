@@ -1456,7 +1456,11 @@ impl<I, R> QuicEndpoint<I, R> {
   pub fn poll_timeout(&mut self) -> Option<Instant> {
     // Refresh the two cheap terms at the single read point (robust against
     // every membership / dial / `last_now` mutator), then read the live
-    // minimum from the incrementally-maintained index.
+    // minimum from the incrementally-maintained index. The `Endpoint` term is
+    // cheap because the membership machine's own `poll_timeout` is bounded by
+    // its incremental suspicion-deadline index (no per-call member scan), and
+    // the immediate-due term reads O(1) flags — so a per-receive re-poll never
+    // folds work proportional to the connection, bridge, dial, or member tables.
     self
       .deadline_index
       .set(TimerKey::Endpoint, self.ep.poll_timeout());
@@ -3561,6 +3565,15 @@ where
           // without changing TCP/TLS behaviour. This bounds inbound bridge state
           // ACROSS all connections; quinn's per-connection
           // `max_concurrent_bidi_streams` is a separate, per-connection limit.
+          // quinn opens remote streams IMPLICITLY: one STREAM (or MAX_STREAM_DATA)
+          // frame naming a high in-credit index advances `next_remote`, so this
+          // loop can accept the whole remaining bidi window in a single datagram —
+          // up to the per-connection bidi credit, capped by the `max_inbound_streams`
+          // headroom above. That is a per-credit-window BATCH bound: config-bounded
+          // and independent of the connection/bridge tables, not amplifiable per
+          // datagram beyond the configured caps. An operator wanting a tighter
+          // per-datagram batch lowers quinn's `max_concurrent_bidi_streams` — gossip
+          // needs only a handful of concurrent reliable exchanges per connection.
           // An outbound bridge is registered in `pending_outbound_kinds` for
           // the life of its exchange and an accepted (inbound) bridge never is
           // (see that field's docs), so the inbound population is exactly the
