@@ -2116,17 +2116,16 @@ fn indirect_probe_at(
   failure_deadline: Instant,
   indirect_peers: SmallVec<SocketAddr>,
 ) {
-  let target = e
-    .members
-    .get(&SmolStr::new("bob"))
-    .unwrap()
-    .state_ref()
-    .server_arc();
+  let (target, target_incarnation) = {
+    let m = e.members.get(&SmolStr::new("bob")).unwrap();
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
   let expected_nacks = indirect_peers.len();
   e.probes.insert(
     seq,
     Probe {
       target,
+      target_incarnation,
       sent_at,
       kind: ProbeKind::Detection,
       // For Detection in AwaitingIndirect the failure deadline IS the
@@ -4571,6 +4570,7 @@ fn reliable_ping_ack_drives_probe_success() {
 
   let probe_seq = 55u32;
   let bob = e.member(&SmolStr::new("bob")).unwrap().clone();
+  let bob_incarnation = e.node_incarnation(&SmolStr::new("bob")).unwrap();
   let now = Instant::now();
 
   // Probe in AwaitingIndirect with the reliable fallback armed
@@ -4581,6 +4581,7 @@ fn reliable_ping_ack_drives_probe_success() {
     probe_seq,
     Probe {
       target: bob,
+      target_incarnation: bob_incarnation,
       sent_at: now,
       kind: ProbeKind::Detection,
       failure_deadline: now + Duration::from_secs(5),
@@ -4853,6 +4854,7 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
 
   let probe_seq = 77u32;
   let bob = e.member(&SmolStr::new("bob")).unwrap().clone();
+  let bob_incarnation = e.node_incarnation(&SmolStr::new("bob")).unwrap();
   let t0 = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
 
@@ -4865,6 +4867,7 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
     probe_seq,
     Probe {
       target: bob,
+      target_incarnation: bob_incarnation,
       sent_at: t0,
       kind: ProbeKind::Detection,
       failure_deadline: deadline,
@@ -8402,5 +8405,202 @@ fn snapshot_version_bumps_on_incarnation_only_alive_update() {
   assert!(
     e.snapshot_version() != v1,
     "an incarnation-only (no event) alive update must still bump the snapshot version"
+  );
+}
+
+// ───────── probe / ping / suspicion failure-path edge regressions ─────────
+
+/// A periodic probe `Ping` whose target carries an over-MTU id must never be
+/// emitted as an over-MTU datagram. Node ids are unbounded, so a lone Ping
+/// (the target is Alive ⇒ no buddy Suspect ⇒ the `len == 1` path) carrying a
+/// large already-admitted target id can exceed `gossip_mtu` even though the
+/// local self-Ping fit at construction. A single message has no compound split
+/// point, so it must be dropped rather than sent as a fragmentable datagram —
+/// the same ceiling the compound branch already enforces.
+#[test]
+fn probe_ping_with_oversize_peer_id_is_not_emitted_over_mtu() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_mtu(gossip_mtu));
+  let t0 = Instant::now();
+  // A peer whose id alone dwarfs the gossip MTU. The local id ("local") is
+  // small, so the construction-time self-Ping floor passed; only the remote
+  // target's id pushes the probe Ping past one datagram.
+  let big_id = "b".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  assert!(
+    e.start_probe(t0),
+    "a probe against the only (Alive) peer must be initiated"
+  );
+  // The FSM entry is registered regardless — dropping the datagram must not
+  // drop the probe (it then fails on its deadline like any lost UDP Ping).
+  assert!(
+    !e.probes.is_empty(),
+    "the probe FSM entry must be registered even when its Ping is too large to send"
+  );
+
+  // No emitted datagram may exceed gossip_mtu.
+  while let Some(tx) = e.poll_transmit() {
+    match tx {
+      Transmit::Packet(p) => {
+        let len = crate::wire::encode_message::<SmolStr, SocketAddr>(p.message_ref())
+          .expect("a probe message must encode")
+          .len();
+        assert!(
+          len <= gossip_mtu,
+          "start_probe emitted a {len}-byte lone Packet exceeding gossip_mtu {gossip_mtu}"
+        );
+      }
+      Transmit::Compound(c) => panic!(
+        "an Alive target yields no buddy Suspect, so no compound is expected; got {:?}",
+        c.into_parts().1
+      ),
+    }
+  }
+}
+
+/// Public `ping(X @ B)` must bind the probe to the caller-supplied address B,
+/// not the address A at which membership happens to store X. Otherwise the Ping
+/// is sent to B while `ack_source_is_valid` expects a responder at A, so the
+/// genuine Ack from B is rejected and the terminal event misreports X @ A.
+#[test]
+fn public_ping_binds_probe_to_caller_supplied_address() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  // Membership stores bob at address A (127.0.0.1:7001)...
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // ...but the caller pings bob at a DIFFERENT address B (127.0.0.1:7009).
+  let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7009);
+  let pid = e
+    .ping(Node::new(SmolStr::new("bob"), addr_b), t0)
+    .expect("ping is accepted while Running");
+
+  // The Ping is transmitted to B.
+  let (seq, to) = match e.poll_transmit().expect("a Ping is emitted") {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      match message {
+        Message::Ping(ping) => (ping.sequence_number(), to),
+        other => panic!("expected a Ping, got {other:?}"),
+      }
+    }
+    other => panic!("expected a lone Packet Ping, got {other:?}"),
+  };
+  assert_eq!(
+    to, addr_b,
+    "the Ping must be sent to the caller-supplied address B"
+  );
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // An Ack from B (where the Ping actually went) must COMPLETE the ping: the
+  // probe target is bound to B, so that responder is accepted.
+  e.handle_ack(addr_b, Ack::new(seq), t0 + Duration::from_millis(10));
+
+  let completed = core::iter::from_fn(|| e.poll_event()).find_map(|ev| match ev {
+    Event::PingCompleted(pc) => Some(pc),
+    _ => None,
+  });
+  let pc = completed.expect(
+    "an Ack from the pinged address B must complete the ping (the probe target \
+     must bind to B, not bob's stored address A)",
+  );
+  assert_eq!(
+    pc.ping_id(),
+    pid,
+    "the completion carries the returned PingId"
+  );
+  assert_eq!(
+    pc.node_ref().address_ref(),
+    &addr_b,
+    "PingCompleted must report the pinged address B, not the stored address A"
+  );
+}
+
+/// An expired Detection probe must suspect the generation it PROBED, not
+/// whatever incarnation the target holds when the probe finally fails. If the
+/// target refuted (advanced its incarnation) while the probe was in flight, the
+/// stale failure must NOT suspect it — matching Go memberlist, which suspects
+/// the snapshot `node.Incarnation` and drops it in `suspectNode` once the live
+/// incarnation has moved on.
+#[test]
+fn expired_probe_does_not_suspect_target_that_refuted_to_newer_incarnation() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  // bob joins at incarnation 1; the probe snapshots that generation.
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  assert!(e.start_probe(t0), "probe bob at incarnation 1");
+  while e.poll_transmit().is_some() {}
+
+  // bob refutes mid-probe, advancing to incarnation 5 at the same address.
+  process_alive_auto(&mut e, alive("bob", 7001, 5), false, t0);
+  assert_eq!(
+    e.node_incarnation(&SmolStr::new("bob")),
+    Some(5),
+    "bob advanced to incarnation 5 while the probe was in flight"
+  );
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The probe expires long after bob advanced. It suspects generation 1, which
+  // process_suspect drops (1 < 5), so bob stays Alive.
+  e.handle_timeout(t0 + Duration::from_secs(30));
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Alive),
+    "a probe failure against incarnation 1 must not suspect bob after it \
+     refuted to incarnation 5"
+  );
+}
+
+/// A sub-millisecond `probe_interval` must not arm a suspicion whose deadline
+/// equals `now`. `probe_interval.as_millis()` truncates to 0, so the old code
+/// produced `min == max == 0` and `Suspicion::new` set `deadline == now` — an
+/// immediate false death the instant a node is suspected.
+#[test]
+fn submillisecond_probe_interval_does_not_arm_immediate_death_suspect() {
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_probe_interval(Duration::from_micros(500)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+
+  // A gossiped Suspect for bob at its current incarnation transitions bob to
+  // Suspect and arms a suspicion timer.
+  e.process_suspect(
+    Suspect::new(1, SmolStr::new("bob"), SmolStr::new("carol")),
+    t0,
+  );
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "bob transitions to Suspect"
+  );
+
+  // The armed deadline must be strictly AFTER now — not an already-expired timer.
+  let deadline = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .and_then(|m| m.suspicion().map(|s| s.deadline()))
+    .expect("bob has an armed suspicion");
+  assert!(
+    deadline > t0,
+    "a sub-ms probe_interval must not arm a suspicion already at its deadline"
+  );
+
+  // Firing the timer at t0 must NOT kill bob (the deadline has not elapsed).
+  e.handle_timeout(t0);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "bob must remain Suspect, not die immediately, under a sub-ms probe_interval"
   );
 }

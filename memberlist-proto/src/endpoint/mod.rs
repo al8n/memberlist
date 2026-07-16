@@ -931,7 +931,19 @@ where
     let interval = self.cfg.probe_interval();
     let min_ms =
       (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
-    let min = Duration::from_millis(min_ms);
+    // `probe_interval.as_millis()` truncates a sub-millisecond interval to 0,
+    // collapsing `min` (and hence `max`) to zero — `Suspicion::new` then arms a
+    // deadline equal to `now`, an immediate false death the instant a node is
+    // suspected. Floor a nonzero interval's timeout at 1ms so a small-but-nonzero
+    // `probe_interval` still yields a positive suspicion window. Any interval
+    // >= 1ms already computes a nonzero `min` (>= interval_ms * mult * scale, all
+    // >= 1), so this floor never alters the normal path; a zero interval (probing
+    // disabled) keeps its zero timeout.
+    let min = if min_ms == 0 && !interval.is_zero() {
+      Duration::from_millis(1)
+    } else {
+      Duration::from_millis(min_ms)
+    };
     // `checked_mul` to degrade a pathologically-large configured product to the
     // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
     // discipline as `Awareness::scale_timeout`); unreachable for any sane config.
@@ -1848,15 +1860,16 @@ where
         self.awareness.record_failure(severity);
         self.bump_snapshot_version();
 
-        // Mark the target as suspect.
+        // Suspect the generation that was actually probed — the incarnation
+        // snapshotted when this probe started — NOT whatever the member holds
+        // now. If the target refuted or was replaced by a newer incarnation
+        // while the probe was in flight, `process_suspect` drops this stale
+        // suspicion via its `inc < local_inc` guard, matching Go memberlist
+        // `suspectNode`: a probe failure says nothing about a generation that
+        // has already moved on.
         let target_id = probe.target.id_ref().cheap_clone();
         let local_id = self.cfg.local_id_ref().cheap_clone();
-        let target_inc = self
-          .members
-          .get(&target_id)
-          .map(|m| m.state_ref().incarnation())
-          .unwrap_or(0);
-        let suspect = Suspect::new(target_inc, target_id, local_id);
+        let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
         self.process_suspect(suspect, now);
       }
       ProbeKind::Ping => {
@@ -2218,6 +2231,9 @@ where
       .get(&target_id)
       .expect("target id came from members iteration");
     let target_arc = target_member.state_ref().server_arc();
+    // Snapshot the probed generation now; a later failure suspects THIS
+    // incarnation, not whatever the member holds when the probe expires.
+    let target_incarnation = target_member.state_ref().incarnation();
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
@@ -2229,6 +2245,7 @@ where
     let failure_deadline = now + self.awareness.scale_timeout(self.cfg.probe_interval());
     let probe = Probe::new_direct(
       target_arc.cheap_clone(),
+      target_incarnation,
       now,
       ProbeKind::Detection,
       pt,
@@ -2285,12 +2302,12 @@ where
 
     let to = target_addr.cheap_clone();
     if probe_msgs.len() == 1 {
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          to,
-          probe_msgs.pop().expect("len checked == 1"),
-        )));
+      // A lone probe Ping is subject to the SAME gossip_mtu ceiling as the
+      // compound path below: node ids are unbounded, so a Ping carrying a
+      // large already-admitted target id can exceed one datagram even though
+      // the construction self-Ping floor covers only the local identity.
+      let ping_msg = probe_msgs.pop().expect("len checked == 1");
+      self.push_probe_packet_within_mtu(to, ping_msg);
     } else {
       // Conservative assembled-compound upper bound — identical idiom to
       // the gossip budget (COMPOUND_TAG_LEN + count varint + per-part
@@ -2312,25 +2329,43 @@ where
           .pending_transmits
           .push_back(Transmit::Compound(CompoundTransmit::new(to, probe_msgs)));
       } else {
-        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect.
-        // Both datagrams are delivered as separate <= MTU sends, so the
-        // refutation path is preserved.
+        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect. Each
+        // is delivered as a separate send under the same lone-datagram MTU
+        // ceiling: a normal split (both parts <= MTU) emits both and preserves
+        // the refutation path, while a part that is itself over-MTU (a large
+        // peer id) is dropped rather than fragmented — never emit an
+        // unsendable datagram from either branch.
         let mut it = probe_msgs.into_iter();
         let ping_msg = it.next().expect("probe_msgs[0] is the Ping");
         let suspect_msg = it.next().expect("probe_msgs[1] is the buddy Suspect");
-        self
-          .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit::new(
-            to.cheap_clone(),
-            ping_msg,
-          )));
-        self
-          .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit::new(to, suspect_msg)));
+        self.push_probe_packet_within_mtu(to.cheap_clone(), ping_msg);
+        self.push_probe_packet_within_mtu(to, suspect_msg);
       }
     }
 
     true
+  }
+
+  /// Queue `msg` as a lone `Packet` to `to`, but only when its wire encoding
+  /// fits the configured `gossip_mtu`. Node ids are unbounded, so a probe
+  /// `Ping` (or its buddy `Suspect`) carrying a large already-admitted peer id
+  /// can exceed the single-datagram budget even though the construction-time
+  /// self-`Ping` floor guarantees only the LOCAL identity fits. A single
+  /// message has no compound split point, so an over-MTU one is dropped rather
+  /// than emitted as a fragmentable, undeliverable datagram — the same ceiling
+  /// the compound branch enforces, mirroring the lone-`Packet` gossip path
+  /// (`len <= gossip_mtu`). The probe FSM entry is unaffected: a dropped `Ping`
+  /// simply receives no Ack and fails on its deadline, exactly as a lost UDP
+  /// datagram would.
+  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) {
+    let encoded_len = crate::wire::encode_message::<I, A>(&msg)
+      .expect("outbound probe message must bridge to wire form")
+      .len();
+    if encoded_len <= self.gossip_mtu() {
+      self
+        .pending_transmits
+        .push_back(Transmit::Packet(PacketTransmit::new(to, msg)));
+    }
   }
 
   /// Round-robin pick the next probe target. Returns `None` if no eligible
@@ -2474,25 +2509,44 @@ where
     self.ensure_running()?;
     let target_id = node.id_ref().cheap_clone();
     let target_addr = node.addr_ref().cheap_clone();
+    // Bind the probe target to the address the Ping is actually SENT to (the
+    // caller-supplied address), so `ack_source_is_valid` accepts the Ack from
+    // that address and `PingFailed` reports the pinged address. Reuse the
+    // stored NodeState (preserving its meta/versions in the terminal event)
+    // ONLY when the member is tracked at that same address; otherwise — an
+    // untracked node, or a known id reachable at a different address than the
+    // one stored — synthesize a minimal NodeState carrying the caller's
+    // id+address rather than binding to the stale stored address.
     let target_arc = match self.members.get(&target_id) {
-      Some(m) => m.state_ref().server_arc(),
-      None => {
-        // Caller is pinging a node we don't track. Synthesize a minimal
-        // NodeState so PingCompleted can carry it.
-        std::sync::Arc::new(NodeState::new(
-          target_id.cheap_clone(),
-          target_addr.cheap_clone(),
-          State::Alive,
-        ))
-      }
+      Some(m) if m.state_ref().address_ref() == &target_addr => m.state_ref().server_arc(),
+      _ => std::sync::Arc::new(NodeState::new(
+        target_id.cheap_clone(),
+        target_addr.cheap_clone(),
+        State::Alive,
+      )),
     };
+    // A Ping never suspects, so its snapshot incarnation is unused; carry the
+    // member's current value (0 if untracked) to satisfy the shared
+    // constructor.
+    let target_incarnation = self
+      .members
+      .get(&target_id)
+      .map(|m| m.state_ref().incarnation())
+      .unwrap_or(0);
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
     // An application ping is direct-only — it waits just `probe_timeout`,
     // with no indirect/fallback escalation and no awareness scaling.
     // Failure deadline == the direct deadline.
-    let probe = Probe::new_direct(target_arc, now, ProbeKind::Ping, pt, now + pt);
+    let probe = Probe::new_direct(
+      target_arc,
+      target_incarnation,
+      now,
+      ProbeKind::Ping,
+      pt,
+      now + pt,
+    );
     let deadline = probe.direct_deadline(pt);
     self.probes.insert(seq, probe);
     self

@@ -55,6 +55,14 @@ pub(crate) enum ProbeKind {
 pub(crate) struct Probe<I, A> {
   /// The peer being probed.
   pub(crate) target: Arc<NodeState<I, A>>,
+  /// The target's incarnation snapshotted at probe creation. On a failed
+  /// Detection probe the target is suspected at THIS generation, not whatever
+  /// incarnation it currently holds: if it refuted (or was replaced by a newer
+  /// incarnation) while the probe was in flight, `process_suspect` drops the
+  /// stale suspicion via its `inc < local_inc` guard. Mirrors Go memberlist
+  /// `probeNode`, which suspects the snapshot `node.Incarnation`, not a
+  /// re-read of the live map.
+  pub(crate) target_incarnation: u32,
   /// When the initial Ping was sent (used for RTT measurement).
   pub(crate) sent_at: Instant,
   /// What kind of probe this is.
@@ -140,6 +148,9 @@ pub(crate) enum ProbePhase<A> {
 impl<I, A> Probe<I, A> {
   /// Construct a fresh probe in `AwaitingDirectAck`.
   ///
+  /// - `target_incarnation` is the target's incarnation at this instant; a
+  ///   later Detection failure suspects that snapshot generation (see the
+  ///   [`target_incarnation`](Self::target_incarnation) field);
   /// - the direct-ack sub-window deadline is derived from
   ///   `sent_at + probe_timeout` (the SAME formula as
   ///   [`direct_deadline`](Self::direct_deadline));
@@ -150,6 +161,7 @@ impl<I, A> Probe<I, A> {
   ///   Ping: `sent_at + probe_timeout`.
   pub(crate) fn new_direct(
     target: Arc<NodeState<I, A>>,
+    target_incarnation: u32,
     sent_at: Instant,
     kind: ProbeKind,
     probe_timeout: Duration,
@@ -157,6 +169,7 @@ impl<I, A> Probe<I, A> {
   ) -> Self {
     Self {
       target,
+      target_incarnation,
       sent_at,
       kind,
       failure_deadline,
