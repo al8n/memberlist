@@ -1872,24 +1872,38 @@ where
         // memberlist `suspectNode`: a probe failure says nothing about a
         // generation that has already moved on.
         let target_id = probe.target.id_ref().cheap_clone();
-        // Invariant: a probe of X@A must never suspect a re-addressed
-        // replacement X@B. The `inc < local_inc` guard alone does NOT enforce
-        // this: a Left/reclaimed id can be re-admitted at a NEW address with an
-        // incarnation <= this probe's snapshot, because the address-adoption
-        // branch of `process_alive_decided` bypasses the incarnation comparison.
-        // The snapshot incarnation would then be >= the replacement's and the
-        // suspicion would land on the wrong instance. Require the current member
-        // for `target_id` to still be at the probed address; if it is absent or
-        // has been re-addressed, the probed instance is gone, so drop the
-        // suspicion rather than accuse the replacement. The awareness penalty
-        // above still stands — our own failure to confirm the probed peer is a
-        // real observation regardless of which instance now holds the id.
+        // Invariant: only the EXACT instance that was probed may be suspected.
+        // Two events can install a DIFFERENT instance under `target_id` while the
+        // probe is in flight, and `process_suspect`'s `inc < local_inc` guard
+        // catches neither on its own:
+        //
+        //   - a re-ADDRESSED replacement X@B — a Left/reclaimed id re-admitted at
+        //     a NEW address, whose incarnation the address-adoption branch of
+        //     `process_alive_decided` sets without comparing the probe snapshot;
+        //   - a same-ADDRESS replacement X@A — the probed id removed by
+        //     `reset_nodes` and re-admitted at the SAME address with a LOWER
+        //     incarnation (a rejoin resets the generation via the new-member
+        //     branch of `process_alive_decided`, which starts at the arriving
+        //     value). The snapshot incarnation is then >= the replacement's, so
+        //     `inc < local_inc` is false and the stale Suspect would land on —
+        //     and could evict — the fresh instance.
+        //
+        // A live SWIM node's incarnation is monotonic non-decreasing: it only
+        // rises, on refutation (matching Go memberlist); ONLY a reset/re-admit
+        // yields a lower value. So the current member is the probed instance iff
+        // it is still at the probed address AND its incarnation has not regressed
+        // below the probe's snapshot. When the current incarnation is strictly
+        // higher (an in-place refutation), we still forward the snapshot-
+        // generation Suspect and let `process_suspect` drop it via
+        // `inc < local_inc`. The awareness penalty above stands regardless — our
+        // own failure to confirm the probed peer is a real observation, whichever
+        // instance now holds the id.
         let probed_addr = probe.target.address_ref();
-        let still_at_probed_addr = self
-          .members
-          .get(&target_id)
-          .is_some_and(|m| m.state_ref().address_ref() == probed_addr);
-        if still_at_probed_addr {
+        let same_probed_instance = self.members.get(&target_id).is_some_and(|m| {
+          let st = m.state_ref();
+          st.address_ref() == probed_addr && st.incarnation() >= probe.target_incarnation
+        });
+        if same_probed_instance {
           let local_id = self.cfg.local_id_ref().cheap_clone();
           let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
           self.process_suspect(suspect, now);
@@ -3636,10 +3650,18 @@ where
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
 
-    // Candidate helper pool = the DISTINCT transport addresses of Alive members,
-    // excluding the local advertise address and the target's address. Resolved
+    // Candidate helper pool = the transport addresses of Alive members,
+    // excluding the local advertise address and the target's address. Collected
     // ONCE here under the immutable `members` borrow, fully owned before any
-    // later `&mut self` call.
+    // later `&mut self` call. Duplicate addresses (distinct ids sharing one
+    // transport address) are NOT removed in this pass — pushing is O(1), so the
+    // pass is O(n) in the membership size `n`. `pick_distinct` below then selects
+    // up to `k` DISTINCT addresses while deduplicating against a set bounded by
+    // `k` (= `indirect_checks`, a small constant), so the whole selection is
+    // O(n·k) = O(n). Deduplicating the full pool here instead — a `contains` scan
+    // per member against a set that grows to `n` — would make every escalation of
+    // a failed direct probe O(n²), delaying timers/gossip/failure-detection on
+    // the single-owner state machine as membership grows.
     //
     // memberlist-core selects helpers with `kRandomNodes` (util.go): it excludes
     // self, the target, and non-Alive members, then dedups the sample by node
@@ -3650,7 +3672,7 @@ where
     // `local + target` (independent of the helper id); the relay
     // `handle_indirect_ping` dedups identical in-flight forwards to at most one
     // Nack; and both `handle_nack` and `ack_source_is_valid` key responders by
-    // address. Sampling DISTINCT ADDRESSES is therefore what preserves the
+    // address. Selecting DISTINCT ADDRESSES is therefore what preserves the
     // configured fan-out width — two ids sharing one address must not let the
     // sample collapse a k-helper fan-out to fewer relays — and the address-keyed
     // Nack accounting. Excluding the local / target ADDRESS (not merely their
@@ -3658,7 +3680,7 @@ where
     // a "helper" would be a meaningless self-relay to our own or the probed
     // endpoint, and its address-keyed Nack would be miscounted against a peer
     // that by definition cannot answer.
-    let mut distinct_addrs: SmallVec<A> = SmallVec::new();
+    let mut candidates: SmallVec<A> = SmallVec::new();
     for m in self.members.iter() {
       let st = m.state_ref();
       if st.state() != State::Alive {
@@ -3668,13 +3690,11 @@ where
       if addr == &local_addr || addr == &target_addr {
         continue;
       }
-      if !distinct_addrs.contains(addr) {
-        distinct_addrs.push(addr.cheap_clone());
-      }
+      candidates.push(addr.cheap_clone());
     }
 
     let k = self.cfg.indirect_checks() as usize;
-    let chosen_addrs = pick_random(&distinct_addrs, k, &mut self.rng);
+    let chosen_addrs = pick_distinct(&mut candidates, k, &mut self.rng);
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
@@ -4280,6 +4300,52 @@ where
     .iter()
     .map(|val| (*val).clone())
     .collect()
+}
+
+// Test-only instrument: counts the membership-comparison work performed by the
+// bounded dedup in `pick_distinct`. Thread-local so parallel tests never race on
+// it (each `pick_distinct` call runs on the test thread that reads it). A
+// regression guard resets it, runs one indirect fan-out, and asserts the count
+// is O(n·k) — failing if candidate selection regresses to O(n²).
+#[cfg(test)]
+thread_local! {
+  pub(crate) static DEDUP_COMPARISONS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Randomly select up to `k` values from `pool` that are DISTINCT under
+/// `PartialEq`, permuting `pool` in place.
+///
+/// Runs in O(`pool.len()` · `k`): an incremental Fisher-Yates draws each next
+/// element uniformly at random, and an element is kept only if it is not already
+/// chosen. The already-chosen set is bounded by `k`, so each membership test is
+/// O(`k`), NOT O(`pool.len()`) — this is what keeps the indirect fan-out from
+/// paying the O(n²) cost of deduplicating the whole membership up front (`n` =
+/// cluster size). Returns fewer than `k` values only when `pool` holds fewer
+/// than `k` distinct values.
+fn pick_distinct<T, R>(pool: &mut [T], k: usize, rng: &mut R) -> SmallVec<T>
+where
+  T: Clone + PartialEq,
+  R: Rng,
+{
+  let mut chosen: SmallVec<T> = SmallVec::new();
+  let n = pool.len();
+  for i in 0..n {
+    if chosen.len() >= k {
+      break;
+    }
+    // Incremental Fisher-Yates: move a uniformly-random element of the
+    // not-yet-drawn suffix `pool[i..]` into slot `i`.
+    let j = rng.random_range(i..n);
+    pool.swap(i, j);
+    // Dedup against the already-chosen set, whose length is bounded by `k`, so
+    // this membership test is O(k) and the whole selection stays O(n·k).
+    #[cfg(test)]
+    DEDUP_COMPARISONS.with(|c| c.set(c.get().wrapping_add(chosen.len() as u64)));
+    if !chosen.contains(&pool[i]) {
+      chosen.push(pool[i].clone());
+    }
+  }
+  chosen
 }
 
 /// Scale the push/pull interval as the cluster grows.

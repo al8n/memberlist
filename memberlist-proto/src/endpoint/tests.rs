@@ -2454,6 +2454,69 @@ fn indirect_fan_out_never_selects_local_or_target_address_alias() {
   );
 }
 
+#[test]
+fn indirect_fan_out_selects_bounded_distinct_helpers_without_quadratic_dedup() {
+  // A large membership must not make a single failed direct probe do O(n²) work
+  // building its indirect-helper pool. The candidate addresses are scanned once
+  // (O(n)); up to `indirect_checks` DISTINCT addresses are then selected while
+  // deduplicating against a set bounded by `indirect_checks`, so the dedup
+  // comparison count is O(n·k), NOT O(n²). With N distinct addresses the fixed
+  // selection stops after k draws (≈k²/2 comparisons); a dedup-the-whole-pool
+  // predecessor performed ≈N²/2. Asserting the count stays at/below N·k pins the
+  // complexity — N·k sits far below N²/2 for large N, so an O(n²) regression
+  // trips this guard.
+  const N: usize = 2000;
+  const K: usize = 3;
+  let mut e = seeded_endpoint(cfg().with_indirect_checks(K as u32), 0x51C0_FFEE);
+  let t0 = Instant::now();
+  // N Alive peers at DISTINCT transport addresses (ports 10000..10000+N), none
+  // aliasing the local (7000) or the target (7001) address.
+  for i in 0..N {
+    let port = 10_000u16 + i as u16;
+    process_alive_auto(&mut e, alive(&format!("h{i}"), port, 1), false, t0);
+  }
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Drop the concurrent reliable fallback so the phase is deterministically
+  // AwaitingIndirect with one expected Nack per selected helper address.
+  e.disable_reliable_ping(SmolStr::new("bob"));
+  insert_direct_probe(&mut e, 42, "bob", t0, t0 + Duration::from_secs(3600));
+
+  DEDUP_COMPARISONS.with(|c| c.set(0));
+  e.probe_fan_out_indirect(42, t0 + Duration::from_millis(1));
+  let comparisons = DEDUP_COMPARISONS.with(|c| c.get());
+
+  // Fan-out width is exactly `indirect_checks` DISTINCT addresses.
+  let (expected_nacks, indirect_peers) = awaiting_indirect(&e, 42);
+  assert_eq!(
+    indirect_peers.len(),
+    K,
+    "the fan-out selects exactly indirect_checks distinct helper addresses"
+  );
+  assert_eq!(
+    expected_nacks, K,
+    "one expected Nack per distinct helper address"
+  );
+  for (i, addr) in indirect_peers.iter().enumerate() {
+    assert!(
+      !indirect_peers[..i].contains(addr),
+      "selected helper addresses must be distinct"
+    );
+  }
+
+  // Complexity guard: O(n·k), not O(n²). N·k = 6000; the O(n²) predecessor
+  // would perform ≈N²/2 = 2_000_000 dedup comparisons here.
+  let n_k = (N as u64) * (K as u64);
+  assert!(
+    comparisons <= n_k,
+    "dedup comparisons ({comparisons}) must be O(N·k) (<= {n_k}), not O(N²); \
+     a whole-pool dedup would perform ≈{} here",
+    (N as u64) * (N as u64) / 2
+  );
+}
+
 // ─────────────── handle_indirect_ping ────────────────────────────────────
 
 use crate::{
@@ -9398,6 +9461,116 @@ fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
     "the replacement's incarnation must be unchanged"
   );
   assert_eq!(m.state_ref().address_ref().port(), 7777);
+  assert!(
+    m.suspicion().is_none(),
+    "no suspicion timer may be armed on the replacement"
+  );
+}
+
+/// A probe of X@A whose target is removed by `reset_nodes` and then re-admitted
+/// at the SAME id and SAME transport address with a LOWER incarnation before the
+/// probe expires must NOT suspect the replacement. A rejoin resets the
+/// generation — the new-member branch of `process_alive_decided` starts at the
+/// arriving incarnation — so the probe snapshot (inc 10) is >= the replacement's
+/// (inc 2) and `process_suspect`'s `inc < local_inc` guard does NOT reject it.
+/// The incarnation-regression guard in `probe_terminate_failure` (current
+/// incarnation must not have regressed below the snapshot) is what protects the
+/// fresh instance here; the address match alone cannot, because the address is
+/// unchanged.
+#[test]
+fn probe_expiry_does_not_suspect_a_same_address_lower_incarnation_replacement() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(80))
+      // Short window so reset_nodes reclaims the left node quickly.
+      .with_gossip_to_the_dead_time(Duration::from_millis(5)),
+  );
+  let t0 = Instant::now();
+  // bob@7001 admitted Alive at incarnation 10; the probe snapshots that.
+  process_alive_auto(&mut e, alive("bob", 7001, 10), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let seq = 56u32;
+  let (target, target_incarnation) = {
+    let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
+  assert_eq!(
+    target_incarnation, 10,
+    "probe snapshots bob@7001 at incarnation 10"
+  );
+  e.probes.insert(
+    seq,
+    Probe::new_direct(
+      target,
+      target_incarnation,
+      t0,
+      ProbeKind::Detection,
+      Duration::from_millis(50),
+      t0 + Duration::from_millis(80),
+    ),
+  );
+
+  // bob gracefully leaves (self-marked Dead ⇒ State::Left), is reclaimed by
+  // reset_nodes once past gossip_to_the_dead_time, then a NEW bob is admitted at
+  // the SAME address 7001 with a LOWER incarnation (2). Because the id was
+  // removed first, this hits the new-member branch, which sets incarnation to 2
+  // (a same-address Alive would otherwise be rejected as `inc <= local_inc`).
+  e.process_dead(dead("bob", "bob", 10), t0 + Duration::from_millis(10));
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Left),
+    "bob self-marked Left"
+  );
+  e.reset_nodes(t0 + Duration::from_millis(20));
+  assert!(
+    e.members.get(&SmolStr::new("bob")).is_none(),
+    "reset_nodes reclaimed the left bob"
+  );
+  e.process_alive_decided(alive("bob", 7001, 2), false, t0 + Duration::from_millis(30));
+  {
+    let m = e
+      .members
+      .get(&SmolStr::new("bob"))
+      .expect("bob@7001 re-admitted");
+    assert_eq!(
+      m.state_ref().address_ref().port(),
+      7001,
+      "replacement at the SAME address"
+    );
+    assert_eq!(
+      m.state_ref().incarnation(),
+      2,
+      "replacement at incarnation 2"
+    );
+    assert_eq!(m.state_ref().state(), State::Alive, "replacement is Alive");
+  }
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The probe of bob@7001/inc10 expires at its failure deadline (t0+80ms).
+  e.handle_timeout(t0 + Duration::from_millis(90));
+  assert!(!e.probes.contains_key(&seq), "the probe terminated");
+
+  // The replacement bob@7001/inc2 must be UNTOUCHED: still Alive, still
+  // incarnation 2, no suspicion timer. A probe of bob@7001/inc10 says nothing
+  // about the fresh bob@7001/inc2.
+  let m = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .expect("bob@7001 present");
+  assert_eq!(
+    m.state_ref().state(),
+    State::Alive,
+    "a probe of bob@7001/inc10 must not suspect the reset+re-admitted bob@7001/inc2"
+  );
+  assert_eq!(
+    m.state_ref().incarnation(),
+    2,
+    "the replacement's incarnation must be unchanged"
+  );
   assert!(
     m.suspicion().is_none(),
     "no suspicion timer may be armed on the replacement"
