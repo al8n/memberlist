@@ -13,6 +13,7 @@ mod bridge;
 mod config;
 mod conn;
 pub mod crypto;
+mod deadline;
 mod demux;
 mod transport_mode;
 
@@ -30,7 +31,7 @@ use rand::{Rng, rngs::SmallRng};
 use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
-use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
+use quinn_proto::{ConnectionHandle, DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 use smallvec_wrapper::{MediumVec, SmallVec};
 
 use crate::{
@@ -43,10 +44,11 @@ use crate::{
 };
 use bridge::Bridge;
 use conn::ConnTable;
+use deadline::{DeadlineIndex, TimerKey};
 use demux::{Class, classify};
 use std::collections::VecDeque;
-// `HashSet` only types a `#[cfg(test)]` snapshot parameter.
-#[cfg(test)]
+// `HashSet` indexes connections with a deferred `ConnectionEvent` backlog (the
+// immediate-due aggregate) and types a `#[cfg(test)]` snapshot parameter.
 use std::collections::HashSet;
 
 /// Whether routing one inbound `DatagramEvent` advanced persistent connection
@@ -331,6 +333,21 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// bounded here by popping-and-dropping past either limit. Best-effort
   /// accounting only — never a membership signal.
   datagram_ingress_dropped: u64,
+  /// Incremental earliest-deadline index backing [`Self::poll_timeout`]. Holds
+  /// the next deadline for every connection, bridge, and pending dial (plus the
+  /// membership endpoint and the immediate-due anchor) so `poll_timeout` reads
+  /// the unified minimum in amortized O(1) instead of folding
+  /// O(connections + bridges + dials) per call. Every deadline-mutating site
+  /// updates the relevant [`TimerKey`]; the invariant is cross-checked in tests
+  /// against a brute-force fold of the same sources.
+  deadline_index: DeadlineIndex,
+  /// Connections that currently hold a deferred `ConnectionEvent` backlog
+  /// (queued by `service_quinn` for delivery on the connection's next
+  /// iteration — see [`conn::ConnEntry::queue_pending_event`]). Maintained
+  /// incrementally at the queue/drain sites so the immediate-due aggregate can
+  /// answer "does any connection have pending events?" in O(1) without scanning
+  /// the connection table on every `poll_timeout`.
+  conns_with_pending_events: HashSet<ConnectionHandle>,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
   /// into production builds.
@@ -496,6 +513,8 @@ impl<I, R> QuicEndpoint<I, R> {
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
+      deadline_index: DeadlineIndex::new(),
+      conns_with_pending_events: HashSet::new(),
       #[cfg(test)]
       counters: TestCounters::default(),
     }
@@ -991,6 +1010,10 @@ impl<I, R> QuicEndpoint<I, R> {
         bytes::Bytes::new(),
       );
     }
+    // `open`/`close` rearmed the connection's timers and no servicing tick
+    // follows this call, so refresh its deadline key inline.
+    let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
+    self.deadline_index.set(TimerKey::Conn(ch), deadline);
     opened
   }
   /// Build the coordinator with an explicit cross-transport encryption
@@ -1101,6 +1124,9 @@ impl<I, R> QuicEndpoint<I, R> {
           deadline,
           attempted: false,
         });
+        // Register the intent's own deadline; the unattempted immediate-due
+        // half is folded live by `refresh_immediate_due`.
+        self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
       }
       other => self.ep.requeue_event(other),
     }
@@ -1127,6 +1153,9 @@ impl<I, R> QuicEndpoint<I, R> {
             deadline,
             attempted: false,
           });
+          // Register the intent's own deadline; the unattempted immediate-due
+          // half is folded live by `refresh_immediate_due`.
+          self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
           continue;
         }
         other => return Some(other),
@@ -1138,7 +1167,24 @@ impl<I, R> QuicEndpoint<I, R> {
   /// bridge stream, every quinn connection, AND every pending-dial intent's
   /// own deadline. Returns an immediate-due wake (an `Instant` already
   /// `<= caller's now`) whenever `dial_pending` holds an entry
-  /// `service_dials` has not yet attempted.
+  /// `service_dials` has not yet attempted, or any connection carries a
+  /// deferred `ConnectionEvent` backlog.
+  ///
+  /// **Amortized O(1).** Production drivers re-poll this after every inbound
+  /// receive batch, so it must not fold an O(connections + bridges + dials)
+  /// minimum per call — corrupted or replayed traffic would otherwise force
+  /// that scan per batch. The minimum is kept incrementally in
+  /// [`Self::deadline_index`]: every deadline-mutating site registers the
+  /// affected [`TimerKey`], so this method reads the live minimum straight from
+  /// the heap without touching the connection or bridge tables. The two cheap
+  /// terms — the membership endpoint's own O(1) `poll_timeout` and the
+  /// immediate-due anchor (derived from the few pending dials plus the O(1)
+  /// pending-events flag) — are refreshed here at the single read point rather
+  /// than chased through every membership / dial / `last_now` mutator; the
+  /// O(connections + bridges) terms and each per-dial deadline are the ones
+  /// maintained at their mutation sites. The returned instant is identical to
+  /// the old O(N) fold, cross-checked in tests against
+  /// [`Self::recompute_earliest_bruteforce`] after every operation.
   ///
   /// The pending-dial deadline term is correctness, not optimisation: when
   /// a dial intent is requeued onto `dial_pending` (the connection is still
@@ -1168,13 +1214,67 @@ impl<I, R> QuicEndpoint<I, R> {
   /// handshake / credit), subsequent wake-ups are driven by the
   /// connection's own `poll_timeout` and by `deadline`; re-firing an
   /// attempted entry every tick would busy-loop a still-handshaking
-  /// connection.
+  /// connection. The deferred-`ConnectionEvent` half of the immediate-due
+  /// term surfaces the one-tick-deferred CID / reset-token feedback
+  /// `service_quinn` queues (mirroring quinn-proto's reference async driver),
+  /// so a strict-poll driver re-enters `service_quinn` to drain it rather than
+  /// sleeping until an unrelated idle / loss / probe timer fires.
   ///
   /// `last_now` is `None` only before the very first `handle_*` /
   /// `start_*` call: in that window the immediate-due wake degrades to the
   /// intent's `deadline` term, which is still strictly better than no
   /// wake at all (the dial fails at the deadline rather than orphaning).
   pub fn poll_timeout(&mut self) -> Option<Instant> {
+    // Refresh the two cheap terms at the single read point (robust against
+    // every membership / dial / `last_now` mutator), then read the live
+    // minimum from the incrementally-maintained index.
+    self
+      .deadline_index
+      .set(TimerKey::Endpoint, self.ep.poll_timeout());
+    self.refresh_immediate_due();
+    self.deadline_index.earliest()
+  }
+
+  /// Recompute the immediate-due anchor key from small state: `Some(last_now)`
+  /// when a freshly-sieved dial is still unattempted OR any connection holds a
+  /// deferred `ConnectionEvent` backlog, else absent. Scans only the few
+  /// pending dials and reads the O(1) `conns_with_pending_events` flag — never
+  /// the connection table — so it stays cheap on the `poll_timeout` hot path.
+  fn refresh_immediate_due(&mut self) {
+    let has_unattempted = self.dial_pending.iter().any(|d| !d.attempted);
+    let has_pending_conn_events = !self.conns_with_pending_events.is_empty();
+    let anchor = if has_unattempted || has_pending_conn_events {
+      // `last_now` is `None` only before the first `handle_*` / `start_*`; the
+      // `.flatten()` degrades that corner to "no anchor added", matching the
+      // old fold's `if let Some(anchor) = self.last_now` guard.
+      self.last_now
+    } else {
+      None
+    };
+    self.deadline_index.set(TimerKey::ImmediateDue, anchor);
+  }
+
+  /// Register connection `ch`'s current transport deadline in the index (or
+  /// clear the key when the connection is gone). Called at connection-mutating
+  /// sites that are NOT followed by a servicing tick's `collect_transmits`
+  /// (which is the per-tick chokepoint that refreshes every surviving
+  /// connection).
+  fn index_conn(&mut self, ch: ConnectionHandle) {
+    let deadline = self
+      .conns
+      .get_mut(ch)
+      .and_then(|e| e.conn_mut().poll_timeout())
+      .map(crate::Instant::from_std);
+    self.deadline_index.set(TimerKey::Conn(ch), deadline);
+  }
+
+  /// Brute-force earliest deadline — a byte-for-byte fold of the same sources
+  /// the incremental [`Self::deadline_index`] tracks, kept as the invariant
+  /// oracle. A test asserts [`Self::poll_timeout`] equals this after every
+  /// public operation, so a missed `set` at any deadline-mutating site is
+  /// caught as a divergence rather than shipped as a silent stale index.
+  #[cfg(test)]
+  fn recompute_earliest_bruteforce(&mut self) -> Option<Instant> {
     let mut best = self.ep.poll_timeout();
     for b in self.bridges.values() {
       if let Some(t) = b.poll_timeout() {
@@ -1200,23 +1300,6 @@ impl<I, R> QuicEndpoint<I, R> {
         has_unattempted = true;
       }
     }
-    // Immediate-due wake on deferred-event backlog. `service_quinn`
-    // queues `ConnectionEvent`s returned by `Endpoint::handle_event`
-    // (e.g. `NewIdentifiers`, the response to `NeedIdentifiers` at
-    // handshake completion) on the OWNING `ConnEntry.pending_events`
-    // for delivery on its NEXT iteration — the one-tick deferral
-    // mirrors quinn-proto's reference async driver and keeps
-    // NEW_CONNECTION_ID frames out of the same-tick stream-data
-    // packet build. Without surfacing the backlog through
-    // `poll_timeout`, a strict-poll driver that sleeps until the
-    // next deadline would not re-enter `service_quinn` until an
-    // unrelated idle/loss/probe timer fires — stalling CID /
-    // reset-token lifecycle work for arbitrarily long. The same
-    // immediate-due idiom the unattempted-dial branch uses: anchor
-    // on `last_now` (no `Instant::now()` inside this Sans-I/O
-    // method), degrading gracefully to "no wake added" on the
-    // first-call corner case before any `handle_*` / `start_*` has
-    // set the anchor.
     if has_unattempted || has_pending_conn_events {
       if let Some(anchor) = self.last_now {
         best = Some(best.map_or(anchor, |b| b.min(anchor)));
@@ -1287,6 +1370,11 @@ impl<I, R> QuicEndpoint<I, R> {
             e.conn_mut().handle_event(cev);
             let advanced = frame_rx_total(&e.conn_ref().stats().frame_rx) != frames_before
               || (e.conn_ref().is_closed() && !closed_before);
+            // `handle_event` may have rearmed this connection's transport timer.
+            // On the `Inert` path NO servicing tick follows to refresh the
+            // deadline index via `collect_transmits`, so refresh it inline here.
+            let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
+            self.deadline_index.set(TimerKey::Conn(ch), deadline);
             if advanced {
               DatagramProgress::Advanced
             } else {
@@ -1347,6 +1435,11 @@ impl<I, R> QuicEndpoint<I, R> {
         ) {
           Ok((ch, conn)) => {
             self.conns.insert_accepted(ch, conn, from);
+            // Register the freshly-accepted connection's deadline. The servicing
+            // tick this `Advanced` triggers will refresh it again via
+            // `collect_transmits`; indexing here keeps the key present the
+            // moment the connection enters the table.
+            self.index_conn(ch);
             // A new connection was committed to the table — service it.
             DatagramProgress::Advanced
           }
@@ -1534,7 +1627,12 @@ impl<I, R> QuicEndpoint<I, R> {
   /// connection occupying the freed slab slot.
   fn finalize_tick(&mut self, now: Instant) {
     for ch in self.conns.iter_handles() {
-      self.conns.reap_if_drained(&mut self.quinn, ch);
+      if self.conns.reap_if_drained(&mut self.quinn, ch) {
+        // The connection left the table: drop its deadline key and any
+        // pending-events membership so neither lingers as a stale index term.
+        self.deadline_index.set(TimerKey::Conn(ch), None);
+        self.conns_with_pending_events.remove(&ch);
+      }
     }
     self.collect_transmits(now);
   }
@@ -1597,6 +1695,13 @@ impl<I, R> QuicEndpoint<I, R> {
           .push_back((tr.destination, Bytes::copy_from_slice(&buf[..tr.size])));
         buf.clear();
       }
+      // Refresh this connection's deadline term now that its transmit queue is
+      // drained. `collect_transmits` is the last per-tick touch of every
+      // surviving connection, so this single loop keeps every live `Conn` key
+      // current — connections mutated earlier in the tick (`service_quinn`,
+      // `service_dials`) need no separate `set`.
+      let deadline = e.conn_mut().poll_timeout().map(crate::Instant::from_std);
+      self.deadline_index.set(TimerKey::Conn(ch), deadline);
     }
   }
 
@@ -1663,37 +1768,46 @@ impl<I, R> QuicEndpoint<I, R> {
       // A dial that cannot even be initiated (ConnectError) — best effort.
       Err(_) => return DatagramSendStatus::NotReady,
     };
-    let Some(e) = self.conns.get_mut(ch) else {
-      return DatagramSendStatus::NotReady;
-    };
-    let conn = e.conn_mut();
-    match conn.datagrams().max_size() {
-      // Still handshaking, peer doesn't support datagrams, or disabled locally.
-      // Best-effort: the driver falls back to UDP; a later datagram lands once
-      // the connection is Established.
-      None => return DatagramSendStatus::NotReady,
-      Some(max) if bytes.len() > max => return DatagramSendStatus::TooLarge,
-      Some(_) => {}
-    }
-    // drop = false: under send-buffer pressure quinn returns Blocked and leaves
-    // the already-queued datagrams intact, rather than evicting the OLDEST to
-    // make room. The unreliable path carries probe Pings and Acks as well as
-    // gossip, so evicting the oldest could silently drop an in-flight probe and
-    // cause a spurious failure-detector timeout; refusing the NEW datagram (the
-    // driver then falls back to plain UDP) preserves the earlier critical
-    // datagrams and loses nothing.
-    match conn.datagrams().send(bytes, false) {
-      Ok(()) => DatagramSendStatus::Queued,
-      // Send buffer full: the driver falls back to plain UDP for this payload.
-      // Not a drop (the payload still goes out over UDP) and not counted.
-      Err(quinn_proto::SendDatagramError::Blocked(_)) => DatagramSendStatus::NotReady,
-      // UnsupportedByPeer / Disabled / TooLarge are excluded by the max_size
-      // pre-check above; any residual error is unexpected — count and fall back.
-      Err(_) => {
-        self.datagram_dropped = self.datagram_dropped.saturating_add(1);
-        DatagramSendStatus::NotReady
+    // Compute the outcome, then unconditionally refresh the connection's
+    // deadline key below: `get_or_dial` may have created a fresh connection and
+    // `datagrams().send` rearms its transmit timer, and no servicing tick
+    // follows this call to refresh it via `collect_transmits`.
+    let status = match self.conns.get_mut(ch) {
+      None => DatagramSendStatus::NotReady,
+      Some(e) => {
+        let conn = e.conn_mut();
+        match conn.datagrams().max_size() {
+          // Still handshaking, peer doesn't support datagrams, or disabled
+          // locally. Best-effort: the driver falls back to UDP; a later
+          // datagram lands once the connection is Established.
+          None => DatagramSendStatus::NotReady,
+          Some(max) if bytes.len() > max => DatagramSendStatus::TooLarge,
+          // drop = false: under send-buffer pressure quinn returns Blocked and
+          // leaves the already-queued datagrams intact, rather than evicting the
+          // OLDEST to make room. The unreliable path carries probe Pings and
+          // Acks as well as gossip, so evicting the oldest could silently drop
+          // an in-flight probe and cause a spurious failure-detector timeout;
+          // refusing the NEW datagram (the driver then falls back to plain UDP)
+          // preserves the earlier critical datagrams and loses nothing.
+          Some(_) => match conn.datagrams().send(bytes, false) {
+            Ok(()) => DatagramSendStatus::Queued,
+            // Send buffer full: the driver falls back to plain UDP for this
+            // payload. Not a drop (the payload still goes out over UDP) and not
+            // counted.
+            Err(quinn_proto::SendDatagramError::Blocked(_)) => DatagramSendStatus::NotReady,
+            // UnsupportedByPeer / Disabled / TooLarge are excluded by the
+            // max_size pre-check above; any residual error is unexpected —
+            // count and fall back.
+            Err(_) => {
+              self.datagram_dropped = self.datagram_dropped.saturating_add(1);
+              DatagramSendStatus::NotReady
+            }
+          },
+        }
       }
-    }
+    };
+    self.index_conn(ch);
+    status
   }
 }
 
@@ -1867,6 +1981,10 @@ where
         deadline,
         attempted: _,
       } = entry;
+      // `mem::take` removed this entry from `dial_pending`; drop its deadline
+      // key. A branch that requeues re-registers it below, so after the loop
+      // the `Dial` keys match the surviving intents exactly.
+      self.deadline_index.set(TimerKey::Dial(id), None);
       // Retire the intent without opening anything on the pooled
       // connection if its own deadline has already elapsed.
       //
@@ -2044,6 +2162,10 @@ where
                     deadline,
                     attempted: true,
                   });
+                  // Requeued (handshake-blocked or credit-exhausted): re-register
+                  // its deadline. `attempted = true`, so the immediate-due half no
+                  // longer fires for it.
+                  self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
                 } else {
                   self.retire_failed_dial(
                     id,
@@ -2152,6 +2274,7 @@ where
           let outcome = Self::outcome_for_terminal(&br);
           // Reap AFTER drain: dropping the bridge frees its slot.
           drop(br);
+          self.deadline_index.set(TimerKey::Bridge(*id), None);
           self.emit_exchange_completed(*id, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -2171,9 +2294,16 @@ where
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            self.deadline_index.set(TimerKey::Bridge(*id), None);
             self.emit_exchange_completed(*id, outcome);
           } else {
+            // Surviving bridge: refresh its deadline key before it moves back
+            // into the table. This pump is the per-tick chokepoint for bridges —
+            // it runs after every mint (`service_quinn` / `service_dials`), so a
+            // freshly-minted surviving bridge is registered here.
+            let deadline = br.poll_timeout();
             self.bridges.insert(*id, br);
+            self.deadline_index.set(TimerKey::Bridge(*id), deadline);
           }
         }
       }
@@ -2214,6 +2344,7 @@ where
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
           let outcome = Self::outcome_for_terminal(&br);
           drop(br);
+          self.deadline_index.set(TimerKey::Bridge(*id), None);
           self.emit_exchange_completed(*id, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -2228,9 +2359,12 @@ where
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            self.deadline_index.set(TimerKey::Bridge(*id), None);
             self.emit_exchange_completed(*id, outcome);
           } else {
+            let deadline = br.poll_timeout();
             self.bridges.insert(*id, br);
+            self.deadline_index.set(TimerKey::Bridge(*id), deadline);
           }
         }
       }
@@ -2770,6 +2904,11 @@ where
           e.queue_pending_event(conn_ev);
         }
       }
+      // Snapshot this connection's deferred-backlog state after the drain-and-
+      // requeue above (the only site pending events change). Applied to the
+      // O(1) `conns_with_pending_events` index at the end of the iteration so
+      // `poll_timeout`'s immediate-due term never scans the connection table.
+      let has_pending_events_after = e.has_pending_events();
       // Drain inbound application datagrams into the same mem_ingress the plain-
       // UDP gossip path fills, tagged with this connection's peer. Mode-
       // independent: a Udp-mode endpoint does not negotiate datagrams, so this is
@@ -2859,6 +2998,9 @@ where
             // `pump_bridges` reap.
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            // This bridge was reaped here rather than by a `pump_bridges` pass,
+            // so clear its deadline key at this site.
+            self.deadline_index.set(TimerKey::Bridge(id), None);
             self.emit_exchange_completed(id, outcome);
           }
         }
@@ -2870,6 +3012,14 @@ where
       // this pass leaves the half-open index in the same pass — a no-op for a
       // still-handshaking, outbound, or already-released connection.
       self.conns.reconcile_pending_inbound(ch);
+      // Apply the deferred-backlog snapshot to the immediate-due index. A
+      // connection reaped later this tick (`finalize_tick`) is removed from the
+      // set there, so a stale membership cannot linger.
+      if has_pending_events_after {
+        self.conns_with_pending_events.insert(ch);
+      } else {
+        self.conns_with_pending_events.remove(&ch);
+      }
     }
   }
 }

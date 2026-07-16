@@ -4854,3 +4854,194 @@ fn corrupted_or_replayed_packet_at_live_cid_skips_servicing() {
     "the same packet delivered intact advances the connection and MUST service"
   );
 }
+
+/// Assert the incremental [`super::DeadlineIndex`] behind
+/// [`QuicEndpoint::poll_timeout`] returns exactly what a brute-force fold of the
+/// same sources ([`QuicEndpoint::recompute_earliest_bruteforce`]) would — the
+/// guard that catches a missed `set` at any deadline-mutating site.
+fn assert_deadline_index_matches(ep: &mut QuicEndpoint<SmolStr>, label: &str) {
+  let want = ep.recompute_earliest_bruteforce();
+  let got = ep.poll_timeout();
+  assert_eq!(
+    got, want,
+    "deadline index diverged from the brute-force fold after: {label}"
+  );
+}
+
+/// The whole risk of the O(1) `poll_timeout` redesign is a missed `set` at some
+/// deadline-mutating site, which would leave the index stale. This drives a full
+/// coordinator lifecycle — public push/pull dial, a real A<->B handshake, an
+/// inbound stream exchange, connection-touching side channels
+/// (`queue_unreliable_datagram`, `try_open_uni_stream_to`), membership
+/// pass-throughs, leave, and idle-timeout drained-reap — and after EVERY public
+/// operation asserts `poll_timeout()` equals the brute-force fold. A stale key
+/// (missed insert, missed clear-on-reap, or wrong immediate-due aggregate) is
+/// caught as a divergence at the offending step.
+#[test]
+fn deadline_index_matches_bruteforce_across_operations() {
+  use crate::{
+    Node,
+    typed::{Alive, Meta, Suspect},
+  };
+
+  let a_addr: SocketAddr = "127.0.0.1:7860".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7861".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7862".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  assert_deadline_index_matches(&mut a, "construction (a)");
+  assert_deadline_index_matches(&mut b, "construction (b)");
+
+  // Public in-band push/pull: sieves a DialRequested into `dial_pending`,
+  // attempts the dial, mints an outbound bridge, and flushes — exercising the
+  // Dial, Conn, and Bridge keys plus the immediate-due term in one call.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert_deadline_index_matches(&mut a, "a.start_push_pull");
+
+  // Ferry the handshake + push/pull to completion. Assert after every
+  // handle_udp (route_datagram_event: accept / Inert-conn-mutation / Advanced)
+  // and every handle_timeout (full tick: pump, service_quinn mint + conn-lost
+  // reap, service_dials, finalize reap, collect_transmits).
+  for round in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        assert_deadline_index_matches(&mut b, "b.handle_udp");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        assert_deadline_index_matches(&mut a, "a.handle_udp");
+      }
+    }
+    // Mid-handshake, exercise the connection-touching public surfaces that run
+    // no servicing tick (must self-index their Conn key).
+    if round == 5 {
+      let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"gossip"), now);
+      assert_deadline_index_matches(&mut a, "a.queue_unreliable_datagram");
+      let _ = a.try_open_uni_stream_to(b_addr, now);
+      assert_deadline_index_matches(&mut a, "a.try_open_uni_stream_to");
+    }
+    a.handle_timeout(now);
+    assert_deadline_index_matches(&mut a, "a.handle_timeout");
+    b.handle_timeout(now);
+    assert_deadline_index_matches(&mut b, "b.handle_timeout");
+  }
+
+  // Membership pass-throughs that mutate the inner endpoint's timers (the
+  // Endpoint term is refreshed live at the read point).
+  let _ = a.start_probe(now);
+  assert_deadline_index_matches(&mut a, "a.start_probe");
+  let alive = Alive::new(1, Node::new(SmolStr::new("c"), c_addr)).with_meta(Meta::empty());
+  a.handle_alive(c_addr, alive, now);
+  assert_deadline_index_matches(&mut a, "a.handle_alive");
+  let suspect = Suspect::new(1, SmolStr::new("c"), SmolStr::new("a"));
+  a.handle_suspect(c_addr, suspect, now);
+  assert_deadline_index_matches(&mut a, "a.handle_suspect");
+  let _ = a.ping(Node::new(SmolStr::new("c"), c_addr), now);
+  assert_deadline_index_matches(&mut a, "a.ping");
+  let _ = a.send_user_packets(b_addr, &[Bytes::from_static(b"x")]);
+  assert_deadline_index_matches(&mut a, "a.send_user_packets");
+  // Drain the unreliable transmit surface (it ticks the inner endpoint's
+  // leave-completion boundary).
+  while a.poll_memberlist_transmit().is_some() {
+    assert_deadline_index_matches(&mut a, "a.poll_memberlist_transmit");
+  }
+
+  // Leave, then advance far past the QUIC idle timeout so the pooled connection
+  // reaches drained-reap and its Conn key is cleared — asserting throughout.
+  let _ = a.leave(now);
+  assert_deadline_index_matches(&mut a, "a.leave");
+  let mut later = now;
+  for _ in 0..60 {
+    later += Duration::from_secs(1);
+    a.handle_timeout(later);
+    assert_deadline_index_matches(&mut a, "a.handle_timeout(post-leave)");
+    b.handle_timeout(later);
+    assert_deadline_index_matches(&mut b, "b.handle_timeout(post-leave)");
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, later);
+        assert_deadline_index_matches(&mut b, "b.handle_udp(teardown)");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, later);
+        assert_deadline_index_matches(&mut a, "a.handle_udp(teardown)");
+      }
+    }
+  }
+}
+
+/// `poll_timeout` must examine O(1) heap entries regardless of how many
+/// connections the table holds — the property that denies an attacker an O(N)
+/// re-poll per inbound receive batch. Populates a server with several real
+/// pooled connections, then asserts a single `poll_timeout` examines a small
+/// constant number of index entries (`>= 1`, so it truly consulted the index)
+/// that does not scale with the connection count.
+///
+/// Mutation-verify: reverting `QuicEndpoint::poll_timeout` to the old O(N) fold
+/// never calls `DeadlineIndex::earliest`, so `entities_scanned` stays `0` and
+/// the `>= 1` assertion fails.
+#[test]
+fn poll_timeout_scans_o1_regardless_of_connection_count() {
+  let now = Instant::now();
+  let s_addr: SocketAddr = "127.0.0.1:7870".parse().unwrap();
+  let mut s = make_endpoint("s", s_addr, now);
+
+  let n = 8usize;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..n {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7871 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(s_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+
+  // Interleaved ferry so the server accepts and pools every client connection.
+  for _ in 0..600 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == s_addr {
+          s.handle_udp(*caddr, &bytes, now);
+        }
+      }
+    }
+    while let Some((to, bytes)) = s.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(s_addr, &bytes, now);
+      }
+    }
+    for (_, c) in clients.iter_mut() {
+      c.handle_timeout(now);
+    }
+    s.handle_timeout(now);
+  }
+
+  let conn_count: usize = clients.iter().map(|(a, _)| s.live_connections_to(*a)).sum();
+  assert!(
+    conn_count >= 6,
+    "expected the server to pool most client connections; got {conn_count}"
+  );
+
+  // Settle the index (discard any tombstones), then measure one poll in
+  // isolation.
+  let _ = s.poll_timeout();
+  s.deadline_index.reset_entities_scanned();
+  let _ = s.poll_timeout();
+  let scanned = s.deadline_index.entities_scanned();
+  assert!(
+    scanned >= 1,
+    "poll_timeout must consult the deadline index — reverting it to the O(N) \
+     fold never calls earliest(), leaving this 0"
+  );
+  assert!(
+    scanned <= 4,
+    "poll_timeout must examine O(1) heap entries, not scale with the \
+     {conn_count} pooled connections; examined {scanned}"
+  );
+}
