@@ -1785,9 +1785,9 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   let mut a = make_endpoint("a", a_addr, now);
 
   // `start_user_message` registers the intent, dials in-band, and (the
-  // connection is still handshaking) requeues the intent onto
-  // `dial_pending` with deadline `now + stream_timeout`. The returned
-  // `StreamId` is the correlation handle the QUIC driver coerces to its
+  // connection is still handshaking) re-parks the intent into
+  // `dial_parked[unreachable]` with deadline `now + stream_timeout`. The
+  // returned `StreamId` is the correlation handle the QUIC driver coerces to its
   // parked `ExchangeId`.
   let id = a
     .start_user_message(unreachable, Bytes::from_static(b"hello"), now)
@@ -1795,15 +1795,19 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   let expected_eid = ExchangeId::from(id);
 
   assert_eq!(
-    a.dial_pending.len(),
+    a.dial_parked
+      .get(&unreachable)
+      .map(|b| b.len())
+      .unwrap_or(0),
     1,
-    "test precondition: the in-band dial must requeue the still-handshaking \
-       UserMessage intent onto `dial_pending`"
+    "test precondition: the in-band dial must re-park the still-handshaking \
+       UserMessage intent into `dial_parked`"
   );
   let entry = a
-    .dial_pending
-    .front_mut()
-    .expect("dial_pending non-empty per the preceding assertion");
+    .dial_parked
+    .get_mut(&unreachable)
+    .and_then(|b| b.first_mut())
+    .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
     "the requeued entry MUST carry the registered intent's id"
@@ -1882,22 +1886,26 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   let mut a = make_endpoint("a", a_addr, now);
 
   // `start_push_pull` on the coordinator registers the intent, dials
-  // in-band, and (the connection is still handshaking) requeues the
-  // intent onto `dial_pending`. The returned `StreamId` is the
+  // in-band, and (the connection is still handshaking) re-parks the
+  // intent into `dial_parked[unreachable]`. The returned `StreamId` is the
   // correlation handle the QUIC driver coerces to its parked
   // `ExchangeId`.
   let id = a.start_push_pull(unreachable, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
   assert_eq!(
-    a.dial_pending.len(),
+    a.dial_parked
+      .get(&unreachable)
+      .map(|b| b.len())
+      .unwrap_or(0),
     1,
-    "test precondition: the in-band dial must requeue the still-handshaking \
-       PushPull intent onto `dial_pending`"
+    "test precondition: the in-band dial must re-park the still-handshaking \
+       PushPull intent into `dial_parked`"
   );
   let entry = a
-    .dial_pending
-    .front_mut()
-    .expect("dial_pending non-empty per the preceding assertion");
+    .dial_parked
+    .get_mut(&unreachable)
+    .and_then(|b| b.first_mut())
+    .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
     "the requeued entry MUST carry the registered intent's id"
@@ -3489,10 +3497,14 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
   let mut a = make_endpoint("self", self_addr, now);
 
   // Register a push/pull intent + dial in-band; the still-handshaking
-  // connection requeues the intent onto `dial_pending`.
+  // connection re-parks the intent into `dial_parked[peer]`.
   let id = a.start_push_pull(peer, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
-  assert_eq!(a.dial_pending.len(), 1, "precondition: intent requeued");
+  assert_eq!(
+    a.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+    1,
+    "precondition: intent re-parked"
+  );
 
   // Drive the pooled connection to Closed WITHOUT it ever reaching
   // Established (the never-Established closed-cache signature that
@@ -3509,7 +3521,11 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
 
   // Keep the standing entry's deadline in the future so the closed-arm (not
   // the deadline-elapsed arm) is the one that fires.
-  a.dial_pending.front_mut().unwrap().deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .get_mut(&peer)
+    .and_then(|b| b.first_mut())
+    .unwrap()
+    .deadline = now + Duration::from_secs(30);
 
   a.service_dials(now);
 
@@ -3530,8 +3546,8 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
   );
   assert_eq!(payload.outcome(), ExchangeStatus::Failed);
   assert!(
-    a.dial_pending.is_empty(),
-    "the retired intent must not be requeued onto dial_pending"
+    a.dial_pending.is_empty() && a.dial_parked.is_empty(),
+    "the retired intent must not be requeued onto dial_pending or re-parked"
   );
 }
 
@@ -5428,119 +5444,100 @@ fn bridges_by_conn_index_matches_bruteforce() {
   );
 }
 
-/// A dial `service_dials` mints on a DIFFERENT connection than the one whose
-/// establishment triggered it must flush its first request bytes onto the wire in
-/// the SAME `handle_udp` pass — not stall until the next global tick.
+/// A dial parked while its TARGET PEER's connection was handshaking must open its
+/// bridge AND flush the first request bytes to that peer within the single
+/// `handle_udp` that establishes the connection — not stall until the next global
+/// tick.
 ///
-/// N holds an established pooled connection to B (no active exchange) and a dial
-/// to B parked in its inner endpoint queue (queued via the raw endpoint so it is
-/// NOT serviced yet). N is meanwhile completing a server-side handshake with A.
-/// The inbound datagram that establishes N's connection to A runs
-/// `service_connection`'s establishment branch → `service_dials`, which opens the
-/// parked dial's bridge on N's connection to B (a connection OTHER than A's). The
-/// bridge's request datagram to B must appear in N's outbound queue within that
-/// same `handle_udp` — proving the per-connection path pumps AND collects the
-/// exact set `service_dials` minted, wherever it landed.
+/// N dials cold B: the in-band `service_dials` creates a handshaking connection
+/// and re-parks the intent on `dial_parked[b_addr]` (no bridge yet). Ferrying the
+/// handshake WITHOUT `n.handle_timeout`, the inbound datagram that drives N's
+/// connection to B to Established runs `service_connection`'s scoped
+/// establishment branch → `service_peer_bucket(b_addr)`, which opens the parked
+/// dial's bridge on that same connection and pumps its first request bytes onto
+/// the wire in that same pass.
 ///
-/// Mutation-verify: drop step (c)'s minted-bridge enqueue + ready-queue drain, so
-/// the cross-connection bridge `service_dials` minted is never pumped or collected
-/// this pass — no datagram to B appears until a later `handle_timeout` and
-/// `flushed_to_b` stays false.
+/// Mutation-verify: drop step (c)'s bucket service (or its minted-bridge enqueue
+/// and ready-queue drain), so the parked dial is never opened on the establishing
+/// pass — no bridge mints until a later `handle_timeout` and `minted_same_pass`
+/// stays false.
 #[test]
-fn cross_connection_dial_mint_flushes_first_bytes_same_pass() {
+fn parked_dial_mints_and_flushes_on_its_peer_establishment() {
   let n_addr: SocketAddr = "127.0.0.1:7920".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7921".parse().unwrap();
-  let a_addr: SocketAddr = "127.0.0.1:7922".parse().unwrap();
   let now = Instant::now();
   let mut n = make_endpoint("n", n_addr, now);
   let mut b = make_endpoint("b", b_addr, now);
-  let mut a = make_endpoint("a", a_addr, now);
 
-  // Establish N -> B (N dials B) and let the push/pull settle so N holds an
-  // established pooled connection to B with no live bridge.
+  // N dials cold B: the in-band `service_dials` creates a handshaking connection
+  // and re-parks the intent on B's bucket. No bridge is minted while B handshakes.
   let _ = n.start_push_pull(b_addr, PushPullKind::Join, now);
-  for _ in 0..300 {
-    let mut moved = false;
-    while let Some((to, bytes)) = n.poll_transmit() {
-      if to == b_addr {
-        b.handle_udp(n_addr, &bytes, now);
-        moved = true;
-      }
-    }
-    while let Some((to, bytes)) = b.poll_transmit() {
-      if to == n_addr {
-        n.handle_udp(b_addr, &bytes, now);
-        moved = true;
-      }
-    }
-    n.handle_timeout(now);
-    b.handle_timeout(now);
-    if n.live_connections_to(b_addr) >= 1 && n.live_bridge_count() == 0 && !moved {
-      break;
-    }
-  }
   assert!(
-    n.live_connections_to(b_addr) >= 1,
-    "test precondition: N must hold an established pooled connection to B"
+    n.dial_parked.contains_key(&b_addr),
+    "test precondition: the dial to still-handshaking B must re-park on B's bucket"
   );
   assert_eq!(
     n.live_bridge_count(),
     0,
-    "test precondition: the N->B push/pull must have settled (no live bridge)"
+    "test precondition: no bridge is minted while B is still handshaking"
   );
-  // Quiesce both sides so the only later datagram to B can be the parked dial's.
-  while n.poll_transmit().is_some() {}
-  while b.poll_transmit().is_some() {}
 
-  // Park a dial to B in N's INNER endpoint queue via the raw endpoint, so it is
-  // NOT serviced now — it waits for the next `service_dials`, which the A
-  // handshake completion will trigger.
-  let _ = n
-    .endpoint_mut()
-    .start_push_pull(b_addr, PushPullKind::Refresh, now);
-
-  // Drive A's server-side handshake to N one inbound datagram at a time, WITHOUT
-  // calling `n.handle_timeout` (a global tick would drain the parked B dial
-  // early). After each `n.handle_udp`, look for a datagram to B in N's outbound
-  // queue: it can only appear once N's connection to A establishes and step (c)
-  // opens + flushes the parked B dial's bridge in that same pass.
-  let _ = a.start_push_pull(n_addr, PushPullKind::Join, now);
-  let mut flushed_to_b = false;
+  // Ferry the handshake one datagram at a time WITHOUT `n.handle_timeout` (a
+  // global tick would service the parked dial through the full drain, defeating
+  // the same-pass-as-establishment claim). The `n.handle_udp` that establishes
+  // N's connection to B must service `dial_parked[b_addr]`, mint its bridge, and
+  // flush the first request bytes to B in that same pass.
+  let mut minted_same_pass = false;
   'outer: for _ in 0..400 {
-    let mut a_out: Vec<Vec<u8>> = Vec::new();
-    while let Some((to, bytes)) = a.poll_transmit() {
-      if to == n_addr {
-        a_out.push(bytes.to_vec());
+    // N -> B (Initial, then handshake continuation).
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        n_out.push(bytes.to_vec());
       }
     }
-    for dg in a_out {
-      n.handle_udp(a_addr, &dg, now);
-      let mut n_out: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
-      while let Some((to, bytes)) = n.poll_transmit() {
-        n_out.push((to, bytes.to_vec()));
+    for dg in n_out {
+      b.handle_udp(n_addr, &dg, now);
+    }
+    // B -> N: the datagram that drives N's connection to Established mints the
+    // parked dial's bridge in that same `handle_udp` pass.
+    let mut b_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        b_out.push(bytes.to_vec());
       }
-      if n_out.iter().any(|(to, _)| *to == b_addr) {
-        flushed_to_b = true;
+    }
+    for dg in b_out {
+      let before = n.live_bridge_count();
+      n.handle_udp(b_addr, &dg, now);
+      if before == 0 && n.live_bridge_count() >= 1 {
+        minted_same_pass = true;
+        // The freshly-minted bridge's first request bytes must be on N's outbound
+        // queue to B this same pass — not stalled to a future tick.
+        let mut sent_to_b = false;
+        while let Some((to, _)) = n.poll_transmit() {
+          if to == b_addr {
+            sent_to_b = true;
+          }
+        }
+        assert!(
+          sent_to_b,
+          "the minted bridge's first request bytes must flush to B within the \
+             establishing pass"
+        );
         break 'outer;
       }
-      // Not yet established: feed N's handshake responses back to A and continue.
-      for (to, bytes) in n_out {
-        if to == a_addr {
-          a.handle_udp(n_addr, &bytes, now);
-        }
-      }
     }
-    // A may advance its own timers; N must NOT (that would service the parked
-    // dial through the global tick, defeating the same-pass claim).
-    a.handle_timeout(now);
+    // Advance only B's timers; N must NOT tick (that would service the parked
+    // dial through the global full drain, defeating the same-pass claim).
+    b.handle_timeout(now);
   }
 
   assert!(
-    flushed_to_b,
-    "the dial parked on N's connection to B must open AND flush its first request \
-       bytes to B within the single handle_udp that established N's connection to \
-       A — a bridge minted on a connection other than the just-established one \
-       must not stall until the next global tick"
+    minted_same_pass,
+    "the dial parked on N's connection to B must open its bridge within the single \
+       handle_udp that established that connection — a scoped establishment must \
+       not defer the parked dial to the next global tick"
   );
 }
 
@@ -6216,44 +6213,127 @@ fn outbound_dials_cannot_exceed_global_connection_cap() {
 }
 
 /// A cold dial (to a peer with NO established connection) that `service_dials`
-/// attempts because a DIFFERENT connection just established must flush its
-/// Initial AND register its deadline key in that same `handle_udp` pass — even
-/// though it mints no bridge (its `open(Bi)` returns `None`, still handshaking).
+/// attempts must flush its Initial AND register its deadline key in the same call
+/// — even though it mints no bridge (its `open(Bi)` returns `None`, still
+/// handshaking) and merely re-parks on the peer's bucket. The touched-but-
+/// bridgeless connection is the case the full `service_dials` (run in-band by
+/// every `start_*` wrapper) must still flush and index the same pass.
 ///
-/// N holds a dial to a cold peer C parked in its inner endpoint queue and is
-/// meanwhile completing a server-side handshake with A. The inbound datagram that
-/// establishes N's connection to A runs `service_connection`'s establishment
-/// branch → `service_dials`, which cold-dials C (a TOUCHED but bridge-less
-/// connection). C's Initial must appear in N's outbound queue that same pass.
-///
-/// Mutation-verify: revert step (c) to collect only minted-bridge connections —
-/// C mints no bridge, so its Initial is never flushed this pass and
-/// `flushed_to_c` stays false.
+/// Mutation-verify: revert the touched-conns flush to collect only minted-bridge
+/// connections — C mints no bridge, so its Initial is never flushed within the
+/// `start_push_pull` call and `flushed_to_c` stays false.
 #[test]
-fn cold_dial_touched_by_establishment_flushes_initial_same_pass() {
+fn cold_dial_touched_flushes_initial_same_pass() {
   let n_addr: SocketAddr = "127.0.0.1:7710".parse().unwrap();
   let c_addr: SocketAddr = "127.0.0.1:7711".parse().unwrap();
-  let a_addr: SocketAddr = "127.0.0.1:7712".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  // C is never instantiated — N only ever cold-dials its address.
+
+  // Dial the COLD peer C in-band: `start_push_pull` runs the full `service_dials`
+  // and `flush_outbound`. C has no established connection, so `get_or_dial`
+  // creates a fresh handshaking connection whose `open(Bi)` returns `None` — no bridge
+  // minted, the intent re-parks on C's bucket. That connection is nonetheless
+  // TOUCHED: its Initial and deadline key must emerge within this same call.
+  let _ = n.start_push_pull(c_addr, PushPullKind::Join, now);
+
+  let mut flushed_to_c = false;
+  while let Some((to, _)) = n.poll_transmit() {
+    if to == c_addr {
+      flushed_to_c = true;
+    }
+  }
+  assert!(
+    flushed_to_c,
+    "the cold dial to C (no bridge minted) must flush its Initial to C within the \
+       single start_push_pull call — a touched-but-bridgeless connection must not \
+       stall until the next global tick"
+  );
+
+  // The still-handshaking intent re-parked on C's bucket, and its connection's
+  // deadline key was registered THIS call — a cold-dial connection is indexed
+  // only by the touched-conns flush, not by `get_or_dial`.
+  assert!(
+    n.dial_parked.contains_key(&c_addr),
+    "the still-handshaking cold dial must re-park on C's bucket"
+  );
+  assert_eq!(n.live_bridge_count(), 0, "a cold dial mints no bridge");
+  let ch_c = n
+    .conns
+    .handle_for(&c_addr)
+    .expect("the cold dial created N's connection to C");
+  assert!(
+    n.deadline_index
+      .contains_key(super::deadline::TimerKey::Conn(ch_c)),
+    "the cold-dialed connection's deadline key must be registered the same call \
+       its Initial is flushed"
+  );
+}
+
+/// Establishment is SCOPED: when one connection completes its handshake,
+/// `service_connection` services ONLY that peer's parked-dial bucket, never the
+/// whole dial queue. Many peers hold parked dials; N's connection to A
+/// establishes; the `dial_entries_serviced` counter must advance by exactly A's
+/// bucket size, and every other peer's bucket must remain untouched.
+///
+/// Mutation-verify: revert step (c) to the whole-queue `service_dials` drain — it
+/// processes every parked bucket, so the counter jumps by the TOTAL parked-dial
+/// count (and drains the other buckets away), failing both assertions.
+#[test]
+fn establishment_services_only_its_peer_bucket() {
+  let n_addr: SocketAddr = "127.0.0.1:7730".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7731".parse().unwrap();
   let now = Instant::now();
   let mut n = make_endpoint("n", n_addr, now);
   let mut a = make_endpoint("a", a_addr, now);
-  // C is never instantiated — N only ever cold-dials its address.
 
-  // Park a dial to the COLD peer C in N's INNER endpoint queue, so it is NOT
-  // serviced now. C has no established connection, so when the dial is finally
-  // attempted it CREATES a fresh handshaking connection whose `open(Bi)` returns
-  // `None` — no bridge minted, the Finding-5 touched-but-bridgeless case.
-  let _ = n
-    .endpoint_mut()
-    .start_push_pull(c_addr, PushPullKind::Join, now);
+  // Two REAL dials to A, issued while A is still cold: each re-parks on A's bucket
+  // (the connection is handshaking, `open(Bi)` returns None).
+  let _ = n.start_push_pull(a_addr, PushPullKind::Join, now);
+  let _ = n.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  let a_bucket = n.dial_parked.get(&a_addr).map(|b| b.len()).unwrap_or(0);
+  assert_eq!(
+    a_bucket, 2,
+    "test precondition: both dials to still-handshaking A re-park on A's bucket"
+  );
 
-  // Drive A's server-side handshake to N one inbound datagram at a time, WITHOUT
-  // n.handle_timeout (a global tick would service the parked C dial early). The
-  // datagram that establishes N's connection to A runs step (c) -> service_dials,
-  // which cold-dials C and must flush C's Initial that same pass.
-  let _ = a.start_push_pull(n_addr, PushPullKind::Join, now);
-  let mut flushed_to_c = false;
+  // MANY parked dials on OTHER cold peers, injected directly. They target
+  // never-answered addresses, so even a whole-queue drain only re-parks them
+  // (open(Bi) None, handshaking); the scoped path never touches them at all.
+  let other_peers = 5usize;
+  let per_peer = 8usize;
+  let mut next_id = 10_000u64;
+  for p in 0..other_peers {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+    for _ in 0..per_peer {
+      n.dial_parked
+        .entry(peer)
+        .or_default()
+        .push(super::PendingDial {
+          id: StreamId::from_raw(next_id),
+          peer,
+          deadline: now + Duration::from_secs(30),
+          attempted: true,
+        });
+      next_id += 1;
+    }
+  }
+  let total_parked = a_bucket + other_peers * per_peer;
+
+  // Drive N's handshake to A one inbound datagram at a time WITHOUT
+  // n.handle_timeout (a global tick would full-drain every bucket). The
+  // handle_udp that establishes N's connection to A must service ONLY A's bucket.
+  let mut asserted = false;
   'outer: for _ in 0..400 {
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == a_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      a.handle_udp(n_addr, &dg, now);
+    }
     let mut a_out: Vec<Vec<u8>> = Vec::new();
     while let Some((to, bytes)) = a.poll_transmit() {
       if to == n_addr {
@@ -6261,41 +6341,195 @@ fn cold_dial_touched_by_establishment_flushes_initial_same_pass() {
       }
     }
     for dg in a_out {
+      let before = n.counters.dial_entries_serviced;
+      let had_a_bucket = n.dial_parked.contains_key(&a_addr);
       n.handle_udp(a_addr, &dg, now);
-      let mut n_out: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
-      while let Some((to, bytes)) = n.poll_transmit() {
-        n_out.push((to, bytes.to_vec()));
-      }
-      if n_out.iter().any(|(to, _)| *to == c_addr) {
-        flushed_to_c = true;
-        // C's connection must also have its deadline key registered THIS pass —
-        // a cold-dial connection is not indexed by `get_or_dial`; only the
-        // touched-conns flush registers it.
-        let ch_c = n
-          .conns
-          .handle_for(&c_addr)
-          .expect("the cold dial created N's connection to C");
-        assert!(
-          n.deadline_index
-            .contains_key(super::deadline::TimerKey::Conn(ch_c)),
-          "the cold-dialed connection's deadline key must be registered the same \
-             pass its Initial is flushed"
+      // A's bucket drains (its dials open) exactly on the establishing pass.
+      if had_a_bucket && !n.dial_parked.contains_key(&a_addr) {
+        let delta = n.counters.dial_entries_serviced - before;
+        assert_eq!(
+          delta, a_bucket as u64,
+          "establishment must service ONLY A's bucket ({a_bucket} dials); a \
+             whole-queue drain would process all {total_parked} parked dials"
         );
-        break 'outer;
-      }
-      for (to, bytes) in n_out {
-        if to == a_addr {
-          a.handle_udp(n_addr, &bytes, now);
+        // Every OTHER peer's bucket is untouched — still parked in full.
+        for p in 0..other_peers {
+          let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+          assert_eq!(
+            n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+            per_peer,
+            "a peer whose connection did NOT establish must keep its full bucket"
+          );
         }
+        asserted = true;
+        break 'outer;
       }
     }
     a.handle_timeout(now);
   }
 
   assert!(
-    flushed_to_c,
-    "the cold dial to C (no bridge minted) must flush its Initial to C within the \
-       single handle_udp that established N's connection to A — a touched-but-\
-       bridgeless connection must not stall until the next global tick"
+    asserted,
+    "N's connection to A must establish and service A's bucket within the ferry"
+  );
+}
+
+/// Like [`test_config`] but limiting each connection to `limit` concurrent
+/// remote-opened bidi streams, so a peer that pins that many bidi streams
+/// exhausts the credit — the setup for the credit-exhaustion / MAX_STREAMS-restore
+/// (`StreamEvent::Available`) path.
+fn test_config_bidi_limit(limit: u32) -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.max_concurrent_bidi_streams(quinn_proto::VarInt::from_u32(limit));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
+/// A dial requeued because the peer's bidi-stream credit was exhausted must retry
+/// — and open its bridge — the moment the peer raises its MAX_STREAMS bidi limit
+/// (a `StreamEvent::Available { dir: Bi }`) delivered via `handle_udp` before the
+/// dial's deadline. Without the `Available` arm the dial waits to its deadline and
+/// fails.
+///
+/// Construction: N and B allow only ONE concurrent bidi stream. N establishes a
+/// pooled connection to B, opens exchange 1 (consuming the single credit), then
+/// dials again — `open(Bi)` returns None (credit exhausted) so the dial re-parks
+/// on B's bucket. Ferrying exchange 1 to completion frees B's stream slot; B sends
+/// MAX_STREAMS, and the datagram carrying it drives N's `Available` arm, which
+/// services B's bucket and opens the parked dial's bridge in that same pass.
+///
+/// Mutation-verify: revert the `Available { dir: Bi }` arm to `_ => {}`. The
+/// MAX_STREAMS still raises the limit, but nothing services the bucket, so the
+/// parked dial never opens within the ferry (which never ticks N) and this fails.
+#[test]
+fn credit_restored_available_retries_parked_dial() {
+  let n_addr: SocketAddr = "127.0.0.1:7740".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7741".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(1),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up (no bidi consumed) so the first
+  // reliable dial opens immediately rather than parking on the handshake.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  // Quiesce so the exchange-1 setup is deterministic.
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+
+  // Exchange 1 opens the single available bidi (credit 1/1 used). Its request is
+  // queued in `out` but NOT delivered yet, so the bridge stays alive.
+  let _id1 = n.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert_eq!(
+    n.live_bridge_count(),
+    1,
+    "test precondition: exchange 1 opens the single bidi credit"
+  );
+  // Exchange 2 finds the credit exhausted -> re-parks on B's bucket, no bridge.
+  let id2 = n.start_push_pull(b_addr, PushPullKind::Refresh, now);
+  assert_eq!(
+    n.dial_parked.get(&b_addr).map(|b| b.len()).unwrap_or(0),
+    1,
+    "test precondition: the second dial re-parks on B's bucket (credit exhausted)"
+  );
+  assert!(
+    !n.bridges.contains_key(&id2),
+    "test precondition: the credit-exhausted dial mints no bridge yet"
+  );
+
+  // Ferry exchange 1 to completion WITHOUT n.handle_timeout: as B reaps its
+  // inbound bridge it frees the slot and sends MAX_STREAMS. The datagram carrying
+  // MAX_STREAMS drives N's `Available` arm, which services B's bucket and opens
+  // the parked dial's bridge in that same handle_udp.
+  //
+  // Advance `now` per iteration so N's connection ACK/loss timers fire — but only
+  // via `handle_udp` (which runs the connection's `handle_timeout` internally),
+  // never via `n.handle_timeout`, which would run a global tick and full-drain
+  // the parked dial regardless of the `Available` arm. The advance stays far
+  // under the dial's stream-timeout deadline so it is the credit restore, not the
+  // deadline, that resolves the parked dial.
+  let mut retried = false;
+  let mut t = now;
+  'outer: for _ in 0..200 {
+    t += Duration::from_millis(20);
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      b.handle_udp(n_addr, &dg, t);
+    }
+    let mut b_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        b_out.push(bytes.to_vec());
+      }
+    }
+    for dg in b_out {
+      n.handle_udp(b_addr, &dg, t);
+      if n.bridges.contains_key(&id2) {
+        retried = true;
+        assert!(
+          !n.dial_parked.contains_key(&b_addr),
+          "the retried dial must leave B's parked bucket once it opens"
+        );
+        break 'outer;
+      }
+    }
+    // Advance only B's coordinator tick (never N's) so the parked dial can open
+    // ONLY via N's `Available` arm, never a global tick's full drain.
+    b.handle_timeout(t);
+  }
+
+  assert!(
+    retried,
+    "the credit-exhausted parked dial must open its bridge on the MAX_STREAMS \
+       (Available) arriving via handle_udp — not wait for its deadline; reverting \
+       the Available arm leaves it parked and this fails"
   );
 }
