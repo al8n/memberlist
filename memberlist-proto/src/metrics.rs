@@ -26,6 +26,14 @@ pub struct Metrics {
   /// Indirect-probe forward requests dropped at the `max_indirect_forwards`
   /// ceiling (a relay-amplification backstop).
   pub indirect_forwards_dropped: u64,
+  /// Indirect-probe forward requests dropped because the forwarded `Ping`, once
+  /// framed, would exceed `gossip_mtu` (a single-datagram budget). A relayed
+  /// `IndirectPing` carries an attacker-controlled target id, and node ids are
+  /// unbounded, so a large target id can push the forwarded Ping past the
+  /// budget; the relay is dropped with no forwarded Ping and no Nack rather than
+  /// emitted as a fragmentable, undeliverable datagram. Distinct from
+  /// `indirect_forwards_dropped`, which is the `max_indirect_forwards` flood cap.
+  pub indirect_forwards_oversized: u64,
   /// Ack payloads withheld from a probe whose source could not be bound to a
   /// tracked member's address (`ack_payload_to_members_only`), bounding the
   /// reflective byte-amplification a spoofed-source ping can elicit.

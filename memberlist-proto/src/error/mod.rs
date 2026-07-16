@@ -72,6 +72,18 @@ pub enum Error {
   /// deterministically unsendable.
   #[error("framed user packet ({} bytes) exceeds the packet MTU ({} bytes)", _0.0, _0.1)]
   UserPacketExceedsMtu(SizeExceeded),
+
+  /// A caller-supplied [`Endpoint::ping`](crate::endpoint::Endpoint::ping)
+  /// target, once framed into a `Ping`, would not fit a single gossip datagram.
+  /// A direct application ping rides one UDP datagram on the gossip socket, so
+  /// an over-budget Ping is deterministically unsendable: the peer receives no
+  /// Ping, never acks, and the probe would fail on its deadline. Node ids are
+  /// unbounded, so a large target id can push the framed Ping past the budget;
+  /// it is rejected before any probe/ack state is registered rather than begun
+  /// as a probe doomed to time out. Carries the framed size and the budget
+  /// (see [`SizeExceeded`]).
+  #[error("framed ping ({} bytes) exceeds the gossip packet budget ({} bytes)", _0.0, _0.1)]
+  PingExceedsMtu(SizeExceeded),
 }
 
 /// Payload for [`Error`]'s size-limit variants: a measured size in bytes that

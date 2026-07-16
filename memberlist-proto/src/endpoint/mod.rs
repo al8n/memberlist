@@ -2350,24 +2350,48 @@ where
     true
   }
 
-  /// Queue `msg` as a lone `Packet` to `to` when its wire encoding fits the
-  /// configured `gossip_mtu`, returning whether it was queued. Node ids are
-  /// unbounded, so a probe `Ping`, its buddy `Suspect`, or an `IndirectPing`
-  /// carrying a large already-admitted peer id can exceed the single-datagram
-  /// budget even though the construction-time self-`Ping` floor guarantees only
-  /// the LOCAL identity fits. A single message has no compound split point, so
-  /// an over-MTU one is dropped (returning `false`) rather than emitted as a
-  /// fragmentable, undeliverable datagram — the same ceiling the compound branch
-  /// enforces, mirroring the lone-`Packet` gossip path (`len <= gossip_mtu`).
-  /// The probe FSM is unaffected: a dropped direct `Ping` simply receives no Ack
-  /// and fails on its deadline, exactly as a lost UDP datagram would; a dropped
+  /// Whether `msg`'s wire encoding fits the configured `gossip_mtu` as a lone
+  /// `Packet`. A pure predicate — a single encode, no queue — so an emitter can
+  /// decide, without a wasted second encoding, whether to queue the datagram or
+  /// reject/drop it.
+  ///
+  /// This is the single ceiling every unreliable-plane `Ping` emitter enforces:
+  /// the periodic probe's direct `Ping` and buddy `Suspect`, and the indirect
+  /// fan-out's `IndirectPing` (all three via `push_probe_packet_within_mtu`);
+  /// the public `ping` API, which returns
+  /// [`Error::PingExceedsMtu`](crate::error::Error::PingExceedsMtu) on an
+  /// over-MTU target rather than register a doomed probe; and the indirect relay
+  /// `handle_indirect_ping`, which drops the over-MTU forward and bumps
+  /// `indirect_forwards_oversized`. Node ids are unbounded, so any of these can
+  /// carry a large already-admitted or attacker-supplied peer id that exceeds
+  /// the single-datagram budget even though the construction-time self-`Ping`
+  /// floor guarantees only the LOCAL identity fits. A single message has no
+  /// compound split point, so an over-MTU one is never emitted (a fragmentable,
+  /// undeliverable datagram) — the same ceiling the compound branch enforces,
+  /// mirroring the lone-`Packet` gossip path (`len <= gossip_mtu`). The probe
+  /// FSM is unaffected: a dropped direct `Ping` simply receives no Ack and fails
+  /// on its deadline, exactly as a lost UDP datagram would; a dropped
   /// `IndirectPing` is excluded from the caller's outstanding-nack accounting so
   /// the FSM never waits on a Nack the unreached peer cannot send.
-  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) -> bool {
-    let encoded_len = crate::wire::encode_message::<I, A>(&msg)
+  fn probe_packet_within_mtu(&self, msg: &Message<I, A>) -> bool {
+    let encoded_len = crate::wire::encode_message::<I, A>(msg)
       .expect("outbound probe message must bridge to wire form")
       .len();
-    if encoded_len <= self.gossip_mtu() {
+    encoded_len <= self.gossip_mtu()
+  }
+
+  /// Queue `msg` as a lone `Packet` to `to` when it fits the configured
+  /// `gossip_mtu` (via `probe_packet_within_mtu`), returning whether it was
+  /// queued; an over-MTU message is dropped (returning `false`) rather than
+  /// emitted. See `probe_packet_within_mtu` for the full rationale and the set
+  /// of emitters that share this ceiling. Used by the periodic probe (direct
+  /// `Ping` + buddy `Suspect`) and the indirect fan-out (`IndirectPing`); the
+  /// public `ping` and indirect-relay paths call the pure predicate directly
+  /// because each measures or registers differently on a miss (a typed error vs.
+  /// a dropped forward), and reusing this queue-on-fit helper there would either
+  /// re-encode for the size or emit a Packet they must not.
+  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) -> bool {
+    if self.probe_packet_within_mtu(&msg) {
       self
         .pending_transmits
         .push_back(Transmit::Packet(PacketTransmit::new(to, msg)));
@@ -2463,6 +2487,28 @@ where
     let our_seq = self.allocate_seq();
     let deadline = now + self.cfg.probe_timeout();
 
+    // Build the forwarded Ping and MTU-check it BEFORE registering any relay
+    // state. A node id is unbounded and `target` is attacker-controlled, so a
+    // large target id can push the forwarded Ping past the single-datagram
+    // `gossip_mtu`; such a forward is dropped entirely — no forwarded Ping, no
+    // AckRegistry/forward entry, no Nack — exactly like the from-mismatch,
+    // flood-cap, and dedup guards above. Registering a doomed forward just to
+    // Nack on expiry would waste the exact relay state the flood backstop
+    // protects and misreport a "reached-but-target-silent" Nack for a Ping we
+    // never sent. The drop bumps its own counter, distinct from the flood cap.
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let forwarded = Ping::new(
+      our_seq,
+      Node::new(local_id, local_addr),
+      Node::new(target_id, target_addr.cheap_clone()),
+    );
+    let msg = Message::Ping(forwarded);
+    if !self.probe_packet_within_mtu(&msg) {
+      self.metrics.indirect_forwards_oversized += 1;
+      return;
+    }
+
     // Register the AckRegistry entry so handle_ack's Forward branch fires.
     self.ack_registry.register(
       our_seq,
@@ -2486,20 +2532,10 @@ where
       },
     );
 
-    // Build and emit the forwarded Ping.
-    let local_id = self.cfg.local_id_ref().cheap_clone();
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let forwarded = Ping::new(
-      our_seq,
-      Node::new(local_id, local_addr),
-      Node::new(target_id, target_addr.cheap_clone()),
-    );
+    // Emit the forwarded Ping (already MTU-validated above).
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit::new(
-        target_addr,
-        Message::Ping(forwarded),
-      )));
+      .push_back(Transmit::Packet(PacketTransmit::new(target_addr, msg)));
   }
 
   /// Initiate a direct application-level ping to `node`. Returns a [`PingId`]
@@ -2513,6 +2549,16 @@ where
   /// Unlike a SWIM failure-detection probe, an application ping is
   /// direct-only: it does not fan out to indirect peers, request a reliable
   /// fallback, or mark the target as suspect on timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`Error::NotRunning`](crate::error::Error::NotRunning) if the
+  /// endpoint has left or shut down. Returns
+  /// [`Error::PingExceedsMtu`](crate::error::Error::PingExceedsMtu) if the
+  /// framed `Ping` to `node` would exceed the single-datagram `gossip_mtu`
+  /// budget — a node id is unbounded, so a large target id can push it past one
+  /// datagram, and such a Ping is rejected up front (registering no probe or ack
+  /// state) rather than begun as a probe doomed to time out.
   pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> Result<PingId, crate::error::Error> {
     // Reject once leaving/left: a departing node starts no new probe.
     self.ensure_running()?;
@@ -2544,10 +2590,39 @@ where
       .unwrap_or(0);
 
     let seq = self.allocate_seq();
+
+    // Build the outbound Ping and measure its framed size with the REAL
+    // allocated seq (the seq varint contributes to the byte count at the MTU
+    // boundary). A direct application ping rides one gossip datagram, so an
+    // over-budget Ping is undeliverable: the peer would never Ack and the probe
+    // could only fail on its deadline. Measure and reject BEFORE inserting the
+    // probe or registering the ack, so an over-MTU target leaves no dangling
+    // probe/ack state and queues no Packet. The now-unused seq is harmless —
+    // `allocate_seq` skips live slots, exactly as the wrapping counter advancing
+    // does.
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let ping = Ping::new(
+      seq,
+      Node::new(local_id, local_addr),
+      Node::new(target_id, target_addr.cheap_clone()),
+    );
+    let msg = Message::Ping(ping);
+    let budget = self.gossip_mtu();
+    let encoded_len = crate::wire::encode_message::<I, A>(&msg)
+      .expect("outbound ping must bridge to wire form")
+      .len();
+    if encoded_len > budget {
+      return Err(crate::error::Error::PingExceedsMtu(
+        crate::error::SizeExceeded::new(encoded_len, budget),
+      ));
+    }
+
+    // Fits the datagram budget: register the direct probe + ack, then queue it.
+    // An application ping is direct-only — it waits just `probe_timeout`, with
+    // no indirect/fallback escalation and no awareness scaling. Failure deadline
+    // == the direct deadline.
     let pt = self.cfg.probe_timeout();
-    // An application ping is direct-only — it waits just `probe_timeout`,
-    // with no indirect/fallback escalation and no awareness scaling.
-    // Failure deadline == the direct deadline.
     let probe = Probe::new_direct(
       target_arc,
       target_incarnation,
@@ -2561,20 +2636,9 @@ where
     self
       .ack_registry
       .register(seq, AckEntry::new(now, deadline, AckKind::Ping));
-
-    let local_id = self.cfg.local_id_ref().cheap_clone();
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let ping = Ping::new(
-      seq,
-      Node::new(local_id, local_addr),
-      Node::new(target_id, target_addr.cheap_clone()),
-    );
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit::new(
-        target_addr,
-        Message::Ping(ping),
-      )));
+      .push_back(Transmit::Packet(PacketTransmit::new(target_addr, msg)));
     Ok(PingId::new(seq))
   }
 

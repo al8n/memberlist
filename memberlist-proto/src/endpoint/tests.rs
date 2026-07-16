@@ -8763,3 +8763,159 @@ fn indirect_fan_out_drops_over_mtu_indirect_ping_and_counts_only_queued() {
     other => panic!("probe must be AwaitingIndirect (racing the reliable fallback), got {other:?}"),
   }
 }
+
+/// A caller-supplied `ping` target whose framed `Ping` exceeds `gossip_mtu`
+/// (an unbounded id dwarfing the single-datagram budget) is rejected up front
+/// with `PingExceedsMtu`: it registers NO probe/ack state and queues NO Packet,
+/// so a probe that could never be delivered on the unreliable plane is never
+/// begun. A within-budget target still queues exactly one Ping and returns Ok.
+#[test]
+fn ping_over_mtu_target_errs_without_registering_probe_or_ack() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_mtu(gossip_mtu));
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  let t0 = Instant::now();
+
+  // An id alone dwarfing the datagram budget makes the framed Ping over-MTU.
+  let big_id = "b".repeat(gossip_mtu * 2);
+  let over = Node::new(
+    SmolStr::new(big_id.as_str()),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
+  );
+  let probes_before = e.probes.len();
+  let acks_before = e.ack_registry.len();
+  match e.ping(over, t0) {
+    Err(Error::PingExceedsMtu(info)) => {
+      assert!(
+        info.size() > gossip_mtu,
+        "the reported framed size must exceed the budget"
+      );
+      assert_eq!(
+        info.limit(),
+        gossip_mtu,
+        "the reported budget is gossip_mtu"
+      );
+    }
+    other => panic!("expected PingExceedsMtu, got {other:?}"),
+  }
+  assert!(
+    e.poll_transmit().is_none(),
+    "an over-MTU ping queues no Packet"
+  );
+  assert_eq!(
+    e.probes.len(),
+    probes_before,
+    "an over-MTU ping registers no probe (no dangling probe slot)"
+  );
+  assert_eq!(
+    e.ack_registry.len(),
+    acks_before,
+    "an over-MTU ping registers no ack entry (no dangling ack)"
+  );
+
+  // A within-budget target still pings: exactly one Ping Packet, Ok.
+  let within = Node::new(
+    SmolStr::new("bob"),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002),
+  );
+  e.ping(within, t0).expect("a within-MTU ping issues");
+  let mut pings = 0usize;
+  while let Some(tx) = e.poll_transmit() {
+    match tx {
+      Transmit::Packet(p) => {
+        assert!(
+          matches!(p.message_ref(), Message::Ping(_)),
+          "a direct ping queues only a Ping"
+        );
+        pings += 1;
+      }
+      Transmit::Compound(c) => {
+        panic!("a direct ping emits a lone Packet, not a compound: {c:?}")
+      }
+    }
+  }
+  assert_eq!(pings, 1, "a within-MTU ping queues exactly one Ping");
+}
+
+/// A relayed IndirectPing whose forwarded `Ping` to `target` would exceed
+/// `gossip_mtu` (an attacker-controlled unbounded target id) is dropped
+/// entirely — no forwarded Ping, no ack-registry/forward state, no Nack — and
+/// bumps the dedicated `indirect_forwards_oversized` counter, NOT the flood-cap
+/// `indirect_forwards_dropped`. A doomed forward registered only to Nack on
+/// expiry would waste the relay state the flood backstop protects and misreport
+/// reached-but-target-silent. A within-MTU indirect ping still forwards one Ping
+/// and registers the forward.
+#[test]
+fn handle_indirect_ping_over_mtu_target_drops_and_counts_oversized() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_mtu(gossip_mtu));
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  let t0 = Instant::now();
+
+  // Transport source matches the embedded requester so the relay-oracle guard
+  // passes; the target id alone dwarfs the datagram budget.
+  let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+  let big_id = "b".repeat(gossip_mtu * 2);
+  let acks_before = e.ack_registry.len();
+  e.handle_indirect_ping(from, ind_ping(&big_id, 7001, "carol", 7002, 42), t0);
+
+  assert!(
+    e.poll_transmit().is_none(),
+    "an over-MTU forwarded Ping is never queued"
+  );
+  assert!(
+    e.indirect_forwards.is_empty(),
+    "an over-MTU forward registers no relay state"
+  );
+  assert_eq!(
+    e.ack_registry.len(),
+    acks_before,
+    "an over-MTU forward registers no ack entry"
+  );
+  assert_eq!(
+    e.metrics().indirect_forwards_oversized,
+    1,
+    "the oversized-forward drop bumps its dedicated counter"
+  );
+  assert_eq!(
+    e.metrics().indirect_forwards_dropped,
+    0,
+    "an oversized drop is NOT a flood-cap drop"
+  );
+
+  // No Nack is emitted when the (never-registered) forward's deadline would
+  // have elapsed.
+  let t1 = t0 + Duration::from_secs(10);
+  e.handle_timeout(t1);
+  assert!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Nack(_))
+    )),
+    "an over-MTU forward was never registered, so no Nack on expiry"
+  );
+
+  // A within-MTU indirect ping still forwards exactly one Ping and registers.
+  e.handle_indirect_ping(from, ind_ping("bob", 7001, "carol", 7002, 43), t1);
+  match e
+    .poll_transmit()
+    .expect("a within-MTU indirect ping forwards a Ping")
+  {
+    Transmit::Packet(p) => assert!(
+      matches!(p.message_ref(), Message::Ping(_)),
+      "the forward is a lone Ping"
+    ),
+    Transmit::Compound(c) => {
+      panic!("the relay forwards a lone Ping Packet, not a compound: {c:?}")
+    }
+  }
+  assert_eq!(
+    e.indirect_forwards.len(),
+    1,
+    "a within-MTU forward registers exactly one relay entry"
+  );
+}
