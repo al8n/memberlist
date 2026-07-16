@@ -118,6 +118,14 @@ pub struct QuicOptions {
   /// in-flight handshakes is refused. See
   /// [`Self::max_pending_connections_per_source`] for the default and rationale.
   max_pending_connections_per_source: Option<usize>,
+  /// Coordinator-wide ceiling on concurrently accepted INBOUND reliable-stream
+  /// exchanges (bridges) across all QUIC connections, or `None` for no bound. An
+  /// inbound bidi stream accepted beyond this many live inbound bridges is
+  /// refused (both halves reset) instead of minting a bridge. Distinct from
+  /// quinn's per-connection `max_concurrent_bidi_streams` — that bounds one
+  /// connection; this bounds the inbound bridge population summed across all of
+  /// them. See [`Self::max_inbound_streams`] for the default and rationale.
+  max_inbound_streams: Option<usize>,
 }
 
 /// Default global QUIC connection ceiling installed by [`QuicOptions::new`].
@@ -144,6 +152,37 @@ pub const DEFAULT_MAX_QUIC_CONNECTIONS: usize = 4096;
 /// the global budget with half-open connections. Tunable via
 /// [`QuicOptions::with_max_pending_connections_per_source`].
 pub const DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE: usize = 16;
+
+/// Default coordinator-wide inbound reliable-stream ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// Each accepted inbound bidi stream mints a bridge that transiently pins up to
+/// ~3x `max_stream_frame_size` of reassembly buffer, so the coordinator bounds
+/// the inbound bridge population ACROSS all connections — quinn's per-connection
+/// `max_concurrent_bidi_streams` bounds only one connection, so without this a
+/// flood of connections (up to [`DEFAULT_MAX_QUIC_CONNECTIONS`]) could each open
+/// their full bidi allowance and mint an unbounded number of bridges.
+///
+/// Legitimate inbound reliable concurrency is the gossip/push-pull fan-in — in
+/// the low tens even for a large LAN cluster — so `1024` is one to two orders of
+/// magnitude of headroom while keeping the population hard-bounded. It sits below
+/// [`DEFAULT_MAX_QUIC_CONNECTIONS`] (a per-tracked-connection factor well under
+/// one), so a connection flood cannot multiply into an unbounded bridge
+/// population: the coordinator admits at most this many inbound bridges
+/// regardless of how many connections are open. With the default KB-scale
+/// push/pull frames the footprint is modest; an operator who raises
+/// `max_stream_frame_size` toward its ceiling should lower this correspondingly
+/// (the product is the worst-case transient reassembly footprint). `None` opts
+/// out of the bound; tune via [`QuicOptions::with_max_inbound_streams`].
+pub const DEFAULT_MAX_QUIC_INBOUND_STREAMS: usize = 1024;
+
+// A default of 0 would reject every inbound stream (the accept gate refuses when
+// `inbound_live >= max`), silently disabling inbound reliable exchanges. Keep the
+// default a usable nonzero bound.
+const _: () = assert!(
+  DEFAULT_MAX_QUIC_INBOUND_STREAMS > 0,
+  "the default QUIC inbound-stream ceiling must be nonzero"
+);
 
 impl QuicOptions {
   /// Build from a caller-built endpoint config, server config, client
@@ -329,6 +368,7 @@ impl QuicOptions {
       unreliable_transport,
       max_quic_connections: Some(DEFAULT_MAX_QUIC_CONNECTIONS),
       max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
+      max_inbound_streams: Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
     }
   }
 
@@ -350,6 +390,18 @@ impl QuicOptions {
   #[inline(always)]
   pub fn with_max_pending_connections_per_source(mut self, max: Option<usize>) -> Self {
     self.max_pending_connections_per_source = max;
+    self
+  }
+
+  /// Override the coordinator-wide inbound reliable-stream ceiling. `None`
+  /// removes the bound. Bounds the inbound bridge population across all QUIC
+  /// connections (an inbound bidi stream accepted beyond the ceiling is refused
+  /// instead of minting a bridge). Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_INBOUND_STREAMS`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_inbound_streams(mut self, max: Option<usize>) -> Self {
+    self.max_inbound_streams = max;
     self
   }
 
@@ -415,6 +467,15 @@ impl QuicOptions {
   #[inline(always)]
   pub const fn max_pending_connections_per_source(&self) -> Option<usize> {
     self.max_pending_connections_per_source
+  }
+
+  /// The coordinator-wide inbound reliable-stream ceiling the QUIC accept loop
+  /// enforces before minting a bridge, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_INBOUND_STREAMS`]`)`; see that constant for
+  /// the rationale.
+  #[inline(always)]
+  pub const fn max_inbound_streams(&self) -> Option<usize> {
+    self.max_inbound_streams
   }
 }
 

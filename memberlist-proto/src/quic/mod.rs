@@ -19,7 +19,8 @@ mod transport_mode;
 #[cfg(feature = "tls")]
 pub use config::{QuicConfigError, QuicConfigOptions};
 pub use crypto::{
-  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_QUIC_CONNECTIONS, QuicOptions,
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_QUIC_CONNECTIONS,
+  DEFAULT_MAX_QUIC_INBOUND_STREAMS, QuicOptions,
 };
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
@@ -47,6 +48,27 @@ use std::collections::VecDeque;
 // `HashSet` only types a `#[cfg(test)]` snapshot parameter.
 #[cfg(test)]
 use std::collections::HashSet;
+
+/// Whether routing one inbound `DatagramEvent` advanced persistent connection
+/// state — the signal [`QuicEndpoint::handle_udp`] uses to decide whether the
+/// datagram warrants a full coordinator servicing pass.
+///
+/// `quinn_proto::Endpoint::handle` returning `Some(DatagramEvent)` does NOT imply
+/// progress: a stateless `Response` (version negotiation, retry, stateless
+/// reset), an over-cap or failed `accept`, and a `ConnectionEvent` for a handle
+/// no longer in the table are all `Some` yet commit no local connection state.
+/// Servicing on those would run an O(connections + streams) pump-and-scan per
+/// datagram driven from untrusted input, so only [`Self::Advanced`] triggers it.
+enum DatagramProgress {
+  /// A new connection was accepted (inserted) or a `ConnectionEvent` was applied
+  /// to a connection still in the table. A servicing pass MUST run.
+  Advanced,
+  /// No persistent connection state changed (a stateless response, an over-cap
+  /// or failed accept, or a `ConnectionEvent` for an unknown handle). Skip the
+  /// servicing pass; any owed outbound bytes were already queued to `out` and
+  /// are flushed by `poll_transmit` independently of servicing.
+  Inert,
+}
 
 /// Maximum entries buffered in `mem_ingress` from the QUIC datagram receive
 /// drain. quinn's `datagram_receive_buffer_size` bounds inbound BYTES but not
@@ -335,15 +357,26 @@ struct TestCounters {
   /// production builds.
   bridges_terminalized_via_close_command: u64,
   /// Test-only counter incremented once per [`QuicEndpoint::service_quic_inbound`]
-  /// call — i.e. once per inbound QUIC datagram that `handle_udp` decided
-  /// actually created or advanced connection state. `handle_udp` runs the
-  /// servicing pass ONLY when `quinn_proto::Endpoint::handle` returns `Some`;
-  /// an inert datagram quinn discards (`None`) skips it. The negative-control
-  /// regression test asserts this counter does NOT advance on an inert datagram
-  /// yet DOES on a real one; reverting the gate (servicing unconditionally)
-  /// makes it advance on the inert datagram too and the test fails. Never
-  /// compiled into production builds.
+  /// call — i.e. once per inbound QUIC datagram that actually created or advanced
+  /// persistent connection state. `handle_udp` runs the servicing pass ONLY when
+  /// `route_datagram_event` reports [`DatagramProgress::Advanced`]; a datagram
+  /// quinn discards (`handle` → `None`) OR one that returns `Some` but commits no
+  /// state (a stateless `Response`, an over-cap or failed `accept`, a
+  /// `ConnectionEvent` for an unknown handle → [`DatagramProgress::Inert`]) skips
+  /// it. The negative-control regression tests assert this counter does NOT
+  /// advance on an inert datagram yet DOES on a real one; reverting the gate
+  /// (servicing on every `Some`, or unconditionally) makes it advance on the
+  /// inert datagram too and those tests fail. Never compiled into production
+  /// builds.
   quic_inbound_servicings: u64,
+  /// Test-only high-water mark of the concurrent INBOUND bridge population,
+  /// sampled inside the `accept(Dir::Bi)` loop at each mint (so it captures the
+  /// true peak even when a short exchange accepts and reaps its bridge within the
+  /// same tick — which a between-tick `live_bridge_count()` sample would miss).
+  /// The inbound-cap regression test asserts this equals the ceiling: an
+  /// off-by-one admits ceiling+1, admit-all drives it to the opened count,
+  /// reject-all leaves it at 0. Never compiled into production builds.
+  max_inbound_bridges_live: usize,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -1156,11 +1189,18 @@ impl<I, R> QuicEndpoint<I, R> {
     from: SocketAddr,
     now: Instant,
     scratch: &[u8],
-  ) {
+  ) -> DatagramProgress {
     match ev {
       DatagramEvent::ConnectionEvent(ch, cev) => {
-        if let Some(e) = self.conns.get_mut(ch) {
-          e.conn_mut().handle_event(cev);
+        // Applied to a connection we still track ⇒ that connection advanced.
+        // A `ConnectionEvent` for an unknown handle (already reaped) applies
+        // nothing, so it made no progress.
+        match self.conns.get_mut(ch) {
+          Some(e) => {
+            e.conn_mut().handle_event(cev);
+            DatagramProgress::Advanced
+          }
+          None => DatagramProgress::Inert,
         }
       }
       DatagramEvent::NewConnection(incoming) => {
@@ -1185,11 +1225,13 @@ impl<I, R> QuicEndpoint<I, R> {
         let over_per_source = self
           .cfg
           .max_pending_connections_per_source()
-          .is_some_and(|max| self.conns.pending_handshakes_from(&from) >= max);
+          .is_some_and(|max| self.conns.pending_inbound_from(&from) >= max);
         if over_global || over_per_source {
           self.ep.metrics_mut().quic_connections_rejected += 1;
           self.quinn.ignore(incoming);
-          return;
+          // The Initial was dropped and no connection-table state was committed,
+          // so this datagram made no progress — no servicing pass is owed.
+          return DatagramProgress::Inert;
         }
         let mut buf = Vec::new();
         match self.quinn.accept(
@@ -1198,7 +1240,11 @@ impl<I, R> QuicEndpoint<I, R> {
           &mut buf,
           Some(self.cfg.server_arc()),
         ) {
-          Ok((ch, conn)) => self.conns.insert_accepted(ch, conn, from),
+          Ok((ch, conn)) => {
+            self.conns.insert_accepted(ch, conn, from);
+            // A new connection was committed to the table — service it.
+            DatagramProgress::Advanced
+          }
           Err(e) => {
             // quinn-proto attaches an `Option<Transmit>` to its `AcceptError`
             // whenever `accept` owes a refusal/close to the peer (CID
@@ -1222,6 +1268,9 @@ impl<I, R> QuicEndpoint<I, R> {
                 }
               }
             }
+            // The accept failed: only a close response (if any) was queued to
+            // `out`; no connection was created, so no servicing is owed.
+            DatagramProgress::Inert
           }
         }
       }
@@ -1234,6 +1283,8 @@ impl<I, R> QuicEndpoint<I, R> {
             .out
             .push_back((t.destination, Bytes::copy_from_slice(&scratch[..t.size])));
         }
+        // A stateless response committed no local connection state.
+        DatagramProgress::Inert
       }
     }
   }
@@ -2101,26 +2152,35 @@ where
       Class::Quic => {
         let mut scratch = Vec::new();
         let data = BytesMut::from(datagram);
-        // Service the coordinator only when quinn actually created or advanced
-        // connection state. `Endpoint::handle` returns `None` for a datagram it
-        // discards (malformed/truncated header, a non-Initial long-header or
-        // short-header packet for an unknown connection, an unmatched stateless
-        // reset): nothing was created or advanced, so a full servicing pass —
-        // which pumps every bridge and scans every connection — would be pure
-        // O(connections + streams) work per datagram driven from untrusted
-        // input. A datagram that DID advance state (`Some(_)`: a connection
-        // event, a new connection, or a stateless response) is routed AND fully
-        // serviced this tick, preserving correctness. Skipping the pass on an
-        // inert datagram cannot strand a connection timer: `poll_timeout` folds
-        // in every connection's own `poll_timeout`, so any connection needing
-        // service for its own timer is still woken through the driver's
-        // `handle_timeout`, independent of inbound-datagram servicing.
+        // Service the coordinator only when this datagram actually created or
+        // advanced persistent connection state. `Endpoint::handle` returning
+        // `None` (a discarded malformed/truncated/unmatched datagram) is skipped;
+        // but `Some(_)` alone does NOT imply progress — a stateless `Response`
+        // (version negotiation / retry / stateless reset), an over-cap or failed
+        // `accept`, and a `ConnectionEvent` for an already-reaped handle are all
+        // `Some` yet commit nothing. `route_datagram_event` reports which case
+        // occurred; only `Advanced` (a new connection inserted, or a
+        // `ConnectionEvent` applied to a live connection) runs the servicing
+        // pass. A full pass pumps every bridge and scans every connection — pure
+        // O(connections + streams) work — so gating it on real progress denies an
+        // attacker an O(N) tick per attacker-triggerable stateless or over-cap
+        // datagram at full occupancy. Skipping the pass on an inert datagram
+        // cannot strand a connection timer: `poll_timeout` folds in every
+        // connection's own `poll_timeout`, so any connection needing service for
+        // its own timer is still woken through the driver's `handle_timeout`,
+        // independent of inbound-datagram servicing. Any owed outbound bytes
+        // (a stateless response, an accept-error close) were queued to `out` by
+        // `route_datagram_event` and are drained by `poll_transmit` regardless.
         if let Some(ev) = self
           .quinn
           .handle(now.into_std(), from, None, None, data, &mut scratch)
         {
-          self.route_datagram_event(ev, from, now, &scratch);
-          self.service_quic_inbound(now);
+          if matches!(
+            self.route_datagram_event(ev, from, now, &scratch),
+            DatagramProgress::Advanced
+          ) {
+            self.service_quic_inbound(now);
+          }
         }
       }
       Class::Memberlist => self.handle_memberlist_udp(from, datagram),
@@ -2416,18 +2476,22 @@ where
             //
             // Cross-connection inbound-stream cap. Each accepted bidi stream
             // mints a Bridge that pins up to ~3x the max reliable frame size, so
-            // admission-gate every inbound bridge against `max_inbound_streams`
+            // admission-gate every inbound bridge against the QUIC-specific
+            // `QuicOptions::max_inbound_streams` (a bounded nonzero default)
             // BEFORE minting — the QUIC twin of the stream coordinator's
             // `accept_connection` gate (`streams::StreamEndpoint`, which counts
-            // `exchanges.filter(|m| !m.outbound)`). This bounds inbound bridge
-            // state ACROSS all connections; quinn's per-connection
+            // `exchanges.filter(|m| !m.outbound)`). The QUIC ceiling is its own
+            // option, not the shared TCP/TLS `EndpointOptions::max_inbound_streams`
+            // (which defaults to unlimited), so a default QUIC endpoint is bounded
+            // without changing TCP/TLS behaviour. This bounds inbound bridge state
+            // ACROSS all connections; quinn's per-connection
             // `max_concurrent_bidi_streams` is a separate, per-connection limit.
             // An outbound bridge is registered in `pending_outbound_kinds` for
             // the life of its exchange and an accepted (inbound) bridge never is
             // (see that field's docs), so the inbound population is exactly the
             // bridges absent from that map. Snapshot it once and track
             // incrementally as this loop mints — no bridge is reaped mid-loop.
-            let max_inbound = self.ep.max_inbound_streams();
+            let max_inbound = self.cfg.max_inbound_streams();
             let mut inbound_live = match max_inbound {
               Some(_) => self
                 .bridges
@@ -2490,6 +2554,11 @@ where
                 ),
               );
               inbound_live += 1;
+              #[cfg(test)]
+              {
+                self.counters.max_inbound_bridges_live =
+                  self.counters.max_inbound_bridges_live.max(inbound_live);
+              }
             }
           }
           quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {

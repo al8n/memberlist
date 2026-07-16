@@ -10,9 +10,28 @@ use quinn_proto::{Connection, ConnectionEvent, ConnectionHandle, Endpoint as Qui
 use slab::Slab;
 use smallvec_wrapper::MediumVec;
 
+/// Which side opened a pooled connection. Only inbound (server-accepted)
+/// connections consume a source's per-source pending allowance: a local
+/// outbound dial to a peer must never charge against that peer's inbound cap,
+/// or simultaneous bidirectional dialing wedges (each side's own outbound to
+/// the peer would block the peer's inbound Initial).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ConnDirection {
+  /// Locally initiated via [`ConnTable::get_or_dial`].
+  Outbound,
+  /// Peer-initiated, accepted by the server endpoint via
+  /// [`ConnTable::insert_accepted`].
+  Inbound,
+}
+
 pub(crate) struct ConnEntry {
   conn: Connection,
   peer: SocketAddr,
+  /// Which side opened this connection — [`ConnDirection::Outbound`] for a local
+  /// dial, [`ConnDirection::Inbound`] for a server-accepted peer dial. The
+  /// per-source pending cap counts inbound connections only (see
+  /// [`ConnTable::pending_inbound_from`]).
+  direction: ConnDirection,
   /// `true` once the connection has been observed Established
   /// (`!is_handshaking() && !is_closed()`) at least once. Sticky — never
   /// reset. Distinguishes a previously-healthy pooled connection now in
@@ -205,6 +224,7 @@ impl ConnTable {
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
+      direction: ConnDirection::Outbound,
       established_at_least_once: false,
       pending_events: VecDeque::new(),
     });
@@ -256,6 +276,7 @@ impl ConnTable {
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
+      direction: ConnDirection::Inbound,
       established_at_least_once: false,
       pending_events: VecDeque::new(),
     });
@@ -325,15 +346,51 @@ impl ConnTable {
     self.conns.len()
   }
 
-  /// Number of connections from `source` still completing their handshake
-  /// (`Connection::is_handshaking()`). The per-source pending cap is enforced
-  /// against this before an unauthenticated inbound Initial commits new state,
-  /// bounding the half-open handshake state a single source address can pin.
-  pub(crate) fn pending_handshakes_from(&self, source: &SocketAddr) -> usize {
+  /// Number of inbound (server-accepted) connections from `source` that have
+  /// not yet established — still handshaking, OR handshake-failed and awaiting
+  /// their drained-reap. This is the half-open state the per-source pending cap
+  /// bounds before an unauthenticated inbound Initial commits new state.
+  ///
+  /// Two properties the cap depends on:
+  ///
+  /// - Direction: a LOCAL outbound dial to `source` is NOT counted. Counting it
+  ///   would wedge simultaneous bidirectional dialing — each side's own
+  ///   handshaking outbound to the peer would block the peer's inbound Initial,
+  ///   so neither exchange completes.
+  /// - Never-established: a failed inbound handshake becomes non-handshaking but
+  ///   its closed/draining slab entry lingers until [`Self::reap_if_drained`]
+  ///   frees it. It stays charged here (`!established_at_least_once`) so a source
+  ///   cannot exceed the cap by repeatedly opening handshakes that fail — its
+  ///   closed-but-undrained entries still consume the allowance. An inbound
+  ///   connection that DID establish has graduated out of the half-open budget
+  ///   and is not counted.
+  pub(crate) fn pending_inbound_from(&self, source: &SocketAddr) -> usize {
     self
       .conns
       .iter()
-      .filter(|(_, e)| e.peer == *source && e.conn.is_handshaking())
+      .filter(|(_, e)| {
+        e.peer == *source && e.direction == ConnDirection::Inbound && !e.established_at_least_once
+      })
+      .count()
+  }
+
+  /// Inbound (server-accepted) connections from `source` that have left the
+  /// handshaking phase WITHOUT ever establishing — the failed/closed-but-
+  /// undrained population [`Self::pending_inbound_from`] must keep charged
+  /// (the state an `is_handshaking()`-only count would wrongly free). Distinct
+  /// from still-handshaking entries; used by the regression test that a failed
+  /// inbound handshake does not release the source's allowance before its reap.
+  #[cfg(test)]
+  pub(crate) fn failed_never_established_inbound_from(&self, source: &SocketAddr) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| {
+        e.peer == *source
+          && e.direction == ConnDirection::Inbound
+          && !e.established_at_least_once
+          && !e.conn.is_handshaking()
+      })
       .count()
   }
 

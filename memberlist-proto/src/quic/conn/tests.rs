@@ -498,3 +498,99 @@ fn conn_entry_observation_accessors_on_fresh_entry() {
     "deque still empty after the no-op drain"
   );
 }
+
+/// The per-source pending cap counts INBOUND (server-accepted) connections
+/// only: a local OUTBOUND dial to a peer must not charge against that peer's
+/// inbound pending allowance. Counting it would wedge simultaneous
+/// bidirectional dialing — each side's own handshaking outbound to the peer
+/// would fill the cap and block the peer's inbound Initial, so neither exchange
+/// completes.
+///
+/// Negative control: drop the `direction == ConnDirection::Inbound` filter in
+/// `pending_inbound_from` — the outbound dial is then counted and the `== 0`
+/// assertion fails.
+#[test]
+fn pending_inbound_from_excludes_local_outbound_dial() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+  let ch = t
+    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .unwrap();
+  // A freshly-dialed outbound connection is handshaking and never established —
+  // exactly the state the pre-fix `is_handshaking()` count would have charged.
+  assert!(t.get(ch).unwrap().conn_ref().is_handshaking());
+  assert_eq!(
+    t.pending_inbound_from(&peer),
+    0,
+    "a local outbound dial must not consume the peer's inbound pending allowance \
+       (or simultaneous bidirectional dialing wedges)"
+  );
+}
+
+/// A failed inbound handshake becomes non-handshaking but its closed/draining
+/// slab entry lingers until its drained-reap. `pending_inbound_from` MUST keep
+/// it charged (`!established_at_least_once`), so a source cannot exceed the
+/// per-source cap by repeatedly opening inbound handshakes that fail — the
+/// closed-but-undrained entries still consume its allowance.
+///
+/// A closed-before-Established connection is the observable state of a failed
+/// inbound TLS handshake (`is_closed() && !is_handshaking()`, established flag
+/// never set); `Connection::close` on a handshaking connection reproduces it
+/// exactly — the same modelling the closed-never-Established tests in this file
+/// use (`closed_never_established_cached_does_not_hide_live_accepted_connection`).
+///
+/// Negative control: count `is_handshaking()` instead of
+/// `!established_at_least_once` in `pending_inbound_from` — the closed failed
+/// entries drop out and the final `== 2` assertion fails (the source's
+/// allowance is wrongly freed by handshakes that failed).
+#[test]
+fn pending_inbound_from_charges_failed_never_established_inbound() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let src: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+  // Two distinct inbound (server-accepted) connections attributed to `src`,
+  // minted on the same endpoint so their slab slots stay in lockstep with the
+  // local ConnTable (the accept-vs-dial origin is irrelevant to
+  // `insert_accepted`, which sets direction = Inbound and inserts — see
+  // `closed_never_established_cached_does_not_hide_live_accepted_connection`).
+  let a1: SocketAddr = "127.0.0.1:4500".parse().unwrap();
+  let a2: SocketAddr = "127.0.0.1:4501".parse().unwrap();
+  let (ch1, c1) = client
+    .connect(now.into_std(), cfg.client().clone(), a1, "localhost")
+    .unwrap();
+  t.insert_accepted(ch1, c1, src);
+  let (ch2, c2) = client
+    .connect(now.into_std(), cfg.client().clone(), a2, "localhost")
+    .unwrap();
+  t.insert_accepted(ch2, c2, src);
+  // Both handshaking → both charged; none has yet failed.
+  assert_eq!(t.pending_inbound_from(&src), 2);
+  assert_eq!(t.failed_never_established_inbound_from(&src), 0);
+  // Drive BOTH into Closed WITHOUT ever establishing — the failed-inbound
+  // signature: `is_closed() && !is_handshaking()`, established flag never set,
+  // and not yet drained (the 3xPTO close timer has not fired, so it lingers).
+  for ch in [ch1, ch2] {
+    t.get_mut(ch)
+      .unwrap()
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+    assert!(t.get(ch).unwrap().conn_ref().is_closed());
+    assert!(!t.get(ch).unwrap().conn_ref().is_handshaking());
+    assert!(!t.get(ch).unwrap().conn_ref().is_drained());
+  }
+  assert_eq!(
+    t.failed_never_established_inbound_from(&src),
+    2,
+    "both inbound entries left the handshaking phase without ever establishing"
+  );
+  assert_eq!(
+    t.pending_inbound_from(&src),
+    2,
+    "failed never-established inbound entries stay charged until their \
+       drained-reap; a source cannot exceed the per-source cap by opening \
+       inbound handshakes that fail"
+  );
+}

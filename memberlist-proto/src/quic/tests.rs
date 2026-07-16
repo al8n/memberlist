@@ -3943,110 +3943,183 @@ fn rejected_merge_terminalizes_responder_bridge_via_pump_bridges_close_arm() {
   );
 }
 
-/// The QUIC bidi-accept loop MUST admission-gate each inbound stream against
-/// `max_inbound_streams` before minting a bridge,
-/// exactly as the stream (TCP/TLS) coordinator's `accept_connection` does. A
-/// peer that opens more concurrent inbound bidi streams than the ceiling must
-/// see the excess reset, and `inbound_streams_rejected` must record each
-/// refusal. Without the gate the accept loop mints an unbounded bridge per
-/// stream across all connections (~3x the max frame size each) from a single
-/// peer's stream backlog.
+/// The QUIC bidi-accept loop admission-gates inbound streams against the
+/// coordinator-wide `QuicOptions::max_inbound_streams` ceiling, exactly as the
+/// stream (TCP/TLS) coordinator's `accept_connection` does. This pins the FULL
+/// contract, not merely "at least one rejection" (which a mutation that rejected
+/// EVERY stream would also satisfy): exactly `CAP` concurrent inbound exchanges
+/// are admitted AND complete, the excess (`OPENED - CAP`) is rejected, the PEAK
+/// concurrent inbound bridge population equals `CAP` (never exceeds it, and
+/// reaches it), and after the admitted batch releases its bridges a fresh
+/// exchange is admitted and completes.
 ///
-/// A drives many push/pull exchanges to B over one pooled connection. B caps
-/// inbound streams at 1: once its single inbound bridge is live, every further
-/// stream accepted in the same pass is refused.
+/// The cap is set via `QuicOptions` (the QUIC-specific option), NOT the shared
+/// TCP/TLS `EndpointOptions::max_inbound_streams` (left at its unlimited
+/// default): if the accept loop read the endpoint option instead of `self.cfg`,
+/// `CAP` would have no effect and all `OPENED` streams would be admitted.
 ///
-/// Negative control: revert the cap check in `service_quinn`'s `accept(Dir::Bi)`
-/// loop — the excess streams mint bridges instead of being reset,
-/// `inbound_streams_rejected` stays 0, and this assertion fails.
+/// A drives `OPENED` push/pull exchanges to B over one pooled connection. Once
+/// Established, one `service_dials` pass opens all their bidi streams together,
+/// so B's accept loop sees them concurrently — before any admitted exchange can
+/// complete-and-reap (completion needs a further round trip), so the first `CAP`
+/// are admitted and the rest reset in one drained accept pass.
+///
+/// Negative controls, each breaking a distinct assertion: (a) reverting the gate
+/// to admit every stream drives the peak to `OPENED` and rejections to 0; (b)
+/// rejecting every stream drives the peak to 0 and admits/completes nothing; (c)
+/// an off-by-one (`>` for `>=`) drives the peak to `CAP + 1`; (d) reading
+/// `self.ep.max_inbound_streams()` (endpoint default `None`) instead of
+/// `self.cfg` admits all `OPENED`.
 #[test]
-fn quic_accept_rejects_inbound_streams_over_max_inbound_streams() {
+fn quic_accept_enforces_max_inbound_streams_admit_cap_reject_excess() {
+  use crate::event::ExchangeKind;
   let a_addr: SocketAddr = "127.0.0.1:7940".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7941".parse().unwrap();
   let now = Instant::now();
   let mut a = make_endpoint("a", a_addr, now);
-  // B caps concurrent inbound reliable streams at 1.
+  const CAP: usize = 3;
+  const OPENED: usize = 8;
+  // B caps concurrent inbound reliable streams at CAP via the QUIC option
+  // (endpoint-level `max_inbound_streams` is left at its unlimited default).
   let mut b = make_endpoint_full(
-    EndpointOptions::new(SmolStr::new("b"), b_addr).with_max_inbound_streams(Some(1)),
-    test_config(),
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_inbound_streams(Some(CAP)),
     b_addr,
     now,
   );
 
-  // Register several push/pull intents up front (before the handshake settles).
-  // They queue as pending dials; once the pooled connection is Established, one
-  // `service_dials` pass opens all their bidi streams together and quinn
-  // coalesces the small requests, so B's accept loop sees multiple concurrent
-  // inbound streams in a single pass — the first fills the ceiling, the rest are
-  // refused.
-  const OPENED: usize = 8;
   for _ in 0..OPENED {
-    // Ignoring StreamId: the test asserts on the rejection metric, not handles.
+    // Ignoring StreamId: the test asserts on metrics/completions, not handles.
     let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
   }
 
-  for _ in 0..300 {
-    let mut moved = false;
+  let mut a_succeeded: usize = 0;
+  for _ in 0..400 {
     while let Some((to, bytes)) = a.poll_transmit() {
       if to == b_addr {
         b.handle_udp(a_addr, &bytes, now);
-        moved = true;
       }
     }
     while let Some((to, bytes)) = b.poll_transmit() {
       if to == a_addr {
         a.handle_udp(b_addr, &bytes, now);
-        moved = true;
       }
     }
     a.handle_timeout(now);
     b.handle_timeout(now);
-    if b.metrics().inbound_streams_rejected > 0 {
-      break;
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded += 1;
+      }
     }
-    if !moved
-      && a.counters.endpoint_events_processed > 0
-      && b.counters.endpoint_events_processed > 0
-    {
+    if b.metrics().inbound_streams_rejected >= (OPENED - CAP) as u64 && a_succeeded >= CAP {
       break;
     }
   }
 
-  assert!(
-    b.metrics().inbound_streams_rejected >= 1,
-    "an inbound QUIC bidi stream accepted past `max_inbound_streams` must be \
-       refused (both halves reset) and bump `inbound_streams_rejected`; the \
-       counter is still 0, so the cross-connection inbound cap did not fire"
+  // Peak concurrent inbound bridges equals the ceiling: never exceeds it, AND
+  // reaches it. Off-by-one shows CAP+1, admit-all shows OPENED, reject-all 0.
+  assert_eq!(
+    b.counters.max_inbound_bridges_live, CAP,
+    "peak concurrent inbound bridges on B must equal the ceiling {CAP}; observed {}",
+    b.counters.max_inbound_bridges_live
   );
-  // B never initiates, so every one of its bridges is inbound; the live inbound
-  // population must never exceed the ceiling.
+  // Only the excess over the ceiling was rejected — not more (reject-all) and
+  // not fewer.
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    (OPENED - CAP) as u64,
+    "exactly the excess {} inbound streams over the ceiling must be rejected",
+    OPENED - CAP
+  );
+  // Exactly CAP below-ceiling exchanges were admitted AND completed.
+  assert_eq!(
+    a_succeeded, CAP,
+    "exactly {CAP} admitted inbound exchanges must complete (Succeeded); observed \
+       {a_succeeded}"
+  );
+
+  // Capacity released: a fresh exchange after the batch is admitted and
+  // completes, and is NOT rejected. This also proves the admitted bridges reaped
+  // (the ceiling gates concurrency, not exchange lifetime) — without a reap the
+  // new inbound stream would hit the full ceiling and be rejected.
+  let rejected_after_batch = b.metrics().inbound_streams_rejected;
+  let succeeded_after_batch = a_succeeded;
+  // Ignoring StreamId: the test asserts on completion, not the handle.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  let mut post_release_succeeded = false;
+  for _ in 0..200 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded += 1;
+      }
+    }
+    if a_succeeded > succeeded_after_batch {
+      post_release_succeeded = true;
+      break;
+    }
+  }
   assert!(
-    b.live_bridge_count() <= 1,
-    "B's live inbound bridge count ({}) exceeded the `max_inbound_streams` \
-       ceiling of 1",
-    b.live_bridge_count()
+    post_release_succeeded,
+    "after the admitted batch releases its bridges, a new inbound exchange must \
+       be admitted and complete"
+  );
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    rejected_after_batch,
+    "the post-release exchange is within the ceiling and must not be rejected"
+  );
+  assert_eq!(
+    b.counters.max_inbound_bridges_live, CAP,
+    "the ceiling must continue to hold across the post-release exchange (peak \
+       still {CAP})"
   );
 }
 
-/// `handle_udp` MUST run a coordinator servicing pass ONLY when
-/// `quinn_proto::Endpoint::handle` actually created or advanced
-/// connection state. A datagram quinn discards (`handle` returns `None`) must
-/// not trigger the O(connections + streams) pump-and-scan pass, or an
-/// untrusted-input flood of inert datagrams costs a full servicing pass each.
+/// `handle_udp` MUST run a coordinator servicing pass ONLY when the datagram
+/// actually created or advanced persistent connection state. A `Some` from
+/// `quinn_proto::Endpoint::handle` does NOT imply progress: a discarded datagram
+/// (`None`), a stateless `Response` (version negotiation / retry / stateless
+/// reset — attacker-triggerable), an over-cap or failed `accept`, and a
+/// `ConnectionEvent` for an unknown handle all leave state untouched, yet the
+/// pre-fix code serviced on every `Some`. Servicing runs the O(connections +
+/// streams) pump-and-scan, so an attacker sending valid stateless or over-cap
+/// datagrams at full occupancy could force O(N) work per datagram.
 ///
 /// The `quic_inbound_servicings` test counter increments once per
-/// `service_quic_inbound` call. An inert datagram (classified `Class::Quic` but
-/// truncated so quinn's `PartialDecode` fails → `handle` returns `None`) must
-/// leave it unchanged; a real datagram on an established connection must still
-/// advance it.
+/// `service_quic_inbound` call. This covers three cases against a POPULATED
+/// connection table: establishing the connection (a `NewConnection` accept plus
+/// applied `ConnectionEvent`s) DID service; an inert `None` datagram and a
+/// version-negotiation `Response` (both attacker-shaped) do NOT; a real datagram
+/// advancing the established connection DOES. (The over-cap case is covered by
+/// `quic_new_connection_refused_over_global_cap`.)
 ///
-/// Negative control: revert the gate so `service_quic_inbound` runs
-/// unconditionally after `handle` — the inert datagram then advances the
-/// counter too and the first assertion fails.
+/// Negative control: revert the gate so `service_quic_inbound` runs on every
+/// `Some` (or unconditionally) — the `Response` case (and, if unconditional, the
+/// `None` case) then advances the counter and those assertions fail.
 #[test]
 fn inert_quic_datagram_skips_coordinator_servicing() {
   let a_addr: SocketAddr = "127.0.0.1:7942".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7943".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7944".parse().unwrap();
   let now = Instant::now();
   let mut a = make_endpoint("a", a_addr, now);
   let mut b = make_endpoint("b", b_addr, now);
@@ -4079,6 +4152,12 @@ fn inert_quic_datagram_skips_coordinator_servicing() {
     b.live_connections_to(a_addr) >= 1,
     "test precondition: B must hold an established connection to A"
   );
+  // (0) Establishing the connection accepted a NewConnection and applied
+  // ConnectionEvents on B, each of which DID advance state and service.
+  assert!(
+    b.counters.quic_inbound_servicings > 0,
+    "a real NewConnection accept and its applied ConnectionEvents MUST service"
+  );
 
   // (1) Inert datagram: first byte 0x40 (FIXED_BIT set) classifies as
   // `Class::Quic`, but the packet is truncated far below a parseable short
@@ -4095,7 +4174,41 @@ fn inert_quic_datagram_skips_coordinator_servicing() {
     b.counters.quic_inbound_servicings
   );
 
-  // (2) A real datagram that advances the established connection must still be
+  // (2) Response-class datagram against the POPULATED table: a real Initial from
+  // a third endpoint whose 4-byte version field (bytes [1..5] of the QUIC long
+  // header) is overwritten with an unsupported version, forcing quinn to emit a
+  // Version Negotiation `Response`. `handle` returns `Some(DatagramEvent::
+  // Response)` — attacker-triggerable, commits no connection state — so it must
+  // NOT service, yet it IS a `Some` (proving this exercises the Some-but-inert
+  // path, distinct from the `None` case above): B queues the VN datagram back.
+  let mut c = make_endpoint("c", c_addr, now);
+  // Ignoring StreamId: only c's on-wire Initial is used.
+  let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+  let mut vn_trigger = drain_first_datagram_to(&mut c, b_addr);
+  vn_trigger[1..5].copy_from_slice(&[0x1a, 0x2a, 0x3a, 0x4a]);
+  // Drain B's outbound so the only datagram queued after the VN feed is the VN.
+  while b.poll_transmit().is_some() {}
+  let before_vn = b.counters.quic_inbound_servicings;
+  b.handle_udp(c_addr, &vn_trigger, now);
+  assert_eq!(
+    b.counters.quic_inbound_servicings, before_vn,
+    "a version-negotiation Response (Some(DatagramEvent::Response)) commits no \
+       connection state and must NOT trigger a servicing pass"
+  );
+  let mut vn_emitted = false;
+  while let Some((to, _)) = b.poll_transmit() {
+    if to == c_addr {
+      vn_emitted = true;
+    }
+  }
+  assert!(
+    vn_emitted,
+    "quinn must have emitted a Version Negotiation datagram to the source — \
+       proving `handle` returned Some(Response), so this is the Some-but-inert \
+       path, not the None-discard path"
+  );
+
+  // (3) A real datagram that advances the established connection must still be
   // serviced. Drive one more exchange and confirm the counter advances on a
   // datagram delivered to B.
   let before_real = b.counters.quic_inbound_servicings;
@@ -4188,6 +4301,10 @@ fn quic_new_connection_refused_over_global_cap() {
 
   // A2 dials B: its Initial must be refused at the global cap.
   let rejected_before = b.metrics().quic_connections_rejected;
+  // An over-cap Initial is `ignore`d before committing state — no servicing pass
+  // is owed for it. Capture the counter so the refused datagrams below can be
+  // shown not to advance it (Finding 1's over-cap case).
+  let servicings_before_a2 = b.counters.quic_inbound_servicings;
   // Ignoring StreamId: the test asserts on the rejection metric, not handles.
   let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
   for _ in 0..20 {
@@ -4220,6 +4337,16 @@ fn quic_new_connection_refused_over_global_cap() {
   assert!(
     b.live_connections_to(a1_addr) >= 1,
     "the pre-existing connection must be unaffected by the refusal"
+  );
+  // The refused over-cap Initials committed no state, so none triggered a
+  // servicing pass (Finding 1: `route_datagram_event` reports `Inert` for an
+  // over-cap `ignore`, so `handle_udp` skips `service_quic_inbound`). Reverting
+  // the servicing gate (service on every `Some`) would advance this counter for
+  // each over-cap Initial an attacker sends at full occupancy.
+  assert_eq!(
+    b.counters.quic_inbound_servicings, servicings_before_a2,
+    "an over-cap Initial is ignored before committing state and must NOT trigger \
+       a servicing pass"
   );
 }
 
@@ -4307,4 +4434,128 @@ fn drain_first_datagram_to(ep: &mut QuicEndpoint<SmolStr>, dst: SocketAddr) -> V
     // the Initial already, but tolerate a couple of empty polls defensively.
   }
   panic!("endpoint emitted no datagram destined to {dst}");
+}
+
+/// Simultaneous bidirectional dial at per-source pending cap 1: `start_push_pull`
+/// attempts each dial and flushes its Initial synchronously, so BEFORE any
+/// delivery each side already holds a handshaking OUTBOUND connection to the
+/// other. Because the per-source cap counts inbound connections only, that local
+/// outbound does NOT consume the peer's inbound allowance — each side accepts the
+/// other's Initial and BOTH push/pull exchanges complete.
+///
+/// Negative control: drop the `direction == Inbound` filter in
+/// `pending_inbound_from` (count outbound dials too) — B's own handshaking
+/// outbound to A fills its cap of 1, so B refuses A's inbound Initial (and vice
+/// versa); neither outbound handshake gets a server side, so neither exchange
+/// completes and both `*_succeeded` assertions fail (with `now` fixed, the
+/// stranded exchanges never even fail by timeout — they simply never complete).
+#[test]
+fn simultaneous_dial_at_per_source_cap_one_both_exchanges_succeed() {
+  use crate::event::ExchangeKind;
+  let a_addr: SocketAddr = "127.0.0.1:7960".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7961".parse().unwrap();
+  let now = Instant::now();
+  // Both endpoints cap concurrent pending inbound handshakes per source at 1.
+  let mut a = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("a"), a_addr),
+    test_config().with_max_pending_connections_per_source(Some(1)),
+    a_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_pending_connections_per_source(Some(1)),
+    b_addr,
+    now,
+  );
+
+  // Simultaneous dial: each side attempts its outbound (and flushes the Initial)
+  // before any delivery, so each holds a handshaking outbound to the other when
+  // the peer's inbound Initial arrives.
+  // Ignoring StreamId: the test asserts on exchange completion, not handles.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  let _ = b.start_push_pull(a_addr, PushPullKind::Join, now);
+
+  let mut a_succeeded = false;
+  let mut b_succeeded = false;
+  for _ in 0..400 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded = true;
+      }
+    }
+    while let Some(ev) = b.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        b_succeeded = true;
+      }
+    }
+    if a_succeeded && b_succeeded {
+      break;
+    }
+  }
+  assert!(
+    a_succeeded,
+    "A's push/pull to B must complete (Succeeded) under simultaneous dial at \
+       per-source cap 1 — A's local outbound dial to B must not block B's inbound \
+       Initial"
+  );
+  assert!(
+    b_succeeded,
+    "B's push/pull to A must complete (Succeeded) under simultaneous dial at \
+       per-source cap 1"
+  );
+}
+
+/// The production-default QUIC config (`QuicOptions::new`, no explicit cap set)
+/// MUST install a bounded, nonzero coordinator-wide inbound-stream ceiling. A
+/// default of `None` (unlimited) lets each of up to `max_quic_connections`
+/// connections open its full bidi allowance and mint an unbounded number of
+/// inbound bridges. The accept loop's behavioural enforcement of this QUIC option
+/// is pinned by `quic_accept_enforces_max_inbound_streams_admit_cap_reject_excess`
+/// (which sets the cap via `QuicOptions`, not the endpoint option); together they
+/// show the default config behaviourally bounds inbound streams.
+///
+/// Negative control: revert the `QuicOptions::new` default to `None` — the first
+/// assertion fails.
+#[test]
+fn production_default_quic_config_bounds_inbound_streams() {
+  use crate::quic::DEFAULT_MAX_QUIC_INBOUND_STREAMS;
+  let qc = test_config();
+  assert_eq!(
+    qc.max_inbound_streams(),
+    Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
+    "the production-default QUIC config must bound inbound streams (not None)"
+  );
+  // The ceiling being nonzero (a `Some(0)` default would reject every inbound
+  // stream) is guarded at compile time next to the constant's definition.
+  // The shared TCP/TLS endpoint-level default is deliberately unchanged
+  // (unlimited): the QUIC bound is QUIC-specific, so TCP/TLS behaviour is intact.
+  let ep = EndpointOptions::new(
+    SmolStr::new("x"),
+    "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
+  );
+  assert_eq!(
+    ep.max_inbound_streams(),
+    None,
+    "the shared TCP/TLS endpoint-level inbound-stream default must remain \
+       unlimited — the QUIC-specific bound must not change it"
+  );
 }

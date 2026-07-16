@@ -739,9 +739,11 @@ impl<I, A, R> Endpoint<I, A, R> {
     self.cfg.stream_timeout()
   }
 
-  /// The optional concurrent inbound-stream ceiling. The stream and QUIC
-  /// coordinators use it to admission-gate inbound exchanges.
-  #[cfg(any(feature = "tls", feature = "tcp", feature = "quic"))]
+  /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
+  /// it to admission-gate inbound exchanges. The QUIC coordinator has its own
+  /// QUIC-specific ceiling ([`crate::QuicOptions::max_inbound_streams`]) with a
+  /// bounded default, so it does not consult this shared (TCP/TLS) option.
+  #[cfg(any(feature = "tls", feature = "tcp"))]
   #[inline(always)]
   pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
     self.cfg.max_inbound_streams()
