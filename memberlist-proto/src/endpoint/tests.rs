@@ -1,5 +1,5 @@
 use super::*;
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use smol_str::SmolStr;
 
 fn cfg() -> EndpointOptions<SmolStr, SocketAddr> {
@@ -8839,34 +8839,102 @@ fn ping_over_mtu_target_errs_without_registering_probe_or_ack() {
   assert_eq!(pings, 1, "a within-MTU ping queues exactly one Ping");
 }
 
-/// A relayed IndirectPing whose forwarded `Ping` to `target` would exceed
-/// `gossip_mtu` (an attacker-controlled unbounded target id) is dropped
-/// entirely — no forwarded Ping, no ack-registry/forward state, no Nack — and
-/// bumps the dedicated `indirect_forwards_oversized` counter, NOT the flood-cap
-/// `indirect_forwards_dropped`. A doomed forward registered only to Nack on
-/// expiry would waste the relay state the flood backstop protects and misreport
-/// reached-but-target-silent. A within-MTU indirect ping still forwards one Ping
-/// and registers the forward.
+/// A caller-supplied `ping` target whose address cannot be encoded on the
+/// compact wire layout — here a scoped IPv6 `SocketAddr` (nonzero `scope_id`),
+/// which the compact encoder rejects — is rejected up front with
+/// `UnencodablePingTarget` rather than PANICKING on the encode: it registers NO
+/// probe/ack state and queues NO Packet. A wire-decoded address always decodes
+/// `scope_id` / `flowinfo` to 0, so only a caller-supplied target can hit this;
+/// a `Result`-returning API must reject it, not abort the process.
 #[test]
-fn handle_indirect_ping_over_mtu_target_drops_and_counts_oversized() {
-  let gossip_mtu = 1400usize;
-  let mut e: Endpoint<SmolStr, SocketAddr> =
-    Endpoint::new_seeded(cfg().with_gossip_mtu(gossip_mtu));
+fn ping_unencodable_target_errs_without_registering_probe_or_ack() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
   let t0 = Instant::now();
 
-  // Transport source matches the embedded requester so the relay-oracle guard
-  // passes; the target id alone dwarfs the datagram budget.
-  let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
-  let big_id = "b".repeat(gossip_mtu * 2);
+  // A scoped IPv6 address (nonzero scope_id) the compact encoder rejects, so
+  // the framed Ping to it is un-encodable.
+  let scoped = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7003, 0, 1));
+  let target = Node::new(SmolStr::new("scoped-peer"), scoped);
+  let probes_before = e.probes.len();
   let acks_before = e.ack_registry.len();
-  e.handle_indirect_ping(from, ind_ping(&big_id, 7001, "carol", 7002, 42), t0);
-
+  match e.ping(target, t0) {
+    Err(Error::UnencodablePingTarget) => {}
+    other => panic!("expected UnencodablePingTarget, got {other:?}"),
+  }
   assert!(
     e.poll_transmit().is_none(),
-    "an over-MTU forwarded Ping is never queued"
+    "an unencodable-target ping queues no Packet"
   );
+  assert_eq!(
+    e.probes.len(),
+    probes_before,
+    "an unencodable-target ping registers no probe (no dangling probe slot)"
+  );
+  assert_eq!(
+    e.ack_registry.len(),
+    acks_before,
+    "an unencodable-target ping registers no ack entry (no dangling ack)"
+  );
+}
+
+/// A relayed IndirectPing whose forwarded `Ping` would exceed `gossip_mtu`
+/// under DIFFERENTIAL MTU — this relay's long local id, prepended to a `target`
+/// that the requester's shorter inbound IndirectPing (`source + target`) still
+/// fit under the same budget — is NOT dropped silently. The requester already
+/// counted this helper in its `expected_nacks`, so a missing Nack would make it
+/// read a responsive helper as unresponsive, inflating `expected_nacks - seen`
+/// and degrading its Lifeguard health. The relay instead sends an immediate
+/// Nack — echoing the requester's own seq, to the validated requester address —
+/// and registers NO relay/ack state, bumping the dedicated
+/// `indirect_forwards_oversized` counter (NOT the flood-cap
+/// `indirect_forwards_dropped`).
+#[test]
+fn handle_indirect_ping_over_mtu_forward_nacks_requester_and_counts_oversized() {
+  let gossip_mtu = 1400usize;
+  // A long relay local id: its self-Ping (`Ping(local, local)`) must still fit
+  // gossip_mtu (the construction floor), but `local + target` for a long target
+  // must exceed it.
+  let long_local = "L".repeat(500);
+  let relay_cfg = EndpointOptions::new(
+    SmolStr::new(long_local.as_str()),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+  )
+  .with_gossip_mtu(gossip_mtu);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(relay_cfg);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  let t0 = Instant::now();
+
+  // A short-id requester and a target sized so the inbound IndirectPing
+  // (`source + target`) fits gossip_mtu but the relay-built forwarded Ping
+  // (`long local + target`) exceeds it: the realistic differential-MTU trigger.
+  let requester_seq = 42u32;
+  let short_source = "s";
+  let long_target = "t".repeat(1100);
+  let requester_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+
+  // The inbound IndirectPing itself fits the datagram budget, so the forward is
+  // over-MTU only because of the relay's longer local id — not an oversized
+  // inbound that a driver's receive buffer would already truncate.
+  let inbound_len = crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::IndirectPing(
+    ind_ping(&long_target, 7001, short_source, 7002, requester_seq),
+  ))
+  .expect("the inbound IndirectPing encodes")
+  .len();
+  assert!(
+    inbound_len <= gossip_mtu,
+    "the inbound IndirectPing must fit gossip_mtu ({inbound_len} <= {gossip_mtu})"
+  );
+
+  let acks_before = e.ack_registry.len();
+  e.handle_indirect_ping(
+    requester_addr,
+    ind_ping(&long_target, 7001, short_source, 7002, requester_seq),
+    t0,
+  );
+
   assert!(
     e.indirect_forwards.is_empty(),
     "an over-MTU forward registers no relay state"
@@ -8879,28 +8947,49 @@ fn handle_indirect_ping_over_mtu_target_drops_and_counts_oversized() {
   assert_eq!(
     e.metrics().indirect_forwards_oversized,
     1,
-    "the oversized-forward drop bumps its dedicated counter"
+    "the oversized forward bumps its dedicated counter"
   );
   assert_eq!(
     e.metrics().indirect_forwards_dropped,
     0,
-    "an oversized drop is NOT a flood-cap drop"
+    "an oversized forward is NOT a flood-cap drop"
   );
 
-  // No Nack is emitted when the (never-registered) forward's deadline would
-  // have elapsed.
-  let t1 = t0 + Duration::from_secs(10);
-  e.handle_timeout(t1);
+  // Exactly one transmit: a Nack echoing the requester's own seq, to the
+  // validated requester address — and no forwarded Ping.
+  match e
+    .poll_transmit()
+    .expect("an over-MTU forward Nacks the requester")
+  {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      assert_eq!(
+        to, requester_addr,
+        "the Nack goes to the validated requester address"
+      );
+      match message {
+        Message::Nack(nack) => assert_eq!(
+          nack.sequence_number(),
+          requester_seq,
+          "the Nack echoes the requester's own probe seq, not our forward seq"
+        ),
+        other => panic!("expected a Nack, got {other:?}"),
+      }
+    }
+    Transmit::Compound(c) => panic!("expected a lone Nack Packet, not a compound: {c:?}"),
+  }
   assert!(
-    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      &tx,
-      Transmit::Packet(p) if matches!(p.message_ref(), Message::Nack(_))
-    )),
-    "an over-MTU forward was never registered, so no Nack on expiry"
+    e.poll_transmit().is_none(),
+    "the over-MTU forward emits exactly one transmit (the Nack), no forwarded Ping"
   );
 
-  // A within-MTU indirect ping still forwards exactly one Ping and registers.
-  e.handle_indirect_ping(from, ind_ping("bob", 7001, "carol", 7002, 43), t1);
+  // The oversized-Nack path left the relay functional: a within-MTU indirect
+  // ping still forwards exactly one Ping and registers one relay entry.
+  e.handle_indirect_ping(
+    requester_addr,
+    ind_ping("bob", 7001, short_source, 7002, 43),
+    t0,
+  );
   match e
     .poll_transmit()
     .expect("a within-MTU indirect ping forwards a Ping")

@@ -2361,8 +2361,10 @@ where
   /// the public `ping` API, which returns
   /// [`Error::PingExceedsMtu`](crate::error::Error::PingExceedsMtu) on an
   /// over-MTU target rather than register a doomed probe; and the indirect relay
-  /// `handle_indirect_ping`, which drops the over-MTU forward and bumps
-  /// `indirect_forwards_oversized`. Node ids are unbounded, so any of these can
+  /// `handle_indirect_ping`, which — because a legitimate requester already
+  /// counted this helper in its `expected_nacks` — Nacks that validated requester
+  /// and bumps `indirect_forwards_oversized` rather than forward a doomed Ping.
+  /// Node ids are unbounded, so any of these can
   /// carry a large already-admitted or attacker-supplied peer id that exceeds
   /// the single-datagram budget even though the construction-time self-`Ping`
   /// floor guarantees only the LOCAL identity fits. A single message has no
@@ -2490,12 +2492,21 @@ where
     // Build the forwarded Ping and MTU-check it BEFORE registering any relay
     // state. A node id is unbounded and `target` is attacker-controlled, so a
     // large target id can push the forwarded Ping past the single-datagram
-    // `gossip_mtu`; such a forward is dropped entirely — no forwarded Ping, no
-    // AckRegistry/forward entry, no Nack — exactly like the from-mismatch,
-    // flood-cap, and dedup guards above. Registering a doomed forward just to
-    // Nack on expiry would waste the exact relay state the flood backstop
-    // protects and misreport a "reached-but-target-silent" Nack for a Ping we
-    // never sent. The drop bumps its own counter, distinct from the flood cap.
+    // `gossip_mtu`; so too can differential MTU — this relay's longer local id
+    // added to a `target` that the requester's shorter inbound IndirectPing
+    // (`source + target`) still fit under the same budget. Unlike the
+    // from-mismatch / flood-cap / dedup guards above — which correctly drop with
+    // no Nack (a spoofed source, an overload backstop, or a duplicate the
+    // original forward still answers: no legitimate requester waiting on THIS
+    // reply) — an MTU-un-forwardable forward has a real requester that already
+    // counted this helper in its `expected_nacks`. Dropping it silently would
+    // make the requester read a responsive helper as unresponsive, inflating its
+    // `expected_nacks - seen`, degrading its Lifeguard health and stretching its
+    // failure deadlines. So send it an immediate Nack — at the same VALIDATED
+    // requester address the relay-Ack / Nack-on-expiry paths use — and register
+    // no relay/ack state (a doomed forward kept only to Nack on expiry would
+    // instead waste the relay state the flood backstop protects). The miss bumps
+    // its own counter, distinct from the flood cap.
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let forwarded = Ping::new(
@@ -2506,6 +2517,16 @@ where
     let msg = Message::Ping(forwarded);
     if !self.probe_packet_within_mtu(&msg) {
       self.metrics.indirect_forwards_oversized += 1;
+      // A Nack carries only a seq, so it always fits the datagram — no MTU gate
+      // needed. It echoes the requester's own probe seq (`requester_seq`), not
+      // our unused forward seq.
+      let nack = Nack::new(requester_seq);
+      self
+        .pending_transmits
+        .push_back(Transmit::Packet(PacketTransmit::new(
+          requester_addr,
+          Message::Nack(nack),
+        )));
       return;
     }
 
@@ -2558,7 +2579,11 @@ where
   /// framed `Ping` to `node` would exceed the single-datagram `gossip_mtu`
   /// budget — a node id is unbounded, so a large target id can push it past one
   /// datagram, and such a Ping is rejected up front (registering no probe or ack
-  /// state) rather than begun as a probe doomed to time out.
+  /// state) rather than begun as a probe doomed to time out. Returns
+  /// [`Error::UnencodablePingTarget`](crate::error::Error::UnencodablePingTarget)
+  /// if `node`'s id or address cannot be encoded on the compact wire layout
+  /// (e.g. a scoped or flow-labelled IPv6 `SocketAddr`), likewise rejected up
+  /// front before any probe/ack state is registered.
   pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> Result<PingId, crate::error::Error> {
     // Reject once leaving/left: a departing node starts no new probe.
     self.ensure_running()?;
@@ -2609,9 +2634,16 @@ where
     );
     let msg = Message::Ping(ping);
     let budget = self.gossip_mtu();
-    let encoded_len = crate::wire::encode_message::<I, A>(&msg)
-      .expect("outbound ping must bridge to wire form")
-      .len();
+    // `node` is caller-supplied. Unlike a wire-decoded address (whose
+    // SocketAddrV6 `scope_id` / `flowinfo` always decode to 0, so it always
+    // re-encodes), a caller-supplied target can carry a nonzero `scope_id` /
+    // `flowinfo` that the compact encoder rejects, making the Ping
+    // un-encodable. Map that to a typed error — before any probe/ack state is
+    // registered — rather than panicking on an ordinary bad target.
+    let encoded_len = match crate::wire::encode_message::<I, A>(&msg) {
+      Ok(bytes) => bytes.len(),
+      Err(_) => return Err(crate::error::Error::UnencodablePingTarget),
+    };
     if encoded_len > budget {
       return Err(crate::error::Error::PingExceedsMtu(
         crate::error::SizeExceeded::new(encoded_len, budget),
