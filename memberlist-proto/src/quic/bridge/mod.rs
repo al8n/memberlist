@@ -39,6 +39,13 @@ pub(crate) struct Bridge<I, A> {
   stream: Stream<I, A>,
   ch: ConnectionHandle,
   sid: QuicSid,
+  /// This bridge's index within its owning connection's bucket in the
+  /// coordinator's `bridges_by_conn` map. Invariant: `bridges_by_conn[self.ch]
+  /// [self.conn_slot]` is this bridge's machine `StreamId`. Recorded at mint by
+  /// `index_bridge_mint`, and repaired whenever a sibling reap's `swap_remove`
+  /// relocates this bridge into a vacated slot. Lets a reap drop the bridge from
+  /// its bucket in O(1) (`swap_remove(conn_slot)`) instead of an O(bucket) scan.
+  conn_slot: usize,
   /// Bytes accepted by memberlist but not yet accepted by the quinn send
   /// stream because it returned `WriteError::Blocked`. Drained head-first on
   /// the next [`Bridge::pump_out`]; never discarded while non-empty.
@@ -156,6 +163,27 @@ pub(crate) struct Bridge<I, A> {
   outbound_label_written: bool,
 }
 
+// Bucket back-pointer accessors — plain `usize` field access, no node-identity
+// or address bound required, so they live in an unbounded impl the coordinator's
+// non-generic `index_bridge_mint` can call.
+impl<I, A> Bridge<I, A> {
+  /// This bridge's index within its owning connection's `bridges_by_conn`
+  /// bucket. Invariant: `bridges_by_conn[self.ch()][self.conn_slot()]` is this
+  /// bridge's machine `StreamId`. Read at reap time (before the bridge is
+  /// dropped) so the coordinator can `swap_remove(conn_slot)` the bucket slot in
+  /// O(1).
+  pub(crate) fn conn_slot(&self) -> usize {
+    self.conn_slot
+  }
+
+  /// Set the bucket back-pointer — see [`Self::conn_slot`]. Called by the
+  /// coordinator's `index_bridge_mint` at mint, and by the reap-side
+  /// `swap_remove` fixup when this bridge is relocated into a vacated slot.
+  pub(crate) fn set_conn_slot(&mut self, slot: usize) {
+    self.conn_slot = slot;
+  }
+}
+
 impl<I, A> Bridge<I, A>
 where
   A: crate::Data + crate::CheapClone + PartialEq + 'static,
@@ -230,6 +258,10 @@ where
       stream,
       ch,
       sid,
+      // Placeholder; `index_bridge_mint` records the real bucket slot the
+      // instant this bridge is inserted into `bridges_by_conn`, before any reap
+      // can consult it.
+      conn_slot: 0,
       pending_out: Vec::new(),
       sent_any: false,
       finish_called: false,

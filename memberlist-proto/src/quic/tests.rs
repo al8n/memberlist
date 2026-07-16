@@ -5139,6 +5139,22 @@ fn bridges_by_conn_index_matches_bruteforce() {
       index, brute,
       "bridges_by_conn diverged from the brute-force filter after: {label}"
     );
+    // conn_slot back-pointers: the bridge at position `p` of `ch`'s bucket must
+    // record `conn_slot == p`, so a reap's `swap_remove(conn_slot)` drops that
+    // exact bridge in O(1). A missed mint-time record or a missed sibling fixup
+    // leaves the back-pointer stale.
+    for (ch, ids) in ep.bridges_by_conn.iter() {
+      for (p, id) in ids.iter().enumerate() {
+        let br = ep.bridges.get(id).unwrap_or_else(|| {
+          panic!("bridges_by_conn[{ch:?}][{p}] = {id:?} absent from bridges (after: {label})")
+        });
+        assert_eq!(
+          br.conn_slot(),
+          p,
+          "conn_slot back-pointer diverged from bucket position for {id:?} after: {label}"
+        );
+      }
+    }
     // bridge_by_conn_sid: the finer-grained (ch, sid) -> id reverse index.
     let mut brute_sid: std::collections::HashMap<
       (quinn_proto::ConnectionHandle, quinn_proto::StreamId),
@@ -5630,6 +5646,235 @@ fn connection_lost_reap_scans_only_its_own_connections_bridges() {
     visits < total_before as u64,
     "the ConnectionLost reap must examine only the lost connection's bridges \
        (O(ch)), not scan the whole {total_before}-bridge table; examined {visits}"
+  );
+}
+
+/// Losing a connection holding K bridges drops them from `bridges_by_conn` in one
+/// whole-bucket map remove followed by a per-bridge bucketless deindex — O(K)
+/// SmallVec work, never O(K²). `bridge_bucket_scan_ops` counts per-element bucket
+/// surgery; the bucketless loss path performs none, so it stays at 0 across the
+/// loss (well within the O(K) bound).
+///
+/// Mutation-verify: revert the loss path to a per-bridge `retain` deindex (the
+/// former O(K)-per-reap bucket scan) — reaping the shrinking bucket K times scans
+/// K + (K-1) + ... elements, so `bridge_bucket_scan_ops` climbs to O(K²) and the
+/// `<= K` assertion fails.
+#[test]
+fn connection_lost_reap_is_linear_in_bucket() {
+  let b_addr: SocketAddr = "127.0.0.1:7693".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7694".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Establish A -> B (A dials; B pools an inbound connection to A).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "precondition: B must pool a connection to A"
+  );
+
+  // Open K live outbound bridges on B's connection to A; never ferry them, so
+  // every one stays live (awaiting a response) until the loss.
+  const K: usize = 8;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  while b.poll_transmit().is_some() {}
+  let ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let k_live = b.bridges.values().filter(|br| br.ch() == ch).count();
+  assert!(
+    k_live >= 4,
+    "precondition: enough sibling bridges to make O(K) vs O(K²) non-vacuous (got {k_live})"
+  );
+
+  // A closes its connection to B; ferry the CONNECTION_CLOSE to B on the datagram
+  // path, so `service_connection`'s loss reap runs the bucketless whole-bucket
+  // deindex in that pass.
+  let ch_a2b = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a2b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  a.flush_outbound_transmits(now);
+  let close_dg = drain_first_datagram_to(&mut a, b_addr);
+
+  b.counters.bridge_bucket_scan_ops = 0;
+  b.handle_udp(a_addr, &close_dg, now);
+
+  assert_eq!(
+    b.bridges.values().filter(|br| br.ch() == ch).count(),
+    0,
+    "every bridge on the lost connection must be reaped"
+  );
+  assert!(
+    !b.bridges_by_conn.contains_key(&ch),
+    "the lost connection's bucket must be gone"
+  );
+  let ops = b.counters.bridge_bucket_scan_ops;
+  assert!(
+    ops <= k_live as u64,
+    "the connection-loss reap of {k_live} bridges must do O(K) SmallVec work \
+       (the shipped bucketless whole-bucket remove does 0; got {ops}); a per-bridge \
+       retain deindex would scan the shrinking bucket K times → O(K²)"
+  );
+}
+
+/// Each single-bridge reap drops the bridge from its `bridges_by_conn` bucket in
+/// O(1) via one `swap_remove`, so reaping K sibling bridges on a live connection
+/// costs O(K) SmallVec work, not O(K²). `bridge_bucket_scan_ops` (one per
+/// swap_remove) therefore equals the reaped count after all siblings reap through
+/// the pump path.
+///
+/// Mutation-verify: revert `index_bridge_reap`'s `swap_remove` to the former
+/// `retain` (counting each scanned element) — reaping the shrinking bucket scans
+/// K + (K-1) + ... elements, so the counter climbs to O(K²) and the equality
+/// assertion fails.
+#[test]
+fn sibling_bridge_reap_is_o1_per_bridge() {
+  let b_addr: SocketAddr = "127.0.0.1:7696".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7697".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Establish B -> A and let the join push/pull settle so B holds a pooled
+  // connection to A with no live bridge.
+  let _ = b.start_push_pull(a_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    b.handle_timeout(now);
+    a.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && b.live_bridge_count() == 0 && !moved {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "precondition: B must pool a connection to A"
+  );
+  assert_eq!(
+    b.live_bridge_count(),
+    0,
+    "precondition: the join push/pull must have settled"
+  );
+  while b.poll_transmit().is_some() {}
+
+  // Open K sibling bridges on B's one connection to A; never ferry them, so they
+  // share one exchange deadline and reap together on a timeout tick via the pump
+  // path — each through a single O(1) `swap_remove`.
+  const K: usize = 8;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  let ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let opened = b.bridges.values().filter(|br| br.ch() == ch).count();
+  assert!(
+    opened >= 4,
+    "precondition: enough sibling bridges (got {opened})"
+  );
+
+  // The multi-element bucket must carry exact conn_slot back-pointers — the
+  // lifecycle cross-check only ever sees size-1 buckets, so this is where the
+  // mint-time recording is checked non-vacuously. A broken swap_remove fixup
+  // would additionally trip `index_bridge_reap`'s `debug_assert` mid-reap below.
+  {
+    let bucket = b
+      .bridges_by_conn
+      .get(&ch)
+      .expect("the sibling bucket exists");
+    for (p, id) in bucket.iter().enumerate() {
+      assert_eq!(
+        b.bridges.get(id).unwrap().conn_slot(),
+        p,
+        "conn_slot must equal the bucket position for sibling {id:?}"
+      );
+    }
+  }
+
+  while b.poll_transmit().is_some() {}
+
+  // Advance to the bridges' exchange deadline; the pump reaps each via
+  // `index_bridge_reap`'s O(1) swap_remove. Keep advancing to the reported
+  // deadline until the bucket empties (an intervening connection PTO/timer may be
+  // earlier); the connection outlives the bridges (idle timeout 20 s > the
+  // exchange deadline), so every reap goes through the pump path, never the
+  // bucketless connection-loss path.
+  b.counters.bridge_bucket_scan_ops = 0;
+  b.counters.bridge_pump_path_reaps = 0;
+  let mut guard = 0;
+  while b.bridges.values().any(|br| br.ch() == ch) {
+    let due = b
+      .poll_timeout()
+      .expect("live bridges contribute a deadline");
+    b.handle_timeout(due + Duration::from_millis(1));
+    guard += 1;
+    assert!(
+      guard < 128,
+      "sibling bridges failed to reap within the deadline horizon"
+    );
+  }
+
+  // Each single-bridge pump-path reap performs exactly one O(1) bucket
+  // swap_remove, so the two counters stay equal however many bridges churn
+  // through the reap: advancing membership time escalates B's probe of the
+  // unreachable A and opens extra reliable-fallback-ping bridges that also reap,
+  // but those track together in both counters. The sibling bucket (>= 4 deep)
+  // makes the equality discriminating — the former O(bucket) retain would scan
+  // 4 + 3 + ... elements per reap, pushing the scan-op count above the reap count.
+  let scan_ops = b.counters.bridge_bucket_scan_ops;
+  let reaps = b.counters.bridge_pump_path_reaps;
+  assert!(
+    reaps >= opened as u64,
+    "the {opened} sibling bridges must have reaped through the pump path (reaps {reaps})"
+  );
+  assert_eq!(
+    scan_ops, reaps,
+    "each pump-path reap must cost exactly one O(1) swap_remove (scan_ops {scan_ops} \
+       vs reaps {reaps}); the former O(bucket) retain would push scan_ops above the \
+       reap count"
   );
 }
 

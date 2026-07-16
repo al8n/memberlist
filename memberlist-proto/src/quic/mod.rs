@@ -54,34 +54,30 @@ use std::collections::VecDeque;
 use std::collections::HashSet;
 
 /// Record machine stream `id` under connection `ch` in the per-connection
-/// bridge index [`QuicEndpoint::bridges_by_conn`].
+/// bridge index [`QuicEndpoint::bridges_by_conn`], and stamp the pushed position
+/// as the bridge's [`Bridge::conn_slot`] back-pointer so a later reap can
+/// `swap_remove` that slot in O(1). Invariant on return:
+/// `bridges_by_conn[ch][bridges[&id].conn_slot()] == id`.
 ///
-/// A free function taking only the index field (never all of `self`) so a mint
-/// site can call it while a `self.conns.get_mut(..)` connection borrow is still
-/// live — the accept loop mints an inbound bridge inside the per-connection
-/// `poll()` drain, where `self.conns` is borrowed mutably.
-fn index_bridge_mint(
+/// A free function taking only the two index fields (never all of `self`) so a
+/// mint site can call it while a `self.conns.get_mut(..)` connection borrow is
+/// still live — the accept loop mints an inbound bridge inside the per-connection
+/// `poll()` drain, where `self.conns` is borrowed mutably. `bridges` and
+/// `bridges_by_conn` are disjoint from `conns`, so both are borrowable here.
+fn index_bridge_mint<I>(
+  bridges: &mut HashMap<StreamId, Bridge<I, SocketAddr>>,
   bridges_by_conn: &mut HashMap<ConnectionHandle, SmallVec<StreamId>>,
   ch: ConnectionHandle,
   id: StreamId,
 ) {
-  bridges_by_conn.entry(ch).or_default().push(id);
-}
-
-/// Drop machine stream `id` from connection `ch`'s entry in the per-connection
-/// bridge index, removing the entry entirely once it empties (so the map holds a
-/// key only while `ch` owns at least one bridge). The reap-side mirror of
-/// [`index_bridge_mint`]; a free function for the same disjoint-borrow reason.
-fn index_bridge_reap(
-  bridges_by_conn: &mut HashMap<ConnectionHandle, SmallVec<StreamId>>,
-  ch: ConnectionHandle,
-  id: StreamId,
-) {
-  if let Some(ids) = bridges_by_conn.get_mut(&ch) {
-    ids.retain(|existing| *existing != id);
-    if ids.is_empty() {
-      bridges_by_conn.remove(&ch);
-    }
+  let bucket = bridges_by_conn.entry(ch).or_default();
+  let slot = bucket.len();
+  bucket.push(id);
+  // The caller inserts the bridge into `bridges` immediately before this mint,
+  // so `get_mut` succeeds; guard defensively rather than panic on a future
+  // caller that reorders the two.
+  if let Some(br) = bridges.get_mut(&id) {
+    br.set_conn_slot(slot);
   }
 }
 
@@ -508,6 +504,25 @@ struct TestCounters {
   /// `self.bridges` scan makes it climb to the total and the test fails. Never
   /// compiled into production builds.
   bridge_scan_visits: u64,
+  /// Test-only count of per-element SmallVec surgeries performed while removing a
+  /// reaped bridge from its [`QuicEndpoint::bridges_by_conn`] bucket. Bumped once
+  /// per single-bridge [`QuicEndpoint::index_bridge_reap`] `swap_remove` (an O(1)
+  /// single-element relocation); the connection-loss path takes the whole bucket
+  /// in one map remove and runs a bucketless deindex, so it never bumps this. A
+  /// K-bridge burst therefore costs O(K). Reverting the removal to the former
+  /// `retain` (which scans the whole bucket per reap, counting each scanned
+  /// element) makes it climb to O(K²) across the burst, which the visit-count
+  /// regression tests assert against. Never compiled into production builds.
+  bridge_bucket_scan_ops: u64,
+  /// Test-only count of single-bridge pump-path reaps — bumped once per
+  /// [`QuicEndpoint::deindex_reaped_bridge`] call, the one path that pairs a
+  /// bucketless deindex with an O(1) bucket `swap_remove`. The invariant
+  /// [`Self::bridge_bucket_scan_ops`] `==` this holds by construction (each such
+  /// reap does exactly one swap_remove), independent of how many bridges reap in
+  /// a run. Reverting the removal to the former O(bucket) `retain` breaks the
+  /// equality (scan ops climb above the reap count); the sibling-reap regression
+  /// test asserts it. Never compiled into production builds.
+  bridge_pump_path_reaps: u64,
   /// Test-only negative-control counter of `dial_pending` entries EXAMINED by
   /// [`QuicEndpoint::refresh_immediate_due`] (the `poll_timeout` hot path). The
   /// shipped O(1) path reads [`QuicEndpoint::unattempted_dial_count`] and never
@@ -1340,20 +1355,25 @@ impl<I, R> QuicEndpoint<I, R> {
     self.deadline_index.set(TimerKey::Conn(ch), deadline);
   }
 
-  /// Drop every incremental index entry a reaped bridge held: its deadline-index
+  /// Drop the reaped bridge's non-bucket index entries: its deadline-index
   /// [`TimerKey::Bridge`] key, its `(ch, sid)` reverse lookup in
-  /// [`Self::bridge_by_conn_sid`], its membership in the per-connection
-  /// [`Self::bridges_by_conn`], and — when it was an inbound (accepted) bridge —
-  /// one unit of [`Self::inbound_bridge_count`].
+  /// [`Self::bridge_by_conn_sid`], and — when it was an inbound (accepted)
+  /// bridge — one unit of [`Self::inbound_bridge_count`]. Does NOT touch
+  /// [`Self::bridges_by_conn`].
+  ///
+  /// The connection-loss reap uses this directly: it takes the whole
+  /// `bridges_by_conn` bucket in one map remove and then runs this per bridge,
+  /// so losing a connection holding K bridges costs O(K) with no per-bridge
+  /// SmallVec surgery. [`Self::deindex_reaped_bridge`] wraps this and
+  /// additionally `swap_remove`s the one bucket slot for a single-bridge reap.
   ///
   /// MUST run BEFORE [`Self::emit_exchange_completed`] for the same `id`.
   /// Inbound vs outbound is read off [`Self::pending_outbound_kinds`], which
   /// `emit_exchange_completed` drains for an outbound bridge; an inbound
   /// (accepted) bridge never enters that map, so `!contains_key` is the inbound
   /// predicate — the same definition the mint-time increment uses.
-  fn deindex_reaped_bridge(&mut self, id: StreamId, ch: ConnectionHandle, sid: QuicSid) {
+  fn deindex_reaped_bridge_bucketless(&mut self, id: StreamId, ch: ConnectionHandle, sid: QuicSid) {
     self.deadline_index.set(TimerKey::Bridge(id), None);
-    index_bridge_reap(&mut self.bridges_by_conn, ch, id);
     self.bridge_by_conn_sid.remove(&(ch, sid));
     if !self.pending_outbound_kinds.contains_key(&id) {
       debug_assert!(
@@ -1361,6 +1381,82 @@ impl<I, R> QuicEndpoint<I, R> {
         "inbound_bridge_count underflow reaping inbound bridge {id:?}"
       );
       self.inbound_bridge_count = self.inbound_bridge_count.saturating_sub(1);
+    }
+  }
+
+  /// Drop every incremental index entry a single reaped bridge held — the
+  /// bucketless entries via [`Self::deindex_reaped_bridge_bucketless`], plus its
+  /// slot in the per-connection [`Self::bridges_by_conn`] bucket via one O(1)
+  /// [`Self::index_bridge_reap`]. `conn_slot` is the bridge's recorded bucket
+  /// position, which the caller MUST capture (alongside `ch`/`sid`) from the
+  /// bridge BEFORE dropping it. MUST run BEFORE [`Self::emit_exchange_completed`]
+  /// for the same `id`.
+  fn deindex_reaped_bridge(
+    &mut self,
+    id: StreamId,
+    ch: ConnectionHandle,
+    sid: QuicSid,
+    conn_slot: usize,
+  ) {
+    #[cfg(test)]
+    {
+      self.counters.bridge_pump_path_reaps = self.counters.bridge_pump_path_reaps.saturating_add(1);
+    }
+    self.deindex_reaped_bridge_bucketless(id, ch, sid);
+    self.index_bridge_reap(id, ch, conn_slot);
+  }
+
+  /// Drop machine stream `id` from connection `ch`'s [`Self::bridges_by_conn`]
+  /// bucket in O(1) via `swap_remove(conn_slot)`, then repair the back-pointer of
+  /// whichever sibling `swap_remove` relocated into the vacated slot. Removes the
+  /// bucket entry once it empties, so the map holds a key only while `ch` owns at
+  /// least one bridge.
+  ///
+  /// `conn_slot` is the bridge's recorded [`Bridge::conn_slot`]; the invariant
+  /// `bridges_by_conn[ch][conn_slot] == id` is asserted in debug. `swap_remove`
+  /// touches at most one element (the relocated tail), so a single reap is O(1)
+  /// and a K-bridge burst is O(K) — where the former `retain` scanned the whole
+  /// bucket per reap (O(K) each, O(K²) per burst).
+  ///
+  /// A method, not a free function like [`index_bridge_mint`]: its sole caller
+  /// [`Self::deindex_reaped_bridge`] holds full `&mut self` (a reap never runs
+  /// under a live `self.conns` borrow), and it needs `self.bridges` for the
+  /// sibling fixup. The relocated sibling is always present in `self.bridges`:
+  /// the reaped bridge was already removed from `self.bridges` by the caller (so
+  /// it is never the one relocated), and every bucket id has a live `bridges`
+  /// entry by the index invariant.
+  fn index_bridge_reap(&mut self, id: StreamId, ch: ConnectionHandle, conn_slot: usize) {
+    // Scope the bucket borrow so the sibling fixup and the empty-bucket removal
+    // can re-borrow `self.bridges` / `self.bridges_by_conn` afterwards.
+    let (relocated_sibling, emptied) = match self.bridges_by_conn.get_mut(&ch) {
+      Some(bucket) => {
+        let removed = bucket.swap_remove(conn_slot);
+        debug_assert_eq!(
+          removed, id,
+          "conn_slot back-pointer must index this bridge's own StreamId"
+        );
+        // `swap_remove` moved the bucket's last element into `conn_slot` — unless
+        // `conn_slot` WAS the last slot, in which case nothing moved and
+        // `get(conn_slot)` is now None (a bare `bucket[conn_slot]` would panic).
+        (bucket.get(conn_slot).copied(), bucket.is_empty())
+      }
+      None => return,
+    };
+    #[cfg(test)]
+    {
+      // One O(1) swap_remove touched a single element. The reverted `retain`
+      // scans the whole bucket per reap, so counting each scanned element makes
+      // this climb to O(K²) across a K-bridge burst — the negative control the
+      // visit-count tests assert against.
+      self.counters.bridge_bucket_scan_ops = self.counters.bridge_bucket_scan_ops.saturating_add(1);
+    }
+    if let Some(sibling_id) = relocated_sibling {
+      if let Some(br) = self.bridges.get_mut(&sibling_id) {
+        br.set_conn_slot(conn_slot);
+      }
+    }
+    if emptied {
+      self.bridges_by_conn.remove(&ch);
     }
   }
 
@@ -2244,7 +2340,7 @@ where
                   // record it as minted this call so the datagram-path caller
                   // pumps and flushes exactly the bridge on `ch` (which may differ
                   // from the connection it is servicing).
-                  index_bridge_mint(&mut self.bridges_by_conn, ch, mid);
+                  index_bridge_mint(&mut self.bridges, &mut self.bridges_by_conn, ch, mid);
                   // Mirror into the `(ch, sid)` reverse index so this
                   // connection's `StreamEvent::Finished`/`Stopped` resolve to
                   // this bridge in O(1).
@@ -2541,9 +2637,12 @@ where
         let outcome = Self::outcome_for_terminal(&br);
         let ch = br.ch();
         let sid = br.sid();
+        // Capture the bucket back-pointer BEFORE `drop(br)` — the O(1)
+        // swap_remove deindex needs it.
+        let conn_slot = br.conn_slot();
         // Reap AFTER drain: dropping the bridge frees its slot.
         drop(br);
-        self.deindex_reaped_bridge(id, ch, sid);
+        self.deindex_reaped_bridge(id, ch, sid, conn_slot);
         self.emit_exchange_completed(id, outcome);
       } else {
         br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -2564,8 +2663,10 @@ where
           let outcome = Self::outcome_for_terminal(&br);
           let ch = br.ch();
           let sid = br.sid();
+          // Capture the bucket back-pointer BEFORE `drop(br)`.
+          let conn_slot = br.conn_slot();
           drop(br);
-          self.deindex_reaped_bridge(id, ch, sid);
+          self.deindex_reaped_bridge(id, ch, sid, conn_slot);
           self.emit_exchange_completed(id, outcome);
         } else {
           // Surviving bridge: refresh its deadline key before it moves back
@@ -3168,7 +3269,7 @@ where
             // is always true here — but keeping the SAME `!contains` predicate the
             // reap-time decrement uses makes the count provably balanced no matter
             // how the id spaces evolve.
-            index_bridge_mint(&mut self.bridges_by_conn, ch, id);
+            index_bridge_mint(&mut self.bridges, &mut self.bridges_by_conn, ch, id);
             self.bridge_by_conn_sid.insert((ch, sid), id);
             if !self.pending_outbound_kinds.contains_key(&id) {
               self.inbound_bridge_count += 1;
@@ -3363,16 +3464,13 @@ where
       // to `Failed(ConnectionLost)` so the `StreamErrored` lifecycle
       // notice inside `drain_then_reap` carries the connection-loss
       // attribution.
-      // Collect this connection's bridges from the per-connection index —
-      // O(this connection's bridges), bounded by quinn's per-conn stream limit —
-      // never an O(all bridges) scan of `self.bridges`. A datagram that loses
-      // one connection therefore costs an attacker only that connection's
-      // bridges, not the whole table.
-      let ids: SmallVec<StreamId> = self
-        .bridges_by_conn
-        .get(&ch)
-        .map(|ids| ids.iter().copied().collect())
-        .unwrap_or_default();
+      // Take this connection's WHOLE bucket in one O(1) map remove, then run a
+      // bucketless deindex per bridge — no per-bridge SmallVec surgery. Losing a
+      // connection holding K bridges (or one datagram FIN-acking K of them)
+      // therefore reaps in O(K) total, never O(K²). Bounded by quinn's per-conn
+      // stream limit, so an attacker who loses one connection pays only that
+      // connection's bridges, never an O(all bridges) scan of the whole table.
+      let ids: SmallVec<StreamId> = self.bridges_by_conn.remove(&ch).unwrap_or_default();
       #[cfg(test)]
       {
         self.counters.bridge_scan_visits = self
@@ -3399,10 +3497,11 @@ where
           let outcome = Self::outcome_for_terminal(&br);
           let sid = br.sid();
           drop(br);
-          // Reaped here rather than by a `pump_bridges` pass, so drop this
-          // bridge's index entries (deadline key, `(ch, sid)` reverse lookup,
-          // per-connection membership, inbound count) at this site.
-          self.deindex_reaped_bridge(id, ch, sid);
+          // The whole bucket was already removed above, so drop this bridge's
+          // remaining index entries (deadline key, `(ch, sid)` reverse lookup,
+          // inbound count) WITHOUT any per-bridge bucket surgery — keeping the
+          // loss reap O(K) across the connection's bridges.
+          self.deindex_reaped_bridge_bucketless(id, ch, sid);
           self.emit_exchange_completed(id, outcome);
         }
       }
