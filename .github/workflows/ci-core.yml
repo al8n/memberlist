@@ -75,6 +75,49 @@ jobs:
       - name: Test
         run: cargo test -p memberlist-proto --features "$FEATURES"
 
+  proto-i686:
+    name: i686 - proto (32-bit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      FEATURES: "std,tcp,tls-rustls-ring,quic-rustls-ring,lz4,snappy,zstd,brotli,crc32,xxhash32,xxhash64,xxhash3,murmur3,aes-gcm,chacha20-poly1305,cidr,serde,clap"
+    steps:
+      - uses: actions/checkout@v7
+
+      # A real 32-bit tier-1 host (with std) so the decoder's
+      # `#[cfg(target_pointer_width = "32")]` bounds regressions execute: a
+      # 64-bit host cannot reach the `offset + len` wrap, and the embedded
+      # thumbv7em lane only cross-compiles (no_std, no test runner).
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: i686-unknown-linux-gnu
+
+      - name: Install 32-bit cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-proto-i686
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test
+        run: cargo test -p memberlist-proto --target i686-unknown-linux-gnu --features "$FEATURES"
+
   sim:
     name: simulation
     runs-on: ubuntu-latest

@@ -2,8 +2,8 @@
 //!
 //! This is a verbatim copy of `memberlist-proto::data` + the supporting
 //! helpers from `memberlist-proto::lib` (`check_encoded_message_size`,
-//! `debug_assert_write_eq`, `debug_assert_read_eq`).  Only the
-//! `use super::WireType` import has been repointed to `crate::wire_type`.
+//! `debug_assert_write_eq`).  Only the `use super::WireType` import has been
+//! repointed to `crate::wire_type`.
 //!
 //! `memberlist-proto` stays frozen and is NOT a dependency of this crate.
 use std::borrow::Cow;
@@ -45,20 +45,6 @@ where
   );
 }
 
-#[cfg(debug_assertions)]
-#[inline]
-pub(crate) fn debug_assert_read_eq<T>(actual: usize, expected: usize)
-where
-  T: ?Sized,
-{
-  debug_assert_eq!(
-    actual,
-    expected,
-    "{}: expect reading {expected} bytes, but actual read {actual} bytes",
-    core::any::type_name::<T>()
-  );
-}
-
 // Only the `std`/`alloc`-gated data submodules (`bytes`, `string`) call this, so
 // it carries the same gate to stay live-code under every feature combination.
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -96,7 +82,7 @@ where
     }
 
     let (offset, len) = decode_u32_varint(src)?;
-    let mut offset = offset.get();
+    let offset = offset.get();
     let len = len as usize;
     // offset + len may overflow usize on 32-bit targets, where a wrap would let
     // the bounds check pass and panic the slice. Reject an end offset that
@@ -110,11 +96,18 @@ where
     let src = &src[offset..end];
     let (bytes_read, value) = Self::decode(src)?;
 
-    #[cfg(debug_assertions)]
-    debug_assert_read_eq::<Self>(bytes_read, len);
+    // The declared length owns the field boundary: the inner decoder must
+    // consume the whole delimited region. A shorter read (e.g. a fixed-size
+    // `[u8; N]` decoder handed a declared `len > N`) would otherwise leave the
+    // trailing in-region bytes to be reparsed as the next field's tag,
+    // smuggling a field across the boundary. Reject the mismatch and advance by
+    // the declared `len`, so the boundary is authoritative regardless of how
+    // many bytes the inner type read.
+    if bytes_read != len {
+      return Err(DecodeError::length_delimited_mismatch());
+    }
 
-    offset += bytes_read;
-    Ok((offset, value))
+    Ok((offset + len, value))
   }
 }
 
@@ -544,6 +537,13 @@ pub enum DecodeError {
   #[error("length-delimited overflow the maximum value of u32")]
   LengthDelimitedOverflow,
 
+  /// Returned when a length-delimited field's declared length does not match
+  /// the number of bytes its inner decoder consumed. The declared length is
+  /// authoritative; a shorter inner read would leave trailing in-region bytes
+  /// to be reparsed as the next field, so the frame is rejected as malformed.
+  #[error("length-delimited field length does not match the consumed bytes")]
+  LengthDelimitedMismatch,
+
   /// A custom decoding error.
   #[error("{0}")]
   Custom(Cow<'static, str>),
@@ -578,6 +578,12 @@ impl DecodeError {
   #[inline]
   pub const fn buffer_underflow() -> Self {
     Self::BufferUnderflow
+  }
+
+  /// Creates a new length-delimited length-mismatch decoding error.
+  #[inline]
+  pub const fn length_delimited_mismatch() -> Self {
+    Self::LengthDelimitedMismatch
   }
 
   /// Creates a new missing field decoding error.
