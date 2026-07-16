@@ -1013,7 +1013,9 @@ where
 
 impl<I, A> Bridge<I, A>
 where
-  A: crate::Data + crate::CheapClone + PartialEq + 'static,
+  // `Eq + Hash` follows the inner `Endpoint`, whose probe fan-out deduplicates
+  // helper addresses through an `FxHashSet<A>` (`A = SocketAddr` in the drivers).
+  A: crate::Data + crate::CheapClone + PartialEq + Eq + core::hash::Hash + 'static,
   I: crate::Id,
 {
   /// Pump inbound quinn bytes into the memberlist stream.

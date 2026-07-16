@@ -214,6 +214,13 @@ pub struct Endpoint<I, A, R = SmallRng> {
 
   // Membership state.
   members: Members<I, A>,
+  /// The next membership-instance generation token to hand out (monotonic;
+  /// never `0`, which is the "unset" sentinel). Bumped at each site that
+  /// creates a NEW membership instance — a brand-new id, or a Left/Dead id
+  /// reclaimed / re-admitted — so a fresh instance never inherits a departed
+  /// one's token even when it reuses the same `(id, address, incarnation)`. See
+  /// [`Member::generation`](crate::members::Member::generation) for the invariant.
+  next_member_generation: u64,
 
   // Lifeguard.
   awareness: Awareness,
@@ -458,6 +465,22 @@ impl<I, A, R> Endpoint<I, A, R> {
       self.incarnation = accused_inc.wrapping_add(1);
     }
     self.incarnation
+  }
+
+  /// Hand out the next membership-instance generation token and advance the
+  /// counter, skipping `0` (the reserved "unset" value). Called at every site
+  /// that admits a new instance under an id. The `u64` space is not a wire
+  /// field and a token is drawn only on a membership replacement, so a wrap is
+  /// astronomically unreachable; the `0`-skip is defensive so the sentinel is
+  /// never handed to a tracked instance. See
+  /// [`Member::generation`](crate::members::Member::generation).
+  pub(crate) const fn next_member_generation(&mut self) -> u64 {
+    let g = self.next_member_generation;
+    self.next_member_generation = match self.next_member_generation.wrapping_add(1) {
+      0 => 1,
+      n => n,
+    };
+    g
   }
 
   /// Returns the mutable access to the RNG.
@@ -1158,9 +1181,15 @@ where
     // The local node's initial state is stamped at the driver-supplied `now`.
     let mut local_state = LocalNodeState::new(local_node_state, now);
     local_state.set_incarnation(cfg.initial_incarnation());
+    // The local node is a membership instance too, so it draws the first
+    // generation token (`1`); the counter advances to the next value handed to
+    // the first admitted peer. Keeping the local record generation-stamped keeps
+    // any self-probe path consistent with peers.
+    let local_generation: u64 = 1;
+    let next_member_generation: u64 = local_generation + 1;
     // Ignoring Err: a fresh `Members` is empty, so the insert returns
     // `None`. Asserting it is the caller-owned invariant we just upheld.
-    let _ = members.insert(Member::new(local_state.clone()));
+    let _ = members.insert(Member::new(local_state.clone()).with_generation(local_generation));
 
     let local_state_snapshot = cfg.initial_local_state_bytes();
     // The configured initial snapshot must fit a single reliable PushPull frame
@@ -1175,6 +1204,7 @@ where
       cfg,
       rng,
       members,
+      next_member_generation,
       awareness,
       broadcast,
       ack_registry: AckRegistry::new(),
@@ -1834,7 +1864,7 @@ where
     // fallback stream is harmless: a late `ReliablePingAcked`
     // hits `complete_probe_success` for a now-absent probe (no-op) and a
     // late `ReliablePingFailed` hits `retire_reliable_fallback` (no-op).
-    let nack_stats = match &probe.phase {
+    let (nack_stats, indirect_or_reliable_dispatched) = match &probe.phase {
       ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         nacked_by,
@@ -1844,15 +1874,31 @@ where
         if let Some(rid) = reliable_stream_id {
           self.pending_stream_intents.remove(rid);
         }
+        // A datagram WAS dispatched on the escalation path if any IndirectPing
+        // queued (`expected_nacks > 0`) or the reliable-ping fallback was opened
+        // (a reliable dial counts as a dispatch); this feeds the abort gate below.
+        let dispatched = *expected_nacks > 0 || reliable_stream_id.is_some();
         // Deduped distinct responders: a duplicate or late Nack never
         // entered `nacked_by`, so `expected - seen` cannot be driven to
         // 0 by a Nack flood to suppress the awareness penalty.
-        Some((*expected_nacks, nacked_by.len()))
+        (Some((*expected_nacks, nacked_by.len())), dispatched)
       }
-      _ => None,
+      _ => (None, false),
     };
     match probe.kind {
       ProbeKind::Detection => {
+        // A probe that dispatched NO datagram at all — an over-MTU direct Ping,
+        // and (after escalation) no IndirectPing queued and no reliable fallback
+        // opened — reflects a purely LOCAL MTU limit (a node id is unbounded, so
+        // a large id can push every Ping/IndirectPing past `gossip_mtu`), NOT
+        // peer loss. Abort cleanly: the probe + ack entry are already removed
+        // above; charge NO awareness penalty and emit NO Suspect. A probe that
+        // DID dispatch (direct Ping sent, or an indirect/reliable attempt) and
+        // then timed out is a genuine failure and takes the penalty + suspicion
+        // path below.
+        if !probe.dispatched && !indirect_or_reliable_dispatched {
+          return;
+        }
         let severity = match nack_stats {
           Some((expected, seen)) if expected > 0 => {
             // Missing nacks = our health is suspect. Saturate to 0 in the
@@ -1865,45 +1911,33 @@ where
         self.awareness.record_failure(severity);
         self.bump_snapshot_version();
 
-        // Suspect the generation that was actually probed — the incarnation
-        // snapshotted when this probe started — NOT whatever the member holds
-        // now. If the target refuted in place (same address, higher
-        // incarnation) while the probe was in flight, `process_suspect` drops
-        // this stale suspicion via its `inc < local_inc` guard, matching Go
-        // memberlist `suspectNode`: a probe failure says nothing about a
-        // generation that has already moved on.
+        // Suspect the exact instance that was probed, at the incarnation
+        // snapshotted when the probe started — NOT whatever now holds the id.
+        // Only the EXACT membership instance may be suspected: while the probe
+        // was in flight the id could have been REPLACED by a different instance,
+        // and `process_suspect`'s `inc < local_inc` guard does not catch every
+        // such case on its own — a `reset_nodes` removal + re-admit at the SAME
+        // address and an EQUAL (or lower) incarnation yields `snapshot_inc >=
+        // current_inc`, so the guard would let a stale Suspect evict the fresh
+        // instance. The generation token settles this precisely: it identifies
+        // one instance across its whole lifetime and changes on any replacement
+        // (new id, or Left/Dead reclaim at any address/incarnation), so an exact
+        // match is true ONLY for the probed instance. An in-place refutation
+        // keeps the SAME generation but raises the incarnation, so the match
+        // still holds and the snapshot-incarnation Suspect below is then dropped
+        // by `process_suspect`'s `inc < local_inc` — matching Go memberlist
+        // `suspectNode`, which suspects `node.Incarnation` and lets the newer
+        // live incarnation reject it. A `0` snapshot (an untracked probe target)
+        // never equals a tracked member's nonzero generation, so it can suspect
+        // no one. The awareness penalty above stands regardless — our own failure
+        // to confirm the probed peer is a real observation whichever instance
+        // now holds the id.
         let target_id = probe.target.id_ref().cheap_clone();
-        // Invariant: only the EXACT instance that was probed may be suspected.
-        // Two events can install a DIFFERENT instance under `target_id` while the
-        // probe is in flight, and `process_suspect`'s `inc < local_inc` guard
-        // catches neither on its own:
-        //
-        //   - a re-ADDRESSED replacement X@B — a Left/reclaimed id re-admitted at
-        //     a NEW address, whose incarnation the address-adoption branch of
-        //     `process_alive_decided` sets without comparing the probe snapshot;
-        //   - a same-ADDRESS replacement X@A — the probed id removed by
-        //     `reset_nodes` and re-admitted at the SAME address with a LOWER
-        //     incarnation (a rejoin resets the generation via the new-member
-        //     branch of `process_alive_decided`, which starts at the arriving
-        //     value). The snapshot incarnation is then >= the replacement's, so
-        //     `inc < local_inc` is false and the stale Suspect would land on —
-        //     and could evict — the fresh instance.
-        //
-        // A live SWIM node's incarnation is monotonic non-decreasing: it only
-        // rises, on refutation (matching Go memberlist); ONLY a reset/re-admit
-        // yields a lower value. So the current member is the probed instance iff
-        // it is still at the probed address AND its incarnation has not regressed
-        // below the probe's snapshot. When the current incarnation is strictly
-        // higher (an in-place refutation), we still forward the snapshot-
-        // generation Suspect and let `process_suspect` drop it via
-        // `inc < local_inc`. The awareness penalty above stands regardless — our
-        // own failure to confirm the probed peer is a real observation, whichever
-        // instance now holds the id.
-        let probed_addr = probe.target.address_ref();
-        let same_probed_instance = self.members.get(&target_id).is_some_and(|m| {
-          let st = m.state_ref();
-          st.address_ref() == probed_addr && st.incarnation() >= probe.target_incarnation
-        });
+        let same_probed_instance = probe.target_generation != 0
+          && self
+            .members
+            .get(&target_id)
+            .is_some_and(|m| m.generation() == probe.target_generation);
         if same_probed_instance {
           let local_id = self.cfg.local_id_ref().cheap_clone();
           let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
@@ -2269,9 +2303,12 @@ where
       .get(&target_id)
       .expect("target id came from members iteration");
     let target_arc = target_member.state_ref().server_arc();
-    // Snapshot the probed generation now; a later failure suspects THIS
-    // incarnation, not whatever the member holds when the probe expires.
+    // Snapshot the probed instance now: a later failure suspects THIS
+    // incarnation (not whatever the member holds at expiry) and only while the
+    // live member still carries THIS generation token (so a rejoin under the
+    // same id — even at the same address/incarnation — is not mistaken for it).
     let target_incarnation = target_member.state_ref().incarnation();
+    let target_generation = target_member.generation();
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
@@ -2284,6 +2321,7 @@ where
     let probe = Probe::new_direct(
       target_arc.cheap_clone(),
       target_incarnation,
+      target_generation,
       now,
       ProbeKind::Detection,
       pt,
@@ -2339,13 +2377,13 @@ where
     }
 
     let to = target_addr.cheap_clone();
-    if probe_msgs.len() == 1 {
+    let direct_dispatched = if probe_msgs.len() == 1 {
       // A lone probe Ping is subject to the SAME gossip_mtu ceiling as the
       // compound path below: node ids are unbounded, so a Ping carrying a
       // large already-admitted target id can exceed one datagram even though
       // the construction self-Ping floor covers only the local identity.
       let ping_msg = probe_msgs.pop().expect("len checked == 1");
-      self.push_probe_packet_within_mtu(to, ping_msg);
+      self.push_probe_packet_within_mtu(to, ping_msg)
     } else {
       // Conservative assembled-compound upper bound — identical idiom to
       // the gossip budget (COMPOUND_TAG_LEN + count varint + per-part
@@ -2366,6 +2404,9 @@ where
         self
           .pending_transmits
           .push_back(Transmit::Compound(CompoundTransmit::new(to, probe_msgs)));
+        // The compound fits `gossip_mtu`, so the direct Ping rides inside it —
+        // the probe HAS dispatched a datagram.
+        true
       } else {
         // Over-MTU compound ⇒ split into two Packets, Ping then Suspect. Each
         // is delivered as a separate send under the same lone-datagram MTU
@@ -2376,9 +2417,20 @@ where
         let mut it = probe_msgs.into_iter();
         let ping_msg = it.next().expect("probe_msgs[0] is the Ping");
         let suspect_msg = it.next().expect("probe_msgs[1] is the buddy Suspect");
-        self.push_probe_packet_within_mtu(to.cheap_clone(), ping_msg);
+        // Only the direct Ping decides whether the probe dispatched; the buddy
+        // Suspect is a refutation optimization, not a probe of the target.
+        let dispatched = self.push_probe_packet_within_mtu(to.cheap_clone(), ping_msg);
         self.push_probe_packet_within_mtu(to, suspect_msg);
+        dispatched
       }
+    };
+    // Record whether the direct Ping actually queued. A probe that dispatches NO
+    // datagram — an over-MTU direct Ping, and (after escalation) over-MTU
+    // IndirectPings with no reliable fallback — reflects a local MTU limit, not
+    // peer loss; `probe_terminate_failure` reads this to abort cleanly instead
+    // of applying an awareness penalty and suspecting the target.
+    if let Some(p) = self.probes.get_mut(&seq) {
+      p.dispatched = direct_dispatched;
     }
 
     true
@@ -2639,13 +2691,18 @@ where
         State::Alive,
       )),
     };
-    // A Ping never suspects, so its snapshot incarnation is unused; carry the
-    // member's current value (0 if untracked) to satisfy the shared
-    // constructor.
+    // A Ping never suspects, so its snapshot incarnation and generation are
+    // unused for suspicion; carry the member's current values (or `0`/"unset"
+    // when the target is untracked) to satisfy the shared constructor.
     let target_incarnation = self
       .members
       .get(&target_id)
       .map(|m| m.state_ref().incarnation())
+      .unwrap_or(0);
+    let target_generation = self
+      .members
+      .get(&target_id)
+      .map(|m| m.generation())
       .unwrap_or(0);
 
     let seq = self.allocate_seq();
@@ -2689,14 +2746,19 @@ where
     // no indirect/fallback escalation and no awareness scaling. Failure deadline
     // == the direct deadline.
     let pt = self.cfg.probe_timeout();
-    let probe = Probe::new_direct(
+    let mut probe = Probe::new_direct(
       target_arc,
       target_incarnation,
+      target_generation,
       now,
       ProbeKind::Ping,
       pt,
       now + pt,
     );
+    // The over-MTU case already returned above, so this direct Ping IS queued
+    // below — the probe has dispatched a datagram. (A Ping never suspects, so
+    // this only keeps the flag honest; the abort path is Detection-only.)
+    probe.dispatched = true;
     let deadline = probe.direct_deadline(pt);
     self.probes.insert(seq, probe);
     self
@@ -3285,7 +3347,12 @@ impl<I, A, R> Endpoint<I, A, R>
 where
   R: Rng,
   I: Id,
-  A: CheapClone + Data + PartialEq + 'static,
+  // `Eq + Hash` (strengthening the `PartialEq` the rest of this block relies on)
+  // lets `probe_fan_out_indirect` deduplicate candidate helper ADDRESSES through
+  // an `FxHashSet<A>` in O(n), so indirect helpers are sampled uniformly over
+  // DISTINCT addresses rather than biased by alias multiplicity. The real
+  // address types satisfy it (the std drivers pin `A = SocketAddr`).
+  A: CheapClone + Data + PartialEq + Eq + core::hash::Hash + 'static,
 {
   /// Process an incoming Alive announcement.
   ///
@@ -3410,7 +3477,11 @@ where
       .with_delegate_version(alive_delegate);
       let mut local_state = LocalNodeState::new(initial, now);
       local_state.set_incarnation(0);
-      let new_member = Member::new(local_state);
+      // A brand-new id is a fresh membership instance: stamp a new generation
+      // token so a probe still in flight against a DEPARTED instance under this
+      // id (removed by `reset_nodes`, then rejoined) cannot match this one, even
+      // when the rejoin reuses the same address and incarnation.
+      let new_member = Member::new(local_state).with_generation(self.next_member_generation());
       let n = self.members.len();
       let offset = if n == 0 {
         0
@@ -3465,8 +3536,18 @@ where
     // Re-fetch the member (we relinquished it for the refute path above).
     // Apply the update, then drop the borrow before calling broadcast_message.
     let new_meta = new_server.meta_ref().cheap_clone();
+    // A reclaim that ADOPTS A NEW ADDRESS (a Left/Dead id re-admitted at a
+    // different address) is a new membership instance even though the record is
+    // reused in place, so it draws a fresh generation. Drawn BEFORE re-borrowing
+    // the member (the counter needs `&mut self`). A same-record update — a
+    // refutation, meta change, or liveness transition at the same address —
+    // keeps its generation and does NOT enter this branch.
+    let reclaim_generation = updates_address.then(|| self.next_member_generation());
     {
       let member = self.members.get_mut(&alive_id).expect("present");
+      if let Some(g) = reclaim_generation {
+        member.set_generation(g);
+      }
       let state_mut = member.state_mut();
       state_mut.set_incarnation(alive_incarnation);
       state_mut.set_server(new_server.clone());
@@ -3651,18 +3732,22 @@ where
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
 
-    // Candidate helper pool = the transport addresses of Alive members,
-    // excluding the local advertise address and the target's address. Collected
+    // Candidate helper pool = the DISTINCT transport addresses of Alive members,
+    // excluding the local advertise address and the target's address. Scanned
     // ONCE here under the immutable `members` borrow, fully owned before any
-    // later `&mut self` call. Duplicate addresses (distinct ids sharing one
-    // transport address) are NOT removed in this pass — pushing is O(1), so the
-    // pass is O(n) in the membership size `n`. `pick_distinct` below then selects
-    // up to `k` DISTINCT addresses while deduplicating against a set bounded by
-    // `k` (= `indirect_checks`, a small constant), so the whole selection is
-    // O(n·k) = O(n). Deduplicating the full pool here instead — a `contains` scan
-    // per member against a set that grows to `n` — would make every escalation of
-    // a failed direct probe O(n²), delaying timers/gossip/failure-detection on
-    // the single-owner state machine as membership grows.
+    // later `&mut self` call. Deduplicated AS IT IS BUILT via an `FxHashSet<A>`
+    // (O(1) per insert), so the pass is O(n) in the membership size `n` and
+    // `distinct` holds each address at most once.
+    //
+    // Sampling then draws uniformly over the DISTINCT addresses. An address
+    // advertised by `m` alias ids must NOT get `m×` the selection probability:
+    // an attacker who registers many aliases at one address would otherwise
+    // reliably win a helper slot and, once in `indirect_peers`, could forge a
+    // relay-Ack to falsely complete the probe and suppress a real suspicion.
+    // Deduplicating FIRST, then sampling `k` uniformly from the distinct set,
+    // gives every distinct address identical probability regardless of alias
+    // count — biasing by entry multiplicity (shuffling a duplicate-laden pool)
+    // is exactly the bug this avoids.
     //
     // memberlist-core selects helpers with `kRandomNodes` (util.go): it excludes
     // self, the target, and non-Alive members, then dedups the sample by node
@@ -3681,7 +3766,8 @@ where
     // a "helper" would be a meaningless self-relay to our own or the probed
     // endpoint, and its address-keyed Nack would be miscounted against a peer
     // that by definition cannot answer.
-    let mut candidates: SmallVec<A> = SmallVec::new();
+    let mut seen: FxHashSet<A> = FxHashSet::default();
+    let mut distinct: SmallVec<A> = SmallVec::new();
     for m in self.members.iter() {
       let st = m.state_ref();
       if st.state() != State::Alive {
@@ -3691,11 +3777,18 @@ where
       if addr == &local_addr || addr == &target_addr {
         continue;
       }
-      candidates.push(addr.cheap_clone());
+      // `insert` returns `true` only the first time an address is seen, so each
+      // distinct address is pushed once regardless of how many ids advertise it.
+      if seen.insert(addr.cheap_clone()) {
+        distinct.push(addr.cheap_clone());
+      }
     }
 
     let k = self.cfg.indirect_checks() as usize;
-    let chosen_addrs = pick_distinct(&mut candidates, k, &mut self.rng);
+    // Uniform over the distinct addresses: `pick_random` samples up to `k`
+    // without replacement, so each distinct address has identical selection
+    // probability (O(distinct) sampling atop the O(n) dedup above).
+    let chosen_addrs = pick_random(&distinct, k, &mut self.rng);
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
@@ -4301,52 +4394,6 @@ where
     .iter()
     .map(|val| (*val).clone())
     .collect()
-}
-
-// Test-only instrument: counts the membership-comparison work performed by the
-// bounded dedup in `pick_distinct`. Thread-local so parallel tests never race on
-// it (each `pick_distinct` call runs on the test thread that reads it). A
-// regression guard resets it, runs one indirect fan-out, and asserts the count
-// is O(n·k) — failing if candidate selection regresses to O(n²).
-#[cfg(test)]
-thread_local! {
-  pub(crate) static DEDUP_COMPARISONS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
-}
-
-/// Randomly select up to `k` values from `pool` that are DISTINCT under
-/// `PartialEq`, permuting `pool` in place.
-///
-/// Runs in O(`pool.len()` · `k`): an incremental Fisher-Yates draws each next
-/// element uniformly at random, and an element is kept only if it is not already
-/// chosen. The already-chosen set is bounded by `k`, so each membership test is
-/// O(`k`), NOT O(`pool.len()`) — this is what keeps the indirect fan-out from
-/// paying the O(n²) cost of deduplicating the whole membership up front (`n` =
-/// cluster size). Returns fewer than `k` values only when `pool` holds fewer
-/// than `k` distinct values.
-fn pick_distinct<T, R>(pool: &mut [T], k: usize, rng: &mut R) -> SmallVec<T>
-where
-  T: Clone + PartialEq,
-  R: Rng,
-{
-  let mut chosen: SmallVec<T> = SmallVec::new();
-  let n = pool.len();
-  for i in 0..n {
-    if chosen.len() >= k {
-      break;
-    }
-    // Incremental Fisher-Yates: move a uniformly-random element of the
-    // not-yet-drawn suffix `pool[i..]` into slot `i`.
-    let j = rng.random_range(i..n);
-    pool.swap(i, j);
-    // Dedup against the already-chosen set, whose length is bounded by `k`, so
-    // this membership test is O(k) and the whole selection stays O(n·k).
-    #[cfg(test)]
-    DEDUP_COMPARISONS.with(|c| c.set(c.get().wrapping_add(chosen.len() as u64)));
-    if !chosen.contains(&pool[i]) {
-      chosen.push(pool[i].clone());
-    }
-  }
-  chosen
 }
 
 /// Scale the push/pull interval as the cluster grows.

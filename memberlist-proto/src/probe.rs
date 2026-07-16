@@ -58,17 +58,39 @@ pub(crate) struct Probe<I, A> {
   /// The peer being probed.
   pub(crate) target: Arc<NodeState<I, A>>,
   /// The target's incarnation snapshotted at probe creation. On a failed
-  /// Detection probe the target is suspected at THIS generation, not whatever
-  /// incarnation it currently holds: if it refuted (or was replaced by a newer
-  /// incarnation) while the probe was in flight, `process_suspect` drops the
-  /// stale suspicion via its `inc < local_inc` guard. Mirrors Go memberlist
-  /// `probeNode`, which suspects the snapshot `node.Incarnation`, not a
-  /// re-read of the live map.
+  /// Detection probe the target is suspected at THIS incarnation, not whatever
+  /// it currently holds: if it refuted (raised its incarnation) in place while
+  /// the probe was in flight, `process_suspect` drops the stale suspicion via
+  /// its `inc < local_inc` guard. Mirrors Go memberlist `probeNode`, which
+  /// suspects the snapshot `node.Incarnation`, not a re-read of the live map.
   pub(crate) target_incarnation: u32,
+  /// The probed membership INSTANCE, captured as the target's generation token
+  /// at probe creation (see [`Member::generation`](crate::members::Member::generation)).
+  /// A failed Detection probe suspects the target only while the current member
+  /// under that id still carries THIS generation. The generation changes when a
+  /// record is replaced by a different instance — a fresh id, or a Left/Dead id
+  /// reclaimed at any address or incarnation (including an EQUAL one, which
+  /// `reset_nodes` removal + re-admit produces and an `(address, incarnation)`
+  /// check cannot distinguish) — so binding to it prevents a stale probe from
+  /// suspecting a replacement that merely reuses the id. `0` is the "unset"
+  /// sentinel (a probe of an untracked target, e.g. the public `ping`); an unset
+  /// snapshot matches no tracked member, so it can never suspect one.
+  pub(crate) target_generation: u64,
   /// When the initial Ping was sent (used for RTT measurement).
   pub(crate) sent_at: Instant,
   /// What kind of probe this is.
   pub(crate) kind: ProbeKind,
+  /// Whether at least one probe datagram was ever actually dispatched for this
+  /// probe. Set `true` once the direct `Ping` is queued (and OR-ed by the
+  /// indirect fan-out for any `IndirectPing` queued or reliable-ping dial
+  /// opened). A node id is unbounded, so a large id can make the direct `Ping`
+  /// AND every `IndirectPing` exceed `gossip_mtu` and be dropped; with reliable
+  /// ping unavailable, NOTHING is sent. A deterministic local MTU limit is not
+  /// peer loss, so `probe_terminate_failure` applies the awareness penalty and
+  /// suspicion only when this (or an indirect/reliable dispatch) is true —
+  /// otherwise it aborts cleanly. Always `false` at construction; the initiator
+  /// records the actual direct send.
+  pub(crate) dispatched: bool,
   /// The absolute authoritative FAILURE deadline, captured ONCE at probe
   /// creation (NOT recomputed from a later `now`). Mirrors memberlist-core
   /// `probe_node`: Detection uses `sent_at + awareness.scale_timeout(
@@ -151,8 +173,12 @@ impl<I, A> Probe<I, A> {
   /// Construct a fresh probe in `AwaitingDirectAck`.
   ///
   /// - `target_incarnation` is the target's incarnation at this instant; a
-  ///   later Detection failure suspects that snapshot generation (see the
+  ///   later Detection failure suspects that snapshot incarnation (see the
   ///   [`target_incarnation`](Self::target_incarnation) field);
+  /// - `target_generation` is the target's membership-instance token at this
+  ///   instant (`0` if untracked); a later Detection failure suspects only
+  ///   while the live member still carries it (see the
+  ///   [`target_generation`](Self::target_generation) field);
   /// - the direct-ack sub-window deadline is derived from
   ///   `sent_at + probe_timeout` (the SAME formula as
   ///   [`direct_deadline`](Self::direct_deadline));
@@ -164,6 +190,7 @@ impl<I, A> Probe<I, A> {
   pub(crate) fn new_direct(
     target: Arc<NodeState<I, A>>,
     target_incarnation: u32,
+    target_generation: u64,
     sent_at: Instant,
     kind: ProbeKind,
     probe_timeout: Duration,
@@ -172,8 +199,12 @@ impl<I, A> Probe<I, A> {
     Self {
       target,
       target_incarnation,
+      target_generation,
       sent_at,
       kind,
+      // No datagram has been dispatched at construction time; the initiator
+      // (`start_probe` / `ping`) records the actual direct send afterward.
+      dispatched: false,
       failure_deadline,
       phase: ProbePhase::AwaitingDirectAck(AwaitingDirectAck {
         deadline: sent_at + probe_timeout,

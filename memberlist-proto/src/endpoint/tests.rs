@@ -2116,9 +2116,13 @@ fn indirect_probe_at(
   failure_deadline: Instant,
   indirect_peers: SmallVec<SocketAddr>,
 ) {
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e.members.get(&SmolStr::new("bob")).unwrap();
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   let expected_nacks = indirect_peers.len();
   e.probes.insert(
@@ -2126,8 +2130,11 @@ fn indirect_probe_at(
     Probe {
       target,
       target_incarnation,
+      target_generation,
       sent_at,
       kind: ProbeKind::Detection,
+      // A probe reaching AwaitingIndirect has already dispatched its direct Ping.
+      dispatched: true,
       // For Detection in AwaitingIndirect the failure deadline IS the
       // phase (cumulative) deadline, by the single-source invariant.
       failure_deadline,
@@ -2303,20 +2310,28 @@ fn insert_direct_probe(
   sent_at: Instant,
   failure_deadline: Instant,
 ) {
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e
       .members
       .get(&SmolStr::new(target_id))
       .expect("target must be an existing member");
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   e.probes.insert(
     seq,
     Probe {
       target,
       target_incarnation,
+      target_generation,
       sent_at,
       kind: ProbeKind::Detection,
+      // Simulate a normally-dispatched probe (its direct Ping was sent), so the
+      // failure path exercises suspicion rather than the no-dispatch abort.
+      dispatched: true,
       failure_deadline,
       phase: ProbePhase::AwaitingDirectAck(AwaitingDirectAck { deadline: sent_at }),
     },
@@ -2455,16 +2470,13 @@ fn indirect_fan_out_never_selects_local_or_target_address_alias() {
 }
 
 #[test]
-fn indirect_fan_out_selects_bounded_distinct_helpers_without_quadratic_dedup() {
-  // A large membership must not make a single failed direct probe do O(n²) work
-  // building its indirect-helper pool. The candidate addresses are scanned once
-  // (O(n)); up to `indirect_checks` DISTINCT addresses are then selected while
-  // deduplicating against a set bounded by `indirect_checks`, so the dedup
-  // comparison count is O(n·k), NOT O(n²). With N distinct addresses the fixed
-  // selection stops after k draws (≈k²/2 comparisons); a dedup-the-whole-pool
-  // predecessor performed ≈N²/2. Asserting the count stays at/below N·k pins the
-  // complexity — N·k sits far below N²/2 for large N, so an O(n²) regression
-  // trips this guard.
+fn indirect_fan_out_selects_bounded_distinct_helpers_at_scale() {
+  // A large membership must still yield a bounded, DISTINCT indirect-helper
+  // fan-out. The candidate addresses are scanned once and deduplicated into an
+  // `FxHashSet<A>` (O(n)); up to `indirect_checks` DISTINCT addresses are then
+  // sampled uniformly (O(distinct)). Exercised here with N = 2000 distinct
+  // addresses to confirm the selection stays exactly `indirect_checks` wide and
+  // free of duplicates regardless of membership size.
   const N: usize = 2000;
   const K: usize = 3;
   let mut e = seeded_endpoint(cfg().with_indirect_checks(K as u32), 0x51C0_FFEE);
@@ -2484,9 +2496,7 @@ fn indirect_fan_out_selects_bounded_distinct_helpers_without_quadratic_dedup() {
   e.disable_reliable_ping(SmolStr::new("bob"));
   insert_direct_probe(&mut e, 42, "bob", t0, t0 + Duration::from_secs(3600));
 
-  DEDUP_COMPARISONS.with(|c| c.set(0));
   e.probe_fan_out_indirect(42, t0 + Duration::from_millis(1));
-  let comparisons = DEDUP_COMPARISONS.with(|c| c.get());
 
   // Fan-out width is exactly `indirect_checks` DISTINCT addresses.
   let (expected_nacks, indirect_peers) = awaiting_indirect(&e, 42);
@@ -2505,16 +2515,6 @@ fn indirect_fan_out_selects_bounded_distinct_helpers_without_quadratic_dedup() {
       "selected helper addresses must be distinct"
     );
   }
-
-  // Complexity guard: O(n·k), not O(n²). N·k = 6000; the O(n²) predecessor
-  // would perform ≈N²/2 = 2_000_000 dedup comparisons here.
-  let n_k = (N as u64) * (K as u64);
-  assert!(
-    comparisons <= n_k,
-    "dedup comparisons ({comparisons}) must be O(N·k) (<= {n_k}), not O(N²); \
-     a whole-pool dedup would perform ≈{} here",
-    (N as u64) * (N as u64) / 2
-  );
 }
 
 // ─────────────── handle_indirect_ping ────────────────────────────────────
@@ -4819,6 +4819,7 @@ fn reliable_ping_ack_drives_probe_success() {
   let probe_seq = 55u32;
   let bob = e.member(&SmolStr::new("bob")).unwrap().clone();
   let bob_incarnation = e.node_incarnation(&SmolStr::new("bob")).unwrap();
+  let bob_generation = e.members.get(&SmolStr::new("bob")).unwrap().generation();
   let now = Instant::now();
 
   // Probe in AwaitingIndirect with the reliable fallback armed
@@ -4830,8 +4831,10 @@ fn reliable_ping_ack_drives_probe_success() {
     Probe {
       target: bob,
       target_incarnation: bob_incarnation,
+      target_generation: bob_generation,
       sent_at: now,
       kind: ProbeKind::Detection,
+      dispatched: true,
       failure_deadline: now + Duration::from_secs(5),
       phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
@@ -5103,6 +5106,7 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
   let probe_seq = 77u32;
   let bob = e.member(&SmolStr::new("bob")).unwrap().clone();
   let bob_incarnation = e.node_incarnation(&SmolStr::new("bob")).unwrap();
+  let bob_generation = e.members.get(&SmolStr::new("bob")).unwrap().generation();
   let t0 = Instant::now();
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
 
@@ -5116,8 +5120,10 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
     Probe {
       target: bob,
       target_incarnation: bob_incarnation,
+      target_generation: bob_generation,
       sent_at: t0,
       kind: ProbeKind::Detection,
+      dispatched: true,
       failure_deadline: deadline,
       phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks: 2,
@@ -8933,18 +8939,23 @@ fn indirect_fan_out_drops_over_mtu_indirect_ping_and_counts_only_queued() {
   // ahead, so the elapsed direct sub-window escalates to the indirect fan-out
   // rather than terminating the probe outright.
   let seq = 91u32;
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e
       .members
       .get(&SmolStr::new(big_id.as_str()))
       .expect("bob admitted");
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   e.probes.insert(
     seq,
     Probe::new_direct(
       target,
       target_incarnation,
+      target_generation,
       t0,
       ProbeKind::Detection,
       Duration::from_millis(500),
@@ -9284,15 +9295,20 @@ fn indirect_fan_out_dedups_helpers_by_shared_address() {
   // failure deadline, so the elapsed direct sub-window escalates to the indirect
   // fan-out rather than terminating outright.
   let seq = 77u32;
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   e.probes.insert(
     seq,
     Probe::new_direct(
       target,
       target_incarnation,
+      target_generation,
       t0,
       ProbeKind::Detection,
       Duration::from_millis(500),
@@ -9371,13 +9387,14 @@ fn indirect_fan_out_dedups_helpers_by_shared_address() {
 }
 
 /// A probe of X@A whose target then leaves and is re-admitted at a DIFFERENT
-/// address (X@B) before the probe expires must NOT suspect the replacement: the
-/// probe-expiry Suspect is bound to the probed address, and X@B is a different
-/// instance. The `inc < local_inc` guard in `process_suspect` does not catch
-/// this, because the address-adoption branch of `process_alive_decided`
-/// re-admits the id at an incarnation the guard accepts (here below the probe
-/// snapshot), so the address-match guard in `probe_terminate_failure` is what
-/// protects the replacement.
+/// address (X@B) before the probe expires must NOT suspect the replacement: X@B
+/// is a different membership instance. The `inc < local_inc` guard in
+/// `process_suspect` does not catch this, because the address-adoption branch of
+/// `process_alive_decided` re-admits the id at an incarnation the guard accepts
+/// (here below the probe snapshot). The generation gate in
+/// `probe_terminate_failure` protects the replacement: the reclaim draws a fresh
+/// generation token, so the probe's snapshot generation no longer matches the
+/// live member's.
 #[test]
 fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
@@ -9393,25 +9410,31 @@ fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
 
   // Start a Detection probe of bob@7001; snapshot target=bob@7001, inc=10.
   let seq = 55u32;
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   assert_eq!(
     target_incarnation, 10,
     "probe snapshots bob@7001 at incarnation 10"
   );
-  e.probes.insert(
-    seq,
-    Probe::new_direct(
-      target,
-      target_incarnation,
-      t0,
-      ProbeKind::Detection,
-      Duration::from_millis(50),
-      t0 + Duration::from_millis(80),
-    ),
+  // Model a normally-dispatched probe (direct Ping sent) so its failure reaches
+  // the generation gate rather than the no-dispatch abort.
+  let mut probe = Probe::new_direct(
+    target,
+    target_incarnation,
+    target_generation,
+    t0,
+    ProbeKind::Detection,
+    Duration::from_millis(50),
+    t0 + Duration::from_millis(80),
   );
+  probe.dispatched = true;
+  e.probes.insert(seq, probe);
 
   // bob gracefully leaves (self-marked Dead ⇒ State::Left, immediately
   // address-reclaimable), then a NEW bob instance is admitted at a DIFFERENT
@@ -9469,14 +9492,14 @@ fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
 
 /// A probe of X@A whose target is removed by `reset_nodes` and then re-admitted
 /// at the SAME id and SAME transport address with a LOWER incarnation before the
-/// probe expires must NOT suspect the replacement. A rejoin resets the
-/// generation — the new-member branch of `process_alive_decided` starts at the
-/// arriving incarnation — so the probe snapshot (inc 10) is >= the replacement's
-/// (inc 2) and `process_suspect`'s `inc < local_inc` guard does NOT reject it.
-/// The incarnation-regression guard in `probe_terminate_failure` (current
-/// incarnation must not have regressed below the snapshot) is what protects the
-/// fresh instance here; the address match alone cannot, because the address is
-/// unchanged.
+/// probe expires must NOT suspect the replacement. The rejoin takes the
+/// new-member branch of `process_alive_decided` and starts at the arriving
+/// incarnation (2), so the probe snapshot (inc 10) is >= the replacement's and
+/// `process_suspect`'s `inc < local_inc` guard does NOT reject it. The generation
+/// gate in `probe_terminate_failure` protects the fresh instance: the re-admit
+/// draws a NEW generation token, so the probe's snapshot generation no longer
+/// matches — neither the address (unchanged) nor the incarnation (regressed)
+/// could distinguish the instances on its own.
 #[test]
 fn probe_expiry_does_not_suspect_a_same_address_lower_incarnation_replacement() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
@@ -9493,25 +9516,31 @@ fn probe_expiry_does_not_suspect_a_same_address_lower_incarnation_replacement() 
   while e.poll_transmit().is_some() {}
 
   let seq = 56u32;
-  let (target, target_incarnation) = {
+  let (target, target_incarnation, target_generation) = {
     let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
-    (m.state_ref().server_arc(), m.state_ref().incarnation())
+    (
+      m.state_ref().server_arc(),
+      m.state_ref().incarnation(),
+      m.generation(),
+    )
   };
   assert_eq!(
     target_incarnation, 10,
     "probe snapshots bob@7001 at incarnation 10"
   );
-  e.probes.insert(
-    seq,
-    Probe::new_direct(
-      target,
-      target_incarnation,
-      t0,
-      ProbeKind::Detection,
-      Duration::from_millis(50),
-      t0 + Duration::from_millis(80),
-    ),
+  // Model a normally-dispatched probe (direct Ping sent) so its failure reaches
+  // the generation gate rather than the no-dispatch abort.
+  let mut probe = Probe::new_direct(
+    target,
+    target_incarnation,
+    target_generation,
+    t0,
+    ProbeKind::Detection,
+    Duration::from_millis(50),
+    t0 + Duration::from_millis(80),
   );
+  probe.dispatched = true;
+  e.probes.insert(seq, probe);
 
   // bob gracefully leaves (self-marked Dead ⇒ State::Left), is reclaimed by
   // reset_nodes once past gossip_to_the_dead_time, then a NEW bob is admitted at
@@ -9574,5 +9603,305 @@ fn probe_expiry_does_not_suspect_a_same_address_lower_incarnation_replacement() 
   assert!(
     m.suspicion().is_none(),
     "no suspicion timer may be armed on the replacement"
+  );
+}
+
+/// F1 core case: a probe of X@A/inc1 whose target is removed by `reset_nodes` and
+/// re-admitted at the SAME id, SAME address, and the SAME incarnation before the
+/// probe expires must NOT suspect the fresh instance. `(id, address, incarnation)`
+/// are all identical to the probed instance, so an `(address, incarnation)` check
+/// cannot tell them apart — only the generation token can. The rejoin takes the
+/// new-member branch of `process_alive_decided`, which draws a fresh generation,
+/// so the probe's snapshot generation no longer matches and no Suspect is emitted.
+///
+/// Mutation check: reverting the generation gate in `probe_terminate_failure` to
+/// `address == probed && incarnation >= snapshot` makes the equal-incarnation
+/// fresh instance satisfy that predicate (same address, `1 >= 1`) and be falsely
+/// suspected — this test then fails.
+#[test]
+fn probe_expiry_does_not_suspect_an_equal_incarnation_reset_readmit_replacement() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(80))
+      // Short window so reset_nodes reclaims the left node quickly.
+      .with_gossip_to_the_dead_time(Duration::from_millis(5)),
+  );
+  let t0 = Instant::now();
+  // bob@7001 admitted Alive at incarnation 1.
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  let original_generation = e.members.get(&SmolStr::new("bob")).unwrap().generation();
+  assert_ne!(
+    original_generation, 0,
+    "a tracked member has a nonzero generation"
+  );
+
+  // Start a Detection probe of bob@7001/inc1; `insert_direct_probe` snapshots the
+  // original generation and marks the probe dispatched (its direct Ping was
+  // sent), so failure reaches the generation gate rather than the no-dispatch
+  // abort.
+  let seq = 57u32;
+  insert_direct_probe(&mut e, seq, "bob", t0, t0 + Duration::from_millis(80));
+  let probe_generation = e.probes.get(&seq).unwrap().target_generation;
+  assert_eq!(
+    probe_generation, original_generation,
+    "the probe snapshots the original instance's generation"
+  );
+
+  // bob gracefully leaves (State::Left), reset_nodes reclaims it, then a FRESH
+  // bob is admitted at the SAME address 7001 and the SAME incarnation 1. Because
+  // the id was removed first, this hits the new-member branch, which draws a NEW
+  // generation — so (id, address, incarnation) all match the probed instance yet
+  // the generation differs.
+  e.process_dead(dead("bob", "bob", 1), t0 + Duration::from_millis(10));
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Left),
+    "bob self-marked Left"
+  );
+  e.reset_nodes(t0 + Duration::from_millis(20));
+  assert!(
+    e.members.get(&SmolStr::new("bob")).is_none(),
+    "reset_nodes reclaimed the left bob"
+  );
+  e.process_alive_decided(alive("bob", 7001, 1), false, t0 + Duration::from_millis(30));
+
+  let fresh_generation = e.members.get(&SmolStr::new("bob")).unwrap().generation();
+  assert_ne!(
+    fresh_generation, probe_generation,
+    "a reset + EQUAL-incarnation re-admit is a NEW instance with a distinct generation"
+  );
+  assert_ne!(
+    fresh_generation, 0,
+    "the fresh instance has a nonzero generation"
+  );
+  {
+    let m = e.members.get(&SmolStr::new("bob")).unwrap();
+    assert_eq!(m.state_ref().address_ref().port(), 7001, "SAME address");
+    assert_eq!(m.state_ref().incarnation(), 1, "SAME incarnation 1");
+    assert_eq!(m.state_ref().state(), State::Alive);
+  }
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The probe of the departed instance expires at its failure deadline (t0+80ms).
+  // The fresh bob@7001/inc1 must be UNTOUCHED — Alive, incarnation 1, no
+  // suspicion — because the probe's snapshot generation no longer matches.
+  e.handle_timeout(t0 + Duration::from_millis(90));
+  assert!(!e.probes.contains_key(&seq), "the probe terminated");
+  let m = e.members.get(&SmolStr::new("bob")).unwrap();
+  assert_eq!(
+    m.state_ref().state(),
+    State::Alive,
+    "the fresh equal-incarnation instance must NOT be suspected"
+  );
+  assert_eq!(m.state_ref().incarnation(), 1);
+  assert!(
+    m.suspicion().is_none(),
+    "no suspicion timer may be armed on the fresh instance"
+  );
+}
+
+/// F2: a probe that dispatched NO datagram — its direct Ping is over-MTU, its
+/// IndirectPings are over-MTU (the same oversized target id), and reliable ping
+/// is DISABLED — reflects a purely LOCAL MTU limit, not peer loss. It must abort
+/// cleanly: no Suspect, no awareness penalty, no leaked probe/ack state.
+///
+/// Mutation check: reverting the abort (always suspecting + penalizing on
+/// failure) makes the unprobeable peer suspected and raises the health score, so
+/// this test fails.
+#[test]
+fn unprobeable_over_mtu_peer_aborts_without_suspicion_or_penalty() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_gossip_mtu(gossip_mtu)
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(200)),
+  );
+  let t0 = Instant::now();
+  // A peer whose id alone dwarfs the MTU: its direct Ping AND every IndirectPing
+  // (which carries this id as the target) exceed one datagram and are dropped.
+  let big_id = "z".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  // Reliable ping disabled → NOTHING can be dispatched for this probe.
+  e.disable_reliable_ping(SmolStr::new(big_id.as_str()));
+  assert_eq!(e.health_score(), 0, "healthy before the probe");
+
+  // start_probe builds the direct Ping; it is over-MTU and not queued, so the
+  // probe records dispatched == false through the real send path.
+  assert!(e.start_probe(t0), "a probe is started for the only peer");
+  let seq = *e.probes.keys().next().expect("one probe registered");
+  assert!(
+    !e.probes.get(&seq).unwrap().dispatched,
+    "the over-MTU direct Ping was NOT dispatched"
+  );
+  while e.poll_transmit().is_some() {}
+
+  // Escalate past the direct sub-window (50ms) but before the failure deadline
+  // (200ms): the fan-out finds every IndirectPing over-MTU (expected_nacks == 0)
+  // and reliable disabled, so it terminates the probe — which aborts.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+
+  assert!(
+    e.probes.is_empty(),
+    "the unprobeable probe aborted, leaving no probe state"
+  );
+  let m = e.members.get(&SmolStr::new(big_id.as_str())).unwrap();
+  assert_eq!(
+    m.state_ref().state(),
+    State::Alive,
+    "an over-MTU peer we never sent any datagram to must NOT be suspected"
+  );
+  assert!(m.suspicion().is_none(), "no suspicion timer may be armed");
+  assert_eq!(
+    e.health_score(),
+    0,
+    "a purely local MTU limit must not charge an awareness failure"
+  );
+}
+
+/// F2 sibling: the SAME over-MTU peer, but with reliable ping ENABLED. The fan-out
+/// opens the reliable-ping fallback (a dial IS a dispatch), so the probe stays
+/// alive racing the deadline; when that fallback never acks, the timeout IS a
+/// genuine peer failure and DOES suspect + penalize. Only the truly-unprobeable
+/// (nothing dispatched) case aborts.
+#[test]
+fn over_mtu_peer_with_reliable_fallback_still_suspects_on_failure() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_gossip_mtu(gossip_mtu)
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(200)),
+  );
+  let t0 = Instant::now();
+  let big_id = "z".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  // Reliable ping left ENABLED (the default).
+  assert!(e.start_probe(t0), "a probe is started for the only peer");
+  let seq = *e.probes.keys().next().expect("one probe registered");
+  assert!(
+    !e.probes.get(&seq).unwrap().dispatched,
+    "the over-MTU direct Ping was NOT dispatched"
+  );
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // Escalate: the fan-out opens the reliable fallback even with zero indirect
+  // peers, so the probe does NOT abort — it stays AwaitingIndirect racing the
+  // deadline with the reliable stream armed.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+  match &e
+    .probes
+    .get(&seq)
+    .expect("probe still racing the reliable fallback")
+    .phase
+  {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      reliable_stream_id,
+      ..
+    }) => {
+      assert_eq!(*expected_nacks, 0, "every IndirectPing is over-MTU");
+      assert!(
+        reliable_stream_id.is_some(),
+        "the reliable fallback was dispatched (a dial counts as a dispatch)"
+      );
+    }
+    other => panic!("expected AwaitingIndirect racing the reliable fallback, got {other:?}"),
+  }
+
+  // The reliable fallback never acks; the probe expires at its failure deadline
+  // (t0+200ms). A datagram WAS dispatched (the reliable dial), so this is a
+  // genuine failure: suspect the peer and charge the awareness penalty.
+  e.handle_timeout(t0 + Duration::from_millis(260));
+  assert!(e.probes.is_empty(), "the probe terminated");
+  let m = e.members.get(&SmolStr::new(big_id.as_str())).unwrap();
+  assert_eq!(
+    m.state_ref().state(),
+    State::Suspect,
+    "a reliable-fallback failure IS peer loss and must suspect the target"
+  );
+  assert!(
+    e.health_score() > 0,
+    "a dispatched-then-failed probe charges an awareness penalty"
+  );
+}
+
+/// F3: indirect-helper selection must be UNIFORM over DISTINCT addresses, not
+/// biased by how many alias ids advertise an address. Address A is advertised by
+/// `M` alias ids and address B by a single id; with `indirect_checks == 1`, over
+/// many independent seeds each distinct address must be chosen ~half the time —
+/// NOT `M:1` in A's favor. Sampling by shuffling the raw, duplicate-laden
+/// candidate pool gives A ~`M`× the selection probability; deduplicating to
+/// distinct addresses BEFORE sampling removes the bias.
+///
+/// Mutation check: replacing the `FxHashSet` dedup + uniform sample with a
+/// shuffle over the duplicate-laden pool makes A win ≈`M/(M+1)` of the trials,
+/// breaking the tolerance.
+#[test]
+fn indirect_helper_selection_is_uniform_over_distinct_addresses() {
+  const M: usize = 5; // alias ids all sharing address A
+  const TRIALS: u64 = 3000;
+  let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6001);
+  let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6002);
+
+  let mut a_selected = 0u64;
+  let mut b_selected = 0u64;
+  for seed in 0..TRIALS {
+    // Fresh endpoint per trial with a distinct seed, so the aggregate reflects
+    // the sampler's distribution rather than one PRNG path.
+    let mut e = seeded_endpoint(cfg().with_indirect_checks(1), seed);
+    let t0 = Instant::now();
+    // M alias ids at address A (6001), one id at address B (6002), and the probe
+    // target at a third address (7001). Both A and B are eligible helpers.
+    for i in 0..M {
+      process_alive_auto(&mut e, alive(&format!("a{i}"), 6001, 1), false, t0);
+    }
+    process_alive_auto(&mut e, alive("bonly", 6002, 1), false, t0);
+    process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+    while e.poll_event().is_some() {}
+    while e.poll_transmit().is_some() {}
+
+    // Isolate the IndirectPing selection: drop the reliable fallback.
+    e.disable_reliable_ping(SmolStr::new("bob"));
+    insert_direct_probe(&mut e, 9, "bob", t0, t0 + Duration::from_secs(3600));
+    e.probe_fan_out_indirect(9, t0 + Duration::from_millis(1));
+
+    let (_n, peers) = awaiting_indirect(&e, 9);
+    assert_eq!(
+      peers.len(),
+      1,
+      "indirect_checks == 1 selects exactly one helper address"
+    );
+    match peers[0] {
+      p if p == addr_a => a_selected += 1,
+      p if p == addr_b => b_selected += 1,
+      other => panic!("selected an unexpected helper address {other:?}"),
+    }
+  }
+
+  assert_eq!(
+    a_selected + b_selected,
+    TRIALS,
+    "every trial selected A or B"
+  );
+  // Uniform ⇒ each ≈ 0.5. The window is many standard deviations wide (so it
+  // never flakes) yet far below the biased ≈M/(M+1) ratio (~0.83) the
+  // entry-shuffle predecessor produced.
+  let a_frac = a_selected as f64 / TRIALS as f64;
+  assert!(
+    (0.43..=0.57).contains(&a_frac),
+    "address A (advertised by {M} alias ids) was selected {a_selected}/{TRIALS} \
+     ({a_frac:.3}); uniform-over-distinct expects ~0.5, an alias-multiplicity bias \
+     would push it toward {:.3}",
+    M as f64 / (M as f64 + 1.0)
   );
 }

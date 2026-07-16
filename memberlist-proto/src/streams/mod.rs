@@ -2152,7 +2152,9 @@ where
   G: Rng,
   R: StreamTransport,
   I: crate::Id,
-  A: crate::CheapClone + crate::Data + PartialEq + 'static,
+  // `Eq + Hash` follows the inner `Endpoint`, whose probe fan-out deduplicates
+  // helper addresses through an `FxHashSet<A>` (`A = SocketAddr` in the drivers).
+  A: crate::CheapClone + crate::Data + PartialEq + Eq + core::hash::Hash + 'static,
 {
   /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
   /// [`Endpoint::start_scheduling`].
