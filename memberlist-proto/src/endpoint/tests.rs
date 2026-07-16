@@ -9835,6 +9835,193 @@ fn over_mtu_peer_with_reliable_fallback_still_suspects_on_failure() {
   );
 }
 
+/// F2 (monotonic dispatch): when the direct Ping and every IndirectPing are
+/// over-MTU, the reliable fallback is the ONLY dispatched attempt. If its DIAL
+/// then fails before the probe expires (`dial_failed` clears
+/// `reliable_stream_id` while the probe stays live), the probe must STILL
+/// suspect on expiry — a failed attempt is peer loss, not "nothing dispatched".
+/// Inferring dispatch from the mutable `reliable_stream_id` at terminate time
+/// (the pre-fix behavior) misreads the retired fallback as no-attempt and lets
+/// the unreachable peer evade suspicion forever; the monotonic
+/// `Probe::dispatched` flag, set when the fallback opened, prevents it.
+///
+/// Mutation check: reverting the abort gate to infer dispatch from
+/// `reliable_stream_id.is_some()` makes this peer abort (no Suspect, no penalty).
+#[test]
+fn over_mtu_reliable_fallback_dial_failed_before_expiry_still_suspects() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_gossip_mtu(gossip_mtu)
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(200)),
+  );
+  let t0 = Instant::now();
+  let big_id = "z".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  assert!(e.start_probe(t0), "a probe is started for the only peer");
+  let seq = *e.probes.keys().next().expect("one probe registered");
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // Escalate: over-MTU direct + all-over-MTU indirect ⇒ the reliable fallback is
+  // the sole dispatch. The fan-out records that dispatch monotonically.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+  let rid = match &e.probes.get(&seq).expect("probe still racing").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      reliable_stream_id,
+      ..
+    }) => {
+      assert_eq!(*expected_nacks, 0, "every IndirectPing is over-MTU");
+      reliable_stream_id.expect("the reliable fallback was dispatched")
+    }
+    other => panic!("expected AwaitingIndirect racing the reliable fallback, got {other:?}"),
+  };
+  assert!(
+    e.probes.get(&seq).unwrap().dispatched,
+    "the reliable dial set the monotonic dispatched flag"
+  );
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The reliable fallback's DIAL fails before the cumulative deadline — this
+  // retires the fallback (clears reliable_stream_id) but leaves the probe alive.
+  e.dial_failed(
+    rid,
+    StreamError::DialFailed("refused".into()),
+    t0 + Duration::from_millis(70),
+  );
+  match &e
+    .probes
+    .get(&seq)
+    .expect("probe not removed by fallback retirement")
+    .phase
+  {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      reliable_stream_id, ..
+    }) => assert!(
+      reliable_stream_id.is_none(),
+      "the failed fallback stream is retired"
+    ),
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  }
+  assert!(
+    e.probes.get(&seq).unwrap().dispatched,
+    "retiring the fallback must NOT clear the monotonic dispatched flag"
+  );
+
+  // Expire: a dispatched-then-failed probe is genuine peer loss ⇒ suspect + penalty.
+  e.handle_timeout(t0 + Duration::from_millis(260));
+  assert!(e.probes.is_empty(), "the probe terminated");
+  assert_eq!(
+    e.members
+      .get(&SmolStr::new(big_id.as_str()))
+      .unwrap()
+      .state_ref()
+      .state(),
+    State::Suspect,
+    "a failed reliable-only fallback IS peer loss and must suspect the target"
+  );
+  assert!(
+    e.health_score() > 0,
+    "a dispatched-then-failed probe charges an awareness penalty"
+  );
+}
+
+/// F2 (monotonic dispatch): same as the `dial_failed` sibling, but the reliable
+/// fallback fails via a `ReliablePingFailed` stream event (the connection
+/// established, then the reliable ping failed). It likewise retires the fallback
+/// (clears `reliable_stream_id`) while the probe stays live, and the probe must
+/// STILL suspect on expiry.
+#[test]
+fn over_mtu_reliable_fallback_ping_failed_before_expiry_still_suspects() {
+  let gossip_mtu = 1400usize;
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_gossip_mtu(gossip_mtu)
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(200)),
+  );
+  let t0 = Instant::now();
+  let big_id = "z".repeat(gossip_mtu * 2);
+  process_alive_auto(&mut e, alive(&big_id, 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  assert!(e.start_probe(t0), "a probe is started");
+  let seq = *e.probes.keys().next().expect("one probe registered");
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  e.handle_timeout(t0 + Duration::from_millis(60));
+  match &e.probes.get(&seq).expect("probe still racing").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      reliable_stream_id,
+      ..
+    }) => {
+      assert_eq!(*expected_nacks, 0, "every IndirectPing is over-MTU");
+      assert!(
+        reliable_stream_id.is_some(),
+        "the reliable fallback was dispatched"
+      );
+    }
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  }
+  assert!(
+    e.probes.get(&seq).unwrap().dispatched,
+    "the reliable dial set the monotonic dispatched flag"
+  );
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The reliable ping fails via the stream-event path before the deadline.
+  let cmd = e.handle_stream_event(
+    EndpointEvent::ReliablePingFailed(crate::event::ReliablePingFailed::new(seq)),
+    t0 + Duration::from_millis(70),
+  );
+  assert!(
+    cmd.is_none(),
+    "ReliablePingFailed returns no stream command"
+  );
+  match &e
+    .probes
+    .get(&seq)
+    .expect("probe not removed by fallback retirement")
+    .phase
+  {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      reliable_stream_id, ..
+    }) => assert!(
+      reliable_stream_id.is_none(),
+      "the failed fallback is retired"
+    ),
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  }
+  assert!(
+    e.probes.get(&seq).unwrap().dispatched,
+    "ReliablePingFailed must NOT clear the monotonic dispatched flag"
+  );
+
+  e.handle_timeout(t0 + Duration::from_millis(260));
+  assert!(e.probes.is_empty(), "the probe terminated");
+  assert_eq!(
+    e.members
+      .get(&SmolStr::new(big_id.as_str()))
+      .unwrap()
+      .state_ref()
+      .state(),
+    State::Suspect,
+    "a failed reliable-only fallback IS peer loss and must suspect the target"
+  );
+  assert!(
+    e.health_score() > 0,
+    "a dispatched-then-failed probe charges an awareness penalty"
+  );
+}
+
 /// F3: indirect-helper selection must be UNIFORM over DISTINCT addresses, not
 /// biased by how many alias ids advertise an address. Address A is advertised by
 /// `M` alias ids and address B by a single id; with `indirect_checks == 1`, over

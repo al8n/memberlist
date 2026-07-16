@@ -80,16 +80,18 @@ pub(crate) struct Probe<I, A> {
   pub(crate) sent_at: Instant,
   /// What kind of probe this is.
   pub(crate) kind: ProbeKind,
-  /// Whether at least one probe datagram was ever actually dispatched for this
-  /// probe. Set `true` once the direct `Ping` is queued (and OR-ed by the
-  /// indirect fan-out for any `IndirectPing` queued or reliable-ping dial
-  /// opened). A node id is unbounded, so a large id can make the direct `Ping`
-  /// AND every `IndirectPing` exceed `gossip_mtu` and be dropped; with reliable
-  /// ping unavailable, NOTHING is sent. A deterministic local MTU limit is not
-  /// peer loss, so `probe_terminate_failure` applies the awareness penalty and
-  /// suspicion only when this (or an indirect/reliable dispatch) is true —
-  /// otherwise it aborts cleanly. Always `false` at construction; the initiator
-  /// records the actual direct send.
+  /// Whether at least one probe datagram/dial was ever dispatched for this
+  /// probe — MONOTONIC: set `true` at each dispatch initiation (the direct
+  /// `Ping` queuing, any `IndirectPing` queuing, or the reliable-ping dial
+  /// opening) and NEVER cleared. A node id is unbounded, so a large id can make
+  /// the direct `Ping` AND every `IndirectPing` exceed `gossip_mtu` and be
+  /// dropped; with reliable ping unavailable, NOTHING is sent. A deterministic
+  /// local MTU limit is not peer loss, so `probe_terminate_failure` reads this
+  /// flag directly — from dispatch HISTORY, not the mutable `reliable_stream_id`
+  /// (which a fallback retirement, `dial_failed` / `ReliablePingFailed`, clears
+  /// while the probe is still live) — and applies the awareness penalty +
+  /// suspicion only when it is true; otherwise it aborts cleanly. `false` at
+  /// construction.
   pub(crate) dispatched: bool,
   /// The absolute authoritative FAILURE deadline, captured ONCE at probe
   /// creation (NOT recomputed from a later `now`). Mirrors memberlist-core

@@ -1864,7 +1864,7 @@ where
     // fallback stream is harmless: a late `ReliablePingAcked`
     // hits `complete_probe_success` for a now-absent probe (no-op) and a
     // late `ReliablePingFailed` hits `retire_reliable_fallback` (no-op).
-    let (nack_stats, indirect_or_reliable_dispatched) = match &probe.phase {
+    let nack_stats = match &probe.phase {
       ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         nacked_by,
@@ -1874,29 +1874,29 @@ where
         if let Some(rid) = reliable_stream_id {
           self.pending_stream_intents.remove(rid);
         }
-        // A datagram WAS dispatched on the escalation path if any IndirectPing
-        // queued (`expected_nacks > 0`) or the reliable-ping fallback was opened
-        // (a reliable dial counts as a dispatch); this feeds the abort gate below.
-        let dispatched = *expected_nacks > 0 || reliable_stream_id.is_some();
         // Deduped distinct responders: a duplicate or late Nack never
         // entered `nacked_by`, so `expected - seen` cannot be driven to
         // 0 by a Nack flood to suppress the awareness penalty.
-        (Some((*expected_nacks, nacked_by.len())), dispatched)
+        Some((*expected_nacks, nacked_by.len()))
       }
-      _ => (None, false),
+      _ => None,
     };
     match probe.kind {
       ProbeKind::Detection => {
         // A probe that dispatched NO datagram at all — an over-MTU direct Ping,
-        // and (after escalation) no IndirectPing queued and no reliable fallback
-        // opened — reflects a purely LOCAL MTU limit (a node id is unbounded, so
-        // a large id can push every Ping/IndirectPing past `gossip_mtu`), NOT
-        // peer loss. Abort cleanly: the probe + ack entry are already removed
-        // above; charge NO awareness penalty and emit NO Suspect. A probe that
-        // DID dispatch (direct Ping sent, or an indirect/reliable attempt) and
-        // then timed out is a genuine failure and takes the penalty + suspicion
-        // path below.
-        if !probe.dispatched && !indirect_or_reliable_dispatched {
+        // no IndirectPing queued, and no reliable fallback opened — reflects a
+        // purely LOCAL MTU limit (a node id is unbounded, so a large id can push
+        // every Ping/IndirectPing past `gossip_mtu`), NOT peer loss. Abort
+        // cleanly: the probe + ack entry are already removed above; charge NO
+        // awareness penalty and emit NO Suspect. `dispatched` is the MONOTONIC
+        // record of whether ANY attempt (direct Ping, IndirectPing, or reliable
+        // dial) was ever made — read from history, NOT reconstructed from the
+        // current `reliable_stream_id`, which a fallback retirement
+        // (`dial_failed` / `ReliablePingFailed`) clears while the probe is still
+        // live (so an over-MTU peer whose sole reliable attempt then fails would
+        // otherwise evade suspicion forever). A probe that DID dispatch and then
+        // timed out is a genuine failure and takes the penalty + suspicion path.
+        if !probe.dispatched {
           return;
         }
         let severity = match nack_stats {
@@ -3868,6 +3868,13 @@ where
       return;
     }
     if let Some(probe) = self.probes.get_mut(&seq) {
+      // Monotonic dispatch: reaching here means at least one escalation attempt
+      // was dispatched — an IndirectPing queued (`expected_nacks > 0`) or the
+      // reliable fallback opened (`reliable_stream_id.is_some()`); the
+      // no-escalation case returned above. Record it now so a later fallback
+      // retirement (which clears `reliable_stream_id`) cannot erase the fact
+      // that an attempt was made, and a genuine failure still suspects.
+      probe.dispatched = true;
       probe.phase = ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         indirect_peers,
