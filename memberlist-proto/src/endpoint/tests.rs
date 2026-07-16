@@ -9008,3 +9008,213 @@ fn handle_indirect_ping_over_mtu_forward_nacks_requester_and_counts_oversized() 
     "a within-MTU forward registers exactly one relay entry"
   );
 }
+
+/// Two distinct member ids advertising the SAME transport address, both chosen
+/// as indirect helpers, contribute exactly ONE IndirectPing to that address.
+/// The IndirectPing body (`local + target`) is independent of the helper id,
+/// the relay dedups identical forwards, and both `handle_nack` and
+/// `ack_source_is_valid` key responders by address — so a second copy could
+/// never yield a second Nack. `expected_nacks` must therefore be 1 (not 2), and
+/// a single Nack from that address drives `expected_nacks - nacked_by.len()` to
+/// 0, so the one responsive helper never leaves a residual awareness penalty.
+#[test]
+fn indirect_fan_out_dedups_helpers_by_shared_address() {
+  // Two eligible helpers (h1, h2) at the SAME address; bob is the probe target
+  // at a distinct address. indirect_checks=2 selects both helpers (pick_random
+  // returns min(k, candidates)).
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_indirect_checks(2));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  process_alive_auto(&mut e, alive("h1", 7002, 1), false, t0);
+  process_alive_auto(&mut e, alive("h2", 7002, 1), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let shared_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+
+  // Insert a Detection probe against bob in AwaitingDirectAck with a far-ahead
+  // failure deadline, so the elapsed direct sub-window escalates to the indirect
+  // fan-out rather than terminating outright.
+  let seq = 77u32;
+  let (target, target_incarnation) = {
+    let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
+  e.probes.insert(
+    seq,
+    Probe::new_direct(
+      target,
+      target_incarnation,
+      t0,
+      ProbeKind::Detection,
+      Duration::from_millis(500),
+      t0 + Duration::from_secs(100),
+    ),
+  );
+
+  // Escalate: past the 500ms direct sub-window, well before the failure deadline.
+  e.handle_timeout(t0 + Duration::from_secs(1));
+
+  // Exactly ONE IndirectPing may be queued, addressed to the shared helper
+  // address (other transmits — a scheduled direct Ping, gossip — are not
+  // IndirectPings and are filtered out).
+  let mut indirect_to_shared = 0usize;
+  while let Some(tx) = e.poll_transmit() {
+    if let Transmit::Packet(p) = tx {
+      if matches!(p.message_ref(), Message::IndirectPing(_)) {
+        assert_eq!(
+          p.to_ref(),
+          &shared_addr,
+          "the only IndirectPing must target the shared helper address"
+        );
+        indirect_to_shared += 1;
+      }
+    }
+  }
+  assert_eq!(
+    indirect_to_shared, 1,
+    "two ids sharing one address must yield exactly one IndirectPing, not two"
+  );
+
+  // `expected_nacks` counts the unique helper address once, and the Nack
+  // allowlist holds it exactly once.
+  match &e.probes.get(&seq).expect("probe remains").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      indirect_peers,
+      ..
+    }) => {
+      assert_eq!(
+        *expected_nacks, 1,
+        "expected_nacks must count the unique helper address once, not per id"
+      );
+      assert_eq!(
+        indirect_peers.as_slice(),
+        &[shared_addr],
+        "the Nack allowlist must hold the shared address exactly once"
+      );
+    }
+    other => panic!("probe must be AwaitingIndirect, got {other:?}"),
+  }
+
+  // One Nack from the shared address answers the single distinct helper:
+  // expected_nacks - nacked_by.len() == 0, so no false awareness penalty.
+  e.handle_nack(shared_addr, Nack::new(seq), t0 + Duration::from_secs(1));
+  match &e.probes.get(&seq).expect("probe remains").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      expected_nacks,
+      nacked_by,
+      ..
+    }) => {
+      assert_eq!(*expected_nacks, 1);
+      assert_eq!(
+        nacked_by.len(),
+        1,
+        "the one distinct helper's Nack is recorded"
+      );
+      assert_eq!(
+        expected_nacks.saturating_sub(nacked_by.len()),
+        0,
+        "the single distinct helper responded → no residual Lifeguard severity"
+      );
+    }
+    other => panic!("probe must be AwaitingIndirect, got {other:?}"),
+  }
+}
+
+/// A probe of X@A whose target then leaves and is re-admitted at a DIFFERENT
+/// address (X@B) before the probe expires must NOT suspect the replacement: the
+/// probe-expiry Suspect is bound to the probed address, and X@B is a different
+/// instance. The `inc < local_inc` guard in `process_suspect` does not catch
+/// this, because the address-adoption branch of `process_alive_decided`
+/// re-admits the id at an incarnation the guard accepts (here below the probe
+/// snapshot), so the address-match guard in `probe_terminate_failure` is what
+/// protects the replacement.
+#[test]
+fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_timeout(Duration::from_millis(50))
+      .with_probe_interval(Duration::from_millis(80)),
+  );
+  let t0 = Instant::now();
+  // bob@7001 admitted Alive at incarnation 10.
+  process_alive_auto(&mut e, alive("bob", 7001, 10), false, t0);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Start a Detection probe of bob@7001; snapshot target=bob@7001, inc=10.
+  let seq = 55u32;
+  let (target, target_incarnation) = {
+    let m = e.members.get(&SmolStr::new("bob")).expect("bob admitted");
+    (m.state_ref().server_arc(), m.state_ref().incarnation())
+  };
+  assert_eq!(
+    target_incarnation, 10,
+    "probe snapshots bob@7001 at incarnation 10"
+  );
+  e.probes.insert(
+    seq,
+    Probe::new_direct(
+      target,
+      target_incarnation,
+      t0,
+      ProbeKind::Detection,
+      Duration::from_millis(50),
+      t0 + Duration::from_millis(80),
+    ),
+  );
+
+  // bob gracefully leaves (self-marked Dead ⇒ State::Left, immediately
+  // address-reclaimable), then a NEW bob instance is admitted at a DIFFERENT
+  // address (7777) with a LOWER incarnation (2) than the probe snapshot (10).
+  // The address-adoption path bypasses the incarnation guard, so bob@7777 is
+  // admitted at incarnation 2.
+  e.process_dead(dead("bob", "bob", 10), t0 + Duration::from_millis(10));
+  e.process_alive_decided(alive("bob", 7777, 2), false, t0 + Duration::from_millis(20));
+  {
+    let m = e
+      .members
+      .get(&SmolStr::new("bob"))
+      .expect("bob@7777 present");
+    assert_eq!(
+      m.state_ref().address_ref().port(),
+      7777,
+      "replacement adopted 7777"
+    );
+    assert_eq!(
+      m.state_ref().incarnation(),
+      2,
+      "replacement at incarnation 2"
+    );
+    assert_eq!(m.state_ref().state(), State::Alive, "replacement is Alive");
+  }
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // The probe of bob@7001 expires at its failure deadline (t0+80ms).
+  e.handle_timeout(t0 + Duration::from_millis(90));
+  assert!(!e.probes.contains_key(&seq), "the probe terminated");
+
+  // The replacement bob@7777 must be UNTOUCHED: still Alive, still incarnation
+  // 2, no suspicion timer. A probe of bob@7001 says nothing about bob@7777.
+  let m = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .expect("bob@7777 present");
+  assert_eq!(
+    m.state_ref().state(),
+    State::Alive,
+    "a probe of bob@7001 must not suspect the re-addressed bob@7777"
+  );
+  assert_eq!(
+    m.state_ref().incarnation(),
+    2,
+    "the replacement's incarnation must be unchanged"
+  );
+  assert_eq!(m.state_ref().address_ref().port(), 7777);
+  assert!(
+    m.suspicion().is_none(),
+    "no suspicion timer may be armed on the replacement"
+  );
+}

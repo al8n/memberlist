@@ -1866,15 +1866,34 @@ where
 
         // Suspect the generation that was actually probed — the incarnation
         // snapshotted when this probe started — NOT whatever the member holds
-        // now. If the target refuted or was replaced by a newer incarnation
-        // while the probe was in flight, `process_suspect` drops this stale
-        // suspicion via its `inc < local_inc` guard, matching Go memberlist
-        // `suspectNode`: a probe failure says nothing about a generation that
-        // has already moved on.
+        // now. If the target refuted in place (same address, higher
+        // incarnation) while the probe was in flight, `process_suspect` drops
+        // this stale suspicion via its `inc < local_inc` guard, matching Go
+        // memberlist `suspectNode`: a probe failure says nothing about a
+        // generation that has already moved on.
         let target_id = probe.target.id_ref().cheap_clone();
-        let local_id = self.cfg.local_id_ref().cheap_clone();
-        let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
-        self.process_suspect(suspect, now);
+        // Invariant: a probe of X@A must never suspect a re-addressed
+        // replacement X@B. The `inc < local_inc` guard alone does NOT enforce
+        // this: a Left/reclaimed id can be re-admitted at a NEW address with an
+        // incarnation <= this probe's snapshot, because the address-adoption
+        // branch of `process_alive_decided` bypasses the incarnation comparison.
+        // The snapshot incarnation would then be >= the replacement's and the
+        // suspicion would land on the wrong instance. Require the current member
+        // for `target_id` to still be at the probed address; if it is absent or
+        // has been re-addressed, the probed instance is gone, so drop the
+        // suspicion rather than accuse the replacement. The awareness penalty
+        // above still stands — our own failure to confirm the probed peer is a
+        // real observation regardless of which instance now holds the id.
+        let probed_addr = probe.target.address_ref();
+        let still_at_probed_addr = self
+          .members
+          .get(&target_id)
+          .is_some_and(|m| m.state_ref().address_ref() == probed_addr);
+        if still_at_probed_addr {
+          let local_id = self.cfg.local_id_ref().cheap_clone();
+          let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
+          self.process_suspect(suspect, now);
+        }
       }
       ProbeKind::Ping => {
         // Notify the application that its directed ping timed out.
@@ -3680,21 +3699,43 @@ where
     } else {
       None
     };
-    // Fan out IndirectPing to each chosen peer, MTU-checking every datagram. A
-    // node id is unbounded, so an IndirectPing carrying a large already-admitted
+    // Fan out IndirectPing to each chosen helper, deduped by transport ADDRESS
+    // and MTU-checking every datagram.
+    //
+    // Membership does not require unique addresses, so two distinct helper ids
+    // can advertise the SAME address. The IndirectPing body is `local + target`
+    // (independent of the helper id), so a second copy to an address already
+    // sent is pure redundancy: the relay `handle_indirect_ping` dedups identical
+    // in-flight forwards (same requester/seq/target) to at most one Nack, and
+    // both `handle_nack` and `ack_source_is_valid` key responders by address, so
+    // that second copy could never yield a second Nack. Counting it would leave
+    // `expected_nacks - nacked_by.len() >= 1` even after the one distinct helper
+    // answered — falsely penalizing local awareness and letting an id pair
+    // sharing an address stretch our failure-detection deadlines. One
+    // representative per address is sufficient and correct.
+    //
+    // A node id is unbounded, so an IndirectPing carrying a large already-admitted
     // target id can exceed one datagram even though it is a valid lone message;
     // such a datagram is dropped (the same ceiling the direct Ping enforces)
     // rather than emitted as a fragmentable, undeliverable packet. Both the Nack
     // allowlist (`indirect_peers`) and `expected_nacks` — the count the FSM waits
     // on and the source of the Lifeguard severity `expected_nacks -
-    // nacked_by.len()` — count ONLY peers whose IndirectPing was actually queued:
-    // a peer we never sent to relays no Ping and returns no Nack, so counting it
-    // would make the FSM wait for a Nack that never comes and penalize our own
-    // health for a probe we never dispatched.
+    // nacked_by.len()` — count ONLY unique addresses whose IndirectPing was
+    // actually queued: a peer we never sent to relays no Ping and returns no
+    // Nack, so counting it would make the FSM wait for a Nack that never comes
+    // and penalize our own health for a probe we never dispatched.
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let target_addr = target_arc.address_ref().cheap_clone();
-    let mut indirect_peers: SmallVec<A> = SmallVec::new();
+    // Collapse the chosen helpers to their distinct addresses first, so an id
+    // pair sharing one address contributes a single IndirectPing.
+    let mut unique_addrs: SmallVec<A> = SmallVec::new();
     for (_peer_id, peer_addr) in &chosen_resolved {
+      if !unique_addrs.contains(peer_addr) {
+        unique_addrs.push(peer_addr.cheap_clone());
+      }
+    }
+    let mut indirect_peers: SmallVec<A> = SmallVec::new();
+    for peer_addr in &unique_addrs {
       let ind = IndirectPing::new(
         seq,
         Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),
