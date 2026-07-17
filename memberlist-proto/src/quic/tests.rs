@@ -123,6 +123,22 @@ fn make_endpoint_full(
   QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
 }
 
+/// Like [`make_endpoint`] but with every periodic membership scheduler disabled
+/// (probe / gossip / push-pull interval = 0, so [`Endpoint::start_scheduling`]
+/// arms none of them). A residue-drain test can then drive `handle_timeout` at the
+/// sticky catch-up anchor across several `CATCHUP_INTERVAL` steps with NO
+/// randomly-staggered membership timer ever falling due inside the drain window,
+/// so every wake is provably a BOUNDED catch-up (never a scheduled full tick)
+/// regardless of the membership RNG stagger. The QUIC transport config is the
+/// default [`test_config`]; only the periodic schedulers change.
+fn make_endpoint_no_schedulers(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
+  let cfg = EndpointOptions::new(SmolStr::new(id), addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  make_endpoint_full(cfg, test_config(), addr, now)
+}
+
 /// A `MergeDelegate` that rejects every inbound merge, driving
 /// `Endpoint::handle_stream_event(PushPullRequestReceived{Join})` to return
 /// `StreamCommand::Close` — the coordinator-level twin of the bridge module's
@@ -5143,7 +5159,10 @@ fn writable_storm_pass_pumps_at_most_the_budget() {
   let a_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7991".parse().unwrap();
   let now = Instant::now();
-  let mut a = make_endpoint("a", a_addr, now);
+  // A's periodic membership schedulers are disabled so the multi-step catch-up
+  // drain below can advance the clock past several `CATCHUP_INTERVAL`s with no
+  // membership timer ever falling due — every wake is then a bounded catch-up.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
   // B advertises a SMALL connection window (so A's sends back-pressure at the
   // connection level) and a HIGH bidi-stream limit (so A can open ~200 exchanges
   // at once).
@@ -5248,26 +5267,55 @@ fn writable_storm_pass_pumps_at_most_the_budget() {
     "test precondition: the storm must leave a residue so liveness is non-vacuous"
   );
 
-  // Liveness: the deferred residue is never dropped. At this quiet instant no
-  // membership or connection timer is due, so each `handle_timeout` is a
-  // Catchup-only wake that pumps one budget-sized chunk via the bounded catch-up;
-  // the residue clears in O(residue / budget) steps and the queue ends empty.
+  // Liveness: the deferred residue is never dropped. A driver re-polls the earliest
+  // wake (`poll_timeout`) and services it; the sticky catch-up anchor is the
+  // earliest wake, so the first wake is a BOUNDED, membership-flat catch-up. Later
+  // chunks may drain via a scheduled tick once the connection's transport timer
+  // comes due (the anchor advances past it) — which is correct: nothing is dropped.
   a.counters.bridge_visits = 0;
+  assert_eq!(
+    a.poll_timeout(),
+    a.next_catchup_at,
+    "the sticky catch-up anchor is the earliest wake while a residue waits"
+  );
+  let mut catchup_steps = 0usize;
   let mut steps = 0usize;
   while !a.ready_bridges.is_empty() {
-    a.handle_timeout(now);
+    let memb_before = a.membership_time_advances();
+    let before = a.ready_bridges.len();
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    let drained = before - a.ready_bridges.len();
+    if a.membership_time_advances() == memb_before {
+      // A Catchup-only wake: no membership tick, and it pumps at most one budget
+      // chunk (a full tick would drain the whole residue at once).
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake pumps at most the budget ({}); a step drained {drained}",
+        super::MAX_BRIDGE_PUMPS_PER_PASS
+      );
+    }
     steps += 1;
     assert!(
-      steps <= residue / super::MAX_BRIDGE_PUMPS_PER_PASS + 2,
-      "the deferred residue must drain in O(residue / budget) bounded catch-up \
-         steps; still {} queued after {steps} steps",
+      steps <= residue + 2,
+      "the deferred residue must converge, never strand; still {} queued after \
+         {steps} steps",
       a.ready_bridges.len()
     );
   }
   assert!(
+    catchup_steps >= 1,
+    "the residue must drain via at least one BOUNDED catch-up wake; reverting \
+       handle_timeout to an unconditional run_tick makes every wake a full \
+       membership tick and leaves this 0"
+  );
+  assert!(
     a.counters.bridge_visits >= residue as u64,
-    "the bounded catch-up must pump the whole {residue}-bridge residue (deferred, \
-       not dropped); visited {}",
+    "the catch-up must pump the whole {residue}-bridge residue (deferred, not \
+       dropped); visited {}",
     a.counters.bridge_visits
   );
 }
@@ -7417,32 +7465,37 @@ fn writable_storm_arm_caps_enqueues() {
 /// A budget-deferred bridge residue holds no `TimerKey::Bridge` deadline until its
 /// first pump, and `poll_timeout` deliberately ignores `ready_bridges`. With
 /// membership (probe/gossip) and connection transport timers all far, the residue
-/// would then get no timely wake and strand. The fix is a THROTTLED Catchup anchor:
-/// `poll_timeout` returns `last_now + CATCHUP_INTERVAL` while a residue waits, and
-/// `handle_timeout` services a Catchup-only wake in BOUNDED steps (not a full O(N)
-/// membership tick), so a driver re-polling at the Catchup deadline drains the
-/// residue one budget-sized chunk per interval and converges.
+/// would then get no timely wake and strand. The fix is a STICKY Catchup anchor:
+/// `poll_timeout` publishes the `next_catchup_at` field verbatim while a residue
+/// waits — armed ONCE when the residue first appeared and advanced only after a
+/// catch-up step runs — and `handle_timeout` services a due Catchup-only wake in
+/// BOUNDED steps (not a full O(N) membership tick), so a driver waking at the
+/// anchor drains one budget-sized chunk per interval and converges.
 ///
 /// Construction: A opens N connection-window-blocked bridges to B (far exchange
 /// deadlines, quiescent connection — no near transport timer), then ONE service
-/// pass over the enqueued storm leaves a residue > budget. Membership timers are
-/// far (fixed `now`, no probe due).
+/// pass over the enqueued storm leaves a residue > budget. A's periodic membership
+/// schedulers are disabled so no staggered timer falls due in the drain window.
 ///
 /// Mutation-verify (i): skip setting `TimerKey::Catchup` in `poll_timeout` — it
-/// then returns the far exchange/idle minimum (or None), so the `<= last_now +
-/// CATCHUP_INTERVAL` assertion fails; the `earliest_excluding(Catchup)` check
-/// proves that value is strictly later, so the Catchup term is load-bearing.
+/// then returns the far exchange/idle minimum (or None), so the `<= now +
+/// CATCHUP_INTERVAL` assertion fails; the `earliest_excluding_2` check proves every
+/// scheduled timer is strictly later, so the Catchup term is load-bearing.
 ///
-/// Mutation-verify (ii): revert `handle_timeout` to always run the full `run_tick`
-/// — a Catchup-only wake then drains the WHOLE residue in one tick (a step drains
-/// more than the budget) AND advances membership time, so the per-step budget bound
-/// and the flat-membership assertions fail.
+/// Mutation-verify (ii): drop the Catchup DUE-gate in `handle_timeout` (revert to
+/// running the full `run_tick` on any anchor-only wake) — a Catchup wake then
+/// drains the WHOLE residue in one tick (a step drains more than the budget) AND
+/// advances membership time, so the per-step budget bound and the flat-membership
+/// assertions fail.
 #[test]
 fn budget_deferred_residue_drains_via_throttled_catchup_wake() {
   let a_addr: SocketAddr = "127.0.0.1:7994".parse().unwrap();
   let b_addr: SocketAddr = "127.0.0.1:7995".parse().unwrap();
   let now = Instant::now();
-  let mut a = make_endpoint("a", a_addr, now);
+  // A's periodic membership schedulers are disabled so the multi-step catch-up
+  // drain advances the clock with no membership timer ever falling due — every
+  // wake is then provably a bounded catch-up, and membership time stays flat.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
   let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
   let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
 
@@ -7504,63 +7557,457 @@ fn budget_deferred_residue_drains_via_throttled_catchup_wake() {
        catch-up needs multiple bounded steps; residue {residue0}"
   );
 
-  // (i) A wake IS scheduled no later than `last_now + CATCHUP_INTERVAL`, and it is
-  // the EARLIEST wake — every non-Catchup timer (membership, connection, bridge
-  // exchange) is strictly later, so the Catchup term is load-bearing (skipping it
-  // returns that far minimum, and the primary assertion below fails).
+  // (i) A wake IS scheduled no later than `now + CATCHUP_INTERVAL` (the sticky
+  // anchor armed when `service_connection` left the residue), and it is the
+  // EARLIEST wake — every scheduled (non-anchor) timer is strictly later, so the
+  // Catchup term is load-bearing (skipping it returns that far minimum, and the
+  // primary assertion below fails).
   let catchup_deadline = now + super::CATCHUP_INTERVAL;
   let wake = a
     .poll_timeout()
     .expect("a non-empty residue must schedule a catch-up wake");
   assert!(
     wake <= catchup_deadline,
-    "poll_timeout must return a throttled catch-up wake no later than last_now + \
+    "poll_timeout must return the sticky catch-up wake no later than now + \
        CATCHUP_INTERVAL while a residue waits; got {wake:?} vs {catchup_deadline:?}"
   );
-  let non_catchup = a
-    .deadline_index
-    .earliest_excluding(super::deadline::TimerKey::Catchup);
+  let non_catchup = a.deadline_index.earliest_excluding_2(
+    super::deadline::TimerKey::Catchup,
+    super::deadline::TimerKey::ImmediateDue,
+  );
   assert!(
     non_catchup.is_none_or(|t| t > catchup_deadline),
-    "non-vacuous: every NON-Catchup timer must be strictly later than the catch-up \
-       deadline, so removing the Catchup term would return a later wake (or None); \
-       got {non_catchup:?}"
+    "non-vacuous: every scheduled (non-anchor) timer must be strictly later than \
+       the catch-up deadline, so removing the Catchup term would return a later \
+       wake (or None); got {non_catchup:?}"
   );
 
-  // (ii) Driving handle_timeout at the catch-up instant REPEATEDLY drains the
-  // residue in bounded steps of the budget, each a BOUNDED catch-up (no full
-  // membership tick), converging to empty with nothing stranded.
-  let memb_before = a.membership_time_advances();
+  // (ii) A driver re-polls the earliest wake (`poll_timeout`) and services it. The
+  // sticky catch-up anchor is the earliest wake, so the first wake is a BOUNDED,
+  // membership-flat catch-up that pumps one budget chunk and advances the anchor
+  // one interval. As the anchor advances past the connection's transport timer
+  // (armed by the in-flight data of the first pump), later chunks drain via a
+  // scheduled tick — correct, and nothing is stranded. A step that does NOT advance
+  // membership is a Catchup-only wake and MUST be bounded.
+  let first_anchor = a
+    .next_catchup_at
+    .expect("a non-empty residue keeps the sticky catch-up anchor armed");
+  assert_eq!(
+    a.poll_timeout(),
+    Some(first_anchor),
+    "the sticky catch-up anchor is the earliest wake while a residue waits"
+  );
+  let mut catchup_steps = 0usize;
   let mut steps = 0usize;
   while !a.ready_bridges.is_empty() {
+    let memb_before = a.membership_time_advances();
     let before = a.ready_bridges.len();
-    a.handle_timeout(catchup_deadline);
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
     let drained = before - a.ready_bridges.len();
-    assert!(
-      drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
-      "each Catchup-only wake must pump at most the budget ({}), not the whole \
-         residue; a step drained {drained} (reverting handle_timeout to an \
-         unconditional full tick drains it all at once)",
-      super::MAX_BRIDGE_PUMPS_PER_PASS
-    );
-    assert!(
-      drained >= 1,
-      "each catch-up step must make progress (converge)"
-    );
+    if a.membership_time_advances() == memb_before {
+      // A Catchup-only wake: no membership tick, at most one budget chunk (dropping
+      // the Catchup due-gate would run the full tick and drain it all at once).
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake must pump at most the budget ({}); a step drained {drained}",
+        super::MAX_BRIDGE_PUMPS_PER_PASS
+      );
+    }
     steps += 1;
     assert!(
-      steps <= residue0 / super::MAX_BRIDGE_PUMPS_PER_PASS + 2,
-      "the catch-up must converge in O(residue / budget) steps"
+      steps <= residue0 + 2,
+      "the catch-up must converge, never strand; still {} queued after {steps} steps",
+      a.ready_bridges.len()
     );
   }
+  assert!(
+    catchup_steps >= 1,
+    "non-vacuous: the residue must drain via at least one BOUNDED catch-up wake; \
+       dropping the Catchup due-gate so every anchor-only wake runs run_tick leaves \
+       this 0 (every wake becomes a membership tick)"
+  );
+}
+
+/// Establish `a` (periodic membership schedulers disabled) to `b`, open `N`
+/// connection-window-blocked reliable bridges, enqueue them all, and run ONE
+/// budgeted service pass — leaving a `ready_bridges` residue > budget with the
+/// sticky catch-up anchor armed at `now + CATCHUP_INTERVAL`. Returns `a` and the
+/// residue size (`b` is dropped: `a` holds the established connection state and the
+/// sticky-anchor regressions drive only `a`).
+fn a_with_budget_deferred_residue(
+  a_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) -> (QuicEndpoint<SmolStr>, usize) {
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "setup: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  let residue = a.ready_bridges.len();
+  assert!(
+    residue > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "setup: one budgeted pass must leave a residue exceeding the budget; got {residue}"
+  );
+  (a, residue)
+}
+
+/// An ImmediateDue-only wake — a connection carrying a deferred `ConnectionEvent`
+/// backlog, the shape a peer's `RETIRE_CONNECTION_ID` flood produces via the
+/// requeued `NewIdentifiers` — must do BOUNDED work: service ONLY the pending-event
+/// connections, never a full O(all connections) tick. The server pools many
+/// connections but exactly one carries a backlog; one `handle_timeout` at the
+/// ImmediateDue anchor (no scheduled timer due) visits exactly that one connection
+/// and does NOT advance membership time.
+///
+/// Mutation-verify: revert `handle_timeout` to the 2-way `if !non_catchup_due {
+/// run_tick }` dispatch — the present ImmediateDue term makes `non_catchup_due`
+/// true, so it runs the full `run_tick`, whose `service_quinn` visits EVERY pooled
+/// connection (`connection_visits` jumps to the pool size) AND advances membership
+/// time, so both the `== 1` visit assertion and the flat-membership assertion fail.
+#[test]
+fn immediate_due_wake_services_only_pending_connections_not_full_tick() {
+  let now = Instant::now();
+  let s_addr: SocketAddr = "127.0.0.1:7780".parse().unwrap();
+  // Schedulers disabled so no membership timer is ever due — the wake this test
+  // drives is provably ImmediateDue-only, not a scheduled tick.
+  let mut s = make_endpoint_no_schedulers("s", s_addr, now);
+
+  let n = 8usize;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..n {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7781 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(s_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+  for _ in 0..600 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == s_addr {
+          s.handle_udp(*caddr, &bytes, now);
+        }
+      }
+    }
+    while let Some((to, bytes)) = s.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(s_addr, &bytes, now);
+      }
+    }
+    for (_, c) in clients.iter_mut() {
+      c.handle_timeout(now);
+    }
+    s.handle_timeout(now);
+    while s.poll_event().is_some() {}
+  }
+  let pooled = s.conns.iter_handles().len();
+  assert!(
+    pooled >= 6,
+    "test precondition: the server must pool most client connections; got {pooled}"
+  );
+
+  // Drain any handshake-queued pending events so the set starts empty and the
+  // single flag below is the ONLY pending-event connection.
+  for _ in 0..10 {
+    if s.conns_with_pending_events.is_empty() {
+      break;
+    }
+    s.handle_timeout(now);
+    while s.poll_transmit().is_some() {}
+    while s.poll_event().is_some() {}
+  }
+  assert!(
+    s.conns_with_pending_events.is_empty(),
+    "test setup: the handshake pending-event backlog must be drained first"
+  );
+
+  // Simulate the RETIRE→NewIdentifiers requeue: flag exactly ONE pooled connection
+  // as carrying a deferred backlog. This arms the ImmediateDue anchor.
+  let target = s
+    .conns
+    .iter_handles()
+    .first()
+    .copied()
+    .expect("the server holds at least one pooled connection");
+  s.conns_with_pending_events.insert(target);
+
+  // Precondition: no scheduled (non-anchor) timer is due, so the wake is
+  // ImmediateDue-only and must divert to the bounded per-connection servicing.
+  let _ = s.poll_timeout();
+  assert!(
+    s.deadline_index
+      .earliest_excluding_2(
+        super::deadline::TimerKey::Catchup,
+        super::deadline::TimerKey::ImmediateDue,
+      )
+      .is_none_or(|t| t > now),
+    "test setup: no scheduled timer may be due at the wake instant"
+  );
+
+  let memb_before = s.membership_time_advances();
+  s.counters.connection_visits = 0;
+  s.handle_timeout(now);
+
   assert_eq!(
-    a.membership_time_advances(),
+    s.counters.connection_visits, 1,
+    "an ImmediateDue-only wake must visit ONLY the one pending-event connection, \
+       not all {pooled} pooled connections; the 2-way dispatch runs the full tick \
+       and visits every connection"
+  );
+  assert_eq!(
+    s.membership_time_advances(),
     memb_before,
-    "a Catchup-only wake must NOT advance membership time (no full tick); reverting \
-       handle_timeout to an unconditional run_tick makes this counter climb"
+    "an ImmediateDue-only wake must NOT advance membership time (no full tick)"
   );
   assert!(
-    steps >= 2,
-    "non-vacuous: a residue > budget needs at least two catch-up steps"
+    s.conns_with_pending_events.is_empty(),
+    "servicing the pending connection drains its backlog and clears its flag \
+       (the set self-drains)"
+  );
+}
+
+/// The EITHER/OR precedence: when a GENUINE scheduled timer is due, `handle_timeout`
+/// MUST run the full `run_tick` (advancing membership time) even if the sticky
+/// Catchup anchor AND the ImmediateDue anchor are ALSO due — the scheduled tick
+/// subsumes both bounded paths and is the ONLY path that advances membership.
+///
+/// Mutation-verify: reorder the dispatch to prefer the anchors over the scheduled
+/// timer — an anchor-only bounded step then runs instead of `run_tick`, membership
+/// time never advances, and the `> before` assertion fails.
+#[test]
+fn due_scheduled_timer_takes_precedence_over_both_anchors() {
+  let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+  let now = Instant::now();
+  // Default schedulers so the membership endpoint arms a real periodic timer.
+  let mut a = make_endpoint("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  // Drain handshake pending events so the insert below is the deliberate anchor.
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+
+  // Build a residue (arms the sticky Catchup anchor).
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  assert!(!a.ready_bridges.is_empty(), "the residue must be present");
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the residue arms the sticky Catchup anchor"
+  );
+
+  // AND a pending-event backlog (arms the ImmediateDue anchor).
+  a.conns_with_pending_events.insert(ch);
+
+  // Pick a wake instant at which the membership timer AND both anchors are due.
+  let memb_deadline = a
+    .endpoint_ref()
+    .poll_timeout()
+    .expect("default schedulers arm a membership timer");
+  let due = memb_deadline.max(now + super::CATCHUP_INTERVAL);
+  let memb_before = a.membership_time_advances();
+  a.handle_timeout(due);
+
+  assert!(
+    a.membership_time_advances() > memb_before,
+    "a due scheduled timer must run the full run_tick (membership advances) even \
+       with the Catchup and ImmediateDue anchors also due; preferring the anchors \
+       would skip membership time"
+  );
+  // The full tick subsumes both bounded paths: it drains the residue and the
+  // pending backlog and clears the sticky anchor.
+  assert!(
+    a.ready_bridges.is_empty() && a.next_catchup_at.is_none(),
+    "run_tick drains the residue and clears the sticky catch-up anchor"
+  );
+  assert!(
+    a.conns_with_pending_events.is_empty(),
+    "run_tick services the pending connection and clears its flag"
+  );
+}
+
+/// The sticky catch-up wake is NOT attacker-pushable. `poll_timeout` publishes the
+/// `next_catchup_at` field VERBATIM, and the field is armed independently of
+/// `last_now`; an inbound datagram bumps `last_now` (even a rejected one) but must
+/// NOT move the wake. So a peer flooding datagrams faster than `CATCHUP_INTERVAL`
+/// cannot push the residue-drain wake forward forever and strand it.
+///
+/// Mutation-verify: revert `poll_timeout` to arm Catchup at `last_now +
+/// CATCHUP_INTERVAL` — each flood datagram bumps `last_now`, so `poll_timeout` then
+/// returns a wake that ADVANCES past every datagram and the "same deadline"
+/// assertion fails on the first flooded datagram.
+#[test]
+fn sticky_catchup_wake_is_not_pushed_by_datagram_flood() {
+  let a_addr: SocketAddr = "127.0.0.1:7998".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
+  let now = Instant::now();
+  let (mut a, residue) = a_with_budget_deferred_residue(a_addr, b_addr, now);
+
+  // The residue armed the sticky anchor at now + CATCHUP_INTERVAL.
+  let pinned = a
+    .next_catchup_at
+    .expect("a budget-deferred residue arms the sticky catch-up anchor");
+  assert_eq!(
+    pinned,
+    now + super::CATCHUP_INTERVAL,
+    "the anchor was armed one interval after the residue-creating pass"
+  );
+  assert_eq!(
+    a.poll_timeout(),
+    Some(pinned),
+    "poll_timeout publishes the sticky anchor as the earliest wake"
+  );
+
+  // Flood: bump `last_now` via rejected (empty) datagrams every < CATCHUP_INTERVAL.
+  // The sticky anchor must stay PINNED — a datagram cannot move it.
+  for i in 1..10u64 {
+    let t = now + Duration::from_millis(i);
+    // An empty datagram classifies as Reject: `handle_udp` bumps `last_now` to `t`
+    // and drops it, touching neither `ready_bridges` nor the sticky anchor.
+    a.handle_udp(b_addr, &[], t);
+    assert_eq!(
+      a.poll_timeout(),
+      Some(pinned),
+      "a datagram flood must NOT push the sticky catch-up wake forward; the \
+         last_now-derived arming would move it to (now + {i}ms) + CATCHUP_INTERVAL"
+    );
+    assert!(
+      !a.ready_bridges.is_empty(),
+      "a rejected flood datagram must not drain or grow the residue"
+    );
+  }
+
+  // The pinned wake is actionable: re-polling the earliest wake drains the residue
+  // to empty, never stranded. The first wake (still the sticky anchor) is a BOUNDED,
+  // membership-flat catch-up; later chunks may drain via a scheduled tick once the
+  // connection's transport timer comes due.
+  let mut catchup_steps = 0usize;
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    let memb_before = a.membership_time_advances();
+    let before = a.ready_bridges.len();
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    let drained = before - a.ready_bridges.len();
+    if a.membership_time_advances() == memb_before {
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake pumps at most the budget; a step drained {drained}"
+      );
+    }
+    steps += 1;
+    assert!(
+      steps <= residue + 2,
+      "the residue must converge, never strand"
+    );
+  }
+  assert!(
+    catchup_steps >= 1,
+    "the residue must drain via at least one bounded catch-up wake"
   );
 }

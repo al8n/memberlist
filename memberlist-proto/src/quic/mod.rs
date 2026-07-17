@@ -574,6 +574,23 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// answer "does any connection have pending events?" in O(1) without scanning
   /// the connection table on every `poll_timeout`.
   conns_with_pending_events: HashSet<ConnectionHandle>,
+  /// The STICKY deferred-servicing (catch-up) wake instant, or `None` when no
+  /// budget-deferred bridge residue waits in [`Self::ready_bridges`].
+  ///
+  /// Armed ONCE to `now + CATCHUP_INTERVAL` when a residue first appears at the
+  /// end of a bounded servicing pass (see [`Self::reconcile_catchup_anchor`]),
+  /// advanced to `now + CATCHUP_INTERVAL` only AFTER a [`Self::catchup_service`]
+  /// step actually runs while residue remains (see
+  /// [`Self::advance_catchup_anchor`]), and cleared to `None` the moment
+  /// `ready_bridges` empties (a bounded pass drains it, or the global tick's
+  /// [`Self::finalize_tick`] clears it).
+  ///
+  /// [`Self::poll_timeout`] publishes this value VERBATIM as [`TimerKey::Catchup`].
+  /// It carries NO `last_now` dependence — unlike the former `last_now +
+  /// CATCHUP_INTERVAL` computation — so an inbound datagram (which bumps `last_now`
+  /// on every receive, even a rejected one) can neither push the wake forward and
+  /// strand the residue nor re-chunk it into O(K) work across a driver's re-polls.
+  next_catchup_at: Option<Instant>,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
   /// into production builds.
@@ -836,6 +853,7 @@ impl<I, R> QuicEndpoint<I, R> {
       datagram_ingress_dropped: 0,
       deadline_index: DeadlineIndex::new(),
       conns_with_pending_events: HashSet::new(),
+      next_catchup_at: None,
       #[cfg(test)]
       counters: TestCounters::default(),
     }
@@ -1563,20 +1581,18 @@ impl<I, R> QuicEndpoint<I, R> {
       .deadline_index
       .set(TimerKey::Endpoint, self.ep.poll_timeout());
     self.refresh_immediate_due();
-    // The throttled catch-up anchor: while a budget-deferred bridge residue waits
-    // in `ready_bridges` (which this fold otherwise ignores), schedule a wake at
-    // `last_now + CATCHUP_INTERVAL` so the residue drains even with no membership /
-    // probe / gossip timer and no near QUIC transport timer to wake the
-    // coordinator. Throttled off `last_now` (a fixed future instant), so repeated
-    // re-polls without time advancing return the SAME deadline — one datagram
-    // cannot re-chunk its residue into O(K) work across re-polls. `last_now` is
-    // `None` only before the first `handle_*`; that first `handle_timeout` arms it.
-    let catchup = if self.ready_bridges.is_empty() {
-      None
-    } else {
-      self.last_now.map(|t| t + CATCHUP_INTERVAL)
-    };
-    self.deadline_index.set(TimerKey::Catchup, catchup);
+    // The STICKY catch-up anchor: while a budget-deferred bridge residue waits in
+    // `ready_bridges` (which this fold otherwise ignores), a wake is scheduled so
+    // the residue drains even with no membership / probe / gossip timer and no near
+    // QUIC transport timer to wake the coordinator. Published VERBATIM from the
+    // sticky `next_catchup_at` field — armed ONCE when the residue appeared and
+    // ADVANCED only after a catch-up step runs — so it has NO `last_now`
+    // dependence: an inbound datagram (which bumps `last_now`) cannot move it, and
+    // repeated re-polls without time advancing return the SAME deadline rather than
+    // re-chunking the residue into O(K) work.
+    self
+      .deadline_index
+      .set(TimerKey::Catchup, self.next_catchup_at);
     self.deadline_index.earliest()
   }
 
@@ -1765,13 +1781,11 @@ impl<I, R> QuicEndpoint<I, R> {
         best = Some(best.map_or(anchor, |b| b.min(anchor)));
       }
     }
-    // The throttled catch-up anchor mirrors `poll_timeout`: while a budget-deferred
-    // bridge residue waits in `ready_bridges`, a wake is folded at
-    // `last_now + CATCHUP_INTERVAL`.
-    if !self.ready_bridges.is_empty() {
-      if let Some(t) = self.last_now.map(|t| t + CATCHUP_INTERVAL) {
-        best = Some(best.map_or(t, |b| b.min(t)));
-      }
+    // The sticky catch-up anchor mirrors `poll_timeout`: fold the `next_catchup_at`
+    // field VERBATIM (armed once when the residue appeared, advanced after each
+    // catch-up step), not a `last_now`-derived value.
+    if let Some(t) = self.next_catchup_at {
+      best = Some(best.map_or(t, |b| b.min(t)));
     }
     best
   }
@@ -2154,6 +2168,9 @@ impl<I, R> QuicEndpoint<I, R> {
     // mint trigger pushed this tick are now flag-dead; clear the pass-scoped
     // queue so it never carries a stale id into a later pass.
     self.ready_bridges.clear();
+    // The residue is gone, so retire the sticky catch-up anchor: no deferred
+    // bridge remains to wake for.
+    self.next_catchup_at = None;
     // The tick ends with an EMPTY queue and no flagged bridge — the strict
     // post-condition, unlike the budgeted datagram path which may leave a residue.
     // With the queue now empty, `debug_assert_ready_drained`'s lockstep also
@@ -3322,40 +3339,110 @@ where
     }
   }
 
+  /// Reconcile the sticky catch-up anchor with the current [`Self::ready_bridges`]
+  /// residue at the END of a bounded servicing pass. Clears the anchor when the
+  /// residue is empty; arms it ONCE to `now + CATCHUP_INTERVAL` when a residue is
+  /// present and no anchor is set yet.
+  ///
+  /// An already-armed anchor is left UNCHANGED while the residue persists — the
+  /// stickiness that keeps an inbound datagram flood (each bumping `last_now`) from
+  /// pushing the residue-drain wake forward and stranding it.
+  fn reconcile_catchup_anchor(&mut self, now: Instant) {
+    if self.ready_bridges.is_empty() {
+      self.next_catchup_at = None;
+    } else if self.next_catchup_at.is_none() {
+      self.next_catchup_at = Some(now + CATCHUP_INTERVAL);
+    }
+  }
+
+  /// Advance the sticky catch-up anchor AFTER a [`Self::catchup_service`] step ran
+  /// at `now`: schedule the next catch-up one [`CATCHUP_INTERVAL`] out while a
+  /// residue remains (pacing the drain at a fixed, table-independent rate), or
+  /// clear it once the residue is empty. Unlike [`Self::reconcile_catchup_anchor`]
+  /// this always re-anchors off the just-serviced `now`, so a driver waking at the
+  /// anchor drains one budget-sized chunk per interval.
+  fn advance_catchup_anchor(&mut self, now: Instant) {
+    self.next_catchup_at = if self.ready_bridges.is_empty() {
+      None
+    } else {
+      Some(now + CATCHUP_INTERVAL)
+    };
+  }
+
   /// Timer tick from the driver.
   ///
-  /// Selective on WHY the driver woke, so the throttled Catchup anchor (armed by
-  /// [`Self::poll_timeout`] while a budget-deferred bridge residue waits in
-  /// `ready_bridges`) does BOUNDED work rather than a full O(N) tick every
-  /// `CATCHUP_INTERVAL`:
+  /// A 3-way dispatch on WHY the driver woke, so an anchor-only wake — the sticky
+  /// Catchup anchor (a budget-deferred bridge residue waits in `ready_bridges`) or
+  /// the ImmediateDue anchor (a connection carries a deferred `ConnectionEvent`
+  /// backlog, or a fresh dial is still unattempted) — does BOUNDED work rather than
+  /// a full O(N) tick. Neither anchor is attacker-pushable: the Catchup anchor is
+  /// sticky (a datagram cannot move it) and the ImmediateDue anchor's pending-event
+  /// set self-drains (a datagram arms at most its own connection), so the bounded
+  /// paths cannot be inflated into repeated O(N) work per datagram.
   ///
-  /// * If any NON-Catchup timer is due (`<= now`) — a membership probe / gossip /
-  ///   suspicion deadline, a connection transport timer, a bridge or dial deadline
-  ///   — run the full periodic [`Self::run_tick`] (which drains the residue via
-  ///   `pump_bridges`, exactly as before). This is a scheduled tick, so its O(N)
-  ///   work is fine; it is not driven per datagram.
-  /// * Otherwise, if a residue waits in `ready_bridges`, the wake can only be the
-  ///   Catchup anchor: run the BOUNDED [`Self::catchup_service`], which pumps at
-  ///   most [`MAX_BRIDGE_PUMPS_PER_PASS`] deferred bridges and flushes the
-  ///   connections it touched, WITHOUT advancing membership time or running the
-  ///   O(N) `service_quinn` / `service_dials`. This keeps a driver re-polling at
-  ///   the throttled Catchup deadline from re-chunking one datagram's residue into
-  ///   O(N) work across re-polls.
-  /// * With no residue (the common case — `run_tick` and every `start_*` clear
-  ///   `ready_bridges`), the Catchup anchor is absent, so the full `run_tick` runs
-  ///   as before regardless of what is due.
+  /// * If any GENUINE scheduled timer is due (`<= now`) — a membership probe /
+  ///   gossip / suspicion deadline, a connection transport timer, or a bridge / dial
+  ///   deadline, i.e. any key EXCLUDING both anchors — run the full periodic
+  ///   [`Self::run_tick`]. It advances membership time AND drains the residue via
+  ///   `pump_bridges` AND services every pending-event connection, so it subsumes
+  ///   both bounded paths; this is the ONLY path that advances membership time. A
+  ///   scheduled tick's O(N) work is fine — it is not driven per datagram.
+  /// * Otherwise, if an anchor is due, run only the matching BOUNDED step(s): the
+  ///   [`Self::catchup_service`] (pumps at most [`MAX_BRIDGE_PUMPS_PER_PASS`]
+  ///   deferred bridges) when the sticky Catchup anchor is due, and/or the
+  ///   [`Self::immediate_service`] (services exactly the pending-event connections
+  ///   and the fresh unattempted dials) when the ImmediateDue anchor is due. Both
+  ///   can be due in one wake — both run — but neither advances membership time or
+  ///   runs the O(N) `service_quinn` / `service_dials` / `finalize_tick`.
+  /// * With nothing due (an arbitrary-instant wake, or a driver that never consults
+  ///   `poll_timeout`), fall back to the full `run_tick` unchanged so no work is
+  ///   ever stranded.
+  ///
+  /// The Endpoint, ImmediateDue, and Catchup terms are refreshed FIRST so the
+  /// dispatch classifies against current values even when the driver did not call
+  /// `poll_timeout` this wake. Refreshing the Endpoint term first is load-bearing:
+  /// a stale membership deadline must not let a genuinely-due SWIM timer be
+  /// misclassified as an anchor-only wake and skipped.
   pub fn handle_timeout(&mut self, now: Instant) {
     self.last_now = Some(now);
-    // A residue with no non-Catchup timer due means this wake IS the throttled
-    // Catchup anchor; service it in bounded steps. Every other case (a real timer
-    // due, or no residue) runs the full periodic tick unchanged.
-    let non_catchup_due = self
+    self
       .deadline_index
-      .earliest_excluding(TimerKey::Catchup)
+      .set(TimerKey::Endpoint, self.ep.poll_timeout());
+    self.refresh_immediate_due();
+    self
+      .deadline_index
+      .set(TimerKey::Catchup, self.next_catchup_at);
+    // Is any GENUINE scheduled timer (membership / connection / bridge / dial) due?
+    // Exclude BOTH anchors — they drive bounded servicing, never the full tick.
+    let scheduled_due = self
+      .deadline_index
+      .earliest_excluding_2(TimerKey::Catchup, TimerKey::ImmediateDue)
       .is_some_and(|d| d <= now);
-    if !non_catchup_due && !self.ready_bridges.is_empty() {
-      self.catchup_service(now);
+    // The sticky Catchup anchor is due only when it is armed AND its instant has
+    // arrived AND a residue actually remains.
+    let catchup_due =
+      self.next_catchup_at.is_some_and(|t| t <= now) && !self.ready_bridges.is_empty();
+    // The ImmediateDue anchor is present (== `last_now` == `now`, hence due)
+    // exactly when `refresh_immediate_due` would arm it: a pending-event connection
+    // or a fresh unattempted dial exists.
+    let immediate_due =
+      !self.conns_with_pending_events.is_empty() || self.unattempted_dial_count > 0;
+    if scheduled_due {
+      // A real timer is due: the full tick subsumes both bounded paths and is the
+      // only path that advances membership time.
+      self.run_tick(now);
+    } else if catchup_due || immediate_due {
+      // An anchor-only wake: do exactly the matching bounded step(s), no full tick.
+      if catchup_due {
+        self.catchup_service(now);
+      }
+      if immediate_due {
+        self.immediate_service(now);
+      }
     } else {
+      // Nothing due — an arbitrary-instant wake. Run the full periodic tick (the
+      // unchanged fallback that also covers a driver that never polls the timeout),
+      // so no residue or pending event is ever stranded.
       self.run_tick(now);
     }
   }
@@ -3387,6 +3474,77 @@ where
     for ch in to_flush {
       self.collect_conn_transmits(ch, now);
     }
+    // Advance the sticky anchor off the just-serviced `now`: another
+    // budget-sized chunk in one more interval while residue remains, else clear.
+    self.advance_catchup_anchor(now);
+  }
+
+  /// Bounded servicing for an ImmediateDue-only wake (see [`Self::handle_timeout`]).
+  /// Applies the one-tick-deferred `ConnectionEvent` backlog on exactly the
+  /// connections that carry one, and attempts the fresh unattempted dials — WITHOUT
+  /// the global O(N) `service_quinn` / `service_dials` / `finalize_tick` /
+  /// `ep.handle_timeout`. So an ImmediateDue-anchored wake costs
+  /// O(|conns_with_pending_events| + |fresh dials|), both bounded and self-draining,
+  /// never O(all connections + all parked dials).
+  ///
+  /// The pending-event set self-drains: servicing a connection applies its requeued
+  /// events (e.g. the `NewIdentifiers` a peer's `RETIRE_CONNECTION_ID` frame
+  /// produced) and applying them pushes no further endpoint event, so the
+  /// connection's flag clears and it leaves the set. A datagram therefore arms at
+  /// most its OWN connection — the wake cannot be inflated by a flood. The fresh
+  /// `dial_pending` FIFO is drained (never the parked buckets — those are the global
+  /// tick's and per-peer establishment's backstop); it is filled only by local FSM
+  /// output (`poll_event` / `requeue_event` / `sieve_dial_events`), so it is bounded
+  /// and not peer-inflatable.
+  fn immediate_service(&mut self, now: Instant) {
+    // Snapshot the pending-event handles: `service_connection` mutates
+    // `conns_with_pending_events` (each serviced connection clears its own flag as
+    // its backlog drains), so iterate a captured copy rather than the live set.
+    let pending: SmallVec<ConnectionHandle> =
+      self.conns_with_pending_events.iter().copied().collect();
+    for ch in pending {
+      self.service_connection(ch, now);
+    }
+    // Attempt the fresh unattempted dials. Drain ONLY the `dial_pending` FIFO, pump
+    // exactly the bridges it mints under a fresh budget, and flush every connection
+    // it touched — the datagram path's scoped dial servicing, minus the whole-parked
+    // -bucket `service_dials` drain and the O(N) `service_quinn`.
+    if self.unattempted_dial_count > 0 {
+      let mut minted: SmallVec<StreamId> = SmallVec::new();
+      let mut touched = TouchedConns::new();
+      let pending_dials = core::mem::take(&mut self.dial_pending);
+      for entry in pending_dials {
+        self.process_dial_entry(entry, now, &mut minted, &mut touched);
+      }
+      for mid in minted {
+        enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+      }
+      let mut pump_budget = MAX_BRIDGE_PUMPS_PER_PASS;
+      // Nothing accepted here, so every current bridge id is pre-existing: the
+      // post-acceptance counter must stay flat in the test-only tracking variant.
+      #[cfg(test)]
+      let pumped = {
+        let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
+        self.drain_ready_bridges_tracking(now, &pre, &mut pump_budget)
+      };
+      #[cfg(not(test))]
+      let pumped = self.drain_ready_bridges(now, &mut pump_budget);
+      // Dedup the pumped-bridge owners against the dial-touched connections so each
+      // is flushed exactly once (a minted bridge's owner is also a touched conn).
+      for mc in pumped {
+        touched.insert(mc);
+      }
+      for mc in touched.into_ordered() {
+        self.collect_conn_transmits(mc, now);
+      }
+    }
+    // A dial that minted past the pump budget (or a serviced connection that left a
+    // residue) may have changed the residue state; reconcile the sticky anchor so a
+    // fresh residue is armed and a drained one is cleared before returning.
+    self.reconcile_catchup_anchor(now);
+    // Pass-end invariant: the pass-scoped ready queue holds only budget-deferred
+    // residue and no live bridge is flagged-but-absent.
+    self.debug_assert_ready_drained();
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt
@@ -3662,6 +3820,10 @@ where
         self.collect_conn_transmits(mc, now);
       }
     }
+    // This budgeted pass may have left (or drained) a `ready_bridges` residue;
+    // arm the sticky catch-up anchor once if a residue now waits, or clear it if
+    // this pass emptied the queue.
+    self.reconcile_catchup_anchor(now);
     // Pass-end invariant: the pass-scoped ready queue is drained empty and no
     // live bridge still flags queued.
     self.debug_assert_ready_drained();
