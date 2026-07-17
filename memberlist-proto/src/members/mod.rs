@@ -128,14 +128,31 @@ impl<I, A> LocalNodeState<I, A> {
 pub struct Member<I, A> {
   state: LocalNodeState<I, A>,
   suspicion: Option<Suspicion<I>>,
+  /// Monotonic membership-instance token. **Invariant:** a generation
+  /// identifies ONE membership instance across its whole lifetime
+  /// (admission → removal); it stays fixed through every in-place update of the
+  /// same record — an incarnation bump (refutation), a meta update, an
+  /// Alive/Suspect/Dead transition — and changes ONLY when the record is
+  /// REPLACED by a different instance: a brand-new id, or a Left/Dead id
+  /// reclaimed / re-admitted at a new-or-same address and any incarnation. The
+  /// gossip machine assigns it from `Endpoint::next_member_generation` at each
+  /// such replacement, so `(id, address, incarnation)` collisions between an old
+  /// and a fresh instance (which a `reset_nodes` reclaim + equal-incarnation
+  /// rejoin produces) still carry distinct generations. `0` is reserved as
+  /// "unset" and is never assigned to a tracked instance.
+  generation: u64,
 }
 
 impl<I, A> Member<I, A> {
-  /// Construct a member with no active suspicion.
+  /// Construct a member with no active suspicion and an unset (`0`) generation.
+  /// The gossip machine assigns the real generation at the admission /
+  /// replacement site via [`with_generation`](Self::with_generation) or
+  /// [`set_generation`](Self::set_generation).
   pub const fn new(state: LocalNodeState<I, A>) -> Self {
     Self {
       state,
       suspicion: None,
+      generation: 0,
     }
   }
 
@@ -181,6 +198,31 @@ impl<I, A> Member<I, A> {
   #[inline(always)]
   pub fn with_suspicion(mut self, s: Suspicion<I>) -> Self {
     self.suspicion = Some(s);
+    self
+  }
+
+  /// This member instance's generation token. See the
+  /// [`generation`](Self::generation) field for the invariant. `0` means unset.
+  #[inline(always)]
+  pub const fn generation(&self) -> u64 {
+    self.generation
+  }
+
+  /// Set the generation token. Called at the admission / replacement site to
+  /// stamp a new membership instance (including an in-place reclaim that adopts
+  /// a new address for a Left/Dead id). See the [`generation`](Self::generation)
+  /// field invariant.
+  #[inline(always)]
+  pub const fn set_generation(&mut self, generation: u64) {
+    self.generation = generation;
+  }
+
+  /// Builder: stamp the generation token at construction time. See the
+  /// [`generation`](Self::generation) field invariant.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_generation(mut self, generation: u64) -> Self {
+    self.generation = generation;
     self
   }
 }

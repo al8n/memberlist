@@ -214,6 +214,13 @@ pub struct Endpoint<I, A, R = SmallRng> {
 
   // Membership state.
   members: Members<I, A>,
+  /// The next membership-instance generation token to hand out (monotonic;
+  /// never `0`, which is the "unset" sentinel). Bumped at each site that
+  /// creates a NEW membership instance — a brand-new id, or a Left/Dead id
+  /// reclaimed / re-admitted — so a fresh instance never inherits a departed
+  /// one's token even when it reuses the same `(id, address, incarnation)`. See
+  /// [`Member::generation`](crate::members::Member::generation) for the invariant.
+  next_member_generation: u64,
 
   // Lifeguard.
   awareness: Awareness,
@@ -458,6 +465,22 @@ impl<I, A, R> Endpoint<I, A, R> {
       self.incarnation = accused_inc.wrapping_add(1);
     }
     self.incarnation
+  }
+
+  /// Hand out the next membership-instance generation token and advance the
+  /// counter, skipping `0` (the reserved "unset" value). Called at every site
+  /// that admits a new instance under an id. The `u64` space is not a wire
+  /// field and a token is drawn only on a membership replacement, so a wrap is
+  /// astronomically unreachable; the `0`-skip is defensive so the sentinel is
+  /// never handed to a tracked instance. See
+  /// [`Member::generation`](crate::members::Member::generation).
+  pub(crate) const fn next_member_generation(&mut self) -> u64 {
+    let g = self.next_member_generation;
+    self.next_member_generation = match self.next_member_generation.wrapping_add(1) {
+      0 => 1,
+      n => n,
+    };
+    g
   }
 
   /// Returns the mutable access to the RNG.
@@ -929,8 +952,24 @@ where
     let n = self.num_members().max(1) as f64;
     let node_scale = crate::mathf::log10(n).max(1.0);
     let interval = self.cfg.probe_interval();
-    let min_ms =
-      (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
+    // `probe_interval.as_millis()` truncates a sub-millisecond interval to 0,
+    // which would collapse `min` (and hence `max`) to zero — `Suspicion::new`
+    // then arms a deadline equal to `now`, an immediate false death the instant
+    // a node is suspected. Floor a NONZERO interval to a 1ms minimum BEFORE it
+    // is scaled by `suspicion_mult` and the node-count scale, so the mult and
+    // scale still apply to a small-but-nonzero interval (a 500µs interval with
+    // mult 4 and node_scale 1.0 yields 4ms, not 1ms). Flooring the interval
+    // rather than the final product keeps two behaviors exact: a >= 1ms interval
+    // already has `as_millis() >= 1`, so the floor is a no-op and this path stays
+    // byte-identical to the unscaled formula; and a zero `suspicion_mult` (or a
+    // zero, probing-disabled interval) still yields a zero timeout, matching Go
+    // `suspicionTimeout` (which returns 0 when the mult or interval is 0).
+    let interval_ms = if interval.is_zero() {
+      0.0
+    } else {
+      (interval.as_millis() as f64).max(1.0)
+    };
+    let min_ms = (interval_ms * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
     let min = Duration::from_millis(min_ms);
     // `checked_mul` to degrade a pathologically-large configured product to the
     // unscaled `min` instead of panicking on `Duration * u32` overflow (the same
@@ -1142,9 +1181,15 @@ where
     // The local node's initial state is stamped at the driver-supplied `now`.
     let mut local_state = LocalNodeState::new(local_node_state, now);
     local_state.set_incarnation(cfg.initial_incarnation());
+    // The local node is a membership instance too, so it draws the first
+    // generation token (`1`); the counter advances to the next value handed to
+    // the first admitted peer. Keeping the local record generation-stamped keeps
+    // any self-probe path consistent with peers.
+    let local_generation: u64 = 1;
+    let next_member_generation: u64 = local_generation + 1;
     // Ignoring Err: a fresh `Members` is empty, so the insert returns
     // `None`. Asserting it is the caller-owned invariant we just upheld.
-    let _ = members.insert(Member::new(local_state.clone()));
+    let _ = members.insert(Member::new(local_state.clone()).with_generation(local_generation));
 
     let local_state_snapshot = cfg.initial_local_state_bytes();
     // The configured initial snapshot must fit a single reliable PushPull frame
@@ -1159,6 +1204,7 @@ where
       cfg,
       rng,
       members,
+      next_member_generation,
       awareness,
       broadcast,
       ack_registry: AckRegistry::new(),
@@ -1710,9 +1756,10 @@ where
     // An Ack arriving at/after the probe's authoritative failure deadline
     // must not rescue it → route to failure. That deadline is the single
     // kind-aware, sent_at-anchored, phase-INDEPENDENT value defined by
-    // `Probe::failure_deadline` (Detection: sent_at+2*pt — direct +
-    // indirect/fallback window, also the AwaitingIndirect phase deadline;
-    // Ping: sent_at+pt — direct-only). Routing through the one source
+    // `Probe::failure_deadline` (Detection: sent_at + scale_timeout(
+    // probe_interval) — the awareness-scaled probe interval snapshotted at
+    // sent, also the AwaitingIndirect phase deadline; Ping: sent_at +
+    // probe_timeout — direct-only). Routing through the one source
     // eliminates per-phase packet-vs-timer cutoff races.
     let cutoff = match self.probes.get(&seq) {
       None => return,
@@ -1836,6 +1883,22 @@ where
     };
     match probe.kind {
       ProbeKind::Detection => {
+        // A probe that dispatched NO datagram at all — an over-MTU direct Ping,
+        // no IndirectPing queued, and no reliable fallback opened — reflects a
+        // purely LOCAL MTU limit (a node id is unbounded, so a large id can push
+        // every Ping/IndirectPing past `gossip_mtu`), NOT peer loss. Abort
+        // cleanly: the probe + ack entry are already removed above; charge NO
+        // awareness penalty and emit NO Suspect. `dispatched` is the MONOTONIC
+        // record of whether ANY attempt (direct Ping, IndirectPing, or reliable
+        // dial) was ever made — read from history, NOT reconstructed from the
+        // current `reliable_stream_id`, which a fallback retirement
+        // (`dial_failed` / `ReliablePingFailed`) clears while the probe is still
+        // live (so an over-MTU peer whose sole reliable attempt then fails would
+        // otherwise evade suspicion forever). A probe that DID dispatch and then
+        // timed out is a genuine failure and takes the penalty + suspicion path.
+        if !probe.dispatched {
+          return;
+        }
         let severity = match nack_stats {
           Some((expected, seen)) if expected > 0 => {
             // Missing nacks = our health is suspect. Saturate to 0 in the
@@ -1848,16 +1911,38 @@ where
         self.awareness.record_failure(severity);
         self.bump_snapshot_version();
 
-        // Mark the target as suspect.
+        // Suspect the exact instance that was probed, at the incarnation
+        // snapshotted when the probe started — NOT whatever now holds the id.
+        // Only the EXACT membership instance may be suspected: while the probe
+        // was in flight the id could have been REPLACED by a different instance,
+        // and `process_suspect`'s `inc < local_inc` guard does not catch every
+        // such case on its own — a `reset_nodes` removal + re-admit at the SAME
+        // address and an EQUAL (or lower) incarnation yields `snapshot_inc >=
+        // current_inc`, so the guard would let a stale Suspect evict the fresh
+        // instance. The generation token settles this precisely: it identifies
+        // one instance across its whole lifetime and changes on any replacement
+        // (new id, or Left/Dead reclaim at any address/incarnation), so an exact
+        // match is true ONLY for the probed instance. An in-place refutation
+        // keeps the SAME generation but raises the incarnation, so the match
+        // still holds and the snapshot-incarnation Suspect below is then dropped
+        // by `process_suspect`'s `inc < local_inc` — matching Go memberlist
+        // `suspectNode`, which suspects `node.Incarnation` and lets the newer
+        // live incarnation reject it. A `0` snapshot (an untracked probe target)
+        // never equals a tracked member's nonzero generation, so it can suspect
+        // no one. The awareness penalty above stands regardless — our own failure
+        // to confirm the probed peer is a real observation whichever instance
+        // now holds the id.
         let target_id = probe.target.id_ref().cheap_clone();
-        let local_id = self.cfg.local_id_ref().cheap_clone();
-        let target_inc = self
-          .members
-          .get(&target_id)
-          .map(|m| m.state_ref().incarnation())
-          .unwrap_or(0);
-        let suspect = Suspect::new(target_inc, target_id, local_id);
-        self.process_suspect(suspect, now);
+        let same_probed_instance = probe.target_generation != 0
+          && self
+            .members
+            .get(&target_id)
+            .is_some_and(|m| m.generation() == probe.target_generation);
+        if same_probed_instance {
+          let local_id = self.cfg.local_id_ref().cheap_clone();
+          let suspect = Suspect::new(probe.target_incarnation, target_id, local_id);
+          self.process_suspect(suspect, now);
+        }
       }
       ProbeKind::Ping => {
         // Notify the application that its directed ping timed out.
@@ -2218,6 +2303,12 @@ where
       .get(&target_id)
       .expect("target id came from members iteration");
     let target_arc = target_member.state_ref().server_arc();
+    // Snapshot the probed instance now: a later failure suspects THIS
+    // incarnation (not whatever the member holds at expiry) and only while the
+    // live member still carries THIS generation token (so a rejoin under the
+    // same id — even at the same address/incarnation — is not mistaken for it).
+    let target_incarnation = target_member.state_ref().incarnation();
+    let target_generation = target_member.generation();
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
@@ -2229,6 +2320,8 @@ where
     let failure_deadline = now + self.awareness.scale_timeout(self.cfg.probe_interval());
     let probe = Probe::new_direct(
       target_arc.cheap_clone(),
+      target_incarnation,
+      target_generation,
       now,
       ProbeKind::Detection,
       pt,
@@ -2284,13 +2377,13 @@ where
     }
 
     let to = target_addr.cheap_clone();
-    if probe_msgs.len() == 1 {
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          to,
-          probe_msgs.pop().expect("len checked == 1"),
-        )));
+    let direct_dispatched = if probe_msgs.len() == 1 {
+      // A lone probe Ping is subject to the SAME gossip_mtu ceiling as the
+      // compound path below: node ids are unbounded, so a Ping carrying a
+      // large already-admitted target id can exceed one datagram even though
+      // the construction self-Ping floor covers only the local identity.
+      let ping_msg = probe_msgs.pop().expect("len checked == 1");
+      self.push_probe_packet_within_mtu(to, ping_msg)
     } else {
       // Conservative assembled-compound upper bound — identical idiom to
       // the gossip budget (COMPOUND_TAG_LEN + count varint + per-part
@@ -2311,26 +2404,89 @@ where
         self
           .pending_transmits
           .push_back(Transmit::Compound(CompoundTransmit::new(to, probe_msgs)));
+        // The compound fits `gossip_mtu`, so the direct Ping rides inside it —
+        // the probe HAS dispatched a datagram.
+        true
       } else {
-        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect.
-        // Both datagrams are delivered as separate <= MTU sends, so the
-        // refutation path is preserved.
+        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect. Each
+        // is delivered as a separate send under the same lone-datagram MTU
+        // ceiling: a normal split (both parts <= MTU) emits both and preserves
+        // the refutation path, while a part that is itself over-MTU (a large
+        // peer id) is dropped rather than fragmented — never emit an
+        // unsendable datagram from either branch.
         let mut it = probe_msgs.into_iter();
         let ping_msg = it.next().expect("probe_msgs[0] is the Ping");
         let suspect_msg = it.next().expect("probe_msgs[1] is the buddy Suspect");
-        self
-          .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit::new(
-            to.cheap_clone(),
-            ping_msg,
-          )));
-        self
-          .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit::new(to, suspect_msg)));
+        // Only the direct Ping decides whether the probe dispatched; the buddy
+        // Suspect is a refutation optimization, not a probe of the target.
+        let dispatched = self.push_probe_packet_within_mtu(to.cheap_clone(), ping_msg);
+        self.push_probe_packet_within_mtu(to, suspect_msg);
+        dispatched
       }
+    };
+    // Record whether the direct Ping actually queued. A probe that dispatches NO
+    // datagram — an over-MTU direct Ping, and (after escalation) over-MTU
+    // IndirectPings with no reliable fallback — reflects a local MTU limit, not
+    // peer loss; `probe_terminate_failure` reads this to abort cleanly instead
+    // of applying an awareness penalty and suspecting the target.
+    if let Some(p) = self.probes.get_mut(&seq) {
+      p.dispatched = direct_dispatched;
     }
 
     true
+  }
+
+  /// Whether `msg`'s wire encoding fits the configured `gossip_mtu` as a lone
+  /// `Packet`. A pure predicate — a single encode, no queue — so an emitter can
+  /// decide, without a wasted second encoding, whether to queue the datagram or
+  /// reject/drop it.
+  ///
+  /// This is the single ceiling every unreliable-plane `Ping` emitter enforces:
+  /// the periodic probe's direct `Ping` and buddy `Suspect`, and the indirect
+  /// fan-out's `IndirectPing` (all three via `push_probe_packet_within_mtu`);
+  /// the public `ping` API, which returns
+  /// [`Error::PingExceedsMtu`](crate::error::Error::PingExceedsMtu) on an
+  /// over-MTU target rather than register a doomed probe; and the indirect relay
+  /// `handle_indirect_ping`, which — because a legitimate requester already
+  /// counted this helper in its `expected_nacks` — Nacks that validated requester
+  /// and bumps `indirect_forwards_oversized` rather than forward a doomed Ping.
+  /// Node ids are unbounded, so any of these can
+  /// carry a large already-admitted or attacker-supplied peer id that exceeds
+  /// the single-datagram budget even though the construction-time self-`Ping`
+  /// floor guarantees only the LOCAL identity fits. A single message has no
+  /// compound split point, so an over-MTU one is never emitted (a fragmentable,
+  /// undeliverable datagram) — the same ceiling the compound branch enforces,
+  /// mirroring the lone-`Packet` gossip path (`len <= gossip_mtu`). The probe
+  /// FSM is unaffected: a dropped direct `Ping` simply receives no Ack and fails
+  /// on its deadline, exactly as a lost UDP datagram would; a dropped
+  /// `IndirectPing` is excluded from the caller's outstanding-nack accounting so
+  /// the FSM never waits on a Nack the unreached peer cannot send.
+  fn probe_packet_within_mtu(&self, msg: &Message<I, A>) -> bool {
+    let encoded_len = crate::wire::encode_message::<I, A>(msg)
+      .expect("outbound probe message must bridge to wire form")
+      .len();
+    encoded_len <= self.gossip_mtu()
+  }
+
+  /// Queue `msg` as a lone `Packet` to `to` when it fits the configured
+  /// `gossip_mtu` (via `probe_packet_within_mtu`), returning whether it was
+  /// queued; an over-MTU message is dropped (returning `false`) rather than
+  /// emitted. See `probe_packet_within_mtu` for the full rationale and the set
+  /// of emitters that share this ceiling. Used by the periodic probe (direct
+  /// `Ping` + buddy `Suspect`) and the indirect fan-out (`IndirectPing`); the
+  /// public `ping` and indirect-relay paths call the pure predicate directly
+  /// because each measures or registers differently on a miss (a typed error vs.
+  /// a dropped forward), and reusing this queue-on-fit helper there would either
+  /// re-encode for the size or emit a Packet they must not.
+  fn push_probe_packet_within_mtu(&mut self, to: A, msg: Message<I, A>) -> bool {
+    if self.probe_packet_within_mtu(&msg) {
+      self
+        .pending_transmits
+        .push_back(Transmit::Packet(PacketTransmit::new(to, msg)));
+      true
+    } else {
+      false
+    }
   }
 
   /// Round-robin pick the next probe target. Returns `None` if no eligible
@@ -2419,6 +2575,47 @@ where
     let our_seq = self.allocate_seq();
     let deadline = now + self.cfg.probe_timeout();
 
+    // Build the forwarded Ping and MTU-check it BEFORE registering any relay
+    // state. A node id is unbounded and `target` is attacker-controlled, so a
+    // large target id can push the forwarded Ping past the single-datagram
+    // `gossip_mtu`; so too can differential MTU — this relay's longer local id
+    // added to a `target` that the requester's shorter inbound IndirectPing
+    // (`source + target`) still fit under the same budget. Unlike the
+    // from-mismatch / flood-cap / dedup guards above — which correctly drop with
+    // no Nack (a spoofed source, an overload backstop, or a duplicate the
+    // original forward still answers: no legitimate requester waiting on THIS
+    // reply) — an MTU-un-forwardable forward has a real requester that already
+    // counted this helper in its `expected_nacks`. Dropping it silently would
+    // make the requester read a responsive helper as unresponsive, inflating its
+    // `expected_nacks - seen`, degrading its Lifeguard health and stretching its
+    // failure deadlines. So send it an immediate Nack — at the same VALIDATED
+    // requester address the relay-Ack / Nack-on-expiry paths use — and register
+    // no relay/ack state (a doomed forward kept only to Nack on expiry would
+    // instead waste the relay state the flood backstop protects). The miss bumps
+    // its own counter, distinct from the flood cap.
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let forwarded = Ping::new(
+      our_seq,
+      Node::new(local_id, local_addr),
+      Node::new(target_id, target_addr.cheap_clone()),
+    );
+    let msg = Message::Ping(forwarded);
+    if !self.probe_packet_within_mtu(&msg) {
+      self.metrics.indirect_forwards_oversized += 1;
+      // A Nack carries only a seq, so it always fits the datagram — no MTU gate
+      // needed. It echoes the requester's own probe seq (`requester_seq`), not
+      // our unused forward seq.
+      let nack = Nack::new(requester_seq);
+      self
+        .pending_transmits
+        .push_back(Transmit::Packet(PacketTransmit::new(
+          requester_addr,
+          Message::Nack(nack),
+        )));
+      return;
+    }
+
     // Register the AckRegistry entry so handle_ack's Forward branch fires.
     self.ack_registry.register(
       our_seq,
@@ -2442,20 +2639,10 @@ where
       },
     );
 
-    // Build and emit the forwarded Ping.
-    let local_id = self.cfg.local_id_ref().cheap_clone();
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let forwarded = Ping::new(
-      our_seq,
-      Node::new(local_id, local_addr),
-      Node::new(target_id, target_addr.cheap_clone()),
-    );
+    // Emit the forwarded Ping (already MTU-validated above).
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit::new(
-        target_addr,
-        Message::Ping(forwarded),
-      )));
+      .push_back(Transmit::Packet(PacketTransmit::new(target_addr, msg)));
   }
 
   /// Initiate a direct application-level ping to `node`. Returns a [`PingId`]
@@ -2469,36 +2656,66 @@ where
   /// Unlike a SWIM failure-detection probe, an application ping is
   /// direct-only: it does not fan out to indirect peers, request a reliable
   /// fallback, or mark the target as suspect on timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`Error::NotRunning`](crate::error::Error::NotRunning) if the
+  /// endpoint has left or shut down. Returns
+  /// [`Error::PingExceedsMtu`](crate::error::Error::PingExceedsMtu) if the
+  /// framed `Ping` to `node` would exceed the single-datagram `gossip_mtu`
+  /// budget — a node id is unbounded, so a large target id can push it past one
+  /// datagram, and such a Ping is rejected up front (registering no probe or ack
+  /// state) rather than begun as a probe doomed to time out. Returns
+  /// [`Error::UnencodablePingTarget`](crate::error::Error::UnencodablePingTarget)
+  /// if `node`'s id or address cannot be encoded on the compact wire layout
+  /// (e.g. a scoped or flow-labelled IPv6 `SocketAddr`), likewise rejected up
+  /// front before any probe/ack state is registered.
   pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> Result<PingId, crate::error::Error> {
     // Reject once leaving/left: a departing node starts no new probe.
     self.ensure_running()?;
     let target_id = node.id_ref().cheap_clone();
     let target_addr = node.addr_ref().cheap_clone();
+    // Bind the probe target to the address the Ping is actually SENT to (the
+    // caller-supplied address), so `ack_source_is_valid` accepts the Ack from
+    // that address and `PingFailed` reports the pinged address. Reuse the
+    // stored NodeState (preserving its meta/versions in the terminal event)
+    // ONLY when the member is tracked at that same address; otherwise — an
+    // untracked node, or a known id reachable at a different address than the
+    // one stored — synthesize a minimal NodeState carrying the caller's
+    // id+address rather than binding to the stale stored address.
     let target_arc = match self.members.get(&target_id) {
-      Some(m) => m.state_ref().server_arc(),
-      None => {
-        // Caller is pinging a node we don't track. Synthesize a minimal
-        // NodeState so PingCompleted can carry it.
-        std::sync::Arc::new(NodeState::new(
-          target_id.cheap_clone(),
-          target_addr.cheap_clone(),
-          State::Alive,
-        ))
-      }
+      Some(m) if m.state_ref().address_ref() == &target_addr => m.state_ref().server_arc(),
+      _ => std::sync::Arc::new(NodeState::new(
+        target_id.cheap_clone(),
+        target_addr.cheap_clone(),
+        State::Alive,
+      )),
     };
+    // A Ping never suspects, so its snapshot incarnation and generation are
+    // unused for suspicion; carry the member's current values (or `0`/"unset"
+    // when the target is untracked) to satisfy the shared constructor.
+    let target_incarnation = self
+      .members
+      .get(&target_id)
+      .map(|m| m.state_ref().incarnation())
+      .unwrap_or(0);
+    let target_generation = self
+      .members
+      .get(&target_id)
+      .map(|m| m.generation())
+      .unwrap_or(0);
 
     let seq = self.allocate_seq();
-    let pt = self.cfg.probe_timeout();
-    // An application ping is direct-only — it waits just `probe_timeout`,
-    // with no indirect/fallback escalation and no awareness scaling.
-    // Failure deadline == the direct deadline.
-    let probe = Probe::new_direct(target_arc, now, ProbeKind::Ping, pt, now + pt);
-    let deadline = probe.direct_deadline(pt);
-    self.probes.insert(seq, probe);
-    self
-      .ack_registry
-      .register(seq, AckEntry::new(now, deadline, AckKind::Ping));
 
+    // Build the outbound Ping and measure its framed size with the REAL
+    // allocated seq (the seq varint contributes to the byte count at the MTU
+    // boundary). A direct application ping rides one gossip datagram, so an
+    // over-budget Ping is undeliverable: the peer would never Ack and the probe
+    // could only fail on its deadline. Measure and reject BEFORE inserting the
+    // probe or registering the ack, so an over-MTU target leaves no dangling
+    // probe/ack state and queues no Packet. The now-unused seq is harmless —
+    // `allocate_seq` skips live slots, exactly as the wrapping counter advancing
+    // does.
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let ping = Ping::new(
@@ -2506,12 +2723,50 @@ where
       Node::new(local_id, local_addr),
       Node::new(target_id, target_addr.cheap_clone()),
     );
+    let msg = Message::Ping(ping);
+    let budget = self.gossip_mtu();
+    // `node` is caller-supplied. Unlike a wire-decoded address (whose
+    // SocketAddrV6 `scope_id` / `flowinfo` always decode to 0, so it always
+    // re-encodes), a caller-supplied target can carry a nonzero `scope_id` /
+    // `flowinfo` that the compact encoder rejects, making the Ping
+    // un-encodable. Map that to a typed error — before any probe/ack state is
+    // registered — rather than panicking on an ordinary bad target.
+    let encoded_len = match crate::wire::encode_message::<I, A>(&msg) {
+      Ok(bytes) => bytes.len(),
+      Err(_) => return Err(crate::error::Error::UnencodablePingTarget),
+    };
+    if encoded_len > budget {
+      return Err(crate::error::Error::PingExceedsMtu(
+        crate::error::SizeExceeded::new(encoded_len, budget),
+      ));
+    }
+
+    // Fits the datagram budget: register the direct probe + ack, then queue it.
+    // An application ping is direct-only — it waits just `probe_timeout`, with
+    // no indirect/fallback escalation and no awareness scaling. Failure deadline
+    // == the direct deadline.
+    let pt = self.cfg.probe_timeout();
+    let mut probe = Probe::new_direct(
+      target_arc,
+      target_incarnation,
+      target_generation,
+      now,
+      ProbeKind::Ping,
+      pt,
+      now + pt,
+    );
+    // The over-MTU case already returned above, so this direct Ping IS queued
+    // below — the probe has dispatched a datagram. (A Ping never suspects, so
+    // this only keeps the flag honest; the abort path is Detection-only.)
+    probe.dispatched = true;
+    let deadline = probe.direct_deadline(pt);
+    self.probes.insert(seq, probe);
+    self
+      .ack_registry
+      .register(seq, AckEntry::new(now, deadline, AckKind::Ping));
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit::new(
-        target_addr,
-        Message::Ping(ping),
-      )));
+      .push_back(Transmit::Packet(PacketTransmit::new(target_addr, msg)));
     Ok(PingId::new(seq))
   }
 
@@ -3092,7 +3347,12 @@ impl<I, A, R> Endpoint<I, A, R>
 where
   R: Rng,
   I: Id,
-  A: CheapClone + Data + PartialEq + 'static,
+  // `Eq + Hash` (strengthening the `PartialEq` the rest of this block relies on)
+  // lets `probe_fan_out_indirect` deduplicate candidate helper ADDRESSES through
+  // an `FxHashSet<A>` in O(n), so indirect helpers are sampled uniformly over
+  // DISTINCT addresses rather than biased by alias multiplicity. The real
+  // address types satisfy it (the std drivers pin `A = SocketAddr`).
+  A: CheapClone + Data + PartialEq + Eq + core::hash::Hash + 'static,
 {
   /// Process an incoming Alive announcement.
   ///
@@ -3217,7 +3477,11 @@ where
       .with_delegate_version(alive_delegate);
       let mut local_state = LocalNodeState::new(initial, now);
       local_state.set_incarnation(0);
-      let new_member = Member::new(local_state);
+      // A brand-new id is a fresh membership instance: stamp a new generation
+      // token so a probe still in flight against a DEPARTED instance under this
+      // id (removed by `reset_nodes`, then rejoined) cannot match this one, even
+      // when the rejoin reuses the same address and incarnation.
+      let new_member = Member::new(local_state).with_generation(self.next_member_generation());
       let n = self.members.len();
       let offset = if n == 0 {
         0
@@ -3272,8 +3536,18 @@ where
     // Re-fetch the member (we relinquished it for the refute path above).
     // Apply the update, then drop the borrow before calling broadcast_message.
     let new_meta = new_server.meta_ref().cheap_clone();
+    // A reclaim that ADOPTS A NEW ADDRESS (a Left/Dead id re-admitted at a
+    // different address) is a new membership instance even though the record is
+    // reused in place, so it draws a fresh generation. Drawn BEFORE re-borrowing
+    // the member (the counter needs `&mut self`). A same-record update — a
+    // refutation, meta change, or liveness transition at the same address —
+    // keeps its generation and does NOT enter this branch.
+    let reclaim_generation = updates_address.then(|| self.next_member_generation());
     {
       let member = self.members.get_mut(&alive_id).expect("present");
+      if let Some(g) = reclaim_generation {
+        member.set_generation(g);
+      }
       let state_mut = member.state_mut();
       state_mut.set_incarnation(alive_incarnation);
       state_mut.set_server(new_server.clone());
@@ -3443,50 +3717,78 @@ where
     }
   }
 
-  /// AwaitingDirectAck → AwaitingIndirect: pick k random alive peers
-  /// (excluding local and the target), send IndirectPings, update FSM phase.
+  /// AwaitingDirectAck → AwaitingIndirect: pick up to `indirect_checks` random
+  /// Alive helpers by DISTINCT transport address (excluding the local advertise
+  /// address and the target's address), send one IndirectPing to each, and
+  /// update the FSM phase.
   fn probe_fan_out_indirect(&mut self, seq: u32, now: Instant) {
-    let target_id = match self.probes.get(&seq) {
-      Some(p) => p.target.id_ref().cheap_clone(),
+    let (target_id, target_addr) = match self.probes.get(&seq) {
+      Some(p) => (
+        p.target.id_ref().cheap_clone(),
+        p.target.address_ref().cheap_clone(),
+      ),
       None => return,
     };
     let local_id = self.cfg.local_id_ref().cheap_clone();
-    let candidates: Vec<I> = self
-      .members
-      .iter()
-      .filter(|m| {
-        let id = m.state_ref().id_ref();
-        id != &local_id && id != &target_id && m.state_ref().state() == State::Alive
-      })
-      .map(|m| m.state_ref().id_ref().cheap_clone())
-      .collect();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+
+    // Candidate helper pool = the DISTINCT transport addresses of Alive members,
+    // excluding the local advertise address and the target's address. Scanned
+    // ONCE here under the immutable `members` borrow, fully owned before any
+    // later `&mut self` call. Deduplicated AS IT IS BUILT via an `FxHashSet<A>`
+    // (O(1) per insert), so the pass is O(n) in the membership size `n` and
+    // `distinct` holds each address at most once.
+    //
+    // Sampling then draws uniformly over the DISTINCT addresses. An address
+    // advertised by `m` alias ids must NOT get `m×` the selection probability:
+    // an attacker who registers many aliases at one address would otherwise
+    // reliably win a helper slot and, once in `indirect_peers`, could forge a
+    // relay-Ack to falsely complete the probe and suppress a real suspicion.
+    // Deduplicating FIRST, then sampling `k` uniformly from the distinct set,
+    // gives every distinct address identical probability regardless of alias
+    // count — biasing by entry multiplicity (shuffling a duplicate-laden pool)
+    // is exactly the bug this avoids.
+    //
+    // memberlist-core selects helpers with `kRandomNodes` (util.go): it excludes
+    // self, the target, and non-Alive members, then dedups the sample by node
+    // Name — the unique node key. A Go node advertises a single address, so its
+    // distinct nodes are already distinct addresses. This Sans-I/O port instead
+    // admits DISTINCT ids at the SAME address, so the honest identity for helper
+    // selection here is the ADDRESS, not the id: the IndirectPing body is
+    // `local + target` (independent of the helper id); the relay
+    // `handle_indirect_ping` dedups identical in-flight forwards to at most one
+    // Nack; and both `handle_nack` and `ack_source_is_valid` key responders by
+    // address. Selecting DISTINCT ADDRESSES is therefore what preserves the
+    // configured fan-out width — two ids sharing one address must not let the
+    // sample collapse a k-helper fan-out to fewer relays — and the address-keyed
+    // Nack accounting. Excluding the local / target ADDRESS (not merely their
+    // ids) keeps an id that only aliases either endpoint out of the sample: such
+    // a "helper" would be a meaningless self-relay to our own or the probed
+    // endpoint, and its address-keyed Nack would be miscounted against a peer
+    // that by definition cannot answer.
+    let mut seen: FxHashSet<A> = FxHashSet::default();
+    let mut distinct: SmallVec<A> = SmallVec::new();
+    for m in self.members.iter() {
+      let st = m.state_ref();
+      if st.state() != State::Alive {
+        continue;
+      }
+      let addr = st.address_ref();
+      if addr == &local_addr || addr == &target_addr {
+        continue;
+      }
+      // `insert` returns `true` only the first time an address is seen, so each
+      // distinct address is pushed once regardless of how many ids advertise it.
+      if seen.insert(addr.cheap_clone()) {
+        distinct.push(addr.cheap_clone());
+      }
+    }
 
     let k = self.cfg.indirect_checks() as usize;
-    let chosen = pick_random(&candidates, k, &mut self.rng);
-    // Resolve each chosen indirect peer's current source address ONCE, here
-    // (immutable `members` borrow, fully owned before any later `&mut self`
-    // call). This single resolved list is used for BOTH the IndirectPing
-    // destinations AND the Nack allowlist, so "peers we counted a Nack
-    // from" is exactly "peers we actually pinged". `candidates` was just
-    // built from `members` and nothing mutates membership within this
-    // synchronous call, so `chosen_resolved.len() == chosen.len()`;
-    // deriving `expected_nacks` from the resolved set keeps the Lifeguard
-    // severity (`expected_nacks - nacked_by.len()`) exact even if that
-    // invariant ever weakened.
-    let chosen_resolved: SmallVec<(I, A)> = chosen
-      .iter()
-      .filter_map(|id| {
-        self
-          .members
-          .get(id)
-          .map(|m| (id.cheap_clone(), m.state_ref().address_ref().cheap_clone()))
-      })
-      .collect();
-    let indirect_peers: SmallVec<A> = chosen_resolved
-      .iter()
-      .map(|(_, addr)| addr.cheap_clone())
-      .collect();
-    let expected_nacks = indirect_peers.len();
+    // Uniform over the distinct addresses: `pick_random` samples up to `k`
+    // without replacement, so each distinct address has identical selection
+    // probability (O(distinct) sampling atop the O(n) dedup above).
+    let chosen_addrs = pick_random(&distinct, k, &mut self.rng);
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
@@ -3496,10 +3798,10 @@ where
     // AwaitingIndirect that the next tick expires immediately rather
     // than getting a fresh window when suspicion should be MORE timely.
     // The reliable fallback is threaded this same absolute deadline.
-    let (target_arc, cumulative_deadline) = self
+    let cumulative_deadline = self
       .probes
       .get(&seq)
-      .map(|p| (p.target.cheap_clone(), p.failure_deadline()))
+      .map(|p| p.failure_deadline())
       .expect("present");
     if cumulative_deadline <= now {
       // The anchored deadline already elapsed before this (late)
@@ -3521,23 +3823,58 @@ where
     let reliable_stream_id = if self.is_reliable_ping_enabled(&target_id) {
       Some(self.start_reliable_ping(
         target_id.cheap_clone(),
-        target_arc.address_ref().cheap_clone(),
+        target_addr.cheap_clone(),
         seq,
         cumulative_deadline,
       ))
     } else {
       None
     };
+    // Fan out one IndirectPing per sampled helper address, MTU-checking every
+    // datagram. The pool is already address-distinct, so no send-side dedup is
+    // needed — each sampled address is a single relay.
+    //
+    // A node id is unbounded, so an IndirectPing carrying a large already-admitted
+    // target id can exceed one datagram even though it is a valid lone message;
+    // such a datagram is dropped (the same ceiling the direct Ping enforces)
+    // rather than emitted as a fragmentable, undeliverable packet. Both the Nack
+    // allowlist (`indirect_peers`) and `expected_nacks` — the count the FSM waits
+    // on and the source of the Lifeguard severity `expected_nacks -
+    // nacked_by.len()` — count ONLY the addresses whose IndirectPing was actually
+    // queued: a peer we never sent to relays no Ping and returns no Nack, so
+    // counting it would make the FSM wait for a Nack that never comes and
+    // penalize our own health for a probe we never dispatched.
+    let mut indirect_peers: SmallVec<A> = SmallVec::new();
+    for peer_addr in &chosen_addrs {
+      let ind = IndirectPing::new(
+        seq,
+        Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),
+        Node::new(target_id.cheap_clone(), target_addr.cheap_clone()),
+      );
+      if self.push_probe_packet_within_mtu(peer_addr.cheap_clone(), Message::IndirectPing(ind)) {
+        indirect_peers.push(peer_addr.cheap_clone());
+      }
+    }
+    let expected_nacks = indirect_peers.len();
+
     if expected_nacks == 0 && reliable_stream_id.is_none() {
-      // Nothing left to try: no eligible indirect peers AND reliable ping
-      // is disabled for this target → suspect now. With reliable ping
-      // enabled we instead race the deadline below — a 2-node /
-      // zero-indirect topology still gets the TCP fallback before the
-      // target is suspected.
+      // Nothing left to try: no IndirectPing was queued (no eligible peer, or
+      // every candidate's datagram exceeded the MTU) AND reliable ping is
+      // disabled for this target → suspect now. With reliable ping enabled we
+      // instead race the deadline — a 2-node / zero-indirect topology, or one
+      // whose indirect datagrams are all over-MTU, still gets the TCP fallback
+      // (not bound by `gossip_mtu`) before the target is suspected.
       self.probe_terminate_failure(seq, now);
       return;
     }
     if let Some(probe) = self.probes.get_mut(&seq) {
+      // Monotonic dispatch: reaching here means at least one escalation attempt
+      // was dispatched — an IndirectPing queued (`expected_nacks > 0`) or the
+      // reliable fallback opened (`reliable_stream_id.is_some()`); the
+      // no-escalation case returned above. Record it now so a later fallback
+      // retirement (which clears `reliable_stream_id`) cannot erase the fact
+      // that an attempt was made, and a genuine failure still suspects.
+      probe.dispatched = true;
       probe.phase = ProbePhase::AwaitingIndirect(AwaitingIndirect {
         expected_nacks,
         indirect_peers,
@@ -3545,24 +3882,6 @@ where
         reliable_stream_id,
         deadline: cumulative_deadline,
       });
-    }
-
-    // Fan out IndirectPing to each chosen peer (addresses already resolved
-    // above — the exact set recorded in `indirect_peers`).
-    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
-    let target_addr = target_arc.address_ref().cheap_clone();
-    for (_peer_id, peer_addr) in &chosen_resolved {
-      let ind = IndirectPing::new(
-        seq,
-        Node::new(local_id.cheap_clone(), local_addr.cheap_clone()),
-        Node::new(target_id.cheap_clone(), target_addr.cheap_clone()),
-      );
-      self
-        .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit::new(
-          peer_addr.cheap_clone(),
-          Message::IndirectPing(ind),
-        )));
     }
   }
 

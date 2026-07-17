@@ -72,6 +72,30 @@ pub enum Error {
   /// deterministically unsendable.
   #[error("framed user packet ({} bytes) exceeds the packet MTU ({} bytes)", _0.0, _0.1)]
   UserPacketExceedsMtu(SizeExceeded),
+
+  /// A caller-supplied [`Endpoint::ping`](crate::endpoint::Endpoint::ping)
+  /// target, once framed into a `Ping`, would not fit a single gossip datagram.
+  /// A direct application ping rides one UDP datagram on the gossip socket, so
+  /// an over-budget Ping is deterministically unsendable: the peer receives no
+  /// Ping, never acks, and the probe would fail on its deadline. Node ids are
+  /// unbounded, so a large target id can push the framed Ping past the budget;
+  /// it is rejected before any probe/ack state is registered rather than begun
+  /// as a probe doomed to time out. Carries the framed size and the budget
+  /// (see [`SizeExceeded`]).
+  #[error("framed ping ({} bytes) exceeds the gossip packet budget ({} bytes)", _0.0, _0.1)]
+  PingExceedsMtu(SizeExceeded),
+
+  /// A caller-supplied [`Endpoint::ping`](crate::endpoint::Endpoint::ping)
+  /// target whose id or advertise address cannot be encoded on the compact wire
+  /// layout — e.g. a scoped or flow-labelled IPv6 `SocketAddr`, whose nonzero
+  /// `scope_id` / `flowinfo` the compact encoder rejects — so the probe `Ping`
+  /// to it could never be framed for the wire. Unlike a wire-decoded address
+  /// (whose `scope_id` / `flowinfo` always decode to 0, so it always re-encodes),
+  /// a caller-supplied target can carry these fields; it is rejected before any
+  /// probe/ack state is registered rather than begun as a probe that can never
+  /// be sent. Use a wire-representable target.
+  #[error("the ping target's identity is not wire-encodable, so its Ping is unsendable")]
+  UnencodablePingTarget,
 }
 
 /// Payload for [`Error`]'s size-limit variants: a measured size in bytes that

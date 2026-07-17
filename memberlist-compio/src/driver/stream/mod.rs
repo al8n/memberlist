@@ -538,7 +538,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
 ) where
   D: Delegate<Id = I, Address = A>,
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + From<SocketAddr>
+    + 'static,
   R: StreamTransport,
   G: rand::Rng + Unpin,
 {
@@ -1509,7 +1514,12 @@ async fn dispatch_command<I, A, R, G>(
   now: Instant,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + From<SocketAddr>
+    + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -1982,7 +1992,7 @@ fn dispatch_bridge_inbound<I, A, R, G>(
   inbound: BridgeInbound,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -2050,7 +2060,12 @@ fn dispatch_gossip<I, A, R, G>(
   label: Option<Bytes>,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + From<SocketAddr>
+    + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -2374,7 +2389,7 @@ async fn drain_transmits<I, A, R, G>(
 ) -> bool
 where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
 {
   let encode_opts = EncodeOptions::new(label);
@@ -2850,7 +2865,7 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
   cidr_policy: &CidrFilter,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -2956,7 +2971,7 @@ fn fire_timeout_with_drain<I, A, R, G>(
 ) -> bool
 where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -3002,7 +3017,7 @@ fn refresh_snapshot<I, A, R, G>(
   snapshot: &SnapshotCell<I, A>,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
 {
   let ep = endpoint.endpoint_ref();
@@ -3045,7 +3060,7 @@ fn refresh_snapshot_if_changed<I, A, R, G>(
   last_version: &mut u64,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
 {
   let v = endpoint.endpoint_ref().snapshot_version();
@@ -3084,7 +3099,7 @@ fn handle_bridge_ready<I, A, R, G>(
   close_timeout: Duration,
 ) where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + 'static,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
   R: StreamTransport,
   G: rand::Rng,
 {
@@ -3165,7 +3180,12 @@ fn handle_accepted<I, A, R, G>(
 ) -> bool
 where
   I: memberlist_proto::Id,
-  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + From<SocketAddr> + 'static,
+  A: memberlist_proto::Data
+    + memberlist_proto::CheapClone
+    + Eq
+    + core::hash::Hash
+    + From<SocketAddr>
+    + 'static,
   R: StreamTransport,
 {
   match accepted {
