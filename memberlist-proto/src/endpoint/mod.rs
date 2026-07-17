@@ -39,7 +39,7 @@ use crate::{
 
 mod deadline;
 
-use deadline::SuspicionDeadlines;
+use deadline::DeadlineIndex;
 
 #[cfg(test)]
 mod tests;
@@ -231,7 +231,7 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // confirm-accelerate / clear routes through `install_suspicion` /
   // `clear_suspicion` / the confirm hook) so `poll_timeout` reads the earliest
   // suspicion deadline in O(log n) instead of folding the whole member list.
-  suspicion_deadlines: SuspicionDeadlines<I>,
+  suspicion_deadlines: DeadlineIndex<I>,
 
   // Lifeguard.
   awareness: Awareness,
@@ -299,6 +299,15 @@ pub struct Endpoint<I, A, R = SmallRng> {
   /// Pending outbound dial intents, keyed by StreamId. Populated by
   /// `start_push_pull`, `start_reliable_ping`, `start_user_message`.
   pending_stream_intents: FxHashMap<StreamId, PendingStreamIntent<I, A>>,
+
+  /// Incremental index of `pending_stream_intents`' dial deadlines, keyed by
+  /// StreamId. Kept in lockstep with `pending_stream_intents` (every insert /
+  /// remove routes through `insert_intent` / `remove_intent`, and `leave`
+  /// clears both together) so `poll_timeout` reads the earliest pending-dial
+  /// deadline in O(log n) instead of folding every parked intent — a fold an
+  /// attacker could inflate by parking many dials (exhausting the transport's
+  /// stream budget) to force O(intents) work per driver re-poll.
+  intent_deadlines: DeadlineIndex<StreamId>,
 
   // App-pushed state (replaces EndpointHooks::ack_payload + disable_reliable_pings).
   ack_payload: Bytes,
@@ -546,6 +555,30 @@ impl<I, A, R> Endpoint<I, A, R> {
     self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
   }
 
+  /// Insert a pending stream-dial `intent` for `id`, mirroring its deadline into
+  /// the intent [`DeadlineIndex`]. The single chokepoint for *adding* a pending
+  /// intent, the intent-plane twin of
+  /// [`install_suspicion`](Self::install_suspicion): keeping the
+  /// `pending_stream_intents` write and the `intent_deadlines` write in one place
+  /// is what lets [`poll_timeout`](Self::poll_timeout) trust the index's
+  /// earliest-intent term. `intent.deadline` is `Copy`, so the index write reads
+  /// it before the intent moves into the map; the two fields are disjoint.
+  fn insert_intent(&mut self, id: StreamId, intent: PendingStreamIntent<I, A>) {
+    self.intent_deadlines.set(&id, Some(intent.deadline));
+    self.pending_stream_intents.insert(id, intent);
+  }
+
+  /// Remove the pending stream-dial intent for `id` from both
+  /// `pending_stream_intents` and the intent [`DeadlineIndex`], returning it if
+  /// present. The single chokepoint for *dropping* a pending intent, the twin of
+  /// [`clear_suspicion`](Self::clear_suspicion): the index remove is
+  /// unconditional (setting `None` on an absent id is a no-op), so the index can
+  /// never retain an earliest-intent entry for an id whose intent was removed.
+  fn remove_intent(&mut self, id: &StreamId) -> Option<PendingStreamIntent<I, A>> {
+    self.intent_deadlines.set(id, None);
+    self.pending_stream_intents.remove(id)
+  }
+
   /// Drop pending stream-dial intents whose deadline has elapsed without a
   /// `dial_succeeded` / `dial_failed` callback. A correct driver always reports
   /// a dial outcome, but a lost result would otherwise leak the intent — which
@@ -561,7 +594,7 @@ impl<I, A, R> Endpoint<I, A, R> {
       .map(|(id, _)| *id)
       .collect();
     for id in expired {
-      if let Some(intent) = self.pending_stream_intents.remove(&id) {
+      if let Some(intent) = self.remove_intent(&id) {
         if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
           self.retire_reliable_fallback(probe_seq);
         }
@@ -663,18 +696,31 @@ impl<I, A, R> Endpoint<I, A, R> {
   ///
   /// Returns `None` if all three sources are empty.
   pub fn poll_timeout(&self) -> Option<Instant> {
-    // The incremental suspicion-deadline index must equal the old
-    // member-list fold at every poll. Checked before the lifecycle gate
+    // The incremental suspicion- and intent-deadline indexes must each equal
+    // the old table fold at every poll. Checked before the lifecycle gate
     // because the invariant holds in every lifecycle state (the gate hides the
-    // deadline from the driver, it does not desynchronize the index). This
+    // deadline from the driver, it does not desynchronize the indexes). This
     // rides the conformance sim's per-step `poll_timeout` fold (a dev build has
     // debug-assertions on) as millions of free oracle checks, and is compiled
-    // out entirely in release so VOPR throughput is unaffected.
+    // out entirely in release so VOPR throughput is unaffected. The oracles read
+    // `earliest_uncounted` so they do not perturb the `entities_scanned`
+    // measurement the O(1)-scan regression test takes through the production
+    // `earliest` path below.
     #[cfg(debug_assertions)]
     debug_assert_eq!(
-      self.suspicion_deadlines.earliest(),
+      self.suspicion_deadlines.earliest_uncounted(),
       self.suspicion_deadline_bruteforce(),
       "suspicion-deadline index drifted from the member-list fold",
+    );
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+      self.intent_deadlines.earliest_uncounted(),
+      self
+        .pending_stream_intents
+        .values()
+        .map(|i| i.deadline)
+        .min(),
+      "intent-deadline index drifted from the pending-intent fold",
     );
     // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
     // indirect forwards are inert (handle_timeout fires none of them), so
@@ -689,11 +735,12 @@ impl<I, A, R> Endpoint<I, A, R> {
     let suspicion_deadline = self.suspicion_deadlines.earliest();
     let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
     let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
-    let intent_deadline = self
-      .pending_stream_intents
-      .values()
-      .map(|i| i.deadline)
-      .min();
+    // O(log n) read of the earliest pending-dial-intent deadline. Formerly a
+    // full `pending_stream_intents.values().map(|i| i.deadline).min()` scan —
+    // an attacker could inflate the parked-intent count (exhaust the transport's
+    // stream budget so pooled dials park, each holding an intent) to force
+    // O(intents) work per driver re-poll; now the incremental index minimum.
+    let intent_deadline = self.intent_deadlines.earliest();
     [
       suspicion_deadline,
       probe_deadline,
@@ -710,8 +757,8 @@ impl<I, A, R> Endpoint<I, A, R> {
 
   /// Brute-force recomputation of the earliest active suspicion deadline by
   /// folding the whole member list — byte-for-byte the fold the incremental
-  /// [`SuspicionDeadlines`] index replaced. The soundness oracle: the index's
-  /// [`earliest`](SuspicionDeadlines::earliest) must equal this at every poll.
+  /// [`DeadlineIndex`] replaced. The soundness oracle: the index's
+  /// [`earliest`](DeadlineIndex::earliest) must equal this at every poll.
   ///
   /// Gated on `debug_assertions` (not `test`) so it is compiled — and its
   /// `debug_assert_eq!` in [`poll_timeout`](Self::poll_timeout) exercised —
@@ -892,7 +939,7 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// are silent at the machine level; the driver surfaces them through its own
   /// channel.
   pub fn dial_failed(&mut self, id: StreamId, _err: crate::error::StreamError, now: Instant) {
-    let Some(intent) = self.pending_stream_intents.remove(&id) else {
+    let Some(intent) = self.remove_intent(&id) else {
       return;
     };
     if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
@@ -1254,7 +1301,7 @@ where
       // No member carries a suspicion at construction (the local node is
       // inserted Alive), so the index starts empty and is maintained by the
       // suspicion lifecycle chokepoints thereafter.
-      suspicion_deadlines: SuspicionDeadlines::new(),
+      suspicion_deadlines: DeadlineIndex::new(),
       awareness,
       broadcast,
       ack_registry: AckRegistry::new(),
@@ -1275,6 +1322,9 @@ where
       merge_delegate: None,
       next_stream_id: 1,
       pending_stream_intents: FxHashMap::default(),
+      // Starts empty (no dial intent at construction) and is maintained in
+      // lockstep by the `insert_intent` / `remove_intent` chokepoints.
+      intent_deadlines: DeadlineIndex::new(),
       ack_payload: Bytes::new(),
       reliable_pings_disabled: FxHashSet::default(),
       user_broadcasts,
@@ -1393,7 +1443,7 @@ where
   }
 
   /// Install `suspicion` on `id`'s member record and mirror its deadline into
-  /// the [`SuspicionDeadlines`] index. The single chokepoint for *arming* a
+  /// the suspicion [`DeadlineIndex`]. The single chokepoint for *arming* a
   /// suspicion: keeping `Member::set_suspicion(Some(..))` and the index write
   /// in one place is what lets [`poll_timeout`](Self::poll_timeout) trust the
   /// index. A no-op if `id` is not a tracked member — callers only ever install
@@ -1409,8 +1459,8 @@ where
     self.suspicion_deadlines.set(id, Some(deadline));
   }
 
-  /// Clear any suspicion on `id`'s member record and remove its
-  /// [`SuspicionDeadlines`] entry. The single chokepoint for *disarming* a
+  /// Clear any suspicion on `id`'s member record and remove its suspicion
+  /// [`DeadlineIndex`] entry. The single chokepoint for *disarming* a
   /// suspicion. The index remove is unconditional (setting `None` on an absent
   /// id is a no-op), so the index can never retain an entry for a member whose
   /// suspicion was cleared.
@@ -1980,7 +2030,7 @@ where
         ..
       }) => {
         if let Some(rid) = reliable_stream_id {
-          self.pending_stream_intents.remove(rid);
+          self.remove_intent(rid);
         }
         // Deduped distinct responders: a duplicate or late Nack never
         // entered `nacked_by`, so `expected - seen` cannot be driven to
@@ -2931,7 +2981,7 @@ where
     let encoded = crate::wire::encode_message::<I, A>(&msg)
       .expect("PushPull encode cannot fail for well-formed data");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer.cheap_clone(),
@@ -2987,7 +3037,7 @@ where
     let encoded = crate::wire::encode_message::<I, A>(&msg)
       .expect("Ping encode cannot fail for well-formed data");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer_addr.cheap_clone(),
@@ -3027,7 +3077,7 @@ where
     let msg = Message::<I, A>::UserData(payload);
     let encoded = crate::wire::encode_message::<I, A>(&msg).expect("UserData encode cannot fail");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer.cheap_clone(),
@@ -3052,7 +3102,7 @@ where
   ///
   /// Returns `None` if `id` is unknown (intent was already cancelled).
   pub fn dial_succeeded(&mut self, id: StreamId, now: Instant) -> Option<Stream<I, A>> {
-    let intent = self.pending_stream_intents.remove(&id)?;
+    let intent = self.remove_intent(&id)?;
     // Write-side deadline authority (symmetric to the read-side check in
     // `Stream::handle_data`): the WHOLE reliable exchange is bounded by
     // `deadline`, so a dial that only completes at/after the exchange
@@ -3258,8 +3308,11 @@ where
     // Drop all pending outbound dial intents: a left node promotes none of them
     // (dial_succeeded refuses each kind once not Running). A push/pull would
     // advertise our pre-leave Alive, a reliable-ping is a detection fallback,
-    // and a user message is new I/O the post-leave contract forbids.
+    // and a user message is new I/O the post-leave contract forbids. Clear the
+    // mirrored intent index in lockstep so no stale earliest-intent deadline
+    // outlives the drained table.
     self.pending_stream_intents.clear();
+    self.intent_deadlines.clear();
     // Also drop any already-queued DialRequested events: a raw Endpoint driver
     // that polls events after leave must not still be told to dial. dial_succeeded
     // would refuse the promotion, but a driver opens the transport in response to

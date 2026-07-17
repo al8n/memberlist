@@ -6,16 +6,16 @@ fn t(secs: u64) -> Instant {
   Instant::from_origin(Duration::from_secs(secs))
 }
 
-/// A distinct member id. `u64` is `Eq + Hash + CheapClone`, the exact bound the
-/// index requires of a real node id, so it exercises the same code paths with
-/// no test scaffolding.
+/// A distinct key. `u64` is `Eq + Hash + CheapClone`, the exact bound the index
+/// requires of a real node id or `StreamId`, so it exercises the same code paths
+/// with no test scaffolding.
 fn id(n: u64) -> u64 {
   n
 }
 
 #[test]
 fn empty_index_has_no_earliest() {
-  let idx = SuspicionDeadlines::<u64>::new();
+  let idx = DeadlineIndex::<u64>::new();
   assert_eq!(idx.earliest(), None);
   assert!(idx.is_empty());
   assert_eq!(idx.live_key_count(), 0);
@@ -24,7 +24,7 @@ fn empty_index_has_no_earliest() {
 
 #[test]
 fn single_suspicion_returns_its_deadline() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(1), Some(t(10)));
   assert_eq!(idx.earliest(), Some(t(10)));
   assert!(!idx.is_empty());
@@ -35,7 +35,7 @@ fn single_suspicion_returns_its_deadline() {
 
 #[test]
 fn earliest_returns_minimum_across_members() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(30)));
   idx.set(&id(1), Some(t(10)));
   idx.set(&id(2), Some(t(20)));
@@ -46,7 +46,7 @@ fn earliest_returns_minimum_across_members() {
 
 #[test]
 fn setting_none_removes_a_member_from_the_minimum() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(10)));
   idx.set(&id(1), Some(t(20)));
   assert_eq!(idx.earliest(), Some(t(10)));
@@ -64,7 +64,7 @@ fn setting_none_removes_a_member_from_the_minimum() {
 
 #[test]
 fn confirmation_accelerating_a_deadline_supersedes_its_prior_entry() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(50)));
   idx.set(&id(1), Some(t(90)));
   assert_eq!(idx.earliest(), Some(t(50)));
@@ -87,7 +87,7 @@ fn confirmation_accelerating_a_deadline_supersedes_its_prior_entry() {
 
 #[test]
 fn set_unchanged_deadline_is_a_noop() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(10)));
   assert_eq!(idx.earliest(), Some(t(10)));
   // Re-registering the SAME deadline must neither grow the index nor rewrite
@@ -106,7 +106,7 @@ fn set_unchanged_deadline_is_a_noop() {
 
 #[test]
 fn removing_then_reinserting_the_same_deadline_is_live_again() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(10)));
   idx.set(&id(0), None);
   assert_eq!(idx.earliest(), None);
@@ -119,7 +119,7 @@ fn removing_then_reinserting_the_same_deadline_is_live_again() {
 
 #[test]
 fn distinct_members_are_distinct_keys() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(7), Some(t(10)));
   idx.set(&id(8), Some(t(20)));
   assert_eq!(idx.live_key_count(), 2);
@@ -138,7 +138,7 @@ fn confirmations_keep_storage_proportional_to_live_suspicions() {
   // member's prior ordered entry rather than stranding it. With one earlier
   // member pinned as the minimum and a second accelerated 10_000 times, the
   // index holds exactly the two live suspicions — not one entry per update.
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   idx.set(&id(0), Some(t(1))); // the pinned, always-minimum suspicion
   let updates = 10_000u64;
   for round in 0..updates {
@@ -162,7 +162,7 @@ fn confirmations_keep_storage_proportional_to_live_suspicions() {
 
 #[test]
 fn is_empty_tracks_live_suspicions() {
-  let mut idx = SuspicionDeadlines::new();
+  let mut idx = DeadlineIndex::new();
   assert!(idx.is_empty());
   idx.set(&id(0), Some(t(10)));
   assert!(!idx.is_empty());
@@ -172,4 +172,66 @@ fn is_empty_tracks_live_suspicions() {
   assert!(!idx.is_empty());
   idx.set(&id(1), None);
   assert!(idx.is_empty());
+}
+
+#[test]
+fn clear_empties_both_maps_at_once() {
+  let mut idx = DeadlineIndex::new();
+  idx.set(&id(0), Some(t(10)));
+  idx.set(&id(1), Some(t(20)));
+  idx.set(&id(2), Some(t(30)));
+  assert_eq!(idx.entry_count(), 3);
+  idx.clear();
+  assert_eq!(idx.earliest(), None);
+  assert!(idx.is_empty());
+  assert_eq!(idx.entry_count(), 0);
+  assert_eq!(idx.live_key_count(), 0);
+  // Post-clear the index is fully usable again — a fresh registration surfaces
+  // with no stale masking.
+  idx.set(&id(5), Some(t(7)));
+  assert_eq!(idx.earliest(), Some(t(7)));
+  assert_eq!(idx.entry_count(), 1);
+}
+
+#[test]
+fn earliest_uncounted_reads_the_minimum_without_bumping_the_scan_counter() {
+  let mut idx = DeadlineIndex::new();
+  idx.set(&id(0), Some(t(30)));
+  idx.set(&id(1), Some(t(10)));
+  idx.reset_entities_scanned();
+  // The oracle read must observe the same minimum as `earliest`...
+  assert_eq!(idx.earliest_uncounted(), Some(t(10)));
+  // ...but must NOT count, so it cannot perturb the O(1)-scan measurement.
+  assert_eq!(
+    idx.entities_scanned(),
+    0,
+    "earliest_uncounted must not touch the scan counter"
+  );
+  // The counting path still counts.
+  assert_eq!(idx.earliest(), Some(t(10)));
+  assert_eq!(idx.entities_scanned(), 1);
+}
+
+#[test]
+fn earliest_examines_o1_entries_regardless_of_live_key_count() {
+  // Populate a large live table, then confirm one `earliest` call examines a
+  // constant number of entries independent of the table size — the property
+  // that keeps `poll_timeout` off the O(members + intents) fold.
+  fn scanned_for(n: u64) -> u64 {
+    let mut idx = DeadlineIndex::new();
+    for i in 0..n {
+      // Deadlines increase with i so the minimum is a single fixed entry.
+      idx.set(&id(i), Some(t(100 + i)));
+    }
+    idx.reset_entities_scanned();
+    let _ = idx.earliest();
+    idx.entities_scanned()
+  }
+  let small = scanned_for(4);
+  let large = scanned_for(4096);
+  assert_eq!(small, 1, "the live minimum is a single ordered entry");
+  assert_eq!(
+    large, small,
+    "examination count must not grow with the number of live keys"
+  );
 }

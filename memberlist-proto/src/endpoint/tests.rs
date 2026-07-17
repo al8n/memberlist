@@ -10449,3 +10449,176 @@ fn suspicion_index_structural_churn_keeps_storage_at_live_suspicions() {
   assert_eq!(e.suspicion_deadlines.entry_count(), 0);
   assert_poll_is_suspicion_min(&e);
 }
+
+// ─── incremental pending-dial-intent index (oracle-checked) ──────────────────
+//
+// The intent-plane twin of the suspicion-index section above. Every mutation of
+// `pending_stream_intents` must mirror into `intent_deadlines` through the
+// `insert_intent` / `remove_intent` chokepoints (and `leave` clears both), so
+// `poll_timeout`'s intent term is an O(log n) index read rather than an
+// O(intents) fold an attacker could inflate by parking many dials.
+
+/// The always-valid half of the invariant: the intent index's earliest equals
+/// the pending-intent fold, and its storage carries exactly the parked intents
+/// (no tombstones). Reads via `earliest_uncounted` so it never perturbs the
+/// scan-count measurement.
+fn assert_intent_index_consistent(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.intent_deadlines.earliest_uncounted(),
+    e.pending_stream_intents.values().map(|i| i.deadline).min(),
+    "intent index earliest must equal the pending-intent fold",
+  );
+  let live = e.pending_stream_intents.len();
+  assert_eq!(
+    e.intent_deadlines.entry_count(),
+    live,
+    "ordered-map storage must equal the pending-intent count (no tombstones)",
+  );
+  assert_eq!(
+    e.intent_deadlines.live_key_count(),
+    live,
+    "authority-map size must equal the pending-intent count",
+  );
+}
+
+/// A datagram flood that inflates the parked-dial-intent count must not turn
+/// `poll_timeout` into an O(intents) scan. Parks many pending stream intents
+/// through the public dial API, then asserts a single `poll_timeout` examines a
+/// small constant number of intent-index entries that does NOT scale with the
+/// intent count — the property that denies an attacker O(intents) work per
+/// driver re-poll.
+///
+/// Mutation-verify: reverting the intent term of `poll_timeout` to the old
+/// `pending_stream_intents.values().map(|i| i.deadline).min()` fold never calls
+/// `DeadlineIndex::earliest`, so `entities_scanned` stays `0` and the `>= 1`
+/// assertion fails — the fold's O(intents) work per poll is exactly what this
+/// guards against.
+#[test]
+fn poll_timeout_intent_term_scans_o1_regardless_of_intent_count() {
+  use crate::event::PushPullKind;
+
+  fn scanned_for(n: usize) -> (u64, usize) {
+    let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+    let t0 = Instant::now();
+    while e.poll_event().is_some() {}
+    // Park `n` pending dial intents: each `start_push_pull` to a distinct peer
+    // queues an intent that stays parked (no dial_succeeded / dial_failed), so
+    // `pending_stream_intents` — and the mirrored `intent_deadlines` index —
+    // grows to `n`.
+    for i in 0..n {
+      let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 20000 + i as u16);
+      let _ = e.start_push_pull(peer, PushPullKind::Join, t0);
+    }
+    assert_eq!(e.pending_stream_intents.len(), n, "all intents parked");
+    // Settle, then measure exactly one poll in isolation.
+    let _ = e.poll_timeout();
+    e.intent_deadlines.reset_entities_scanned();
+    let _ = e.poll_timeout();
+    (
+      e.intent_deadlines.entities_scanned(),
+      e.pending_stream_intents.len(),
+    )
+  }
+
+  let (small, small_n) = scanned_for(8);
+  let (large, large_n) = scanned_for(512);
+  assert_eq!(small_n, 8);
+  assert_eq!(large_n, 512);
+  assert!(
+    small >= 1,
+    "poll_timeout must consult the intent index — reverting it to the O(intents) \
+     fold never calls earliest(), leaving this 0"
+  );
+  assert!(
+    small <= 2,
+    "one poll must examine O(1) intent-index entries, not scale with the parked \
+     intents; examined {small}"
+  );
+  assert_eq!(
+    large, small,
+    "intent-term examination count must not grow with the {large_n} parked intents \
+     (was {large}, single-baseline {small})"
+  );
+}
+
+/// Every intent maintenance chokepoint keeps `intent_deadlines` in lockstep with
+/// `pending_stream_intents`: the three inserts (`start_push_pull` /
+/// `start_reliable_ping` / `start_user_message`) and the removes via
+/// `dial_succeeded` and `dial_failed`. The consistency oracle is asserted after
+/// each step.
+#[test]
+fn intent_index_tracks_pending_intents_through_dial_lifecycle() {
+  use crate::{error::StreamError, event::PushPullKind};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  assert_intent_index_consistent(&e); // 0 intents
+
+  let p = |port: u16| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+
+  // Insert via all three start_* chokepoints, each with a distinct deadline so
+  // the surfaced minimum is unambiguous.
+  let id_pp = e.start_push_pull(p(7101), PushPullKind::Join, t0);
+  assert_intent_index_consistent(&e);
+  let id_rp = e.start_reliable_ping(SmolStr::new("bob"), p(7102), 7, t0 + Duration::from_secs(5));
+  assert_intent_index_consistent(&e);
+  let id_um = e
+    .start_user_message(p(7103), bytes::Bytes::from_static(b"hi"), t0)
+    .expect("running node accepts a user message");
+  assert_intent_index_consistent(&e);
+  assert_eq!(e.pending_stream_intents.len(), 3);
+  assert_eq!(e.intent_deadlines.entry_count(), 3);
+
+  // Remove one via dial_succeeded (promoted to a live stream)...
+  let _stream = e.dial_succeeded(id_pp, t0).expect("dial within deadline");
+  assert!(!e.pending_stream_intents.contains_key(&id_pp));
+  assert_intent_index_consistent(&e);
+
+  // ...one via dial_failed...
+  e.dial_failed(id_um, StreamError::DialFailed("refused".into()), t0);
+  assert!(!e.pending_stream_intents.contains_key(&id_um));
+  assert_intent_index_consistent(&e);
+
+  // ...leaving only the reliable-ping intent parked.
+  assert!(e.pending_stream_intents.contains_key(&id_rp));
+  assert_eq!(e.pending_stream_intents.len(), 1);
+  assert_eq!(e.intent_deadlines.entry_count(), 1);
+  assert_intent_index_consistent(&e);
+}
+
+/// `leave()` drops all parked intents and must clear the mirrored index in
+/// lockstep, leaving no stale earliest-intent deadline behind. The oracle in
+/// `poll_timeout` runs before the lifecycle gate, so it also checks the index
+/// against the (now empty) fold in the Leaving state.
+#[test]
+fn intent_index_cleared_on_leave() {
+  use crate::event::PushPullKind;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+
+  for i in 0..4u16 {
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7201 + i);
+    let _ = e.start_push_pull(peer, PushPullKind::Join, t0);
+  }
+  assert_eq!(e.intent_deadlines.entry_count(), 4);
+  assert_intent_index_consistent(&e);
+
+  e.leave(t0).expect("leave ok");
+
+  assert!(
+    e.pending_stream_intents.is_empty(),
+    "leave drops all intents"
+  );
+  assert!(
+    e.intent_deadlines.is_empty(),
+    "leave clears the intent index"
+  );
+  assert_eq!(e.intent_deadlines.entry_count(), 0);
+  assert_eq!(e.intent_deadlines.live_key_count(), 0);
+  // Oracle still holds in the Leaving state (both empty).
+  assert_intent_index_consistent(&e);
+  let _ = e.poll_timeout();
+}

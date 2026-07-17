@@ -266,6 +266,11 @@ impl StreamId {
   }
 }
 
+// A `Copy` `u64` newtype: cloning is a constant-time bit copy, so it satisfies
+// `CheapClone`. Lets a `StreamId` key the `Endpoint`'s incremental
+// pending-dial-intent `DeadlineIndex`, which clones its key on insert.
+impl crate::CheapClone for StreamId {}
+
 /// A single message destined for one peer (one plain-frame datagram).
 #[derive(Debug)]
 pub struct PacketTransmit<I, A> {
