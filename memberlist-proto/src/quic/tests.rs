@@ -6783,3 +6783,229 @@ fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
     K * M
   );
 }
+
+/// A single `Available` (or handshake completion) that unblocks a peer's parked
+/// bucket where every entry MINTS must not let ONE datagram drive O(bucket) dial
+/// work: `service_peer_bucket` attempts at most `MAX_DIAL_ATTEMPTS_PER_PASS`
+/// entries per pass, then defers the untouched tail. A K-credit `MAX_STREAMS`
+/// grant (or a handshake granting a large initial bidi credit) makes every bucket
+/// entry return `Minted`, so — unlike the credit-exhausted case that stops at the
+/// first re-park — nothing bounds the drain except this budget.
+///
+/// Construction: establish N -> B with a large bidi credit via a datagram warm-up
+/// (no bidi consumed, no bridge minted), then inject M REAL dial intents parked on
+/// B's bucket (registered on the raw endpoint so `dial_succeeded` resolves each,
+/// then moved to `dial_parked` as attempted — the state a burst reaches after
+/// parking on a since-established, amply-credited connection). ONE
+/// `service_peer_bucket` then mints at most the budget and re-parks the rest.
+///
+/// Mutation-verify: remove the `MAX_DIAL_ATTEMPTS_PER_PASS` cap (keep only the
+/// `Reparked` break) — the amply-credited bucket never re-parks, so the pass mints
+/// all M and the `<= budget` assertion fails.
+#[test]
+fn established_bucket_pass_mints_at_most_the_budget() {
+  let n_addr: SocketAddr = "127.0.0.1:7780".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7781".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(512),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up: no bidi credit is consumed and no
+  // bridge is minted, so the pooled connection is Established with its full
+  // 512-stream initial bidi credit and N holds zero bridges before the injection.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while n.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: the datagram warm-up mints no bridge"
+  );
+
+  // Inject M REAL parked intents on B's bucket. Register each on the raw endpoint
+  // (so `dial_succeeded` resolves it into a real `Stream`) WITHOUT servicing, sieve
+  // the emitted `DialRequested`s into `dial_pending`, then move them onto
+  // `dial_parked[b]` as attempted — the post-parking state under test.
+  const M: usize = 256;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    n.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  n.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = n.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    M,
+    "test precondition: all M intents sieve into dial_pending"
+  );
+  // They are now parked-attempted, not unattempted-pending.
+  n.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    n.dial_parked.entry(b_addr).or_default().push(pd);
+  }
+  let parked_before = n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the cap to be \
+       non-vacuous"
+  );
+
+  // ONE service_peer_bucket pass mints at most the budget, then defers the tail.
+  let before = n.counters.dial_entries_serviced;
+  let _ = n.service_peer_bucket(b_addr, now);
+  let attempts = n.counters.dial_entries_serviced - before;
+  assert!(
+    attempts <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "one service_peer_bucket pass on an amply-credited bucket must attempt at most \
+       MAX_DIAL_ATTEMPTS_PER_PASS={}, not the {M}-entry bucket; attempted {attempts} \
+       (removing the cap mints all {M})",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  // Every budgeted attempt minted a REAL bridge (not a retire): the mint path — not
+  // the expired/retire path — is what the drain must bound here.
+  assert_eq!(
+    n.live_bridge_count(),
+    attempts as usize,
+    "every budgeted attempt opened a real outbound bridge on the amply-credited \
+       established connection"
+  );
+  // Exactly the un-attempted tail rides on the bucket, untouched (nothing dropped).
+  let tail = n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - attempts as usize,
+    "exactly the un-attempted tail (M - budget) stays parked for the next drain"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // Liveness: the un-budgeted full drain mints the whole deferred tail on the
+  // established connection's remaining credit — nothing is stranded.
+  let _ = n.service_dials(now);
+  assert_eq!(
+    n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0),
+    0,
+    "the un-budgeted service_dials drains the whole deferred tail, leaving the \
+       bucket empty (nothing lost)"
+  );
+}
+
+/// A long expired prefix in one peer's parked bucket must not let a single
+/// `Available` (or establishment) drive O(bucket) dial retirements:
+/// `service_peer_bucket` attempts at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries per
+/// pass REGARDLESS of outcome. An expired entry takes the deadline-elapsed retire
+/// branch (no connection dialed, no credit consumed, no re-park), so — like the
+/// mint case, and unlike the credit-exhausted case — nothing but this budget stops
+/// the drain scanning the whole expired prefix.
+///
+/// Construction: park M expired intents (deadline already elapsed) on ONE peer.
+/// Drive ONE `service_peer_bucket` and assert it attempted at most the budget,
+/// deferring the rest as an untouched parked tail.
+///
+/// Mutation-verify: remove the `MAX_DIAL_ATTEMPTS_PER_PASS` cap (keep only the
+/// `Reparked` break) — an expired prefix never re-parks, so the pass retires all M
+/// and the `<= budget` assertion fails.
+#[test]
+fn expired_prefix_pass_attempts_at_most_the_budget() {
+  let n_addr: SocketAddr = "127.0.0.1:7790".parse().unwrap();
+  let peer: SocketAddr = "127.0.0.9:7791".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+
+  // Park M expired intents (deadline in the past) on ONE peer. Each attempt hits
+  // the deadline-elapsed retire branch, so the drain continues through the whole
+  // prefix unless the per-pass budget stops it. Fake ids are sound here: the retire
+  // path routes through `dial_failed`, a no-op for an unregistered intent.
+  const M: usize = 256;
+  let elapsed = now - Duration::from_secs(1);
+  for i in 0..M {
+    n.dial_parked
+      .entry(peer)
+      .or_default()
+      .push(super::PendingDial {
+        id: StreamId::from_raw(40_000 + i as u64),
+        peer,
+        deadline: elapsed,
+        attempted: true,
+      });
+  }
+  let parked_before = n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the cap to be \
+       non-vacuous"
+  );
+
+  // ONE pass: attempts at most the budget, then defers the untouched tail.
+  let before = n.counters.dial_entries_serviced;
+  let _ = n.service_peer_bucket(peer, now);
+  let attempted = n.counters.dial_entries_serviced - before;
+  assert!(
+    attempted <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "one service_peer_bucket pass must attempt at most \
+       MAX_DIAL_ATTEMPTS_PER_PASS={}, not the {M}-entry expired prefix; attempted \
+       {attempted} (removing the cap retires all {M})",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  let tail = n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - attempted as usize,
+    "exactly the un-attempted tail stays parked for the next drain"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // Liveness: the un-budgeted full drain retires everything the budget deferred.
+  let _ = n.service_dials(now);
+  assert_eq!(
+    n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+    0,
+    "the un-budgeted service_dials drains the whole deferred tail (expired intents \
+       retired), leaving the bucket empty"
+  );
+}

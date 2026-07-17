@@ -144,6 +144,27 @@ const MAX_INGRESS_DATAGRAMS_PER_PEER: usize = 1024;
 /// so the tick is woken with no extra term, and the tick pumps the residue.
 const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
 
+/// Maximum parked-dial intents [`QuicEndpoint::service_peer_bucket`] attempts in
+/// ONE per-`Available` pass. Bounds the per-`Available` (and per-establishment)
+/// dial work a single datagram can drive, the dial-plane twin of
+/// [`MAX_BRIDGE_PUMPS_PER_PASS`].
+///
+/// One frame can advertise a K-credit `MAX_STREAMS_BIDI` increase (or a handshake
+/// completion granting a large initial bidi credit), so a peer whose pooled
+/// connection is established with ample credit lets every bucket entry return
+/// `Minted` — an uncapped scoped drain would then mint O(bucket) bridges and run
+/// O(bucket) dial processing for that ONE datagram. A long expired prefix returns
+/// `Retired` repeatedly and is likewise scanned unboundedly. This bound caps the
+/// attempts per pass REGARDLESS of outcome: past the budget the untouched tail is
+/// re-parked (each entry keeps its `attempted` flag and its existing
+/// [`TimerKey::Dial`] deadline key), and the un-budgeted full-drain
+/// [`QuicEndpoint::service_dials`] on the next tick drains everything the budget
+/// deferred. Nothing strands: every parked entry's `TimerKey::Dial` is already
+/// folded by [`QuicEndpoint::poll_timeout`], so the tick wakes no later than the
+/// earliest dial deadline. The [`DialAttempt::Reparked`] early-out is retained, so
+/// a handshake-blocked bucket still stops at the first re-park.
+const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
+
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
 /// frame) into the shared coordinator ingress queue, enforcing the per-peer
 /// standing-share cap AND the node-global cap so neither source can exceed the
@@ -2544,11 +2565,23 @@ where
     // buckets).
     if let Some(bucket) = self.dial_parked.swap_remove(&peer) {
       let mut entries = bucket.into_iter();
-      for entry in entries.by_ref() {
+      // Attempt at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries this pass, REGARDLESS
+      // of outcome. A `while` (checking the budget BEFORE pulling the next entry)
+      // rather than `for … in by_ref()` so a budget stop leaves the still-unpulled
+      // tail intact in `entries` for the re-park below — a big `MAX_STREAMS` grant
+      // (or a handshake granting large initial credit) that mints every entry, and
+      // a long expired prefix that retires every entry, must not let ONE datagram
+      // drive O(bucket) dial work.
+      let mut attempts = 0usize;
+      while attempts < MAX_DIAL_ATTEMPTS_PER_PASS {
+        let Some(entry) = entries.next() else {
+          break;
+        };
+        attempts += 1;
         match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
           // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
           // retire consumes none, so a later entry in the bucket may still find
-          // an opening — keep draining.
+          // an opening — keep draining (up to the budget).
           DialAttempt::Minted | DialAttempt::Retired => {}
           // The first re-park proves the shared pooled connection is still
           // handshaking or its restored bidi credit is already spent. Every
@@ -2560,11 +2593,13 @@ where
           DialAttempt::Reparked => break,
         }
       }
-      // The re-parked entry (the one that hit `break`) has already re-inserted
-      // itself into `dial_parked[peer]`, recreating the bucket. Append the
-      // UN-attempted tail after it so no intent is dropped. Each tail entry keeps
-      // `attempted = true` and its existing `TimerKey::Dial` deadline key
-      // untouched: the tick's `service_dials` retires any that expire, and
+      // Append the untouched tail — the entries the budget deferred, or the ones
+      // after the re-parked entry (which has already re-inserted itself into
+      // `dial_parked[peer]`, recreating the bucket) — so no intent is dropped.
+      // Each tail entry keeps `attempted = true` and its existing `TimerKey::Dial`
+      // deadline key untouched (only `process_dial_entry` touches those, and the
+      // tail never reached it): the un-budgeted `service_dials` on the next tick
+      // drains everything deferred and retires any that expire, and
       // `poll_timeout`'s folded `Dial` term already wakes the tick at the earliest
       // dial deadline, so leaving them untouched strands nothing.
       let rest: SmallVec<PendingDial> = entries.collect();
