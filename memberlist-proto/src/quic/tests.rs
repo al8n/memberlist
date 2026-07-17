@@ -1828,7 +1828,7 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   let entry = a
     .dial_parked
     .get_mut(&unreachable)
-    .and_then(|b| b.first_mut())
+    .and_then(|b| b.front_mut())
     .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
@@ -1926,7 +1926,7 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   let entry = a
     .dial_parked
     .get_mut(&unreachable)
-    .and_then(|b| b.first_mut())
+    .and_then(|b| b.front_mut())
     .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
@@ -3545,7 +3545,7 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
   // the deadline-elapsed arm) is the one that fires.
   a.dial_parked
     .get_mut(&peer)
-    .and_then(|b| b.first_mut())
+    .and_then(|b| b.front_mut())
     .unwrap()
     .deadline = now + Duration::from_secs(30);
 
@@ -6483,7 +6483,7 @@ fn establishment_services_only_its_peer_bucket() {
       n.dial_parked
         .entry(peer)
         .or_default()
-        .push(super::PendingDial {
+        .push_back(super::PendingDial {
           id: StreamId::from_raw(next_id),
           peer,
           deadline: now + Duration::from_secs(30),
@@ -6744,7 +6744,7 @@ fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
     n.dial_parked
       .entry(cold_peer)
       .or_default()
-      .push(super::PendingDial {
+      .push_back(super::PendingDial {
         id: StreamId::from_raw(20_000 + i as u64),
         peer: cold_peer,
         deadline,
@@ -6887,7 +6887,7 @@ fn established_bucket_pass_mints_at_most_the_budget() {
   n.unattempted_dial_count = 0;
   for mut pd in pending {
     pd.attempted = true;
-    n.dial_parked.entry(b_addr).or_default().push(pd);
+    n.dial_parked.entry(b_addr).or_default().push_back(pd);
   }
   let parked_before = n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0);
   assert!(
@@ -6970,7 +6970,7 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
     n.dial_parked
       .entry(peer)
       .or_default()
-      .push(super::PendingDial {
+      .push_back(super::PendingDial {
         id: StreamId::from_raw(40_000 + i as u64),
         peer,
         deadline: elapsed,
@@ -7013,6 +7013,268 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
     0,
     "the un-budgeted service_dials drains the whole deferred tail (expired intents \
        retired), leaving the bucket empty"
+  );
+}
+
+/// A per-peer readiness event that services a large parked bucket must leave the
+/// unprocessed tail RESIDENT in the same allocation — the resident-tail
+/// bounded-prefix bound. `service_peer_bucket` detaches a bounded front-prefix
+/// with O(1) `pop_front` and never moves, collects, or re-inserts the tail, so
+/// one datagram's dial work is O(min(budget, bucket)) with no per-datagram copy
+/// of the tail back into a recreated bucket.
+///
+/// Phase 1 (mint): an established, amply-credited connection mints the budget's
+/// worth of entries off the front; the M - budget tail stays parked with its
+/// backing storage untouched — the SAME back-element address and the SAME
+/// `VecDeque` capacity across the pass.
+///
+/// Phase 2 (handshake-blocked): the first entry re-parks and the drain stops; it
+/// rotates to the BACK of the resident bucket (front-pop, back-repark) while
+/// every other entry stays parked in place, so nothing is dropped and the bucket
+/// keeps all M entries.
+///
+/// Mutation-verify: restore the whole-bucket take with a `collect()` + `extend()`
+/// tail move — Phase 1's back-element-address assertion fails (the tail is
+/// relocated into a fresh allocation), and Phase 2's rotated-order assertion
+/// fails (a front re-insert leaves the re-parked entry at the FRONT).
+#[test]
+fn service_peer_bucket_leaves_tail_resident_no_move() {
+  // ---- Phase 1: established + amply-credited -> the budget mints off the front,
+  //      the un-processed tail stays resident in the same allocation. ----
+  let n_addr: SocketAddr = "127.0.0.1:7800".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7801".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(512),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up: no bidi credit is consumed and no
+  // bridge is minted, so the pooled connection is Established with its full
+  // 512-stream initial bidi credit.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while n.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: the datagram warm-up mints no bridge"
+  );
+
+  // Inject M REAL parked intents on B's bucket (registered on the raw endpoint so
+  // `dial_succeeded` resolves each), marked attempted — the post-parking state a
+  // burst reaches on a since-established, amply-credited connection.
+  const M: usize = 256;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    n.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  n.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = n.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    M,
+    "test precondition: all M intents sieve into dial_pending"
+  );
+  n.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    n.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  let parked_before = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.len())
+    .unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the resident tail to \
+       be non-vacuous"
+  );
+
+  // Witness the resident tail's backing storage BEFORE the pass: the physical
+  // address of the back element and the bucket's capacity. Popping off the FRONT
+  // never relocates the back element or reallocates the ring buffer; a
+  // `collect()` + `extend()` tail move would rebuild the tail into a fresh
+  // allocation, relocating the back element.
+  let tail_ptr_before: *const super::PendingDial = n
+    .dial_parked
+    .get(&b_addr)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry as *const super::PendingDial)
+    .expect("the parked bucket has a resident back element");
+  let cap_before = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.capacity())
+    .expect("the parked bucket is present");
+
+  // ONE service_peer_bucket pass mints the budget's prefix, then defers the tail.
+  let before = n.counters.dial_entries_serviced;
+  let _ = n.service_peer_bucket(b_addr, now);
+  let processed = (n.counters.dial_entries_serviced - before) as usize;
+
+  // (a) the pass attempts at most the budget.
+  assert!(
+    processed <= super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "one pass must attempt at most MAX_DIAL_ATTEMPTS_PER_PASS={}, attempted {processed}",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  assert!(
+    processed > 0,
+    "non-vacuous: the pass must have minted a prefix"
+  );
+  // Every budgeted attempt opened a REAL bridge (the mint path, not a retire), so
+  // the prefix was consumed off the front rather than dropped.
+  assert_eq!(
+    n.live_bridge_count(),
+    processed,
+    "every budgeted attempt opened a real outbound bridge off the front"
+  );
+
+  // (b) the bucket still holds exactly the un-processed tail (M - processed).
+  let tail = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.len())
+    .unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - processed,
+    "exactly the un-processed tail (M - processed) stays resident"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // (c) the resident tail was neither relocated nor rebuilt: the same back
+  // element lives at the same address, in a bucket of the same capacity. A
+  // `collect()` + `extend()` tail move relocates the back element into a fresh
+  // allocation, so this fails under that mutation.
+  let tail_ptr_after: *const super::PendingDial = n
+    .dial_parked
+    .get(&b_addr)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry as *const super::PendingDial)
+    .expect("the resident tail still has a back element");
+  assert_eq!(
+    tail_ptr_before, tail_ptr_after,
+    "the resident tail's back element must not be relocated (no collect()+extend() rebuild)"
+  );
+  assert_eq!(
+    n.dial_parked
+      .get(&b_addr)
+      .map(|bucket| bucket.capacity())
+      .expect("the resident tail's bucket is present"),
+    cap_before,
+    "the resident tail's backing VecDeque must not be reallocated"
+  );
+
+  // ---- Phase 2: handshake-blocked -> the first entry re-parks and the drain
+  //      stops; it rotates to the BACK while the resident tail stays in place. ----
+  let n2_addr: SocketAddr = "127.0.0.1:7802".parse().unwrap();
+  let cold_peer: SocketAddr = "127.0.0.9:7803".parse().unwrap();
+  let mut n2 = make_endpoint("n2", n2_addr, now);
+
+  // Park M attempted intents on ONE never-answered peer. The first
+  // `service_peer_bucket` attempt dials it — a single still-handshaking
+  // connection — and `open(Bi)` returns None, so the entry re-parks; every later
+  // entry shares that connection and would re-park identically, so the drain
+  // stops at the first.
+  const HB_M: usize = 256;
+  let deadline = now + Duration::from_secs(30);
+  let first_id = StreamId::from_raw(50_000);
+  let second_id = StreamId::from_raw(50_001);
+  for i in 0..HB_M {
+    n2.dial_parked
+      .entry(cold_peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(50_000 + i as u64),
+        peer: cold_peer,
+        deadline,
+        attempted: true,
+      });
+  }
+
+  let before2 = n2.counters.dial_entries_serviced;
+  let _ = n2.service_peer_bucket(cold_peer, now);
+  let processed2 = n2.counters.dial_entries_serviced - before2;
+  assert_eq!(
+    processed2, 1,
+    "a handshake-blocked bucket must stop at the first re-park (O(1), not O(bucket))"
+  );
+  // Nothing dropped: the re-parked entry rode back into the same bucket, so all M
+  // stay parked.
+  assert_eq!(
+    n2.dial_parked
+      .get(&cold_peer)
+      .map(|bucket| bucket.len())
+      .unwrap_or(0),
+    HB_M,
+    "the re-park returns the entry to the bucket, so all M stay parked"
+  );
+  // Front-pop + back-repark: the first entry rotated to the BACK, so the new
+  // front is the SECOND parked entry and the back is the FIRST. A front re-insert
+  // (the old collect()+extend() shape) would instead leave the first entry at the
+  // FRONT.
+  let front_id = n2
+    .dial_parked
+    .get(&cold_peer)
+    .and_then(|bucket| bucket.front())
+    .map(|entry| entry.id)
+    .expect("the resident bucket has a front element");
+  let back_id = n2
+    .dial_parked
+    .get(&cold_peer)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry.id)
+    .expect("the resident bucket has a back element");
+  assert_eq!(
+    front_id, second_id,
+    "front-pop rotates the re-parked entry off the front; the second entry leads"
+  );
+  assert_eq!(
+    back_id, first_id,
+    "the re-parked first entry rides at the back of the resident bucket"
   );
 }
 

@@ -515,7 +515,13 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   ///
   /// [`IndexMap`] (not a plain `HashMap`) so the global tick drains buckets in a
   /// deterministic insertion order, which the conformance simulation relies on.
-  dial_parked: IndexMap<SocketAddr, SmallVec<PendingDial>, FxBuildHasher>,
+  ///
+  /// Each bucket is a [`VecDeque`] so a per-peer readiness event can detach a
+  /// bounded front-prefix in place — `pop_front` is O(1) — while the unprocessed
+  /// tail stays resident in the same allocation. A single event's dial work is
+  /// therefore O(min(budget, bucket)) with no per-event copy of the tail back
+  /// into a recreated bucket.
+  dial_parked: IndexMap<SocketAddr, VecDeque<PendingDial>, FxBuildHasher>,
   /// Incremental count of entries in [`Self::dial_pending`] whose `attempted`
   /// bit is `false`. Maintained at every `dial_pending` mutation (enqueue,
   /// `mem::take` drain, requeue) so [`Self::refresh_immediate_due`] answers "is
@@ -2602,65 +2608,68 @@ where
   /// exactly its blocked intents retry in O(that bucket) instead of scanning the
   /// whole dial queue on every such event.
   ///
-  /// The bucket is removed whole, then each entry runs the same per-entry logic
-  /// [`Self::service_dials`] applies; a still-blocked entry re-parks into
-  /// `dial_parked[peer]` (recreating the bucket), so on return the bucket holds
-  /// exactly the survivors and is absent when every entry cleared. Reports minted
-  /// bridges and touched connections identically for the caller to pump and
-  /// flush the same pass.
+  /// The bucket is NOT removed whole: a bounded front-prefix is detached in
+  /// place with O(1) `pop_front` while the unprocessed tail stays resident in
+  /// the same allocation. Each popped entry runs the same per-entry logic
+  /// [`Self::service_dials`] applies; a still-blocked entry re-parks onto the
+  /// BACK of `dial_parked[peer]` and the drain stops (every later entry shares
+  /// that connection and would re-park identically). An emptied bucket is
+  /// dropped so a stored bucket is always non-empty. Reports minted bridges and
+  /// touched connections identically for the caller to pump and flush the same
+  /// pass.
   fn service_peer_bucket(&mut self, peer: SocketAddr, now: Instant) -> ServicedDials {
     let mut minted: SmallVec<StreamId> = SmallVec::new();
     let mut touched = TouchedConns::new();
-    // O(1) removal: `swap_remove`, not `shift_remove` — nothing depends on
+    // Attempt at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries this pass, REGARDLESS
+    // of outcome — a big `MAX_STREAMS` grant (or a handshake granting large
+    // initial credit) that mints every entry, and a long expired prefix that
+    // retires every entry, must not let ONE datagram drive O(bucket) dial work.
+    let mut attempts = 0usize;
+    while attempts < MAX_DIAL_ATTEMPTS_PER_PASS {
+      // O(1) `get_mut` then O(1) `pop_front` detaches one entry from the front
+      // while the tail stays resident — no whole-bucket take, no tail copy. The
+      // borrow is released with this `let`, so `process_dial_entry` (which
+      // re-borrows `self`, including `dial_parked`, to re-park) runs freely. A
+      // missing key or an emptied bucket ends the pass.
+      let Some(entry) = self
+        .dial_parked
+        .get_mut(&peer)
+        .and_then(VecDeque::pop_front)
+      else {
+        break;
+      };
+      attempts += 1;
+      match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
+        // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
+        // retire consumes none, so a later entry in the bucket may still find
+        // an opening — keep draining (up to the budget).
+        DialAttempt::Minted | DialAttempt::Retired => {}
+        // The first re-park proves the shared pooled connection is still
+        // handshaking or its restored bidi credit is already spent. Every later
+        // entry in this bucket targets that SAME connection and would re-park
+        // identically, so stop instead of re-attempting the whole bucket for
+        // each single-credit `Available` — attempting the whole bucket per
+        // credit is O(bucket) per credit, so K single-credit frames cost
+        // O(K^2). Stopping here makes each `Available` O(1). The re-parked entry
+        // went to the BACK of the bucket (via `process_dial_entry`'s
+        // `push_back`), so it is not re-popped this pass; the resident tail
+        // ahead of it and this entry behind it both ride to the next drain with
+        // `attempted = true` and their `TimerKey::Dial` deadline keys intact
+        // (only `process_dial_entry` touches those), so `poll_timeout`'s folded
+        // `Dial` term still wakes the un-budgeted `service_dials` at the
+        // earliest dial deadline — nothing is stranded.
+        DialAttempt::Reparked => break,
+      }
+    }
+    // Preserve the "a stored bucket is never empty" field invariant: a pass that
+    // drained the last entry (every entry minted or retired) leaves the bucket
+    // present but empty, so drop it. O(1) `swap_remove` — nothing depends on
     // `dial_parked`'s iteration order (the tick's `service_dials` drains it via
     // `mem::take`, and both the deadline fold and the debug recount are
     // order-agnostic aggregates over `values()`), so trading insertion order for
-    // O(1) is safe and stays deterministic for VOPR replay. `shift_remove` would
-    // instead shift every later bucket, making a per-`Available` event O(#peer
-    // buckets).
-    if let Some(bucket) = self.dial_parked.swap_remove(&peer) {
-      let mut entries = bucket.into_iter();
-      // Attempt at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries this pass, REGARDLESS
-      // of outcome. A `while` (checking the budget BEFORE pulling the next entry)
-      // rather than `for … in by_ref()` so a budget stop leaves the still-unpulled
-      // tail intact in `entries` for the re-park below — a big `MAX_STREAMS` grant
-      // (or a handshake granting large initial credit) that mints every entry, and
-      // a long expired prefix that retires every entry, must not let ONE datagram
-      // drive O(bucket) dial work.
-      let mut attempts = 0usize;
-      while attempts < MAX_DIAL_ATTEMPTS_PER_PASS {
-        let Some(entry) = entries.next() else {
-          break;
-        };
-        attempts += 1;
-        match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
-          // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
-          // retire consumes none, so a later entry in the bucket may still find
-          // an opening — keep draining (up to the budget).
-          DialAttempt::Minted | DialAttempt::Retired => {}
-          // The first re-park proves the shared pooled connection is still
-          // handshaking or its restored bidi credit is already spent. Every
-          // later entry in this bucket targets that SAME connection and would
-          // re-park identically, so stop instead of re-attempting the whole
-          // bucket for each single-credit `Available` — attempting the whole
-          // bucket per credit is O(bucket) per credit, so K single-credit
-          // frames cost O(K^2). Stopping here makes each `Available` O(1).
-          DialAttempt::Reparked => break,
-        }
-      }
-      // Append the untouched tail — the entries the budget deferred, or the ones
-      // after the re-parked entry (which has already re-inserted itself into
-      // `dial_parked[peer]`, recreating the bucket) — so no intent is dropped.
-      // Each tail entry keeps `attempted = true` and its existing `TimerKey::Dial`
-      // deadline key untouched (only `process_dial_entry` touches those, and the
-      // tail never reached it): the un-budgeted `service_dials` on the next tick
-      // drains everything deferred and retires any that expire, and
-      // `poll_timeout`'s folded `Dial` term already wakes the tick at the earliest
-      // dial deadline, so leaving them untouched strands nothing.
-      let rest: SmallVec<PendingDial> = entries.collect();
-      if !rest.is_empty() {
-        self.dial_parked.entry(peer).or_default().extend(rest);
-      }
+    // O(1) is safe and stays deterministic for VOPR replay.
+    if self.dial_parked.get(&peer).is_some_and(VecDeque::is_empty) {
+      self.dial_parked.swap_remove(&peer);
     }
     ServicedDials {
       minted_bridges: minted,
@@ -2924,13 +2933,20 @@ where
                 // peer's connection (handshake completion, or a MAX_STREAMS
                 // raise) services exactly this intent via
                 // `service_peer_bucket`. `attempted = true`, so it no longer
-                // contributes to the immediate-due wake.
-                self.dial_parked.entry(peer).or_default().push(PendingDial {
-                  id,
-                  peer,
-                  deadline,
-                  attempted: true,
-                });
+                // contributes to the immediate-due wake. Appended to the BACK:
+                // `service_peer_bucket` pops from the FRONT and stops on the
+                // first re-park, so a self-re-park lands behind the resident
+                // tail and is not re-popped this pass.
+                self
+                  .dial_parked
+                  .entry(peer)
+                  .or_default()
+                  .push_back(PendingDial {
+                    id,
+                    peer,
+                    deadline,
+                    attempted: true,
+                  });
                 // Requeued (handshake-blocked or credit-exhausted): re-register
                 // its deadline so the tick's exact-at-deadline retirement wake
                 // still fires for the parked intent.
