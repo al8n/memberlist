@@ -7009,3 +7009,139 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
        retired), leaving the bucket empty"
   );
 }
+
+/// One connection-window MAX_DATA makes quinn emit `StreamEvent::Writable` for
+/// EVERY connection-window-blocked stream in a SINGLE `poll()` drain, and the
+/// arm's per-event reverse-index lookup + `ready_bridges` push would otherwise
+/// grow the ready queue by O(blocked streams) for that ONE datagram. The arm caps
+/// its enqueues at `MAX_BRIDGE_PUMPS_PER_PASS` per pass, so `ready_bridges` growth
+/// from a Writable storm is bounded no matter how many streams the MAX_DATA
+/// unblocks.
+///
+/// Unlike `writable_storm_pass_pumps_at_most_the_budget` (which bounds the DRAIN,
+/// enqueuing the storm synthetically), this drives a REAL MAX_DATA: A opens N
+/// connection-window-blocked bridges, B reads A's data and emits MAX_DATA, and A's
+/// `poll()` then storms `Writable`. The per-pass ENQUEUE count (queue growth), not
+/// only the pump count, is what is asserted.
+///
+/// Mutation-verify: remove the `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
+/// cap — the storm pass then enqueues one bridge per Writable (~N), so its per-pass
+/// `writable_bridges_enqueued` equals `writable_events_seen` and the `<= budget`
+/// assertion fails on that pass.
+#[test]
+fn writable_storm_arm_caps_enqueues() {
+  let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B: small connection window (so A's sends back-pressure at the connection level)
+  // and a high bidi-stream limit (so A can open many exchanges at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A opens N reliable exchanges; B's 16 KiB connection window admits only a few,
+  // so the rest stay connection-window-blocked (in quinn's connection_blocked set)
+  // — each a bridge that will receive a `Writable` when a MAX_DATA arrives.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  let live = a.bridges.len();
+  assert!(
+    live > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "test precondition: A must hold more connection-window-blocked bridges ({live}) \
+       than the budget so the storm is non-vacuous"
+  );
+
+  // Deliver A's blocked sends to B and let B read them and emit MAX_DATA, but do
+  // NOT deliver B's output back to A yet — so all N blocked bridges accumulate on A
+  // before any MAX_DATA reaches it, landing the whole storm in one A pass.
+  let mut b_to_a: Vec<Vec<u8>> = Vec::new();
+  let mut t = now;
+  for _ in 0..80 {
+    t += Duration::from_millis(5);
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, t);
+        moved = true;
+      }
+    }
+    b.handle_timeout(t);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        b_to_a.push(bytes.to_vec());
+      }
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    !b_to_a.is_empty(),
+    "B must emit datagrams (a MAX_DATA raising the connection window) after reading \
+       A's back-pressured data"
+  );
+
+  // Measured phase: deliver B's datagrams to A ONE AT A TIME. Each `handle_udp` is
+  // one service pass = one `Writable`-arm run. Reset the counters before each and
+  // assert the per-pass enqueues never exceed the budget; the storm pass proves the
+  // cap is non-vacuous (it SEES far more Writables than the budget).
+  let mut max_events_seen = 0u64;
+  for dg in &b_to_a {
+    a.counters.writable_events_seen = 0;
+    a.counters.writable_bridges_enqueued = 0;
+    a.handle_udp(b_addr, dg, t);
+    let seen = a.counters.writable_events_seen;
+    let enqueued = a.counters.writable_bridges_enqueued;
+    max_events_seen = max_events_seen.max(seen);
+    assert!(
+      enqueued <= super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+      "one service pass must enqueue at most MAX_BRIDGE_PUMPS_PER_PASS={} bridges \
+         from the Writable arm, not the {seen} the storm delivered this pass; \
+         enqueued {enqueued} (removing the cap makes this equal {seen})",
+      super::MAX_BRIDGE_PUMPS_PER_PASS
+    );
+  }
+  assert!(
+    max_events_seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "non-vacuous: one service pass must have seen more Writable events \
+       ({max_events_seen}) than the budget, so the cap actually bound the enqueues \
+       (removing it would exceed the budget on that pass)"
+  );
+}

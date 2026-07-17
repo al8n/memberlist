@@ -733,6 +733,22 @@ struct TestCounters {
   /// drain makes it scale with every parked dial and the test fails. Never
   /// compiled into production builds.
   dial_entries_serviced: u64,
+  /// Test-only count of `StreamEvent::Writable` events the per-connection
+  /// `poll()` drain delivered to the `Writable` arm this run — bumped at arm
+  /// entry, BEFORE the per-pass cap. One connection-window MAX_DATA storms this
+  /// with a `Writable` per connection-window-blocked stream, so a single service
+  /// pass can see far more than the pump budget; this counter proves the storm is
+  /// real (so the enqueue cap below is non-vacuous). Never compiled into
+  /// production builds.
+  writable_events_seen: u64,
+  /// Test-only count of bridges the `Writable` arm actually enqueued onto
+  /// `ready_bridges` — bumped AFTER the per-pass `MAX_BRIDGE_PUMPS_PER_PASS` cap,
+  /// so a single service pass bumps it at most that many times no matter how large
+  /// the Writable storm. The Writable-storm regression test resets it per handle_udp
+  /// and asserts the per-pass delta never exceeds the budget; removing the cap makes
+  /// it track `writable_events_seen` and the storm pass exceeds the budget. Never
+  /// compiled into production builds.
+  writable_bridges_enqueued: u64,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -3722,6 +3738,13 @@ where
     // raised its MAX_STREAMS bidi limit, so a dial requeued on this peer's
     // exhausted bidi credit can now open. Consumed after the borrow drops.
     let mut credit_restored = false;
+    // Per-pass count of `StreamEvent::Writable` enqueues, capped at
+    // `MAX_BRIDGE_PUMPS_PER_PASS`. One connection-window MAX_DATA makes quinn emit
+    // `Writable` for EVERY connection-window-blocked stream, so an uncapped arm
+    // would grow `ready_bridges` by O(blocked streams) — up to
+    // `max_inbound_streams` — for that ONE datagram. Bounding the enqueues to the
+    // pump budget caps that queue growth; see the `Writable` arm.
+    let mut writable_enqueues: usize = 0;
     while let Some(ev) = e.conn_mut().poll() {
       match ev {
         quinn_proto::Event::ConnectionLost { .. } => {
@@ -3861,11 +3884,40 @@ where
           }
         }
         quinn_proto::Event::Stream(quinn_proto::StreamEvent::Writable { id: sid }) => {
+          #[cfg(test)]
+          {
+            self.counters.writable_events_seen =
+              self.counters.writable_events_seen.saturating_add(1);
+          }
+          // Cap the Writable enqueues (and thus `ready_bridges` growth) this pass
+          // at the pump budget. One connection-window MAX_DATA (one attacker byte)
+          // makes quinn drain its whole connection-blocked set, emitting a
+          // `Writable` for EVERY connection-window-blocked stream, so an uncapped
+          // arm would do an O(1) reverse-index lookup + `ready_bridges` push for
+          // each — O(blocked streams), up to `max_inbound_streams`, for that ONE
+          // datagram. Past the budget, skip the lookup and enqueue entirely: a
+          // still-blocked bridge cannot progress without a window, the next real
+          // MAX_DATA re-emits its `Writable`, and — having been pumped before — it
+          // already holds a `TimerKey::Bridge` deadline that wakes the tick, so a
+          // dropped enqueue here is harmless. The residual poll-loop iteration over
+          // the remaining `Writable` events is O(quinn `max_concurrent_bidi_streams`)
+          // — the same config-bounded, table-independent per-credit-window batch
+          // bound the inbound `accept(Dir::Bi)` loop documents, not a per-datagram
+          // amplification.
+          if writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS {
+            continue;
+          }
+          writable_enqueues += 1;
           // T3 (writable): send-side backpressure released for this stream (a
           // MAX_STREAM_DATA raise, or a connection-window / ACK relax surfaced by
           // `poll()`). Enqueue the owning bridge so the pass drain retries its
           // blocked `pending_out` flush in `pump_out`.
           if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
+            #[cfg(test)]
+            {
+              self.counters.writable_bridges_enqueued =
+                self.counters.writable_bridges_enqueued.saturating_add(1);
+            }
             enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
           }
         }
