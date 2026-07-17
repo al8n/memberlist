@@ -5248,20 +5248,26 @@ fn writable_storm_pass_pumps_at_most_the_budget() {
     "test precondition: the storm must leave a residue so liveness is non-vacuous"
   );
 
-  // Liveness: the un-budgeted tick drains the whole residue — every deferred
-  // bridge is pumped and the ready queue ends empty. The overflow was deferred,
-  // never dropped.
+  // Liveness: the deferred residue is never dropped. At this quiet instant no
+  // membership or connection timer is due, so each `handle_timeout` is a
+  // Catchup-only wake that pumps one budget-sized chunk via the bounded catch-up;
+  // the residue clears in O(residue / budget) steps and the queue ends empty.
   a.counters.bridge_visits = 0;
-  a.handle_timeout(now);
-  assert!(
-    a.ready_bridges.is_empty(),
-    "the un-budgeted tick clears the ready queue (residue drained): {} entries left",
-    a.ready_bridges.len()
-  );
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    a.handle_timeout(now);
+    steps += 1;
+    assert!(
+      steps <= residue / super::MAX_BRIDGE_PUMPS_PER_PASS + 2,
+      "the deferred residue must drain in O(residue / budget) bounded catch-up \
+         steps; still {} queued after {steps} steps",
+      a.ready_bridges.len()
+    );
+  }
   assert!(
     a.counters.bridge_visits >= residue as u64,
-    "the tick must pump the whole {residue}-bridge residue (deferred, not \
-       dropped); visited {}",
+    "the bounded catch-up must pump the whole {residue}-bridge residue (deferred, \
+       not dropped); visited {}",
     a.counters.bridge_visits
   );
 }
@@ -7143,5 +7149,156 @@ fn writable_storm_arm_caps_enqueues() {
     "non-vacuous: one service pass must have seen more Writable events \
        ({max_events_seen}) than the budget, so the cap actually bound the enqueues \
        (removing it would exceed the budget on that pass)"
+  );
+}
+
+/// A budget-deferred bridge residue holds no `TimerKey::Bridge` deadline until its
+/// first pump, and `poll_timeout` deliberately ignores `ready_bridges`. With
+/// membership (probe/gossip) and connection transport timers all far, the residue
+/// would then get no timely wake and strand. The fix is a THROTTLED Catchup anchor:
+/// `poll_timeout` returns `last_now + CATCHUP_INTERVAL` while a residue waits, and
+/// `handle_timeout` services a Catchup-only wake in BOUNDED steps (not a full O(N)
+/// membership tick), so a driver re-polling at the Catchup deadline drains the
+/// residue one budget-sized chunk per interval and converges.
+///
+/// Construction: A opens N connection-window-blocked bridges to B (far exchange
+/// deadlines, quiescent connection — no near transport timer), then ONE service
+/// pass over the enqueued storm leaves a residue > budget. Membership timers are
+/// far (fixed `now`, no probe due).
+///
+/// Mutation-verify (i): skip setting `TimerKey::Catchup` in `poll_timeout` — it
+/// then returns the far exchange/idle minimum (or None), so the `<= last_now +
+/// CATCHUP_INTERVAL` assertion fails; the `earliest_excluding(Catchup)` check
+/// proves that value is strictly later, so the Catchup term is load-bearing.
+///
+/// Mutation-verify (ii): revert `handle_timeout` to always run the full `run_tick`
+/// — a Catchup-only wake then drains the WHOLE residue in one tick (a step drains
+/// more than the budget) AND advances membership time, so the per-step budget bound
+/// and the flat-membership assertions fail.
+#[test]
+fn budget_deferred_residue_drains_via_throttled_catchup_wake() {
+  let a_addr: SocketAddr = "127.0.0.1:7994".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7995".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // Open N connection-window-blocked bridges (far exchange deadlines), then enqueue
+  // them all and run ONE service pass so the pump budget leaves a residue > budget.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  let residue0 = a.ready_bridges.len();
+  assert!(
+    residue0 > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "test precondition: one pass must leave a residue exceeding the budget so the \
+       catch-up needs multiple bounded steps; residue {residue0}"
+  );
+
+  // (i) A wake IS scheduled no later than `last_now + CATCHUP_INTERVAL`, and it is
+  // the EARLIEST wake — every non-Catchup timer (membership, connection, bridge
+  // exchange) is strictly later, so the Catchup term is load-bearing (skipping it
+  // returns that far minimum, and the primary assertion below fails).
+  let catchup_deadline = now + super::CATCHUP_INTERVAL;
+  let wake = a
+    .poll_timeout()
+    .expect("a non-empty residue must schedule a catch-up wake");
+  assert!(
+    wake <= catchup_deadline,
+    "poll_timeout must return a throttled catch-up wake no later than last_now + \
+       CATCHUP_INTERVAL while a residue waits; got {wake:?} vs {catchup_deadline:?}"
+  );
+  let non_catchup = a
+    .deadline_index
+    .earliest_excluding(super::deadline::TimerKey::Catchup);
+  assert!(
+    non_catchup.is_none_or(|t| t > catchup_deadline),
+    "non-vacuous: every NON-Catchup timer must be strictly later than the catch-up \
+       deadline, so removing the Catchup term would return a later wake (or None); \
+       got {non_catchup:?}"
+  );
+
+  // (ii) Driving handle_timeout at the catch-up instant REPEATEDLY drains the
+  // residue in bounded steps of the budget, each a BOUNDED catch-up (no full
+  // membership tick), converging to empty with nothing stranded.
+  let memb_before = a.membership_time_advances();
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    let before = a.ready_bridges.len();
+    a.handle_timeout(catchup_deadline);
+    let drained = before - a.ready_bridges.len();
+    assert!(
+      drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+      "each Catchup-only wake must pump at most the budget ({}), not the whole \
+         residue; a step drained {drained} (reverting handle_timeout to an \
+         unconditional full tick drains it all at once)",
+      super::MAX_BRIDGE_PUMPS_PER_PASS
+    );
+    assert!(
+      drained >= 1,
+      "each catch-up step must make progress (converge)"
+    );
+    steps += 1;
+    assert!(
+      steps <= residue0 / super::MAX_BRIDGE_PUMPS_PER_PASS + 2,
+      "the catch-up must converge in O(residue / budget) steps"
+    );
+  }
+  assert_eq!(
+    a.membership_time_advances(),
+    memb_before,
+    "a Catchup-only wake must NOT advance membership time (no full tick); reverting \
+       handle_timeout to an unconditional run_tick makes this counter climb"
+  );
+  assert!(
+    steps >= 2,
+    "non-vacuous: a residue > budget needs at least two catch-up steps"
   );
 }

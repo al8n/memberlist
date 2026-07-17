@@ -165,6 +165,23 @@ const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
 /// a handshake-blocked bucket still stops at the first re-park.
 const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
 
+/// How long [`QuicEndpoint::poll_timeout`] throttles the deferred-servicing
+/// (Catchup) wake while a budget-deferred bridge residue waits in
+/// [`QuicEndpoint::ready_bridges`].
+///
+/// A datagram may defer bridges past the per-pass pump budget (or MINT a bridge
+/// past the budget) that hold no [`TimerKey::Bridge`] deadline yet — that key is
+/// set only on a bridge's first pump. With gossip/probe disabled or scheduled
+/// after the exchange deadline and no near QUIC transport timer, `poll_timeout`
+/// (which deliberately ignores `ready_bridges`) would otherwise return no timely
+/// wake and the residue would strand or miss its deadline. This anchors a wake at
+/// `last_now + CATCHUP_INTERVAL`, pacing the residue drain at
+/// [`MAX_BRIDGE_PUMPS_PER_PASS`] per interval — a fixed, table-independent rate —
+/// while guaranteeing the wake lands far inside any exchange deadline. Throttled
+/// (a future instant), not immediate, so one datagram cannot re-chunk its residue
+/// into O(K) work across a driver's re-polls.
+const CATCHUP_INTERVAL: core::time::Duration = core::time::Duration::from_millis(10);
+
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
 /// frame) into the shared coordinator ingress queue, enforcing the per-peer
 /// standing-share cap AND the node-global cap so neither source can exceed the
@@ -1540,6 +1557,20 @@ impl<I, R> QuicEndpoint<I, R> {
       .deadline_index
       .set(TimerKey::Endpoint, self.ep.poll_timeout());
     self.refresh_immediate_due();
+    // The throttled catch-up anchor: while a budget-deferred bridge residue waits
+    // in `ready_bridges` (which this fold otherwise ignores), schedule a wake at
+    // `last_now + CATCHUP_INTERVAL` so the residue drains even with no membership /
+    // probe / gossip timer and no near QUIC transport timer to wake the
+    // coordinator. Throttled off `last_now` (a fixed future instant), so repeated
+    // re-polls without time advancing return the SAME deadline — one datagram
+    // cannot re-chunk its residue into O(K) work across re-polls. `last_now` is
+    // `None` only before the first `handle_*`; that first `handle_timeout` arms it.
+    let catchup = if self.ready_bridges.is_empty() {
+      None
+    } else {
+      self.last_now.map(|t| t + CATCHUP_INTERVAL)
+    };
+    self.deadline_index.set(TimerKey::Catchup, catchup);
     self.deadline_index.earliest()
   }
 
@@ -1726,6 +1757,14 @@ impl<I, R> QuicEndpoint<I, R> {
     if has_unattempted || has_pending_conn_events {
       if let Some(anchor) = self.last_now {
         best = Some(best.map_or(anchor, |b| b.min(anchor)));
+      }
+    }
+    // The throttled catch-up anchor mirrors `poll_timeout`: while a budget-deferred
+    // bridge residue waits in `ready_bridges`, a wake is folded at
+    // `last_now + CATCHUP_INTERVAL`.
+    if !self.ready_bridges.is_empty() {
+      if let Some(t) = self.last_now.map(|t| t + CATCHUP_INTERVAL) {
+        best = Some(best.map_or(t, |b| b.min(t)));
       }
     }
     best
@@ -3268,9 +3307,70 @@ where
   }
 
   /// Timer tick from the driver.
+  ///
+  /// Selective on WHY the driver woke, so the throttled Catchup anchor (armed by
+  /// [`Self::poll_timeout`] while a budget-deferred bridge residue waits in
+  /// `ready_bridges`) does BOUNDED work rather than a full O(N) tick every
+  /// `CATCHUP_INTERVAL`:
+  ///
+  /// * If any NON-Catchup timer is due (`<= now`) — a membership probe / gossip /
+  ///   suspicion deadline, a connection transport timer, a bridge or dial deadline
+  ///   — run the full periodic [`Self::run_tick`] (which drains the residue via
+  ///   `pump_bridges`, exactly as before). This is a scheduled tick, so its O(N)
+  ///   work is fine; it is not driven per datagram.
+  /// * Otherwise, if a residue waits in `ready_bridges`, the wake can only be the
+  ///   Catchup anchor: run the BOUNDED [`Self::catchup_service`], which pumps at
+  ///   most [`MAX_BRIDGE_PUMPS_PER_PASS`] deferred bridges and flushes the
+  ///   connections it touched, WITHOUT advancing membership time or running the
+  ///   O(N) `service_quinn` / `service_dials`. This keeps a driver re-polling at
+  ///   the throttled Catchup deadline from re-chunking one datagram's residue into
+  ///   O(N) work across re-polls.
+  /// * With no residue (the common case — `run_tick` and every `start_*` clear
+  ///   `ready_bridges`), the Catchup anchor is absent, so the full `run_tick` runs
+  ///   as before regardless of what is due.
   pub fn handle_timeout(&mut self, now: Instant) {
     self.last_now = Some(now);
-    self.run_tick(now);
+    // A residue with no non-Catchup timer due means this wake IS the throttled
+    // Catchup anchor; service it in bounded steps. Every other case (a real timer
+    // due, or no residue) runs the full periodic tick unchanged.
+    let non_catchup_due = self
+      .deadline_index
+      .earliest_excluding(TimerKey::Catchup)
+      .is_some_and(|d| d <= now);
+    if !non_catchup_due && !self.ready_bridges.is_empty() {
+      self.catchup_service(now);
+    } else {
+      self.run_tick(now);
+    }
+  }
+
+  /// Bounded deferred-residue servicing for a Catchup-only wake (see
+  /// [`Self::handle_timeout`]). Pumps at most [`MAX_BRIDGE_PUMPS_PER_PASS`] bridges
+  /// from `ready_bridges` under a fresh budget and flushes + re-indexes exactly the
+  /// connections it pumped — mirroring [`Self::service_connection`]'s post-drain
+  /// `collect_conn_transmits` — but WITHOUT advancing membership time
+  /// (`Endpoint::handle_timeout`) or running the O(N) `service_quinn` /
+  /// `service_dials`. So a Catchup-triggered wake stays O(budget), non-amplifiable:
+  /// a driver re-polling at the throttled Catchup deadline drains the residue one
+  /// budget-sized chunk per [`CATCHUP_INTERVAL`], and while any residue remains
+  /// `poll_timeout` re-arms Catchup, so absent new datagrams the residue strictly
+  /// drains to empty. A real periodic tick still does its O(N) work when a
+  /// non-Catchup timer is due.
+  fn catchup_service(&mut self, now: Instant) {
+    let mut budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    // Nothing minted or accepted here, so no bridge is "pumped after acceptance":
+    // snapshot every current bridge id as pre-existing in the test-only tracking
+    // variant so the post-acceptance counter stays flat.
+    #[cfg(test)]
+    let to_flush = {
+      let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
+      self.drain_ready_bridges_tracking(now, &pre, &mut budget)
+    };
+    #[cfg(not(test))]
+    let to_flush = self.drain_ready_bridges(now, &mut budget);
+    for ch in to_flush {
+      self.collect_conn_transmits(ch, now);
+    }
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt

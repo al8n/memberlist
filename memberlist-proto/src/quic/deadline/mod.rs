@@ -49,6 +49,14 @@ pub(crate) enum TimerKey {
   /// sieved dial is still unattempted or a connection carries a deferred
   /// `ConnectionEvent` backlog. A singleton key.
   ImmediateDue,
+  /// The throttled deferred-servicing anchor: `last_now + CATCHUP_INTERVAL` while
+  /// the coordinator's `ready_bridges` residue is non-empty, else absent. The twin
+  /// of [`TimerKey::ImmediateDue`] but THROTTLED — a FUTURE instant re-armed off
+  /// `last_now`, so repeated driver re-polls without time advancing return the
+  /// SAME deadline rather than an immediate re-drain, and one datagram's
+  /// budget-deferred bridge residue cannot re-chunk into O(K) work across those
+  /// re-polls. A singleton key.
+  Catchup,
 }
 
 /// An ordered per-key deadline index with no tombstones, backing an
@@ -133,6 +141,20 @@ impl DeadlineIndex {
       self.entities_scanned += 1;
     }
     earliest
+  }
+
+  /// The earliest registered deadline across all keys EXCEPT `skip`, or `None`
+  /// when no other key is registered. `skip` is a SINGLETON key (there is at most
+  /// one `by_deadline` entry for it), so this scans past at most that one entry at
+  /// the ordered front and returns the next — O(1), like [`Self::earliest`], not a
+  /// table scan. Used by `handle_timeout` to decide whether any NON-`skip` timer
+  /// is due before diverting a `skip`-only (Catchup-only) wake to bounded catch-up
+  /// servicing.
+  pub(crate) fn earliest_excluding(&self, skip: TimerKey) -> Option<Instant> {
+    self
+      .by_deadline
+      .iter()
+      .find_map(|(&(d, _), &key)| (key != skip).then_some(d))
   }
 
   /// Test-only ordered-map-examination count since the last reset. See
