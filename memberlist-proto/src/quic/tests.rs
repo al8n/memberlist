@@ -57,6 +57,28 @@ fn test_config_small_conn_window() -> QuicOptions {
   )
 }
 
+/// Like [`test_config_small_conn_window`] but also RAISING the peer's
+/// concurrent-bidi-stream limit, so a sender can open MANY reliable exchanges at
+/// once and have them all back-pressure at the CONNECTION window — the setup for
+/// the connection-window Writable-storm that a single MAX_DATA releases.
+fn test_config_small_conn_window_bidi(bidi: u32) -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.receive_window(quinn_proto::VarInt::from_u32(16 * 1024));
+  transport.stream_receive_window(quinn_proto::VarInt::from_u32(4 * 1024 * 1024));
+  transport.max_concurrent_bidi_streams(quinn_proto::VarInt::from_u32(bidi));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
 fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
   let cfg = EndpointOptions::new(SmolStr::new(id), addr);
   let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
@@ -5095,6 +5117,152 @@ fn connection_window_backpressured_exchange_completes_under_strict_poll() {
        re-pumps the bridge. A single-write flush stalls the tail (no re-wake) and \
        B never receives the full {}-byte payload.",
     payload.len()
+  );
+}
+
+/// One connection-level flow-control window increase (a single MAX_DATA — one
+/// attacker byte) makes quinn-proto emit `StreamEvent::Writable` for EVERY stream
+/// blocked on the connection window, and the datagram `poll()` drain enqueues
+/// each owning bridge. Without a bound the pass would then pump ALL of them (up to
+/// `max_inbound_streams`, ~1024) for that ONE datagram. The pass budget caps that:
+/// a single service pass pumps at most `MAX_BRIDGE_PUMPS_PER_PASS` ready bridges;
+/// the overflow stays queued and drains on a later pass or the un-budgeted tick,
+/// deferred but never dropped.
+///
+/// Construction: A opens MANY reliable exchanges to B, all back-pressured at B's
+/// small connection window (so they stay live with un-flushed `pending_out`). The
+/// Writable-storm enqueue is reproduced by enqueuing every live bridge via the
+/// same `enqueue_ready_bridge` the `poll()` drain uses, then ONE service pass runs
+/// over that full queue.
+///
+/// Mutation-verify: set the pass budget to `usize::MAX` (pump-to-empty) — the one
+/// pass then pumps all ~N bridges, so `bridge_visits` jumps to N and the
+/// `<= MAX_BRIDGE_PUMPS_PER_PASS` assertion fails.
+#[test]
+fn writable_storm_pass_pumps_at_most_the_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7991".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B advertises a SMALL connection window (so A's sends back-pressure at the
+  // connection level) and a HIGH bidi-stream limit (so A can open ~200 exchanges
+  // at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A opens N reliable user-message exchanges to B. Each opens a bidi and buffers
+  // its payload; B's 16 KiB connection window admits only the first few, so the
+  // rest stay live with un-flushed `pending_out`. Held (never ferried) so all
+  // stay live.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let live = a.bridges.len();
+  assert!(
+    live >= 128,
+    "test precondition: A must hold many concurrent connection-window-blocked \
+       bridges so the budget is the binding constraint; got {live}"
+  );
+
+  // Reproduce the Writable storm: enqueue every live bridge onto the pass-scoped
+  // ready queue via the SAME helper the `poll()` drain uses on each MAX_DATA
+  // Writable. `flush_outbound`'s `finalize_tick` cleared the queue after the last
+  // `start_user_message`, so this is a clean enqueue of the full storm set.
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  let enqueued = a.ready_bridges.len();
+  assert!(
+    enqueued > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "the storm must exceed the pass budget for the cap to be non-vacuous \
+       (enqueued {enqueued}, budget {})",
+    super::MAX_BRIDGE_PUMPS_PER_PASS
+  );
+
+  // ONE service pass over the full ready queue (the per-datagram path).
+  a.counters.bridge_visits = 0;
+  a.service_connection(ch, now);
+  let one_pass = a.counters.bridge_visits;
+  assert!(
+    one_pass <= super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "one service pass must pump at most MAX_BRIDGE_PUMPS_PER_PASS={} bridges, not \
+       the {enqueued} Writable-storm bridges; pumped {one_pass} (pump-to-empty \
+       would pump ~{enqueued})",
+    super::MAX_BRIDGE_PUMPS_PER_PASS
+  );
+  assert!(
+    one_pass >= 1,
+    "non-vacuous: the budgeted pass must still pump at least one bridge"
+  );
+  // The un-pumped remainder stays QUEUED (deferred, not dropped).
+  let residue = a.ready_bridges.len();
+  assert_eq!(
+    residue,
+    enqueued - one_pass as usize,
+    "exactly the un-pumped remainder rides to the next pass / tick"
+  );
+  assert!(
+    residue > 0,
+    "test precondition: the storm must leave a residue so liveness is non-vacuous"
+  );
+
+  // Liveness: the un-budgeted tick drains the whole residue — every deferred
+  // bridge is pumped and the ready queue ends empty. The overflow was deferred,
+  // never dropped.
+  a.counters.bridge_visits = 0;
+  a.handle_timeout(now);
+  assert!(
+    a.ready_bridges.is_empty(),
+    "the un-budgeted tick clears the ready queue (residue drained): {} entries left",
+    a.ready_bridges.len()
+  );
+  assert!(
+    a.counters.bridge_visits >= residue as u64,
+    "the tick must pump the whole {residue}-bridge residue (deferred, not \
+       dropped); visited {}",
+    a.counters.bridge_visits
   );
 }
 

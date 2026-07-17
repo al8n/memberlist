@@ -127,6 +127,23 @@ const MAX_MEM_INGRESS_DATAGRAMS: usize = 8192;
 /// is popped from quinn (so its buffer cannot accumulate) and dropped.
 const MAX_INGRESS_DATAGRAMS_PER_PEER: usize = 1024;
 
+/// Maximum ready bridges the datagram service path pumps in ONE pass. Overflow
+/// stays queued in `ready_bridges` (its `Bridge::queued` flag set) and drains on
+/// the next pass — popped FRONT-first, so oldest-first round-robin — or on the
+/// un-budgeted tick `pump_bridges`, which services every bridge regardless.
+///
+/// A single connection-level flow-control window increase (one MAX_DATA frame —
+/// one attacker byte) makes quinn-proto emit `StreamEvent::Writable` for EVERY
+/// stream blocked on the connection window, so an unbounded datagram pump would
+/// run up to `QuicOptions::max_inbound_streams` (~1024 by default)
+/// `pump_one_bridge` calls for that one datagram. Gossip needs only a handful of
+/// concurrent reliable exchanges per connection, so this bound clears legitimate
+/// bursts while capping a Writable-storm's per-datagram pump work far below that
+/// inbound-bridge ceiling. The deferred residue is never dropped: every surviving
+/// bridge already holds a `TimerKey::Bridge` deadline that `poll_timeout` folds,
+/// so the tick is woken with no extra term, and the tick pumps the residue.
+const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
+
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
 /// frame) into the shared coordinator ingress queue, enforcing the per-peer
 /// standing-share cap AND the node-global cap so neither source can exceed the
@@ -2055,27 +2072,59 @@ impl<I, R> QuicEndpoint<I, R> {
     // mint trigger pushed this tick are now flag-dead; clear the pass-scoped
     // queue so it never carries a stale id into a later pass.
     self.ready_bridges.clear();
+    // The tick ends with an EMPTY queue and no flagged bridge — the strict
+    // post-condition, unlike the budgeted datagram path which may leave a residue.
+    // With the queue now empty, `debug_assert_ready_drained`'s lockstep also
+    // confirms no live bridge is still flagged.
+    debug_assert!(
+      self.ready_bridges.is_empty(),
+      "tick did not end with an empty ready-bridge queue: {} entries remain",
+      self.ready_bridges.len(),
+    );
     self.debug_assert_ready_drained();
   }
 
-  /// Debug-only pass-end invariant: the pass-scoped [`Self::ready_bridges`] queue
-  /// is empty and no live bridge still carries a set [`Bridge::queued`] flag.
+  /// Debug-only pass-end invariant: queue/flag lockstep between the pass-scoped
+  /// [`Self::ready_bridges`] queue and each live bridge's [`Bridge::queued`] flag.
   ///
-  /// Queue/flag lockstep: a trigger sets the flag only when it pushes the id, and
-  /// the flag is cleared only at pump entry — either by a queue pop-drain
-  /// ([`Self::drain_ready_bridges`]) or by the global pump-all
-  /// ([`Self::pump_bridges`], which services every bridge and so clears every
-  /// flag) — or with the bridge on reap. The queue is emptied only by a
-  /// drain-to-empty or [`Self::finalize_tick`]'s clear. Both invariants therefore
-  /// hold at the end of every servicing pass; the assert guards a future trigger
-  /// site that enqueues without a matching drain. Compiled out in release.
+  /// The budgeted datagram path ([`Self::drain_ready_bridges`]) pumps at most
+  /// [`MAX_BRIDGE_PUMPS_PER_PASS`] bridges per pass and LEAVES any overflow queued
+  /// for the next pass or the tick, so — unlike the tick, which clears the queue
+  /// (see [`Self::finalize_tick`]) — the queue is NOT required to be empty here.
+  /// What must always hold is the bidirectional lockstep that keeps the O(1)
+  /// enqueue dedup and the no-lost-wakeup guarantee sound:
+  ///
+  /// * every live bridge whose `queued()` flag is set is present in
+  ///   `ready_bridges` — else the datagram path would never pump it and
+  ///   [`enqueue_ready_bridge`] would refuse to re-add it (flag already set),
+  ///   stranding it until the tick; and
+  /// * every id in `ready_bridges` that still names a LIVE bridge has its
+  ///   `queued()` flag set, so a live bridge is never enqueued twice.
+  ///
+  /// A stale id whose bridge was reaped WHILE queued — a connection-loss reap
+  /// removes the bridge without popping the queue — is permitted: the next drain
+  /// pops and no-ops it, and the tick's clear wipes any residue. The flag is set
+  /// only on enqueue and cleared only at pump entry (a queue pop-drain, or the
+  /// global [`Self::pump_bridges`] that clears every flag) or with the bridge on
+  /// reap, so the two never drift for a live bridge. Compiled out in release.
   fn debug_assert_ready_drained(&self) {
-    debug_assert!(
-      self.ready_bridges.is_empty() && self.bridges.values().all(|br| !br.queued()),
-      "ready-bridge queue not fully drained at pass end: {} queued entries, any-flag-set {}",
-      self.ready_bridges.len(),
-      self.bridges.values().any(|br| br.queued()),
-    );
+    #[cfg(debug_assertions)]
+    {
+      for id in &self.ready_bridges {
+        if let Some(br) = self.bridges.get(id) {
+          debug_assert!(
+            br.queued(),
+            "ready-bridge queue/flag drift: queued id {id:?} names a live bridge whose queued flag is clear",
+          );
+        }
+      }
+      for (id, br) in &self.bridges {
+        debug_assert!(
+          !br.queued() || self.ready_bridges.contains(id),
+          "ready-bridge queue/flag drift: bridge {id:?} has its queued flag set but is absent from ready_bridges",
+        );
+      }
+    }
   }
 
   /// Move any `Event::DialRequested` currently in the inner endpoint's
@@ -2913,8 +2962,9 @@ where
     }
   }
 
-  /// Drain the pass-scoped ready-bridge queue [`Self::ready_bridges`]: pop each
-  /// enqueued machine [`StreamId`] and pump it exactly once via the shared
+  /// Drain the pass-scoped ready-bridge queue [`Self::ready_bridges`] under a
+  /// per-pass pump budget: pop up to `*budget` enqueued machine [`StreamId`]s
+  /// from the FRONT and pump each exactly once via the shared
   /// [`Self::pump_one_bridge`] (which clears its [`Bridge::queued`] flag at
   /// entry), returning the distinct set of [`ConnectionHandle`]s whose bridges
   /// it pumped so the caller flushes each one's owed transmits this same pass —
@@ -2922,20 +2972,42 @@ where
   /// than the one being serviced. A since-reaped id no-ops (its
   /// [`Self::pump_one_bridge`] finds no bridge and returns `None`).
   ///
+  /// `budget` is decremented once per pop and is SHARED across every
+  /// `drain_ready_bridges` call in one service pass (see [`Self::service_connection`]),
+  /// so a single pass pumps at most [`MAX_BRIDGE_PUMPS_PER_PASS`] bridges total —
+  /// not that many per call. Any un-pumped remainder STAYS in `ready_bridges`
+  /// with its `queued` flag set; the queue is persistent across datagram passes,
+  /// so leftover bridges ride to the next pass (drained front-first =
+  /// oldest-first) or to the un-budgeted tick `pump_bridges`. This caps a
+  /// MAX_DATA Writable-storm — one frame makes quinn emit `Writable` for every
+  /// connection-window-blocked stream — at a fixed per-datagram pump cost rather
+  /// than up to `max_inbound_streams`. Nothing is stranded: every surviving
+  /// bridge already registered a `TimerKey::Bridge` deadline that `poll_timeout`
+  /// folds, so the residue waits for the naturally-scheduled tick (or the next
+  /// datagram) with no extra `poll_timeout` term.
+  ///
   /// Replaces the former all-bridges-on-`ch` pump on the datagram path: only the
-  /// bridges a readiness trigger enqueued this pass are pumped, so a corrupted or
-  /// replayed packet — which advances no stream state and fires no trigger —
-  /// pumps zero, while under valid traffic the pumped set is exactly the bridges
-  /// the arriving frames advanced.
+  /// bridges a readiness trigger enqueued (and this pass's budget admits) are
+  /// pumped, so a corrupted or replayed packet — which advances no stream state
+  /// and fires no trigger — pumps zero, while under valid traffic the pumped set
+  /// is exactly the bridges the arriving frames advanced, capped by the budget.
   ///
   /// `#[cfg(not(test))]`: test builds drain via the post-acceptance-tracking
   /// [`Self::drain_ready_bridges_tracking`] instead, so this untracked variant is
   /// compiled only for production — mirroring how the global tick splits
   /// `pump_bridges` from `pump_bridges_tracking_post_acceptance`.
   #[cfg(not(test))]
-  fn drain_ready_bridges(&mut self, now: Instant) -> SmallVec<ConnectionHandle> {
+  fn drain_ready_bridges(
+    &mut self,
+    now: Instant,
+    budget: &mut usize,
+  ) -> SmallVec<ConnectionHandle> {
     let mut pumped_conns: SmallVec<ConnectionHandle> = SmallVec::new();
-    while let Some(id) = self.ready_bridges.pop_front() {
+    while *budget > 0 {
+      let Some(id) = self.ready_bridges.pop_front() else {
+        break;
+      };
+      *budget -= 1;
       if let Some(ch) = self.pump_one_bridge(id, now) {
         if !pumped_conns.contains(&ch) {
           pumped_conns.push(ch);
@@ -3075,9 +3147,14 @@ where
     &mut self,
     now: Instant,
     pre_snapshot_ids: &HashSet<StreamId>,
+    budget: &mut usize,
   ) -> SmallVec<ConnectionHandle> {
     let mut pumped_conns: SmallVec<ConnectionHandle> = SmallVec::new();
-    while let Some(id) = self.ready_bridges.pop_front() {
+    while *budget > 0 {
+      let Some(id) = self.ready_bridges.pop_front() else {
+        break;
+      };
+      *budget -= 1;
       if self.bridges.contains_key(&id) && !pre_snapshot_ids.contains(&id) {
         self.counters.bridges_pumped_after_acceptance = self
           .counters
@@ -3321,17 +3398,23 @@ where
     // `Readable`/`Writable`/`Finished`/`Stopped` made ready (T2–T5). It returns
     // the readiness marks (establishment, credit restore) consumed by step (c).
     let marks = self.service_one_conn(ch, now);
-    // (b) Drain the ready queue: pump exactly the bridges `service_one_conn` made
-    // ready this pass — never every bridge on `ch` — so their first buffered
-    // request/response bytes reach the quinn send stream and any terminal bridge
-    // reaps the same pass. A corrupted or replayed packet fires no trigger, so
-    // this drains nothing. The drain returns the distinct connections it pumped;
-    // accumulate them (plus the dials' touched connections below) to flush after
-    // step (d).
+    // One pump budget SHARED across BOTH `drain_ready_bridges` calls in this pass
+    // (the ready-queue drain here and the post-`service_peer_bucket` drain below),
+    // so a Writable-storm datagram pumps at most `MAX_BRIDGE_PUMPS_PER_PASS`
+    // bridges TOTAL this pass — not that many per drain. Overflow stays queued in
+    // `ready_bridges` for the next pass or the un-budgeted tick.
+    let mut pump_budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    // (b) Drain the ready queue: pump the bridges `service_one_conn` made ready
+    // this pass — never every bridge on `ch`, and never more than the pass budget
+    // — so their first buffered request/response bytes reach the quinn send stream
+    // and any terminal bridge reaps the same pass. A corrupted or replayed packet
+    // fires no trigger, so this drains nothing. The drain returns the distinct
+    // connections it pumped; accumulate them (plus the dials' touched connections
+    // below) to flush after step (d).
     #[cfg(test)]
-    let mut to_flush = self.drain_ready_bridges_tracking(now, &pre_service_ids);
+    let mut to_flush = self.drain_ready_bridges_tracking(now, &pre_service_ids, &mut pump_budget);
     #[cfg(not(test))]
-    let mut to_flush = self.drain_ready_bridges(now);
+    let mut to_flush = self.drain_ready_bridges(now, &mut pump_budget);
     // (c) If `ch` became ready this pass — its handshake completed, or its peer
     // raised its MAX_STREAMS bidi limit — attempt ONLY the dials parked on that
     // peer, never the whole dial queue. A pooled push/pull or reliable-ping
@@ -3373,9 +3456,9 @@ where
         enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
       }
       #[cfg(test)]
-      let pumped = self.drain_ready_bridges_tracking(now, &pre_service_ids);
+      let pumped = self.drain_ready_bridges_tracking(now, &pre_service_ids, &mut pump_budget);
       #[cfg(not(test))]
-      let pumped = self.drain_ready_bridges(now);
+      let pumped = self.drain_ready_bridges(now, &mut pump_budget);
       for mc in pumped {
         if !to_flush.contains(&mc) {
           to_flush.push(mc);
