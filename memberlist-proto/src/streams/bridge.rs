@@ -57,9 +57,13 @@
 //!
 //! `StreamBridge` is consumed by the unified stream-transport coordinator.
 
+use std::collections::VecDeque;
+
 use crate::Instant;
 #[cfg(not(feature = "std"))]
 use std::{string::ToString, vec::Vec};
+
+use bytes::Bytes;
 
 use crate::{
   bridge_phase::{BridgeFailure, LinkState},
@@ -149,6 +153,15 @@ pub(crate) struct StreamBridge<I, A, R> {
   /// frame with the framed bytes verbatim).
   #[cfg(compression)]
   compression: crate::CompressionOptions,
+  /// `true` once the current `output_buf` payload is the endpoint's serve-ready
+  /// (already-compressed) cached push/pull response, so the outbound encode
+  /// skips its compression stage (re-compressing would double-wrap the frame
+  /// and change the wire bytes) and applies only its per-frame encryption +
+  /// length prefix. Set when the response is loaded via `stream_load_response`;
+  /// the small raw request / ack frames stay `false` and are compressed here as
+  /// before. No-op without a compression backend.
+  #[cfg(compression)]
+  response_precompressed: bool,
   /// Cross-transport encryption configuration. The bridge is the single
   /// encrypt/decrypt point on the reliable path when `R::is_secure() ==
   /// false`. For a secure transport (TLS), the constructor receives a
@@ -218,6 +231,8 @@ where
       deadline,
       #[cfg(compression)]
       compression,
+      #[cfg(compression)]
+      response_precompressed: false,
       #[cfg(encryption)]
       encryption: effective_encryption,
       recv_accum: Vec::new(),
@@ -225,35 +240,50 @@ where
     }
   }
 
-  /// Encode one outbound reliable unit: compress (when built in), then encrypt
-  /// (when built in), then length-delimit. The inverse of
-  /// [`Self::take_reliable_unit`]. With no transform backend this is just
-  /// `[unit_len][framed]`.
-  // `unused_mut` / `unused_assignments`: the `payload` binding is reassigned
-  // only under the compression/encryption cfgs, so with one or neither built in
-  // the initial binding (or a stage's write) is never observed.
-  #[allow(unused_mut, unused_assignments)]
-  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, FrameError> {
-    use std::borrow::Cow;
-    let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
+  /// Encode one outbound reliable unit into its `[unit_len][payload]` chunk
+  /// pair `(header, payload)`: compress (when built in and the body is not
+  /// already serve-ready), then encrypt (when built in and enabled), then emit
+  /// the varint length as its OWN small chunk so the (possibly shared) payload
+  /// body is not byte-copied to prepend the header. The inverse of
+  /// [`Self::take_reliable_unit`]. With no transform backend, and for a
+  /// pre-compressed body, the payload chunk is the input `body` verbatim.
+  ///
+  /// On the reliable stream path the record layer copies the chunks into its
+  /// own outbound buffer (rustls plaintext / raw TCP), so a slow peer's retained
+  /// unit is inherently per-bridge; the one crypto copy this makes when
+  /// encryption is enabled is that inherent wire cost.
+  fn reliable_unit(&self, body: Bytes) -> Result<(Bytes, Bytes), FrameError> {
+    // Step 1: compression. Skip it for the endpoint's serve-ready (already
+    // compressed) cached response — re-compressing would double-wrap the frame
+    // and change the wire bytes. The small raw request / ack frames compress
+    // here as before.
     #[cfg(compression)]
-    {
-      payload = Cow::Owned(crate::compression::compress_reliable_payload(
+    let payload: Bytes = if self.response_precompressed {
+      body
+    } else {
+      Bytes::from(crate::compression::compress_reliable_payload(
         &self.compression,
-        framed,
-      ));
-    }
+        &body,
+      ))
+    };
+    #[cfg(not(compression))]
+    let payload: Bytes = body;
+    // Step 2: encryption. Gate on `is_enabled()` so a disabled keyring costs no
+    // copy — the body passes straight through. When enabled the per-frame nonce
+    // makes it inherently per-bridge: the one accepted crypto copy.
     #[cfg(encryption)]
-    {
-      payload = Cow::Owned(
+    let payload: Bytes = if self.encryption.is_enabled() {
+      Bytes::from(
         crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
           .map_err(FrameError::Encryption)?,
-      );
-    }
-    let mut out = Vec::with_capacity(5 + payload.len());
-    crate::framing::encode_varint_u32(payload.len() as u32, &mut out);
-    out.extend_from_slice(&payload);
-    Ok(out)
+      )
+    } else {
+      payload
+    };
+    // Step 3: length-delimit — the varint header is its own small chunk.
+    let mut header = Vec::with_capacity(5);
+    crate::framing::encode_varint_u32(payload.len() as u32, &mut header);
+    Ok((Bytes::from(header), payload))
   }
 
   /// Take one complete reliable unit `[unit_len][payload]` off the front of
@@ -755,21 +785,23 @@ where
       return Err(());
     }
 
-    // Gather every `poll_transmit` yield from this drain into one buffer,
-    // then write it as ONE self-delimiting reliable unit. A byte stream does
-    // not preserve write/read boundaries, so framing each drain as one
-    // `[unit_len][payload]` unit lets the peer re-delimit it regardless of
-    // how the transport chunks the bytes. The `poll_transmit` borrow on
-    // `stream` ends before the `write_plaintext` borrow on `records` begins.
-    let mut gathered = Vec::new();
-    let mut chunk = Vec::new();
+    // Gather every `poll_transmit` yield from this drain, encode it as ONE
+    // self-delimiting reliable unit, and write the unit's chunks sequentially
+    // into the record layer. A byte stream does not preserve write/read
+    // boundaries, so framing each drain as one `[unit_len][payload]` unit lets
+    // the peer re-delimit it regardless of how the transport chunks the bytes.
+    // Draining chunks moves the (possibly shared) response body by refcount —
+    // never byte-copying it — until the single record-layer write, which is the
+    // one inherent per-bridge copy (rustls plaintext / per-frame-nonce
+    // ciphertext). The `poll_transmit` borrow on `stream` ends before the
+    // `write_plaintext` borrow on `records` begins.
+    let mut gathered: VecDeque<Bytes> = VecDeque::new();
     loop {
-      chunk.clear();
       let yielded = self
         .stream
         .as_mut()
         .expect("stream is Some")
-        .poll_transmit(now, &mut chunk)
+        .poll_transmit(now, &mut gathered)
         .is_some();
       if !yielded {
         break;
@@ -777,14 +809,14 @@ where
       // `poll_transmit` yielded this exchange's output: the send half now
       // owes its close.
       self.sent_any = true;
-      gathered.extend_from_slice(&chunk);
     }
     if !gathered.is_empty() {
+      let body = crate::stream::coalesce_output_chunks(gathered);
       // An encryption backend error here (e.g. a primary key whose backend
       // feature was not built into this binary) is fatal — emitting plaintext
       // on the wire would silently bypass authentication on an
       // encrypted-cluster reliable exchange. Atomically retire-then-fail.
-      let unit = match self.encode_reliable_unit(&gathered) {
+      let (header, payload) = match self.reliable_unit(body) {
         Ok(u) => u,
         Err(e) => {
           self.fail_with_retire(BridgeFailure::Transport(format!("reliable encode: {e}")));
@@ -792,11 +824,15 @@ where
         }
       };
       // Fail the exchange synchronously if the record layer cannot admit the
-      // whole unit (its outbound bound is exceeded). The unit was NOT queued, so
-      // proceeding would silently drop the frame and surface only as a later
-      // timeout; retire-then-fail now. For one-unit-per-exchange the bound
-      // always admits the unit, so this never fires.
-      if !self.records.write_plaintext(&unit) {
+      // whole unit (its outbound bound is exceeded). No partial frame is ever
+      // buffered on a rejection: the record layer stages nothing on a `false`
+      // return, and the leading header chunk (if it staged) is dropped by the
+      // `fail_with_retire` → `clear_outbound` below — so a rejected unit never
+      // leaks a lone length prefix onto the wire. For one-unit-per-exchange the
+      // bound always admits the unit, so this never fires.
+      let admitted =
+        self.records.write_plaintext(&header) && self.records.write_plaintext(&payload);
+      if !admitted {
         self.fail_with_retire(BridgeFailure::Transport(
           "reliable send buffer overflow".to_string(),
         ));
@@ -1298,6 +1334,13 @@ where
               resp.into_encoded(),
               response_deadline,
             );
+            // The cached response is the endpoint's serve-ready (already
+            // compressed) body — the outbound encode must skip its own
+            // compression stage so it is not double-wrapped.
+            #[cfg(compression)]
+            {
+              self.response_precompressed = true;
+            }
             self.deadline = response_deadline;
             // Ignoring Err: `pump_out` failing here terminalizes the bridge,
             // which the lifecycle-notice selection below reflects as
@@ -1392,6 +1435,13 @@ where
               resp.into_encoded(),
               response_deadline,
             );
+            // The cached response is the endpoint's serve-ready (already
+            // compressed) body — the outbound encode must skip its own
+            // compression stage so it is not double-wrapped.
+            #[cfg(compression)]
+            {
+              self.response_precompressed = true;
+            }
             self.deadline = response_deadline;
             // Ignoring Err: a `pump_out` failure terminalizes the bridge,
             // which the next-tick reap reflects.

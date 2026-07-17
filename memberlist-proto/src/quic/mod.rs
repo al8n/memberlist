@@ -927,9 +927,17 @@ impl<I, R> QuicEndpoint<I, R> {
     ep: Endpoint<I, SocketAddr, R>,
     cfg: QuicOptions,
     compression: crate::CompressionOptions,
-  ) -> Self {
+  ) -> Self
+  where
+    I: crate::Id,
+  {
     let mut this = Self::new(ep, cfg);
     this.compression = compression;
+    // Fold the same compression into the endpoint's serve-ready push/pull
+    // response cache so an inbound reply is compressed once per membership
+    // change and served to every requester by refcount, byte-identical to a
+    // per-request bridge encode.
+    this.ep.set_response_compression(compression);
     this
   }
 
@@ -1004,8 +1012,14 @@ impl<I, R> QuicEndpoint<I, R> {
       feature = "brotli"
     )))
   )]
-  pub fn set_compression_options(&mut self, compression: crate::CompressionOptions) {
+  pub fn set_compression_options(&mut self, compression: crate::CompressionOptions)
+  where
+    I: crate::Id,
+  {
     self.compression = compression;
+    // Rebuild the endpoint's serve-ready response cache under the new policy so
+    // the reply stays byte-identical to what the bridges now encode.
+    self.ep.set_response_compression(compression);
   }
 
   /// Compress one outbound gossip datagram for the wire. When compression is

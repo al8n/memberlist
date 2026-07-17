@@ -672,21 +672,37 @@ impl Network {
         || self.faults.partitioned(vs.initiator_addr, vs.acceptor_addr))
     });
 
+    // `poll_transmit` now drains a chain of refcounted `Bytes` chunks; the
+    // virtual pipe reassembles them into one contiguous buffer before handing
+    // them to the peer's `handle_data` (which expects a `&[u8]` frame).
+    let mut chunks = VecDeque::new();
     let mut buf = Vec::with_capacity(4096);
     for vs in streams.iter_mut() {
       // ── Initiator → Acceptor ────────────────────────────────────────────
-      buf.clear();
-      if vs.initiator.poll_transmit(now, &mut buf).is_some() && !buf.is_empty() {
-        // Ignoring Err: a decode failure terminalizes the stream, which the
-        // step loop's stream-drain pass reaps; nothing actionable here.
-        let _ = vs.acceptor.handle_data(&buf, now);
+      chunks.clear();
+      if vs.initiator.poll_transmit(now, &mut chunks).is_some() {
+        buf.clear();
+        for chunk in &chunks {
+          buf.extend_from_slice(chunk);
+        }
+        if !buf.is_empty() {
+          // Ignoring Err: a decode failure terminalizes the stream, which the
+          // step loop's stream-drain pass reaps; nothing actionable here.
+          let _ = vs.acceptor.handle_data(&buf, now);
+        }
       }
       // ── Acceptor → Initiator ────────────────────────────────────────────
-      buf.clear();
-      if vs.acceptor.poll_transmit(now, &mut buf).is_some() && !buf.is_empty() {
-        // Ignoring Err: same terminality-as-reap reasoning as the
-        // initiator → acceptor direction above.
-        let _ = vs.initiator.handle_data(&buf, now);
+      chunks.clear();
+      if vs.acceptor.poll_transmit(now, &mut chunks).is_some() {
+        buf.clear();
+        for chunk in &chunks {
+          buf.extend_from_slice(chunk);
+        }
+        if !buf.is_empty() {
+          // Ignoring Err: same terminality-as-reap reasoning as the
+          // initiator → acceptor direction above.
+          let _ = vs.initiator.handle_data(&buf, now);
+        }
       }
       // ── Route EndpointEvents (initiator) ────────────────────────────────
       while let Some(ep_ev) = vs.initiator.poll_endpoint_event() {

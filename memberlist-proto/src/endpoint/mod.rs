@@ -268,14 +268,17 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // Bookkeeping.
   incarnation: u32,
   local_state_snapshot: Bytes,
-  // Cached, pre-encoded inbound push/pull RESPONSE frame: our entire membership
+  // Cached, serve-ready inbound push/pull RESPONSE body: our entire membership
   // view (every member as a `PushNodeState`) plus `local_state_snapshot`, with
-  // `join` cleared. The response body is request-independent, so it is folded
-  // and encoded ONCE per membership change — on the schedule-fired tick via
-  // `refresh_pushpull_response_cache` — and served to every requester by an O(1)
-  // `Bytes::clone`, keeping the per-datagram servicing cost off the O(members)
-  // build+encode. Byte-identical to a fresh `encode_push_pull_response` over the
-  // same membership.
+  // `join` cleared, encoded and then run through the coordinator-uniform
+  // compression stage (`response_compression`). The body is request-independent,
+  // so it is folded, encoded, and compressed ONCE per membership change — on the
+  // schedule-fired tick via `refresh_pushpull_response_cache` — and served to
+  // every requester by an O(1) `Bytes::clone`, keeping the per-datagram
+  // servicing cost off the O(members) build. The transport bridge wraps it in
+  // its per-frame encryption + length prefix; the on-wire bytes are identical to
+  // encoding + compressing the frame per request. With compression disabled (or
+  // no backend) this is the raw `encode_push_pull_response` frame verbatim.
   cached_pushpull_response: Bytes,
   // The `snapshot_version` the cached response was last built at. A tick rebuilds
   // the cache only when this differs from `snapshot_version` (which every
@@ -287,6 +290,17 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // application-state blob). Forces the next tick to rebuild the cache even
   // though `snapshot_version` is unchanged.
   cached_response_dirty: bool,
+  // Compression applied when building the serve-ready cached response. The
+  // reliable-unit transform pipeline is `compress -> encrypt -> length-delimit`;
+  // compression is coordinator-uniform (one policy for every peer) and
+  // deterministic, so it is amortized once per membership change here rather
+  // than recomputed per inbound request. Encryption stays per-bridge (a fresh
+  // per-frame nonce cannot be shared), so the cache stores only the compressed
+  // body and each transport bridge applies its own encryption + length prefix.
+  // A driver/coordinator opts in via `set_response_compression`; the default
+  // (disabled) leaves the cache byte-identical to the raw encoded frame.
+  #[cfg(compression)]
+  response_compression: crate::CompressionOptions,
   // Counts the O(members) response builds (see `build_pushpull_response_bytes`).
   // A regression test drives many inbound push/pull requests against a static
   // member table and asserts this stays flat — proving the per-request path
@@ -1029,7 +1043,10 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// encoded bytes. The stream must be in `InboundSendingResponse` phase when
   /// this is called.
   pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Bytes, deadline: Instant) {
-    stream.output_buf.extend(encoded);
+    // O(1) refcount push — the whole (possibly Θ(members)) response body is
+    // enqueued as a single shared chunk, never byte-copied. Every requester's
+    // stream holds a clone of the same backing allocation.
+    stream.output_buf.push_back(encoded);
     stream.deadline = Some(deadline);
   }
 }
@@ -1067,16 +1084,47 @@ where
         .with_delegate_version(ns.delegate_version())
       })
       .collect();
-    let encoded = Bytes::from(Self::encode_push_pull_response(
-      &local_states,
-      self.local_state_snapshot.clone(),
-      false,
+    let framed =
+      Self::encode_push_pull_response(&local_states, self.local_state_snapshot.clone(), false);
+    // Fold the coordinator-uniform compression into the cache so it is paid once
+    // per membership change, not once per inbound request. `compress_reliable_payload`
+    // honors the don't-expand rule (a body that would not shrink is stored
+    // verbatim), so the serve-ready bytes are exactly what the transport bridge
+    // would have produced from the raw frame — the bridge then skips its own
+    // compression stage for this pre-compressed body and only applies its
+    // (per-frame-nonce) encryption + length prefix. With no compression backend,
+    // or compression disabled, the frame is stored unchanged.
+    #[cfg(compression)]
+    let serve_ready = Bytes::from(crate::compression::compress_reliable_payload(
+      &self.response_compression,
+      &framed,
     ));
+    #[cfg(not(compression))]
+    let serve_ready = Bytes::from(framed);
     #[cfg(test)]
     {
       self.pushpull_response_builds += 1;
     }
-    encoded
+    serve_ready
+  }
+
+  /// Set the compression policy used to build the serve-ready cached push/pull
+  /// response, and rebuild the cache immediately under the new policy.
+  ///
+  /// Called by a transport coordinator whenever its compression configuration is
+  /// established or changed ([`crate::quic::QuicEndpoint::set_compression_options`]
+  /// and the stream-endpoint equivalent), so the cache stays byte-identical to
+  /// what that coordinator's bridges would encode. Encryption is deliberately NOT
+  /// folded in here — it carries a fresh per-frame nonce and so cannot be shared
+  /// across requests; each bridge applies it independently over this compressed
+  /// body.
+  #[cfg(compression)]
+  pub(crate) fn set_response_compression(&mut self, compression: crate::CompressionOptions) {
+    self.response_compression = compression;
+    // Force a rebuild now so an inbound exchange served before the next tick
+    // already reflects the new policy (no stale-policy window on the wire).
+    self.cached_response_dirty = true;
+    self.refresh_pushpull_response_cache();
   }
 
   /// Rebuild the cached inbound push/pull response IFF a response-relevant input
@@ -1101,6 +1149,15 @@ where
   #[cfg(test)]
   pub(crate) const fn pushpull_response_builds(&self) -> u64 {
     self.pushpull_response_builds
+  }
+
+  /// Clone the serve-ready cached push/pull response — the exact `Bytes`
+  /// [`handle_stream_event`](Self::handle_stream_event) hands each requester.
+  /// The clone shares the cache's backing allocation, so its `as_ptr()`
+  /// identifies that one buffer (used by the shared-buffer regression test).
+  #[cfg(test)]
+  pub(crate) fn cached_pushpull_response(&self) -> Bytes {
+    self.cached_pushpull_response.clone()
   }
 }
 
@@ -1414,6 +1471,8 @@ where
       cached_pushpull_response: Bytes::new(),
       cached_response_version: 0,
       cached_response_dirty: true,
+      #[cfg(compression)]
+      response_compression: crate::CompressionOptions::new(),
       #[cfg(test)]
       pushpull_response_builds: 0,
       lifecycle: Lifecycle::Running,
@@ -3241,7 +3300,14 @@ where
       }
       return None;
     }
-    let output_buf: std::collections::VecDeque<u8> = VecDeque::from(intent.encoded);
+    // The request frame is enqueued as a single refcounted chunk. An empty
+    // `encoded` (never produced by an intent, but defended against) would push
+    // a zero-length chunk that the transport's chunk writers must not observe,
+    // so skip it.
+    let mut output_buf: std::collections::VecDeque<Bytes> = VecDeque::new();
+    if !intent.encoded.is_empty() {
+      output_buf.push_back(Bytes::from(intent.encoded));
+    }
     let phase = StreamPhase::OutboundSendingRequest(intent.kind);
     Some(Stream {
       id,

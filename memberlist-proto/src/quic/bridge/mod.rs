@@ -17,8 +17,11 @@
 //! receive window is momentarily full; the next pump retries from the
 //! remainder.
 
+use std::collections::VecDeque;
+
 use crate::Instant;
 
+use bytes::Bytes;
 use quinn_proto::{ConnectionHandle, StreamId as QuicSid, VarInt};
 
 use super::conn::ConnTable;
@@ -31,6 +34,14 @@ use crate::{
   stream::Stream,
 };
 use core::time::Duration;
+
+/// Build the `[LABELED_TAG][len][label]` prefix as one owned [`Bytes`] chunk
+/// for the outbound chunk chain (`pending_out`).
+fn label_prefix_chunk(label: &[u8]) -> Bytes {
+  let mut buf = Vec::new();
+  encode_label_prefix(label, &mut buf);
+  Bytes::from(buf)
+}
 
 /// Couples one memberlist reliable-exchange [`Stream`] to one quinn bidi
 /// stream on a pooled connection, pumping bytes both ways and enforcing the
@@ -54,10 +65,25 @@ pub(crate) struct Bridge<I, A> {
   /// pop-drain or the global pump-all that services every bridge). Dropped with
   /// the bridge on reap, so a reaped bridge leaves no dangling flag.
   queued: bool,
-  /// Bytes accepted by memberlist but not yet accepted by the quinn send
-  /// stream because it returned `WriteError::Blocked`. Drained head-first on
-  /// the next [`Bridge::pump_out`]; never discarded while non-empty.
-  pending_out: Vec<u8>,
+  /// Outbound chunk chain staged for the quinn send stream: the label prefix
+  /// and reliable-unit chunks accepted by memberlist but not yet fully accepted
+  /// by quinn (a `write_chunks` partial-accept / `WriteError::Blocked`). Held as
+  /// refcounted [`Bytes`] so a large shared response body is handed to quinn by
+  /// reference — `write_chunks` stores it in quinn's `SendBuffer` by refcount,
+  /// so K bridges serving the same cached response share ONE backing allocation
+  /// instead of K copies. Drained head-first on each [`Bridge::pump_out`]; a
+  /// partial front chunk is advanced in place (never copied) and retried; never
+  /// discarded while non-empty.
+  pending_out: VecDeque<Bytes>,
+  /// `true` once the current `output_buf` payload is the endpoint's serve-ready
+  /// (already-compressed) cached push/pull response, so the outbound encode must
+  /// NOT re-apply compression (that would double-wrap the frame and change the
+  /// wire bytes) — only its per-frame encryption + length prefix. Set when the
+  /// response is loaded via `stream_load_response`; irrelevant for the small
+  /// raw request / ack frames, which are compressed here as before. No-op
+  /// without a compression backend (the endpoint stores the raw frame).
+  #[cfg(compression)]
+  response_precompressed: bool,
   /// "Owe a finish": `true` once `Stream::poll_transmit` has yielded this
   /// exchange's output bytes (armed on the yield, NOT only after a full
   /// successful write — so a first write that partial-accepts then `Blocked`s
@@ -297,7 +323,9 @@ where
       // A freshly minted bridge is not yet on the ready queue; the coordinator
       // enqueues it (setting the flag) at its mint trigger.
       queued: false,
-      pending_out: Vec::new(),
+      pending_out: VecDeque::new(),
+      #[cfg(compression)]
+      response_precompressed: false,
       sent_any: false,
       finish_called: false,
       phase: LinkState::Active,
@@ -316,40 +344,52 @@ where
     }
   }
 
-  /// Encode one outbound reliable unit: compress (when built in), then encrypt
-  /// (when built in), then length-delimit. The inverse of
-  /// [`Self::take_reliable_unit`]. With no transform backend this is just
-  /// `[unit_len][framed]`.
+  /// Encode one outbound reliable unit into its `[unit_len][payload]` chunk
+  /// pair `(header, payload)`: compress (when built in and the body is not
+  /// already serve-ready), then encrypt (when built in and enabled), then emit
+  /// the varint length as its OWN small chunk so the (possibly shared) payload
+  /// body is never byte-copied to prepend the header. The inverse of
+  /// [`Self::take_reliable_unit`]. With no transform backend, and for a
+  /// pre-compressed body, the payload chunk is the input `body` verbatim — the
+  /// same refcounted allocation flows through to quinn.
   ///
-  /// The QUIC reliable path force-disables encryption in the constructor
-  /// (quinn already encrypts the stream), so the encryption stage is identity
-  /// at runtime even when an encryption backend is built in; the stage is
-  /// retained for shape-parity with the plain-stream bridge.
-  // `unused_mut` / `unused_assignments`: the `payload` binding is reassigned
-  // only under the compression/encryption cfgs, so with one or neither built in
-  // the initial binding (or a stage's write) is never observed.
-  #[allow(unused_mut, unused_assignments)]
-  fn encode_reliable_unit(&self, framed: &[u8]) -> Result<Vec<u8>, FrameError> {
-    use std::borrow::Cow;
-    let mut payload: Cow<'_, [u8]> = Cow::Borrowed(framed);
+  /// The QUIC reliable path force-disables encryption in the constructor (quinn
+  /// already encrypts the stream), so the encryption stage is identity at
+  /// runtime even when an encryption backend is built in; the stage is retained
+  /// for shape-parity with the plain-stream bridge.
+  fn reliable_unit(&self, body: Bytes) -> Result<(Bytes, Bytes), FrameError> {
+    // Step 1: compression. Skip it when the body is the endpoint's serve-ready
+    // (already-compressed) cached response — re-compressing would double-wrap
+    // the frame and change the wire bytes. The small raw request / ack frames
+    // are compressed here exactly as before.
     #[cfg(compression)]
-    {
-      payload = Cow::Owned(crate::compression::compress_reliable_payload(
+    let payload: Bytes = if self.response_precompressed {
+      body
+    } else {
+      Bytes::from(crate::compression::compress_reliable_payload(
         &self.compression,
-        framed,
-      ));
-    }
+        &body,
+      ))
+    };
+    #[cfg(not(compression))]
+    let payload: Bytes = body;
+    // Step 2: encryption. Gate on `is_enabled()` so a disabled keyring (always,
+    // on the QUIC path) costs no copy — the shared `Bytes` passes straight
+    // through. When enabled the per-frame nonce makes this inherently
+    // per-bridge, so it is the one accepted crypto copy.
     #[cfg(encryption)]
-    {
-      payload = Cow::Owned(
+    let payload: Bytes = if self.encryption.is_enabled() {
+      Bytes::from(
         crate::encryption::encrypt_reliable_payload(&self.encryption, &payload)
           .map_err(FrameError::Encryption)?,
-      );
-    }
-    let mut out = Vec::with_capacity(5 + payload.len());
-    crate::framing::encode_varint_u32(payload.len() as u32, &mut out);
-    out.extend_from_slice(&payload);
-    Ok(out)
+      )
+    } else {
+      payload
+    };
+    // Step 3: length-delimit — the varint header is its own small chunk.
+    let mut header = Vec::with_capacity(5);
+    crate::framing::encode_varint_u32(payload.len() as u32, &mut header);
+    Ok((Bytes::from(header), payload))
   }
 
   /// Take one complete reliable unit `[unit_len][payload]` off the front of
@@ -820,31 +860,81 @@ where
     // is the very first pump_out call, at which point no bytes have been sent.
     if !self.outbound_label_written && (self.eager_outbound_label || self.inbound_label_validated) {
       if let Some(lbl) = &self.label {
-        encode_label_prefix(lbl, &mut self.pending_out);
+        self.pending_out.push_back(label_prefix_chunk(lbl));
       }
       self.outbound_label_written = true;
     }
 
-    // Flush any back-pressured remainder first so stream order is preserved.
+    // Gather every `poll_transmit` yield into one shared body, encode it as ONE
+    // self-delimiting reliable unit, and append the unit's chunks to
+    // `pending_out` behind any retained back-pressured tail (stream order is
+    // preserved: the tail — a prior unit's remainder — was queued first). A QUIC
+    // stream chunks bytes arbitrarily (and flow-control credit may split the
+    // write), so framing each drain as one `[unit_len][payload]` unit lets the
+    // peer re-delimit it regardless of how the stream chunks the bytes.
+    let mut gathered: VecDeque<Bytes> = VecDeque::new();
+    while self.stream.poll_transmit(now, &mut gathered).is_some() {
+      // `poll_transmit` yielded this exchange's output: the send half now
+      // owes a `finish()` (armed here, before any write, so a partial-accept-
+      // then-Blocked still owes it — unchanged from today).
+      self.sent_any = true;
+    }
+    if !gathered.is_empty() {
+      let body = crate::stream::coalesce_output_chunks(gathered);
+      // The QUIC bridge force-disables encryption in its constructor (quinn
+      // already encrypts the stream), so the encryption stage never fails
+      // here. The fallible `Result` is still matched — the encode shares its
+      // shape with the StreamBridge path — but on this path the error branch
+      // is unreachable in practice.
+      let (header, payload) = match self.reliable_unit(body) {
+        Ok(u) => u,
+        Err(e) => {
+          // Ignoring Err: idempotent retirement.
+          let _ = conn.send_stream(self.sid).reset(VarInt::from_u32(0));
+          let _ = conn.recv_stream(self.sid).stop(VarInt::from_u32(0));
+          self.pending_out.clear();
+          self.fail(BridgeFailure::Transport(format!("encrypt: {e}")));
+          return Err(());
+        }
+      };
+      self.pending_out.push_back(header);
+      self.pending_out.push_back(payload);
+    }
+
+    // Flush `pending_out` (label prefix + reliable-unit chunks) via
+    // `write_chunks`, which stores each ACCEPTED `Bytes` in quinn's `SendBuffer`
+    // BY REFCOUNT — so K bridges serving the same shared cached response body
+    // hand quinn K references to ONE backing allocation, not K copies (total
+    // resident is Θ(members), not Θ(K·members)). A partial write advances the
+    // boundary chunk in place (`Bytes::split_to`, no copy) and empties the fully
+    // written front chunks; we drop the emptied fronts and retry.
     //
-    // Loop the write until the tail fully drains or the stream blocks. A single
-    // `write` can partially accept newly-restored connection-window credit and
-    // return `Ok(partial)` WITHOUT reaching `Err(WriteError::Blocked)`: quinn
-    // registers a stream for a later `StreamEvent::Writable` only when a write
-    // observes zero credit and returns `Blocked`, so a partial-accept-then-
+    // A single `write_chunks` can partially accept newly-restored connection-
+    // window credit and return `Ok` WITHOUT reaching `WriteError::Blocked`:
+    // quinn registers a stream for a later `StreamEvent::Writable` only when a
+    // write observes zero credit and returns `Blocked`, so a partial-accept-then-
     // return would leave the retained tail with no future readiness wake and the
-    // bridge would stall to its exchange deadline under ordinary connection-
-    // level backpressure from a fully compliant peer. Looping guarantees the
-    // flush ends either with the tail drained (fall through to write new units)
-    // or on a `Blocked` that re-registered the stream (quinn re-emits `Writable`
-    // on the next credit release). Mirrors the gathered-unit write loop below;
-    // it terminates because a non-empty `pending_out` write returns `Ok(n >= 1)`
-    // or `Err(Blocked)` — quinn never returns `Ok(0)` for a non-empty buffer
-    // (`Send::write` returns `Err(Blocked)` on a zero stream/connection budget).
+    // bridge would stall to its exchange deadline under ordinary connection-level
+    // backpressure from a compliant peer. Looping guarantees the flush ends
+    // either with the tail drained (fall through to the finish) or on a `Blocked`
+    // that re-registered the stream. It terminates because each `Ok` accepts
+    // >= 1 byte from a non-empty front chunk (quinn returns `Blocked` on zero
+    // stream/connection budget, never `Ok(0)` for non-empty data).
     while !self.pending_out.is_empty() {
-      match conn.send_stream(self.sid).write(&self.pending_out) {
-        Ok(n) => {
-          self.pending_out.drain(..n);
+      let chunks = self.pending_out.make_contiguous();
+      match conn.send_stream(self.sid).write_chunks(chunks) {
+        Ok(written) => {
+          // `write_chunks` emptied (via `mem::take`) each fully written front
+          // chunk and advanced any partial boundary chunk in place. Drop the
+          // emptied fronts; a retained non-empty partial stays at the front.
+          while self.pending_out.front().is_some_and(Bytes::is_empty) {
+            self.pending_out.pop_front();
+          }
+          if written.bytes == 0 {
+            // Defensive: no forward progress (zero credit consumed). Retain the
+            // tail for the next readiness wake rather than spin.
+            return Ok(());
+          }
         }
         Err(quinn_proto::WriteError::Blocked) => return Ok(()),
         Err(e) => {
@@ -859,61 +949,6 @@ where
           self.pending_out.clear();
           self.fail(BridgeFailure::Transport(format!("send write: {e:?}")));
           return Err(());
-        }
-      }
-    }
-
-    // Gather every `poll_transmit` yield into one buffer, then write it as
-    // ONE self-delimiting reliable unit. A QUIC stream chunks bytes
-    // arbitrarily (and flow-control credit may split the write), so framing
-    // each drain as one `[unit_len][payload]` unit lets the peer re-delimit
-    // it regardless of how the stream chunks the bytes.
-    let mut gathered = Vec::new();
-    let mut chunk = Vec::new();
-    while self.stream.poll_transmit(now, &mut chunk).is_some() {
-      // `poll_transmit` yielded this exchange's output: the send half now
-      // owes a `finish()` (armed here, before any write, so a partial-accept-
-      // then-Blocked still owes it — unchanged from today).
-      self.sent_any = true;
-      gathered.extend_from_slice(&chunk);
-      chunk.clear();
-    }
-    if !gathered.is_empty() {
-      // The QUIC bridge force-disables encryption in its constructor (quinn
-      // already encrypts the stream), so the encryption stage never fails
-      // here. The fallible `Result` is still matched — the encode shares its
-      // shape with the StreamBridge path — but on this path the error branch
-      // is unreachable in practice.
-      let unit = match self.encode_reliable_unit(&gathered) {
-        Ok(u) => u,
-        Err(e) => {
-          // Ignoring Err: idempotent retirement.
-          let _ = conn.send_stream(self.sid).reset(VarInt::from_u32(0));
-          let _ = conn.recv_stream(self.sid).stop(VarInt::from_u32(0));
-          self.pending_out.clear();
-          self.fail(BridgeFailure::Transport(format!("encrypt: {e}")));
-          return Err(());
-        }
-      };
-      let mut off = 0;
-      while off < unit.len() {
-        match conn.send_stream(self.sid).write(&unit[off..]) {
-          Ok(w) => off += w,
-          Err(quinn_proto::WriteError::Blocked) => {
-            // Retain the COMPRESSED-unit remainder; replayed head-first next
-            // tick by the existing `pending_out` flush at the top of pump_out.
-            self.pending_out.extend_from_slice(&unit[off..]);
-            return Ok(());
-          }
-          Err(e) => {
-            // Atomic failure — same retire-then-fail as the existing arm.
-            // Ignoring Err: idempotent retirement.
-            let _ = conn.send_stream(self.sid).reset(VarInt::from_u32(0));
-            let _ = conn.recv_stream(self.sid).stop(VarInt::from_u32(0));
-            self.pending_out.clear();
-            self.fail(BridgeFailure::Transport(format!("send write: {e:?}")));
-            return Err(());
-          }
         }
       }
     }
@@ -1057,7 +1092,7 @@ where
         self.inbound_label_validated = true;
         if !self.eager_outbound_label && !self.outbound_label_written {
           if let Some(lbl) = &self.label {
-            encode_label_prefix(lbl, &mut self.pending_out);
+            self.pending_out.push_back(label_prefix_chunk(lbl));
           }
           self.outbound_label_written = true;
         }
@@ -1082,11 +1117,16 @@ where
     self.outbound_label_written
   }
 
-  /// Test-only: the bytes currently staged in `pending_out`.
+  /// Test-only: the bytes currently staged in `pending_out`, concatenated
+  /// across the chunk chain into one contiguous buffer for assertions.
   #[cfg(test)]
   #[allow(dead_code)]
-  pub(crate) fn pending_out_bytes(&self) -> &[u8] {
-    &self.pending_out
+  pub(crate) fn pending_out_bytes(&self) -> Vec<u8> {
+    let mut out = Vec::with_capacity(self.pending_out.iter().map(Bytes::len).sum());
+    for chunk in &self.pending_out {
+      out.extend_from_slice(chunk);
+    }
+    out
   }
 }
 
@@ -1161,7 +1201,7 @@ where
                       // so no bytes have been sent yet).
                       if !self.eager_outbound_label && !self.outbound_label_written {
                         if let Some(lbl) = &self.label {
-                          encode_label_prefix(lbl, &mut self.pending_out);
+                          self.pending_out.push_back(label_prefix_chunk(lbl));
                         }
                         self.outbound_label_written = true;
                       }
@@ -1377,6 +1417,13 @@ where
               resp.into_encoded(),
               response_deadline,
             );
+            // The cached response is the endpoint's serve-ready (already
+            // compressed) body — the outbound encode must skip its own
+            // compression stage so it is not double-wrapped.
+            #[cfg(compression)]
+            {
+              self.response_precompressed = true;
+            }
             self.deadline = response_deadline;
             // Ignoring Err: `pump_out` failing here terminalizes the bridge,
             // which the next-tick `pump_bridges` reap reflects as
@@ -1510,6 +1557,13 @@ where
               resp.into_encoded(),
               response_deadline,
             );
+            // The cached response is the endpoint's serve-ready (already
+            // compressed) body — the outbound encode must skip its own
+            // compression stage so it is not double-wrapped.
+            #[cfg(compression)]
+            {
+              self.response_precompressed = true;
+            }
             self.deadline = response_deadline;
             // Ignoring Err: a `pump_out` failure terminalizes the bridge,
             // which the next-tick `pump_bridges` reap reflects.

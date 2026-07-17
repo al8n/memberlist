@@ -3556,7 +3556,9 @@ fn start_push_pull_emits_dial_requested_and_dial_succeeded_returns_stream() {
 
   // Stream's output_buf should contain encoded PushPull bytes.
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes expected");
+  let n = stream
+    .poll_transmit_vec(t0, &mut buf)
+    .expect("bytes expected");
   assert!(n > 0, "expected non-empty encoded PushPull");
 
   // First byte is PUSH_PULL_MESSAGE_TAG = 8.
@@ -3612,7 +3614,7 @@ fn outbound_push_pull_decode_and_merge() {
   let mut _req_buf = Vec::new();
   // Draining the request via the public API auto-advances the phase to
   // OutboundAwaitingResponse.
-  stream.poll_transmit(t0, &mut _req_buf);
+  stream.poll_transmit_vec(t0, &mut _req_buf);
 
   // Simulate peer's PushPull reply — contains "carol" as a member.
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
@@ -3714,7 +3716,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
         t0 + Duration::from_secs(5),
       );
       let mut out = Vec::new();
-      let n = stream.poll_transmit(t0, &mut out).expect("bytes");
+      let n = stream.poll_transmit_vec(t0, &mut out).expect("bytes");
       assert!(n > 0);
     }
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
@@ -3782,7 +3784,7 @@ fn post_leave_push_pull_reply_does_not_merge() {
   while e.poll_event().is_some() {}
   let mut stream = e.dial_succeeded(id, t0).expect("stream");
   let mut req_buf = Vec::new();
-  stream.poll_transmit(t0, &mut req_buf);
+  stream.poll_transmit_vec(t0, &mut req_buf);
 
   // ...then the node leaves before the peer's reply lands. The in-flight reply
   // must not re-establish membership during the drain.
@@ -4210,7 +4212,9 @@ fn start_reliable_ping_emits_dial_requested() {
   // Dial succeeds — stream output_buf must contain an encoded Ping.
   let mut stream = e.dial_succeeded(id, t0).expect("stream expected");
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes expected");
+  let n = stream
+    .poll_transmit_vec(t0, &mut buf)
+    .expect("bytes expected");
   assert!(n > 0, "expected non-empty encoded Ping");
   // First byte is PING_MESSAGE_TAG = 2.
   assert_eq!(buf[0], 2u8, "first byte must be PING_MESSAGE_TAG");
@@ -4359,7 +4363,7 @@ fn inbound_reliable_ping_encodes_ack() {
   // Stream should have Ack in output_buf.
   let mut out = Vec::new();
   let n = stream
-    .poll_transmit(t0, &mut out)
+    .poll_transmit_vec(t0, &mut out)
     .expect("ack bytes expected");
   assert!(n > 0, "expected non-empty Ack response");
   // First byte is ACK_MESSAGE_TAG = 4.
@@ -4384,7 +4388,10 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   while e.poll_event().is_some() {}
   let mut s_out = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  assert!(s_out.poll_transmit(t0, &mut buf).is_some(), "request bytes");
+  assert!(
+    s_out.poll_transmit_vec(t0, &mut buf).is_some(),
+    "request bytes"
+  );
   assert!(
     matches!(s_out.phase, StreamPhase::OutboundAwaitingResponse(_)),
     "drain must advance OutboundSendingRequest → OutboundAwaitingResponse"
@@ -4420,7 +4427,10 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
     StreamCommand::Close => panic!("expected SendPushPullResponse"),
   }
   buf.clear();
-  assert!(s_in.poll_transmit(t0, &mut buf).is_some(), "response bytes");
+  assert!(
+    s_in.poll_transmit_vec(t0, &mut buf).is_some(),
+    "response bytes"
+  );
   assert!(
     s_in.is_done(),
     "draining the response must advance InboundSendingResponse → Done"
@@ -4447,7 +4457,7 @@ fn outbound_reliable_ping_rejects_wrong_ack_seq() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  s.poll_transmit(t0, &mut buf); // drain ping ⇒ OutboundAwaitingResponse
+  s.poll_transmit_vec(t0, &mut buf); // drain ping ⇒ OutboundAwaitingResponse
 
   let wrong = crate::wire::encode_message::<SmolStr, SocketAddr>(
     &Message::<SmolStr, SocketAddr>::Ack(Ack::new(9999)),
@@ -4486,7 +4496,7 @@ fn inbound_reliable_ping_rejects_wrong_target() {
   );
   let mut out = Vec::new();
   assert!(
-    s.poll_transmit(t0, &mut out).is_none(),
+    s.poll_transmit_vec(t0, &mut out).is_none(),
     "no Ack must be queued for a misrouted ping"
   );
 }
@@ -4880,7 +4890,7 @@ fn start_user_message_encodes_user_data() {
 
   let mut stream = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes");
+  let n = stream.poll_transmit_vec(t0, &mut buf).expect("bytes");
   assert!(n > 0);
   // First byte is USER_DATA_MESSAGE_TAG = 9.
   assert_eq!(buf[0], 9u8);
@@ -5015,7 +5025,7 @@ fn timed_out_stream_never_transmits_queued_bytes() {
   // cleared (`poll_transmit` must not drain it after the stream fails).
   let mut buf = Vec::new();
   assert!(
-    stream.poll_transmit(deadline, &mut buf).is_none(),
+    stream.poll_transmit_vec(deadline, &mut buf).is_none(),
     "a timed-out stream must transmit nothing"
   );
   assert!(
@@ -5338,7 +5348,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   // Driver polls transmit AT the deadline, before any handle_timeout.
   let mut buf = Vec::new();
   assert!(
-    s.poll_transmit(t0 + Duration::from_millis(100), &mut buf)
+    s.poll_transmit_vec(t0 + Duration::from_millis(100), &mut buf)
       .is_none(),
     "a stream past its deadline must transmit nothing"
   );
@@ -5354,7 +5364,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   );
   // Idempotent.
   assert!(
-    s.poll_transmit(t0 + Duration::from_millis(200), &mut buf)
+    s.poll_transmit_vec(t0 + Duration::from_millis(200), &mut buf)
       .is_none()
   );
 }
@@ -5386,7 +5396,7 @@ fn eof_before_response_fails_peer_closed() {
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
   assert!(
-    s.poll_transmit(t0, &mut buf).is_some(),
+    s.poll_transmit_vec(t0, &mut buf).is_some(),
     "request drains ⇒ OutboundAwaitingResponse"
   );
 
@@ -5632,7 +5642,7 @@ fn trailing_bytes_after_outbound_done_fails_decode() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
-  s.poll_transmit(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
+  s.poll_transmit_vec(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
   assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Build a legitimate reply followed by junk bytes in a SINGLE
@@ -5735,7 +5745,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
-  s.poll_transmit(t0, &mut _req_buf);
+  s.poll_transmit_vec(t0, &mut _req_buf);
   assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Chunk 1: the legitimate reply (FSM → Done).
@@ -6010,7 +6020,7 @@ fn end_to_end_push_pull_membership_convergence() {
   let mut stream_a = a.dial_succeeded(id_a, t0).expect("A stream");
   let mut a_request = Vec::new();
   stream_a
-    .poll_transmit(t0, &mut a_request)
+    .poll_transmit_vec(t0, &mut a_request)
     .expect("A request bytes");
   assert!(!a_request.is_empty(), "request must be non-empty");
   assert_eq!(a_request[0], 8u8, "must start with PUSH_PULL_MESSAGE_TAG");
@@ -6064,7 +6074,7 @@ fn end_to_end_push_pull_membership_convergence() {
   // Drain B's response bytes (simulating the driver sending them to A).
   let mut b_response = Vec::new();
   stream_b
-    .poll_transmit(t0, &mut b_response)
+    .poll_transmit_vec(t0, &mut b_response)
     .expect("B response bytes");
   assert!(!b_response.is_empty(), "B response bytes must be non-empty");
 

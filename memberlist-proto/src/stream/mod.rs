@@ -6,7 +6,7 @@
 //!
 //! ```text
 //!   driver calls: handle_data(&[u8], now)  →  decode, advance FSM
-//!   driver calls: poll_transmit(&mut Vec<u8>)  →  drain encoded bytes
+//!   driver calls: poll_transmit(&mut VecDeque<Bytes>)  →  drain encoded chunks
 //!   driver calls: poll_endpoint_event()  →  drain events for Endpoint
 //!   driver calls: poll_event()  →  drain app-visible events
 //!   driver calls: handle_timeout(now)  →  advance on deadline
@@ -151,8 +151,13 @@ pub struct Stream<I, A> {
   pub(crate) phase: StreamPhase,
   /// Accumulator for incoming raw plain-frame bytes.
   pub(crate) input_buf: BytesMut,
-  /// Encoded bytes queued for transmission; driver drains via `poll_transmit`.
-  pub(crate) output_buf: VecDeque<u8>,
+  /// Encoded frame queued for transmission as a chain of refcounted [`Bytes`]
+  /// chunks; the driver drains it via `poll_transmit`. Holding the queue as
+  /// `Bytes` (not a flat `VecDeque<u8>`) lets a large pre-encoded response — the
+  /// cached push/pull reply, served to every requester as an O(1) clone — be
+  /// enqueued and handed to the transport by refcount, never byte-copied. The
+  /// FSM never inspects the chunk contents; it only moves them out on drain.
+  pub(crate) output_buf: VecDeque<Bytes>,
   /// Deadline for the current phase (write-drain deadline OR read deadline).
   pub(crate) deadline: Option<Instant>,
   /// Events destined for Endpoint (PushPullRequestReceived/PushPullReplyReceived, ReliablePingAcked, …).
@@ -189,8 +194,10 @@ where
     }
   }
 
-  /// Drain encoded bytes into `buf`. Returns the number of bytes written,
-  /// or `None` if there is nothing to send right now.
+  /// Drain the encoded output chunks into `out` (appended in order), moving
+  /// each refcounted [`Bytes`] by clone — never byte-copying the payload.
+  /// Returns the total number of bytes moved, or `None` if there is nothing to
+  /// send right now.
   ///
   /// Draining the request/response is what advances the FSM: once the last
   /// byte is handed to the I/O layer here, an `OutboundSendingRequest`
@@ -202,7 +209,7 @@ where
   /// `deadline` (the overall exchange deadline set at dial/accept or by
   /// `stream_load_response`) carries over as the read deadline — a single
   /// per-exchange deadline covers the whole request/response.
-  pub fn poll_transmit(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<usize> {
+  pub fn poll_transmit(&mut self, now: Instant, out: &mut VecDeque<Bytes>) -> Option<usize> {
     // A terminal stream emits nothing — ever. Without this guard a stream
     // that `handle_timeout`/`handle_data` already moved to `Failed` (its
     // deadline elapsed) would still have its queued push/pull reply or
@@ -233,12 +240,13 @@ where
     if self.output_buf.is_empty() {
       return None;
     }
-    let n = self.output_buf.len();
-    buf.reserve(n);
-    let (a, b) = self.output_buf.as_slices();
-    buf.extend_from_slice(a);
-    buf.extend_from_slice(b);
-    self.output_buf.clear();
+    // Move every queued chunk to the caller by refcount — the payload bytes are
+    // never copied. `n` sums the chunk lengths for the drained-byte return.
+    let mut n = 0usize;
+    while let Some(chunk) = self.output_buf.pop_front() {
+      n += chunk.len();
+      out.push_back(chunk);
+    }
     // The output buffer is fully drained (poll_transmit always empties it):
     // advance the write phase.
     match core::mem::replace(&mut self.phase, StreamPhase::Done) {
@@ -261,6 +269,20 @@ where
         // bytes here) — restore it untouched.
         self.phase = other;
       }
+    }
+    Some(n)
+  }
+
+  /// Test-only convenience: drain [`Self::poll_transmit`]'s chunk chain into a
+  /// flat byte buffer (appended), preserving the pre-chunk-chain draining shape
+  /// so higher-level tests that feed the bytes straight into a peer's
+  /// `handle_data` need not reassemble the chunks themselves.
+  #[cfg(test)]
+  pub(crate) fn poll_transmit_vec(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<usize> {
+    let mut chunks = VecDeque::new();
+    let n = self.poll_transmit(now, &mut chunks)?;
+    for chunk in &chunks {
+      buf.extend_from_slice(chunk);
     }
     Some(n)
   }
@@ -809,7 +831,7 @@ where
             let ack_msg = Message::<I, A>::Ack(ack);
             let encoded = crate::wire::encode_message::<I, A>(&ack_msg)
               .expect("Ack encode cannot fail for well-formed data");
-            self.output_buf.extend(encoded);
+            self.output_buf.push_back(Bytes::from(encoded));
             self.phase = StreamPhase::InboundSendingResponse;
           }
           Message::UserData(data) => {
@@ -854,6 +876,31 @@ where
       }
     }
     Ok(())
+  }
+}
+
+/// Coalesce the chunks drained from a [`Stream`]'s `output_buf` by
+/// `poll_transmit` into a single [`Bytes`] payload for the transport's
+/// reliable-unit encode. A reliable exchange is single-frame-per-direction, so
+/// the queue holds exactly one chunk in the steady state and this is an O(1)
+/// move of that shared allocation; the multi-chunk concatenation is defensive
+/// and never exercised by the current FSM. An empty queue yields empty `Bytes`.
+#[cfg_attr(
+  not(any(feature = "tcp", feature = "tls", feature = "quic")),
+  allow(dead_code)
+)]
+pub(crate) fn coalesce_output_chunks(mut chunks: VecDeque<Bytes>) -> Bytes {
+  match chunks.len() {
+    0 => Bytes::new(),
+    1 => chunks.pop_front().expect("len checked == 1"),
+    _ => {
+      let total: usize = chunks.iter().map(Bytes::len).sum();
+      let mut buf = BytesMut::with_capacity(total);
+      for chunk in &chunks {
+        buf.extend_from_slice(chunk);
+      }
+      buf.freeze()
+    }
   }
 }
 
