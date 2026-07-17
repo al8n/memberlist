@@ -620,16 +620,22 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// strand the residue nor re-chunk it into O(K) work across a driver's re-polls.
   next_catchup_at: Option<Instant>,
   /// Distinct peers whose DIALER bridge reaped during the current servicing pass,
-  /// freeing one of that connection's [`C_OUT`] outbound slots. A slot free lets
-  /// a `C_OUT`-parked dial to that peer finally open, so the two responsive
-  /// servicing paths ([`Self::service_connection`] and [`Self::catchup_service`])
-  /// drain this set at the end of a pass and [`Self::service_peer_bucket`] each
-  /// peer — one bounded wake per reaped dialer bridge, riding the servicing pass
-  /// (never a `last_now`-armed anchor), so it is not attacker-per-datagram
-  /// pushable. The global tick's [`Self::service_dials`] full-drains every bucket
-  /// regardless, so [`Self::finalize_tick`] merely clears this set (its parked
-  /// dials are the tick's own backstop). Deduped at insertion; bounded by the
-  /// distinct peers reaped in a pass (`<= MAX_BRIDGE_PUMPS_PER_PASS`).
+  /// freeing one of that connection's [`C_OUT`] outbound slots. A slot free lets a
+  /// `C_OUT`-parked dial to that peer finally open, so EVERY servicing path drains
+  /// this set through the one unified [`Self::service_slot_freed_peers`] consume
+  /// after its LAST pump — the tick and [`Self::flush_outbound`] before
+  /// [`Self::finalize_tick`], and the bounded [`Self::service_connection`] /
+  /// [`Self::catchup_service`] / [`Self::immediate_service`] passes after their
+  /// final drain. Draining it services each peer's parked bucket so the dial opens
+  /// on the same pass rather than stranding until its [`TimerKey::Dial`] deadline
+  /// retires it (a real reliable-exchange failure in the strict-poll quiescent
+  /// window otherwise). The consume LOOPS TO A FIXPOINT because a serviced peer can
+  /// mint a dialer that reaps and re-populates this set; a minted bridge a bounded
+  /// pass's budget cannot pump rides the sticky catch-up anchor (`next_catchup_at`),
+  /// which stays armed while this set is non-empty. Populated only by
+  /// completion-driven reaps (never a datagram set) and deduped at insertion, so the
+  /// wake is not attacker-per-datagram pushable; [`Self::finalize_tick`] asserts the
+  /// tick drained it.
   slot_freed_peers: SmallVec<SocketAddr>,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
@@ -2242,12 +2248,17 @@ impl<I, R> QuicEndpoint<I, R> {
     // The residue is gone, so retire the sticky catch-up anchor: no deferred
     // bridge remains to wake for.
     self.next_catchup_at = None;
-    // The tick's `service_dials` (the caller, before this) full-drains EVERY
-    // parked bucket, so any dial parked behind a `C_OUT` slot freed by this
-    // tick's reaps was already re-attempted — the slot-free wake is the between-
-    // tick optimization for the datagram / catch-up paths, and the tick is its
-    // backstop. Clear the accumulator so it carries no peer into a later pass.
-    self.slot_freed_peers.clear();
+    // The caller (`tick` / `flush_outbound`) drains every freed peer through
+    // `service_slot_freed_peers` after its last pump and BEFORE this finalize, so
+    // any dial parked behind a `C_OUT` slot freed by this pass's reaps — including
+    // a reap in the post-`service_dials` second pump — was already re-attempted.
+    // The set must therefore be empty here; a residue would mean a slot-free wake
+    // was silently dropped rather than serviced or retained behind the anchor.
+    debug_assert!(
+      self.slot_freed_peers.is_empty(),
+      "slot_freed_peers must be drained before finalize: {} peer(s) remain",
+      self.slot_freed_peers.len(),
+    );
     // The tick ends with an EMPTY queue and no flagged bridge — the strict
     // post-condition, unlike the budgeted datagram path which may leave a residue.
     // With the queue now empty, `debug_assert_ready_drained`'s lockstep also
@@ -3483,16 +3494,23 @@ where
     }
   }
 
-  /// Reconcile the sticky catch-up anchor with the current [`Self::ready_bridges`]
-  /// residue at the END of a bounded servicing pass. Clears the anchor when the
-  /// residue is empty; arms it ONCE to `now + CATCHUP_INTERVAL` when a residue is
-  /// present and no anchor is set yet.
+  /// Reconcile the sticky catch-up anchor with the current deferred residue at the
+  /// END of a bounded servicing pass. Clears the anchor when nothing waits; arms it
+  /// ONCE to `now + CATCHUP_INTERVAL` when a residue is present and no anchor is set
+  /// yet.
+  ///
+  /// The residue is a budget-deferred bridge in [`Self::ready_bridges`] OR a peer
+  /// still queued in [`Self::slot_freed_peers`] (a slot freed past this pass's
+  /// budget whose parked dial the fixpoint could not service): both must ride the
+  /// anchor so a strict-poll driver still wakes to drain them. `slot_freed_peers` is
+  /// completion-driven, not a datagram set, so folding it here keeps the anchor
+  /// attacker-unpushable.
   ///
   /// An already-armed anchor is left UNCHANGED while the residue persists — the
   /// stickiness that keeps an inbound datagram flood (each bumping `last_now`) from
   /// pushing the residue-drain wake forward and stranding it.
   fn reconcile_catchup_anchor(&mut self, now: Instant) {
-    if self.ready_bridges.is_empty() {
+    if self.ready_bridges.is_empty() && self.slot_freed_peers.is_empty() {
       self.next_catchup_at = None;
     } else if self.next_catchup_at.is_none() {
       self.next_catchup_at = Some(now + CATCHUP_INTERVAL);
@@ -3504,9 +3522,11 @@ where
   /// residue remains (pacing the drain at a fixed, table-independent rate), or
   /// clear it once the residue is empty. Unlike [`Self::reconcile_catchup_anchor`]
   /// this always re-anchors off the just-serviced `now`, so a driver waking at the
-  /// anchor drains one budget-sized chunk per interval.
+  /// anchor drains one budget-sized chunk per interval. "Residue" is a budget-
+  /// deferred [`Self::ready_bridges`] bridge OR a peer still in
+  /// [`Self::slot_freed_peers`] — see [`Self::reconcile_catchup_anchor`].
   fn advance_catchup_anchor(&mut self, now: Instant) {
-    self.next_catchup_at = if self.ready_bridges.is_empty() {
+    self.next_catchup_at = if self.ready_bridges.is_empty() && self.slot_freed_peers.is_empty() {
       None
     } else {
       Some(now + CATCHUP_INTERVAL)
@@ -3563,9 +3583,11 @@ where
       .earliest_excluding_2(TimerKey::Catchup, TimerKey::ImmediateDue)
       .is_some_and(|d| d <= now);
     // The sticky Catchup anchor is due only when it is armed AND its instant has
-    // arrived AND a residue actually remains.
-    let catchup_due =
-      self.next_catchup_at.is_some_and(|t| t <= now) && !self.ready_bridges.is_empty();
+    // arrived AND a residue actually remains — a budget-deferred `ready_bridges`
+    // bridge OR a still-queued `slot_freed_peers` peer (a slot freed past a bounded
+    // pass's budget). `catchup_service` drains both, so both keep it due.
+    let catchup_due = self.next_catchup_at.is_some_and(|t| t <= now)
+      && (!self.ready_bridges.is_empty() || !self.slot_freed_peers.is_empty());
     // The ImmediateDue anchor is present (== `last_now` == `now`, hence due)
     // exactly when `refresh_immediate_due` would arm it: a pending-event connection
     // or a fresh unattempted dial exists.
@@ -3589,6 +3611,95 @@ where
       // so no residue or pending event is ever stranded.
       self.run_tick(now);
     }
+  }
+
+  /// Complete the slot-free wake: service the parked dials of every peer whose
+  /// DIALER bridge reaped during this servicing pass — recorded in
+  /// [`Self::slot_freed_peers`] by [`Self::on_dialer_bridge_reaped`] when a reap
+  /// released a [`C_OUT`] outbound slot — and return the distinct connections it
+  /// touched so the caller flushes their owed transmits.
+  ///
+  /// The single slot-free consume point, shared by every servicing path so a slot
+  /// freed by ANY pump is serviced before the pass ends rather than stranding the
+  /// parked dial until its [`TimerKey::Dial`] deadline retires it: the tick's
+  /// post-`service_dials` second `pump_bridges`, [`Self::flush_outbound`]'s pumps
+  /// (it owns no `service_dials` at all, so every one of its reaps would otherwise
+  /// strand), and the bounded datagram / catch-up passes' second drains.
+  ///
+  /// LOOPS TO A FIXPOINT: servicing a freed peer's bucket can MINT a dialer bridge
+  /// that reaps within the SAME drain (a synchronous exchange failure), freeing
+  /// another slot and re-populating `slot_freed_peers`. Each turn drains the set
+  /// with [`core::mem::take`] and stops once it stays empty; a single non-looped
+  /// pass would strand that re-populated peer's parked dial. The fixpoint provably
+  /// converges — each parked dial is minted at most once across the whole loop (a
+  /// minted dial either opens a surviving bridge, consuming a slot, or fails and
+  /// RETIRES; a retired dial never re-mints), so the set re-populates only from the
+  /// finite parked-dial population and empties in a bounded number of turns. The
+  /// `iter_cap` is a pure release-build backstop against a reasoning error, and is
+  /// debug-asserted never reached.
+  ///
+  /// `budget` is the pass's shared bridge-pump budget. The bounded servicing paths
+  /// pass their in-flight budget so a slot-free drain cannot inflate a pass past
+  /// [`MAX_BRIDGE_PUMPS_PER_PASS`] total pumps — any minted-bridge overflow stays
+  /// queued in `ready_bridges` behind the sticky catch-up anchor the caller re-arms.
+  /// The O(N) tick / `flush_outbound` paths pass an unbounded budget: they already
+  /// pump every bridge unbudgeted and clear the ready queue in
+  /// [`Self::finalize_tick`], so a slot-free minted bridge must be fully pumped this
+  /// pass (it holds no [`TimerKey::Bridge`] deadline until its first pump, and the
+  /// anchor `finalize_tick` clears cannot carry it).
+  fn service_slot_freed_peers(
+    &mut self,
+    now: Instant,
+    budget: &mut usize,
+  ) -> SmallVec<ConnectionHandle> {
+    let mut touched: SmallVec<ConnectionHandle> = SmallVec::new();
+    // Pin the pre-pass bridge ids so the test-only tracking drain counts any bridge
+    // this helper mints-and-pumps as a post-acceptance pump, mirroring the catch-up
+    // and datagram consumers.
+    #[cfg(test)]
+    let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
+    // Convergence-guaranteed backstop (see the method docs); debug-asserted never
+    // reached. Unbounded config falls back to a large fixed ceiling.
+    let iter_cap = self
+      .cfg
+      .max_quic_connections()
+      .map_or(1usize << 20, |m| m.saturating_mul(2));
+    let mut iters = 0usize;
+    while !self.slot_freed_peers.is_empty() {
+      iters += 1;
+      debug_assert!(
+        iters <= iter_cap,
+        "slot-free fixpoint exceeded its convergence bound ({iter_cap} iterations)"
+      );
+      if iters > iter_cap {
+        break;
+      }
+      // Take the current wave; a reap DURING the servicing below re-queues its peer
+      // for the next turn rather than mutating the set mid-iteration.
+      let peers = core::mem::take(&mut self.slot_freed_peers);
+      for peer in peers {
+        let ServicedDials {
+          minted_bridges,
+          touched_conns,
+        } = self.service_peer_bucket(peer, now);
+        for mid in minted_bridges {
+          enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+        }
+        // Pump the freshly-opened dials under the shared budget so their first
+        // request bytes reach the quinn send stream this pass; a dialer that reaps
+        // here re-populates `slot_freed_peers` for the next turn.
+        #[cfg(test)]
+        let pumped = self.drain_ready_bridges_tracking(now, &pre, budget);
+        #[cfg(not(test))]
+        let pumped = self.drain_ready_bridges(now, budget);
+        for mc in touched_conns.into_iter().chain(pumped) {
+          if !touched.contains(&mc) {
+            touched.push(mc);
+          }
+        }
+      }
+    }
+    touched
   }
 
   /// Bounded deferred-residue servicing for a Catchup-only wake (see
@@ -3616,51 +3727,23 @@ where
     let mut to_flush = self.drain_ready_bridges(now, &mut budget);
     // Slot-free wake: a DIALER bridge may have reaped inside the drain above,
     // freeing a `C_OUT` slot on its connection. Service each such peer's parked
-    // bucket so a `C_OUT`-parked dial opens on the sustained catch-up cadence —
+    // bucket to a fixpoint under the SAME shared budget so the catch-up pass stays
+    // O(budget) and a `C_OUT`-parked dial opens on the sustained catch-up cadence —
     // WITHOUT this, a residue drain that only ever runs `catchup_service` (no
     // datagrams, no due timer) would strand the parked dial until `service_dials`
-    // retires it as expired. `mem::take` clears the accumulator so a reap during
-    // this servicing re-queues for the next catch-up rather than looping.
-    let freed = core::mem::take(&mut self.slot_freed_peers);
-    if !freed.is_empty() {
-      let mut touched_conns: SmallVec<ConnectionHandle> = SmallVec::new();
-      for peer in freed {
-        let ServicedDials {
-          minted_bridges,
-          touched_conns: peer_touched,
-        } = self.service_peer_bucket(peer, now);
-        for mid in minted_bridges {
-          enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
-        }
-        for mc in peer_touched {
-          if !touched_conns.contains(&mc) {
-            touched_conns.push(mc);
-          }
-        }
-      }
-      // Pump the freshly-minted bridges under the SAME shared budget so the
-      // catch-up pass stays O(budget), then flush their owners and the touched
-      // connections alongside the initial drain's.
-      #[cfg(test)]
-      let pumped = self.drain_ready_bridges_tracking(now, &pre, &mut budget);
-      #[cfg(not(test))]
-      let pumped = self.drain_ready_bridges(now, &mut budget);
-      for mc in pumped {
-        if !to_flush.contains(&mc) {
-          to_flush.push(mc);
-        }
-      }
-      for mc in touched_conns {
-        if !to_flush.contains(&mc) {
-          to_flush.push(mc);
-        }
+    // retires it as expired. Accumulate its touched connections alongside the
+    // initial drain's.
+    for mc in self.service_slot_freed_peers(now, &mut budget) {
+      if !to_flush.contains(&mc) {
+        to_flush.push(mc);
       }
     }
     for ch in to_flush {
       self.collect_conn_transmits(ch, now);
     }
-    // Advance the sticky anchor off the just-serviced `now`: another
-    // budget-sized chunk in one more interval while residue remains, else clear.
+    // Advance the sticky anchor off the just-serviced `now`: another budget-sized
+    // chunk in one more interval while any residue (a `ready_bridges` bridge or a
+    // still-queued `slot_freed_peers` peer) remains, else clear.
     self.advance_catchup_anchor(now);
   }
 
@@ -3723,9 +3806,19 @@ where
         self.collect_conn_transmits(mc, now);
       }
     }
+    // Slot-free wake: the fresh-dial pump above (or one of the serviced connections)
+    // may have reaped a DIALER bridge, freeing a `C_OUT` slot whose peer has a parked
+    // dial. Service each such peer to a fixpoint under a fresh bounded budget so the
+    // parked dial opens this bounded wake rather than stranding to its deadline;
+    // flush the connections it touched.
+    let mut slot_free_budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    for mc in self.service_slot_freed_peers(now, &mut slot_free_budget) {
+      self.collect_conn_transmits(mc, now);
+    }
     // A dial that minted past the pump budget (or a serviced connection that left a
     // residue) may have changed the residue state; reconcile the sticky anchor so a
-    // fresh residue is armed and a drained one is cleared before returning.
+    // fresh residue — a `ready_bridges` bridge or a still-queued `slot_freed_peers`
+    // peer — is armed and a drained one is cleared before returning.
     self.reconcile_catchup_anchor(now);
     // Pass-end invariant: the pass-scoped ready queue holds only budget-deferred
     // residue and no live bridge is flagged-but-absent.
@@ -3954,56 +4047,31 @@ where
         .then(|| self.conns.get(ch).map(|e| e.peer()))
         .flatten()
     });
-    // Build the deduped set of peers whose parked bucket to attempt this pass:
-    // the establishment / credit-restore peer (if any), PLUS every peer whose
-    // DIALER bridge reaped in step (a)/(b) — freeing a `C_OUT` slot a parked dial
-    // can now take (the slot-free wake). `mem::take` clears the accumulator so a
-    // reap DURING this servicing re-queues for the next pass instead of looping;
-    // the count of freed peers is bounded by this pass's reaps, so the wake rides
-    // the servicing pass and is not attacker-per-datagram inflatable.
-    let mut peers_to_service: SmallVec<SocketAddr> = SmallVec::new();
+    // Attempt ONLY the establishment / credit-restore peer's parked bucket (if this
+    // pass produced one), never the whole dial queue. The slot-free wake for peers
+    // whose DIALER bridge reaped is a separate, unified consume via
+    // `service_slot_freed_peers` after step (d), so this arm handles the
+    // establishment / credit-restore transition alone.
     if let Some(peer) = service_peer {
-      peers_to_service.push(peer);
-    }
-    for peer in core::mem::take(&mut self.slot_freed_peers) {
-      if !peers_to_service.contains(&peer) {
-        peers_to_service.push(peer);
-      }
-    }
-    if !peers_to_service.is_empty() {
-      // Attempt each peer's parked bucket and enqueue every freshly-minted
-      // outbound bridge (T1, outbound twin of the inbound-accept enqueue) so the
-      // single drain below pumps its first request bytes into its quinn send
-      // stream before its owning connection is collected. Accumulate the touched
-      // connections to flush after the drain.
-      let mut touched_conns: SmallVec<ConnectionHandle> = SmallVec::new();
-      for peer in peers_to_service {
-        let ServicedDials {
-          minted_bridges,
-          touched_conns: peer_touched,
-        } = self.service_peer_bucket(peer, now);
-        for mid in minted_bridges {
-          enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
-        }
-        for mc in peer_touched {
-          if !touched_conns.contains(&mc) {
-            touched_conns.push(mc);
-          }
-        }
+      // Attempt the peer's parked bucket and enqueue every freshly-minted outbound
+      // bridge (T1, outbound twin of the inbound-accept enqueue) so the drain below
+      // pumps its first request bytes into its quinn send stream before its owning
+      // connection is collected. Accumulate the touched connections to flush.
+      let ServicedDials {
+        minted_bridges,
+        touched_conns,
+      } = self.service_peer_bucket(peer, now);
+      for mid in minted_bridges {
+        enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
       }
       #[cfg(test)]
       let pumped = self.drain_ready_bridges_tracking(now, &pre_service_ids, &mut pump_budget);
       #[cfg(not(test))]
       let pumped = self.drain_ready_bridges(now, &mut pump_budget);
-      for mc in pumped {
-        if !to_flush.contains(&mc) {
-          to_flush.push(mc);
-        }
-      }
       // Flush + re-index every connection the dials touched — the minted-bridge
       // owners AND the mutated-but-bridgeless ones (a redial Initial, an
-      // invalidated-intent reset).
-      for mc in touched_conns {
+      // invalidated-intent reset) — plus the pumped-bridge owners.
+      for mc in pumped.into_iter().chain(touched_conns) {
         if !to_flush.contains(&mc) {
           to_flush.push(mc);
         }
@@ -4031,9 +4099,21 @@ where
         self.collect_conn_transmits(mc, now);
       }
     }
-    // This budgeted pass may have left (or drained) a `ready_bridges` residue;
-    // arm the sticky catch-up anchor once if a residue now waits, or clear it if
-    // this pass emptied the queue.
+    // Slot-free wake: a DIALER bridge may have reaped in step (a)/(b)/(c) or the
+    // step-(d) reap, freeing a `C_OUT` slot whose peer has a parked dial waiting.
+    // Service every such peer to a fixpoint under THIS pass's shared budget so the
+    // parked dial opens now rather than stranding until its dial deadline; flush the
+    // connections it touched (including `ch`, which the helper may have minted a new
+    // bridge on after step (d)'s collect). The count of freed peers is bounded by
+    // this pass's reaps, so the wake rides the servicing pass and is not
+    // attacker-per-datagram inflatable. This is the ONE slot-free consume on this
+    // path.
+    for mc in self.service_slot_freed_peers(now, &mut pump_budget) {
+      self.collect_conn_transmits(mc, now);
+    }
+    // This budgeted pass may have left (or drained) a residue; arm the sticky
+    // catch-up anchor once if a `ready_bridges` bridge or a still-queued
+    // `slot_freed_peers` peer now waits, or clear it if this pass emptied both.
     self.reconcile_catchup_anchor(now);
     // Pass-end invariant: the pass-scoped ready queue is drained empty and no
     // live bridge still flags queued.
@@ -4071,6 +4151,17 @@ where
     self.pump_bridges_tracking_post_acceptance(now, &pre_step2_ids);
     #[cfg(not(test))]
     self.pump_bridges(now);
+    // (5.6) Slot-free wake: the step-(5.5) pump above (or a connection-loss reap in
+    // step (4)) may have reaped a DIALER bridge AFTER step (5)'s `service_dials`
+    // full-drain, freeing a `C_OUT` slot whose peer has a parked dial `service_dials`
+    // did not re-attempt. The tick is the O(N) backstop that clears `ready_bridges`
+    // and the anchor in `finalize_tick`, so fully drain each freed peer's bucket
+    // (unbounded budget) here — a slot-free minted bridge holds no `TimerKey::Bridge`
+    // deadline until its first pump, and the cleared anchor cannot carry it.
+    let mut slot_free_budget = usize::MAX;
+    // Ignoring the touched set: `finalize_tick`'s full `collect_transmits` below
+    // flushes every connection this drain touched.
+    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget);
     self.finalize_tick(now);
   }
 
@@ -4145,6 +4236,15 @@ where
     self.pump_bridges_tracking_post_acceptance(now, &pre_first_pump_ids);
     #[cfg(not(test))]
     self.pump_bridges(now);
+    // Slot-free wake: `flush_outbound` owns no `service_dials`, so EVERY dialer
+    // reaped by its pumps above frees a `C_OUT` slot whose peer's parked dial would
+    // otherwise strand until `finalize_tick` silently cleared the accumulator. Fully
+    // drain each freed peer's bucket (unbounded budget, the O(N)-path twin of the
+    // tick's step (5.6)); `finalize_tick`'s `collect_transmits` flushes every
+    // touched connection.
+    let mut slot_free_budget = usize::MAX;
+    // Ignoring the touched set: `finalize_tick`'s full `collect_transmits` flushes them.
+    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget);
     self.finalize_tick(now);
   }
 

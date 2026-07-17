@@ -8451,6 +8451,324 @@ fn slot_free_wake_from_catchup_opens_parked_dial() {
   );
 }
 
+/// `flush_outbound` owns NO `service_dials`, so a DIALER bridge reaped by its pumps
+/// frees a `C_OUT` slot that no dial-servicing on that path re-attempts — only the
+/// unified `service_slot_freed_peers` consume (after the last pump, before
+/// `finalize_tick`) opens the `C_OUT`-parked dial. Without it `finalize_tick`
+/// silently clears the freed-peer accumulator and the parked dial strands to its
+/// dial deadline.
+///
+/// Construction: A fills the `C_OUT` cap with un-ferried user-message dialers to B,
+/// then forces one live dialer terminal (NOT enqueued). A further
+/// `start_user_message` (for B') runs `service_dials` — which parks B', the victim
+/// not yet reaped so the cap is still full — then `flush_outbound`, whose first
+/// `pump_bridges` reaps the victim and whose slot-free consume opens B' the same
+/// call.
+///
+/// Mutation-verify: drop the `service_slot_freed_peers` call from `flush_outbound` —
+/// the victim still reaps, but nothing services B's freed slot, so B' stays in
+/// `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_serviced_after_late_flush_pump() {
+  let a_addr: SocketAddr = "127.0.0.1:8260".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8261".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap with un-ferried dialers (their payloads never leave A, so every
+  // bridge stays live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap with user-message dials");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap"
+  );
+
+  // Force ONE live dialer terminal WITHOUT enqueuing it: `flush_outbound`'s first
+  // `pump_bridges` (which pumps every bridge) reaps it below.
+  let victim = *a
+    .bridges
+    .keys()
+    .next()
+    .expect("A holds live dialer bridges");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+
+  // `start_user_message` runs `service_dials` (B' parks — the victim has not reaped
+  // yet, so the cap is full) then `flush_outbound` (its pump reaps the victim, and
+  // the slot-free consume opens B').
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the forced-terminal dialer must reap inside flush_outbound's pump"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot flush_outbound's pump freed — \
+       dropping the slot-free consume from flush_outbound strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "one dialer reaped (-1) and the parked dial opened (+1): count returns to C_OUT"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "flush_outbound must drain the freed-peer accumulator before finalize"
+  );
+}
+
+/// `service_slot_freed_peers` LOOPS TO A FIXPOINT: pumping a freed peer's bucket can
+/// reap another DIALER bridge (a synchronous failure) whose reap re-populates
+/// `slot_freed_peers`, so a single non-looped pass would leave the set non-empty and
+/// strand the re-populated peer's parked dial. The loop drains it to empty.
+///
+/// Construction: A holds a live dialer to B; it is forced terminal and enqueued, and
+/// B is seeded into `slot_freed_peers` (as a prior reap would have). Servicing B
+/// drains the ready queue, reaping the forced-terminal dialer, whose reap re-queues
+/// B into `slot_freed_peers` — the reentrancy the loop must absorb.
+///
+/// Mutation-verify: replace the fixpoint loop with a single non-looped pass — the
+/// reentrant reap leaves `slot_freed_peers` non-empty on return, so this assertion
+/// fails (and on the tick / `flush_outbound` paths `finalize_tick`'s `debug_assert!`
+/// would fire).
+#[test]
+fn slot_free_fixpoint_reentrant() {
+  let a_addr: SocketAddr = "127.0.0.1:8270".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8271".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // One live dialer bridge to B; force it terminal and enqueue it so the helper's
+  // drain reaps it — the reap re-queues B into `slot_freed_peers`.
+  let payload = Bytes::from_static(b"x");
+  a.start_user_message(b_addr, payload, now)
+    .expect("A opens one user-message dialer to B");
+  while a.poll_transmit().is_some() {}
+  let victim = *a.bridges.keys().next().expect("A holds one dialer bridge");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+  super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, victim);
+
+  // Seed the set as a prior-pass reap would have, so the helper enters its loop.
+  a.slot_freed_peers.push(b_addr);
+
+  let mut budget = super::MAX_BRIDGE_PUMPS_PER_PASS;
+  let _ = a.service_slot_freed_peers(now, &mut budget);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the enqueued forced-terminal dialer must reap inside the helper's drain"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "the fixpoint must drain slot_freed_peers to empty even when a reap during the \
+       drain re-populates it; a single non-looped pass leaves B queued and would \
+       trip finalize_tick's debug_assert"
+  );
+}
+
+/// The global tick's second `pump_bridges` (step 5.5) runs AFTER step 5's
+/// `service_dials` full-drain, so a DIALER bridge that reaps there frees a `C_OUT`
+/// slot `service_dials` already passed — its `C_OUT`-parked dial strands unless the
+/// step (5.6) `service_slot_freed_peers` consume (before `finalize_tick`) services
+/// the freed peer. This is the tick twin of the `flush_outbound` case.
+///
+/// Construction: A holds a live victim dialer to B whose OPENING is delivered to B's
+/// quinn (so B knows the stream) but never read; A fills the rest of the `C_OUT` cap
+/// and parks B'. B issues STOP_SENDING for the victim's stream, harvested into A's
+/// connection as a STAGED `ConnectionEvent` (NOT applied). Running the tick then
+/// applies it in step (4), which fails+enqueues the victim; step (2)'s earlier pump
+/// left it live, so it reaps only in step (5.5) — after `service_dials` — and the
+/// step (5.6) consume opens B'.
+///
+/// Mutation-verify: drop the `service_slot_freed_peers` call from the tick — the
+/// victim still reaps in step (5.5) but `finalize_tick` clears the freed-peer
+/// accumulator, so B' stays in `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_serviced_after_late_tick_pump() {
+  use bytes::BytesMut;
+  use quinn_proto::{DatagramEvent, VarInt};
+
+  let a_addr: SocketAddr = "127.0.0.1:8280".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8281".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic schedulers off so the tick's step (3) fires no membership timer
+  // that could reap or redial independently of the slot-free consume under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  let a_ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  let b_ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a pooled connection to A");
+
+  // Open the victim dialer and capture its ids. Deliver its opening datagrams to B's
+  // quinn ONLY (no coordinator read), so B's `Connection` knows the stream — and can
+  // STOP it — while the recv half stays unconsumed.
+  let payload = Bytes::from_static(b"victim");
+  a.start_user_message(b_addr, payload.clone(), now)
+    .expect("A opens the victim user-message dialer to B");
+  let victim = *a.bridges.keys().next().expect("A holds the victim bridge");
+  let vsid = a.bridges.get(&victim).unwrap().sid();
+  {
+    let mut scratch = Vec::new();
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        if let Some(DatagramEvent::ConnectionEvent(ch, cev)) = b.quinn.handle(
+          now.into_std(),
+          a_addr,
+          None,
+          None,
+          BytesMut::from(&bytes[..]),
+          &mut scratch,
+        ) {
+          b.conns.get_mut(ch).unwrap().conn_mut().handle_event(cev);
+        }
+      }
+    }
+  }
+
+  // Fill the rest of the C_OUT cap with un-ferried dialers, then park B'.
+  for _ in 1..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.conns.get(a_ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap (victim + fillers)"
+  );
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().any(|d| d.id == parked_id))
+      .unwrap_or(false),
+    "test precondition: B' parked behind the cap"
+  );
+
+  // B issues STOP_SENDING for the victim's recv half; harvest its datagrams into A's
+  // connection as STAGED pending events (NOT applied) so they take effect only in the
+  // tick's step (4).
+  let _ = b
+    .conns
+    .get_mut(b_ch)
+    .unwrap()
+    .conn_mut()
+    .recv_stream(vsid)
+    .stop(VarInt::from_u32(7));
+  let mut stop_dgs: Vec<Vec<u8>> = Vec::new();
+  {
+    let mut buf = Vec::new();
+    while let Some(tr) =
+      b.conns
+        .get_mut(b_ch)
+        .unwrap()
+        .conn_mut()
+        .poll_transmit(now.into_std(), 1, &mut buf)
+    {
+      stop_dgs.push(buf[..tr.size].to_vec());
+      buf.clear();
+    }
+  }
+  assert!(
+    !stop_dgs.is_empty(),
+    "B must emit a STOP_SENDING datagram for the victim's stream"
+  );
+  {
+    let mut scratch = Vec::new();
+    for dg in &stop_dgs {
+      if let Some(DatagramEvent::ConnectionEvent(ch, cev)) = a.quinn.handle(
+        now.into_std(),
+        b_addr,
+        None,
+        None,
+        BytesMut::from(&dg[..]),
+        &mut scratch,
+      ) {
+        a.conns.get_mut(ch).unwrap().queue_pending_event(cev);
+      }
+    }
+  }
+  assert!(
+    a.bridges.contains_key(&victim),
+    "test precondition: the victim is still live entering the tick (step 2 has not \
+       yet applied the staged STOP)"
+  );
+
+  // Run the tick: step (4) applies the staged STOP (fails+enqueues the victim), step
+  // (5) `service_dials` re-parks B' (cap still full), step (5.5) reaps the victim,
+  // and step (5.6)'s consume opens B' on the freed slot.
+  a.run_tick(now);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the victim must reap in the tick's second pump (after service_dials)"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot the step-(5.5) reap freed — dropping \
+       the tick's step-(5.6) slot-free consume strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "the tick must drain the freed-peer accumulator before finalize (finalize asserts it)"
+  );
+}
+
 /// Deleting the Writable skip means the arm acts on EVERY connection-window edge,
 /// so a bridge blocked past the OLD per-pass budget is still enqueued and pumps
 /// within the catch-up cadence — never stranded to its exchange deadline (quinn
