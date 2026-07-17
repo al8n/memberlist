@@ -187,6 +187,27 @@ struct PendingDial {
   attempted: bool,
 }
 
+/// Which terminal branch [`QuicEndpoint::process_dial_entry`] took for one parked
+/// intent, so the scoped per-peer drain [`QuicEndpoint::service_peer_bucket`] can
+/// stop the instant the peer's shared pooled connection can open no more streams
+/// this pass. The full-drain [`QuicEndpoint::service_dials`] ignores it — the tick
+/// is the backstop and drains every bucket unconditionally.
+enum DialAttempt {
+  /// A bridge was opened on the peer's pooled connection; one bidi credit was
+  /// consumed, so a later entry in the bucket may still find credit.
+  Minted,
+  /// The intent was retired without opening a stream — its deadline elapsed, the
+  /// pooled connection was closed, the global connection cap was hit, or
+  /// `dial_succeeded` invalidated it. No bidi credit was consumed, so a later
+  /// entry may still open.
+  Retired,
+  /// The intent re-parked into [`QuicEndpoint::dial_parked`] because the pooled
+  /// connection is still handshaking or its bidi credit is exhausted. Every later
+  /// entry in the same bucket shares that connection and would re-park
+  /// identically, so the scoped drain stops here.
+  Reparked,
+}
+
 /// What one [`QuicEndpoint::service_dials`] pass produced, for the per-datagram
 /// caller to flush and re-index its side effects in the same pass.
 ///
@@ -2465,9 +2486,41 @@ where
   fn service_peer_bucket(&mut self, peer: SocketAddr, now: Instant) -> ServicedDials {
     let mut minted: SmallVec<StreamId> = SmallVec::new();
     let mut touched = TouchedConns::new();
-    if let Some(bucket) = self.dial_parked.shift_remove(&peer) {
-      for entry in bucket {
-        self.process_dial_entry(entry, now, &mut minted, &mut touched);
+    // O(1) removal: `swap_remove`, not `shift_remove` — nothing depends on
+    // `dial_parked`'s iteration order (the tick's `service_dials` drains it via
+    // `mem::take`, and both the deadline fold and the debug recount are
+    // order-agnostic aggregates over `values()`), so trading insertion order for
+    // O(1) is safe and stays deterministic for VOPR replay. `shift_remove` would
+    // instead shift every later bucket, making a per-`Available` event O(#peer
+    // buckets).
+    if let Some(bucket) = self.dial_parked.swap_remove(&peer) {
+      let mut entries = bucket.into_iter();
+      for entry in entries.by_ref() {
+        match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
+          // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
+          // retire consumes none, so a later entry in the bucket may still find
+          // an opening — keep draining.
+          DialAttempt::Minted | DialAttempt::Retired => {}
+          // The first re-park proves the shared pooled connection is still
+          // handshaking or its restored bidi credit is already spent. Every
+          // later entry in this bucket targets that SAME connection and would
+          // re-park identically, so stop instead of re-attempting the whole
+          // bucket for each single-credit `Available` — attempting the whole
+          // bucket per credit is O(bucket) per credit, so K single-credit
+          // frames cost O(K^2). Stopping here makes each `Available` O(1).
+          DialAttempt::Reparked => break,
+        }
+      }
+      // The re-parked entry (the one that hit `break`) has already re-inserted
+      // itself into `dial_parked[peer]`, recreating the bucket. Append the
+      // UN-attempted tail after it so no intent is dropped. Each tail entry keeps
+      // `attempted = true` and its existing `TimerKey::Dial` deadline key
+      // untouched: the tick's `service_dials` retires any that expire, and
+      // `poll_timeout`'s folded `Dial` term already wakes the tick at the earliest
+      // dial deadline, so leaving them untouched strands nothing.
+      let rest: SmallVec<PendingDial> = entries.collect();
+      if !rest.is_empty() {
+        self.dial_parked.entry(peer).or_default().extend(rest);
       }
     }
     ServicedDials {
@@ -2489,7 +2542,7 @@ where
     now: Instant,
     minted: &mut SmallVec<StreamId>,
     touched: &mut TouchedConns,
-  ) {
+  ) -> DialAttempt {
     #[cfg(test)]
     {
       self.counters.dial_entries_serviced = self.counters.dial_entries_serviced.saturating_add(1);
@@ -2548,7 +2601,7 @@ where
         StreamError::DialFailed("quic dial deadline elapsed".into()),
         now,
       );
-      return;
+      return DialAttempt::Retired;
     }
     // The membership address `peer` IS the wire `SocketAddr` (the
     // coordinator pins `A = SocketAddr` internally); the TLS verification
@@ -2619,6 +2672,7 @@ where
                   self.inbound_bridge_count += 1;
                 }
                 minted.push(mid);
+                DialAttempt::Minted
               }
               None => {
                 // Defense-in-depth: the deadline pre-check above
@@ -2663,6 +2717,7 @@ where
                   // semantics as the send-half reset above.
                   let _ = conn.recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
                 }
+                DialAttempt::Retired
               }
             },
             None => {
@@ -2724,6 +2779,7 @@ where
                   StreamError::DialFailed("quic stream open: cached connection closed".into()),
                   now,
                 );
+                DialAttempt::Retired
               } else if now < deadline {
                 // Re-park by TARGET PEER so the next readiness event on this
                 // peer's connection (handshake completion, or a MAX_STREAMS
@@ -2740,15 +2796,22 @@ where
                 // its deadline so the tick's exact-at-deadline retirement wake
                 // still fires for the parked intent.
                 self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
+                DialAttempt::Reparked
               } else {
                 self.retire_failed_dial(
                   id,
                   StreamError::DialFailed("quic stream open deadline elapsed".into()),
                   now,
                 );
+                DialAttempt::Retired
               }
             }
           }
+        } else {
+          // `get_or_dial` returned `Ok(ch)` but the handle vanished before this
+          // re-borrow (a "cannot happen" defensive path): treat it as retired so
+          // the scoped drain keeps going rather than re-parking a phantom.
+          DialAttempt::Retired
         }
       }
       Err(conn::DialError::AtGlobalCap) => {
@@ -2763,9 +2826,11 @@ where
           StreamError::DialFailed("quic connection table at capacity".into()),
           now,
         );
+        DialAttempt::Retired
       }
       Err(conn::DialError::Connect(e)) => {
         self.retire_failed_dial(id, StreamError::DialFailed(e.to_string().into()), now);
+        DialAttempt::Retired
       }
     }
   }

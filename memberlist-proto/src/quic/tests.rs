@@ -6533,3 +6533,85 @@ fn credit_restored_available_retries_parked_dial() {
        the Available arm leaves it parked and this fails"
   );
 }
+
+/// A single-credit `MAX_STREAMS` restore (`StreamEvent::Available { dir: Bi }`)
+/// services a peer's parked-dial bucket in O(1), NOT O(bucket):
+/// `service_peer_bucket` stops at the FIRST re-park. Every entry in one peer's
+/// bucket shares that peer's single pooled connection and its one bidi-credit
+/// pool, so once an attempt re-parks (credit exhausted or still handshaking)
+/// every later entry would re-park identically. Re-attempting the whole bucket
+/// per credit is O(bucket) per credit, so K single-credit frames (K small
+/// packets) cost O(K^2); stopping after the first re-park makes each restore
+/// O(1), so K restores cost O(K).
+///
+/// Construction: park M attempted intents on ONE never-answered peer. Its pooled
+/// connection stays handshaking, so every attempt's `open(Bi)` returns `None` and
+/// re-parks. Drive `service_peer_bucket` K times (each call is one single-credit
+/// `Available`; a real `MAX_STREAMS` datagram reaches the same arm) and assert
+/// each call attempts exactly ONE entry — independent of the M-entry bucket.
+///
+/// Mutation-verify: drop the `break` on `DialAttempt::Reparked` (drain the whole
+/// bucket per credit) — each call then attempts all M entries, so the per-call
+/// delta jumps to M and the `<= 1` assertion fails on the first restore.
+#[test]
+fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
+  let n_addr: SocketAddr = "127.0.0.1:7760".parse().unwrap();
+  let cold_peer: SocketAddr = "127.0.0.9:7761".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+
+  // Park M attempted intents on ONE cold peer. The first `service_peer_bucket`
+  // attempt dials it — creating a single pooled, still-handshaking connection —
+  // and `open(Bi)` returns `None`, so the entry re-parks. All M target the SAME
+  // pooled connection.
+  const M: usize = 24;
+  let deadline = now + Duration::from_secs(30);
+  for i in 0..M {
+    n.dial_parked
+      .entry(cold_peer)
+      .or_default()
+      .push(super::PendingDial {
+        id: StreamId::from_raw(20_000 + i as u64),
+        peer: cold_peer,
+        deadline,
+        attempted: true,
+      });
+  }
+  assert_eq!(
+    n.dial_parked.get(&cold_peer).map(|b| b.len()).unwrap_or(0),
+    M,
+    "test precondition: all M intents park on the one cold peer's bucket"
+  );
+
+  // K single-credit restores. Each `service_peer_bucket` must attempt exactly ONE
+  // entry (the first re-parks, the drain breaks) — O(1) per credit, independent
+  // of the M-entry bucket. The whole-bucket drain would attempt all M per call.
+  const K: usize = 24;
+  let base = n.counters.dial_entries_serviced;
+  for i in 0..K {
+    let before = n.counters.dial_entries_serviced;
+    n.service_peer_bucket(cold_peer, now);
+    let delta = n.counters.dial_entries_serviced - before;
+    assert!(
+      delta <= 1,
+      "single-credit Available restore #{i} on an M={M} handshake-blocked bucket \
+         must attempt O(1) entries (stop at the first re-park), not the whole \
+         bucket; attempted {delta} — reverting the `break` makes this {M}"
+    );
+  }
+
+  // The bucket is intact: nothing minted (still handshaking) and nothing dropped —
+  // every intent still awaits the tick's full drain or a real credit.
+  assert_eq!(
+    n.dial_parked.get(&cold_peer).map(|b| b.len()).unwrap_or(0),
+    M,
+    "the handshake-blocked bucket retains all M entries across the K restores"
+  );
+  // Cumulative: K restores attempted O(K) entries total, never O(K*M).
+  assert!(
+    n.counters.dial_entries_serviced - base <= K as u64,
+    "K={K} single-credit restores must be O(K)={K} total dial attempts, not \
+       O(K*M)={}",
+    K * M
+  );
+}
