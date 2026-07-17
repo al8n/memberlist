@@ -268,6 +268,31 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // Bookkeeping.
   incarnation: u32,
   local_state_snapshot: Bytes,
+  // Cached, pre-encoded inbound push/pull RESPONSE frame: our entire membership
+  // view (every member as a `PushNodeState`) plus `local_state_snapshot`, with
+  // `join` cleared. The response body is request-independent, so it is folded
+  // and encoded ONCE per membership change — on the schedule-fired tick via
+  // `refresh_pushpull_response_cache` — and served to every requester by an O(1)
+  // `Bytes::clone`, keeping the per-datagram servicing cost off the O(members)
+  // build+encode. Byte-identical to a fresh `encode_push_pull_response` over the
+  // same membership.
+  cached_pushpull_response: Bytes,
+  // The `snapshot_version` the cached response was last built at. A tick rebuilds
+  // the cache only when this differs from `snapshot_version` (which every
+  // membership / incarnation / liveness / health change bumps), so a
+  // static-membership tick is a single `u64` comparison.
+  cached_response_version: u64,
+  // Set when a response input that does NOT move `snapshot_version` changes.
+  // Today the sole such input is `set_local_state_snapshot` (the local
+  // application-state blob). Forces the next tick to rebuild the cache even
+  // though `snapshot_version` is unchanged.
+  cached_response_dirty: bool,
+  // Counts the O(members) response builds (see `build_pushpull_response_bytes`).
+  // A regression test drives many inbound push/pull requests against a static
+  // member table and asserts this stays flat — proving the per-request path
+  // serves the cache and never re-folds the table.
+  #[cfg(test)]
+  pushpull_response_builds: u64,
   lifecycle: Lifecycle,
 
   // Output queues (drained via `poll_*`).
@@ -972,15 +997,15 @@ impl<I, A, R> Endpoint<I, A, R> {
     }
   }
 
-  /// Encode a `StreamCommand::SendPushPullResponse` into raw bytes suitable
-  /// for loading into a `Stream::output_buf`. The driver calls this after
-  /// receiving the command from `handle_stream_event`, then calls
-  /// `stream_load_response(stream, bytes, deadline)`.
+  /// Encode a push/pull response body into raw bytes suitable for loading into
+  /// a `Stream::output_buf`.
   ///
   /// Takes pre-built `PushNodeState` entries so incarnation numbers are
-  /// available (they live in `LocalNodeState`, not `NodeState`). The driver
-  /// may build them from the `StreamCommand::SendPushPullResponse.local_states`
-  /// slice using the incarnation values it tracks separately.
+  /// available (they live in `LocalNodeState`, not `NodeState`). Used internally
+  /// to build the cached response served via
+  /// [`StreamCommand::SendPushPullResponse`](crate::event::StreamCommand); the
+  /// bytes carried by that command are the output of this function over the full
+  /// membership, produced once per membership change.
   ///
   /// Standalone associated function; does not read or modify `Endpoint` state.
   pub fn encode_push_pull_response(
@@ -1003,9 +1028,79 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// write deadline. After this call `stream.poll_transmit()` will drain the
   /// encoded bytes. The stream must be in `InboundSendingResponse` phase when
   /// this is called.
-  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Vec<u8>, deadline: Instant) {
+  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Bytes, deadline: Instant) {
     stream.output_buf.extend(encoded);
     stream.deadline = Some(deadline);
+  }
+}
+
+impl<I, A, R> Endpoint<I, A, R>
+where
+  I: Id,
+  A: CheapClone + Data + PartialEq + 'static,
+{
+  /// Build and encode the inbound push/pull response frame from the CURRENT
+  /// membership: every member folded into a wire-format `PushNodeState` (live
+  /// liveness, tracked incarnation, meta, protocol/delegate versions) plus the
+  /// local application-state snapshot, with `join` cleared. This is the single
+  /// O(members) fold+encode behind the response cache;
+  /// [`refresh_pushpull_response_cache`](Self::refresh_pushpull_response_cache)
+  /// is its only steady-state caller (plus the one-time pre-build at
+  /// construction), so the per-request path never runs it.
+  fn build_pushpull_response_bytes(&mut self) -> Bytes {
+    let local_states: Vec<PushNodeState<I, A>> = self
+      .members
+      .iter()
+      .map(|m| {
+        let ls = m.state_ref();
+        let ns = ls.server_ref();
+        // Live liveness (`ls.state()`), not the frozen server snapshot
+        // (`ns.state()`) — see start_push_pull for the rationale.
+        PushNodeState::new(
+          ls.incarnation(),
+          ns.id_ref().cheap_clone(),
+          ns.address_ref().cheap_clone(),
+          ls.state(),
+        )
+        .with_meta(ns.meta_ref().cheap_clone())
+        .with_protocol_version(ns.protocol_version())
+        .with_delegate_version(ns.delegate_version())
+      })
+      .collect();
+    let encoded = Bytes::from(Self::encode_push_pull_response(
+      &local_states,
+      self.local_state_snapshot.clone(),
+      false,
+    ));
+    #[cfg(test)]
+    {
+      self.pushpull_response_builds += 1;
+    }
+    encoded
+  }
+
+  /// Rebuild the cached inbound push/pull response IFF a response-relevant input
+  /// changed since the last build (`snapshot_version` moved, or a non-versioned
+  /// input set `cached_response_dirty`). This is the ONLY steady-state site that
+  /// runs the O(members) build+encode; every requester is then served an O(1)
+  /// `Bytes::clone`. Called on the schedule-fired tick
+  /// ([`handle_timeout`](Self::handle_timeout)) only — NEVER on the per-request
+  /// [`handle_stream_event`](Self::handle_stream_event) path — so however many
+  /// inbound exchanges complete in one datagram, none re-folds the table.
+  fn refresh_pushpull_response_cache(&mut self) {
+    if self.snapshot_version == self.cached_response_version && !self.cached_response_dirty {
+      return;
+    }
+    self.cached_pushpull_response = self.build_pushpull_response_bytes();
+    self.cached_response_version = self.snapshot_version;
+    self.cached_response_dirty = false;
+  }
+
+  /// Cumulative count of O(members) response builds. A build happens only at
+  /// construction and on a membership-changing tick, never per request.
+  #[cfg(test)]
+  pub(crate) const fn pushpull_response_builds(&self) -> u64 {
+    self.pushpull_response_builds
   }
 }
 
@@ -1314,6 +1409,13 @@ where
       probes_since_reset: 0,
       incarnation: initial_incarnation,
       local_state_snapshot,
+      // Placeholder: the real self-only response is pre-built below (the forced
+      // `cached_response_dirty` makes the first `refresh` build it).
+      cached_pushpull_response: Bytes::new(),
+      cached_response_version: 0,
+      cached_response_dirty: true,
+      #[cfg(test)]
+      pushpull_response_builds: 0,
       lifecycle: Lifecycle::Running,
       pending_events: VecDeque::new(),
       pending_transmits: VecDeque::new(),
@@ -1343,6 +1445,13 @@ where
     // directly, so emit its join explicitly here with the same `Arc<NodeState>`
     // payload the peer-join path uses.
     endpoint.emit_event(Event::NodeJoined(local_state.server_arc()));
+    // Pre-build the inbound push/pull response cache so the first inbound
+    // exchange — which can precede the first `handle_timeout` — is served an
+    // O(1) `Bytes` clone rather than an on-path member-table fold. The forced
+    // `cached_response_dirty` above makes this initial `refresh` build the
+    // self-only response; every later membership change rebuilds it on the next
+    // tick.
+    endpoint.refresh_pushpull_response_cache();
     Ok(endpoint)
   }
 
@@ -2239,6 +2348,11 @@ where
     self.ensure_running()?;
     validate_local_state_snapshot::<I, A>(&bytes, self.cfg.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
+    // `local_state_snapshot` is part of the push/pull response body but is NOT
+    // covered by `snapshot_version` (which tracks membership / liveness), so mark
+    // the response cache dirty to force the next tick to rebuild it. Without this
+    // a request served after the change would ship the stale snapshot forever.
+    self.cached_response_dirty = true;
     Ok(())
   }
 
@@ -3831,6 +3945,12 @@ where
     self.fire_probe_scheduler(now);
     self.fire_gossip_scheduler(now);
     self.fire_pushpull_scheduler(now);
+    // Rebuild the inbound push/pull response cache once, AFTER this tick's
+    // membership transitions (suspicion expiry, probe-driven suspects, dead/left
+    // reaping) have settled, so a request served before the next tick is at most
+    // one tick stale. Gated internally on `snapshot_version` — a static-membership
+    // tick is a single comparison.
+    self.refresh_pushpull_response_cache();
   }
 
   /// Advance the probe FSM. `AwaitingDirectAck` probes whose deadline
@@ -4487,27 +4607,17 @@ where
             originating_stream_id,
           )));
         }
-        let local_states: Vec<PushNodeState<I, A>> = self
-          .members
-          .iter()
-          .map(|m| {
-            let ls = m.state_ref();
-            let ns = ls.server_ref();
-            // Live liveness (`ls.state()`), not the frozen server snapshot
-            // (`ns.state()`) — see start_push_pull for the rationale.
-            PushNodeState::new(
-              ls.incarnation(),
-              ns.id_ref().cheap_clone(),
-              ns.address_ref().cheap_clone(),
-              ls.state(),
-            )
-            .with_meta(ns.meta_ref().cheap_clone())
-            .with_protocol_version(ns.protocol_version())
-            .with_delegate_version(ns.delegate_version())
-          })
-          .collect();
+        // Reply with OUR pre-encoded membership snapshot, built once per
+        // membership change on the schedule-fired tick (see
+        // `refresh_pushpull_response_cache`). The response body is
+        // request-independent, so serving it is an O(1) `Bytes::clone`: the
+        // completed exchange never re-folds the member table. The reply reflects
+        // membership as of the last tick, so this request's just-merged `states`
+        // surface in the next tick's rebuild — at most one tick later.
+        // `merge_state` above still applies the peer's push immediately; only
+        // the reflected-back copy is tick-quantized.
         Some(StreamCommand::SendPushPullResponse(
-          SendPushPullResponse::new(local_states, self.local_state_snapshot.clone()),
+          SendPushPullResponse::new(self.cached_pushpull_response.clone()),
         ))
       }
       // A Leaving/Left node processes no reliable-plane inbound: it completes no

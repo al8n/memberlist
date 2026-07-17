@@ -1337,15 +1337,13 @@ where
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
           StreamCommand::SendPushPullResponse(resp) => {
-            let (local_states, user_data) = resp.into_parts();
-            // `handle_stream_event` returns the response state UNENCODED and
-            // the inbound stream's `output_buf` is still empty: the driver
-            // must encode the snapshot and load it into the stream before
-            // any of it can be transmitted. Without the encode + load the
-            // inbound push/pull reply is never produced and the peer is left
-            // with a half-applied merge (split-brain). `join = false` and the
-            // 5s write deadline mirror the inbound-response path of the
-            // approved memberlist-simulation driver.
+            // The response arrives PRE-ENCODED (built once per membership change
+            // and served as an O(1) `Bytes` clone; see
+            // `refresh_pushpull_response_cache`), with `join = false`. The
+            // inbound stream's `output_buf` is still empty, so load the frame
+            // before any of it can be transmitted — without the load the reply
+            // is never produced and the peer is left with a half-applied merge
+            // (split-brain).
             //
             // Response-deadline refresh in lockstep with the inner stream's
             // write deadline. `stream_load_response` sets the inner stream's
@@ -1364,9 +1362,11 @@ where
             // on the response leg for exactly this reason: the response
             // window must measure from response start, not from accept.
             let response_deadline = now + Duration::from_secs(5);
-            let encoded =
-              Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
-            Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
+            Endpoint::<I, A>::stream_load_response(
+              &mut self.stream,
+              resp.into_encoded(),
+              response_deadline,
+            );
             self.deadline = response_deadline;
             // Ignoring Err: `pump_out` failing here terminalizes the bridge,
             // which the next-tick `pump_bridges` reap reflects as
@@ -1486,18 +1486,20 @@ where
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
           StreamCommand::SendPushPullResponse(resp) => {
-            let (local_states, user_data) = resp.into_parts();
-            // Mirror `drain_then_reap`'s response-deadline refresh: the
-            // bridge-level `self.deadline` is advanced to the SAME `now + 5s`
-            // value `stream_load_response` writes into the inner stream's
-            // own deadline so the `Done`-but-unflushed abandon does not
-            // fire on the stale accept deadline before the fresh response
-            // window elapses (see the `drain_then_reap` arm's full
-            // rationale).
+            // The response arrives PRE-ENCODED (an O(1) `Bytes` clone of the
+            // per-tick cache; see `refresh_pushpull_response_cache`). Mirror
+            // `drain_then_reap`'s response-deadline refresh: the bridge-level
+            // `self.deadline` is advanced to the SAME `now + 5s` value
+            // `stream_load_response` writes into the inner stream's own deadline
+            // so the `Done`-but-unflushed abandon does not fire on the stale
+            // accept deadline before the fresh response window elapses (see the
+            // `drain_then_reap` arm's full rationale).
             let response_deadline = now + Duration::from_secs(5);
-            let encoded =
-              Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
-            Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
+            Endpoint::<I, A>::stream_load_response(
+              &mut self.stream,
+              resp.into_encoded(),
+              response_deadline,
+            );
             self.deadline = response_deadline;
             // Ignoring Err: a `pump_out` failure terminalizes the bridge,
             // which the next-tick `pump_bridges` reap reflects.

@@ -1664,20 +1664,51 @@ fn merge_state_folds_remote_batch() {
   );
 }
 
+/// Decode a `SendPushPullResponse` command's pre-encoded frame and return the
+/// member ids it carries. Asserts the response is a `PushPull` with `join`
+/// cleared (a response is never a join).
+fn pushpull_reply_state_ids(cmd: StreamCommand<SmolStr, SocketAddr>) -> Vec<SmolStr> {
+  match cmd {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let bytes = resp.into_encoded();
+      let (_, msg) = crate::wire::decode_message::<SmolStr, SocketAddr>(&bytes)
+        .expect("cached push/pull response must decode");
+      match msg {
+        Message::PushPull(pp) => {
+          assert!(
+            !pp.join(),
+            "a push/pull RESPONSE always clears the join flag"
+          );
+          pp.states_slice()
+            .iter()
+            .map(|s| s.id_ref().cheap_clone())
+            .collect()
+        }
+        other => panic!("expected a PushPull response frame, got {other:?}"),
+      }
+    }
+    StreamCommand::Close => panic!("an admitted join merge must not close the stream"),
+  }
+}
+
 /// `push_pull`: an inbound push/pull exchange merges the peer's membership view
-/// and replies with the local view. The oracle has the initiator ship its state
-/// and watches the receiver learn every node; here we feed the receiver an
-/// inbound `PushPullRequestReceived` and route it through `handle_stream_event`
-/// (the proto's "apply an incoming push/pull" path), which merges the batch and
-/// hands back the local-view response the driver would encode.
+/// and replies with the local view. memberlist publishes its local state to the
+/// wire BEFORE merging the remote push, so the reply carries the receiver's own
+/// view as of the last tick — the just-merged peers are at most one tick stale
+/// and surface on the next refresh. Here we feed the receiver an inbound
+/// `PushPullRequestReceived`, route it through `handle_stream_event`, and assert
+/// both the immediate merge and the tick-quantized reply.
 #[test]
-fn push_pull_merges_request_and_replies_with_local_view() {
+fn push_pull_merges_request_and_replies_with_cached_local_view() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   // The receiver already knows one peer of its own.
   let mine = node("mine", 8010);
   let t0 = Instant::now();
   e.process_alive(alive_of(&mine, 1), false, t0);
   while e.poll_event().is_some() {}
+  // Publish the receiver's current view into the response cache; the
+  // schedule-fired tick is the only place the O(members) response is (re)built.
+  e.handle_timeout(t0);
 
   // The peer pushes a membership view containing itself plus another node the
   // receiver has never seen.
@@ -1699,7 +1730,8 @@ fn push_pull_merges_request_and_replies_with_local_view() {
     .handle_stream_event(req, t0)
     .expect("an admitted push/pull request must yield a response command");
 
-  // The inbound membership is merged: both pushed nodes are now known Alive.
+  // The inbound membership is merged IMMEDIATELY: both pushed nodes are now
+  // known Alive (the merge is unaffected by the tick-quantized reply).
   assert_eq!(e.member_liveness(peer.id_ref()), Some(State::Alive));
   assert_eq!(e.member_liveness(other.id_ref()), Some(State::Alive));
   assert_eq!(
@@ -1723,24 +1755,49 @@ fn push_pull_merges_request_and_replies_with_local_view() {
     );
   }
 
-  // The receiver replies with its OWN view, which now includes every node it
-  // knows (local + mine + peer + other).
-  match cmd {
-    StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, _user_data) = resp.into_parts();
-      for want in [
-        e.local_id_ref(),
-        mine.id_ref(),
-        peer.id_ref(),
-        other.id_ref(),
-      ] {
-        assert!(
-          local_states.iter().any(|s| s.id_ref() == want),
-          "the push/pull reply must carry the local view of {want}, got {local_states:?}"
-        );
-      }
-    }
-    StreamCommand::Close => panic!("an admitted join merge must not close the stream"),
+  // The reply carries the receiver's own view as published to the cache by the
+  // LAST tick — local + mine — but NOT the just-merged peer/other. The
+  // requester already holds the states it pushed, so echoing them back is
+  // redundant; the tick-quantized reply still converges.
+  let reply_ids = pushpull_reply_state_ids(cmd);
+  for want in [e.local_id_ref(), mine.id_ref()] {
+    assert!(
+      reply_ids.iter().any(|id| id == want),
+      "the cached reply must carry the receiver's own view of {want}, got {reply_ids:?}"
+    );
+  }
+  for absent in [peer.id_ref(), other.id_ref()] {
+    assert!(
+      !reply_ids.iter().any(|id| id == absent),
+      "the just-merged {absent} must NOT appear until the next tick refreshes the cache, \
+       got {reply_ids:?}"
+    );
+  }
+
+  // After a tick refreshes the cache, a fresh request's reply reflects the
+  // merged nodes — at most one tick of staleness.
+  e.handle_timeout(t0);
+  let req2 = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
+    *peer.addr_ref(),
+    vec![pns_of(&peer, 1, State::Alive)],
+    Bytes::new(),
+    PushPullKind::Join,
+    StreamId::from_raw(2),
+  ));
+  let cmd2 = e
+    .handle_stream_event(req2, t0)
+    .expect("a second request must also yield a response command");
+  let reply_ids2 = pushpull_reply_state_ids(cmd2);
+  for want in [
+    e.local_id_ref(),
+    mine.id_ref(),
+    peer.id_ref(),
+    other.id_ref(),
+  ] {
+    assert!(
+      reply_ids2.iter().any(|id| id == want),
+      "after a tick the reply must carry the full merged view of {want}, got {reply_ids2:?}"
+    );
   }
 }
 

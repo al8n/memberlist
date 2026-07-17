@@ -1281,23 +1281,21 @@ where
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
           StreamCommand::SendPushPullResponse(resp) => {
-            let (local_states, user_data) = resp.into_parts();
-            // `handle_stream_event` returns the response state UNENCODED with
-            // the inbound stream's `output_buf` still empty: encode the snapshot
-            // and load it before any of it can be transmitted, or the peer is
-            // left with a half-applied merge (split-brain). The bridge-level
-            // `self.deadline` is advanced to the SAME value `stream_load_response`
-            // writes into the inner stream so the `Done`-but-awaiting-peer-close
-            // abandon does not fire on the stale accept deadline before the fresh
-            // response window elapses. Derived from the configured `stream_timeout`
-            // (not a hardcoded constant) so a large response on a slow link gets
-            // the same budget the request side had.
+            // The response arrives PRE-ENCODED (an O(1) `Bytes` clone of the
+            // per-tick cache; see `refresh_pushpull_response_cache`). The inbound
+            // stream's `output_buf` is still empty, so load the frame before any
+            // of it can be transmitted, or the peer is left with a half-applied
+            // merge (split-brain). The bridge-level `self.deadline` is advanced
+            // to the SAME value `stream_load_response` writes into the inner
+            // stream so the `Done`-but-awaiting-peer-close abandon does not fire
+            // on the stale accept deadline before the fresh response window
+            // elapses. Derived from the configured `stream_timeout` (not a
+            // hardcoded constant) so a large response on a slow link gets the
+            // same budget the request side had.
             let response_deadline = now + ep.stream_timeout();
-            let encoded =
-              Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(
               self.stream.as_mut().expect("stream is Some"),
-              encoded,
+              resp.into_encoded(),
               response_deadline,
             );
             self.deadline = response_deadline;
@@ -1383,16 +1381,15 @@ where
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
           StreamCommand::SendPushPullResponse(resp) => {
-            let (local_states, user_data) = resp.into_parts();
-            // Derived from the configured `stream_timeout` (not a hardcoded
-            // constant) so a large response on a slow link gets the same budget
-            // the request side had.
+            // The response arrives PRE-ENCODED (an O(1) `Bytes` clone of the
+            // per-tick cache; see `refresh_pushpull_response_cache`). The
+            // response deadline is derived from the configured `stream_timeout`
+            // (not a hardcoded constant) so a large response on a slow link gets
+            // the same budget the request side had.
             let response_deadline = now + ep.stream_timeout();
-            let encoded =
-              Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(
               self.stream.as_mut().expect("stream is Some"),
-              encoded,
+              resp.into_encoded(),
               response_deadline,
             );
             self.deadline = response_deadline;

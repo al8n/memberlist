@@ -285,17 +285,12 @@ fn user_data_received_exposes_fields_and_parts() {
 }
 
 #[test]
-fn send_push_pull_response_exposes_fields_and_parts() {
+fn send_push_pull_response_exposes_encoded_frame() {
   use super::SendPushPullResponse;
-  let resp = SendPushPullResponse::new(
-    std::vec![push_state(95), push_state(96)],
-    Bytes::from_static(b"local-ud"),
-  );
-  assert_eq!(resp.local_states_slice().len(), 2);
-  assert_eq!(resp.user_data_ref().as_ref(), b"local-ud");
-  let (states, ud) = resp.into_parts();
-  assert_eq!(states.len(), 2);
-  assert_eq!(ud.as_ref(), b"local-ud");
+  let resp: SendPushPullResponse<SmolStr, SocketAddr> =
+    SendPushPullResponse::new(Bytes::from_static(b"encoded-frame"));
+  assert_eq!(resp.encoded_ref().as_ref(), b"encoded-frame");
+  assert_eq!(resp.into_encoded().as_ref(), b"encoded-frame");
 }
 
 #[test]
@@ -315,8 +310,7 @@ fn stream_command_close_and_response_variants() {
   use super::{SendPushPullResponse, StreamCommand};
   let close: StreamCommand<SmolStr, SocketAddr> = StreamCommand::Close;
   assert!(matches!(close, StreamCommand::Close));
-  let respond: StreamCommand<SmolStr, SocketAddr> = StreamCommand::SendPushPullResponse(
-    SendPushPullResponse::new(std::vec![push_state(97)], Bytes::new()),
-  );
+  let respond: StreamCommand<SmolStr, SocketAddr> =
+    StreamCommand::SendPushPullResponse(SendPushPullResponse::new(Bytes::new()));
   assert!(matches!(respond, StreamCommand::SendPushPullResponse(_)));
 }

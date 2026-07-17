@@ -793,8 +793,8 @@ impl Default for Network {
 /// Apply a `StreamCommand` returned by `Endpoint::handle_stream_event` to the
 /// appropriate `Stream`.
 ///
-/// For `SendPushPullResponse`: encodes the response payload and loads it into
-/// the stream's output buffer via `stream_load_response`.
+/// For `SendPushPullResponse`: loads the pre-encoded response frame into the
+/// stream's output buffer via `stream_load_response`.
 fn apply_stream_command(
   stream: &mut Stream<SmolStr, SocketAddr>,
   cmd: StreamCommand<SmolStr, SocketAddr>,
@@ -802,11 +802,8 @@ fn apply_stream_command(
 ) {
   match cmd {
     StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      let encoded =
-        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       let deadline = now + Duration::from_secs(5);
-      Endpoint::<SmolStr, SocketAddr>::stream_load_response(stream, encoded, deadline);
+      Endpoint::<SmolStr, SocketAddr>::stream_load_response(stream, resp.into_encoded(), deadline);
     }
     StreamCommand::Close => {
       // Stream will transition to Done on its own after sending/receiving.

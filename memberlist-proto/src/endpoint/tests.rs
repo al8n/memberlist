@@ -3703,12 +3703,8 @@ fn inbound_push_pull_decode_and_response_bytes() {
 
   match cmd {
     StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      // local_states is already in wire-format PushNodeState (with the
-      // local node's tracked incarnation), so we hand it straight to the
-      // encoder.
-      let encoded =
-        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
+      // The response is the endpoint's pre-encoded, cached membership frame.
+      let encoded = resp.into_encoded();
       assert!(!encoded.is_empty(), "encoded response must be non-empty");
       assert_eq!(encoded[0], 8u8, "first byte must be PUSH_PULL_MESSAGE_TAG");
 
@@ -4415,12 +4411,9 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   let cmd = e.handle_stream_event(ep_ev, t0).expect("StreamCommand");
   match cmd {
     StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      let enc =
-        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       Endpoint::<SmolStr, SocketAddr>::stream_load_response(
         &mut s_in,
-        enc,
+        resp.into_encoded(),
         t0 + Duration::from_secs(5),
       );
     }
@@ -6053,10 +6046,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // ── Step 3: B encodes its response and loads it into stream_b ─────────
   let encoded_b = match cmd_b {
-    StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false)
-    }
+    StreamCommand::SendPushPullResponse(resp) => resp.into_encoded(),
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
   };
   assert!(!encoded_b.is_empty(), "B response must be non-empty");
@@ -10621,4 +10611,252 @@ fn intent_index_cleared_on_leave() {
   // Oracle still holds in the Leaving state (both empty).
   assert_intent_index_consistent(&e);
   let _ = e.poll_timeout();
+}
+
+// ── Inbound push/pull response cache: O(1) per-request servicing ─────────────
+
+fn sock(port: u16) -> SocketAddr {
+  SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+fn inbound_pushpull_request(
+  peer: SocketAddr,
+  states: Vec<PushNodeState<SmolStr, SocketAddr>>,
+  stream_id: u64,
+) -> EndpointEvent<SmolStr, SocketAddr> {
+  EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
+    peer,
+    states,
+    Bytes::new(),
+    PushPullKind::Join,
+    StreamId::from_raw(stream_id),
+  ))
+}
+
+fn pushpull_response_bytes(cmd: Option<StreamCommand<SmolStr, SocketAddr>>) -> Bytes {
+  match cmd {
+    Some(StreamCommand::SendPushPullResponse(resp)) => resp.into_encoded(),
+    other => panic!("expected SendPushPullResponse, got {other:?}"),
+  }
+}
+
+fn decode_pushpull(bytes: &Bytes) -> crate::typed::PushPull<SmolStr, SocketAddr> {
+  let (_, msg) = crate::wire::decode_message::<SmolStr, SocketAddr>(bytes)
+    .expect("cached push/pull response must decode");
+  match msg {
+    crate::typed::Message::PushPull(pp) => {
+      assert!(
+        !pp.join(),
+        "a push/pull response always clears the join flag"
+      );
+      pp
+    }
+    other => panic!("expected a PushPull response frame, got {other:?}"),
+  }
+}
+
+fn decode_pushpull_response(
+  cmd: Option<StreamCommand<SmolStr, SocketAddr>>,
+) -> crate::typed::PushPull<SmolStr, SocketAddr> {
+  decode_pushpull(&pushpull_response_bytes(cmd))
+}
+
+fn reply_member_ids(cmd: Option<StreamCommand<SmolStr, SocketAddr>>) -> Vec<SmolStr> {
+  decode_pushpull_response(cmd)
+    .states_slice()
+    .iter()
+    .map(|s| s.id_ref().cheap_clone())
+    .collect()
+}
+
+/// The completed inbound push/pull path serves a cached, pre-encoded response:
+/// the O(members) fold+encode runs once per membership-changing tick, never per
+/// request. Drives many requests against a static member table and asserts the
+/// build counter stays flat, then grows the table and asserts a single tick
+/// rebuilds exactly once — the counter scales with neither request count nor
+/// member count.
+#[test]
+fn pushpull_response_cache_built_once_per_membership_change_not_per_request() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+
+  // Grow a large member table.
+  const N: u16 = 60;
+  for i in 0..N {
+    process_alive_auto(&mut e, alive(&format!("m{i}"), 9000 + i, 1), false, t0);
+  }
+  // Publish the current membership into the response cache (the schedule-fired
+  // tick is the only place the O(members) response is (re)built).
+  e.handle_timeout(t0);
+  assert_eq!(e.num_members(), N as usize + 1);
+  let builds_before = e.pushpull_response_builds();
+
+  // Drive many inbound requests against STATIC membership. Each pushes a state
+  // we already hold at the same incarnation (a no-op merge → no version bump),
+  // so the cache is served, never rebuilt.
+  let peer = sock(9500);
+  // The served frame is an O(1) clone of the cache: every request shares the
+  // SAME underlying buffer. A rebuild — extracted or inlined — allocates a fresh
+  // frame at a different address, so a stable pointer proves no per-request fold
+  // ran (complementing the build counter below).
+  let mut cache_ptr: Option<*const u8> = None;
+  for req_i in 0..200u64 {
+    let bytes = pushpull_response_bytes(e.handle_stream_event(
+      inbound_pushpull_request(peer, vec![pns("m0", 9000, 1, State::Alive)], req_i + 1),
+      t0,
+    ));
+    match cache_ptr {
+      None => cache_ptr = Some(bytes.as_ptr()),
+      Some(p) => assert_eq!(
+        bytes.as_ptr(),
+        p,
+        "each response must be an O(1) clone of the same cached buffer, not a rebuild"
+      ),
+    }
+    assert_eq!(
+      decode_pushpull(&bytes).states_slice().len(),
+      e.num_members(),
+      "every response is complete (carries all members)"
+    );
+  }
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_before,
+    "the per-request path must never rebuild the response (O(1) clone per request)"
+  );
+
+  // Grow again + a single tick → exactly one more build, regardless of the 200
+  // requests already served or the member count.
+  for i in N..(2 * N) {
+    process_alive_auto(&mut e, alive(&format!("m{i}"), 9000 + i, 1), false, t0);
+  }
+  e.handle_timeout(t0);
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_before + 1,
+    "one membership-changing tick rebuilds exactly once"
+  );
+
+  // Still O(1) at the larger size: a fresh cache buffer (from the grow tick),
+  // again shared across every request.
+  let builds_after_grow = e.pushpull_response_builds();
+  let mut cache_ptr2: Option<*const u8> = None;
+  for req_i in 0..200u64 {
+    let bytes = pushpull_response_bytes(e.handle_stream_event(
+      inbound_pushpull_request(peer, vec![pns("m0", 9000, 1, State::Alive)], 1000 + req_i),
+      t0,
+    ));
+    match cache_ptr2 {
+      None => cache_ptr2 = Some(bytes.as_ptr()),
+      Some(p) => assert_eq!(bytes.as_ptr(), p),
+    }
+    assert_eq!(
+      decode_pushpull(&bytes).states_slice().len(),
+      e.num_members()
+    );
+  }
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_after_grow,
+    "requests remain O(1) after the table grows"
+  );
+}
+
+/// The cached response reflects membership as of the last tick: a change applied
+/// between ticks is at most one tick stale (absent until the next refresh), and
+/// present afterward. Proves the staleness bound is exactly one tick.
+#[test]
+fn pushpull_response_reflects_membership_change_only_after_the_next_tick() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  process_alive_auto(&mut e, alive("known", 9001, 1), false, t0);
+  e.handle_timeout(t0); // cache: [local, known]
+
+  // Add "late" WITHOUT an intervening tick.
+  process_alive_auto(&mut e, alive("late", 9002, 1), false, t0);
+  assert!(
+    e.member(&SmolStr::new("late")).is_some(),
+    "late is a member immediately (the merge/insert is not tick-gated)"
+  );
+
+  // A request BEFORE the next tick serves the pre-change cache: local + known,
+  // but NOT late.
+  let peer = sock(9500);
+  let ids = reply_member_ids(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0));
+  assert!(
+    ids.iter().any(|id| id == &SmolStr::new("known")),
+    "the reply carries the last-tick view of known, got {ids:?}"
+  );
+  assert!(
+    !ids.iter().any(|id| id == &SmolStr::new("late")),
+    "late (added since the last tick) is at most one tick stale, not yet in the reply: {ids:?}"
+  );
+
+  // After a tick, a fresh request reflects late.
+  e.handle_timeout(t0);
+  let ids2 = reply_member_ids(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 2), t0));
+  assert!(
+    ids2.iter().any(|id| id == &SmolStr::new("late")),
+    "after a tick the reply reflects late: {ids2:?}"
+  );
+}
+
+/// A Leaving/Left node closes an inbound push/pull rather than serving a stale
+/// live snapshot: the lifecycle gate precedes the cached-response path.
+#[test]
+fn pushpull_response_left_node_closes_and_never_serves_the_cache() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+
+  let peer = sock(9500);
+  let cmd = e.handle_stream_event(
+    inbound_pushpull_request(peer, vec![pns("carol", 9003, 1, State::Alive)], 1),
+    t0,
+  );
+  assert!(
+    matches!(cmd, Some(StreamCommand::Close)),
+    "a left node must Close an inbound push/pull, never serve a live snapshot, got {cmd:?}"
+  );
+}
+
+/// `set_local_state_snapshot` mutates the response body (the local application
+/// state) WITHOUT moving `snapshot_version`, so it marks the cache dirty; the
+/// next tick then rebuilds the response with the new snapshot.
+#[test]
+fn pushpull_response_cache_dirtied_by_set_local_state_snapshot() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.handle_timeout(t0); // cache built with the initial (empty) snapshot
+
+  e.set_local_state_snapshot(Bytes::from_static(b"app-state-v2"))
+    .expect("set_local_state_snapshot ok");
+
+  // A request BEFORE a tick still serves the old cache (empty snapshot): the
+  // dirty flag defers the rebuild to the tick.
+  let peer = sock(9500);
+  let before =
+    decode_pushpull_response(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0))
+      .user_data_bytes();
+  assert!(
+    before.is_empty(),
+    "pre-tick reply carries the old (empty) snapshot: {before:?}"
+  );
+
+  // After a tick, the dirty flag forces a rebuild reflecting the new snapshot,
+  // even though `snapshot_version` never moved.
+  e.handle_timeout(t0);
+  let after =
+    decode_pushpull_response(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 2), t0))
+      .user_data_bytes();
+  assert_eq!(
+    after.as_ref(),
+    b"app-state-v2",
+    "the dirty flag makes the next tick rebuild the cache with the new snapshot"
+  );
 }

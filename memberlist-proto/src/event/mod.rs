@@ -6,7 +6,7 @@ use std::{string::String, vec::Vec};
 
 use crate::typed::{Message, NodeState, PushNodeState};
 use bytes::Bytes;
-use core::time::Duration;
+use core::{marker::PhantomData, time::Duration};
 use smallvec_wrapper::TinyVec;
 
 /// A coordinator-allocated handle for one in-flight reliable exchange,
@@ -1057,44 +1057,50 @@ pub enum EndpointEvent<I, A> {
   UserDataReceived(UserDataReceived<A>),
 }
 
-/// Payload for [`StreamCommand::SendPushPullResponse`]: the local node's state
-/// snapshot to ship back as the response to an inbound push/pull.
+/// Payload for [`StreamCommand::SendPushPullResponse`]: the local node's
+/// fully-encoded push/pull response frame, ready to load into the responding
+/// stream's output buffer.
+///
+/// The frame is the local node's entire membership view (every member as a
+/// wire-format `PushNodeState`, carrying incarnation, live state, and
+/// protocol/delegate versions) plus the local application-state snapshot, with
+/// the push/pull `join` flag cleared. That body is independent of the request
+/// that triggered it, so the [`Endpoint`](crate::endpoint::Endpoint) builds and
+/// encodes it once per membership change and hands each requester an O(1)
+/// [`Bytes`] clone — a completed inbound exchange never re-folds the member
+/// table. The bytes are byte-identical to a
+/// [`Endpoint::encode_push_pull_response`](crate::endpoint::Endpoint::encode_push_pull_response)
+/// over the same membership.
 #[derive(Debug)]
 pub struct SendPushPullResponse<I, A> {
-  local_states: Vec<PushNodeState<I, A>>,
-  user_data: Bytes,
+  encoded: Bytes,
+  _marker: PhantomData<(I, A)>,
 }
 
 impl<I, A> SendPushPullResponse<I, A> {
-  /// Construct a new payload.
+  /// Construct a new payload from the pre-encoded response frame.
   #[inline(always)]
-  pub const fn new(local_states: Vec<PushNodeState<I, A>>, user_data: Bytes) -> Self {
+  pub const fn new(encoded: Bytes) -> Self {
     Self {
-      local_states,
-      user_data,
+      encoded,
+      _marker: PhantomData,
     }
   }
 
-  /// The local node's view of cluster state to ship back, in wire-format
-  /// `PushNodeState` (carries incarnation, state, protocol/delegate
-  /// versions). The Endpoint builds this from each `LocalNodeState`
-  /// before handing it off; the driver passes it directly to
-  /// `Endpoint::encode_push_pull_response`.
+  /// The pre-encoded push/pull response frame to write back to the requesting
+  /// peer. The driver loads these bytes into the responding stream's output
+  /// buffer via
+  /// [`Endpoint::stream_load_response`](crate::endpoint::Endpoint::stream_load_response)
+  /// unchanged.
   #[inline(always)]
-  pub fn local_states_slice(&self) -> &[PushNodeState<I, A>] {
-    self.local_states.as_slice()
+  pub const fn encoded_ref(&self) -> &Bytes {
+    &self.encoded
   }
 
-  /// Application-level payload to ship alongside.
+  /// Consume the payload into the pre-encoded response frame.
   #[inline(always)]
-  pub const fn user_data_ref(&self) -> &Bytes {
-    &self.user_data
-  }
-
-  /// Consume the payload into its (local_states, user_data) parts.
-  #[inline(always)]
-  pub fn into_parts(self) -> (Vec<PushNodeState<I, A>>, Bytes) {
-    (self.local_states, self.user_data)
+  pub fn into_encoded(self) -> Bytes {
+    self.encoded
   }
 }
 
