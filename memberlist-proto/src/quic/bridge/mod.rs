@@ -204,6 +204,16 @@ impl<I, A> Bridge<I, A> {
   pub(crate) fn set_queued(&mut self, queued: bool) {
     self.queued = queued;
   }
+
+  /// `true` for the dialer role (we opened this bidi via `open(Dir::Bi)`),
+  /// `false` for the acceptor role (accepted via `accept(Dir::Bi)`) — the
+  /// `eager_outbound_label` field. Read at reap time (before the bridge is
+  /// dropped) so the coordinator decrements the owning connection's
+  /// outbound-bridge count for exactly the dialer bridges its `open(Dir::Bi)`
+  /// admission gate counted at mint.
+  pub(crate) fn eager_outbound_label(&self) -> bool {
+    self.eager_outbound_label
+  }
 }
 
 impl<I, A> Bridge<I, A>

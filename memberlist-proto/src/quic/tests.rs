@@ -7327,23 +7327,24 @@ fn service_peer_bucket_leaves_tail_resident_no_move() {
 }
 
 /// One connection-window MAX_DATA makes quinn emit `StreamEvent::Writable` for
-/// EVERY connection-window-blocked stream in a SINGLE `poll()` drain, and the
-/// arm's per-event reverse-index lookup + `ready_bridges` push would otherwise
-/// grow the ready queue by O(blocked streams) for that ONE datagram. The arm caps
-/// its enqueues at `MAX_BRIDGE_PUMPS_PER_PASS` per pass, so `ready_bridges` growth
-/// from a Writable storm is bounded no matter how many streams the MAX_DATA
-/// unblocks.
+/// EVERY connection-window-blocked stream in a SINGLE `poll()` drain. The arm
+/// acts on EVERY edge — no per-pass enqueue cap — because quinn clears
+/// `connection_blocked` on this yield and never re-adds it, so a skipped edge
+/// would strand a still-blocked bridge to its exchange deadline. Bounding the
+/// storm is instead the local `C_OUT` outbound cap: the blocked set is our
+/// inbound accepts (config) plus at most `C_OUT` dialer streams, so acting on
+/// every edge is O(config), not O(the attacker's stream count).
 ///
 /// Unlike `writable_storm_pass_pumps_at_most_the_budget` (which bounds the DRAIN,
 /// enqueuing the storm synthetically), this drives a REAL MAX_DATA: A opens N
-/// connection-window-blocked bridges, B reads A's data and emits MAX_DATA, and A's
-/// `poll()` then storms `Writable`. The per-pass ENQUEUE count (queue growth), not
-/// only the pump count, is what is asserted.
+/// connection-window-blocked DIALER bridges (N < `C_OUT`, so all open), B reads
+/// A's data and emits MAX_DATA, and A's `poll()` then storms `Writable`. The
+/// per-pass ENQUEUE count is asserted to EQUAL the events seen (no skip).
 ///
-/// Mutation-verify: remove the `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
-/// cap — the storm pass then enqueues one bridge per Writable (~N), so its per-pass
-/// `writable_bridges_enqueued` equals `writable_events_seen` and the `<= budget`
-/// assertion fails on that pass.
+/// Mutation-verify: restore a `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
+/// skip — the storm pass then enqueues at most the budget while seeing ~N
+/// events, so `writable_bridges_enqueued < writable_events_seen` and the
+/// `enqueued == seen` assertion fails on that pass.
 #[test]
 fn writable_storm_arm_caps_enqueues() {
   let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
@@ -7436,8 +7437,10 @@ fn writable_storm_arm_caps_enqueues() {
 
   // Measured phase: deliver B's datagrams to A ONE AT A TIME. Each `handle_udp` is
   // one service pass = one `Writable`-arm run. Reset the counters before each and
-  // assert the per-pass enqueues never exceed the budget; the storm pass proves the
-  // cap is non-vacuous (it SEES far more Writables than the budget).
+  // assert the arm acts on EVERY edge (enqueued == seen, no skip) and that the
+  // blocked set the storm delivers stays bounded by the local `C_OUT` cap (all of
+  // A's blocked streams are dialers). The storm pass proves this is non-vacuous
+  // (it SEES far more Writables than the OLD per-pass budget).
   let mut max_events_seen = 0u64;
   for dg in &b_to_a {
     a.counters.writable_events_seen = 0;
@@ -7446,19 +7449,27 @@ fn writable_storm_arm_caps_enqueues() {
     let seen = a.counters.writable_events_seen;
     let enqueued = a.counters.writable_bridges_enqueued;
     max_events_seen = max_events_seen.max(seen);
+    assert_eq!(
+      enqueued, seen,
+      "the Writable arm must act on EVERY edge (no per-pass skip): a dropped edge \
+         strands a bridge whose `connection_blocked` entry quinn cleared on yield; \
+         seen {seen}, enqueued {enqueued} (restoring a per-pass cap makes enqueued \
+         fall below seen on the storm pass)"
+    );
     assert!(
-      enqueued <= super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
-      "one service pass must enqueue at most MAX_BRIDGE_PUMPS_PER_PASS={} bridges \
-         from the Writable arm, not the {seen} the storm delivered this pass; \
-         enqueued {enqueued} (removing the cap makes this equal {seen})",
-      super::MAX_BRIDGE_PUMPS_PER_PASS
+      seen <= super::C_OUT as u64,
+      "the blocked set one MAX_DATA storms ({seen}) must stay bounded by the local \
+         outbound cap C_OUT={} — all of A's blocked streams are dialers, so the \
+         per-datagram Writable work is O(config), not O(the peer's advertised \
+         MAX_STREAMS)",
+      super::C_OUT
     );
   }
   assert!(
     max_events_seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
     "non-vacuous: one service pass must have seen more Writable events \
-       ({max_events_seen}) than the budget, so the cap actually bound the enqueues \
-       (removing it would exceed the budget on that pass)"
+       ({max_events_seen}) than the old per-pass budget, so acting on every edge \
+       (not the reverted skip) is what is under test"
   );
 }
 
@@ -8009,5 +8020,556 @@ fn sticky_catchup_wake_is_not_pushed_by_datagram_flood() {
   assert!(
     catchup_steps >= 1,
     "the residue must drain via at least one bounded catch-up wake"
+  );
+}
+
+/// Ferry a datagram warm-up A->B->A until A holds an established pooled connection
+/// to B (no bidi stream consumed), so a subsequent reliable dial opens immediately
+/// rather than parking on the handshake. Quiesces both transmit queues on return.
+fn establish(
+  a: &mut QuicEndpoint<SmolStr>,
+  b: &mut QuicEndpoint<SmolStr>,
+  a_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  a.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "establish: A must hold an established pooled connection to B"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+}
+
+/// The per-connection outbound-stream cap bounds the number of live DIALER bridges
+/// on a pooled connection at `C_OUT`, regardless of how large a `MAX_STREAMS`
+/// limit the PEER advertises. Excess dials re-park (they are not retired) so they
+/// open as slots free. This is the local bound that keeps quinn's
+/// `connection_blocked` set — and thus the Writable-arm work per MAX_DATA —
+/// config-bounded rather than peer-controlled.
+///
+/// Construction: B advertises a bidi limit far above `C_OUT`, so credit is never
+/// the binding constraint. A opens `C_OUT + EXTRA` outbound user-message dials to
+/// B WITHOUT ferrying (their payloads never leave A, so every bridge stays live).
+///
+/// Mutation-verify: remove the `C_OUT` gate in `process_dial_entry` — all
+/// `C_OUT + EXTRA` dials then open (credit allows), so `outbound_bridge_count`
+/// climbs to `C_OUT + EXTRA` and the `== C_OUT` assertion fails.
+#[test]
+fn outbound_cap_bounds_live_dialer_bridges() {
+  let a_addr: SocketAddr = "127.0.0.1:8200".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8201".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B advertises a bidi limit WAY above C_OUT, so the local cap — not the peer's
+  // credit — is the binding constraint that parks the excess.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const EXTRA: usize = 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..(super::C_OUT + EXTRA) {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to the established B");
+    // Drain A's owed transmits so `out` does not grow unboundedly; the payloads
+    // are discarded (never delivered to B), so every opened bridge stays live.
+    while a.poll_transmit().is_some() {}
+  }
+
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "the connection must hold exactly C_OUT live dialer bridges — the excess dials \
+       park behind the local cap, NOT the peer's credit"
+  );
+  assert_eq!(
+    a.bridges.len(),
+    super::C_OUT,
+    "exactly C_OUT dialer bridges are live on A (B dials nothing back)"
+  );
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    EXTRA,
+    "the EXTRA dials past the cap must re-park on B's bucket (a NEW re-park cause), \
+       not retire — so they open as slots free"
+  );
+}
+
+/// The outbound-count balance across mint and single reap, keyed on the DIALER
+/// role (`eager_outbound_label`) and NOT on `pending_outbound_kinds`. A GOSSIP
+/// push/pull — a dialer that is ABSENT from `pending_outbound_kinds` (it never
+/// went through the driver `start_push_pull` wrapper) — MUST still be counted at
+/// mint and decremented at reap, or the counter leaks on every gossip dial until
+/// the connection permanently refuses all dials (a silent cluster brick).
+///
+/// Mutation-verify: key the mint increment off `pending_outbound_kinds` — the
+/// gossip dial (absent) is then not counted and the `== 1` assertion fails. Key
+/// the reap decrement off `pending_outbound_kinds` — the gossip dial is then not
+/// decremented and the post-reap `== 0` assertion fails (the leak).
+#[test]
+fn outbound_count_counts_and_decrements_gossip_dial() {
+  let a_addr: SocketAddr = "127.0.0.1:8210".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8211".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Inject a GOSSIP push/pull directly on the inner endpoint — this bypasses the
+  // quic-level `start_push_pull` wrapper, so the dial's id is NEVER inserted into
+  // `pending_outbound_kinds` (exactly an internally-scheduled gossip dial).
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+
+  // Ferry until the dial opens its bridge; break WHILE it is still live.
+  let mut ch = None;
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_bridge_count() >= 1 {
+      ch = a.conns.handle_for(&b_addr);
+      break;
+    }
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+  }
+  let ch = ch.expect("A's gossip dial must open a bridge on a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    a.live_bridge_count(),
+    "the gossip dialer bridge (absent from pending_outbound_kinds) MUST be counted \
+       — keying the increment off pending_outbound_kinds leaves this 0"
+  );
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() >= 1,
+    "the gossip dial is counted against the connection's outbound cap"
+  );
+
+  // Ferry the exchange to completion; the bridge reaps via the single-reap pump
+  // path on the SURVIVING connection.
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_bridge_count() == 0 {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "the gossip exchange must complete and reap its bridge on the surviving connection"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    0,
+    "the reaped gossip dialer bridge MUST decrement the outbound count back to 0 — \
+       keying the decrement off pending_outbound_kinds leaks the counter (a silent brick)"
+  );
+}
+
+/// A connection-level loss reaps every DIALER bridge on the connection AND removes
+/// the whole `ConnEntry`, so the outbound count is discarded wholesale with no
+/// leak — the bulk-reap decrement is balanced (its debug-assert would fire on an
+/// underflow) and the entry is gone.
+#[test]
+fn outbound_count_discarded_with_connentry_on_connection_loss() {
+  let a_addr: SocketAddr = "127.0.0.1:8220".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8221".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Open a few live dialer bridges (payloads never delivered, so they stay live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..3 {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() >= 3,
+    "the three dialer bridges are counted before the loss"
+  );
+
+  // Force the pooled connection to drained-loss WITHOUT elapsing the bridges' own
+  // exchange deadlines: the bulk reap runs (decrementing the count per dialer
+  // bridge) and `reap_if_drained` removes the whole entry this same tick.
+  a.conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  let close_due = a
+    .conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .poll_timeout()
+    .expect("close arms the Close timer");
+  a.handle_timeout(crate::Instant::from_std(close_due));
+
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "every dialer bridge riding the lost connection must be reaped this tick"
+  );
+  assert!(
+    a.conns.handle_for(&b_addr).is_none() && a.conns.get(ch).is_none(),
+    "the whole ConnEntry (with its outbound count) must be gone — no counter leak"
+  );
+}
+
+/// A reliable-ping fallback is EXEMPT from the `C_OUT` outbound cap: it is a rare,
+/// single-stream, liveness-critical failure-detection dial, and parking it behind
+/// a user-message flood could miss the probe's cumulative deadline and yield a
+/// false-positive Dead. It opens even when the connection is already at `C_OUT`
+/// dialer bridges (and still increments the count, for accounting).
+///
+/// Mutation-verify: gate reliable-ping like every other dial — it then re-parks at
+/// the cap (no bridge minted), so the `bridges.contains_key(ping_id)` assertion
+/// fails and it would instead sit in `dial_parked` until its probe deadline.
+#[test]
+fn reliable_ping_exempt_from_outbound_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8230".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8231".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap with user-message dials (payloads never delivered → all live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is exactly at the C_OUT cap"
+  );
+
+  // A reliable-ping dial to the SAME peer at the cap must OPEN (exempt), not park.
+  let ping_id = a.start_reliable_ping(
+    SmolStr::new("b"),
+    b_addr,
+    7,
+    now + Duration::from_secs(5),
+    now,
+  );
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the reliable-ping dial MUST open its bridge even at the C_OUT cap (exempt) — \
+       gating it too would leave it parked and risk a false-positive Dead"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT + 1,
+    "the exempt reliable-ping still increments the outbound count, for accounting"
+  );
+
+  // A further USER-MESSAGE dial at the cap DOES park (the exemption is scoped to
+  // reliable-ping only).
+  let over_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules one more user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    !a.bridges.contains_key(&over_id),
+    "a NON-reliable-ping dial past the cap must NOT open (it parks) — the exemption \
+       is reliable-ping-only"
+  );
+}
+
+/// The slot-free wake fires from `catchup_service`: when a DIALER bridge reaps
+/// inside the catch-up pump it frees a `C_OUT` slot, and the same catch-up pass
+/// services the peer's parked bucket so a `C_OUT`-parked dial opens — rather than
+/// stranding to its deadline while only `catchup_service` runs (no datagrams, no
+/// due timer).
+///
+/// Mutation-verify: drop the slot-free servicing from `catchup_service` — the
+/// reap inside the catch-up pump frees the slot but nothing services the parked
+/// dial, so `parked_id` stays in `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_wake_from_catchup_opens_parked_dial() {
+  let a_addr: SocketAddr = "127.0.0.1:8240".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8241".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap, then one more dial parks behind it (a genuine C_OUT re-park).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap with user-message dials");
+    while a.poll_transmit().is_some() {}
+  }
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().any(|d| d.id == parked_id))
+      .unwrap_or(false),
+    "test precondition: the extra dial parked behind the cap"
+  );
+
+  // Force ONE live dialer bridge terminal and enqueue ONLY it, then run a
+  // catch-up pass: pumping it reaps a dialer bridge (freeing a slot), and the
+  // same catch-up services B's bucket so the parked dial opens.
+  let victim = *a
+    .bridges
+    .keys()
+    .find(|id| **id != parked_id)
+    .expect("A holds live dialer bridges");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+  super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, victim);
+  a.catchup_service(now);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the forced-terminal dialer bridge must reap inside the catch-up pump"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot the catch-up reap freed — dropping \
+       the slot-free wake from catchup_service strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "one dialer reaped (-1) and the parked dial opened (+1): the count returns to C_OUT"
+  );
+}
+
+/// Deleting the Writable skip means the arm acts on EVERY connection-window edge,
+/// so a bridge blocked past the OLD per-pass budget is still enqueued and pumps
+/// within the catch-up cadence — never stranded to its exchange deadline (quinn
+/// clears `connection_blocked` on yield and never re-adds it, so a dropped edge
+/// would be permanent).
+///
+/// Construction: A opens N connection-window-blocked bridges (N far above the pump
+/// budget). B reads A's data and emits MAX_DATA; delivering it storms `Writable`
+/// for all N. Draining the catch-up cadence (with a data ferry, never advancing to
+/// the ~5s exchange deadline) reaps ALL N.
+///
+/// Mutation-verify: restore the `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
+/// skip — the storm pass then enqueues at most the pump budget and pumps exactly
+/// that many, so NO residue forms (the past-budget edges are dropped, never
+/// enqueued) and the `after > before` assertion fails; a dropped edge is
+/// permanent because quinn cleared `connection_blocked` on the yield.
+#[test]
+fn writable_edge_not_dropped_bridge_enqueues_and_drains_via_catchup() {
+  let a_addr: SocketAddr = "127.0.0.1:8250".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8251".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic schedulers off so the residue drains via bounded catch-up wakes
+  // rather than a full tick that would pump every bridge regardless.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_small_conn_window_bidi(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Open N connection-window-blocked DIALER bridges — far above the pump budget so
+  // one MAX_DATA storms more Writables than the budget — but under C_OUT so all
+  // open.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to B");
+  }
+  let live0 = a.bridges.len();
+  assert!(
+    live0 > super::MAX_BRIDGE_PUMPS_PER_PASS && live0 <= super::C_OUT,
+    "test precondition: A holds more blocked bridges ({live0}) than the pump budget \
+       but under C_OUT (so all open)"
+  );
+
+  // Deliver A's blocked sends to B and let B read them and emit MAX_DATA; do NOT
+  // deliver B's output back to A yet, so the storm concentrates in one A pass.
+  let mut b_to_a: Vec<Vec<u8>> = Vec::new();
+  let mut t = now;
+  for _ in 0..120 {
+    t += Duration::from_millis(5);
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, t);
+        moved = true;
+      }
+    }
+    b.handle_timeout(t);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        b_to_a.push(bytes.to_vec());
+      }
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    !b_to_a.is_empty(),
+    "B must emit MAX_DATA datagrams after reading A's data"
+  );
+
+  // Deliver B's MAX_DATA to A one datagram = one service pass at a time. On the
+  // pass that storms MORE Writables than the pump budget, the arm must enqueue ALL
+  // of them: the pass pumps at most the budget and leaves the excess as RESIDUE
+  // (`after > before`). The skip caps the enqueues at the budget, so that same
+  // pass leaves NO residue and the excess edges are dropped forever.
+  let mut storm_seen = 0u64;
+  let mut storm_residue_grew = false;
+  for dg in &b_to_a {
+    a.counters.writable_events_seen = 0;
+    let before = a.ready_bridges.len();
+    a.handle_udp(b_addr, dg, t);
+    let seen = a.counters.writable_events_seen;
+    let after = a.ready_bridges.len();
+    if seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64 {
+      storm_seen = storm_seen.max(seen);
+      if after > before {
+        storm_residue_grew = true;
+      }
+    }
+    // Drain the residue via the sticky catch-up cadence before the next datagram,
+    // so each pass's residue growth is measured cleanly. The catch-up pumps the
+    // enqueued bridges (proving they are pumped, never stranded); it converges
+    // because no new MAX_DATA arrives during the drain.
+    let mut steps = 0usize;
+    while !a.ready_bridges.is_empty() {
+      let wake = a
+        .poll_timeout()
+        .expect("a non-empty residue always schedules a wake");
+      a.handle_timeout(wake);
+      steps += 1;
+      assert!(steps <= N, "the residue must drain in bounded steps");
+    }
+  }
+  assert!(
+    storm_seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "non-vacuous: one pass must storm more Writable edges ({storm_seen}) than the \
+       pump budget, so the past-budget edges are what the skip would drop"
+  );
+  assert!(
+    storm_residue_grew,
+    "the storm pass must ENQUEUE more bridges than it pumps this pass, leaving a \
+       residue (after > before) — proof every edge past the pump budget was acted \
+       on. Restoring the enqueue skip caps enqueues at the budget so no residue \
+       forms and the past-budget bridges are stranded."
   );
 }

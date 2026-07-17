@@ -77,6 +77,19 @@ pub(crate) struct ConnEntry {
   /// delivery on the NEXT iteration of THIS connection. See
   /// [`Self::queue_pending_event`] / [`Self::take_pending_events`].
   pending_events: VecDeque<ConnectionEvent>,
+  /// Count of live DIALER (locally opened via `open(Dir::Bi)`) bidi bridges
+  /// currently riding this connection. A bridge is a dialer iff its bridge-side
+  /// `eager_outbound_label` is `true`; the coordinator increments this at every
+  /// dial mint and decrements it at every dialer-bridge reap under that SAME
+  /// predicate, so the count returns to 0 once a connection's dialer bridges
+  /// have all reaped (and is discarded with the entry if the connection is
+  /// dropped wholesale). It bounds the LOCAL outbound half of quinn's
+  /// `connection_blocked` set: the coordinator admission-gates `open(Dir::Bi)`
+  /// at `super::C_OUT`, so a peer advertising an enormous MAX_STREAMS cannot
+  /// make this node hold an attacker-scaled outbound bidi-stream population.
+  /// Independent of the coordinator's separate `inbound_bridge_count` (which
+  /// counts accepted bridges); a bridge contributes to exactly one of the two.
+  outbound_bridge_count: usize,
 }
 
 impl ConnEntry {
@@ -164,6 +177,36 @@ impl ConnEntry {
   #[cfg(test)]
   pub(crate) fn pending_events_len(&self) -> usize {
     self.pending_events.len()
+  }
+
+  /// Live count of DIALER (we-opened, `eager_outbound_label`) bidi bridges on
+  /// this connection — the outbound half of quinn's `connection_blocked` set the
+  /// coordinator's `open(Dir::Bi)` admission gate bounds. See the field docs.
+  #[inline(always)]
+  pub(crate) fn outbound_bridge_count(&self) -> usize {
+    self.outbound_bridge_count
+  }
+
+  /// Record one newly minted dialer bridge on this connection. Paired 1:1 with
+  /// [`Self::dec_outbound_bridge_count`] under the coordinator's
+  /// `eager_outbound_label` predicate, so every increment is matched by exactly
+  /// one decrement (or discarded whole with the entry on connection reap).
+  #[inline(always)]
+  pub(crate) fn inc_outbound_bridge_count(&mut self) {
+    self.outbound_bridge_count += 1;
+  }
+
+  /// Release one reaped dialer bridge's unit of this connection's outbound
+  /// count. Debug-asserts against underflow: a decrement with no matching mint
+  /// is a predicate mismatch between the mint and reap sites (the exact fault an
+  /// `eager_outbound_label`-vs-`pending_outbound_kinds` keying error would cause).
+  #[inline(always)]
+  pub(crate) fn dec_outbound_bridge_count(&mut self) {
+    debug_assert!(
+      self.outbound_bridge_count > 0,
+      "outbound_bridge_count underflow: a dialer-bridge reap has no matching mint"
+    );
+    self.outbound_bridge_count = self.outbound_bridge_count.saturating_sub(1);
   }
 }
 
@@ -302,6 +345,7 @@ impl ConnTable {
       // pending allowance (see `pending_inbound_from`), so it is not indexed.
       pending_indexed: false,
       pending_events: VecDeque::new(),
+      outbound_bridge_count: 0,
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
     self.peers.insert(peer, ch);
@@ -359,6 +403,10 @@ impl ConnTable {
       // (on removal while still un-established).
       pending_indexed: true,
       pending_events: VecDeque::new(),
+      // An inbound (server-accepted) connection can still be the canonical
+      // handle a later local dial rides (simultaneous bidirectional dial), so a
+      // dialer bridge may be opened on it — start the outbound count at zero.
+      outbound_bridge_count: 0,
     });
     assert_eq!(
       slot, ch.0,

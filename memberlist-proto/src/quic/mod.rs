@@ -165,6 +165,34 @@ const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
 /// a handshake-blocked bucket still stops at the first re-park.
 const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
 
+/// Maximum concurrent DIALER (locally opened) bidi bridges the coordinator
+/// admits per pooled connection — the local cap on the OUTBOUND half of quinn's
+/// `connection_blocked` set.
+///
+/// A single connection-window MAX_DATA makes quinn-proto emit a
+/// `StreamEvent::Writable` for EVERY connection-window-blocked stream, and that
+/// blocked set is our INBOUND accepts (bounded by our advertised bidi limit — a
+/// config constant, `<= 100`) PLUS the streams WE opened — which is otherwise
+/// bounded only by the PEER's advertised `MAX_STREAMS`, an attacker-controlled
+/// value. Without a local cap, a peer advertising an enormous MAX_STREAMS could
+/// make this node hold — and re-enumerate on every MAX_DATA — an attacker-scaled
+/// outbound-stream population. Gating `open(Dir::Bi)` at [`C_OUT`] bounds the
+/// outbound half to a local config constant, so `|connection_blocked| <=
+/// advertised_bidi (<= 100) + C_OUT + O(concurrent reliable-pings)` — table- and
+/// peer-independent, the same config-bounded batch class as the inbound
+/// `accept(Dir::Bi)` loop.
+///
+/// 256 is generous: gossip runs only a handful of concurrent outbound reliable
+/// exchanges (push/pull plus a reliable-ping fallback) per peer, so it clears
+/// every legitimate burst and only backpressures a pathological user-message
+/// flood at one peer — whose excess dials re-park on their [`TimerKey::Dial`]
+/// deadline and open as slots free (see [`QuicEndpoint::process_dial_entry`]'s
+/// C_OUT gate). A reliable-ping fallback is EXEMPT from the gate (it still
+/// increments the count for accounting): parking a rare, liveness-critical probe
+/// fallback behind a user-message flood could miss the probe's cumulative
+/// deadline and yield a false-positive Dead — a SWIM-accuracy regression.
+const C_OUT: usize = 256;
+
 /// How long [`QuicEndpoint::poll_timeout`] throttles the deferred-servicing
 /// (Catchup) wake while a budget-deferred bridge residue waits in
 /// [`QuicEndpoint::ready_bridges`].
@@ -591,6 +619,18 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// on every receive, even a rejected one) can neither push the wake forward and
   /// strand the residue nor re-chunk it into O(K) work across a driver's re-polls.
   next_catchup_at: Option<Instant>,
+  /// Distinct peers whose DIALER bridge reaped during the current servicing pass,
+  /// freeing one of that connection's [`C_OUT`] outbound slots. A slot free lets
+  /// a `C_OUT`-parked dial to that peer finally open, so the two responsive
+  /// servicing paths ([`Self::service_connection`] and [`Self::catchup_service`])
+  /// drain this set at the end of a pass and [`Self::service_peer_bucket`] each
+  /// peer — one bounded wake per reaped dialer bridge, riding the servicing pass
+  /// (never a `last_now`-armed anchor), so it is not attacker-per-datagram
+  /// pushable. The global tick's [`Self::service_dials`] full-drains every bucket
+  /// regardless, so [`Self::finalize_tick`] merely clears this set (its parked
+  /// dials are the tick's own backstop). Deduped at insertion; bounded by the
+  /// distinct peers reaped in a pass (`<= MAX_BRIDGE_PUMPS_PER_PASS`).
+  slot_freed_peers: SmallVec<SocketAddr>,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
   /// into production builds.
@@ -775,19 +815,22 @@ struct TestCounters {
   dial_entries_serviced: u64,
   /// Test-only count of `StreamEvent::Writable` events the per-connection
   /// `poll()` drain delivered to the `Writable` arm this run — bumped at arm
-  /// entry, BEFORE the per-pass cap. One connection-window MAX_DATA storms this
-  /// with a `Writable` per connection-window-blocked stream, so a single service
-  /// pass can see far more than the pump budget; this counter proves the storm is
-  /// real (so the enqueue cap below is non-vacuous). Never compiled into
-  /// production builds.
+  /// entry. One connection-window MAX_DATA storms this with a `Writable` per
+  /// connection-window-blocked stream; that blocked set is now bounded by
+  /// `advertised_bidi + C_OUT + O(pings)` (a config constant), and the arm acts
+  /// on EVERY edge, so this equals [`Self::writable_bridges_enqueued`] whenever
+  /// every event resolves to a live bridge. Never compiled into production
+  /// builds.
   writable_events_seen: u64,
   /// Test-only count of bridges the `Writable` arm actually enqueued onto
-  /// `ready_bridges` — bumped AFTER the per-pass `MAX_BRIDGE_PUMPS_PER_PASS` cap,
-  /// so a single service pass bumps it at most that many times no matter how large
-  /// the Writable storm. The Writable-storm regression test resets it per handle_udp
-  /// and asserts the per-pass delta never exceeds the budget; removing the cap makes
-  /// it track `writable_events_seen` and the storm pass exceeds the budget. Never
-  /// compiled into production builds.
+  /// `ready_bridges` — bumped once per `Writable` edge that resolves to a live
+  /// bridge (no per-pass cap: every edge is acted on, since dropping one would
+  /// strand a still-blocked bridge whose `connection_blocked` entry quinn cleared
+  /// on yield). The Writable-storm regression test resets it per `handle_udp` and
+  /// asserts it EQUALS [`Self::writable_events_seen`] on the storm pass (no
+  /// skip), while the local `C_OUT` cap keeps that count config-bounded; restoring
+  /// a per-pass enqueue cap makes it fall below `writable_events_seen` on the
+  /// storm pass and that test fails. Never compiled into production builds.
   writable_bridges_enqueued: u64,
 }
 
@@ -854,6 +897,7 @@ impl<I, R> QuicEndpoint<I, R> {
       deadline_index: DeadlineIndex::new(),
       conns_with_pending_events: HashSet::new(),
       next_catchup_at: None,
+      slot_freed_peers: SmallVec::new(),
       #[cfg(test)]
       counters: TestCounters::default(),
     }
@@ -1735,6 +1779,33 @@ impl<I, R> QuicEndpoint<I, R> {
     }
   }
 
+  /// A DIALER bridge on connection `ch` was just reaped: release its unit of the
+  /// connection's [`C_OUT`] outbound count and record `ch`'s peer for the
+  /// slot-free wake. The caller MUST invoke this ONLY for a reaped bridge whose
+  /// [`bridge::Bridge::eager_outbound_label`] is `true` — the same predicate the
+  /// mint-time [`conn::ConnEntry::inc_outbound_bridge_count`] uses, so the count
+  /// is provably balanced (returns to 0 once a connection's dialer bridges have
+  /// all reaped) and never keyed off `pending_outbound_kinds` (which would leak
+  /// on every gossip dial).
+  ///
+  /// A missing entry is a no-op: the connection-loss bulk reap may run while the
+  /// entry is mid-removal, in which case the counter is discarded WITH the entry
+  /// and there is nothing to decrement. Freeing a slot lets a `C_OUT`-parked dial
+  /// to this peer open, so the peer is queued into [`Self::slot_freed_peers`]
+  /// (deduped) for the servicing pass's slot-free wake.
+  fn on_dialer_bridge_reaped(&mut self, ch: ConnectionHandle) {
+    let peer = match self.conns.get_mut(ch) {
+      Some(e) => {
+        e.dec_outbound_bridge_count();
+        e.peer()
+      }
+      None => return,
+    };
+    if !self.slot_freed_peers.contains(&peer) {
+      self.slot_freed_peers.push(peer);
+    }
+  }
+
   /// Brute-force earliest deadline — a byte-for-byte fold of the same sources
   /// the incremental [`Self::deadline_index`] tracks, kept as the invariant
   /// oracle. A test asserts [`Self::poll_timeout`] equals this after every
@@ -2171,6 +2242,12 @@ impl<I, R> QuicEndpoint<I, R> {
     // The residue is gone, so retire the sticky catch-up anchor: no deferred
     // bridge remains to wake for.
     self.next_catchup_at = None;
+    // The tick's `service_dials` (the caller, before this) full-drains EVERY
+    // parked bucket, so any dial parked behind a `C_OUT` slot freed by this
+    // tick's reaps was already re-attempted — the slot-free wake is the between-
+    // tick optimization for the datagram / catch-up paths, and the tick is its
+    // backstop. Clear the accumulator so it carries no peer into a later pass.
+    self.slot_freed_peers.clear();
     // The tick ends with an EMPTY queue and no flagged bridge — the strict
     // post-condition, unlike the budgeted datagram path which may leave a residue.
     // With the queue now empty, `debug_assert_ready_drained`'s lockstep also
@@ -2694,13 +2771,48 @@ where
     }
   }
 
+  /// Re-park a still-blocked dial intent onto the BACK of its peer's
+  /// [`Self::dial_parked`] bucket and restore its [`TimerKey::Dial`] deadline
+  /// key. The single re-park primitive shared by every re-park cause in
+  /// [`Self::process_dial_entry`] — the local `C_OUT` outbound-cap gate and the
+  /// handshake-blocked / peer-credit-exhausted `open(Bi) == None` paths: an
+  /// intent that could not open a stream this pass but whose deadline is still in
+  /// the future waits for the next per-peer readiness or slot-free wake.
+  ///
+  /// `attempted = true` so it no longer contributes an immediate-due wake;
+  /// appended to the BACK so a self-re-park lands behind the resident bucket tail
+  /// and is not re-popped this pass ([`Self::service_peer_bucket`] pops FRONT and
+  /// stops on the first re-park). Re-registering the `Dial` deadline keeps the
+  /// tick's exact-at-deadline retirement wake firing for the parked intent. The
+  /// caller MUST have confirmed `now < deadline`.
+  fn repark_blocked_dial(
+    &mut self,
+    id: StreamId,
+    peer: SocketAddr,
+    deadline: Instant,
+  ) -> DialAttempt {
+    self
+      .dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(PendingDial {
+        id,
+        peer,
+        deadline,
+        attempted: true,
+      });
+    self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
+    DialAttempt::Reparked
+  }
+
   /// Attempt one dial intent, appending any minted bridge to `minted` and any
   /// created/mutated connection to `touched`. Shared verbatim by the full drain
   /// ([`Self::service_dials`]) and the scoped per-peer drain
   /// ([`Self::service_peer_bucket`]) so both apply identical semantics: deadline
-  /// pre-check, `get_or_dial`, the `open(Bi)` three-way outcome, and — when the
-  /// connection is still handshaking or the peer's bidi credit is exhausted — a
-  /// re-park into [`Self::dial_parked`] keyed by the intent's target peer.
+  /// pre-check, `get_or_dial`, the local `C_OUT` outbound-cap gate, the
+  /// `open(Bi)` three-way outcome, and — when the cap is reached, the connection
+  /// is still handshaking, or the peer's bidi credit is exhausted — a re-park via
+  /// [`Self::repark_blocked_dial`] keyed by the intent's target peer.
   fn process_dial_entry(
     &mut self,
     entry: PendingDial,
@@ -2792,6 +2904,30 @@ where
         // connection, even when no bridge is minted on it. O(1) dedup via the
         // accumulator's set — no O(touched²) `contains` scan across the pass.
         touched.insert(ch);
+        // Local outbound-stream admission gate. `open(Dir::Bi)` below adds a
+        // DIALER bridge to this connection; without a local cap a peer
+        // advertising an enormous MAX_STREAMS could let a user-message flood pin
+        // an attacker-scaled outbound bidi-stream population (each a stream quinn
+        // re-enumerates on every MAX_DATA through `connection_blocked`). Cap the
+        // live dialer count at `C_OUT`: past it, re-park this intent — a NEW
+        // re-park cause alongside the handshake-blocked and credit-exhausted
+        // `open(Bi) == None` paths below — so it opens as this connection's
+        // dialer bridges reap and free a slot (the slot-free wake). The
+        // deadline pre-check above guarantees `now < deadline` here.
+        //
+        // A RELIABLE-PING fallback is EXEMPT: it is a rare, single-stream,
+        // liveness-critical failure-detection dial, and parking it behind a
+        // user-message burst could miss the probe's cumulative deadline and
+        // yield a false-positive Dead. It still opens (and still increments the
+        // count for accounting) — it is simply never gated by the cap.
+        let is_reliable_ping = matches!(
+          self.pending_outbound_kinds.get(&id),
+          Some(ExchangeKind::ReliablePing)
+        );
+        if !is_reliable_ping && self.conns.get(ch).map_or(0, |e| e.outbound_bridge_count()) >= C_OUT
+        {
+          return self.repark_blocked_dial(id, peer, deadline);
+        }
         if let Some(e) = self.conns.get_mut(ch) {
           match e.conn_mut().streams().open(Dir::Bi) {
             Some(sid) => match self.ep.dial_succeeded(id, now) {
@@ -2835,6 +2971,18 @@ where
                 // side. This is the same predicate `deindex_reaped_bridge` uses.
                 if !self.pending_outbound_kinds.contains_key(&mid) {
                   self.inbound_bridge_count += 1;
+                }
+                // Count this dialer bridge against the connection's local
+                // outbound cap. EVERY mint here is a dialer (the `true`
+                // `eager_outbound_label` passed to `Bridge::new` above),
+                // independent of `pending_outbound_kinds` — so a gossip push/pull
+                // dial (absent from that map) IS counted, and is decremented by
+                // the SAME `eager_outbound_label` predicate at reap. Keying this
+                // off `pending_outbound_kinds` instead would leak the counter on
+                // every gossip dial until the connection permanently refused all
+                // dials. The reap decrement lives in `on_dialer_bridge_reaped`.
+                if let Some(e) = self.conns.get_mut(ch) {
+                  e.inc_outbound_bridge_count();
                 }
                 minted.push(mid);
                 DialAttempt::Minted
@@ -2946,29 +3094,11 @@ where
                 );
                 DialAttempt::Retired
               } else if now < deadline {
-                // Re-park by TARGET PEER so the next readiness event on this
-                // peer's connection (handshake completion, or a MAX_STREAMS
-                // raise) services exactly this intent via
-                // `service_peer_bucket`. `attempted = true`, so it no longer
-                // contributes to the immediate-due wake. Appended to the BACK:
-                // `service_peer_bucket` pops from the FRONT and stops on the
-                // first re-park, so a self-re-park lands behind the resident
-                // tail and is not re-popped this pass.
-                self
-                  .dial_parked
-                  .entry(peer)
-                  .or_default()
-                  .push_back(PendingDial {
-                    id,
-                    peer,
-                    deadline,
-                    attempted: true,
-                  });
-                // Requeued (handshake-blocked or credit-exhausted): re-register
-                // its deadline so the tick's exact-at-deadline retirement wake
-                // still fires for the parked intent.
-                self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
-                DialAttempt::Reparked
+                // Handshake-blocked or credit-exhausted: re-park by TARGET PEER
+                // so the next readiness event on this peer's connection
+                // (handshake completion, or a MAX_STREAMS raise) services exactly
+                // this intent via `service_peer_bucket`.
+                self.repark_blocked_dial(id, peer, deadline)
               } else {
                 self.retire_failed_dial(
                   id,
@@ -3168,6 +3298,10 @@ where
       // reap deindex.
       br.set_queued(false);
       let conn = br.ch();
+      // The dialer/acceptor role is immutable (set at `Bridge::new`); capture it
+      // once here so a reap below can release this connection's outbound-cap
+      // slot iff the bridge was a dialer — see `on_dialer_bridge_reaped`.
+      let eager_outbound = br.eager_outbound_label();
       // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
       // error, so `is_terminal()` below drives the prompt reap; the
       // `#[must_use]` Results are consumed — terminality is the signal.
@@ -3187,6 +3321,11 @@ where
         // Reap AFTER drain: dropping the bridge frees its slot.
         drop(br);
         self.deindex_reaped_bridge(id, conn, sid, conn_slot);
+        // A reaped dialer bridge frees one of `conn`'s `C_OUT` outbound slots;
+        // release the count and wake the peer's `C_OUT`-parked dials.
+        if eager_outbound {
+          self.on_dialer_bridge_reaped(conn);
+        }
         self.emit_exchange_completed(id, outcome);
       } else {
         br.drain_payload_only(&mut self.ep, &mut self.conns, now);
@@ -3210,6 +3349,11 @@ where
           let conn_slot = br.conn_slot();
           drop(br);
           self.deindex_reaped_bridge(id, conn, sid, conn_slot);
+          // A reaped dialer bridge frees one of `conn`'s `C_OUT` outbound slots;
+          // release the count and wake the peer's `C_OUT`-parked dials.
+          if eager_outbound {
+            self.on_dialer_bridge_reaped(conn);
+          }
           self.emit_exchange_completed(id, outcome);
         } else {
           // Surviving bridge: refresh its deadline key before it moves back
@@ -3461,16 +3605,57 @@ where
   /// non-Catchup timer is due.
   fn catchup_service(&mut self, now: Instant) {
     let mut budget = MAX_BRIDGE_PUMPS_PER_PASS;
-    // Nothing minted or accepted here, so no bridge is "pumped after acceptance":
-    // snapshot every current bridge id as pre-existing in the test-only tracking
-    // variant so the post-acceptance counter stays flat.
+    // The `pre` snapshot pins every bridge id present BEFORE this pass's pumps, so
+    // the test-only tracking variant counts any bridge minted-and-pumped DURING
+    // the pass (only the slot-free wake below can mint here) as post-acceptance.
     #[cfg(test)]
-    let to_flush = {
-      let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
-      self.drain_ready_bridges_tracking(now, &pre, &mut budget)
-    };
+    let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
+    #[cfg(test)]
+    let mut to_flush = self.drain_ready_bridges_tracking(now, &pre, &mut budget);
     #[cfg(not(test))]
-    let to_flush = self.drain_ready_bridges(now, &mut budget);
+    let mut to_flush = self.drain_ready_bridges(now, &mut budget);
+    // Slot-free wake: a DIALER bridge may have reaped inside the drain above,
+    // freeing a `C_OUT` slot on its connection. Service each such peer's parked
+    // bucket so a `C_OUT`-parked dial opens on the sustained catch-up cadence —
+    // WITHOUT this, a residue drain that only ever runs `catchup_service` (no
+    // datagrams, no due timer) would strand the parked dial until `service_dials`
+    // retires it as expired. `mem::take` clears the accumulator so a reap during
+    // this servicing re-queues for the next catch-up rather than looping.
+    let freed = core::mem::take(&mut self.slot_freed_peers);
+    if !freed.is_empty() {
+      let mut touched_conns: SmallVec<ConnectionHandle> = SmallVec::new();
+      for peer in freed {
+        let ServicedDials {
+          minted_bridges,
+          touched_conns: peer_touched,
+        } = self.service_peer_bucket(peer, now);
+        for mid in minted_bridges {
+          enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+        }
+        for mc in peer_touched {
+          if !touched_conns.contains(&mc) {
+            touched_conns.push(mc);
+          }
+        }
+      }
+      // Pump the freshly-minted bridges under the SAME shared budget so the
+      // catch-up pass stays O(budget), then flush their owners and the touched
+      // connections alongside the initial drain's.
+      #[cfg(test)]
+      let pumped = self.drain_ready_bridges_tracking(now, &pre, &mut budget);
+      #[cfg(not(test))]
+      let pumped = self.drain_ready_bridges(now, &mut budget);
+      for mc in pumped {
+        if !to_flush.contains(&mc) {
+          to_flush.push(mc);
+        }
+      }
+      for mc in touched_conns {
+        if !to_flush.contains(&mc) {
+          to_flush.push(mc);
+        }
+      }
+    }
     for ch in to_flush {
       self.collect_conn_transmits(ch, now);
     }
@@ -3769,16 +3954,42 @@ where
         .then(|| self.conns.get(ch).map(|e| e.peer()))
         .flatten()
     });
+    // Build the deduped set of peers whose parked bucket to attempt this pass:
+    // the establishment / credit-restore peer (if any), PLUS every peer whose
+    // DIALER bridge reaped in step (a)/(b) — freeing a `C_OUT` slot a parked dial
+    // can now take (the slot-free wake). `mem::take` clears the accumulator so a
+    // reap DURING this servicing re-queues for the next pass instead of looping;
+    // the count of freed peers is bounded by this pass's reaps, so the wake rides
+    // the servicing pass and is not attacker-per-datagram inflatable.
+    let mut peers_to_service: SmallVec<SocketAddr> = SmallVec::new();
     if let Some(peer) = service_peer {
-      let ServicedDials {
-        minted_bridges,
-        touched_conns,
-      } = self.service_peer_bucket(peer, now);
-      // Enqueue each freshly-minted outbound bridge (T1, outbound twin of the
-      // inbound-accept enqueue) so the drain below pumps its first request bytes
-      // into its quinn send stream before its owning connection is collected.
-      for mid in minted_bridges {
-        enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+      peers_to_service.push(peer);
+    }
+    for peer in core::mem::take(&mut self.slot_freed_peers) {
+      if !peers_to_service.contains(&peer) {
+        peers_to_service.push(peer);
+      }
+    }
+    if !peers_to_service.is_empty() {
+      // Attempt each peer's parked bucket and enqueue every freshly-minted
+      // outbound bridge (T1, outbound twin of the inbound-accept enqueue) so the
+      // single drain below pumps its first request bytes into its quinn send
+      // stream before its owning connection is collected. Accumulate the touched
+      // connections to flush after the drain.
+      let mut touched_conns: SmallVec<ConnectionHandle> = SmallVec::new();
+      for peer in peers_to_service {
+        let ServicedDials {
+          minted_bridges,
+          touched_conns: peer_touched,
+        } = self.service_peer_bucket(peer, now);
+        for mid in minted_bridges {
+          enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+        }
+        for mc in peer_touched {
+          if !touched_conns.contains(&mc) {
+            touched_conns.push(mc);
+          }
+        }
       }
       #[cfg(test)]
       let pumped = self.drain_ready_bridges_tracking(now, &pre_service_ids, &mut pump_budget);
@@ -4016,13 +4227,6 @@ where
     // raised its MAX_STREAMS bidi limit, so a dial requeued on this peer's
     // exhausted bidi credit can now open. Consumed after the borrow drops.
     let mut credit_restored = false;
-    // Per-pass count of `StreamEvent::Writable` enqueues, capped at
-    // `MAX_BRIDGE_PUMPS_PER_PASS`. One connection-window MAX_DATA makes quinn emit
-    // `Writable` for EVERY connection-window-blocked stream, so an uncapped arm
-    // would grow `ready_bridges` by O(blocked streams) — up to
-    // `max_inbound_streams` — for that ONE datagram. Bounding the enqueues to the
-    // pump budget caps that queue growth; see the `Writable` arm.
-    let mut writable_enqueues: usize = 0;
     while let Some(ev) = e.conn_mut().poll() {
       match ev {
         quinn_proto::Event::ConnectionLost { .. } => {
@@ -4167,29 +4371,24 @@ where
             self.counters.writable_events_seen =
               self.counters.writable_events_seen.saturating_add(1);
           }
-          // Cap the Writable enqueues (and thus `ready_bridges` growth) this pass
-          // at the pump budget. One connection-window MAX_DATA (one attacker byte)
-          // makes quinn drain its whole connection-blocked set, emitting a
-          // `Writable` for EVERY connection-window-blocked stream, so an uncapped
-          // arm would do an O(1) reverse-index lookup + `ready_bridges` push for
-          // each — O(blocked streams), up to `max_inbound_streams`, for that ONE
-          // datagram. Past the budget, skip the lookup and enqueue entirely: a
-          // still-blocked bridge cannot progress without a window, the next real
-          // MAX_DATA re-emits its `Writable`, and — having been pumped before — it
-          // already holds a `TimerKey::Bridge` deadline that wakes the tick, so a
-          // dropped enqueue here is harmless. The residual poll-loop iteration over
-          // the remaining `Writable` events is O(quinn `max_concurrent_bidi_streams`)
-          // — the same config-bounded, table-independent per-credit-window batch
-          // bound the inbound `accept(Dir::Bi)` loop documents, not a per-datagram
-          // amplification.
-          if writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS {
-            continue;
-          }
-          writable_enqueues += 1;
           // T3 (writable): send-side backpressure released for this stream (a
           // MAX_STREAM_DATA raise, or a connection-window / ACK relax surfaced by
-          // `poll()`). Enqueue the owning bridge so the pass drain retries its
-          // blocked `pending_out` flush in `pump_out`.
+          // `poll()`). Act on EVERY edge — an O(1) reverse-index lookup and
+          // `ready_bridges` push (deduped by the `queued` flag) — never a skip.
+          //
+          // One connection-window MAX_DATA makes quinn drain its whole
+          // `connection_blocked` set, one `Writable` per blocked stream. That set
+          // is now config-bounded: our INBOUND accepts (`<= advertised_bidi`, a
+          // config constant) PLUS the DIALER streams WE opened, capped at `C_OUT`
+          // by `process_dial_entry`'s admission gate — so the arm is O(config)
+          // amortised (O(config + stale-`connection_blocked`-churn) for a single
+          // datagram, since quinn pops-and-skips a freed stream's id from that set
+          // lazily rather than eagerly removing it — bounded, one-shot per freed
+          // stream). Dropping a `Writable` edge here would instead STRAND a
+          // still-blocked bridge: quinn clears `connection_blocked` on this yield
+          // and never re-adds it, so a skipped bridge would never be re-enqueued
+          // and would sit to its exchange deadline. The pump stays budgeted
+          // downstream in `drain_ready_bridges`; this arm only enqueues.
           if let Some(&mid) = self.bridge_by_conn_sid.get(&(ch, sid)) {
             #[cfg(test)]
             {
@@ -4437,12 +4636,22 @@ where
           // `pump_bridges` reap.
           let outcome = Self::outcome_for_terminal(&br);
           let sid = br.sid();
+          // Capture the dialer role BEFORE `drop(br)` for the outbound-count
+          // release below.
+          let eager_outbound = br.eager_outbound_label();
           drop(br);
           // The whole bucket was already removed above, so drop this bridge's
           // remaining index entries (deadline key, `(ch, sid)` reverse lookup,
           // inbound count) WITHOUT any per-bridge bucket surgery — keeping the
           // loss reap O(K) across the connection's bridges.
           self.deindex_reaped_bridge_bucketless(id, ch, sid);
+          // A reaped dialer bridge releases its outbound-count unit. The entry
+          // is still present here (its drained-reap runs later this pass), so
+          // the decrement keeps the count balanced even before the whole entry
+          // is dropped; `on_dialer_bridge_reaped` no-ops if it is already gone.
+          if eager_outbound {
+            self.on_dialer_bridge_reaped(ch);
+          }
           self.emit_exchange_completed(id, outcome);
         }
       }
