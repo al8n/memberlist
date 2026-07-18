@@ -10366,3 +10366,370 @@ fn quic_options_validate_rejects_zero_user_dial_cap() {
     .validate()
     .expect("the default config validates");
 }
+
+/// Establish `a -> b` via a datagram warm-up: the connection reaches Established
+/// with no bidi credit consumed and no bridge minted, so a boundedness test starts
+/// from a clean slate with the peer's full initial stream grant.
+fn establish_via_warmup(
+  a: &mut QuicEndpoint<SmolStr>,
+  a_addr: SocketAddr,
+  b: &mut QuicEndpoint<SmolStr>,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  a.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "precondition: A must establish a pooled connection to B"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: the datagram warm-up mints no bridge"
+  );
+}
+
+/// Supply bound under an honest wedge: with a peer that receives nothing back (an
+/// honest partition — a crashed / partitioned / wedged peer), the coordinator's
+/// per-connection resident dialer-bridge state and its total outbound-stream supply
+/// stay bounded by config constants, NOT by how many reliable user messages the
+/// application issues, and NOT growing across generations as bridges reap and
+/// re-mint.
+///
+/// `B` grants ample bidi credit (`C_OUT + 64`, so the LOCAL `C_OUT` cap — not the
+/// peer's `MAX_STREAMS` — binds the concurrent dialer set) behind a small
+/// connection window. After establishing via a datagram warm-up (no bridge minted,
+/// full bidi grant unconsumed), all `B -> A` datagrams are withheld: `A`'s outbound
+/// is drained and discarded so nothing crosses the partition and, crucially, `B`'s
+/// `MAX_STREAMS_BIDI` replenishments (which it would send as `A` resets timed-out
+/// streams) never reach `A`, freezing `A`'s peer-granted bidi credit at its initial
+/// grant. `A` then keeps issuing reliable user messages across several
+/// `stream_timeout` generations. The per-peer reliable-dial admission cap is raised
+/// far above the storm so admission never masks the QUIC-side supply bound.
+///
+/// Because each `open(Dir::Bi)` consumes one never-replenished bidi credit, the
+/// TOTAL dialer bridges opened over the whole wedge is bounded by the initial grant
+/// (a config constant) and the CONCURRENT resident set is bounded by `C_OUT` — with
+/// per-tick pump work bounded by the live set plus the pass budget in every
+/// generation, never scaling with the (raised, unbounded) parked-intent backlog.
+///
+/// The observable for total supply is the set of distinct bridge stream ids ever
+/// resident in `self.bridges` (a mint creates exactly one such id, and under the
+/// wedge a fresh mint survives — its deadline is in the future — until the next
+/// snapshot, so the union captures every mint); the concurrent bound is the
+/// `live_bridge_count` high-water.
+///
+/// Mutation-verify: disable the `C_OUT` pre-open gate in `process_dial_entry` — the
+/// resident dialer set then climbs to the peer's full granted bidi credit
+/// (`C_OUT + 64`, above `C_OUT`), so the `live_bridge_count` high-water passes
+/// `C_OUT + allowance` and that assertion fails.
+#[test]
+fn wedged_peer_supply_bounds_outbound_dialer_state() {
+  let a_addr: SocketAddr = "127.0.0.1:7838".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7839".parse().unwrap();
+  let mut now = Instant::now();
+
+  // A: periodic membership schedulers OFF (the user-message storm is the only
+  // dialer, so the observable is clean), a short `stream_timeout` (cheap
+  // virtual-time generations), and the per-peer reliable-dial admission cap raised
+  // far above the storm so admission never masks the QUIC-side bound.
+  const RAISED_ADMISSION: usize = 1 << 16;
+  let stream_timeout = Duration::from_millis(200);
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(stream_timeout);
+  let a_qc = test_config().with_max_pending_user_dials_per_peer(RAISED_ADMISSION);
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+
+  // B grants ample bidi credit (C_OUT + 64) behind a small connection window, so
+  // the LOCAL C_OUT cap binds the concurrent set while the connection window
+  // back-pressures the data.
+  const GRANTED_BIDI: u32 = super::C_OUT as u32 + 64;
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(
+    b_cfg,
+    test_config_small_conn_window_bidi(GRANTED_BIDI),
+    b_addr,
+    now,
+  );
+
+  establish_via_warmup(&mut a, a_addr, &mut b, b_addr, now);
+
+  // The wedge is now in force: from here NO `B -> A` byte is ever delivered. `A`'s
+  // outbound is drained and discarded so its `out` queue stays bounded, but B's
+  // stream-credit replenishments never reach A, freezing A's bidi grant.
+  const BATCH: usize = 512;
+  const GENERATIONS: usize = 4;
+  let payload = Bytes::from_static(b"reliable-user-message-under-honest-wedge");
+
+  let mut minted_ids: std::collections::HashSet<StreamId> = std::collections::HashSet::new();
+  let mut high_water_live = 0usize;
+  let mut ever_parked = false;
+  let mut total_started = 0usize;
+  // Allowance for rounding / a warm-up credit return / any exempt dial.
+  const ALLOWANCE: usize = 8;
+
+  for generation in 0..GENERATIONS {
+    // A keeps issuing reliable user messages to the wedged peer. Admission is
+    // raised sky-high, so each start registers an intent (minting a bridge if a
+    // C_OUT slot AND peer bidi credit are free, else parking) and is never refused.
+    for _ in 0..BATCH {
+      a.start_user_message(b_addr, payload.clone(), now)
+        .expect("raised admission never refuses under the wedge");
+      total_started += 1;
+    }
+    // Discard A's outbound: nothing crosses the partition, nothing returns.
+    while a.poll_transmit().is_some() {}
+    // Capture every bridge minted this generation before any reap can remove it.
+    for id in a.bridges.keys() {
+      minted_ids.insert(*id);
+    }
+    high_water_live = high_water_live.max(a.live_bridge_count());
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| !q.is_empty())
+      .unwrap_or(false)
+    {
+      ever_parked = true;
+    }
+    while a.poll_event().is_some() {}
+
+    // Advance one stream_timeout generation and tick. Expired bridges reap (freeing
+    // C_OUT slots) and the slot-free wake mints parked dials into the freed slots —
+    // but only up to the frozen bidi credit, so the supply cannot grow past the
+    // initial grant, and the resident set cannot exceed C_OUT.
+    now += stream_timeout + Duration::from_millis(1);
+    let bv_before = a.counters.bridge_visits;
+    a.handle_timeout(now);
+    let bv_delta = a.counters.bridge_visits - bv_before;
+    assert!(
+      bv_delta <= (super::C_OUT + super::MAX_BRIDGE_PUMPS_PER_PASS) as u64,
+      "generation {generation}: per-tick pump work must stay bounded by the live set plus \
+         the pass budget (<= C_OUT + budget = {}), never scaling with the parked \
+         backlog; got {bv_delta}",
+      super::C_OUT + super::MAX_BRIDGE_PUMPS_PER_PASS
+    );
+    // Capture any bridges the slot-free wake minted in this tick.
+    for id in a.bridges.keys() {
+      minted_ids.insert(*id);
+    }
+    high_water_live = high_water_live.max(a.live_bridge_count());
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+
+  let total_minted = minted_ids.len();
+
+  // Non-vacuity: the wedge genuinely parked excess dials, and issued far more starts
+  // than the bound allows to mint — so the bound actually bites.
+  assert!(
+    ever_parked,
+    "non-vacuous: the wedge must have parked excess dials"
+  );
+  assert!(
+    total_started >= BATCH * GENERATIONS,
+    "non-vacuous: every batch must have been issued"
+  );
+
+  // SUPPLY BOUND: over the whole wedge the coordinator opened at most a config
+  // constant of dialer bridges — the peer's initial (frozen, never-replenished)
+  // bidi grant plus a small allowance — NOT one per start_user_message.
+  let supply_bound = super::C_OUT + GRANTED_BIDI as usize + ALLOWANCE;
+  assert!(
+    total_minted <= supply_bound,
+    "supply bound: total distinct dialer bridges minted over the wedge ({total_minted}) \
+       must be <= C_OUT + granted_bidi + allowance = {supply_bound}"
+  );
+  assert!(
+    total_minted < total_started / 2,
+    "non-vacuous supply bound: {total_minted} mints must be far below the \
+       {total_started} starts issued (a per-start mint would explode past this)"
+  );
+
+  // CONCURRENT / RESIDENT BOUND (the C_OUT-gate-sensitive assertion): the resident
+  // dialer set never exceeded the local cap plus a small allowance across ANY
+  // generation — no per-generation growth in live bridge state.
+  assert!(
+    high_water_live <= super::C_OUT + ALLOWANCE,
+    "concurrent live dialer bridges high-water ({high_water_live}) must stay \
+       <= C_OUT + allowance = {} across every generation",
+    super::C_OUT + ALLOWANCE
+  );
+}
+
+/// Recovery drain: releasing an honest wedge does not disrupt the deadline
+/// machinery — the work parked during the partition drains (previously parked dials
+/// mint and their exchanges reach a terminal SUCCESS), driven purely by the poll
+/// surface, rather than stranding to a deadline failure.
+///
+/// Same wedge shape as `wedged_peer_supply_bounds_outbound_dialer_state`, with an
+/// ample `stream_timeout` so recovery has deadline headroom: `A` establishes to
+/// `B`, then — while `B -> A` is withheld — issues a batch exceeding `C_OUT` so a
+/// tail of dials parks (blocked, deadlines still in the future, nothing yet
+/// succeeded). The wedge is then RELEASED (bidirectional ferrying resumes) and the
+/// coordinators are driven purely by `poll_timeout` / `handle_timeout` (no manual
+/// servicing): `B`'s stream-credit replenishments reach `A`, the parked dials mint,
+/// the buffered payloads flush through the connection window, and the exchanges
+/// complete. Assertions are on COUNTERS and terminal outcomes, never wall-clock —
+/// the parked bucket drains to empty and the count of SUCCEEDED `ExchangeCompleted`
+/// events climbs above zero.
+///
+/// Mutation-verify: do NOT release — keep dropping the `B -> A` datagrams instead of
+/// ferrying them. The parked dials never regain stream credit, so no exchange
+/// reaches a SUCCEEDED terminus (each instead fails at its deadline) and the
+/// `succeeded > 0` assertion fails. (Surgically skipping a single `service_connection`
+/// is not cleanly mutable against the real poll surface, so dropping the release is
+/// the mutation, per the test contract.)
+#[test]
+fn released_wedge_drains_parked_dials_to_completion() {
+  let a_addr: SocketAddr = "127.0.0.1:7846".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7847".parse().unwrap();
+  let mut now = Instant::now();
+
+  // A: schedulers OFF (clean observation) with the DEFAULT stream_timeout, so the
+  // release has ample deadline headroom to complete the parked exchanges; admission
+  // raised so the wedge parks freely.
+  const RAISED_ADMISSION: usize = 1 << 16;
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let a_qc = test_config().with_max_pending_user_dials_per_peer(RAISED_ADMISSION);
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+
+  const GRANTED_BIDI: u32 = super::C_OUT as u32 + 64;
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(
+    b_cfg,
+    test_config_small_conn_window_bidi(GRANTED_BIDI),
+    b_addr,
+    now,
+  );
+
+  establish_via_warmup(&mut a, a_addr, &mut b, b_addr, now);
+
+  // WEDGE (no time advance): A issues a batch exceeding C_OUT so a tail parks.
+  // Small payloads so the release flushes them through the 16 KiB connection window
+  // in a few rounds. B -> A is withheld: A's transmits are discarded, so B never
+  // sees the messages and nothing completes yet.
+  const BATCH: usize = super::C_OUT + 128;
+  let payload = Bytes::from_static(b"recover");
+  for _ in 0..BATCH {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("raised admission never refuses");
+  }
+  while a.poll_transmit().is_some() {}
+  let parked_before = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+  assert!(
+    parked_before > 0,
+    "precondition: the wedge must park a tail of dials (issued {BATCH}, cap C_OUT={})",
+    super::C_OUT
+  );
+  // Nothing has completed under the wedge (B never received a message).
+  let mut succeeded = 0usize;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      assert!(
+        !ec.outcome().is_succeeded(),
+        "no exchange can succeed while B -> A is withheld"
+      );
+    }
+  }
+  while b.poll_event().is_some() {}
+
+  // RELEASE: resume bidirectional ferrying and drive purely via the poll surface
+  // (ferry + poll_timeout + handle_timeout). B's credit replenishments now reach A,
+  // the parked dials mint, and the exchanges flush and complete.
+  let mut steps = 0usize;
+  loop {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(ec) = ev {
+        if ec.outcome().is_succeeded() {
+          succeeded += 1;
+        }
+      }
+    }
+    while b.poll_event().is_some() {}
+
+    let parked = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+    if !moved && parked == 0 && a.live_bridge_count() == 0 {
+      break;
+    }
+    // Advance to the earliest scheduled wake (the poll surface drives the clock),
+    // never backwards and always strictly forward so an ACK/idle timer can fire.
+    let next = [a.poll_timeout(), b.poll_timeout()]
+      .into_iter()
+      .flatten()
+      .min()
+      .unwrap_or(now)
+      .max(now + Duration::from_millis(1));
+    now = next;
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+
+    steps += 1;
+    assert!(
+      steps < 20_000,
+      "the release drain must converge via the poll surface, not spin; still {} parked, \
+         {} live after {steps} steps",
+      a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+      a.live_bridge_count()
+    );
+  }
+
+  // The parked/blocked work drained — no strand.
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    0,
+    "release must drain the parked dial bucket to empty (no strand)"
+  );
+  // Release enabled real completions: exchanges reached a SUCCEEDED terminus within
+  // their deadline, driven purely by the poll surface. Dropping the release (the
+  // mutation) leaves this at zero.
+  assert!(
+    succeeded > 0,
+    "release must let parked exchanges reach a SUCCEEDED terminus (got {succeeded}); \
+       withholding B -> A instead fails every exchange at its deadline"
+  );
+}

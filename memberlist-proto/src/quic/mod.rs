@@ -182,6 +182,29 @@ const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
 /// peer-independent, the same config-bounded batch class as the inbound
 /// `accept(Dir::Bi)` loop.
 ///
+/// The list is bounded over a whole zero-credit episode, not merely per pass.
+/// quinn-proto adds a stream to `connection_blocked` only while the
+/// connection-level write limit is zero, and each stream id is flag-guarded to at
+/// most one simultaneous entry; the first credit-carrying servicing pass pops the
+/// entire backlog — a stale id is skipped in O(1) — because the coordinator polls
+/// each connection to exhaustion, so no entry survives the pass that restores
+/// credit.
+///
+/// Under the transport config this crate installs the peer-granted MAX_DATA term
+/// never binds: quinn's default `receive_window` is effectively unbounded and the
+/// coordinator does not lower it, so a zero connection write limit arises only from
+/// ACK starvation — a crashed, partitioned, or wedged peer, or a burst past the
+/// `send_window`. ACK starvation neither stale-ifies entries (staleness requires
+/// reset/fin ACKs) nor grants fresh stream credit, so while the limit is pinned at
+/// zero the list can hold only the inbound accepts PLUS `C_OUT` PLUS the
+/// reliable-ping exemption PLUS whatever bidi credit was already pre-granted — a
+/// config constant that never scales with the peer's `MAX_STREAMS`. The stall
+/// self-frees when SWIM failure detection or the QUIC idle timeout retires the
+/// connection. An operator who installs a custom `TransportConfig` with a finite
+/// `receive_window` makes the term bindable; the same config constants then bound
+/// the list per blocked-episode instead (the configuration note on
+/// [`QuicOptions::new`] states this on the public surface).
+///
 /// 256 is generous: gossip runs only a handful of concurrent outbound reliable
 /// exchanges (push/pull plus a reliable-ping fallback) per peer, so it clears
 /// every legitimate burst and only backpressures a pathological user-message
@@ -1395,6 +1418,11 @@ impl<I, R> QuicEndpoint<I, R> {
     self.ep.max_stream_frame_size()
   }
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
+  ///
+  /// Sans-I/O drain obligation: the driver drains this to empty each wake. The
+  /// queue is unbounded toward a non-draining driver by design — the same
+  /// convention as quinn-proto's own transmit queue — so bounding it is the
+  /// draining driver's responsibility, not the coordinator's.
   pub fn poll_transmit(&mut self) -> Option<(SocketAddr, Bytes)> {
     self.out.pop_front()
   }
@@ -1410,6 +1438,12 @@ impl<I, R> QuicEndpoint<I, R> {
   /// on the composed unit's public ingress). The codec-owning layer drains
   /// this, decodes each `Message`, and feeds it back through
   /// [`handle_packet`](Self::handle_packet).
+  ///
+  /// Drain obligation: the driver drains this each wake. Unlike the transmit and
+  /// event queues it is hard-capped per peer and node-globally (the per-peer
+  /// standing-share cap plus the node-global `MAX_MEM_INGRESS_DATAGRAMS` cap), so a
+  /// driver that stops draining drops inbound datagrams (counted) rather than
+  /// growing memory without bound.
   pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
     let (from, bytes) = self.mem_ingress.pop_front()?;
     // Keep the per-peer share counter exact: decrement on pop and remove the
@@ -1714,6 +1748,10 @@ impl<I, R> QuicEndpoint<I, R> {
   /// mid-handshake silently drop it, orphaning the pending stream intent
   /// (the push/pull or reliable-ping would never open). External callers
   /// only observe application-visible events.
+  ///
+  /// Sans-I/O drain obligation: the driver drains this each wake. Like the
+  /// transmit queue it is unbounded toward a non-draining driver by design, so
+  /// bounding it is the draining driver's responsibility.
   pub fn poll_event(&mut self) -> Option<Event<I, SocketAddr>> {
     loop {
       match self.ep.poll_event()? {
@@ -4047,7 +4085,11 @@ where
   ///   runs the O(N) `service_quinn` / `service_dials` / `finalize_tick`.
   /// * With nothing due (an arbitrary-instant wake, or a driver that never consults
   ///   `poll_timeout`), fall back to the full `run_tick` unchanged so no work is
-  ///   ever stranded.
+  ///   ever stranded. This nothing-due arm runs the O(N) tick by design — it is the
+  ///   backstop for a driver that never reads `poll_timeout` — so a driver that
+  ///   wakes only on real I/O or on the `poll_timeout` instant, and gates
+  ///   `handle_timeout` on inbound quiescence, never reaches this arm and never pays
+  ///   the O(N) cost on an idle wake.
   ///
   /// The Endpoint, ImmediateDue, and Catchup terms are refreshed FIRST so the
   /// dispatch classifies against current values even when the driver did not call
@@ -4121,9 +4163,16 @@ where
   /// converges — each parked dial is minted at most once across the whole loop (a
   /// minted dial either opens a surviving bridge, consuming a slot, or fails and
   /// RETIRES; a retired dial never re-mints), so the set re-populates only from the
-  /// finite parked-dial population and empties in a bounded number of turns. The
-  /// `iter_cap` is a pure release-build backstop against a reasoning error, and is
-  /// debug-asserted never reached.
+  /// finite parked-dial population and empties in a bounded number of turns. On the
+  /// budgeted (catch-up / datagram) callers a fresh turn runs only after a pump
+  /// reaped a dialer bridge, and the shared pump budget caps such reaps, so the loop
+  /// turns at most `MAX_BRIDGE_PUMPS_PER_PASS + 1` times while the shared dial budget
+  /// caps it at `MAX_DIAL_ATTEMPTS_PER_PASS` attempts across all turns — a worst case
+  /// on the order of `(MAX_BRIDGE_PUMPS_PER_PASS + 1) * MAX_DIAL_ATTEMPTS_PER_PASS`
+  /// servicing attempts, far under `iter_cap`. The un-budgeted tick / flush callers
+  /// pass `usize::MAX`, where the finite parked-dial population is the operative
+  /// bound instead. The `iter_cap` is a pure release-build backstop against a
+  /// reasoning error, and is debug-asserted never reached.
   ///
   /// `budget` is the pass's shared bridge-pump budget. The bounded servicing paths
   /// pass their in-flight budget so a slot-free drain cannot inflate a pass past
@@ -4282,19 +4331,25 @@ where
   /// Applies the one-tick-deferred `ConnectionEvent` backlog on exactly the
   /// connections that carry one, and attempts the fresh unattempted dials — WITHOUT
   /// the global O(N) `service_quinn` / `service_dials` / `finalize_tick` /
-  /// `ep.handle_timeout`. So an ImmediateDue-anchored wake costs
-  /// O(|conns_with_pending_events| + |fresh dials|), both bounded and self-draining,
-  /// never O(all connections + all parked dials).
+  /// `ep.handle_timeout`. A single wake costs
+  /// O(|conns_with_pending_events| + |fresh dials|): the pending-event term can
+  /// approach the live-connection count when a preceding tick deferred
+  /// connection-id feedback across many connections at once, but it is a one-shot
+  /// drain of work a tick already produced — never re-inflated per datagram — so it
+  /// amortizes to O(1) per deferred event rather than O(all connections + all
+  /// parked dials) per wake.
   ///
   /// The pending-event set self-drains: servicing a connection applies its requeued
   /// events (e.g. the `NewIdentifiers` a peer's `RETIRE_CONNECTION_ID` frame
   /// produced) and applying them pushes no further endpoint event, so the
   /// connection's flag clears and it leaves the set. A datagram therefore arms at
-  /// most its OWN connection — the wake cannot be inflated by a flood. The fresh
-  /// `dial_pending` FIFO is drained (never the parked buckets — those are the global
-  /// tick's and per-peer establishment's backstop); it is filled only by local FSM
-  /// output (`poll_event` / `requeue_event` / `sieve_dial_events`), so it is bounded
-  /// and not peer-inflatable.
+  /// most its OWN connection — the wake cannot be inflated by a flood, which
+  /// `corrupted_or_replayed_packet_services_only_its_connection` pins by holding
+  /// per-datagram `connection_visits` at exactly one regardless of the table size.
+  /// The fresh `dial_pending` FIFO is drained (never the parked buckets — those are
+  /// the global tick's and per-peer establishment's backstop); it is filled only by
+  /// local FSM output (`poll_event` / `requeue_event` / `sieve_dial_events`), so it
+  /// is bounded and not peer-inflatable.
   fn immediate_service(&mut self, now: Instant) {
     // Snapshot the pending-event handles: `service_connection` mutates
     // `conns_with_pending_events` (each serviced connection clears its own flag as

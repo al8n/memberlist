@@ -266,6 +266,20 @@ impl QuicOptions {
   /// `Recv` is ever allocated on the receiver for an unwelcome
   /// uni-stream frame, so no remote uni-stream state can accumulate.
   ///
+  /// Configuration note on `receive_window`: the coordinator caps the outbound
+  /// reliable-stream population it opens per connection at a local constant
+  /// (`C_OUT`), so the stream set quinn re-enumerates on every connection-window
+  /// MAX_DATA is bounded by a config constant rather than by the peer's advertised
+  /// `MAX_STREAMS`. With the default (effectively unbounded) `receive_window` the
+  /// connection-level write limit reaches zero only under ACK starvation (a
+  /// crashed or partitioned peer), so that blocked set is touched only under peer
+  /// failure and self-frees when the connection is retired. Supplying a FINITE
+  /// `receive_window` on this `transport` makes ordinary connection-window
+  /// backpressure drive the same re-enumeration: it stays bounded by the same
+  /// config constant per blocked-episode, but is now exercised in normal operation
+  /// rather than only under a stalled peer. Lowering `receive_window` trades peak
+  /// per-connection memory for that per-episode re-enumeration cost.
+  ///
   /// quinn-proto APIs used here:
   /// - `EndpointOptions::grease_quic_bit(bool) -> &mut Self`.
   /// - `TransportConfig::max_concurrent_uni_streams(VarInt) -> &mut Self`.
