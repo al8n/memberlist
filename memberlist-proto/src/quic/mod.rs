@@ -2721,6 +2721,37 @@ where
     }
   }
 
+  /// Attempt ONLY the dial intents freshly emitted since the last sieve — the
+  /// fresh-FIFO half of [`Self::service_dials`] WITHOUT its parked-bucket drain.
+  ///
+  /// A reliable-send entry point owes immediate progress for the ONE exchange it
+  /// just created, not an O(all parked dials) sweep of every peer still
+  /// handshaking or flow-control-blocked. So this sieves the inner endpoint's
+  /// newly-queued `DialRequested` into `dial_pending` and drains ONLY that fresh
+  /// FIFO; a fresh intent that cannot open a stream re-parks with its
+  /// `TimerKey::Dial` deadline intact, exactly as the full drain does. Every
+  /// previously-parked intent keeps its own deadline key, so the tick's full
+  /// `service_dials` and the establishment / credit-restore / slot-free wakes
+  /// still service them — nothing strands. Reports minted bridges and touched
+  /// connections identically to [`Self::service_dials`] for the caller to pump
+  /// and flush the same pass.
+  fn service_fresh_dials(&mut self, now: Instant) -> ServicedDials {
+    let mut minted: SmallVec<StreamId> = SmallVec::new();
+    let mut touched = TouchedConns::new();
+    // Sieve any DialRequested newly emitted by the inner endpoint into the
+    // private `dial_pending` deque, then drain only that fresh FIFO. The parked
+    // buckets are deliberately left for the tick and the readiness wakes.
+    self.sieve_dial_events();
+    let pending = core::mem::take(&mut self.dial_pending);
+    for entry in pending {
+      self.process_dial_entry(entry, now, &mut minted, &mut touched);
+    }
+    ServicedDials {
+      minted_bridges: minted,
+      touched_conns: touched.into_ordered(),
+    }
+  }
+
   /// Attempt only the dials parked on `peer` — the event-driven, scoped twin of
   /// [`Self::service_dials`]. Invoked when a per-peer readiness event fires (the
   /// peer's connection establishes, or it raises its MAX_STREAMS bidi limit), so
@@ -3839,26 +3870,100 @@ where
     self.debug_assert_ready_drained();
   }
 
+  /// Service ONLY the exchange a `start_*` call just created — the outbound-start
+  /// twin of the per-datagram [`Self::service_connection`], and the bounded
+  /// replacement for the former global `service_dials` + `flush_outbound` pair.
+  ///
+  /// A reliable send is a per-request path: running the whole-table
+  /// `service_dials` (every parked bucket) and `flush_outbound` (the entire
+  /// bridge table twice, every connection via `service_quinn`, then
+  /// `finalize_tick`) on each `start_*` makes one ordinary user message
+  /// O(dials + bridges + connections). Under honest degeneracy — peers
+  /// handshaking, partitioned, or flow-control-blocked so parked dials accumulate
+  /// — repeated sends then become quadratic and can stall the event loop long
+  /// enough to disrupt SWIM timers. This bounds each `start_*` to the work of its
+  /// OWN new exchange:
+  ///
+  /// * (a) Attempt only THIS start's freshly-queued dial intent(s) via
+  ///   [`Self::service_fresh_dials`] — never the parked buckets.
+  /// * (b) Pump exactly the bridges it minted (a pooled-Established dial's request
+  ///   bytes) so each one's first bytes reach its quinn send stream. A direct
+  ///   [`Self::pump_one_bridge`] — not the shared `ready_bridges` queue — honors
+  ///   the start's immediate-progress contract even when a prior pass left a
+  ///   budget-deferred residue queued ahead of them.
+  /// * (c) Flush exactly the connections the dial touched — a fresh dial's
+  ///   Initial, a pooled dial's request bytes, an invalidated-intent reset — so
+  ///   they reach `out` and their deadline keys refresh this pass. Every minted
+  ///   bridge's connection is in this set (recorded at mint), so (b)'s pumped
+  ///   bytes are collected here.
+  /// * (d) A minted bridge that turned terminal on its first pump (a request-
+  ///   encode failure) freed a `C_OUT` slot; drain each freed peer's parked
+  ///   bucket to a bounded fixpoint so its waiting dial opens now, and flush the
+  ///   connections it touched. The freed-peer count is bounded by this pass's
+  ///   reaps, so this stays O(1), not O(tables).
+  /// * (e) Re-arm the sticky catch-up anchor if (d) left a budget-deferred residue
+  ///   so a strict-poll driver still wakes to drain it.
+  ///
+  /// The global `service_dials`, `pump_bridges`, `service_quinn`, and
+  /// `finalize_tick` run EXCLUSIVELY on the scheduled tick ([`Self::run_tick`] /
+  /// [`Self::tick`]) and the driver's explicit [`Self::flush_outbound_transmits`]
+  /// flush-all — never per reliable request. Membership time is NOT advanced here
+  /// (no `Endpoint::handle_timeout`), preserving the property that a just-arrived
+  /// but still-buffered `Ack` / `Alive` is decoded before any probe / suspect /
+  /// gossip scheduler fires.
+  fn service_started_exchange(&mut self, now: Instant) {
+    // (a) This start's own fresh dial intent(s) — never the parked buckets.
+    let ServicedDials {
+      minted_bridges,
+      touched_conns,
+    } = self.service_fresh_dials(now);
+    // (b) Pump exactly the bridges it minted so their first request bytes reach
+    // the quinn send stream before (c) collects the connection's transmits. The
+    // owning connection is already in `touched_conns` (recorded at mint), so the
+    // pumped bytes are flushed by (c); a minted bridge that reaps here re-populates
+    // `slot_freed_peers`, drained by (d).
+    for mid in minted_bridges {
+      self.pump_one_bridge(mid, now);
+    }
+    // (c) Flush + re-index exactly the touched connections.
+    for ch in touched_conns {
+      self.collect_conn_transmits(ch, now);
+    }
+    // (d) Slot-free fixpoint under a fresh pump budget: a minted bridge that reaped
+    // in (b) freed a `C_OUT` slot whose peer may have a parked dial waiting.
+    let mut pump_budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    for mc in self.service_slot_freed_peers(now, &mut pump_budget) {
+      self.collect_conn_transmits(mc, now);
+    }
+    // (e) Arm the sticky catch-up anchor for any budget-deferred residue (d) left.
+    self.reconcile_catchup_anchor(now);
+    // Pass-end coherence: every flagged bridge is queued and vice versa.
+    self.debug_assert_ready_drained();
+  }
+
   /// Initiate an outbound push/pull state exchange with `peer` and attempt
   /// the dial in-band.
   ///
   /// Wrapper around [`Endpoint::start_push_pull`] that ALSO drives
-  /// `service_dials(now)` before returning, so the `DialRequested` the
-  /// inner endpoint queues is sieved into the private `dial_pending` deque
-  /// AND attempted (the bidi stream is opened if a pooled connection is
-  /// already established; otherwise the entry stays in `dial_pending` with
-  /// `attempted = true` and the next tick retries). Preferred entry point
-  /// for the driver: a caller that goes through `endpoint_mut()` instead
-  /// can only wake the dial via [`Self::poll_timeout`]'s immediate-due
-  /// term — see that method's docs.
+  /// [`Self::service_started_exchange`] before returning, so the
+  /// `DialRequested` the inner endpoint queues is sieved into the private
+  /// `dial_pending` deque AND attempted (the bidi stream is opened if a pooled
+  /// connection is already established; otherwise the intent re-parks on its
+  /// peer's `dial_parked` bucket with its `TimerKey::Dial` deadline and a later
+  /// readiness wake or the tick retries it). Preferred entry point for the
+  /// driver: a caller that goes through `endpoint_mut()` instead can only wake
+  /// the dial via [`Self::poll_timeout`]'s immediate-due term — see that
+  /// method's docs.
   ///
-  /// Runs [`Self::flush_outbound`] after `service_dials` so the dial's
-  /// Initial datagram (fresh dial) or the freshly-opened bridge's request
-  /// bytes (pooled-Established dial) emerge on the very next
-  /// [`Self::poll_transmit`] — a driver that uses only the public Sans-I/O
-  /// poll surface (`poll_transmit` / `poll_timeout` / `handle_udp` /
+  /// [`Self::service_started_exchange`] pumps the freshly-minted bridge and
+  /// flushes the touched connection, so the dial's Initial datagram (fresh dial)
+  /// or the freshly-opened bridge's request bytes (pooled-Established dial) emerge
+  /// on the very next [`Self::poll_transmit`] — a driver that uses only the public
+  /// Sans-I/O poll surface (`poll_transmit` / `poll_timeout` / `handle_udp` /
   /// `handle_timeout`) sees the exchange progress without a same-instant
-  /// `handle_timeout` pre-pump.
+  /// `handle_timeout` pre-pump. Unlike the former global flush, it services only
+  /// THIS exchange, so a reliable send never scans the whole dial / bridge /
+  /// connection tables.
   pub fn start_push_pull(
     &mut self,
     peer: SocketAddr,
@@ -3871,8 +3976,7 @@ where
       .pending_outbound_kinds
       .insert(id, ExchangeKind::PushPull);
     self.pending_outbound_peers.insert(id, peer);
-    self.service_dials(now);
-    self.flush_outbound(now);
+    self.service_started_exchange(now);
     id
   }
 
@@ -3904,8 +4008,7 @@ where
       .pending_outbound_kinds
       .insert(id, ExchangeKind::ReliablePing);
     self.pending_outbound_peers.insert(id, peer_addr);
-    self.service_dials(now);
-    self.flush_outbound(now);
+    self.service_started_exchange(now);
     id
   }
 
@@ -3929,8 +4032,7 @@ where
       .pending_outbound_kinds
       .insert(id, ExchangeKind::UserMessage);
     self.pending_outbound_peers.insert(id, peer);
-    self.service_dials(now);
-    self.flush_outbound(now);
+    self.service_started_exchange(now);
     Ok(id)
   }
 
@@ -4179,54 +4281,43 @@ where
     self.finalize_tick(now);
   }
 
-  /// Zero-time outbound flush invoked from the high-level `start_*` APIs
-  /// AFTER `service_dials`. Runs the shared [`Self::run_tick`] tail
-  /// (bridge pump + `service_quinn` + drained-reap + `collect_transmits`)
-  /// WITHOUT step (3) (`Endpoint::handle_timeout`).
+  /// The flush-all behind the driver's public [`Self::flush_outbound_transmits`]
+  /// — a driver calls it after queuing unreliable datagrams so they leave on the
+  /// same tick. Runs the shared [`Self::run_tick`] tail (bridge pump +
+  /// `service_quinn` + drained-reap + `collect_transmits`) WITHOUT step (3)
+  /// (`Endpoint::handle_timeout`). It is a deliberate driver-invoked flush of the
+  /// whole outbound surface, NOT a per-request path — the per-reliable-request
+  /// dial servicing lives in the bounded [`Self::service_started_exchange`].
   ///
   /// Step (3) is deliberately skipped: memberlist timers (probe cumulative-
   /// deadline, suspicion, gossip / push-pull schedulers) advance solely
   /// through the driver's explicit [`Self::handle_timeout`], which fires
   /// AFTER the driver has drained [`Self::poll_memberlist_ingress`],
   /// decoded each frame, and fed each typed message via
-  /// [`Self::handle_packet`]. Advancing time inside a `start_*` call would
+  /// [`Self::handle_packet`]. Advancing time inside this flush would
   /// fire same-instant probe / suspect / gossip / push-pull schedulers
   /// BEFORE a just-arrived (still-buffered) `Ack` / `Alive` is decoded and
   /// applied — the same property [`Self::handle_udp`] protects on the
   /// `Class::Memberlist` ingress path.
   ///
-  /// Bridge step (2) is included because for an already-Established pooled
-  /// connection `service_dials` opens a fresh bidi stream and inserts a new
-  /// `Bridge` carrying the encoded request bytes in its FSM `Stream` output
-  /// buffer; the bytes only reach the quinn send stream when `pump_out`
-  /// runs. Without this same-instant pump, the bytes sit inside the bridge
-  /// and the next [`Self::collect_transmits`] returns empty — a driver that
-  /// uses only `poll_transmit` / `poll_timeout` / `handle_udp` would see
-  /// the dial's Initial (or the bridge's request bytes) only on the NEXT
-  /// `handle_timeout` cycle, advancing virtual time before the exchange
-  /// emits its first datagram.
-  ///
-  /// `Connection::poll_transmit` likewise only emerges through
-  /// [`Self::collect_transmits`]; running `service_quinn` + `collect_transmits`
-  /// here puts a fresh dial's Initial onto the outbound queue at the same
-  /// instant the `start_*` returns.
-  ///
-  /// `service_dials` is run BY THE CALLER (the `start_*` wrapper) before
-  /// this method, mirroring `run_tick`'s ordering: the dial is processed,
-  /// then its outbound side-effects flush in the same call.
+  /// The first `pump_bridges(now)` flushes every bridge's owed `pending_out`
+  /// into its quinn send stream, and `service_quinn` + `collect_transmits` then
+  /// put each connection's owed datagrams (a bridge's request bytes, a fresh
+  /// connection's Initial) onto the outbound queue at the same instant the flush
+  /// returns — a driver using only `poll_transmit` / `poll_timeout` /
+  /// `handle_udp` sees them without a `handle_timeout` cycle.
   ///
   /// A second `pump_bridges(now)` runs AFTER `service_quinn` to pump any
-  /// inbound bridges its `accept(Dir::Bi)` loop just inserted: `start_*`
-  /// is called from arbitrary points in the driver's loop, and a peer's
-  /// data may have arrived since the prior `handle_udp` (a Bi stream that
-  /// `service_quinn` accepts inside this `flush_outbound`). Without this
-  /// second pump, that newly-accepted inbound bridge's first data isn't
-  /// fed into `Bridge::pump_in` this tick, and a strict-poll driver next
-  /// wakes at the bridge's exchange deadline — at which point
-  /// `Stream::handle_data` rejects the buffered request as timed out. See
-  /// [`Self::run_tick`]'s docstring for the full strict-poll self-
-  /// sufficiency rationale; the second pump's idempotency on already-
-  /// pumped bridges is the same property documented there.
+  /// inbound bridges its `accept(Dir::Bi)` loop just inserted: this flush is
+  /// called from arbitrary points in the driver's loop, and a peer's data may
+  /// have arrived since the prior `handle_udp` (a Bi stream that `service_quinn`
+  /// accepts inside this flush). Without this second pump, that newly-accepted
+  /// inbound bridge's first data isn't fed into `Bridge::pump_in` this tick, and
+  /// a strict-poll driver next wakes at the bridge's exchange deadline — at which
+  /// point `Stream::handle_data` rejects the buffered request as timed out. See
+  /// [`Self::run_tick`]'s docstring for the full strict-poll self-sufficiency
+  /// rationale; the second pump's idempotency on already-pumped bridges is the
+  /// same property documented there.
   ///
   /// Unlike the global tick, this method owns no `service_dials`. So it services
   /// exactly the parked buckets whose peers `service_quinn` reported becoming

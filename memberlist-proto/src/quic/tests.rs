@@ -6596,6 +6596,150 @@ fn establishment_services_only_its_peer_bucket() {
   );
 }
 
+/// A reliable-send entry point (`start_user_message` / `start_push_pull` /
+/// `start_reliable_ping`) must do work bounded by its OWN new exchange — never
+/// O(parked dials + bridges + connections). Pre-populate all three tables (many
+/// parked dials on cold peers, many live back-pressured bridges on an established
+/// connection), then issue ONE `start_user_message` to a fresh peer and prove the
+/// three servicing-visit counters advance by their O(1) amounts — exactly one
+/// fresh dial entry, ZERO connection services, ZERO bridge pumps — independent of
+/// the table sizes. Growing the parked-dial table then leaves the fresh-dial count
+/// unchanged, proving the per-request work does not scale.
+///
+/// Mutation-verify: restore the former `self.service_dials(now);
+/// self.flush_outbound(now)` pair in `service_started_exchange`. `service_dials`
+/// then drains every parked bucket, so `dial_entries_serviced` jumps by the whole
+/// parked population; `flush_outbound`'s `service_quinn` visits every connection
+/// (so `connection_visits` scales with the connection table) and its two
+/// `pump_bridges` calls visit every live bridge twice (so `bridge_visits` scales
+/// with the bridge table) — failing all three assertions.
+#[test]
+fn reliable_start_touches_constant_entries_regardless_of_table_size() {
+  let a_addr: SocketAddr = "127.0.0.1:7810".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7811".parse().unwrap();
+  let now = Instant::now();
+  // No periodic schedulers on A, so the ONLY `DialRequested` it ever emits is the
+  // one each explicit `start_*` call queues — the fresh-dial count stays exact.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  // B advertises a SMALL connection window (so A's exchanges back-pressure and
+  // stay live) and a HIGH bidi-stream limit (so A can open many at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // Populate the BRIDGE table: open many reliable user-message exchanges to B.
+  // B's small connection window admits only the first few, so the rest stay live
+  // with un-flushed `pending_out`. Held (never ferried) so all stay live.
+  const BRIDGES: usize = 200;
+  let payload = Bytes::from(vec![0xB4u8; 4096]);
+  for _ in 0..BRIDGES {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let live_bridges = a.bridges.len();
+  assert!(
+    live_bridges >= 128,
+    "test precondition: A must hold many concurrent connection-window-blocked \
+       bridges so the bridge-table scan is non-vacuous; got {live_bridges}"
+  );
+
+  // Populate the DIAL table: inject parked dials on distinct cold peers (targeting
+  // never-answered addresses so even a whole-queue drain only re-parks them; the
+  // scoped path never touches them at all).
+  let park = |a: &mut QuicEndpoint<SmolStr>, peers: core::ops::Range<usize>, base_id: u64| {
+    for p in peers {
+      let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+      a.dial_parked
+        .entry(peer)
+        .or_default()
+        .push_back(super::PendingDial {
+          id: StreamId::from_raw(base_id + p as u64),
+          peer,
+          deadline: now + Duration::from_secs(30),
+          attempted: true,
+        });
+    }
+  };
+  const PARKED: usize = 200;
+  park(&mut a, 0..PARKED, 10_000);
+
+  // One reliable send to a FRESH cold peer (no pooled connection, no parked bucket)
+  // must service ONLY its own new dial intent.
+  let fresh: SocketAddr = "127.0.0.8:5000".parse().unwrap();
+  a.counters.dial_entries_serviced = 0;
+  a.counters.connection_visits = 0;
+  a.counters.bridge_visits = 0;
+  let _ = a
+    .start_user_message(fresh, payload.clone(), now)
+    .expect("A starts a reliable user message to a fresh peer");
+
+  assert_eq!(
+    a.counters.dial_entries_serviced, 1,
+    "a reliable start must service ONLY its own fresh dial intent (1), never the \
+       {PARKED} parked dials a whole-queue `service_dials` drain would process"
+  );
+  assert_eq!(
+    a.counters.connection_visits,
+    0,
+    "a reliable start runs no `service_quinn`, so it services ZERO connections; a \
+       global `flush_outbound` would visit every one of the {} live connections",
+    a.live_connections_to(b_addr)
+  );
+  assert_eq!(
+    a.counters.bridge_visits, 0,
+    "a reliable start to a fresh cold peer mints no bridge, so it pumps ZERO \
+       bridges; a global `flush_outbound` would pump every one of the \
+       {live_bridges} live bridges twice"
+  );
+
+  // Grow the parked-dial table and re-verify the per-request fresh-dial count does
+  // NOT scale with it.
+  const GROWN: usize = 400;
+  park(&mut a, PARKED..GROWN, 30_000);
+  let fresh2: SocketAddr = "127.0.0.8:5001".parse().unwrap();
+  a.counters.dial_entries_serviced = 0;
+  let _ = a
+    .start_user_message(fresh2, payload.clone(), now)
+    .expect("A starts a second reliable user message to another fresh peer");
+  assert_eq!(
+    a.counters.dial_entries_serviced, 1,
+    "doubling the parked-dial table to {GROWN} must not change the O(1) per-request \
+       fresh-dial count"
+  );
+}
+
 /// Like [`test_config`] but limiting each connection to `limit` concurrent
 /// remote-opened bidi streams, so a peer that pins that many bidi streams
 /// exhausts the credit — the setup for the credit-exhaustion / MAX_STREAMS-restore
@@ -8459,11 +8603,12 @@ fn slot_free_wake_from_catchup_opens_parked_dial() {
 /// dial deadline.
 ///
 /// Construction: A fills the `C_OUT` cap with un-ferried user-message dialers to B,
-/// then forces one live dialer terminal (NOT enqueued). A further
-/// `start_user_message` (for B') runs `service_dials` — which parks B', the victim
-/// not yet reaped so the cap is still full — then `flush_outbound`, whose first
-/// `pump_bridges` reaps the victim and whose slot-free consume opens B' the same
-/// call.
+/// then forces one live dialer terminal (NOT enqueued). A `start_user_message`
+/// (for B') parks B' behind the still-full cap — the scoped start pumps only its
+/// own minted bridge, and the capped B' mints none, so the victim stays live. The
+/// driver's explicit `flush_outbound_transmits` then runs `flush_outbound`, whose
+/// first `pump_bridges` reaps the victim and whose slot-free consume opens B' the
+/// same call.
 ///
 /// Mutation-verify: drop the `service_slot_freed_peers` call from `flush_outbound` —
 /// the victim still reaps, but nothing services B's freed slot, so B' stays in
@@ -8509,12 +8654,14 @@ fn slot_free_serviced_after_late_flush_pump() {
     .expect("A holds live dialer bridges");
   a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
 
-  // `start_user_message` runs `service_dials` (B' parks — the victim has not reaped
-  // yet, so the cap is full) then `flush_outbound` (its pump reaps the victim, and
-  // the slot-free consume opens B').
+  // The scoped `start_user_message` parks B' behind the still-full cap (it pumps
+  // only its own minted bridge, and the capped B' mints none), leaving the victim
+  // live. The driver's explicit `flush_outbound_transmits` then runs `flush_outbound`,
+  // whose first `pump_bridges` reaps the victim and whose slot-free consume opens B'.
   let parked_id = a
     .start_user_message(b_addr, payload.clone(), now)
     .expect("A schedules the dial that parks behind the cap");
+  a.flush_outbound_transmits(now);
   while a.poll_transmit().is_some() {}
 
   assert!(
