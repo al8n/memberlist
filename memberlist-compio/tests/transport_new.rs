@@ -202,6 +202,7 @@ async fn tcp_join_with_unresolved_seed() {
 /// i.e. a 65467-byte plaintext ceiling). `Memberlist::new` must reject it
 /// fail-fast with `InvalidGossipMtu` BEFORE binding any socket, while a value
 /// just under the ceiling constructs successfully.
+#[cfg(all(encryption, checksum))]
 #[compio::test]
 async fn transport_new_rejects_impossible_gossip_mtu() {
   // 1 MiB plaintext gossip_mtu — far above the 65467-byte ceiling. A

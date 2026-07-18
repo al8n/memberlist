@@ -13,9 +13,11 @@ use std::{net::SocketAddr, time::Duration};
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
 use memberlist_reactor::{
-  Channel, ChecksumAlgorithm, ChecksumOptions, Error, MaybeResolved, Memberlist, MemberlistOptions,
-  Options, RuntimeOptions, SocketAddrResolver, VoidDelegate,
+  Channel, Error, MaybeResolved, Memberlist, MemberlistOptions, Options, RuntimeOptions,
+  SocketAddrResolver, VoidDelegate,
 };
+#[cfg(feature = "crc32")]
+use memberlist_reactor::{ChecksumAlgorithm, ChecksumOptions};
 use smol_str::SmolStr;
 
 async fn make(id: &str) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {

@@ -1200,6 +1200,7 @@ async fn shutdown_fails_parked_reliable_send() {
 /// it reached `close_and_drain`. The window is racy, so each variant is
 /// accumulated across attempts (rotating the push order so none is starved);
 /// the bound fails loudly if any variant is never observed.
+#[cfg(all(compression, checksum, encryption))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_close_and_drain_fails_every_queued_command() {
   use std::{sync::Barrier, thread};

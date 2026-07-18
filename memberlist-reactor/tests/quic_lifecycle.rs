@@ -17,9 +17,10 @@ use std::{net::SocketAddr, time::Duration};
 
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
+#[cfg(all(compression, encryption))]
+use memberlist_reactor::{CompressionOptions, EncryptionOptions};
 use memberlist_reactor::{
-  CompressionOptions, EncryptionOptions, Error, MaybeResolved, Memberlist, Node, Options,
-  QuicOptions, SocketAddrResolver, VoidDelegate,
+  Error, MaybeResolved, Memberlist, Node, Options, QuicOptions, SocketAddrResolver, VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -129,6 +130,7 @@ async fn quic_directed_sends_after_leave_are_rejected() {
 }
 
 /// After `leave()`, both QUIC policy mutations are rejected with `NotRunning`.
+#[cfg(all(compression, encryption))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quic_set_policy_options_after_leave_is_rejected() {
   let (a, b, _a_addr) = converged_pair().await;
@@ -243,6 +245,7 @@ async fn quic_oversized_send_is_rejected() {
 
 /// `set_compression_options` / `set_encryption_options` on a LIVE QUIC node
 /// succeed (the success arm of the gated setters).
+#[cfg(all(compression, encryption))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quic_live_policy_setters_succeed() {
   let a = make("q-set-a", support::self_trusted_quic_config()).await;

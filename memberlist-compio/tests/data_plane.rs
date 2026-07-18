@@ -527,7 +527,7 @@ async fn post_join_metadata_update_disseminates() {
 /// build AES is unsupported and the reconfiguration must surface
 /// `MemberlistError::Encryption`. A disabled (no-keyring) policy is always
 /// usable and must ack `Ok`.
-#[cfg(not(feature = "aes-gcm"))]
+#[cfg(all(encryption, not(feature = "aes-gcm")))]
 #[compio::test]
 async fn set_encryption_options_rejects_unsupported_algorithm() {
   use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};

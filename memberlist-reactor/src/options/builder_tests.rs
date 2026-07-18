@@ -59,11 +59,15 @@ fn memberlist_options_default_leaves_every_override_unset() {
   assert_eq!(opts.label(), None);
   assert!(!opts.skip_inbound_label_check());
   // Exercise the compression/checksum/encryption accessors (machine defaults).
+  #[cfg(compression)]
   let _compression = opts.compression();
+  #[cfg(checksum)]
   let _checksum = opts.checksum();
+  #[cfg(encryption)]
   let _encryption = opts.encryption();
 }
 
+#[cfg(all(compression, encryption))]
 #[test]
 fn memberlist_options_compression_encryption_builders() {
   let opts = MemberlistOptions::new()
@@ -76,6 +80,7 @@ fn memberlist_options_compression_encryption_builders() {
 /// `with_checksum` sets the gossip (unreliable) checksum field; the accessor
 /// reflects the override. Checksumming is gossip-plane only — the reliable
 /// stream path carries no checksum — so this configures just the one field.
+#[cfg(feature = "crc32")]
 #[test]
 fn memberlist_options_with_checksum_sets_field() {
   use memberlist_proto::ChecksumAlgorithm;

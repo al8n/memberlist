@@ -303,9 +303,11 @@ async fn command_after_shutdown_returns_error_promptly() {
   let r_meta = m_clone
     .update_node_metadata(b"after-shutdown".to_vec())
     .await;
+  #[cfg(compression)]
   let r_compr = m_clone
     .set_compression_options(memberlist_proto::CompressionOptions::new())
     .await;
+  #[cfg(encryption)]
   let r_enc = m_clone
     .set_encryption_options(memberlist_proto::EncryptionOptions::new())
     .await;
@@ -316,10 +318,12 @@ async fn command_after_shutdown_returns_error_promptly() {
     matches!(r_meta, Err(MemberlistError::Shutdown)),
     "update_node_metadata: expected Shutdown, got {r_meta:?}",
   );
+  #[cfg(compression)]
   assert!(
     matches!(r_compr, Err(MemberlistError::Shutdown)),
     "set_compression_options: expected Shutdown, got {r_compr:?}",
   );
+  #[cfg(encryption)]
   assert!(
     matches!(r_enc, Err(MemberlistError::Shutdown)),
     "set_encryption_options: expected Shutdown, got {r_enc:?}",

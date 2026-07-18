@@ -28,13 +28,14 @@ use crate::{
 use lochan::mpsc;
 
 use super::{
-  BridgeHandle, BridgeOut, BridgeReady, GOSSIP_RECV_BUF_MAX, MemberlistError, PendingCommands,
-  PendingJoin, PendingLeave, StreamTransportOptions, dispatch_command, dispatch_gossip,
-  drain_actions, drain_events, drain_transport_transmits, fire_timeout_with_drain,
-  freeze_and_drain_bridges_to_disconnected, gossip_recv_buf_len, min_pending_join_deadline,
-  min_pending_leave_deadline, process_one_action, reap_pending_joins, reap_pending_leave,
-  spawn_bridge,
+  BridgeHandle, BridgeOut, BridgeReady, MemberlistError, PendingCommands, PendingJoin,
+  PendingLeave, StreamTransportOptions, dispatch_command, dispatch_gossip, drain_actions,
+  drain_events, drain_transport_transmits, fire_timeout_with_drain,
+  freeze_and_drain_bridges_to_disconnected, min_pending_join_deadline, min_pending_leave_deadline,
+  process_one_action, reap_pending_joins, reap_pending_leave, spawn_bridge,
 };
+#[cfg(all(encryption, checksum))]
+use super::{GOSSIP_RECV_BUF_MAX, gossip_recv_buf_len};
 use compio::net::{TcpListener, TcpStream};
 use core::time::Duration;
 
@@ -186,6 +187,7 @@ async fn dispatch_gossip_drops_malformed_datagram() {
 /// `gossip_recv_buf_len` sizes the recv buffer to `gossip_mtu +
 /// ENCRYPTED_WRAPPER_OVERHEAD`, clamped at the 65507-byte UDP-payload ceiling:
 /// a default-MTU endpoint sits below the ceiling, a near-max MTU clamps to it.
+#[cfg(all(encryption, checksum))]
 #[compio::test]
 async fn gossip_recv_buf_len_tracks_mtu_and_clamps_at_ceiling() {
   // Default MTU endpoint: buffer is mtu + overhead, strictly below the ceiling.

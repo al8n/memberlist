@@ -12,9 +12,12 @@ use std::{net::SocketAddr, time::Duration};
 
 use agnostic::tokio::TokioRuntime;
 use bytes::Bytes;
+#[cfg(compression)]
+use memberlist_reactor::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_reactor::EncryptionOptions;
 use memberlist_reactor::{
-  CompressionOptions, EncryptionOptions, Error, MaybeResolved, Memberlist, Node, Options,
-  SocketAddrResolver, VoidDelegate,
+  Error, MaybeResolved, Memberlist, Node, Options, SocketAddrResolver, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -118,6 +121,7 @@ async fn directed_sends_after_leave_are_rejected() {
 /// `set_encryption_options`) are rejected with `NotRunning` rather than falsely
 /// acked: the node emits no protocol traffic, so a new policy could never take
 /// effect on the wire.
+#[cfg(all(compression, encryption))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_policy_options_after_leave_is_rejected() {
   let (a, b, _a_addr) = converged_pair().await;
@@ -308,9 +312,11 @@ async fn commands_after_shutdown_return_shutdown_promptly() {
   let r_send = clone
     .send("127.0.0.1:1".parse().unwrap(), Bytes::from_static(b"z"))
     .await;
+  #[cfg(compression)]
   let r_compr = clone
     .set_compression_options(CompressionOptions::new())
     .await;
+  #[cfg(encryption)]
   let r_enc = clone.set_encryption_options(EncryptionOptions::new()).await;
   let elapsed = start.elapsed();
 
@@ -323,10 +329,12 @@ async fn commands_after_shutdown_return_shutdown_promptly() {
     "leave: {r_leave:?}"
   );
   assert!(matches!(r_send, Err(Error::Shutdown)), "send: {r_send:?}");
+  #[cfg(compression)]
   assert!(
     matches!(r_compr, Err(Error::Shutdown)),
     "compr: {r_compr:?}"
   );
+  #[cfg(encryption)]
   assert!(matches!(r_enc, Err(Error::Shutdown)), "enc: {r_enc:?}");
   assert!(
     elapsed < Duration::from_secs(2),

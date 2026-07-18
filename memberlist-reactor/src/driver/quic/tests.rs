@@ -5,8 +5,14 @@ use std::{
 };
 
 use agnostic::{net::Net, tokio::TokioRuntime};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::EncryptionOptions;
 use memberlist_proto::{
-  ChecksumOptions, CompressionOptions, EncryptionOptions, Node, QuicOptions, UnreliableTransport,
+  Node, QuicOptions, UnreliableTransport,
   config::EndpointOptions,
   endpoint::Endpoint,
   event::{Reliability, UserPacket},
@@ -18,9 +24,16 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use smol_str::SmolStr;
 
 use super::*;
+#[cfg(all(compression, checksum, encryption))]
+use crate::command::SendUserCmd;
+#[cfg(checksum)]
+use crate::command::SetChecksumOptionsCmd;
+#[cfg(compression)]
+use crate::command::SetCompressionOptionsCmd;
+#[cfg(encryption)]
+use crate::command::SetEncryptionOptionsCmd;
 use crate::command::{
-  JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SendUserCmd,
-  SetAckPayloadCmd, SetChecksumOptionsCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
+  JoinCmd, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd, SetAckPayloadCmd,
   SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
 };
 use rustls::version::TLS13;
@@ -383,6 +396,7 @@ async fn shutdown_fails_parked_leave() {
 /// which takes the whole queue and replies `Shutdown` to each replier. The
 /// five distinguishable variants (join, user, compression, checksum,
 /// encryption) are checked.
+#[cfg(all(compression, checksum, encryption))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_close_and_drain_fails_every_queued_command() {
   use Barrier;

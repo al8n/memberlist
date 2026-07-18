@@ -539,9 +539,11 @@ async fn command_after_shutdown_returns_error_promptly() {
   let r_meta = m_clone
     .update_node_metadata(b"after-shutdown".to_vec())
     .await;
+  #[cfg(compression)]
   let r_compr = m_clone
     .set_compression_options(memberlist_proto::CompressionOptions::new())
     .await;
+  #[cfg(encryption)]
   let r_enc = m_clone
     .set_encryption_options(memberlist_proto::EncryptionOptions::new())
     .await;
@@ -552,10 +554,12 @@ async fn command_after_shutdown_returns_error_promptly() {
     matches!(r_meta, Err(memberlist_compio::MemberlistError::Shutdown)),
     "update_node_metadata: expected Shutdown, got {r_meta:?}",
   );
+  #[cfg(compression)]
   assert!(
     matches!(r_compr, Err(memberlist_compio::MemberlistError::Shutdown)),
     "set_compression_options: expected Shutdown, got {r_compr:?}",
   );
+  #[cfg(encryption)]
   assert!(
     matches!(r_enc, Err(memberlist_compio::MemberlistError::Shutdown)),
     "set_encryption_options: expected Shutdown, got {r_enc:?}",
@@ -1381,6 +1385,7 @@ async fn update_node_metadata_after_leave_is_rejected() {
 /// `MemberlistError::NotRunning` rather than falsely ack a change that will
 /// never be observed. Strongly discriminating: without the gate each call
 /// returns `Ok(())`.
+#[cfg(all(compression, encryption))]
 #[compio::test]
 async fn set_policy_options_after_leave_is_rejected() {
   let a = make_tcp("policy-after-leave-a", loopback_addr(0)).await;
