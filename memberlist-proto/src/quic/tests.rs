@@ -6956,7 +6956,10 @@ fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
   let base = n.counters.dial_entries_serviced;
   for i in 0..K {
     let before = n.counters.dial_entries_serviced;
-    n.service_peer_bucket(cold_peer, now);
+    // A fresh full dial budget per restore: each call must still stop at the first
+    // re-park (O(1)), independent of the budget.
+    let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+    n.service_peer_bucket(cold_peer, now, &mut dial_budget);
     let delta = n.counters.dial_entries_serviced - before;
     assert!(
       delta <= 1,
@@ -7090,7 +7093,8 @@ fn established_bucket_pass_mints_at_most_the_budget() {
 
   // ONE service_peer_bucket pass mints at most the budget, then defers the tail.
   let before = n.counters.dial_entries_serviced;
-  let _ = n.service_peer_bucket(b_addr, now);
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(b_addr, now, &mut dial_budget);
   let attempts = n.counters.dial_entries_serviced - before;
   assert!(
     attempts <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
@@ -7178,7 +7182,8 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
 
   // ONE pass: attempts at most the budget, then defers the untouched tail.
   let before = n.counters.dial_entries_serviced;
-  let _ = n.service_peer_bucket(peer, now);
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(peer, now, &mut dial_budget);
   let attempted = n.counters.dial_entries_serviced - before;
   assert!(
     attempted <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
@@ -7340,7 +7345,8 @@ fn service_peer_bucket_leaves_tail_resident_no_move() {
 
   // ONE service_peer_bucket pass mints the budget's prefix, then defers the tail.
   let before = n.counters.dial_entries_serviced;
-  let _ = n.service_peer_bucket(b_addr, now);
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(b_addr, now, &mut dial_budget);
   let processed = (n.counters.dial_entries_serviced - before) as usize;
 
   // (a) the pass attempts at most the budget.
@@ -7428,7 +7434,8 @@ fn service_peer_bucket_leaves_tail_resident_no_move() {
   }
 
   let before2 = n2.counters.dial_entries_serviced;
-  let _ = n2.service_peer_bucket(cold_peer, now);
+  let mut dial_budget2 = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n2.service_peer_bucket(cold_peer, now, &mut dial_budget2);
   let processed2 = n2.counters.dial_entries_serviced - before2;
   assert_eq!(
     processed2, 1,
@@ -8730,10 +8737,11 @@ fn slot_free_fixpoint_reentrant() {
   super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, victim);
 
   // Seed the set as a prior-pass reap would have, so the helper enters its loop.
-  a.slot_freed_peers.push(b_addr);
+  a.slot_freed_peers.insert(b_addr);
 
   let mut budget = super::MAX_BRIDGE_PUMPS_PER_PASS;
-  let _ = a.service_slot_freed_peers(now, &mut budget);
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_slot_freed_peers(now, &mut budget, &mut dial_budget);
 
   assert!(
     !a.bridges.contains_key(&victim),
@@ -9036,5 +9044,438 @@ fn writable_edge_not_dropped_bridge_enqueues_and_drains_via_catchup() {
        residue (after > before) — proof every edge past the pump budget was acted \
        on. Restoring the enqueue skip caps enqueues at the budget so no residue \
        forms and the past-budget bridges are stranded."
+  );
+}
+
+/// The class-closure anchor test: a BOUNDED servicing pass that budget-defers a
+/// creditable parked-dial tail deposits the peer into the ready-dial ledger, arming
+/// the sticky catch-up anchor, so a STRICT-POLL driver (advancing only via
+/// `poll_timeout` / `handle_timeout`) mints every deferred intent BEFORE its dial
+/// deadline — no reliable send expires despite available capacity.
+///
+/// Construction: establish A -> B with ample bidi credit, quiesce so no ImmediateDue
+/// anchor competes, inject `M > MAX_DIAL_ATTEMPTS_PER_PASS` real creditable intents
+/// parked on B's bucket, then run ONE budgeted `service_peer_bucket` pass (the
+/// establishment/credit path a datagram drives) which mints the budget and DEFERS a
+/// creditable tail. The minted bridges are left un-enqueued so the SOLE residue is
+/// the ready-dial deposit — the anchor is armed by the dial ledger alone.
+///
+/// Mutations that must each fail this test (only (a) is exercised in CI; (b) and (c)
+/// are stated as the contract):
+///   (a) remove the ready-dial deposit in `service_peer_bucket` — the ledger stays
+///       empty, so `reconcile_catchup_anchor` never arms `next_catchup_at` and the
+///       pre-drive assertions fail; were the drive reached, the tail would strand.
+///   (b) drop `ready_dial_peers` from `has_residue` — `reconcile_catchup_anchor`
+///       sees no residue and clears the anchor, same failure.
+///   (c) make `catchup_service` skip the ready-dial drain — the anchor fires but
+///       drains nothing, so the tail never mints and the post-drive assertions fail.
+#[test]
+fn budget_deferred_parked_dial_mints_before_deadline_via_catchup() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8300".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8301".parse().unwrap();
+  let now = Instant::now();
+  // A: periodic membership schedulers disabled so no staggered timer falls due in the
+  // drain window — every wake is provably the bounded catch-up (never a full tick that
+  // would `service_dials` full-drain the tail regardless of the ledger).
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Quiesce any handshake-queued pending events so no ImmediateDue anchor (an
+  // earlier-than-catch-up wake) competes with the catch-up during the strict-poll
+  // drive.
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "test precondition: the warm-up mints no bridge"
+  );
+
+  // Inject M real creditable intents parked on B's bucket: register each on the raw
+  // endpoint (so `dial_succeeded` resolves it into a real Stream), sieve the emitted
+  // DialRequested into dial_pending, then move them onto dial_parked[B] as attempted —
+  // the post-parking state a burst reaches on a since-established, amply-credited
+  // connection.
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  assert_eq!(pending.len(), M, "all M intents sieve into dial_pending");
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket must exceed the budget so the pass defers a creditable tail"
+  );
+  while a.poll_event().is_some() {}
+
+  // ONE budgeted pass (the datagram establishment/credit path): mint the budget,
+  // DEFER the tail, DEPOSIT B into the ready-dial ledger. The minted bridges are left
+  // un-enqueued so the ledger is the SOLE residue that arms the anchor.
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(b_addr, now, &mut dial_budget);
+  let minted_first = a.live_bridge_count();
+  assert_eq!(
+    minted_first,
+    super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the budgeted pass mints exactly the budget"
+  );
+  let deferred = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+  assert_eq!(
+    deferred,
+    M - minted_first,
+    "exactly the creditable tail stays parked"
+  );
+  assert!(deferred > 0, "non-vacuous: a creditable tail was deferred");
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the budget-deferred tail deposits B into the ready-dial ledger (removing the \
+       deposit — mutation a — leaves it empty)"
+  );
+  // Arm the sticky anchor for the ledger residue — the reconcile step every bounded
+  // caller runs after `service_peer_bucket`. Removing the deposit (mutation a) or
+  // dropping ready_dial_peers from `has_residue` (mutation b) leaves this `None`.
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the ready-dial residue must arm the sticky catch-up anchor"
+  );
+
+  // Strict-poll drive: advance ONLY via poll_timeout/handle_timeout. Every deferred
+  // intent must mint (open a real bridge) before its dial deadline, with zero
+  // ExchangeCompleted failures.
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ready-dial residue always schedules a catch-up wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "every deferred parked dial must mint before its deadline via the catch-up wake; \
+       removing the deposit / the has_residue inclusion / the catchup drain strands it"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "all M intents minted a real bridge (none retired despite available capacity)"
+  );
+  assert!(
+    !saw_failure,
+    "no deferred dial may retire to ExchangeCompleted::Failed — capacity was available"
+  );
+}
+
+/// The tick's step (5.6) and `flush_outbound` thread `usize::MAX` as the DIAL budget
+/// into `service_slot_freed_peers`, so those O(N) paths can NEVER budget-exit a freed
+/// peer's bucket with a creditable tail — the property that makes `finalize_tick`'s
+/// "ready_dial_peers empty" debug-assert sound. This pins that an unbounded dial
+/// budget fully drains a `> budget` freed bucket WITHOUT depositing into the ledger.
+///
+/// Construction: establish A -> B with ample credit, inject `> budget` real creditable
+/// intents parked on B, seed B into `slot_freed_peers` (as a dialer reap would), then
+/// run the slot-free consume with the tick's `usize::MAX` budgets.
+///
+/// Mutation (stated): pass `MAX_DIAL_ATTEMPTS_PER_PASS` at step (5.6) instead of
+/// `usize::MAX` — the freed bucket budget-exits, deposits B into `ready_dial_peers`
+/// (as `established_bucket_pass_mints_at_most_the_budget` shows a finite budget does),
+/// and `finalize_tick`'s debug-assert fires on the tick's own path.
+#[test]
+fn slot_free_unbounded_dial_budget_drains_without_deposit() {
+  let a_addr: SocketAddr = "127.0.0.1:8310".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8311".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("register a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "non-vacuous: the freed bucket exceeds the budget, so a finite budget would deposit"
+  );
+  while a.poll_event().is_some() {}
+
+  // The tick's step (5.6) threading: unbounded pump AND dial budgets. B is the freed
+  // peer. The unbounded dial budget must fully drain B's `> budget` bucket with NO
+  // ready-dial deposit, so `finalize_tick`'s empty-ledger assert holds on the tick path.
+  a.slot_freed_peers.insert(b_addr);
+  let mut pump_budget = usize::MAX;
+  let mut dial_budget = usize::MAX;
+  let _ = a.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget);
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the unbounded dial budget fully drains the > budget freed bucket in one pass"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "every deferred intent minted — so the bucket WAS creditable and a finite budget \
+       would have deposited a creditable tail"
+  );
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "the unbounded dial budget never budget-exits, so it deposits nothing — the \
+       property finalize_tick's ready_dial_peers-empty assert relies on"
+  );
+}
+
+/// The zero-attempt deposit arm: a BOUNDED pass whose shared dial budget is already
+/// exhausted when the slot-free fixpoint reaches a freed peer's bucket must STILL
+/// deposit that peer into the ready-dial ledger — the peer was already taken out of
+/// `slot_freed_peers`, so absent a deposit its wake is consumed and the bucket strands.
+///
+/// Construction: seed B into `slot_freed_peers` with a non-empty parked bucket, then
+/// run `service_slot_freed_peers` with the dial budget already at ZERO (the state the
+/// fixpoint reaches after an earlier ready-dial drain in the same pass spent it).
+///
+/// Mutation (stated): require an attempt was made (drop the zero-attempt arm —
+/// `bucket_nonempty && attempted_any && !last_was_reparked`) — the zero-budget bucket
+/// then deposits nothing, so `reconcile_catchup_anchor` leaves `next_catchup_at`
+/// `None` and `poll_timeout` returns only the far dial/idle deadline, stranding B.
+#[test]
+fn zero_attempt_deposit_arms_catchup_for_starved_slot_free_peer() {
+  let a_addr: SocketAddr = "127.0.0.1:8320".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8321".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  while a.poll_event().is_some() {}
+
+  // A non-empty parked bucket on B (fake ids suffice — a zero-budget pass never
+  // attempts them, so they are never resolved). This is the tail an earlier ready-dial
+  // drain in the same interval deferred.
+  let deadline = now + Duration::from_secs(30);
+  for i in 0..4u64 {
+    a.dial_parked
+      .entry(b_addr)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(95_000 + i),
+        peer: b_addr,
+        deadline,
+        attempted: true,
+      });
+  }
+
+  // Seed B as a freed peer and run the slot-free consume with the shared dial budget
+  // ALREADY exhausted. B is `mem::take`n out of `slot_freed_peers`; the zero-attempt
+  // deposit is the ONLY thing that keeps its wake alive.
+  a.slot_freed_peers.insert(b_addr);
+  let mut pump_budget = super::MAX_BRIDGE_PUMPS_PER_PASS;
+  let mut dial_budget = 0usize;
+  let _ = a.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget);
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "B was taken out of slot_freed_peers by the fixpoint"
+  );
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the zero-attempt arm deposits B into the ready-dial ledger even though the budget \
+       was spent before reaching its bucket (dropping the arm strands B)"
+  );
+  // The reconcile step every bounded caller runs: the ledger residue arms the anchor.
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the zero-attempt deposit arms the sticky catch-up anchor"
+  );
+  assert_eq!(
+    a.poll_timeout(),
+    Some(now + super::CATCHUP_INTERVAL),
+    "poll_timeout returns the armed catch-up anchor — nearer than the far dial/idle \
+       deadlines; dropping the zero-attempt arm returns only that far deadline"
+  );
+}
+
+/// Front-park: a reliable-ping-exempt dial that re-parks (its connection still
+/// handshaking, `open(Bi) == None`) lands at the FRONT of its peer's bucket, ahead of
+/// the ordinary user-message dials that re-parked at the BACK — so a `C_OUT`-blocked
+/// user-message head can never shadow the liveness-critical probe fallback behind the
+/// `service_peer_bucket` stop-on-`Reparked` break.
+///
+/// Construction: three dials to a never-answered peer (its connection stays
+/// handshaking, so every `open(Bi)` returns `None` and re-parks): two user messages,
+/// then one reliable ping. The ping is exempt, so it front-parks.
+///
+/// Mutation (stated): revert the exempt re-park to `push_back` — the ping lands at the
+/// BACK, behind the user-message head; on the next bucket service a `C_OUT`-blocked
+/// user-message head would re-park and break before the ping is popped, stranding it.
+#[test]
+fn reliable_ping_reparks_at_front_of_bucket() {
+  let a_addr: SocketAddr = "127.0.0.1:8330".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8331".parse().unwrap();
+  let now = Instant::now();
+  // No B endpoint: B never answers, so A's connection to B stays handshaking and every
+  // dial re-parks via the `open(Bi) == None` path.
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Two user-message dials re-park at the BACK while B handshakes.
+  let u1 = a
+    .start_user_message(b_addr, Bytes::from_static(b"u1"), now)
+    .expect("A registers the first user-message dial");
+  let u2 = a
+    .start_user_message(b_addr, Bytes::from_static(b"u2"), now)
+    .expect("A registers the second user-message dial");
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    2,
+    "both user-message dials re-park while B handshakes"
+  );
+
+  // The reliable-ping dial is exempt, so it re-parks at the FRONT, ahead of the
+  // user-message head — the bucket order becomes [ping, u1, u2].
+  let deadline = now + Duration::from_secs(5);
+  let ping = a.start_reliable_ping(SmolStr::new("b"), b_addr, 7, deadline, now);
+  let order: Vec<StreamId> = a
+    .dial_parked
+    .get(&b_addr)
+    .expect("B's parked bucket holds all three dials")
+    .iter()
+    .map(|d| d.id)
+    .collect();
+  assert_eq!(
+    order,
+    vec![ping, u1, u2],
+    "the reliable-ping re-parks at the FRONT (exempt) ahead of the user-message head, \
+       which stays behind it in arrival order; reverting the exempt re-park to \
+       push_back would order it [u1, u2, ping] and a C_OUT-blocked user-message head \
+       would shadow the ping behind the stop-on-Reparked break"
+  );
+}
+
+/// `flush_outbound` fully drains the ready-dial ledger BEFORE `finalize_tick`, so a
+/// budget-deferred deposit an earlier BOUNDED pass left cannot survive a flush-all
+/// into the finalize empty-ledger assert.
+///
+/// Construction: establish A -> B, inject `> budget` creditable intents parked on B,
+/// run ONE budgeted `service_peer_bucket` pass that deposits B into the ledger, then
+/// `flush_outbound_transmits`.
+///
+/// Mutation (stated): remove flush_outbound's ready-dial consume — the deposit
+/// survives into `finalize_tick`, whose `debug_assert!(ready_dial_peers.is_empty())`
+/// then fires (this test panics in a debug build).
+#[test]
+fn flush_outbound_drains_ready_dial_ledger_before_finalize() {
+  let a_addr: SocketAddr = "127.0.0.1:8340".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8341".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("register a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  while a.poll_event().is_some() {}
+
+  // One budgeted pass deposits B into the ready-dial ledger (mint the budget, defer
+  // the creditable tail).
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(b_addr, now, &mut dial_budget);
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the bounded pass deposits B into the ready-dial ledger"
+  );
+
+  // A flush-all must consume the ledger fully before finalize; the finalize
+  // empty-ledger debug-assert would fire (panic) if the deposit survived.
+  a.flush_outbound_transmits(now);
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "flush_outbound consumes the ready-dial ledger fully before finalize_tick; removing \
+       that consume trips finalize_tick's ready_dial_peers-empty debug-assert"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the flush-all drains B's whole deferred tail (unbounded budget)"
   );
 }

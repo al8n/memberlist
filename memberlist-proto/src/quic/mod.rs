@@ -351,6 +351,53 @@ impl TouchedConns {
   }
 }
 
+/// An insertion-ordered set of peer [`SocketAddr`]s with O(1) deduplication — the
+/// residue-ledger shape shared by [`QuicEndpoint::slot_freed_peers`] and
+/// [`QuicEndpoint::ready_dial_peers`].
+///
+/// Pairs an insertion-ordered `SmallVec` — drained in first-insert order so a VOPR
+/// replay services peers in a deterministic sequence — with an [`FxHashSet`] for
+/// O(1) membership, so re-queuing the same peer across a mass-partition pass stays
+/// linear rather than O(peers²) via a `SmallVec::contains` scan. The connection
+/// twin is [`TouchedConns`].
+#[derive(Default)]
+struct PeerResidue {
+  order: SmallVec<SocketAddr>,
+  seen: FxHashSet<SocketAddr>,
+}
+
+impl PeerResidue {
+  /// Queue `peer`, preserving first-insert order and ignoring repeats in O(1).
+  fn insert(&mut self, peer: SocketAddr) {
+    if self.seen.insert(peer) {
+      self.order.push(peer);
+    }
+  }
+
+  /// Whether the ledger holds no peer.
+  fn is_empty(&self) -> bool {
+    self.order.is_empty()
+  }
+
+  /// The number of queued peers (debug-assert diagnostics only).
+  fn len(&self) -> usize {
+    self.order.len()
+  }
+
+  /// Remove and return the queued peers in first-insert order, leaving the ledger
+  /// empty — the residue-drain idiom mirroring `core::mem::take`: a re-insert
+  /// during servicing re-queues onto the now-empty ledger for the next turn.
+  fn take(&mut self) -> SmallVec<SocketAddr> {
+    core::mem::take(self).order
+  }
+
+  /// Drop every queued peer, leaving the ledger empty.
+  fn clear(&mut self) {
+    self.order.clear();
+    self.seen.clear();
+  }
+}
+
 /// Readiness a single [`QuicEndpoint::service_one_conn`] pass observed on its
 /// connection that the caller must act on AFTER the connection borrow drops —
 /// each unblocks the outbound dials parked on this connection's peer.
@@ -635,8 +682,25 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// which stays armed while this set is non-empty. Populated only by
   /// completion-driven reaps (never a datagram set) and deduped at insertion, so the
   /// wake is not attacker-per-datagram pushable; [`Self::finalize_tick`] asserts the
-  /// tick drained it.
-  slot_freed_peers: SmallVec<SocketAddr>,
+  /// tick drained it. Dedup is O(1) via the [`PeerResidue`] set+vec shape so a
+  /// mass-partition pass that frees many slots stays linear.
+  slot_freed_peers: PeerResidue,
+  /// Distinct peers whose parked-dial bucket a BOUNDED servicing pass could not
+  /// finish attempting because the pass's shared dial-attempt budget ran out with a
+  /// still-creditable tail resident — the dial-plane residue ledger, the third
+  /// residue kind alongside [`Self::ready_bridges`] and [`Self::slot_freed_peers`].
+  ///
+  /// Deposited at the single chokepoint [`Self::service_peer_bucket`]'s exit
+  /// whenever it leaves a non-empty bucket without the last attempt re-parking (see
+  /// that method for the exact condition), so every budget-deferred parked dial is
+  /// covered by the sticky catch-up anchor ([`Self::next_catchup_at`]) instead of
+  /// stranding until its [`TimerKey::Dial`] deadline retires it despite available
+  /// capacity. [`Self::catchup_service`] drains it under an interval dial budget,
+  /// [`Self::flush_outbound`] drains it fully, and the global tick's step-(5)
+  /// [`Self::service_dials`] full drain clears it (that step already attempted every
+  /// bucket). Insertion-ordered and O(1)-deduped ([`PeerResidue`]) so the drain is
+  /// deterministic for VOPR replay and a repeated deposit stays linear.
+  ready_dial_peers: PeerResidue,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
   /// into production builds.
@@ -903,7 +967,8 @@ impl<I, R> QuicEndpoint<I, R> {
       deadline_index: DeadlineIndex::new(),
       conns_with_pending_events: HashSet::new(),
       next_catchup_at: None,
-      slot_freed_peers: SmallVec::new(),
+      slot_freed_peers: PeerResidue::default(),
+      ready_dial_peers: PeerResidue::default(),
       #[cfg(test)]
       counters: TestCounters::default(),
     }
@@ -1821,9 +1886,7 @@ impl<I, R> QuicEndpoint<I, R> {
       }
       None => return,
     };
-    if !self.slot_freed_peers.contains(&peer) {
-      self.slot_freed_peers.push(peer);
-    }
+    self.slot_freed_peers.insert(peer);
   }
 
   /// Brute-force earliest deadline — a byte-for-byte fold of the same sources
@@ -2273,6 +2336,17 @@ impl<I, R> QuicEndpoint<I, R> {
       "slot_freed_peers must be drained before finalize: {} peer(s) remain",
       self.slot_freed_peers.len(),
     );
+    // The ready-dial ledger must likewise be empty here: the tick's step (5)
+    // `service_dials` full drain clears it (every bucket was attempted) and step
+    // (5.6) runs with an unbounded dial budget that cannot budget-exit, so it never
+    // re-deposits; `flush_outbound` drains it fully with an unbounded budget before
+    // this finalize. A residue would mean a budget-deferred dial's catch-up wake was
+    // silently dropped rather than serviced.
+    debug_assert!(
+      self.ready_dial_peers.is_empty(),
+      "ready_dial_peers must be cleared/drained before finalize: {} peer(s) remain",
+      self.ready_dial_peers.len(),
+    );
     // The tick ends with an EMPTY queue and no flagged bridge — the strict
     // post-condition, unlike the budgeted datagram path which may leave a residue.
     // With the queue now empty, `debug_assert_ready_drained`'s lockstep also
@@ -2326,6 +2400,39 @@ impl<I, R> QuicEndpoint<I, R> {
         );
       }
     }
+  }
+
+  /// Whether any deferred servicing residue remains that the sticky catch-up
+  /// anchor must cover: a budget-deferred bridge queued in [`Self::ready_bridges`],
+  /// a peer whose freed `C_OUT` slot still awaits its parked dial in
+  /// [`Self::slot_freed_peers`], or a peer with a budget-deferred parked dial in
+  /// [`Self::ready_dial_peers`].
+  ///
+  /// The single source of truth for "the catch-up anchor must be armed", consumed
+  /// by [`Self::reconcile_catchup_anchor`], [`Self::advance_catchup_anchor`], and
+  /// [`Self::handle_timeout`]'s catch-up due gate, so no residue kind can be added
+  /// or dropped from the anchor's coverage at only some of the three sites.
+  fn has_residue(&self) -> bool {
+    !self.ready_bridges.is_empty()
+      || !self.slot_freed_peers.is_empty()
+      || !self.ready_dial_peers.is_empty()
+  }
+
+  /// Debug-only class-closure invariant checked at the end of every BOUNDED
+  /// servicing pass: if any deferred residue remains ([`Self::has_residue`]), the
+  /// sticky catch-up anchor MUST be armed, so a strict-poll driver is guaranteed a
+  /// pre-deadline wake to drain it. "No bounded pass may end with residue and no
+  /// armed anchor" — the structural guarantee that makes deferral-without-a-wake
+  /// unrepresentable rather than a per-site obligation. Compiled out in release.
+  fn debug_assert_residue_anchored(&self) {
+    debug_assert!(
+      !self.has_residue() || self.next_catchup_at.is_some(),
+      "a bounded servicing pass left deferred residue (ready_bridges: {}, \
+       slot_freed_peers: {}, ready_dial_peers: {}) with no catch-up anchor armed",
+      self.ready_bridges.len(),
+      self.slot_freed_peers.len(),
+      self.ready_dial_peers.len(),
+    );
   }
 
   /// Move any `Event::DialRequested` currently in the inner endpoint's
@@ -2761,21 +2868,40 @@ where
   /// The bucket is NOT removed whole: a bounded front-prefix is detached in
   /// place with O(1) `pop_front` while the unprocessed tail stays resident in
   /// the same allocation. Each popped entry runs the same per-entry logic
-  /// [`Self::service_dials`] applies; a still-blocked entry re-parks onto the
-  /// BACK of `dial_parked[peer]` and the drain stops (every later entry shares
-  /// that connection and would re-park identically). An emptied bucket is
-  /// dropped so a stored bucket is always non-empty. Reports minted bridges and
-  /// touched connections identically for the caller to pump and flush the same
-  /// pass.
-  fn service_peer_bucket(&mut self, peer: SocketAddr, now: Instant) -> ServicedDials {
+  /// [`Self::service_dials`] applies; a still-blocked entry re-parks (BACK for an
+  /// ordinary intent, FRONT for a reliable-ping-exempt one) and the drain stops
+  /// (every later entry shares that connection and would re-park identically). An
+  /// emptied bucket is dropped so a stored bucket is always non-empty. Reports
+  /// minted bridges and touched connections identically for the caller to pump and
+  /// flush the same pass.
+  ///
+  /// `dial_budget` is the pass's shared dial-attempt budget, decremented once per
+  /// attempt REGARDLESS of outcome — a big `MAX_STREAMS` grant (or a handshake
+  /// granting large initial credit) that mints every entry, and a long expired
+  /// prefix that retires every entry, must not let ONE datagram drive O(bucket)
+  /// dial work. A bounded caller passes its per-pass budget; the O(N) tick and
+  /// [`Self::flush_outbound`] pass `usize::MAX` so those paths never budget-exit
+  /// with a creditable tail.
+  ///
+  /// When the budget (or the [`DialAttempt::Reparked`] early-out) leaves a still-
+  /// creditable tail resident, the peer is deposited into [`Self::ready_dial_peers`]
+  /// so the sticky catch-up anchor wakes to finish it — see the deposit condition
+  /// at the exit.
+  fn service_peer_bucket(
+    &mut self,
+    peer: SocketAddr,
+    now: Instant,
+    dial_budget: &mut usize,
+  ) -> ServicedDials {
     let mut minted: SmallVec<StreamId> = SmallVec::new();
     let mut touched = TouchedConns::new();
-    // Attempt at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries this pass, REGARDLESS
-    // of outcome — a big `MAX_STREAMS` grant (or a handshake granting large
-    // initial credit) that mints every entry, and a long expired prefix that
-    // retires every entry, must not let ONE datagram drive O(bucket) dial work.
-    let mut attempts = 0usize;
-    while attempts < MAX_DIAL_ATTEMPTS_PER_PASS {
+    // `attempted_any` distinguishes a call that never touched the bucket (the
+    // shared budget was already spent when the call reached this peer) from one
+    // that made progress; `last_was_reparked` records whether the final attempt
+    // re-parked. Both drive the ledger deposit below.
+    let mut attempted_any = false;
+    let mut last_was_reparked = false;
+    while *dial_budget > 0 {
       // O(1) `get_mut` then O(1) `pop_front` detaches one entry from the front
       // while the tail stays resident — no whole-bucket take, no tail copy. The
       // borrow is released with this `let`, so `process_dial_entry` (which
@@ -2788,27 +2914,32 @@ where
       else {
         break;
       };
-      attempts += 1;
+      *dial_budget -= 1;
+      attempted_any = true;
       match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
         // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
         // retire consumes none, so a later entry in the bucket may still find
         // an opening — keep draining (up to the budget).
-        DialAttempt::Minted | DialAttempt::Retired => {}
+        DialAttempt::Minted | DialAttempt::Retired => last_was_reparked = false,
         // The first re-park proves the shared pooled connection is still
         // handshaking or its restored bidi credit is already spent. Every later
         // entry in this bucket targets that SAME connection and would re-park
         // identically, so stop instead of re-attempting the whole bucket for
         // each single-credit `Available` — attempting the whole bucket per
         // credit is O(bucket) per credit, so K single-credit frames cost
-        // O(K^2). Stopping here makes each `Available` O(1). The re-parked entry
-        // went to the BACK of the bucket (via `process_dial_entry`'s
-        // `push_back`), so it is not re-popped this pass; the resident tail
-        // ahead of it and this entry behind it both ride to the next drain with
+        // O(K^2). Stopping here makes each `Available` O(1). An ordinary re-park
+        // went to the BACK of the bucket; a reliable-ping-exempt one to the
+        // FRONT (both via `process_dial_entry`'s `repark_blocked_dial`) — the
+        // break fires BEFORE re-popping either, so a front re-park is not
+        // re-popped this pass. The resident entries ride to the next drain with
         // `attempted = true` and their `TimerKey::Dial` deadline keys intact
-        // (only `process_dial_entry` touches those), so `poll_timeout`'s folded
-        // `Dial` term still wakes the un-budgeted `service_dials` at the
-        // earliest dial deadline — nothing is stranded.
-        DialAttempt::Reparked => break,
+        // (only `process_dial_entry` touches those), and a re-park owns a
+        // block-reason wake (establishment / `Available` / slot-free), so
+        // nothing is stranded.
+        DialAttempt::Reparked => {
+          last_was_reparked = true;
+          break;
+        }
       }
     }
     // Preserve the "a stored bucket is never empty" field invariant: a pass that
@@ -2821,42 +2952,74 @@ where
     if self.dial_parked.get(&peer).is_some_and(VecDeque::is_empty) {
       self.dial_parked.swap_remove(&peer);
     }
+    // Deposit this peer into the ready-dial ledger — the SINGLE chokepoint that
+    // gives every budget-deferred parked dial a pre-deadline catch-up wake — iff a
+    // still-creditable tail remains that this call did not resolve. Two arms, both
+    // load-bearing:
+    //   * ZERO attempts this call (`!attempted_any`): the shared budget was already
+    //     exhausted when the call reached this bucket (e.g. the slot-free fixpoint
+    //     after the catch-up ready-dial drain spent it). The peer was already taken
+    //     out of its wake source, so absent a deposit its wake is consumed and the
+    //     bucket strands.
+    //   * the last attempt did NOT re-park (`!last_was_reparked`): the loop exited
+    //     on the shared budget with a creditable tail. A `Reparked` exit deposits
+    //     nothing — each re-park cause owns its own wake (handshake ->
+    //     establishment; credit exhausted -> `Available`, and no grant means no
+    //     capacity so the deadline retirement is correct; `C_OUT` -> slot-free) —
+    //     so a ledger deposit would be redundant, and for the no-capacity credit
+    //     case a spurious pre-deadline wake.
+    let bucket_nonempty = self
+      .dial_parked
+      .get(&peer)
+      .is_some_and(|bucket| !bucket.is_empty());
+    if bucket_nonempty && (!attempted_any || !last_was_reparked) {
+      self.ready_dial_peers.insert(peer);
+    }
     ServicedDials {
       minted_bridges: minted,
       touched_conns: touched.into_ordered(),
     }
   }
 
-  /// Re-park a still-blocked dial intent onto the BACK of its peer's
-  /// [`Self::dial_parked`] bucket and restore its [`TimerKey::Dial`] deadline
-  /// key. The single re-park primitive shared by every re-park cause in
-  /// [`Self::process_dial_entry`] — the local `C_OUT` outbound-cap gate and the
-  /// handshake-blocked / peer-credit-exhausted `open(Bi) == None` paths: an
-  /// intent that could not open a stream this pass but whose deadline is still in
-  /// the future waits for the next per-peer readiness or slot-free wake.
+  /// Re-park a still-blocked dial intent onto its peer's [`Self::dial_parked`]
+  /// bucket and restore its [`TimerKey::Dial`] deadline key. The single re-park
+  /// primitive shared by every re-park cause in [`Self::process_dial_entry`] — the
+  /// local `C_OUT` outbound-cap gate and the handshake-blocked / peer-credit-
+  /// exhausted `open(Bi) == None` paths: an intent that could not open a stream
+  /// this pass but whose deadline is still in the future waits for the next
+  /// per-peer readiness or slot-free wake.
   ///
-  /// `attempted = true` so it no longer contributes an immediate-due wake;
-  /// appended to the BACK so a self-re-park lands behind the resident bucket tail
-  /// and is not re-popped this pass ([`Self::service_peer_bucket`] pops FRONT and
-  /// stops on the first re-park). Re-registering the `Dial` deadline keeps the
-  /// tick's exact-at-deadline retirement wake firing for the parked intent. The
-  /// caller MUST have confirmed `now < deadline`.
+  /// `attempted = true` so it no longer contributes an immediate-due wake.
+  /// Re-registering the `Dial` deadline keeps the tick's exact-at-deadline
+  /// retirement wake firing for the parked intent. The caller MUST have confirmed
+  /// `now < deadline`.
+  ///
+  /// `exempt` places a liveness-critical reliable-ping intent at the FRONT of its
+  /// bucket, so a `C_OUT`-blocked user-message head can never shadow it behind the
+  /// [`Self::service_peer_bucket`] stop-on-`Reparked` break; an ordinary intent
+  /// appends at the BACK. Either way a self-re-park is not re-popped this pass —
+  /// `service_peer_bucket` pops FRONT and breaks on the first re-park BEFORE
+  /// re-popping, so a front re-park is left resident and the budget bounds the
+  /// rest.
   fn repark_blocked_dial(
     &mut self,
     id: StreamId,
     peer: SocketAddr,
     deadline: Instant,
+    exempt: bool,
   ) -> DialAttempt {
-    self
-      .dial_parked
-      .entry(peer)
-      .or_default()
-      .push_back(PendingDial {
-        id,
-        peer,
-        deadline,
-        attempted: true,
-      });
+    let entry = PendingDial {
+      id,
+      peer,
+      deadline,
+      attempted: true,
+    };
+    let bucket = self.dial_parked.entry(peer).or_default();
+    if exempt {
+      bucket.push_front(entry);
+    } else {
+      bucket.push_back(entry);
+    }
     self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
     DialAttempt::Reparked
   }
@@ -2982,7 +3145,9 @@ where
         );
         if !is_reliable_ping && self.conns.get(ch).map_or(0, |e| e.outbound_bridge_count()) >= C_OUT
         {
-          return self.repark_blocked_dial(id, peer, deadline);
+          // `is_reliable_ping` is false on this arm (the gate exempts it), so this
+          // re-park always appends at the BACK; the flag is threaded uniformly.
+          return self.repark_blocked_dial(id, peer, deadline, is_reliable_ping);
         }
         if let Some(e) = self.conns.get_mut(ch) {
           match e.conn_mut().streams().open(Dir::Bi) {
@@ -3153,8 +3318,10 @@ where
                 // Handshake-blocked or credit-exhausted: re-park by TARGET PEER
                 // so the next readiness event on this peer's connection
                 // (handshake completion, or a MAX_STREAMS raise) services exactly
-                // this intent via `service_peer_bucket`.
-                self.repark_blocked_dial(id, peer, deadline)
+                // this intent via `service_peer_bucket`. A reliable-ping fallback
+                // parks at the FRONT so it is not shadowed behind a C_OUT-blocked
+                // user-message head at the next bucket service.
+                self.repark_blocked_dial(id, peer, deadline, is_reliable_ping)
               } else {
                 self.retire_failed_dial(
                   id,
@@ -3544,18 +3711,18 @@ where
   /// ONCE to `now + CATCHUP_INTERVAL` when a residue is present and no anchor is set
   /// yet.
   ///
-  /// The residue is a budget-deferred bridge in [`Self::ready_bridges`] OR a peer
-  /// still queued in [`Self::slot_freed_peers`] (a slot freed past this pass's
-  /// budget whose parked dial the fixpoint could not service): both must ride the
-  /// anchor so a strict-poll driver still wakes to drain them. `slot_freed_peers` is
-  /// completion-driven, not a datagram set, so folding it here keeps the anchor
-  /// attacker-unpushable.
+  /// The residue is any of the three [`Self::has_residue`] kinds — a budget-
+  /// deferred bridge in [`Self::ready_bridges`], a peer still queued in
+  /// [`Self::slot_freed_peers`], or a peer with a budget-deferred parked dial in
+  /// [`Self::ready_dial_peers`]: all must ride the anchor so a strict-poll driver
+  /// still wakes to drain them. All three are completion/pass driven, not datagram
+  /// sets, so folding them here keeps the anchor attacker-unpushable.
   ///
   /// An already-armed anchor is left UNCHANGED while the residue persists — the
   /// stickiness that keeps an inbound datagram flood (each bumping `last_now`) from
   /// pushing the residue-drain wake forward and stranding it.
   fn reconcile_catchup_anchor(&mut self, now: Instant) {
-    if self.ready_bridges.is_empty() && self.slot_freed_peers.is_empty() {
+    if !self.has_residue() {
       self.next_catchup_at = None;
     } else if self.next_catchup_at.is_none() {
       self.next_catchup_at = Some(now + CATCHUP_INTERVAL);
@@ -3567,11 +3734,10 @@ where
   /// residue remains (pacing the drain at a fixed, table-independent rate), or
   /// clear it once the residue is empty. Unlike [`Self::reconcile_catchup_anchor`]
   /// this always re-anchors off the just-serviced `now`, so a driver waking at the
-  /// anchor drains one budget-sized chunk per interval. "Residue" is a budget-
-  /// deferred [`Self::ready_bridges`] bridge OR a peer still in
-  /// [`Self::slot_freed_peers`] — see [`Self::reconcile_catchup_anchor`].
+  /// anchor drains one budget-sized chunk per interval. "Residue" is any
+  /// [`Self::has_residue`] kind.
   fn advance_catchup_anchor(&mut self, now: Instant) {
-    self.next_catchup_at = if self.ready_bridges.is_empty() && self.slot_freed_peers.is_empty() {
+    self.next_catchup_at = if !self.has_residue() {
       None
     } else {
       Some(now + CATCHUP_INTERVAL)
@@ -3628,11 +3794,11 @@ where
       .earliest_excluding_2(TimerKey::Catchup, TimerKey::ImmediateDue)
       .is_some_and(|d| d <= now);
     // The sticky Catchup anchor is due only when it is armed AND its instant has
-    // arrived AND a residue actually remains — a budget-deferred `ready_bridges`
-    // bridge OR a still-queued `slot_freed_peers` peer (a slot freed past a bounded
-    // pass's budget). `catchup_service` drains both, so both keep it due.
-    let catchup_due = self.next_catchup_at.is_some_and(|t| t <= now)
-      && (!self.ready_bridges.is_empty() || !self.slot_freed_peers.is_empty());
+    // arrived AND a residue actually remains — any [`Self::has_residue`] kind: a
+    // budget-deferred `ready_bridges` bridge, a still-queued `slot_freed_peers`
+    // peer, or a budget-deferred `ready_dial_peers` peer. `catchup_service` drains
+    // all three, so any of them keeps it due.
+    let catchup_due = self.next_catchup_at.is_some_and(|t| t <= now) && self.has_residue();
     // The ImmediateDue anchor is present (== `last_now` == `now`, hence due)
     // exactly when `refresh_immediate_due` would arm it: a pending-event connection
     // or a fresh unattempted dial exists.
@@ -3692,10 +3858,17 @@ where
   /// [`Self::finalize_tick`], so a slot-free minted bridge must be fully pumped this
   /// pass (it holds no [`TimerKey::Bridge`] deadline until its first pump, and the
   /// anchor `finalize_tick` clears cannot carry it).
+  ///
+  /// `dial_budget` is the pass's shared DIAL-attempt budget (distinct from the
+  /// bridge-pump `budget`), threaded into the per-peer [`Self::service_peer_bucket`]
+  /// so a freed peer's bucket that exhausts it deposits its creditable tail into the
+  /// ready-dial ledger rather than being scanned unboundedly. The O(N) tick /
+  /// `flush_outbound` paths pass `usize::MAX` so those paths never budget-exit.
   fn service_slot_freed_peers(
     &mut self,
     now: Instant,
     budget: &mut usize,
+    dial_budget: &mut usize,
   ) -> SmallVec<ConnectionHandle> {
     let mut touched: SmallVec<ConnectionHandle> = SmallVec::new();
     // Pin the pre-pass bridge ids so the test-only tracking drain counts any bridge
@@ -3721,12 +3894,12 @@ where
       }
       // Take the current wave; a reap DURING the servicing below re-queues its peer
       // for the next turn rather than mutating the set mid-iteration.
-      let peers = core::mem::take(&mut self.slot_freed_peers);
+      let peers = self.slot_freed_peers.take();
       for peer in peers {
         let ServicedDials {
           minted_bridges,
           touched_conns,
-        } = self.service_peer_bucket(peer, now);
+        } = self.service_peer_bucket(peer, now, dial_budget);
         for mid in minted_bridges {
           enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
         }
@@ -3759,26 +3932,61 @@ where
   /// `poll_timeout` re-arms Catchup, so absent new datagrams the residue strictly
   /// drains to empty. A real periodic tick still does its O(N) work when a
   /// non-Catchup timer is due.
+  ///
+  /// Drains all three residue kinds under one interval budget pair (a bridge-pump
+  /// budget and a dial-attempt budget): first the ready-dial ledger, then the
+  /// budget-deferred `ready_bridges`, then the slot-free fixpoint. A bucket that
+  /// exhausts the dial budget re-deposits into the ledger (via
+  /// [`Self::service_peer_bucket`]) and rides the advanced anchor to the next
+  /// interval.
   fn catchup_service(&mut self, now: Instant) {
     let mut budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
     // The `pre` snapshot pins every bridge id present BEFORE this pass's pumps, so
     // the test-only tracking variant counts any bridge minted-and-pumped DURING
-    // the pass (only the slot-free wake below can mint here) as post-acceptance.
+    // the pass (the ready-dial drain or the slot-free wake below) as
+    // post-acceptance.
     #[cfg(test)]
     let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
+    // Ready-dial ledger: attempt each budget-deferred peer's parked bucket under the
+    // shared dial budget, enqueuing its freshly-minted outbound bridges for the
+    // pump below. `take` first so a bucket that re-exhausts the budget re-deposits
+    // for the NEXT interval rather than being re-serviced this pass.
+    let mut to_flush: SmallVec<ConnectionHandle> = SmallVec::new();
+    for peer in self.ready_dial_peers.take() {
+      let ServicedDials {
+        minted_bridges,
+        touched_conns,
+      } = self.service_peer_bucket(peer, now, &mut dial_budget);
+      for mid in minted_bridges {
+        enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
+      }
+      for mc in touched_conns {
+        if !to_flush.contains(&mc) {
+          to_flush.push(mc);
+        }
+      }
+    }
+    // Budget-deferred bridge residue: pump at most the bridge budget (the ledger
+    // mints above ride this drain too).
     #[cfg(test)]
-    let mut to_flush = self.drain_ready_bridges_tracking(now, &pre, &mut budget);
+    let pumped = self.drain_ready_bridges_tracking(now, &pre, &mut budget);
     #[cfg(not(test))]
-    let mut to_flush = self.drain_ready_bridges(now, &mut budget);
-    // Slot-free wake: a DIALER bridge may have reaped inside the drain above,
+    let pumped = self.drain_ready_bridges(now, &mut budget);
+    for mc in pumped {
+      if !to_flush.contains(&mc) {
+        to_flush.push(mc);
+      }
+    }
+    // Slot-free wake: a DIALER bridge may have reaped inside the drains above,
     // freeing a `C_OUT` slot on its connection. Service each such peer's parked
-    // bucket to a fixpoint under the SAME shared budget so the catch-up pass stays
+    // bucket to a fixpoint under the SAME shared budgets so the catch-up pass stays
     // O(budget) and a `C_OUT`-parked dial opens on the sustained catch-up cadence —
     // WITHOUT this, a residue drain that only ever runs `catchup_service` (no
     // datagrams, no due timer) would strand the parked dial until `service_dials`
     // retires it as expired. Accumulate its touched connections alongside the
-    // initial drain's.
-    for mc in self.service_slot_freed_peers(now, &mut budget) {
+    // earlier drains'.
+    for mc in self.service_slot_freed_peers(now, &mut budget, &mut dial_budget) {
       if !to_flush.contains(&mc) {
         to_flush.push(mc);
       }
@@ -3787,9 +3995,11 @@ where
       self.collect_conn_transmits(ch, now);
     }
     // Advance the sticky anchor off the just-serviced `now`: another budget-sized
-    // chunk in one more interval while any residue (a `ready_bridges` bridge or a
-    // still-queued `slot_freed_peers` peer) remains, else clear.
+    // chunk in one more interval while any residue remains, else clear.
     self.advance_catchup_anchor(now);
+    // Class-closure: a residue this bounded pass could not finish must leave the
+    // anchor armed.
+    self.debug_assert_residue_anchored();
   }
 
   /// Bounded servicing for an ImmediateDue-only wake (see [`Self::handle_timeout`]).
@@ -3853,21 +4063,26 @@ where
     }
     // Slot-free wake: the fresh-dial pump above (or one of the serviced connections)
     // may have reaped a DIALER bridge, freeing a `C_OUT` slot whose peer has a parked
-    // dial. Service each such peer to a fixpoint under a fresh bounded budget so the
+    // dial. Service each such peer to a fixpoint under fresh bounded budgets so the
     // parked dial opens this bounded wake rather than stranding to its deadline;
-    // flush the connections it touched.
+    // flush the connections it touched. A bucket that exhausts the dial budget
+    // deposits into the ready-dial ledger and rides the anchor reconciled below.
     let mut slot_free_budget = MAX_BRIDGE_PUMPS_PER_PASS;
-    for mc in self.service_slot_freed_peers(now, &mut slot_free_budget) {
+    let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
+    for mc in self.service_slot_freed_peers(now, &mut slot_free_budget, &mut dial_budget) {
       self.collect_conn_transmits(mc, now);
     }
     // A dial that minted past the pump budget (or a serviced connection that left a
     // residue) may have changed the residue state; reconcile the sticky anchor so a
-    // fresh residue — a `ready_bridges` bridge or a still-queued `slot_freed_peers`
-    // peer — is armed and a drained one is cleared before returning.
+    // fresh residue — any [`Self::has_residue`] kind — is armed and a drained one is
+    // cleared before returning.
     self.reconcile_catchup_anchor(now);
     // Pass-end invariant: the pass-scoped ready queue holds only budget-deferred
     // residue and no live bridge is flagged-but-absent.
     self.debug_assert_ready_drained();
+    // Class-closure: a residue this bounded pass could not finish must leave the
+    // anchor armed.
+    self.debug_assert_residue_anchored();
   }
 
   /// Service ONLY the exchange a `start_*` call just created — the outbound-start
@@ -3932,13 +4147,18 @@ where
     // (d) Slot-free fixpoint under a fresh pump budget: a minted bridge that reaped
     // in (b) freed a `C_OUT` slot whose peer may have a parked dial waiting.
     let mut pump_budget = MAX_BRIDGE_PUMPS_PER_PASS;
-    for mc in self.service_slot_freed_peers(now, &mut pump_budget) {
+    let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
+    for mc in self.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget) {
       self.collect_conn_transmits(mc, now);
     }
-    // (e) Arm the sticky catch-up anchor for any budget-deferred residue (d) left.
+    // (e) Arm the sticky catch-up anchor for any budget-deferred residue (d) left —
+    // any [`Self::has_residue`] kind, including a ready-dial deposit from (d).
     self.reconcile_catchup_anchor(now);
     // Pass-end coherence: every flagged bridge is queued and vice versa.
     self.debug_assert_ready_drained();
+    // Class-closure: a residue this bounded pass could not finish must leave the
+    // anchor armed.
+    self.debug_assert_residue_anchored();
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt
@@ -4123,6 +4343,11 @@ where
     // bridges TOTAL this pass — not that many per drain. Overflow stays queued in
     // `ready_bridges` for the next pass or the un-budgeted tick.
     let mut pump_budget = MAX_BRIDGE_PUMPS_PER_PASS;
+    // One dial-attempt budget SHARED across the step-(c) establishment/credit bucket
+    // call AND the step-(d) slot-free consume, so a single datagram drives at most
+    // `MAX_DIAL_ATTEMPTS_PER_PASS` dial attempts total; a bucket that exhausts it
+    // deposits its creditable tail into the ready-dial ledger for the catch-up wake.
+    let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
     // (b) Drain the ready queue: pump the bridges `service_one_conn` made ready
     // this pass — never every bridge on `ch`, and never more than the pass budget
     // — so their first buffered request/response bytes reach the quinn send stream
@@ -4176,7 +4401,7 @@ where
       let ServicedDials {
         minted_bridges,
         touched_conns,
-      } = self.service_peer_bucket(peer, now);
+      } = self.service_peer_bucket(peer, now, &mut dial_budget);
       for mid in minted_bridges {
         enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, mid);
       }
@@ -4223,17 +4448,22 @@ where
     // bridge on after step (d)'s collect). The count of freed peers is bounded by
     // this pass's reaps, so the wake rides the servicing pass and is not
     // attacker-per-datagram inflatable. This is the ONE slot-free consume on this
-    // path.
-    for mc in self.service_slot_freed_peers(now, &mut pump_budget) {
+    // path. The shared `dial_budget` (already partly spent by step (c)) bounds its
+    // dial attempts; a bucket that exhausts it deposits into the ready-dial ledger.
+    for mc in self.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget) {
       self.collect_conn_transmits(mc, now);
     }
     // This budgeted pass may have left (or drained) a residue; arm the sticky
-    // catch-up anchor once if a `ready_bridges` bridge or a still-queued
-    // `slot_freed_peers` peer now waits, or clear it if this pass emptied both.
+    // catch-up anchor once if any [`Self::has_residue`] kind now waits (a
+    // `ready_bridges` bridge, a `slot_freed_peers` peer, or a `ready_dial_peers`
+    // deposit), or clear it if this pass emptied them all.
     self.reconcile_catchup_anchor(now);
     // Pass-end invariant: the pass-scoped ready queue is drained empty and no
     // live bridge still flags queued.
     self.debug_assert_ready_drained();
+    // Class-closure: a residue this bounded pass could not finish must leave the
+    // anchor armed.
+    self.debug_assert_residue_anchored();
   }
 
   /// Shared tick body. `advance_membership_time` gates step (3)
@@ -4261,6 +4491,16 @@ where
     // (5) Dial requests emitted by (3) or by accept-events, plus every parked
     // bucket (the liveness backstop for expiry and handshake-failure retirement).
     self.service_dials(now);
+    // The un-budgeted `service_dials` above `mem::take`s and fully drains EVERY
+    // parked bucket, so every peer the ready-dial ledger pointed at had its bucket
+    // attempted; any entry that re-parked created a fresh bucket owning its own
+    // establishment / credit / slot-free wake, never a ledger deposit
+    // (`service_dials` calls `process_dial_entry` directly, not `service_peer_bucket`,
+    // so it deposits nothing). The ledger's budget-deferred residue is therefore
+    // gone; clear it so step (5.6)'s unbounded slot-free wake — which cannot
+    // budget-exit, so cannot re-deposit — and `finalize_tick`'s empty-ledger assert
+    // both hold on the tick path.
+    self.ready_dial_peers.clear();
     // (5.5) Pump bridges inserted by (4) and (5) this same tick — see
     // method docstring above for the strict-poll self-sufficiency rationale.
     #[cfg(test)]
@@ -4272,12 +4512,16 @@ where
     // full-drain, freeing a `C_OUT` slot whose peer has a parked dial `service_dials`
     // did not re-attempt. The tick is the O(N) backstop that clears `ready_bridges`
     // and the anchor in `finalize_tick`, so fully drain each freed peer's bucket
-    // (unbounded budget) here — a slot-free minted bridge holds no `TimerKey::Bridge`
-    // deadline until its first pump, and the cleared anchor cannot carry it.
+    // (unbounded pump AND dial budgets) here — a slot-free minted bridge holds no
+    // `TimerKey::Bridge` deadline until its first pump, and the cleared anchor cannot
+    // carry it. The `usize::MAX` dial budget guarantees `service_peer_bucket` never
+    // budget-exits, so it re-deposits nothing into the just-cleared ledger and the
+    // finalize assert stays sound.
     let mut slot_free_budget = usize::MAX;
+    let mut slot_free_dial_budget = usize::MAX;
     // Ignoring the touched set: `finalize_tick`'s full `collect_transmits` below
     // flushes every connection this drain touched.
-    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget);
+    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget, &mut slot_free_dial_budget);
     self.finalize_tick(now);
   }
 
@@ -4322,20 +4566,38 @@ where
   /// Unlike the global tick, this method owns no `service_dials`. So it services
   /// exactly the parked buckets whose peers `service_quinn` reported becoming
   /// ready during THIS flush — a connection establishing, or a peer raising its
-  /// MAX_STREAMS bidi limit — instead of leaving them to the next tick. Those
-  /// buckets' minted bridges and touched connections are flushed by the full
-  /// second `pump_bridges` and `finalize_tick`'s `collect_transmits` below.
+  /// MAX_STREAMS bidi limit — AND fully drains the ready-dial ledger (a deposit an
+  /// earlier BOUNDED pass left) so it cannot survive a flush-all into
+  /// `finalize_tick`'s empty-ledger assert. Those buckets' minted bridges and
+  /// touched connections are flushed by the full second `pump_bridges` and
+  /// `finalize_tick`'s `collect_transmits` below.
   fn flush_outbound(&mut self, now: Instant) {
     #[cfg(test)]
     let pre_first_pump_ids: HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     let ready_peers = self.service_quinn(now);
+    // One unbounded dial budget SHARED across the ready-peers loop, the ready-dial
+    // ledger drain, and the slot-free consume: this is an O(N) flush-all path, so it
+    // must never budget-exit a bucket (which would deposit into the ledger it is
+    // about to assert empty).
+    let mut dial_budget = usize::MAX;
     for peer in ready_peers {
       // Ignoring the ServicedDials: the full second `pump_bridges` and
       // `finalize_tick`'s `collect_transmits` below flush every bridge minted and
       // connection touched by these bucket drains, so the per-pass side-effect
       // report the datagram path consumes is not needed here.
-      let _ = self.service_peer_bucket(peer, now);
+      let _ = self.service_peer_bucket(peer, now, &mut dial_budget);
+    }
+    // Drain the ready-dial ledger fully (unbounded budget = no re-deposit): a
+    // budget-deferred deposit an earlier bounded pass left must not outlive this
+    // flush-all. `take` first so the loop cannot re-service a re-deposit (there is
+    // none under the unbounded budget, but the idiom keeps the invariant local).
+    for peer in self.ready_dial_peers.take() {
+      // Ignoring the ServicedDials: the full second `pump_bridges` and
+      // `finalize_tick`'s `collect_transmits` below flush every bridge minted and
+      // connection touched by these bucket drains, so the per-pass side-effect
+      // report the datagram path consumes is not needed here.
+      let _ = self.service_peer_bucket(peer, now, &mut dial_budget);
     }
     #[cfg(test)]
     self.pump_bridges_tracking_post_acceptance(now, &pre_first_pump_ids);
@@ -4344,12 +4606,12 @@ where
     // Slot-free wake: `flush_outbound` owns no `service_dials`, so EVERY dialer
     // reaped by its pumps above frees a `C_OUT` slot whose peer's parked dial would
     // otherwise strand until `finalize_tick` silently cleared the accumulator. Fully
-    // drain each freed peer's bucket (unbounded budget, the O(N)-path twin of the
-    // tick's step (5.6)); `finalize_tick`'s `collect_transmits` flushes every
-    // touched connection.
+    // drain each freed peer's bucket (unbounded pump AND dial budgets, the O(N)-path
+    // twin of the tick's step (5.6)); `finalize_tick`'s `collect_transmits` flushes
+    // every touched connection.
     let mut slot_free_budget = usize::MAX;
     // Ignoring the touched set: `finalize_tick`'s full `collect_transmits` flushes them.
-    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget);
+    let _ = self.service_slot_freed_peers(now, &mut slot_free_budget, &mut dial_budget);
     self.finalize_tick(now);
   }
 
