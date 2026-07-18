@@ -51,7 +51,7 @@ use crate::{
     SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   driver::join_reply,
-  error::{Error, JoinFailed},
+  error::{Error, JoinFailed, UserDialBacklogFull},
   observation::observation_payload_bytes,
   shared::Shared,
   snapshot::snapshot_of,
@@ -429,19 +429,47 @@ where
           let _ = reply.send(Err(Error::SendFailed));
           return;
         }
+        // Whole-batch admission preflight. The coordinator bounds one peer's
+        // outstanding reliable user-message dials, and `start_user_message`
+        // refuses past that ceiling. Admit the ENTIRE batch atomically here,
+        // before starting any exchange, so a batch that would cross the ceiling
+        // is reported as backpressure with nothing started — rather than
+        // starting a prefix and failing mid-loop, which would strand
+        // already-started exchanges behind an unregistered waiter. This is
+        // backpressure on this node's own load, not a delivery failure: retry
+        // once the peer drains.
+        if !self.endpoint.can_admit_user_dials(to, payloads.len()) {
+          let limit = self.endpoint.max_pending_user_dials_per_peer();
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.send(Err(Error::UserDialBacklogFull(UserDialBacklogFull::new(
+            to, limit,
+          ))));
+          return;
+        }
         let mut pending = HashSet::with_capacity(payloads.len());
         for payload in payloads {
-          // `QuicEndpoint::start_user_message` calls `service_dials` +
-          // `flush_outbound` in-band (no separate `poll_action` loop needed,
-          // unlike the stream driver). The returned `StreamId` coerces to the
-          // `ExchangeId` that the bridge-reap path stamps on
-          // `Event::ExchangeCompleted(UserMessage)`.
+          // A reliable `start_user_message` services only its own new exchange
+          // in-band (no separate `poll_action` loop, unlike the stream driver);
+          // the returned `StreamId` coerces to the `ExchangeId` the bridge-reap
+          // path stamps on `Event::ExchangeCompleted(UserMessage)`. The preflight
+          // admitted the whole batch and this single task drives the coordinator,
+          // so every per-call admission gate here is guaranteed to pass. The
+          // `Err` arm is unreachable defense-in-depth: it must never panic the
+          // driver task. An already-started exchange left without a registered
+          // waiter completes as a clean no-op in `account_event` (its
+          // `ExchangeCompleted` matches no `PendingUserSend`), so abandoning the
+          // started prefix cannot hang a caller.
           // Ignoring StreamId: only ExchangeId::from is needed for correlation.
-          let stream_id = self
-            .endpoint
-            .start_user_message(to, payload, now)
-            .expect("issued while running");
-          pending.insert(ExchangeId::from(stream_id));
+          match self.endpoint.start_user_message(to, payload, now) {
+            Ok(stream_id) => {
+              pending.insert(ExchangeId::from(stream_id));
+            }
+            Err(e) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::from(e)));
+              return;
+            }
+          }
         }
         self.pending_user_sends.push(PendingUserSend {
           pending,

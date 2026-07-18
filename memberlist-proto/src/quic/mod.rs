@@ -1453,6 +1453,39 @@ impl<I, R> QuicEndpoint<I, R> {
   pub fn max_stream_frame_size(&self) -> usize {
     self.ep.max_stream_frame_size()
   }
+
+  /// The configured per-peer reliable user-message dial ceiling
+  /// ([`QuicOptions::max_pending_user_dials_per_peer`](crate::quic::QuicOptions::max_pending_user_dials_per_peer)).
+  /// A driver reads this to report the limit on its own backpressure error when
+  /// [`Self::can_admit_user_dials`] refuses a batch.
+  #[inline]
+  pub fn max_pending_user_dials_per_peer(&self) -> usize {
+    self.cfg.max_pending_user_dials_per_peer()
+  }
+
+  /// Driver-facing admission preflight for a batch of `n` new reliable
+  /// user-message dials to `peer`: returns whether all `n` intents fit under the
+  /// per-peer outstanding-dial ceiling
+  /// ([`QuicOptions::max_pending_user_dials_per_peer`](crate::quic::QuicOptions::max_pending_user_dials_per_peer))
+  /// given the peer's current [`ExchangeKind::UserMessage`] backlog.
+  ///
+  /// A driver dispatching a multi-payload reliable send calls this ONCE, before
+  /// issuing any [`Self::start_user_message`], so the whole batch is admitted
+  /// atomically or refused as visible backpressure — never started partially.
+  /// Because this single coordinator is driven by one task, the backlog cannot
+  /// change between this read and the subsequent `start_user_message` calls, and
+  /// each of those calls increments the backlog by at most one, so a `true` here
+  /// guarantees every per-call admission gate in the batch passes. `n == 0` is
+  /// trivially admissible.
+  ///
+  /// This is a pure read; the per-call gate inside [`Self::start_user_message`]
+  /// remains the enforcement point.
+  #[inline]
+  pub fn can_admit_user_dials(&self, peer: SocketAddr, n: usize) -> bool {
+    let current = self.user_dial_backlog.get(&peer).copied().unwrap_or(0);
+    current.saturating_add(n) <= self.cfg.max_pending_user_dials_per_peer()
+  }
+
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
   ///
   /// Sans-I/O drain obligation: the driver drains this to empty each wake. The

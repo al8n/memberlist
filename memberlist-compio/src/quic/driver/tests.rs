@@ -30,6 +30,18 @@ use core::time::Duration;
 /// caller that wants the post-`leave()` `NotRunning` branches calls
 /// `endpoint.leave(now)` first.
 fn build_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<smol_str::SmolStr> {
+  build_endpoint_with_quic(id, addr, now, test_quic_options())
+}
+
+/// Like [`build_endpoint`] but with a caller-supplied `QuicOptions`, so a test
+/// can set a low `max_pending_user_dials_per_peer` to exercise the per-peer
+/// reliable user-message dial backlog ceiling cheaply.
+fn build_endpoint_with_quic(
+  id: &str,
+  addr: SocketAddr,
+  now: Instant,
+  qc: memberlist_proto::QuicOptions,
+) -> QuicEndpoint<smol_str::SmolStr> {
   use memberlist_proto::{EndpointOptions, endpoint::Endpoint};
   use rand::SeedableRng;
 
@@ -40,7 +52,6 @@ fn build_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<smol
   let mut ep: Endpoint<smol_str::SmolStr, SocketAddr, rand::rngs::StdRng> = Endpoint::new(cfg, rng);
   ep.start_scheduling(now);
 
-  let qc = test_quic_options();
   let mut seed = [0u8; 32];
   seed[..2].copy_from_slice(&addr.port().to_le_bytes());
   QuicEndpoint::<smol_str::SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
@@ -1097,4 +1108,219 @@ async fn reap_pending_joins_resolves_empty_pending_waiters() {
     ),
     other => panic!("expected Ok(reached_set), got {other:?}"),
   }
+}
+
+/// The per-peer reliable-backlog ceiling reports backpressure — it does NOT
+/// panic the driver task. With a low cap, reliable sends to a peer park until
+/// the backlog is full; the next single send is refused with
+/// `UserDialBacklogFull` (carrying the peer and the cap). `dispatch_command`
+/// returning normally is itself the no-panic proof, and a follow-up command is
+/// still serviced.
+#[compio::test]
+async fn reliable_send_over_cap_returns_backpressure_not_panic() {
+  const CAP: usize = 2;
+  let now = Instant::now();
+  let mut ep = build_endpoint_with_quic(
+    "a",
+    addr(17931),
+    now,
+    test_quic_options().with_max_pending_user_dials_per_peer(CAP),
+  );
+  let cidr = allow_all();
+  let peer = addr(17999);
+
+  // Fill the peer's backlog to the cap with parked sends. Each `dispatch_one`
+  // builds a fresh parking bundle (dropped here), but the coordinator's per-peer
+  // backlog lives in `ep` and persists across calls.
+  for _ in 0..CAP {
+    let (tx, _rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+    let out = dispatch_one(
+      &mut ep,
+      Command::SendReliable(SendReliableCmd::new(
+        peer,
+        vec![bytes::Bytes::from_static(b"park")],
+        tx,
+      )),
+      now,
+      &cidr,
+    )
+    .await;
+    assert_eq!(
+      out.pending_user_sends_len, 1,
+      "an admitted send parks a waiter"
+    );
+  }
+  assert!(
+    !ep.can_admit_user_dials(peer, 1),
+    "the peer's reliable backlog is saturated at the cap"
+  );
+
+  // The (cap+1)th single send is refused as backpressure — dispatch returns
+  // (no panic) and the reply carries the peer + cap.
+  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+  let out = dispatch_one(
+    &mut ep,
+    Command::SendReliable(SendReliableCmd::new(
+      peer,
+      vec![bytes::Bytes::from_static(b"overflow")],
+      tx,
+    )),
+    now,
+    &cidr,
+  )
+  .await;
+  assert_eq!(
+    out.pending_user_sends_len, 0,
+    "a refused send parks no waiter"
+  );
+  match rx.await {
+    Ok(Err(MemberlistError::UserDialBacklogFull(full))) => {
+      assert_eq!(full.peer(), peer, "the error names the target peer");
+      assert_eq!(full.limit(), CAP, "the error carries the configured cap");
+    }
+    other => panic!("expected UserDialBacklogFull backpressure, got {other:?}"),
+  }
+
+  // The coordinator is unharmed: a follow-up empty-payload send is still
+  // serviced with `Ok`.
+  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+  let out = dispatch_one(
+    &mut ep,
+    Command::SendReliable(SendReliableCmd::new(peer, vec![], tx)),
+    now,
+    &cidr,
+  )
+  .await;
+  assert_eq!(
+    out.pending_user_sends_len, 0,
+    "an empty-payload send parks no waiter"
+  );
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "a follow-up command is serviced after the refusal"
+  );
+}
+
+/// A single `send_many`-style batch of (cap+1) payloads is refused ATOMICALLY:
+/// the whole batch's reply is the backpressure error and NO exchange was started
+/// (the peer's backlog is unchanged, so a full-cap batch is admissible again).
+#[compio::test]
+async fn reliable_batch_over_cap_rejected_atomically() {
+  const CAP: usize = 2;
+  let now = Instant::now();
+  let mut ep = build_endpoint_with_quic(
+    "a",
+    addr(17932),
+    now,
+    test_quic_options().with_max_pending_user_dials_per_peer(CAP),
+  );
+  let cidr = allow_all();
+  let peer = addr(17999);
+
+  let payloads: Vec<bytes::Bytes> = (0..=CAP).map(|_| bytes::Bytes::from_static(b"x")).collect();
+  let (tx, rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+  let out = dispatch_one(
+    &mut ep,
+    Command::SendReliable(SendReliableCmd::new(peer, payloads, tx)),
+    now,
+    &cidr,
+  )
+  .await;
+  assert_eq!(
+    out.pending_user_sends_len, 0,
+    "the refused batch parks no waiter"
+  );
+  assert!(
+    matches!(rx.await, Ok(Err(MemberlistError::UserDialBacklogFull(_)))),
+    "an over-cap batch is refused as backpressure"
+  );
+  assert!(
+    ep.can_admit_user_dials(peer, CAP),
+    "the atomic refusal started no exchange: the backlog is unchanged"
+  );
+}
+
+/// Repeated over-cap sends stay bounded and never panic, and the ceiling is
+/// per-peer: a peer with headroom is admitted (parks a waiter) rather than
+/// refused, so a send proceeds wherever reliable capacity is available.
+#[compio::test]
+async fn reliable_over_cap_repeated_bounded_and_per_peer() {
+  const CAP: usize = 2;
+  let now = Instant::now();
+  let mut ep = build_endpoint_with_quic(
+    "a",
+    addr(17933),
+    now,
+    test_quic_options().with_max_pending_user_dials_per_peer(CAP),
+  );
+  let cidr = allow_all();
+  let full_peer = addr(17999);
+
+  for _ in 0..CAP {
+    let (tx, _rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+    dispatch_one(
+      &mut ep,
+      Command::SendReliable(SendReliableCmd::new(
+        full_peer,
+        vec![bytes::Bytes::from_static(b"p")],
+        tx,
+      )),
+      now,
+      &cidr,
+    )
+    .await;
+  }
+  assert!(
+    !ep.can_admit_user_dials(full_peer, 1),
+    "the peer's backlog is saturated"
+  );
+
+  // Repeated over-cap sends all return bounded backpressure; each dispatch
+  // returns normally (no panic).
+  for _ in 0..5 {
+    let (tx, rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+    let out = dispatch_one(
+      &mut ep,
+      Command::SendReliable(SendReliableCmd::new(
+        full_peer,
+        vec![bytes::Bytes::from_static(b"q")],
+        tx,
+      )),
+      now,
+      &cidr,
+    )
+    .await;
+    assert_eq!(
+      out.pending_user_sends_len, 0,
+      "an over-cap send parks no waiter"
+    );
+    assert!(
+      matches!(rx.await, Ok(Err(MemberlistError::UserDialBacklogFull(_)))),
+      "each over-cap send is bounded backpressure"
+    );
+  }
+
+  // Capacity is per-peer: a peer with headroom is admitted and parks a waiter,
+  // NOT refused.
+  let fresh_peer = addr(18000);
+  assert!(
+    ep.can_admit_user_dials(fresh_peer, CAP),
+    "a fresh peer has full reliable headroom"
+  );
+  let (tx, _rx) = futures_channel::oneshot::channel::<super::Result<()>>();
+  let out = dispatch_one(
+    &mut ep,
+    Command::SendReliable(SendReliableCmd::new(
+      fresh_peer,
+      vec![bytes::Bytes::from_static(b"r")],
+      tx,
+    )),
+    now,
+    &cidr,
+  )
+  .await;
+  assert_eq!(
+    out.pending_user_sends_len, 1,
+    "a send to a peer with capacity is admitted and parks, not refused"
+  );
 }

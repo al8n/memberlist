@@ -73,6 +73,9 @@ pub use snapshot::MemberlistSnapshot;
   doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
 )]
 pub use delegate::{Delegate, VoidDelegate};
+#[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+pub use error::UserDialBacklogFull;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 #[cfg_attr(
   docsrs,

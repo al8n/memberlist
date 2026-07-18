@@ -136,6 +136,22 @@ async fn build_driver(
   Arc<Shared<SmolStr>>,
   Arc<AtomicU64>,
 ) {
+  build_driver_with_quic(obs_cap, obs_budget, self_trusted_quic()).await
+}
+
+/// Like [`build_driver`] but with a caller-supplied `QuicOptions`, so a test can
+/// set a low `max_pending_user_dials_per_peer` to exercise the per-peer reliable
+/// user-message dial backlog ceiling cheaply.
+async fn build_driver_with_quic(
+  obs_cap: usize,
+  obs_budget: Option<u64>,
+  quic: QuicOptions,
+) -> (
+  QuicDriver<SmolStr, TokioRuntime>,
+  flume::Receiver<Event<SmolStr, SocketAddr>>,
+  Arc<Shared<SmolStr>>,
+  Arc<AtomicU64>,
+) {
   let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
     .await
     .expect("bind gossip socket");
@@ -146,7 +162,7 @@ async fn build_driver(
     ),
     crate::gossip_rng().expect("test: OS entropy"),
   );
-  let mut endpoint = QuicEndpoint::new(ep, self_trusted_quic());
+  let mut endpoint = QuicEndpoint::new(ep, quic);
   endpoint.start_scheduling(Instant::now());
   let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
   let obs_payload_bytes = Arc::new(AtomicU64::new(0));
@@ -702,5 +718,178 @@ async fn dispatch_set_ack_payload_running_replies_ok() {
   assert!(
     matches!(rx.await, Ok(Ok(()))),
     "an in-budget ack payload is stored on a running QUIC node"
+  );
+}
+
+/// The per-peer reliable-backlog ceiling reports backpressure — it does NOT
+/// panic the driver task. With a low cap, reliable sends to a never-answering
+/// peer park until the backlog is full; the next single send is refused with
+/// `UserDialBacklogFull` (carrying the peer and the cap), and the task survives
+/// to service a follow-up command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reliable_send_over_cap_returns_backpressure_not_panic() {
+  const CAP: usize = 2;
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with_quic(
+    16,
+    Some(1 << 20),
+    self_trusted_quic().with_max_pending_user_dials_per_peer(CAP),
+  )
+  .await;
+  let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+
+  // Fill the peer's backlog to the cap with parked sends to a never-answering
+  // peer. Queue them all, then a single poll drains the whole command queue.
+  for _ in 0..CAP {
+    let (tx, _rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+    shared.push_command(Command::SendReliable(SendReliableCmd {
+      to: peer,
+      payloads: vec![Bytes::from_static(b"park")],
+      reply: tx,
+    }));
+  }
+  assert!(
+    poll_once(&mut driver).is_pending(),
+    "parked sends keep the driver running"
+  );
+  assert!(
+    !driver.endpoint.can_admit_user_dials(peer, 1),
+    "the peer's reliable backlog is saturated at the cap"
+  );
+
+  // The (cap+1)th single send is refused as backpressure — not a panic.
+  let (tx, rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+  shared.push_command(Command::SendReliable(SendReliableCmd {
+    to: peer,
+    payloads: vec![Bytes::from_static(b"overflow")],
+    reply: tx,
+  }));
+  assert!(
+    poll_once(&mut driver).is_pending(),
+    "the driver survives the refusal"
+  );
+  match rx.await {
+    Ok(Err(Error::UserDialBacklogFull(full))) => {
+      assert_eq!(full.peer(), peer, "the error names the target peer");
+      assert_eq!(full.limit(), CAP, "the error carries the configured cap");
+    }
+    other => panic!("expected UserDialBacklogFull backpressure, got {other:?}"),
+  }
+
+  // The task is still alive: a follow-up command is still serviced (an
+  // empty-payload send replies `Ok` immediately), proving no panic.
+  let (tx, rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+  shared.push_command(Command::SendReliable(SendReliableCmd {
+    to: peer,
+    payloads: vec![],
+    reply: tx,
+  }));
+  assert!(poll_once(&mut driver).is_pending());
+  assert!(
+    matches!(rx.await, Ok(Ok(()))),
+    "a follow-up command is serviced after the refusal"
+  );
+}
+
+/// A single `send_many`-style batch of (cap+1) payloads to a fresh peer is
+/// refused ATOMICALLY: the whole batch's reply is the backpressure error and NO
+/// exchange was started (the peer's backlog is unchanged, so a full-cap batch is
+/// admissible again, and no waiter was registered).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reliable_batch_over_cap_rejected_atomically() {
+  const CAP: usize = 2;
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with_quic(
+    16,
+    Some(1 << 20),
+    self_trusted_quic().with_max_pending_user_dials_per_peer(CAP),
+  )
+  .await;
+  let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+
+  let (tx, rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+  let payloads: Vec<Bytes> = (0..=CAP).map(|_| Bytes::from_static(b"x")).collect();
+  shared.push_command(Command::SendReliable(SendReliableCmd {
+    to: peer,
+    payloads,
+    reply: tx,
+  }));
+  assert!(poll_once(&mut driver).is_pending());
+  assert!(
+    matches!(rx.await, Ok(Err(Error::UserDialBacklogFull(_)))),
+    "an over-cap batch is refused as backpressure"
+  );
+  assert!(
+    driver.endpoint.can_admit_user_dials(peer, CAP),
+    "the atomic refusal started no exchange: the backlog is unchanged"
+  );
+  assert!(
+    driver.pending_user_sends.is_empty(),
+    "no waiter was registered for the refused batch"
+  );
+}
+
+/// Repeated over-cap sends stay bounded and never panic, and the ceiling is
+/// per-peer: a peer with headroom is admitted (parks) rather than refused, so a
+/// send proceeds wherever reliable capacity is available.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reliable_over_cap_repeated_bounded_and_per_peer() {
+  const CAP: usize = 2;
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with_quic(
+    16,
+    Some(1 << 20),
+    self_trusted_quic().with_max_pending_user_dials_per_peer(CAP),
+  )
+  .await;
+  let full_peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+
+  for _ in 0..CAP {
+    let (tx, _rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+    shared.push_command(Command::SendReliable(SendReliableCmd {
+      to: full_peer,
+      payloads: vec![Bytes::from_static(b"p")],
+      reply: tx,
+    }));
+  }
+  assert!(poll_once(&mut driver).is_pending());
+  assert!(
+    !driver.endpoint.can_admit_user_dials(full_peer, 1),
+    "the peer's backlog is saturated"
+  );
+
+  // Repeated over-cap sends all return bounded backpressure; the task never
+  // panics (each poll stays pending).
+  for _ in 0..5 {
+    let (tx, rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+    shared.push_command(Command::SendReliable(SendReliableCmd {
+      to: full_peer,
+      payloads: vec![Bytes::from_static(b"q")],
+      reply: tx,
+    }));
+    assert!(
+      poll_once(&mut driver).is_pending(),
+      "the driver stays alive under repeated over-cap load"
+    );
+    assert!(
+      matches!(rx.await, Ok(Err(Error::UserDialBacklogFull(_)))),
+      "each over-cap send is bounded backpressure"
+    );
+  }
+
+  // Capacity is per-peer: a peer with headroom is admitted and parks, NOT
+  // refused.
+  let fresh_peer: SocketAddr = "127.0.0.1:10".parse().unwrap();
+  assert!(
+    driver.endpoint.can_admit_user_dials(fresh_peer, CAP),
+    "a fresh peer has full reliable headroom"
+  );
+  let (tx, mut rx) = futures_channel::oneshot::channel::<Result<(), Error>>();
+  shared.push_command(Command::SendReliable(SendReliableCmd {
+    to: fresh_peer,
+    payloads: vec![Bytes::from_static(b"r")],
+    reply: tx,
+  }));
+  assert!(poll_once(&mut driver).is_pending());
+  assert!(
+    matches!(rx.try_recv(), Ok(None)),
+    "a send to a peer with capacity is admitted and parks, not refused"
   );
 }

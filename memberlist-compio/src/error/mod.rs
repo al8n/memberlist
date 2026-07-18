@@ -134,6 +134,50 @@ impl fmt::Display for InvalidAdvertiseAddr {
   }
 }
 
+/// Payload for [`MemberlistError::UserDialBacklogFull`]: the peer whose
+/// per-peer reliable user-message dial backlog is full and the configured
+/// per-peer outstanding-dial limit it reached.
+#[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserDialBacklogFull {
+  peer: SocketAddr,
+  limit: usize,
+}
+
+#[cfg(feature = "quic")]
+impl UserDialBacklogFull {
+  /// Build from the target peer and the per-peer outstanding-dial limit.
+  #[inline]
+  pub(crate) fn new(peer: SocketAddr, limit: usize) -> Self {
+    Self { peer, limit }
+  }
+
+  /// The peer whose reliable user-message dial backlog is full.
+  #[inline]
+  pub fn peer(&self) -> SocketAddr {
+    self.peer
+  }
+
+  /// The configured per-peer outstanding-dial limit that was reached.
+  #[inline]
+  pub fn limit(&self) -> usize {
+    self.limit
+  }
+}
+
+#[cfg(feature = "quic")]
+impl std::fmt::Display for UserDialBacklogFull {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "reliable user-message dial backlog to {} is full ({} outstanding intents); \
+       backpressure, not failure — retry once the peer drains",
+      self.peer, self.limit,
+    )
+  }
+}
+
 /// Errors returned by [`Memberlist`](crate::Memberlist) operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -325,6 +369,20 @@ pub enum MemberlistError {
   /// or the stream-level exchange timed out.
   #[error("reliable send failed: one or more outbound exchanges failed")]
   SendFailed,
+
+  /// A reliable directed send over QUIC was refused because the per-peer
+  /// reliable user-message dial backlog to the target is already at its
+  /// configured ceiling
+  /// ([`QuicOptions::max_pending_user_dials_per_peer`](memberlist_proto::QuicOptions::max_pending_user_dials_per_peer)).
+  /// This is admission control on this node's OWN reliable-send load —
+  /// backpressure, not a delivery failure. The whole batch is admitted
+  /// atomically, so a refused send started no exchange at all; retry once the
+  /// peer establishes or grants stream credit and the backlog drains. Carries
+  /// the peer and the limit.
+  #[cfg(feature = "quic")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+  #[error("{0}")]
+  UserDialBacklogFull(UserDialBacklogFull),
 
   /// The cluster label supplied to
   /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)
