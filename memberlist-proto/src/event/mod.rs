@@ -662,6 +662,73 @@ impl<A> DialRequested<A> {
   }
 }
 
+/// The dial descriptor returned by the machine's start-with-intent methods
+/// ([`Endpoint::start_push_pull_direct`], [`Endpoint::start_reliable_ping_direct`],
+/// [`Endpoint::start_user_message_direct`]).
+///
+/// Those methods create exactly the same stream intent as their event-emitting
+/// siblings ([`Endpoint::start_push_pull`] etc.) but, instead of enqueueing an
+/// [`Event::DialRequested`] onto `poll_event`, hand this descriptor straight back
+/// to the caller. A driver that owns its dial servicing (the composed QUIC
+/// coordinator) can then act on the dial in-band without draining and re-queueing
+/// the machine's whole application-event backlog to extract the one dial request.
+///
+/// The descriptor carries everything the event carries — `id`, `peer`, `deadline`
+/// — plus the originating [`ExchangeKind`], which the event does not: a caller
+/// that needs the kind (e.g. to apply the reliable-ping outbound-cap exemption)
+/// reads it here rather than looking it up out of band.
+#[derive(Debug)]
+pub struct DialIntent<A> {
+  id: StreamId,
+  peer: A,
+  deadline: crate::Instant,
+  kind: ExchangeKind,
+}
+
+impl<A> DialIntent<A> {
+  /// Construct a new descriptor.
+  #[inline(always)]
+  pub const fn new(id: StreamId, peer: A, deadline: crate::Instant, kind: ExchangeKind) -> Self {
+    Self {
+      id,
+      peer,
+      deadline,
+      kind,
+    }
+  }
+
+  /// The stream ID to report back in `dial_succeeded` / `dial_failed`. Identical
+  /// to the `StreamId` the start method also returns alongside this descriptor.
+  #[inline(always)]
+  pub const fn id(&self) -> StreamId {
+    self.id
+  }
+
+  /// The peer to dial.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// Deadline by which the dial (and full exchange) must complete.
+  #[inline(always)]
+  pub const fn deadline(&self) -> crate::Instant {
+    self.deadline
+  }
+
+  /// The originating exchange kind (push/pull, reliable ping, or user message).
+  #[inline(always)]
+  pub const fn kind(&self) -> ExchangeKind {
+    self.kind
+  }
+
+  /// Consume the descriptor into its (id, peer, deadline, kind) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (StreamId, A, crate::Instant, ExchangeKind) {
+    (self.id, self.peer, self.deadline, self.kind)
+  }
+}
+
 /// Application-facing event drained from [`Endpoint::poll_event`].
 #[derive(Debug)]
 pub enum Event<I, A> {

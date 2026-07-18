@@ -481,6 +481,52 @@ fn push_pull_scale_above_threshold() {
   assert_eq!(push_pull_scale(sec, 65), Duration::from_secs(3));
 }
 
+/// The event-emitting `start_push_pull` and the descriptor-returning
+/// `start_push_pull_direct` are the SAME surface: from an identical fresh endpoint
+/// and identical args, the old method's `DialRequested` and the direct method's
+/// `DialIntent` carry the same id / peer / deadline — but the direct method
+/// enqueues NO event.
+///
+/// Mutation-verify: make the direct method also push the `DialRequested` (or the
+/// old wrapper drop it) — the "no DialRequested from the direct path" assertion (or
+/// the old-surface `expect`) then fails.
+#[test]
+fn start_push_pull_direct_matches_event_emitting_surface() {
+  use crate::event::ExchangeKind;
+  let t0 = Instant::now();
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // OLD method: enqueues a DialRequested carrying (id, peer, deadline).
+  let mut e_old: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
+  let id_old = e_old.start_push_pull(peer, PushPullKind::Refresh, t0);
+  let dial = core::iter::from_fn(|| e_old.poll_event())
+    .find_map(|ev| match ev {
+      Event::DialRequested(p) => Some(p),
+      _ => None,
+    })
+    .expect("the event-emitting start_push_pull enqueues a DialRequested");
+  assert_eq!(dial.id(), id_old);
+  assert_eq!(dial.peer_ref(), &peer);
+  let deadline = dial.deadline();
+
+  // DIRECT method: same id / peer / deadline, and NO event.
+  let mut e_new: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
+  let (id_new, intent) = e_new.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  let intent = intent.expect("a running endpoint returns Some(DialIntent)");
+  assert_eq!(
+    id_new, id_old,
+    "same id from the same fresh endpoint + args"
+  );
+  assert_eq!(intent.id(), id_old);
+  assert_eq!(intent.peer_ref(), &peer);
+  assert_eq!(intent.deadline(), deadline);
+  assert_eq!(intent.kind(), ExchangeKind::PushPull);
+  assert!(
+    !core::iter::from_fn(|| e_new.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    "start_push_pull_direct must enqueue NO DialRequested"
+  );
+}
+
 #[test]
 fn update_meta_emits_node_updated_and_increments_incarnation() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());

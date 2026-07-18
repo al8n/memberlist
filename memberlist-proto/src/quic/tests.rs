@@ -3407,11 +3407,11 @@ fn try_open_uni_stream_to_unknown_peer_is_false() {
 }
 
 /// `start_reliable_ping` is the reliable-fallback dial wrapper: it records the
-/// exchange kind/peer, sieves the inner `DialRequested` into `dial_pending`,
-/// and attempts the dial in-band. Against a cold peer the handshake is not yet
-/// complete, so no bridge opens this tick but a quinn Initial is emitted on
-/// the outbound path (the dial was attempted). Covers the wrapper body and
-/// the `service_dials` cold-dial requeue arm.
+/// exchange kind/peer and services its dial from the returned `DialIntent` in-band
+/// (no event-queue sieve). Against a cold peer the handshake is not yet complete,
+/// so no bridge opens this tick but a quinn Initial is emitted on the outbound path
+/// (the dial was attempted). Covers the wrapper body and the `process_dial_entry`
+/// cold-dial requeue arm.
 #[test]
 fn start_reliable_ping_attempts_dial_in_band() {
   let self_addr: SocketAddr = "127.0.0.1:7790".parse().unwrap();
@@ -5904,9 +5904,10 @@ fn deadline_index_matches_bruteforce_across_operations() {
   assert_deadline_index_matches(&mut a, "construction (a)");
   assert_deadline_index_matches(&mut b, "construction (b)");
 
-  // Public in-band push/pull: sieves a DialRequested into `dial_pending`,
-  // attempts the dial, mints an outbound bridge, and flushes — exercising the
-  // Dial, Conn, and Bridge keys plus the immediate-due term in one call.
+  // Public in-band push/pull: services its dial from the returned descriptor (no
+  // event-queue sieve), attempts the dial, mints an outbound bridge, and flushes —
+  // exercising the Dial, Conn, and Bridge keys plus the immediate-due term in one
+  // call.
   let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
   assert_deadline_index_matches(&mut a, "a.start_push_pull");
 
@@ -6420,6 +6421,7 @@ fn poll_timeout_does_not_scan_dial_pending() {
       peer,
       deadline: now + Duration::from_secs(30),
       attempted: true,
+      kind: super::ExchangeKind::UserMessage,
     });
   }
   assert_eq!(n.unattempted_dial_count(), 0);
@@ -6447,6 +6449,7 @@ fn poll_timeout_does_not_scan_dial_pending() {
     peer: "127.0.0.2:9999".parse().unwrap(),
     deadline: now + Duration::from_secs(30),
     attempted: false,
+    kind: super::ExchangeKind::UserMessage,
   });
   n.unattempted_dial_count += 1;
   assert_eq!(n.unattempted_dial_count(), n.unattempted_dial_recount());
@@ -6630,6 +6633,7 @@ fn establishment_services_only_its_peer_bucket() {
           peer,
           deadline: now + Duration::from_secs(30),
           attempted: true,
+          kind: super::ExchangeKind::UserMessage,
         });
       next_id += 1;
     }
@@ -6783,6 +6787,7 @@ fn reliable_start_touches_constant_entries_regardless_of_table_size() {
           peer,
           deadline: now + Duration::from_secs(30),
           attempted: true,
+          kind: super::ExchangeKind::UserMessage,
         });
     }
   };
@@ -7035,6 +7040,7 @@ fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
         peer: cold_peer,
         deadline,
         attempted: true,
+        kind: super::ExchangeKind::UserMessage,
       });
   }
   assert_eq!(
@@ -7265,6 +7271,7 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
         peer,
         deadline: elapsed,
         attempted: true,
+        kind: super::ExchangeKind::UserMessage,
       });
   }
   let parked_before = n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0);
@@ -7524,6 +7531,7 @@ fn service_peer_bucket_leaves_tail_resident_no_move() {
         peer: cold_peer,
         deadline,
         attempted: true,
+        kind: super::ExchangeKind::UserMessage,
       });
   }
 
@@ -8610,6 +8618,197 @@ fn reliable_ping_exempt_from_outbound_cap() {
   );
 }
 
+/// A per-request reliable `start_*` does ZERO event-queue work: it services its
+/// dial straight from the [`crate::DialIntent`] the machine returns, never draining
+/// and re-queueing the whole application-event backlog to sieve out the one dial
+/// request. Seed a large non-dial backlog, run many `start_user_message` calls, and
+/// assert `sieve_dial_events` moved nothing — and that the backlog stays observable
+/// in its original order.
+///
+/// Mutation-verify: revert the wrapper to the event-emitting `start_user_message`
+/// plus a `sieve_dial_events` call — the sieve then re-traverses the whole backlog
+/// on every start and `events_resieved` climbs to `N * B`, failing the `== 0`
+/// assertion.
+#[test]
+fn reliable_start_does_no_event_queue_work() {
+  let a_addr: SocketAddr = "127.0.0.1:8260".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // Clear any construction-time events so the backlog below is exactly the seeded
+  // NodeJoined set.
+  while a.poll_event().is_some() {}
+
+  // Seed a large non-dial backlog: B distinct alives, each emitting a NodeJoined
+  // that stays queued in the inner endpoint (never drained via poll_event).
+  const B: usize = 64;
+  let mut expected_ids: Vec<SmolStr> = Vec::with_capacity(B);
+  for i in 0..B {
+    let id = SmolStr::new(format!("peer-{i}"));
+    let peer: SocketAddr = format!("127.0.0.2:{}", 9000 + i).parse().unwrap();
+    let alive = crate::typed::Alive::new(1, crate::Node::new(id.clone(), peer))
+      .with_meta(crate::typed::Meta::empty());
+    a.handle_alive(peer, alive, now);
+    expected_ids.push(id);
+  }
+
+  // Run many reliable starts to a cold peer. Each services its own dial from the
+  // returned descriptor; none touches the inner event queue.
+  a.counters.events_resieved = 0;
+  const N: usize = 8;
+  let target: SocketAddr = "127.0.0.3:9500".parse().unwrap();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..N {
+    a.start_user_message(target, payload.clone(), now)
+      .expect("A schedules a reliable user-message dial");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.counters.events_resieved, 0,
+    "a reliable start must move no events through sieve_dial_events; reverting a \
+       wrapper to the event-emitting method + sieve makes this climb to N*B"
+  );
+
+  // The backlog is intact and still observed in its original FIFO order.
+  let mut seen: Vec<SmolStr> = Vec::new();
+  while let Some(ev) = a.poll_event() {
+    if let Event::NodeJoined(ns) = ev {
+      seen.push(ns.id_ref().clone());
+    }
+  }
+  assert_eq!(
+    seen, expected_ids,
+    "every backlog NodeJoined must still be observable in its original order"
+  );
+}
+
+/// The machine-INTERNAL reliable-ping escalation gets the `C_OUT` outbound-cap
+/// exemption even though it never passes through the coordinator start wrapper (so
+/// it populates no `pending_outbound_kinds` entry). The probe FSM emits its
+/// reliable-ping `DialRequested` inside `ep.handle_timeout`; the tick's
+/// `service_dials` sieve stamps the kind via `Endpoint::intent_kind` and
+/// `process_dial_entry` reads it off the entry. Here the escalation's exact
+/// `DialRequested` is injected via the raw endpoint's `start_reliable_ping` (the
+/// same OLD method the probe FSM calls) and then serviced by one `run_tick` — the
+/// same sieve path — so a saturated cap cannot strand the liveness-critical
+/// fallback to its probe deadline (a false Suspect of a live peer).
+///
+/// Mutation-verify: re-source the exemption to
+/// `pending_outbound_kinds.get(&id) == Some(ReliablePing)` — the injected ping has
+/// no such map entry, so it is gated at the cap, parks, and its bridge never mints;
+/// both the `contains_key` and the `> C_OUT` assertions then fail.
+#[test]
+fn machine_internal_reliable_ping_exempt_from_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8262".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8263".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Saturate A's outbound cap to B with user-message dials (payloads never
+  // delivered → all live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is exactly at the C_OUT cap"
+  );
+
+  // Inject the machine-internal reliable-ping the way the probe FSM does: the OLD
+  // `start_reliable_ping` on the raw endpoint enqueues an `Event::DialRequested`
+  // and registers an `OutboundKind::ReliablePing` intent, but populates NO
+  // coordinator `pending_outbound_kinds` entry — exactly the escalation's state.
+  let deadline = now + Duration::from_secs(5);
+  let ping_id = a
+    .endpoint_mut()
+    .start_reliable_ping(SmolStr::new("b"), b_addr, 7, deadline);
+  assert!(
+    !a.pending_outbound_kinds.contains_key(&ping_id),
+    "precondition: the machine-internal ping has no pending_outbound_kinds entry"
+  );
+
+  // One tick sieves that DialRequested (service_dials → intent_kind stamps the
+  // ReliablePing kind onto the entry), and process_dial_entry exempts it.
+  a.run_tick(now);
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the machine-internal reliable-ping MUST open its bridge despite the saturated \
+       cap — the exemption is read off the entry's kind, not pending_outbound_kinds"
+  );
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() > super::C_OUT,
+    "the exempt reliable-ping opened PAST the cap; only an exempt dial can"
+  );
+  assert!(
+    !a.dial_parked
+      .get(&b_addr)
+      .is_some_and(|bucket| !bucket.is_empty()),
+    "no reliable-ping intent parked behind the saturated cap"
+  );
+}
+
+/// An inert post-leave `start_push_pull` (the endpoint is no longer running, so the
+/// machine registers no intent and queues no event) must NOT leak a
+/// `pending_outbound_*` entry — no bridge is ever created for the id to reap it —
+/// and must emit a SYNCHRONOUS `Failed` `ExchangeCompleted` for the returned id so a
+/// join waiter parked on it resolves immediately instead of hanging to its timeout.
+///
+/// Mutation-verify: restore the unconditional `pending_outbound_*` insert on the
+/// inert path — the `!contains_key` leak assertions then fail.
+#[test]
+fn inert_push_pull_after_leave_no_map_leak_and_synchronous_failed() {
+  use crate::event::{ExchangeId, ExchangeKind, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8266".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  a.leave(now).expect("leave succeeds");
+  // Clear the leave's own events so the completion below is unambiguous.
+  while a.poll_event().is_some() {}
+
+  let peer: SocketAddr = "127.0.0.3:9600".parse().unwrap();
+  let id = a.start_push_pull(peer, PushPullKind::Refresh, now);
+  assert!(
+    !a.pending_outbound_kinds.contains_key(&id),
+    "an inert post-leave push/pull must insert no pending_outbound_kinds entry"
+  );
+  assert!(
+    !a.pending_outbound_peers.contains_key(&id),
+    "an inert post-leave push/pull must insert no pending_outbound_peers entry"
+  );
+
+  let mut saw_failed = false;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(c) = ev {
+      if c.eid() == ExchangeId::from(id) {
+        assert_eq!(c.outcome(), ExchangeStatus::Failed);
+        assert_eq!(c.kind(), ExchangeKind::PushPull);
+        saw_failed = true;
+      }
+    }
+  }
+  assert!(
+    saw_failed,
+    "an inert post-leave push/pull must emit a synchronous Failed ExchangeCompleted \
+       for its id so a parked join waiter resolves immediately"
+  );
+}
+
 /// The slot-free wake fires from `catchup_service`: when a DIALER bridge reaps
 /// inside the catch-up pump it frees a `C_OUT` slot, and the same catch-up pass
 /// services the peer's parked bucket so a `C_OUT`-parked dial opens — rather than
@@ -9418,6 +9617,7 @@ fn zero_attempt_deposit_arms_catchup_for_starved_slot_free_peer() {
         peer: b_addr,
         deadline,
         attempted: true,
+        kind: super::ExchangeKind::UserMessage,
       });
   }
 

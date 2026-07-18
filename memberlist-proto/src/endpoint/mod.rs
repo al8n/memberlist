@@ -26,9 +26,9 @@ use crate::{
   delegate::{AliveDelegate, MergeDelegate},
   error::{EndpointInitError, Error, GossipMtuBound, MetaTooLarge, SizeExceeded},
   event::{
-    CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
-    PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse, Transmit,
-    UserPacket,
+    CompoundTransmit, DialIntent, DialRequested, Event, ExchangeKind, NodeConflict, PacketTransmit,
+    PingCompleted, PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse,
+    Transmit, UserPacket,
   },
   members::{LocalNodeState, Member, Members},
   metrics::Metrics,
@@ -553,6 +553,32 @@ impl<I, A, R> Endpoint<I, A, R> {
     let id = StreamId::from_raw(self.next_stream_id);
     self.next_stream_id += 1;
     id
+  }
+
+  /// The [`ExchangeKind`] of the pending stream intent for `id`, or `None` when no
+  /// intent is resident.
+  ///
+  /// The [`Event::DialRequested`] payload carries `id`/`peer`/`deadline` but not the
+  /// originating kind. A driver that sieves dial requests out of `poll_event`
+  /// (rather than reading the kind off the [`DialIntent`] returned by the
+  /// `start_*_direct` methods) recovers the kind here. An intent is resident from
+  /// its start method until `dial_succeeded` / `dial_failed` / `leave`, so a sieve
+  /// running while the intent lives observes `Some`; `None` means the intent was
+  /// already consumed or cleared.
+  ///
+  /// Only the QUIC coordinator sieves dial events and needs the kind (for its
+  /// reliable-ping outbound-cap exemption); the stream coordinators read the kind
+  /// off their own staging map, so this is `quic`-gated to stay dead-code-free.
+  #[cfg(feature = "quic")]
+  pub(crate) fn intent_kind(&self, id: StreamId) -> Option<ExchangeKind> {
+    self
+      .pending_stream_intents
+      .get(&id)
+      .map(|intent| match intent.kind {
+        OutboundKind::PushPull(_) => ExchangeKind::PushPull,
+        OutboundKind::ReliablePing(_) => ExchangeKind::ReliablePing,
+        OutboundKind::UserMessage => ExchangeKind::UserMessage,
+      })
   }
 
   /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
@@ -3101,23 +3127,36 @@ where
     Ok(PingId::new(seq))
   }
 
-  /// Initiate an outbound push/pull state exchange with `peer`.
+  /// Initiate an outbound push/pull state exchange with `peer`, returning the dial
+  /// descriptor directly instead of enqueueing an [`Event::DialRequested`].
   ///
-  /// Encodes the local membership state into a PushPull message immediately.
-  /// Returns the `StreamId` identifying this dial. The driver observes
-  /// `Event::DialRequested { id, peer, deadline }` from `poll_event()` and
-  /// dials accordingly.
+  /// The intent-creating core of [`Endpoint::start_push_pull`]: it allocates the
+  /// stream id, encodes the local membership state into a PushPull message, and
+  /// registers the pending intent EXACTLY as the event-emitting method does — but
+  /// hands the caller a [`DialIntent`] rather than queueing the dial request onto
+  /// `poll_event`. A driver that services its own dials in-band uses this to skip
+  /// the drain-and-requeue of the whole application-event backlog per reliable send.
+  ///
+  /// Returns `(id, None)` on the not-running inert-id path: a leaving/left node
+  /// registers no intent and emits no event, so there is no descriptor — the
+  /// returned id is inert, exactly as the event-emitting method leaves it.
+  /// Otherwise returns `(id, Some(intent))` with `intent.id() == id`.
   ///
   /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
   /// for periodic anti-entropy.
-  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+  pub fn start_push_pull_direct(
+    &mut self,
+    peer: A,
+    kind: PushPullKind,
+    now: Instant,
+  ) -> (StreamId, Option<DialIntent<A>>) {
     let id = self.allocate_stream_id();
     // A leaving/left node initiates no push/pull: it queues no dial intent and
     // emits no DialRequested, so it advertises none of its pre-leave Alive state
     // to a seed. The returned id is inert; the gated callers (join command
     // handlers and seed drains) never reach this once not Running.
     if !self.is_running() {
-      return id;
+      return (id, None);
     }
     let deadline = now + self.cfg.stream_timeout();
 
@@ -3165,37 +3204,58 @@ where
       },
     );
 
-    // Signal the driver to dial.
-    self
-      .pending_events
-      .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
+    (
+      id,
+      Some(DialIntent::new(id, peer, deadline, ExchangeKind::PushPull)),
+    )
+  }
 
+  /// Initiate an outbound push/pull state exchange with `peer`.
+  ///
+  /// Encodes the local membership state into a PushPull message immediately.
+  /// Returns the `StreamId` identifying this dial. The driver observes
+  /// `Event::DialRequested { id, peer, deadline }` from `poll_event()` and
+  /// dials accordingly. See [`Endpoint::start_push_pull_direct`] for the variant
+  /// that returns the dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
+  /// for periodic anti-entropy.
+  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+    let (id, intent) = self.start_push_pull_direct(peer, kind, now);
+    if let Some(intent) = intent {
+      let (id, peer, deadline, _kind) = intent.into_parts();
+      self
+        .pending_events
+        .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
+    }
     id
   }
 
   /// Initiate a reliable-stream fallback ping for probe sequence number
-  /// `probe_seq`. Encodes a Ping message (source = local node, target = peer)
-  /// and queues a dial intent. Returns `StreamId`; the driver observes
-  /// `Event::DialRequested` from `poll_event()`. Opened concurrently with the
-  /// indirect fan-out by `probe_fan_out_indirect`.
+  /// `probe_seq`, returning the dial descriptor directly instead of enqueueing an
+  /// [`Event::DialRequested`].
+  ///
+  /// The intent-creating core of [`Endpoint::start_reliable_ping`]: it encodes the
+  /// Ping message and registers the pending intent identically, but hands back a
+  /// [`DialIntent`] rather than queueing the dial request onto `poll_event`.
+  /// Returns `(id, None)` on the not-running inert-id path (a leaving/left node
+  /// opens no fallback), else `(id, Some(intent))` with `intent.id() == id`.
   ///
   /// `deadline` is the owning probe's single cumulative deadline, NOT an
   /// independent stream timeout — the reliable fallback must race exactly
-  /// the same deadline as the indirect pings. This keeps a slow/skewed
-  /// `stream_timeout` from either killing the fallback before, or letting
-  /// it outlive, the probe.
-  pub fn start_reliable_ping(
+  /// the same deadline as the indirect pings.
+  pub fn start_reliable_ping_direct(
     &mut self,
     peer_id: I,
     peer_addr: A,
     probe_seq: u32,
     deadline: Instant,
-  ) -> StreamId {
+  ) -> (StreamId, Option<DialIntent<A>>) {
     let id = self.allocate_stream_id();
     // A leaving/left node opens no reliable-ping fallback. The returned id is
     // inert; the only caller is the probe FSM, gated by handle_timeout.
     if !self.is_running() {
-      return id;
+      return (id, None);
     }
 
     let local_id = self.cfg.local_id_ref().cheap_clone();
@@ -3221,27 +3281,65 @@ where
       },
     );
 
-    self
-      .pending_events
-      .push_back(Event::DialRequested(DialRequested::new(
-        id, peer_addr, deadline,
-      )));
+    (
+      id,
+      Some(DialIntent::new(
+        id,
+        peer_addr,
+        deadline,
+        ExchangeKind::ReliablePing,
+      )),
+    )
+  }
 
+  /// Initiate a reliable-stream fallback ping for probe sequence number
+  /// `probe_seq`. Encodes a Ping message (source = local node, target = peer)
+  /// and queues a dial intent. Returns `StreamId`; the driver observes
+  /// `Event::DialRequested` from `poll_event()`. Opened concurrently with the
+  /// indirect fan-out by `probe_fan_out_indirect`. See
+  /// [`Endpoint::start_reliable_ping_direct`] for the variant that returns the
+  /// dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// `deadline` is the owning probe's single cumulative deadline, NOT an
+  /// independent stream timeout — the reliable fallback must race exactly
+  /// the same deadline as the indirect pings. This keeps a slow/skewed
+  /// `stream_timeout` from either killing the fallback before, or letting
+  /// it outlive, the probe.
+  pub fn start_reliable_ping(
+    &mut self,
+    peer_id: I,
+    peer_addr: A,
+    probe_seq: u32,
+    deadline: Instant,
+  ) -> StreamId {
+    let (id, intent) = self.start_reliable_ping_direct(peer_id, peer_addr, probe_seq, deadline);
+    if let Some(intent) = intent {
+      let (id, peer_addr, deadline, _kind) = intent.into_parts();
+      self
+        .pending_events
+        .push_back(Event::DialRequested(DialRequested::new(
+          id, peer_addr, deadline,
+        )));
+    }
     id
   }
 
-  /// Enqueue a reliable-stream delivery of `payload` to `peer`. Returns a
-  /// `StreamId`; the driver observes `Event::DialRequested` and dials. On
-  /// success the driver drains `stream.poll_transmit()`. No reply is expected;
-  /// the stream transitions to Done after bytes are drained.
+  /// Enqueue a reliable-stream delivery of `payload` to `peer`, returning the dial
+  /// descriptor directly instead of enqueueing an [`Event::DialRequested`].
+  ///
+  /// The intent-creating core of [`Endpoint::start_user_message`]: it encodes the
+  /// UserData message and registers the pending intent identically, but returns a
+  /// [`DialIntent`] rather than queueing the dial request onto `poll_event`. Errors
+  /// (rather than returning an inert id) once leaving/left — a departing node starts
+  /// no new reliable dial — so there is no `None`-descriptor path here.
   ///
   /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
-  pub fn start_user_message(
+  pub fn start_user_message_direct(
     &mut self,
     peer: A,
     payload: bytes::Bytes,
     now: Instant,
-  ) -> Result<StreamId, crate::error::Error> {
+  ) -> Result<(StreamId, DialIntent<A>), crate::error::Error> {
     // Reject once leaving/left: a departing node starts no new reliable dial.
     self.ensure_running()?;
     let id = self.allocate_stream_id();
@@ -3261,10 +3359,31 @@ where
       },
     );
 
+    Ok((
+      id,
+      DialIntent::new(id, peer, deadline, ExchangeKind::UserMessage),
+    ))
+  }
+
+  /// Enqueue a reliable-stream delivery of `payload` to `peer`. Returns a
+  /// `StreamId`; the driver observes `Event::DialRequested` and dials. On
+  /// success the driver drains `stream.poll_transmit()`. No reply is expected;
+  /// the stream transitions to Done after bytes are drained. See
+  /// [`Endpoint::start_user_message_direct`] for the variant that returns the
+  /// dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
+  pub fn start_user_message(
+    &mut self,
+    peer: A,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, crate::error::Error> {
+    let (id, intent) = self.start_user_message_direct(peer, payload, now)?;
+    let (_, peer, deadline, _kind) = intent.into_parts();
     self
       .pending_events
       .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
-
     Ok(id)
   }
 

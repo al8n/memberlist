@@ -157,11 +157,11 @@ pub use error::{EndpointInitError, Error, SizeExceeded, StreamError};
 // to `SmallRng`), re-exported so a driver can name the trait bound, seed a
 // `SmallRng`, and inject it without taking its own direct `rand` dependency.
 pub use event::{
-  CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
-  PingCompleted, PingFailed, PingId, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,
-  Reliability, ReliablePingAcked, ReliablePingFailed, RemoteStateReceived, SendPushPullResponse,
-  StreamClosed, StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived,
-  UserPacket,
+  CompoundTransmit, DecodeError, DialIntent, DialRequested, EndpointEvent, Event, NodeConflict,
+  PacketTransmit, PingCompleted, PingFailed, PingId, PushPullKind, PushPullReplyReceived,
+  PushPullRequestReceived, Reliability, ReliablePingAcked, ReliablePingFailed, RemoteStateReceived,
+  SendPushPullResponse, StreamClosed, StreamCommand, StreamErrored, StreamEvent, StreamId,
+  Transmit, UserDataReceived, UserPacket,
 };
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]

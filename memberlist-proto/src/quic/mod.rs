@@ -268,6 +268,17 @@ struct PendingDial {
   peer: SocketAddr,
   deadline: Instant,
   attempted: bool,
+  /// The originating [`ExchangeKind`], carried on the entry so
+  /// [`QuicEndpoint::process_dial_entry`]'s reliable-ping `C_OUT` outbound-cap
+  /// exemption reads it from the entry itself rather than out of
+  /// [`QuicEndpoint::pending_outbound_kinds`]. The wrappers populate that map,
+  /// but the machine-INTERNAL probe-FSM reliable-ping escalation does not — its
+  /// dial arrives via the tick sieve, so keying the exemption off the map would
+  /// strand the liveness-critical fallback behind a saturated cap. The direct-path
+  /// entries stamp this from the returned [`DialIntent`]; the sieve/bypass intakes
+  /// stamp it via [`Endpoint::intent_kind`] (defaulting to a non-exempt kind if the
+  /// intent is already gone — the field's sole consumer is that exemption).
+  kind: ExchangeKind,
 }
 
 /// Which terminal branch [`QuicEndpoint::process_dial_entry`] took for one parked
@@ -902,6 +913,15 @@ struct TestCounters {
   /// a per-pass enqueue cap makes it fall below `writable_events_seen` on the
   /// storm pass and that test fails. Never compiled into production builds.
   writable_bridges_enqueued: u64,
+  /// Test-only count of events MOVED by [`QuicEndpoint::sieve_dial_events`] —
+  /// bumped once per event the sieve pulls from the inner `poll_event` queue
+  /// (whether routed to `dial_pending` or requeued). The per-request `start_*`
+  /// wrappers service their dial from the [`DialIntent`] the machine returns, so
+  /// they never run the sieve: the no-sieve-per-start regression test seeds a large
+  /// non-dial backlog, runs many reliable starts, and asserts this delta is `0`.
+  /// Reverting a wrapper to the event-emitting method plus the sieve makes it climb
+  /// with the backlog and that test fails. Never compiled into production builds.
+  events_resieved: u64,
 }
 
 // Construction, transform configuration, transport plumbing, and accessors —
@@ -1586,11 +1606,15 @@ impl<I, R> QuicEndpoint<I, R> {
     match ev {
       Event::DialRequested(dial) => {
         let (id, peer, deadline) = dial.into_parts();
+        // Stamp the intent's kind for the reliable-ping cap exemption; default to a
+        // non-exempt kind if the intent is already gone (see PendingDial::kind).
+        let kind = self.ep.intent_kind(id).unwrap_or(ExchangeKind::UserMessage);
         self.dial_pending.push_back(PendingDial {
           id,
           peer,
           deadline,
           attempted: false,
+          kind,
         });
         // A freshly-deposited intent is unattempted; bump the incremental count
         // `refresh_immediate_due` reads for its immediate-due wake.
@@ -1618,11 +1642,15 @@ impl<I, R> QuicEndpoint<I, R> {
       match self.ep.poll_event()? {
         Event::DialRequested(dial) => {
           let (id, peer, deadline) = dial.into_parts();
+          // Stamp the intent's kind for the reliable-ping cap exemption; default to
+          // a non-exempt kind if the intent is already gone (see PendingDial::kind).
+          let kind = self.ep.intent_kind(id).unwrap_or(ExchangeKind::UserMessage);
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
             deadline,
             attempted: false,
+            kind,
           });
           // A freshly-sieved intent is unattempted; bump the incremental count
           // `refresh_immediate_due` reads for its immediate-due wake.
@@ -1672,10 +1700,15 @@ impl<I, R> QuicEndpoint<I, R> {
   /// after the intent's `deadline`, postponing the `dial_failed` past the
   /// user-visible exchange timeout.
   ///
-  /// The immediate-due term is defence-in-depth for callers that bypass
-  /// the high-level [`Self::start_push_pull`] / [`Self::start_reliable_ping`]
-  /// / [`Self::start_user_message`] wrappers (which dial in-band) and queue
-  /// a `DialRequested` directly via `endpoint_mut()`. A caller that drains
+  /// The immediate-due term's dial half is now live ONLY for the bypass routes.
+  /// The high-level [`Self::start_push_pull`] / [`Self::start_reliable_ping`] /
+  /// [`Self::start_user_message`] wrappers service their own dial in-band from the
+  /// [`DialIntent`] the machine returns and never deposit an unattempted entry into
+  /// `dial_pending`, so they contribute no immediate-due wake. The term is
+  /// defence-in-depth for a caller that instead queues a `DialRequested` directly
+  /// via `endpoint_mut()`, or feeds one through the public [`Self::requeue_event`] /
+  /// [`Self::poll_event`] sieve (both set the entry's own `TimerKey::Dial` and this
+  /// immediate-due anchor). A caller that drains
   /// [`Self::poll_event`] (sieving the `DialRequested` into `dial_pending`)
   /// and then advances solely by `poll_timeout` would otherwise only see
   /// the intent's own `deadline` ≈ `now + stream_timeout` — by the time
@@ -1726,8 +1759,10 @@ impl<I, R> QuicEndpoint<I, R> {
   }
 
   /// Recompute the immediate-due anchor key from small state: `Some(last_now)`
-  /// when a freshly-sieved dial is still unattempted OR any connection holds a
-  /// deferred `ConnectionEvent` backlog, else absent. Reads the O(1)
+  /// when an unattempted bypass-route dial (sieved from `poll_event` /
+  /// `requeue_event`, or the tick's own `service_dials` sieve) is still resident OR
+  /// any connection holds a deferred `ConnectionEvent` backlog, else absent. Reads
+  /// the O(1)
   /// `unattempted_dial_count` and `conns_with_pending_events` flags — never
   /// scans `dial_pending` or the connection table — so it stays cheap on the
   /// `poll_timeout` hot path a driver re-polls per inbound receive.
@@ -2447,14 +2482,26 @@ impl<I, R> QuicEndpoint<I, R> {
   fn sieve_dial_events(&mut self) {
     let mut others: Vec<Event<I, SocketAddr>> = Vec::new();
     while let Some(ev) = self.ep.poll_event() {
+      // Count every event this sieve moves — the negative-control seam the
+      // no-sieve-per-start regression test asserts stays flat across reliable
+      // starts (the wrappers service their dial from the returned descriptor, so a
+      // start traverses no event queue). Never compiled into production builds.
+      #[cfg(test)]
+      {
+        self.counters.events_resieved = self.counters.events_resieved.saturating_add(1);
+      }
       match ev {
         Event::DialRequested(dial) => {
           let (id, peer, deadline) = dial.into_parts();
+          // Stamp the intent's kind for the reliable-ping cap exemption; default to
+          // a non-exempt kind if the intent is already gone (see PendingDial::kind).
+          let kind = self.ep.intent_kind(id).unwrap_or(ExchangeKind::UserMessage);
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
             deadline,
             attempted: false,
+            kind,
           });
           // Keep the unattempted count exact even mid-sieve; `service_dials`
           // resets it to 0 at its `mem::take` immediately after this call.
@@ -2841,37 +2888,6 @@ where
     }
   }
 
-  /// Attempt ONLY the dial intents freshly emitted since the last sieve — the
-  /// fresh-FIFO half of [`Self::service_dials`] WITHOUT its parked-bucket drain.
-  ///
-  /// A reliable-send entry point owes immediate progress for the ONE exchange it
-  /// just created, not an O(all parked dials) sweep of every peer still
-  /// handshaking or flow-control-blocked. So this sieves the inner endpoint's
-  /// newly-queued `DialRequested` into `dial_pending` and drains ONLY that fresh
-  /// FIFO; a fresh intent that cannot open a stream re-parks with its
-  /// `TimerKey::Dial` deadline intact, exactly as the full drain does. Every
-  /// previously-parked intent keeps its own deadline key, so the tick's full
-  /// `service_dials` and the establishment / credit-restore / slot-free wakes
-  /// still service them — nothing strands. Reports minted bridges and touched
-  /// connections identically to [`Self::service_dials`] for the caller to pump
-  /// and flush the same pass.
-  fn service_fresh_dials(&mut self, now: Instant) -> ServicedDials {
-    let mut minted: SmallVec<StreamId> = SmallVec::new();
-    let mut touched = TouchedConns::new();
-    // Sieve any DialRequested newly emitted by the inner endpoint into the
-    // private `dial_pending` deque, then drain only that fresh FIFO. The parked
-    // buckets are deliberately left for the tick and the readiness wakes.
-    self.sieve_dial_events();
-    let pending = core::mem::take(&mut self.dial_pending);
-    for entry in pending {
-      self.process_dial_entry(entry, now, &mut minted, &mut touched);
-    }
-    ServicedDials {
-      minted_bridges: minted,
-      touched_conns: touched.into_ordered(),
-    }
-  }
-
   /// Attempt only the dials parked on `peer` — the event-driven, scoped twin of
   /// [`Self::service_dials`]. Invoked when a per-peer readiness event fires (the
   /// peer's connection establishes, or it raises its MAX_STREAMS bidi limit), so
@@ -3007,26 +3023,29 @@ where
   /// retirement wake firing for the parked intent. The caller MUST have confirmed
   /// `now < deadline`.
   ///
-  /// `exempt` places a liveness-critical reliable-ping intent at the FRONT of its
+  /// A reliable-ping `kind` places a liveness-critical intent at the FRONT of its
   /// bucket, so a `C_OUT`-blocked user-message head can never shadow it behind the
-  /// [`Self::service_peer_bucket`] stop-on-`Reparked` break; an ordinary intent
+  /// [`Self::service_peer_bucket`] stop-on-`Reparked` break; every other kind
   /// appends at the BACK. Either way a self-re-park is not re-popped this pass —
   /// `service_peer_bucket` pops FRONT and breaks on the first re-park BEFORE
   /// re-popping, so a front re-park is left resident and the budget bounds the
-  /// rest.
+  /// rest. The `kind` is also restored onto the re-parked entry so a later pass
+  /// still reads the exemption off the entry itself.
   fn repark_blocked_dial(
     &mut self,
     id: StreamId,
     peer: SocketAddr,
     deadline: Instant,
-    exempt: bool,
+    kind: ExchangeKind,
   ) -> DialAttempt {
     let entry = PendingDial {
       id,
       peer,
       deadline,
       attempted: true,
+      kind,
     };
+    let exempt = matches!(kind, ExchangeKind::ReliablePing);
     let bucket = self.dial_parked.entry(peer).or_default();
     if exempt {
       bucket.push_front(entry);
@@ -3068,6 +3087,7 @@ where
       peer,
       deadline,
       attempted,
+      kind,
     } = entry;
     // This entry left `dial_pending`: if it was still unattempted, release its
     // unit of the incremental `unattempted_dial_count`. A branch below that
@@ -3152,15 +3172,21 @@ where
         // user-message burst could miss the probe's cumulative deadline and
         // yield a false-positive Dead. It still opens (and still increments the
         // count for accounting) — it is simply never gated by the cap.
-        let is_reliable_ping = matches!(
-          self.pending_outbound_kinds.get(&id),
-          Some(ExchangeKind::ReliablePing)
-        );
+        //
+        // The kind is read off the ENTRY itself (stamped from the returned
+        // `DialIntent` on the direct path, or via `Endpoint::intent_kind` at the
+        // tick sieve) — NOT `pending_outbound_kinds`, which only the coordinator
+        // start wrappers populate. The machine-INTERNAL probe-FSM reliable-ping
+        // escalation dials through the tick sieve with no such map entry, so
+        // keying the exemption off that map would deny it and strand the fallback
+        // behind a saturated cap to its probe deadline — a false Suspect of a live
+        // peer.
+        let is_reliable_ping = matches!(kind, ExchangeKind::ReliablePing);
         if !is_reliable_ping && self.conns.get(ch).map_or(0, |e| e.outbound_bridge_count()) >= C_OUT
         {
           // `is_reliable_ping` is false on this arm (the gate exempts it), so this
-          // re-park always appends at the BACK; the flag is threaded uniformly.
-          return self.repark_blocked_dial(id, peer, deadline, is_reliable_ping);
+          // re-park always appends at the BACK; the kind is threaded uniformly.
+          return self.repark_blocked_dial(id, peer, deadline, kind);
         }
         if let Some(e) = self.conns.get_mut(ch) {
           match e.conn_mut().streams().open(Dir::Bi) {
@@ -3334,7 +3360,7 @@ where
                 // this intent via `service_peer_bucket`. A reliable-ping fallback
                 // parks at the FRONT so it is not shadowed behind a C_OUT-blocked
                 // user-message head at the next bucket service.
-                self.repark_blocked_dial(id, peer, deadline, is_reliable_ping)
+                self.repark_blocked_dial(id, peer, deadline, kind)
               } else {
                 self.retire_failed_dial(
                   id,
@@ -4112,8 +4138,10 @@ where
   /// enough to disrupt SWIM timers. This bounds each `start_*` to the work of its
   /// OWN new exchange:
   ///
-  /// * (a) Attempt only THIS start's freshly-queued dial intent(s) via
-  ///   [`Self::service_fresh_dials`] — never the parked buckets.
+  /// * (a) Attempt exactly THIS start's own dial intent — the [`PendingDial`] the
+  ///   caller built from the [`DialIntent`] the machine returned — via
+  ///   [`Self::process_dial_entry`], with no event-queue sieve and never the
+  ///   parked buckets.
   /// * (b) Pump exactly the bridges it minted (a pooled-Established dial's request
   ///   bytes) so each one's first bytes reach its quinn send stream. A direct
   ///   [`Self::pump_one_bridge`] — not the shared `ready_bridges` queue — honors
@@ -4139,22 +4167,25 @@ where
   /// (no `Endpoint::handle_timeout`), preserving the property that a just-arrived
   /// but still-buffered `Ack` / `Alive` is decoded before any probe / suspect /
   /// gossip scheduler fires.
-  fn service_started_exchange(&mut self, now: Instant) {
-    // (a) This start's own fresh dial intent(s) — never the parked buckets.
-    let ServicedDials {
-      minted_bridges,
-      touched_conns,
-    } = self.service_fresh_dials(now);
+  fn service_started_exchange(&mut self, entry: PendingDial, now: Instant) {
+    // (a) This start's own dial intent, serviced inline from the descriptor the
+    // machine returned — no event-queue sieve, never the parked buckets. The
+    // entry is constructed `attempted = true` by the caller (it never entered
+    // `dial_pending`, so it was never counted in `unattempted_dial_count`), so
+    // `process_dial_entry` decrements no count it never bumped.
+    let mut minted: SmallVec<StreamId> = SmallVec::new();
+    let mut touched = TouchedConns::new();
+    self.process_dial_entry(entry, now, &mut minted, &mut touched);
     // (b) Pump exactly the bridges it minted so their first request bytes reach
     // the quinn send stream before (c) collects the connection's transmits. The
-    // owning connection is already in `touched_conns` (recorded at mint), so the
+    // owning connection is already in `touched` (recorded at mint), so the
     // pumped bytes are flushed by (c); a minted bridge that reaps here re-populates
     // `slot_freed_peers`, drained by (d).
-    for mid in minted_bridges {
+    for mid in minted {
       self.pump_one_bridge(mid, now);
     }
     // (c) Flush + re-index exactly the touched connections.
-    for ch in touched_conns {
+    for ch in touched.into_ordered() {
       self.collect_conn_transmits(ch, now);
     }
     // (d) Slot-free fixpoint under a fresh pump budget: a minted bridge that reaped
@@ -4174,19 +4205,46 @@ where
     self.debug_assert_residue_anchored();
   }
 
+  /// Emit the synchronous terminal `Failed` completion for an inert post-leave
+  /// dial id whose machine intent was never created (a `start_*_direct` method
+  /// returned `None` because the endpoint is no longer running), so a driver
+  /// waiter parked on `ExchangeId::from(id)` resolves immediately instead of
+  /// hanging to its own timeout. No dial state exists for `id` — no bridge, no
+  /// `pending_outbound_*` entry — so this only emits the event; there is nothing to
+  /// drain and no `dial_failed` to route (the machine holds no intent).
+  ///
+  /// Kind-selective exactly like [`Self::retire_failed_dial`]'s emission half:
+  /// `PushPull` (a join waiter) and `UserMessage` (a reliable-send waiter) resolve
+  /// on this event; `ReliablePing` has no parked waiter (its failure drives the
+  /// probe FSM via `dial_failed`) so it is not widened. Only `start_push_pull` and
+  /// `start_reliable_ping` reach this — `start_user_message` errors rather than
+  /// returning an inert id — so in practice this emits for the push/pull case and
+  /// no-ops for the reliable-ping case.
+  fn emit_inert_dial_failed(&mut self, id: StreamId, peer: SocketAddr, kind: ExchangeKind) {
+    if matches!(kind, ExchangeKind::ReliablePing) {
+      return;
+    }
+    self
+      .ep
+      .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
+        ExchangeId::from(id),
+        peer,
+        ExchangeStatus::Failed,
+        kind,
+      )));
+  }
+
   /// Initiate an outbound push/pull state exchange with `peer` and attempt
   /// the dial in-band.
   ///
-  /// Wrapper around [`Endpoint::start_push_pull`] that ALSO drives
-  /// [`Self::service_started_exchange`] before returning, so the
-  /// `DialRequested` the inner endpoint queues is sieved into the private
-  /// `dial_pending` deque AND attempted (the bidi stream is opened if a pooled
-  /// connection is already established; otherwise the intent re-parks on its
-  /// peer's `dial_parked` bucket with its `TimerKey::Dial` deadline and a later
-  /// readiness wake or the tick retries it). Preferred entry point for the
-  /// driver: a caller that goes through `endpoint_mut()` instead can only wake
-  /// the dial via [`Self::poll_timeout`]'s immediate-due term — see that
-  /// method's docs.
+  /// Wrapper around [`Endpoint::start_push_pull_direct`]: it takes the returned
+  /// [`DialIntent`] and drives [`Self::service_started_exchange`] on exactly that
+  /// one intent — with NO event-queue sieve — so the bidi stream opens if a pooled
+  /// connection is already established; otherwise the intent re-parks on its peer's
+  /// `dial_parked` bucket with its `TimerKey::Dial` deadline and a later readiness
+  /// wake or the tick retries it. Preferred entry point for the driver: a caller
+  /// that goes through `endpoint_mut()` instead can only wake the dial via
+  /// [`Self::poll_timeout`]'s immediate-due term — see that method's docs.
   ///
   /// [`Self::service_started_exchange`] pumps the freshly-minted bridge and
   /// flushes the touched connection, so the dial's Initial datagram (fresh dial)
@@ -4194,9 +4252,15 @@ where
   /// on the very next [`Self::poll_transmit`] — a driver that uses only the public
   /// Sans-I/O poll surface (`poll_transmit` / `poll_timeout` / `handle_udp` /
   /// `handle_timeout`) sees the exchange progress without a same-instant
-  /// `handle_timeout` pre-pump. Unlike the former global flush, it services only
-  /// THIS exchange, so a reliable send never scans the whole dial / bridge /
-  /// connection tables.
+  /// `handle_timeout` pre-pump. It services only THIS exchange, so a reliable send
+  /// never scans the whole dial / bridge / connection tables and does zero
+  /// event-queue work.
+  ///
+  /// On the not-running inert-id path the descriptor is `None`: the endpoint
+  /// registered no intent and queued no event, so NO `pending_outbound_*` entry is
+  /// inserted (inserting one would leak — no bridge is ever created for this id to
+  /// reap it) and a synchronous `Failed` [`Event::ExchangeCompleted`] is emitted for
+  /// the returned id so a join waiter parked on it resolves immediately.
   pub fn start_push_pull(
     &mut self,
     peer: SocketAddr,
@@ -4204,27 +4268,48 @@ where
     now: Instant,
   ) -> StreamId {
     self.last_now = Some(now);
-    let id = self.ep.start_push_pull(peer, kind, now);
-    self
-      .pending_outbound_kinds
-      .insert(id, ExchangeKind::PushPull);
-    self.pending_outbound_peers.insert(id, peer);
-    self.service_started_exchange(now);
+    let (id, intent) = self.ep.start_push_pull_direct(peer, kind, now);
+    match intent {
+      Some(intent) => {
+        // `attempted = true`: this entry never entered `dial_pending`, so it was
+        // never counted in `unattempted_dial_count`; constructing it attempted
+        // keeps `process_dial_entry` from decrementing a count it never bumped, so
+        // the "unattempted_dial_count == unattempted entries in dial_pending"
+        // oracle stays exact.
+        let entry = PendingDial {
+          id,
+          peer,
+          deadline: intent.deadline(),
+          attempted: true,
+          kind: intent.kind(),
+        };
+        self.pending_outbound_kinds.insert(id, intent.kind());
+        self.pending_outbound_peers.insert(id, peer);
+        self.service_started_exchange(entry, now);
+      }
+      None => self.emit_inert_dial_failed(id, peer, ExchangeKind::PushPull),
+    }
     id
   }
 
   /// Initiate a reliable-stream fallback ping for probe `probe_seq` and
   /// attempt the dial in-band.
   ///
-  /// Wrapper around [`Endpoint::start_reliable_ping`]; see
+  /// Wrapper around [`Endpoint::start_reliable_ping_direct`]; see
   /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-
   /// flush semantics. The `deadline` is the owning probe's single
   /// cumulative deadline (NOT an independent stream-timeout — the reliable
   /// fallback must race the indirect pings against the SAME deadline),
   /// forwarded unchanged. The inner method takes only the deadline so this
-  /// wrapper accepts `now` separately: `service_dials` needs the real wall-
+  /// wrapper accepts `now` separately: `process_dial_entry` needs the real wall-
   /// clock instant (not the future deadline) and `last_now` must remain a
   /// known-past anchor.
+  ///
+  /// On the not-running inert-id path the descriptor is `None`: no
+  /// `pending_outbound_*` entry is inserted and — unlike push/pull — no completion
+  /// is emitted, because no driver parks a waiter on a reliable-ping fallback (its
+  /// failure drives the probe FSM via `dial_failed`, matching
+  /// [`Self::retire_failed_dial`]'s ReliablePing rule).
   pub fn start_reliable_ping(
     &mut self,
     peer_id: I,
@@ -4234,23 +4319,35 @@ where
     now: Instant,
   ) -> StreamId {
     self.last_now = Some(now);
-    let id = self
+    let (id, intent) = self
       .ep
-      .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
-    self
-      .pending_outbound_kinds
-      .insert(id, ExchangeKind::ReliablePing);
-    self.pending_outbound_peers.insert(id, peer_addr);
-    self.service_started_exchange(now);
+      .start_reliable_ping_direct(peer_id, peer_addr, probe_seq, deadline);
+    match intent {
+      Some(intent) => {
+        let entry = PendingDial {
+          id,
+          peer: peer_addr,
+          deadline: intent.deadline(),
+          attempted: true,
+          kind: intent.kind(),
+        };
+        self.pending_outbound_kinds.insert(id, intent.kind());
+        self.pending_outbound_peers.insert(id, peer_addr);
+        self.service_started_exchange(entry, now);
+      }
+      None => self.emit_inert_dial_failed(id, peer_addr, ExchangeKind::ReliablePing),
+    }
     id
   }
 
   /// Initiate a one-way reliable user-message delivery to `peer` and
   /// attempt the dial in-band.
   ///
-  /// Wrapper around [`Endpoint::start_user_message`]; see
-  /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-
-  /// flush semantics.
+  /// Wrapper around [`Endpoint::start_user_message_direct`]; see
+  /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-flush
+  /// semantics. Propagates the inner lifecycle refusal: a Leaving/Left node starts
+  /// no new reliable user message and registers no outbound intent, so this never
+  /// reaches an inert-descriptor path (the inner method errors instead).
   pub fn start_user_message(
     &mut self,
     peer: SocketAddr,
@@ -4258,14 +4355,17 @@ where
     now: Instant,
   ) -> Result<StreamId, Error> {
     self.last_now = Some(now);
-    // Propagate the inner lifecycle refusal: a Leaving/Left node starts no new
-    // reliable user message and registers no outbound intent.
-    let id = self.ep.start_user_message(peer, payload, now)?;
-    self
-      .pending_outbound_kinds
-      .insert(id, ExchangeKind::UserMessage);
+    let (id, intent) = self.ep.start_user_message_direct(peer, payload, now)?;
+    let entry = PendingDial {
+      id,
+      peer,
+      deadline: intent.deadline(),
+      attempted: true,
+      kind: intent.kind(),
+    };
+    self.pending_outbound_kinds.insert(id, intent.kind());
     self.pending_outbound_peers.insert(id, peer);
-    self.service_started_exchange(now);
+    self.service_started_exchange(entry, now);
     Ok(id)
   }
 
