@@ -955,13 +955,32 @@ where
 
     // Shutdown: best-effort leave, flush to quiescence, fail any parked waiters, stop.
     if this.shared.is_shutdown() {
+      // Fail the parked reliable-exchange waiters with `Shutdown` BEFORE the
+      // best-effort leave below. `leave()` purges the QUIC coordinator's reliable
+      // dial pipeline and emits a terminal `Failed` `ExchangeCompleted` for every
+      // parked push/pull and reliable user-send so a graceful (non-shutdown) leave
+      // resolves those waiters instead of leaving them to hang. On the SHUTDOWN
+      // path the caller must instead learn the node is tearing down, so drain these
+      // two waiter sets to `Shutdown` here; the purge's completions then find no
+      // parked waiter and `account_event` no-ops them.
+      for (_, mut pj) in this.pending_joins.drain() {
+        // Ignoring Err: the join caller dropped its reply receiver.
+        // Carry the addresses already reached before shutdown raced this waiter —
+        // callers see the partial contacted set, not empty.
+        let _ = pj
+          .reply
+          .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
+      }
+      for ps in this.pending_user_sends.drain(..) {
+        // Ignoring Err: the send_reliable caller dropped its reply receiver.
+        let _ = ps.reply.send(Err(Error::Shutdown));
+      }
       // Ignoring Err: best-effort leave during shutdown.
       let _ = this.endpoint.leave(Instant::now());
-      // Drain endpoint events to quiescence before reaping pending_joins: a
-      // single drain_surfaces pass is capped at transmit_batch, so a large
-      // batch of already-queued ExchangeCompleted events would be partially
-      // skipped, leaving contacted addresses unaccounted in the Err tuple.
-      // Loop until drain_surfaces reports no remaining work.
+      // Drain endpoint surfaces to quiescence: flush the leave's dead-self gossip
+      // transmits and drain any trailing events. The join / user-send waiters were
+      // already failed with `Shutdown` above, so the leave purge's `Failed`
+      // completions (and any other queued events) resolve no waiter here.
       loop {
         let (_, more) = this.drain_surfaces(cx);
         if !more {
@@ -1030,14 +1049,6 @@ where
           }
         }
       }
-      for (_, mut pj) in this.pending_joins.drain() {
-        // Ignoring Err: the join caller dropped its reply receiver.
-        // Carry the addresses already reached before shutdown raced
-        // this waiter — callers see the partial contacted set, not empty.
-        let _ = pj
-          .reply
-          .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
-      }
       if let Some(pl) = this.pending_leave.take() {
         for replier in pl.repliers {
           // Ignoring Err: the leave caller dropped its reply receiver.
@@ -1047,10 +1058,6 @@ where
       for pp in this.pending_pings.drain(..) {
         // Ignoring Err: the ping caller dropped its reply receiver.
         let _ = pp.reply.send(Err(Error::Shutdown));
-      }
-      for ps in this.pending_user_sends.drain(..) {
-        // Ignoring Err: the send_reliable caller dropped its reply receiver.
-        let _ = ps.reply.send(Err(Error::Shutdown));
       }
       // Release the bound port BEFORE acking the shutdown caller. Drop the UDP
       // socket, closing its FD synchronously (the agnostic `UdpSocket` has no
