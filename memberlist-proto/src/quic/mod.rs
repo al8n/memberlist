@@ -1584,7 +1584,13 @@ impl<I, R> QuicEndpoint<I, R> {
   /// that deposits an event must satisfy that invariant.
   ///
   /// Routing differs by event kind:
-  /// - `Event::DialRequested` is routed DIRECTLY into the private
+  /// - `Event::DialRequested` on a left endpoint (`!is_running()`) is DROPPED
+  ///   before any deposit — the coordinator intercepts this variant before
+  ///   delegating, so [`Endpoint::requeue_event`]'s own not-running drop never
+  ///   sees it; replicating the gate here keeps a re-queued dial from re-entering
+  ///   the reliable pipeline that `leave` just purged (see
+  ///   [`Self::purge_reliable_dials`]).
+  /// - `Event::DialRequested` (while running) is routed DIRECTLY into the private
   ///   `dial_pending` deque with `attempted = false`, bypassing the
   ///   inner Endpoint queue entirely. Otherwise a caller that calls
   ///   [`Self::poll_timeout`] WITHOUT an intervening
@@ -1605,6 +1611,16 @@ impl<I, R> QuicEndpoint<I, R> {
     self.last_now = Some(now);
     match ev {
       Event::DialRequested(dial) => {
+        // A leaving/left node re-admits no dial. The coordinator intercepts
+        // `DialRequested` BEFORE delegating, so `Endpoint::requeue_event`'s own
+        // not-running drop never sees it — replicate that gate here, checked
+        // BEFORE any deposit so nothing lands in `dial_pending`, the incremental
+        // `unattempted_dial_count`, or the deadline index once the endpoint has
+        // left. `leave` purges the reliable dial pipeline; this closes the
+        // re-queue re-entry into it.
+        if !self.ep.is_running() {
+          return;
+        }
         let (id, peer, deadline) = dial.into_parts();
         // Stamp the intent's kind for the reliable-ping cap exemption; default to a
         // non-exempt kind if the intent is already gone (see PendingDial::kind).
@@ -2807,7 +2823,100 @@ where
   /// [`Endpoint::leave_with`](crate::Endpoint::leave_with)).
   pub fn leave_with(&mut self, now: Instant, farewell: Option<Bytes>) -> Result<(), Error> {
     self.last_now = Some(now);
-    self.ep.leave_with(now, farewell)
+    let result = self.ep.leave_with(now, farewell);
+    // Lifecycle chokepoint: once the endpoint has left, retire the coordinator-
+    // private RELIABLE dial pipeline here — the post-leave contract is enforced at
+    // this single lifecycle chokepoint rather than behind a per-path gate in
+    // `service_dials` (lifecycle transitions are centralized at the chokepoints, not
+    // scattered per path). The machine clears its own intent table and
+    // queued `DialRequested` events on leave, but the coordinator's private
+    // `dial_pending` / `dial_parked` / `ready_dial_peers` survive it; the next
+    // un-gated `service_dials` would otherwise `get_or_dial` a FRESH post-leave
+    // outbound connection and handshake, contradicting post-leave quiescence.
+    // Delegated AFTER the machine so `is_running()` already reflects the leave;
+    // gated on it so a leave that failed to initiate (still Running) keeps its
+    // legitimate in-flight dials.
+    if !self.ep.is_running() {
+      self.purge_reliable_dials(now);
+    }
+    result
+  }
+
+  /// Retire the coordinator-private RELIABLE dial pipeline at the leave
+  /// chokepoint (see [`Self::leave_with`]). Drains the fresh
+  /// [`Self::dial_pending`] FIFO and every [`Self::dial_parked`] bucket, giving
+  /// each drained intent the full per-entry take-out bookkeeping
+  /// [`Self::process_dial_entry`] owns plus a terminal failure so a parked
+  /// waiter resolves — see [`Self::purge_dial_entry`].
+  ///
+  /// The UNRELIABLE dead-self gossip plane is deliberately untouched: a departing
+  /// node must still gossip its own death, and
+  /// [`queue_unreliable_datagram`](Self::queue_unreliable_datagram) may open a
+  /// datagram-only connection to carry it — that dialing stays legitimate
+  /// post-leave. Only the reliable pipeline (push/pull, reliable user message,
+  /// reliable-ping fallback) is quiesced here, matching the contract that forbids
+  /// new reliable I/O while leave rides the unreliable plane.
+  fn purge_reliable_dials(&mut self, now: Instant) {
+    // Own each source before iterating so `purge_dial_entry`'s `&mut self`
+    // (`retire_failed_dial` re-borrows the endpoint) never aliases the container —
+    // the same `mem::take` idiom `service_dials` uses to drain these two.
+    let pending = core::mem::take(&mut self.dial_pending);
+    for entry in pending {
+      self.purge_dial_entry(entry, now);
+    }
+    let parked = core::mem::take(&mut self.dial_parked);
+    for bucket in parked.into_values() {
+      for entry in bucket {
+        self.purge_dial_entry(entry, now);
+      }
+    }
+    // The ready-dial ledger points ONLY at `dial_parked` buckets the drain just
+    // emptied, so clear it — otherwise `has_residue` would report a phantom
+    // deferred dial and keep the sticky catch-up anchor armed for work that no
+    // longer exists.
+    self.ready_dial_peers.clear();
+    // `slot_freed_peers` and the catch-up anchor (`next_catchup_at`) need NO
+    // action: every peer the set names now points at an empty (drained) bucket, so
+    // a post-leave `service_slot_freed_peers` pass drains the set to no-ops (an
+    // empty bucket opens nothing and re-deposits nothing — see
+    // `service_peer_bucket`) and the following `finalize_tick` retires the anchor.
+    // The residue-anchor invariant (`has_residue` ⇒ anchor armed) held before leave
+    // and clearing `ready_dial_peers` only shrinks the residue, so it still holds.
+    // Already-minted outbound bridges (`ready_bridges`) are a separate lifecycle
+    // from dial intents and reap through their own path, untouched here.
+  }
+
+  /// Retire one drained pending-dial `entry` at the leave chokepoint.
+  ///
+  /// Applies the SAME per-entry take-out bookkeeping
+  /// [`Self::process_dial_entry`] performs when an entry leaves
+  /// [`Self::dial_pending`] — the invariant the test-only `unattempted_dial_recount`
+  /// and `recompute_earliest_bruteforce` oracles cross-check — then routes the
+  /// intent through the shared pre-bridge failure path [`Self::retire_failed_dial`].
+  ///
+  /// `retire_failed_dial` alone does NEITHER piece of that bookkeeping: leaving the
+  /// `unattempted_dial_count` unit armed would keep `poll_timeout` returning an
+  /// immediate-due wake forever (a permanent post-leave busy-wake), and leaking the
+  /// [`TimerKey::Dial`] deadline key would fire stale `run_tick`-driving wakes for
+  /// an intent that no longer exists.
+  fn purge_dial_entry(&mut self, entry: PendingDial, now: Instant) {
+    let PendingDial { id, attempted, .. } = entry;
+    // Mirror `process_dial_entry`'s `dial_pending`-exit bookkeeping: release the
+    // incremental unattempted unit (saturating) and drop the deadline key. Unlike
+    // `process_dial_entry` there is no re-park, so the key is dropped for good.
+    if !attempted {
+      self.unattempted_dial_count = self.unattempted_dial_count.saturating_sub(1);
+    }
+    self.deadline_index.set(TimerKey::Dial(id), None);
+    // Resolve a parked waiter: drains `pending_outbound_kinds` / `_peers`, emits a
+    // terminal `Failed` `ExchangeCompleted` for a UserMessage / PushPull (the
+    // ReliablePing fallback is suppressed — its failure drives the probe FSM), and
+    // retires the machine intent (a no-op post-leave, already cleared).
+    self.retire_failed_dial(
+      id,
+      StreamError::DialFailed("quic endpoint left".into()),
+      now,
+    );
   }
 
   /// Initiate a direct application-level ping to `node`. Returns

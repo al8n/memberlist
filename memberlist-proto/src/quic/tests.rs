@@ -8809,6 +8809,280 @@ fn inert_push_pull_after_leave_no_map_leak_and_synchronous_failed() {
   );
 }
 
+/// The leave chokepoint purges the coordinator-private RELIABLE dial pipeline:
+/// after `leave`, `dial_pending`, every `dial_parked` bucket, and the ready-dial
+/// ledger are empty, no subsequent tick opens a fresh outbound connection to a
+/// parked peer, and each purged UserMessage / PushPull intent surfaces a terminal
+/// `Failed` `ExchangeCompleted` so a parked join / reliable-send waiter resolves.
+///
+/// Mutation-verify: remove the purge call from `leave_with` — the surviving parked
+/// dials ride the next un-gated tick's `service_dials`, whose `get_or_dial` opens
+/// a fresh post-leave connection to each cold peer, so the flat-conns assertion
+/// fails.
+#[test]
+fn post_leave_purges_reliable_dial_pipeline() {
+  use crate::event::{ExchangeId, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8300".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Inject parked reliable dials on distinct cold peers (never-answered
+  // addresses). Each mirrors a real park: an entry in its peer bucket with
+  // `attempted = true`, its `TimerKey::Dial` deadline key registered, and its
+  // `pending_outbound_{kinds,peers}` staged (as a `start_*` wrapper would) so the
+  // purge's `retire_failed_dial` can surface a Failed completion. No connection is
+  // opened for these peers — the assertion below is that leave keeps it that way.
+  let deadline = now + Duration::from_secs(30);
+  let kinds = [
+    super::ExchangeKind::UserMessage,
+    super::ExchangeKind::PushPull,
+  ];
+  let mut expected: Vec<(StreamId, SocketAddr)> = Vec::new();
+  for i in 0..6u64 {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9000 + i).parse().unwrap();
+    let id = StreamId::from_raw(1_000 + i);
+    let kind = kinds[(i % 2) as usize];
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id,
+        peer,
+        deadline,
+        attempted: true,
+        kind,
+      });
+    a.deadline_index
+      .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+    a.pending_outbound_kinds.insert(id, kind);
+    a.pending_outbound_peers.insert(id, peer);
+    expected.push((id, peer));
+  }
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "test precondition: no connections before leave"
+  );
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running(), "after leave the endpoint is not running");
+
+  // The pipeline is empty the moment leave returns.
+  assert!(a.dial_pending.is_empty(), "leave drains dial_pending");
+  assert!(
+    a.dial_parked.is_empty(),
+    "leave drains every dial_parked bucket"
+  );
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "leave clears the ready-dial ledger"
+  );
+
+  // Each purged UserMessage / PushPull intent surfaced a Failed completion.
+  let mut failed: Vec<ExchangeId> = Vec::new();
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(c) = ev {
+      if c.outcome() == ExchangeStatus::Failed {
+        failed.push(c.eid());
+      }
+    }
+  }
+  for (id, _peer) in &expected {
+    assert!(
+      failed.contains(&ExchangeId::from(*id)),
+      "each purged reliable intent must surface a Failed ExchangeCompleted so its \
+       parked waiter resolves; missing id {id:?}"
+    );
+  }
+
+  // Run several ticks: none opens a fresh connection to any parked peer.
+  for _ in 0..3 {
+    a.handle_timeout(now);
+  }
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "no post-leave tick may open a fresh outbound connection — the reliable dial \
+     pipeline was purged at the leave chokepoint"
+  );
+  for (_id, peer) in &expected {
+    assert!(
+      a.conns.handle_for(peer).is_none(),
+      "no pooled connection to a purged parked peer may exist post-leave"
+    );
+  }
+}
+
+/// The purge releases `unattempted_dial_count` for every unattempted entry it
+/// drains, so a fresh (never-attempted) dial that survived into `dial_pending`
+/// cannot arm a permanent post-leave immediate-due busy-wake. Before leave the
+/// unattempted dial forces `poll_timeout` to an immediate-due wake at `last_now`;
+/// after leave the count is 0 and no such wake is sourced from the dial term.
+///
+/// Mutation-verify: drop the `unattempted_dial_count` decrement from
+/// `purge_dial_entry` — the count stays >= 1 (while `dial_pending` is emptied), so
+/// `unattempted_dial_count() == 0` fails and `poll_timeout` re-arms the
+/// immediate-due wake at `last_now`.
+#[test]
+fn no_immediate_due_wake_after_leave() {
+  let a_addr: SocketAddr = "127.0.0.1:8310".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // Anchor `last_now` (and run one empty tick) so the immediate-due term is
+  // well-defined.
+  a.handle_timeout(now);
+
+  // Seed ONE unattempted fresh dial directly into `dial_pending` (bypassing the
+  // intake route), mirroring a real sieve deposit: `attempted = false`, the
+  // incremental count bumped, and its Dial deadline key registered.
+  let peer: SocketAddr = "127.0.0.9:9100".parse().unwrap();
+  let id = StreamId::from_raw(2_000);
+  let deadline = now + Duration::from_secs(30);
+  a.dial_pending.push_back(super::PendingDial {
+    id,
+    peer,
+    deadline,
+    attempted: false,
+    kind: super::ExchangeKind::UserMessage,
+  });
+  a.unattempted_dial_count += 1;
+  a.deadline_index
+    .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+  assert_eq!(a.unattempted_dial_count(), a.unattempted_dial_recount());
+  assert_eq!(
+    a.poll_timeout(),
+    Some(now),
+    "test precondition: an unattempted dial forces an immediate-due wake at last_now"
+  );
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  // The busy-wake kill: the unattempted unit was released, so the count is 0 (and
+  // agrees with the brute-force recount), and `poll_timeout` no longer returns the
+  // immediate-due wake sourced from the dial term.
+  assert_eq!(
+    a.unattempted_dial_count(),
+    0,
+    "the purge must release every unattempted unit so ImmediateDue is not armed"
+  );
+  assert_eq!(a.unattempted_dial_count(), a.unattempted_dial_recount());
+  assert_ne!(
+    a.poll_timeout(),
+    Some(now),
+    "post-leave poll_timeout must not return an immediate-due wake driven by the \
+     purged dial half"
+  );
+}
+
+/// The purge drops every drained intent's `TimerKey::Dial` deadline key, so no
+/// orphan Dial key survives leave to fire a stale `run_tick`-driving wake. Reads
+/// the deadline-index oracle (`contains_key`) directly.
+///
+/// Mutation-verify: drop the `deadline_index.set(TimerKey::Dial(id), None)` from
+/// `purge_dial_entry` — each drained intent's Dial key survives leave; the
+/// `contains_key` assertion then finds an orphan and fails.
+#[test]
+fn leave_purge_drops_dial_deadline_keys() {
+  let a_addr: SocketAddr = "127.0.0.1:8320".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let deadline = now + Duration::from_secs(30);
+  // A mix: unattempted entries in `dial_pending` and attempted parked entries,
+  // each with its Dial key registered as a real intake / park would.
+  let mut ids: Vec<StreamId> = Vec::new();
+  for i in 0..4u64 {
+    let id = StreamId::from_raw(3_000 + i);
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9200 + i).parse().unwrap();
+    if i % 2 == 0 {
+      a.dial_pending.push_back(super::PendingDial {
+        id,
+        peer,
+        deadline,
+        attempted: false,
+        kind: super::ExchangeKind::UserMessage,
+      });
+      a.unattempted_dial_count += 1;
+    } else {
+      a.dial_parked
+        .entry(peer)
+        .or_default()
+        .push_back(super::PendingDial {
+          id,
+          peer,
+          deadline,
+          attempted: true,
+          kind: super::ExchangeKind::PushPull,
+        });
+    }
+    a.deadline_index
+      .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+    ids.push(id);
+  }
+  for id in &ids {
+    assert!(
+      a.deadline_index
+        .contains_key(super::deadline::TimerKey::Dial(*id)),
+      "test precondition: Dial key registered"
+    );
+  }
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  for id in &ids {
+    assert!(
+      !a.deadline_index
+        .contains_key(super::deadline::TimerKey::Dial(*id)),
+      "the purge must drop every drained intent's TimerKey::Dial; an orphan key \
+       fires stale post-leave wakes forever"
+    );
+  }
+}
+
+/// The coordinator `requeue_event`'s `DialRequested` arm is gated on the running
+/// state: a `DialRequested` re-queued after leave is DROPPED before any deposit,
+/// matching `Endpoint::requeue_event`'s own not-running gate that the
+/// coordinator's interception would otherwise bypass.
+///
+/// Mutation-verify: remove the `if !self.ep.is_running() { return; }` gate — the
+/// requeued dial deposits into `dial_pending` (bumps the count, sets a Dial key);
+/// the empty-pipeline assertions then fail.
+#[test]
+fn post_leave_requeue_dial_requested_dropped() {
+  use crate::event::DialRequested;
+  let a_addr: SocketAddr = "127.0.0.1:8330".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  let id = StreamId::from_raw(4_000);
+  let peer: SocketAddr = "127.0.0.9:9300".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  let before_count = a.unattempted_dial_count();
+  a.requeue_event(
+    Event::DialRequested(DialRequested::new(id, peer, deadline)),
+    now,
+  );
+
+  assert!(
+    a.dial_pending.is_empty(),
+    "a DialRequested re-queued after leave must be dropped, not deposited into \
+     dial_pending"
+  );
+  assert_eq!(
+    a.unattempted_dial_count(),
+    before_count,
+    "the dropped requeue must not bump the unattempted count"
+  );
+  assert!(
+    !a.deadline_index
+      .contains_key(super::deadline::TimerKey::Dial(id)),
+    "the dropped requeue must register no Dial deadline key"
+  );
+}
+
 /// The slot-free wake fires from `catchup_service`: when a DIALER bridge reaps
 /// inside the catch-up pump it frees a `C_OUT` slot, and the same catch-up pass
 /// services the peer's parked bucket so a `C_OUT`-parked dial opens — rather than
