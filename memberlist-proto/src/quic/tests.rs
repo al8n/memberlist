@@ -10048,6 +10048,250 @@ fn flush_outbound_drains_ready_dial_ledger_before_finalize() {
   );
 }
 
+/// Populate the ready-dial ledger with `n` distinct budget-deferred peers, each
+/// holding one non-empty parked bucket, then run ONE [`QuicEndpoint::catchup_service`]
+/// and return `(peer visits, dial attempts, resident ledger len after, anchor armed)`.
+///
+/// One EXPIRED entry per peer is the cheapest creditable bucket: the drain pops the
+/// peer, `service_peer_bucket` attempts (retires) the single entry under the shared
+/// dial budget and empties the bucket — exercising the drain's per-peer VISIT and
+/// attempt accounting without standing up `n` real established connections. The
+/// per-peer visit order and per-peer budget consumption are identical to a mint
+/// bucket, so this faithfully bounds the drain's visit count. No `TimerKey::Dial`
+/// keys are registered, so nothing counts as a due scheduled timer.
+fn drive_one_catchup_over_n_deferred_ready_dial_peers(n: usize) -> (u64, u64, usize, bool) {
+  let a_addr: SocketAddr = "127.0.0.1:8360".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: `catchup_service` is invoked directly and no membership timer
+  // interferes with the ledger drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  let elapsed = now - Duration::from_secs(1);
+  for i in 0..n {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9000 + i).parse().unwrap();
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(60_000 + i as u64),
+        peer,
+        deadline: elapsed,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    n,
+    "all {n} distinct peers seeded into the ready-dial ledger"
+  );
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  let attempts_before = a.counters.dial_entries_serviced;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  let attempts = a.counters.dial_entries_serviced - attempts_before;
+  (
+    visits,
+    attempts,
+    a.ready_dial_peers.len(),
+    a.next_catchup_at.is_some(),
+  )
+}
+
+/// The budgeted catch-up ready-dial drain visits at most a budget-sized front-prefix
+/// of the ledger — its work is O(interval dial budget), INDEPENDENT of how many peers
+/// the ledger holds — leaving the untouched tail resident and the sticky anchor armed
+/// for the next interval. This is the bound the residue ledger exists to uphold, now
+/// enforced in the ledger's own drain: the former whole-ledger `take` detached and
+/// visited EVERY peer even after the budget hit zero (hashing, bucket-calling, and
+/// re-depositing each), making the drain scale with the ledger table.
+///
+/// Mutation-verify: revert the drain to `for peer in self.ready_dial_peers.take()` —
+/// it visits all `n` peers, so `visits` climbs to the ledger size (300, then 600) and
+/// both the `<= budget` and the "does not scale with the peer count" assertions fail.
+#[test]
+fn catchup_ready_dial_drain_visits_are_budget_bounded_not_ledger_sized() {
+  let budget = super::MAX_DIAL_ATTEMPTS_PER_PASS as u64;
+
+  // 300 deferred peers: ONE catch-up visits at most a budget-sized prefix, not 300.
+  let (visits_300, attempts_300, resident_300, anchor_300) =
+    drive_one_catchup_over_n_deferred_ready_dial_peers(300);
+  assert!(
+    attempts_300 <= budget,
+    "one catch-up attempts at most MAX_DIAL_ATTEMPTS_PER_PASS={budget} dials; attempted {attempts_300}"
+  );
+  assert!(
+    visits_300 <= budget,
+    "the bounded-prefix drain VISITS at most a budget-sized prefix (each visited peer's \
+       single-entry bucket consumes one budget unit), not all 300 ledger peers; visited \
+       {visits_300}"
+  );
+  assert!(
+    visits_300 < 300,
+    "the drain must leave most of the 300-peer ledger unvisited; visited {visits_300}"
+  );
+  assert_eq!(
+    resident_300,
+    300 - visits_300 as usize,
+    "exactly the unvisited tail stays resident — each visited peer's single-entry bucket \
+       emptied and left the ledger, nothing else moved"
+  );
+  assert!(
+    resident_300 > 0,
+    "non-vacuous: a large tail remains resident for the next interval"
+  );
+  assert!(
+    anchor_300,
+    "the resident tail keeps has_residue true, so advance_catchup_anchor leaves the sticky \
+       catch-up anchor armed"
+  );
+
+  // Double the ledger to 600: the per-catch-up visit count must NOT scale with it.
+  let (visits_600, _attempts_600, resident_600, anchor_600) =
+    drive_one_catchup_over_n_deferred_ready_dial_peers(600);
+  assert_eq!(
+    visits_600, visits_300,
+    "the per-catch-up visit count is bounded by the interval dial budget and is INDEPENDENT \
+       of the ledger size: 300 and 600 peers both visit {visits_300}. Reverting to the \
+       whole-ledger `take` makes this 300 vs 600 (scaling with the table) and the equality fails"
+  );
+  assert!(
+    visits_600 <= budget,
+    "the 600-peer ledger still visits at most the budget; visited {visits_600}"
+  );
+  assert!(
+    resident_600 > resident_300,
+    "the larger ledger leaves a larger resident tail — the drain did not scale up its work to \
+       compensate; {resident_600} resident vs {resident_300}"
+  );
+  assert!(
+    anchor_600,
+    "the 600-peer residue also keeps the anchor armed"
+  );
+}
+
+/// The budgeted catch-up ready-dial drain is fair: a peer re-deposited after it
+/// exhausts the interval dial budget rotates to the BACK of the ledger, so successive
+/// catch-up intervals round-robin the whole ledger to empty and nothing strands. A
+/// large-bucket HEAD peer that re-deposits every interval must not shadow the resident
+/// tail — after the head is serviced once it drops behind the tail, so the next
+/// interval reaches every tail peer.
+///
+/// Mutation-verify: make the re-deposit push to the FRONT (`push_front` in
+/// `PeerResidue::insert`) — the head stays at the ledger front and is re-serviced
+/// every interval while the tail starves, so the "every tail peer serviced after two
+/// intervals" assertion fails.
+#[test]
+fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
+  let a_addr: SocketAddr = "127.0.0.1:8370".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: every wake is provably a bounded ready-dial catch-up (no membership
+  // tick), so the ledger drains solely through the drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  // A HEAD peer with a bucket three interval-budgets deep, inserted FIRST so it sits at
+  // the ledger front, plus one interval-budget's worth of single-entry TAIL peers.
+  // Expired entries are the cheapest population (retire on service); the drain's
+  // per-peer visit ORDER and budget consumption match a mint bucket, so this exercises
+  // round-robin fairness without real connections.
+  const HEAD_ENTRIES: usize = 3 * super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let tails: Vec<SocketAddr> = (0..super::MAX_DIAL_ATTEMPTS_PER_PASS)
+    .map(|i| format!("127.0.0.10:{}", 9000 + i).parse().unwrap())
+    .collect();
+  let head: SocketAddr = "127.0.0.9:9500".parse().unwrap();
+  let elapsed = now - Duration::from_secs(1);
+  for i in 0..HEAD_ENTRIES {
+    a.dial_parked
+      .entry(head)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(70_000 + i as u64),
+        peer: head,
+        deadline: elapsed,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  a.ready_dial_peers.insert(head);
+  for (i, &peer) in tails.iter().enumerate() {
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(80_000 + i as u64),
+        peer,
+        deadline: elapsed,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    1 + tails.len(),
+    "head + tail peers seeded into the ledger"
+  );
+
+  // Arm the sticky anchor as `reconcile_catchup_anchor` would, then drive the strict
+  // poll-surface cadence: poll_timeout -> advance to the anchor -> handle_timeout.
+  a.next_catchup_at = Some(now + super::CATCHUP_INTERVAL);
+  let memb0 = a.membership_time_advances();
+  for _ in 0..2 {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ready-dial residue schedules a catch-up wake");
+    assert_eq!(
+      Some(wake),
+      a.next_catchup_at,
+      "the catch-up anchor is the earliest wake while a ready-dial residue waits"
+    );
+    a.handle_timeout(wake);
+    assert_eq!(
+      a.membership_time_advances(),
+      memb0,
+      "a ready-dial catch-up wake is a BOUNDED catch-up, not a full tick: it advances no \
+         membership time"
+    );
+  }
+  let serviced_after_two = tails
+    .iter()
+    .filter(|p| !a.dial_parked.contains_key(*p))
+    .count();
+  assert_eq!(
+    serviced_after_two,
+    tails.len(),
+    "after two catch-up intervals every tail peer's bucket is serviced: the head re-deposited \
+       to the BACK after interval 1, so interval 2 round-robins to the tail. A FRONT re-deposit \
+       keeps the head at the front and leaves the tail unserviced here"
+  );
+
+  // Liveness: keep driving; the whole ledger drains to empty within a bounded number of
+  // intervals (ceil(HEAD_ENTRIES / budget) dominates) — nothing strands.
+  let mut intervals = 2usize;
+  while !a.ready_dial_peers.is_empty() {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    intervals += 1;
+    assert!(
+      intervals <= 8,
+      "the ready-dial ledger must converge to empty, never strand; {} peers still queued",
+      a.ready_dial_peers.len()
+    );
+  }
+  assert!(
+    a.dial_parked.is_empty(),
+    "every parked bucket drained across the round-robin intervals — nothing stranded"
+  );
+  assert!(
+    a.next_catchup_at.is_none(),
+    "the emptied ledger clears the sticky catch-up anchor"
+  );
+}
+
 /// The per-peer reliable user-message admission cap refuses a `start_user_message`
 /// once `max_pending_user_dials_per_peer` intents are already OUTSTANDING to that
 /// peer, and the refused call is a pure no-op.

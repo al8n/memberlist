@@ -385,26 +385,32 @@ impl TouchedConns {
   }
 }
 
-/// An insertion-ordered set of peer [`SocketAddr`]s with O(1) deduplication — the
-/// residue-ledger shape shared by [`QuicEndpoint::slot_freed_peers`] and
-/// [`QuicEndpoint::ready_dial_peers`].
+/// An insertion-ordered set of peer [`SocketAddr`]s with O(1) deduplication and
+/// O(1) front-pop — the residue-ledger shape shared by
+/// [`QuicEndpoint::slot_freed_peers`] and [`QuicEndpoint::ready_dial_peers`].
 ///
-/// Pairs an insertion-ordered `SmallVec` — drained in first-insert order so a VOPR
-/// replay services peers in a deterministic sequence — with an [`FxHashSet`] for
-/// O(1) membership, so re-queuing the same peer across a mass-partition pass stays
-/// linear rather than O(peers²) via a `SmallVec::contains` scan. The connection
-/// twin is [`TouchedConns`].
+/// Pairs an insertion-ordered [`VecDeque`] — appended at the back and popped at the
+/// front in first-queued order, so a VOPR replay services peers in a deterministic
+/// sequence and a re-deposit rotates behind the still-resident tail — with an
+/// [`FxHashSet`] for O(1) membership, so re-queuing the same peer across a
+/// mass-partition pass stays linear rather than O(peers²) via a sequential
+/// `contains` scan. The `order` deque and the `seen` set always hold the SAME peer
+/// set: every mutation touches both. The connection twin is [`TouchedConns`].
 #[derive(Default)]
 struct PeerResidue {
-  order: SmallVec<SocketAddr>,
+  order: VecDeque<SocketAddr>,
   seen: FxHashSet<SocketAddr>,
 }
 
 impl PeerResidue {
-  /// Queue `peer`, preserving first-insert order and ignoring repeats in O(1).
+  /// Queue `peer` at the BACK, preserving first-insert order and ignoring repeats in
+  /// O(1). Back-insertion is load-bearing for the budgeted catch-up drain: a peer
+  /// re-deposited after its bucket exhausted the interval dial budget rotates BEHIND
+  /// the still-resident tail, so [`QuicEndpoint::catchup_service`] round-robins the
+  /// whole ledger across successive intervals instead of re-servicing the same head.
   fn insert(&mut self, peer: SocketAddr) {
     if self.seen.insert(peer) {
-      self.order.push(peer);
+      self.order.push_back(peer);
     }
   }
 
@@ -413,15 +419,28 @@ impl PeerResidue {
     self.order.is_empty()
   }
 
-  /// The number of queued peers (debug-assert diagnostics only).
+  /// The number of queued peers — the budgeted catch-up drain's pre-drain visit
+  /// bound (snapshot before the drain) and debug-assert diagnostics.
   fn len(&self) -> usize {
     self.order.len()
   }
 
-  /// Remove and return the queued peers in first-insert order, leaving the ledger
+  /// Pop the oldest-queued peer off the FRONT in O(1), also removing it from the
+  /// dedup set so a later re-[`Self::insert`] of the same peer re-queues it (at the
+  /// back). Returns `None` when the ledger is empty. The budgeted
+  /// [`QuicEndpoint::catchup_service`] drain pops only while its interval dial budget
+  /// remains, leaving the untouched tail resident; the O(N) tick / `flush_outbound`
+  /// paths use [`Self::take`] to drain the whole ledger instead.
+  fn pop_front(&mut self) -> Option<SocketAddr> {
+    let peer = self.order.pop_front()?;
+    self.seen.remove(&peer);
+    Some(peer)
+  }
+
+  /// Remove and return every queued peer in first-insert order, leaving the ledger
   /// empty — the residue-drain idiom mirroring `core::mem::take`: a re-insert
   /// during servicing re-queues onto the now-empty ledger for the next turn.
-  fn take(&mut self) -> SmallVec<SocketAddr> {
+  fn take(&mut self) -> VecDeque<SocketAddr> {
     core::mem::take(self).order
   }
 
@@ -731,8 +750,11 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// which stays armed while this set is non-empty. Populated only by
   /// completion-driven reaps (never a datagram set) and deduped at insertion, so the
   /// wake is not attacker-per-datagram pushable; [`Self::finalize_tick`] asserts the
-  /// tick drained it. Dedup is O(1) via the [`PeerResidue`] set+vec shape so a
-  /// mass-partition pass that frees many slots stays linear.
+  /// tick drained it. Dedup is O(1) via the [`PeerResidue`] set+deque shape so a
+  /// mass-partition pass that frees many slots stays linear. This ledger is drained
+  /// order-agnostically — [`Self::service_slot_freed_peers`] `take`s and services the
+  /// WHOLE set each fixpoint turn — so the deque's front-to-back order is immaterial
+  /// to its behavior (only [`Self::ready_dial_peers`] relies on the front-pop order).
   slot_freed_peers: PeerResidue,
   /// Distinct peers whose parked-dial bucket a BOUNDED servicing pass could not
   /// finish attempting because the pass's shared dial-attempt budget ran out with a
@@ -744,11 +766,15 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// that method for the exact condition), so every budget-deferred parked dial is
   /// covered by the sticky catch-up anchor ([`Self::next_catchup_at`]) instead of
   /// stranding until its [`TimerKey::Dial`] deadline retires it despite available
-  /// capacity. [`Self::catchup_service`] drains it under an interval dial budget,
-  /// [`Self::flush_outbound`] drains it fully, and the global tick's step-(5)
-  /// [`Self::service_dials`] full drain clears it (that step already attempted every
-  /// bucket). Insertion-ordered and O(1)-deduped ([`PeerResidue`]) so the drain is
-  /// deterministic for VOPR replay and a repeated deposit stays linear.
+  /// capacity. [`Self::catchup_service`] drains it as a bounded FRONT-prefix under an
+  /// interval dial budget — popping only while the budget remains and leaving the
+  /// untouched tail resident, so the drain is O(budget) per interval rather than
+  /// O(ledger); a peer that budget-exits re-deposits at the BACK and the ledger
+  /// round-robins to empty across intervals. [`Self::flush_outbound`] drains it fully,
+  /// and the global tick's step-(5) [`Self::service_dials`] full drain clears it (that
+  /// step already attempted every bucket). Insertion-ordered ([`VecDeque`] front-pop)
+  /// and O(1)-deduped ([`PeerResidue`]) so the drain is deterministic for VOPR replay
+  /// and a repeated deposit stays linear.
   ready_dial_peers: PeerResidue,
   /// Test-only instrumentation counters — one per negative-control regression
   /// test; see [`TestCounters`] for the per-counter contract. Never compiled
@@ -932,6 +958,16 @@ struct TestCounters {
   /// drain makes it scale with every parked dial and the test fails. Never
   /// compiled into production builds.
   dial_entries_serviced: u64,
+  /// Test-only count of peers VISITED (popped and serviced) by the budgeted
+  /// ready-dial drain in [`QuicEndpoint::catchup_service`] — bumped once per peer the
+  /// bounded pop-loop pops off the ledger. The drain pops a front-prefix bounded by
+  /// the interval dial budget, so this delta stays O(budget) no matter how many peers
+  /// the ledger holds: a 300- and a 600-peer ledger yield the same bounded visit
+  /// count. The regression test resets it before one `catchup_service` and asserts
+  /// the delta does not scale with the peer count; reverting the drain to the
+  /// whole-ledger `take` visits every peer and makes the delta equal the ledger size,
+  /// failing the test. Never compiled into production builds.
+  ready_dial_peer_visits: u64,
   /// Test-only count of `StreamEvent::Writable` events the per-connection
   /// `poll()` drain delivered to the `Writable` arm this run — bumped at arm
   /// entry. One connection-window MAX_DATA storms this with a `Writable` per
@@ -4259,11 +4295,14 @@ where
   /// non-Catchup timer is due.
   ///
   /// Drains all three residue kinds under one interval budget pair (a bridge-pump
-  /// budget and a dial-attempt budget): first the ready-dial ledger, then the
-  /// budget-deferred `ready_bridges`, then the slot-free fixpoint. A bucket that
-  /// exhausts the dial budget re-deposits into the ledger (via
+  /// budget and a dial-attempt budget): first the ready-dial ledger as a bounded
+  /// front-prefix (pop peers while the dial budget remains, at most the ledger's
+  /// pre-drain length, leaving the tail resident), then the budget-deferred
+  /// `ready_bridges`, then the slot-free fixpoint. A ready-dial peer that exhausts the
+  /// dial budget re-deposits at the BACK of the ledger (via
   /// [`Self::service_peer_bucket`]) and rides the advanced anchor to the next
-  /// interval.
+  /// interval, so the ledger round-robins to empty over ceil(len / budget) intervals
+  /// and the drain stays O(budget) regardless of the ledger's size.
   fn catchup_service(&mut self, now: Instant) {
     let mut budget = MAX_BRIDGE_PUMPS_PER_PASS;
     let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
@@ -4274,11 +4313,44 @@ where
     #[cfg(test)]
     let pre: HashSet<StreamId> = self.bridges.keys().copied().collect();
     // Ready-dial ledger: attempt each budget-deferred peer's parked bucket under the
-    // shared dial budget, enqueuing its freshly-minted outbound bridges for the
-    // pump below. `take` first so a bucket that re-exhausts the budget re-deposits
-    // for the NEXT interval rather than being re-serviced this pass.
+    // shared interval dial budget, enqueuing its freshly-minted outbound bridges for
+    // the pump below. This is a bounded-PREFIX drain — pop peers off the FRONT only
+    // while a dial budget remains AND at most the ledger's PRE-DRAIN length (snapshot
+    // once, before the loop) — leaving the untouched tail RESIDENT, so a catch-up
+    // pass stays O(budget) regardless of how many peers the ledger holds. A
+    // whole-ledger `take` would instead visit, hash, and re-deposit EVERY peer even
+    // after the budget hit zero, making the drain scale with the ledger table — the
+    // very class the residue ledger exists to close, reappearing in its own drain.
+    //
+    // Two cooperating caps bound and terminate the loop:
+    //   * the dial budget stops the pass at MAX_DIAL_ATTEMPTS_PER_PASS attempts —
+    //     every visited peer with a non-empty bucket consumes at least one unit;
+    //   * the pre-drain visit count stops it after visiting each originally-queued
+    //     peer at most once.
+    // A peer whose bucket exhausts the dial budget mid-drain re-deposits itself at the
+    // BACK of the ledger (via `service_peer_bucket`); the budget is then zero, so the
+    // loop exits before re-popping it, and the pre-drain visit cap independently
+    // guarantees a back-rotated re-deposit is never re-serviced this pass. It instead
+    // rides the anchor `advance_catchup_anchor` re-arms below to the NEXT interval, so
+    // the ledger round-robins to empty over ceil(pre-drain-len / budget) intervals
+    // with nothing stranded. A peer that fully drains its bucket removes itself and
+    // never re-deposits. Termination holds because each iteration either consumes a
+    // unit of dial budget or is one of the at-most-pre-drain visits, and both counters
+    // strictly decrease. Only this BUDGETED drain needs the bound; `flush_outbound`
+    // and the tick drain the ledger fully under a `usize::MAX` dial budget that never
+    // budget-exits, so their whole-ledger drains stay correct and unchanged.
     let mut to_flush: SmallVec<ConnectionHandle> = SmallVec::new();
-    for peer in self.ready_dial_peers.take() {
+    let mut remaining_visits = self.ready_dial_peers.len();
+    while dial_budget > 0 && remaining_visits > 0 {
+      let Some(peer) = self.ready_dial_peers.pop_front() else {
+        break;
+      };
+      remaining_visits -= 1;
+      #[cfg(test)]
+      {
+        self.counters.ready_dial_peer_visits =
+          self.counters.ready_dial_peer_visits.saturating_add(1);
+      }
       let ServicedDials {
         minted_bridges,
         touched_conns,
