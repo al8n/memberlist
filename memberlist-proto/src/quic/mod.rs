@@ -165,6 +165,36 @@ const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
 /// a handshake-blocked bucket still stops at the first re-park.
 const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
 
+/// Maximum peers the budgeted catch-up ready-dial drain in
+/// [`QuicEndpoint::catchup_service`] POPS from [`QuicEndpoint::ready_dial_peers`] in
+/// ONE [`CATCHUP_INTERVAL`], independent of the ledger's size — the visit-count twin
+/// of the [`MAX_DIAL_ATTEMPTS_PER_PASS`] attempt bound.
+///
+/// The attempt budget alone does NOT bound the pass's peer visits, because a ledger
+/// entry can go STALE: a peer is deposited into `ready_dial_peers` when its parked
+/// bucket budget-exits still non-empty, but a later DIRECT
+/// [`QuicEndpoint::service_peer_bucket`] call — an establishment / `MAX_STREAMS`
+/// `Available` / slot-free wake — can drain that same bucket to empty and drop it from
+/// [`QuicEndpoint::dial_parked`] WITHOUT removing the peer from the ledger. Servicing
+/// such a stale entry pops an empty/absent bucket, so it makes ZERO dial attempts: it
+/// consumes a VISIT but NOT a unit of dial budget. A ledger-length-only visit bound
+/// therefore lets an arbitrarily long stale prefix be walked in full in ONE interval —
+/// O(ledger) work every `CATCHUP_INTERVAL`, the exact unbounded-per-interval class the
+/// ledger's budgeted drain exists to close, reappearing through its own stale entries.
+///
+/// This independent cap makes each catch-up pop at most a CONSTANT number of peers no
+/// matter how many stale entries the ledger holds. Popping a stale entry removes it
+/// from the ledger and never re-deposits it (the deposit condition requires a
+/// non-empty bucket), so stale entries SELF-CLEAN at up to this many per interval.
+/// Set to twice [`MAX_DIAL_ATTEMPTS_PER_PASS`] so it is always ≥ the dial budget: on an
+/// all-live ledger (every visit spends a dial unit) the dial budget still binds first,
+/// so the visit cap never truncates a pass below the attempts it could spend; and a
+/// stale prefix up to this cap minus the dial budget is skipped past WITHIN one pass
+/// while the full dial budget is still spent on the live peers behind it, so a stale
+/// prefix cannot starve the live tail of an interval's whole dial budget. Kept a small
+/// multiple so the per-interval catch-up work stays constant.
+const MAX_READY_DIAL_VISITS_PER_PASS: usize = 2 * MAX_DIAL_ATTEMPTS_PER_PASS;
+
 /// Maximum concurrent DIALER (locally opened) bidi bridges the coordinator
 /// admits per pooled connection — the local cap on the OUTBOUND half of quinn's
 /// `connection_blocked` set.
@@ -427,10 +457,12 @@ impl PeerResidue {
 
   /// Pop the oldest-queued peer off the FRONT in O(1), also removing it from the
   /// dedup set so a later re-[`Self::insert`] of the same peer re-queues it (at the
-  /// back). Returns `None` when the ledger is empty. The budgeted
-  /// [`QuicEndpoint::catchup_service`] drain pops only while its interval dial budget
-  /// remains, leaving the untouched tail resident; the O(N) tick / `flush_outbound`
-  /// paths use [`Self::take`] to drain the whole ledger instead.
+  /// back) — and so a popped STALE entry (a peer whose bucket already emptied) simply
+  /// leaves the ledger and self-cleans. Returns `None` when the ledger is empty. The
+  /// budgeted [`QuicEndpoint::catchup_service`] drain pops only while both its interval
+  /// dial budget and its [`MAX_READY_DIAL_VISITS_PER_PASS`] visit budget remain, leaving
+  /// the untouched tail resident; the O(N) tick / `flush_outbound` paths use
+  /// [`Self::take`] to drain the whole ledger instead.
   fn pop_front(&mut self) -> Option<SocketAddr> {
     let peer = self.order.pop_front()?;
     self.seen.remove(&peer);
@@ -961,12 +993,17 @@ struct TestCounters {
   /// Test-only count of peers VISITED (popped and serviced) by the budgeted
   /// ready-dial drain in [`QuicEndpoint::catchup_service`] — bumped once per peer the
   /// bounded pop-loop pops off the ledger. The drain pops a front-prefix bounded by
-  /// the interval dial budget, so this delta stays O(budget) no matter how many peers
-  /// the ledger holds: a 300- and a 600-peer ledger yield the same bounded visit
-  /// count. The regression test resets it before one `catchup_service` and asserts
-  /// the delta does not scale with the peer count; reverting the drain to the
-  /// whole-ledger `take` visits every peer and makes the delta equal the ledger size,
-  /// failing the test. Never compiled into production builds.
+  /// the min of the interval dial budget and the independent
+  /// [`MAX_READY_DIAL_VISITS_PER_PASS`] visit budget, so this delta stays O(constant)
+  /// no matter how many peers the ledger holds — including a prefix of STALE entries
+  /// (empty buckets that attempt no dials and so spend no dial budget), which only the
+  /// visit budget bounds: a 300- and a 600-peer ledger yield the same bounded visit
+  /// count. One regression test resets it before a `catchup_service` over non-empty
+  /// buckets (the dial budget binds) and another over stale entries (the visit budget
+  /// binds), each asserting the delta does not scale with the peer count; reverting the
+  /// drain to the whole-ledger `take`, or dropping the visit budget for the stale case,
+  /// visits every peer and makes the delta equal the ledger size, failing the test.
+  /// Never compiled into production builds.
   ready_dial_peer_visits: u64,
   /// Test-only count of `StreamEvent::Writable` events the per-connection
   /// `poll()` drain delivered to the `Writable` arm this run — bumped at arm
@@ -4329,13 +4366,21 @@ where
   ///
   /// Drains all three residue kinds under one interval budget pair (a bridge-pump
   /// budget and a dial-attempt budget): first the ready-dial ledger as a bounded
-  /// front-prefix (pop peers while the dial budget remains, at most the ledger's
-  /// pre-drain length, leaving the tail resident), then the budget-deferred
-  /// `ready_bridges`, then the slot-free fixpoint. A ready-dial peer that exhausts the
-  /// dial budget re-deposits at the BACK of the ledger (via
-  /// [`Self::service_peer_bucket`]) and rides the advanced anchor to the next
-  /// interval, so the ledger round-robins to empty over ceil(len / budget) intervals
-  /// and the drain stays O(budget) regardless of the ledger's size.
+  /// front-prefix, then the budget-deferred `ready_bridges`, then the slot-free
+  /// fixpoint. The ready-dial drain pops peers under TWO independent caps — a
+  /// [`MAX_DIAL_ATTEMPTS_PER_PASS`] dial-attempt budget AND a
+  /// [`MAX_READY_DIAL_VISITS_PER_PASS`] peer-visit budget (plus the ledger's pre-drain
+  /// length) — leaving the untouched tail resident. The visit cap is what keeps the
+  /// pop count constant: a STALE ledger entry (a peer whose bucket a direct
+  /// `service_peer_bucket` wake already drained to empty) attempts zero dials, so it
+  /// spends a visit but NO dial budget; without the visit cap an arbitrarily long
+  /// stale prefix would be walked in full every interval — O(ledger) work, the class
+  /// the ledger exists to close. A LIVE ready-dial peer that exhausts the dial budget
+  /// re-deposits at the BACK of the ledger (via [`Self::service_peer_bucket`]) and
+  /// rides the advanced anchor to the next interval, while a stale entry pops off and
+  /// never re-deposits — so the ledger round-robins live peers and self-cleans stale
+  /// ones to empty over successive intervals, and the drain stays O(budget) regardless
+  /// of the ledger's size.
   fn catchup_service(&mut self, now: Instant) {
     let mut budget = MAX_BRIDGE_PUMPS_PER_PASS;
     let mut dial_budget = MAX_DIAL_ATTEMPTS_PER_PASS;
@@ -4348,36 +4393,50 @@ where
     // Ready-dial ledger: attempt each budget-deferred peer's parked bucket under the
     // shared interval dial budget, enqueuing its freshly-minted outbound bridges for
     // the pump below. This is a bounded-PREFIX drain — pop peers off the FRONT only
-    // while a dial budget remains AND at most the ledger's PRE-DRAIN length (snapshot
+    // while both budgets remain AND at most the ledger's PRE-DRAIN length (snapshot
     // once, before the loop) — leaving the untouched tail RESIDENT, so a catch-up
     // pass stays O(budget) regardless of how many peers the ledger holds. A
     // whole-ledger `take` would instead visit, hash, and re-deposit EVERY peer even
     // after the budget hit zero, making the drain scale with the ledger table — the
     // very class the residue ledger exists to close, reappearing in its own drain.
     //
-    // Two cooperating caps bound and terminate the loop:
+    // Three cooperating caps bound and terminate the loop:
     //   * the dial budget stops the pass at MAX_DIAL_ATTEMPTS_PER_PASS attempts —
     //     every visited peer with a non-empty bucket consumes at least one unit;
+    //   * the visit budget stops it at MAX_READY_DIAL_VISITS_PER_PASS peer pops — the
+    //     bound the dial budget CANNOT provide, because a STALE entry (a peer whose
+    //     bucket a direct `service_peer_bucket` wake already drained to empty, dropping
+    //     it from `dial_parked` but leaving the peer in the ledger) pops an empty
+    //     bucket and attempts zero dials, spending a visit but no dial unit. Absent
+    //     this cap an arbitrarily long stale prefix would be walked in full in ONE
+    //     interval — the O(ledger) class again;
     //   * the pre-drain visit count stops it after visiting each originally-queued
-    //     peer at most once.
-    // A peer whose bucket exhausts the dial budget mid-drain re-deposits itself at the
-    // BACK of the ledger (via `service_peer_bucket`); the budget is then zero, so the
-    // loop exits before re-popping it, and the pre-drain visit cap independently
+    //     peer at most once (so a same-pass BACK re-deposit is never re-serviced when
+    //     the ledger is shorter than the visit budget).
+    // A LIVE peer whose bucket exhausts the dial budget mid-drain re-deposits itself at
+    // the BACK of the ledger (via `service_peer_bucket`); the budget is then zero, so
+    // the loop exits before re-popping it, and the pre-drain visit cap independently
     // guarantees a back-rotated re-deposit is never re-serviced this pass. It instead
-    // rides the anchor `advance_catchup_anchor` re-arms below to the NEXT interval, so
-    // the ledger round-robins to empty over ceil(pre-drain-len / budget) intervals
-    // with nothing stranded. A peer that fully drains its bucket removes itself and
-    // never re-deposits. Termination holds because each iteration either consumes a
-    // unit of dial budget or is one of the at-most-pre-drain visits, and both counters
-    // strictly decrease. Only this BUDGETED drain needs the bound; `flush_outbound`
-    // and the tick drain the ledger fully under a `usize::MAX` dial budget that never
-    // budget-exits, so their whole-ledger drains stay correct and unchanged.
+    // rides the anchor `advance_catchup_anchor` re-arms below to the NEXT interval. A
+    // peer that fully drains its bucket — or a stale entry with no bucket — removes
+    // itself on the pop and never re-deposits (the deposit condition requires a
+    // non-empty bucket), so stale entries self-clean at up to the visit budget per
+    // interval and a live peer behind a stale prefix is reached within a bounded number
+    // of intervals as that prefix shrinks. Termination holds because each iteration
+    // consumes a unit of dial budget, a unit of visit budget, or is one of the
+    // at-most-pre-drain visits, and all three counters strictly decrease. Only this
+    // BUDGETED drain needs the caps; `flush_outbound` and the tick drain the ledger
+    // fully under a `usize::MAX` dial budget that never budget-exits and add NO visit
+    // cap — they are the O(N) paths by design, so their whole-ledger drains stay
+    // correct and unchanged.
     let mut to_flush: SmallVec<ConnectionHandle> = SmallVec::new();
     let mut remaining_visits = self.ready_dial_peers.len();
-    while dial_budget > 0 && remaining_visits > 0 {
+    let mut visit_budget = MAX_READY_DIAL_VISITS_PER_PASS;
+    while dial_budget > 0 && visit_budget > 0 && remaining_visits > 0 {
       let Some(peer) = self.ready_dial_peers.pop_front() else {
         break;
       };
+      visit_budget -= 1;
       remaining_visits -= 1;
       #[cfg(test)]
       {

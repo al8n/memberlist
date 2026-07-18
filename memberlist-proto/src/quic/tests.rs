@@ -10292,6 +10292,228 @@ fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
   );
 }
 
+/// Populate the ready-dial ledger with `n` distinct STALE entries — peers resident in
+/// [`QuicEndpoint::ready_dial_peers`] whose [`QuicEndpoint::dial_parked`] bucket is
+/// ABSENT — then run ONE [`QuicEndpoint::catchup_service`] and return
+/// `(peer visits, resident ledger len after, anchor armed)`.
+///
+/// A stale entry reproduces the ledger state left after a DIRECT `service_peer_bucket`
+/// wake (an establishment / `MAX_STREAMS` `Available` / slot-free wake) drained a
+/// deposited peer's bucket to empty and dropped it from `dial_parked` WITHOUT removing
+/// the peer from the ledger. Inserting straight into `ready_dial_peers` with no parked
+/// bucket is exactly that state, deterministic and with no connections to stand up.
+/// Servicing a stale entry pops an empty/absent bucket, so it attempts ZERO dials —
+/// spending a VISIT but no dial budget. No `TimerKey::Dial` keys are registered, so
+/// nothing counts as a due scheduled timer.
+fn drive_one_catchup_over_n_stale_ready_dial_peers(n: usize) -> (u64, usize, bool) {
+  let a_addr: SocketAddr = "127.0.0.1:8380".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: `catchup_service` is invoked directly and no membership timer
+  // interferes with the ledger drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  for i in 0..n {
+    let peer: SocketAddr = format!("127.0.0.11:{}", 9000 + i).parse().unwrap();
+    // STALE: resident in the ledger with NO `dial_parked` bucket — the state a direct
+    // `service_peer_bucket` wake leaves after emptying a deposited peer's bucket.
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    n,
+    "all {n} distinct stale peers seeded into the ready-dial ledger"
+  );
+  assert!(
+    a.dial_parked.is_empty(),
+    "test precondition: every seeded entry is STALE — no dial_parked bucket backs it"
+  );
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  (
+    visits,
+    a.ready_dial_peers.len(),
+    a.next_catchup_at.is_some(),
+  )
+}
+
+/// The budgeted catch-up ready-dial drain pops at most a CONSTANT number of peers even
+/// when a long prefix of the ledger is STALE — entries whose parked bucket a direct
+/// `service_peer_bucket` wake already emptied, so servicing them attempts zero dials
+/// and spends NO dial budget. The dial-attempt budget cannot bound such a pass (a stale
+/// visit costs no dial unit), so the independent [`MAX_READY_DIAL_VISITS_PER_PASS`]
+/// visit budget is what holds the pop count constant. The visited stale entries
+/// self-clean (popped, never re-deposited), the unvisited stale tail stays resident for
+/// the next interval, and the sticky anchor stays armed.
+///
+/// Mutation-verify: drop the visit budget (revert the loop to the `remaining_visits =
+/// len()` bound alone). A stale visit spends no dial budget, so the loop walks the WHOLE
+/// stale ledger: `visits` climbs to 300 then 600 (the ledger size), so both the
+/// `== MAX_READY_DIAL_VISITS_PER_PASS` and the "flat across ledger size" assertions
+/// fail.
+#[test]
+fn catchup_ready_dial_drain_visits_are_visit_bounded_over_a_stale_prefix() {
+  let cap = super::MAX_READY_DIAL_VISITS_PER_PASS as u64;
+
+  // 300 stale entries: ONE catch-up pops at most the visit budget, not 300.
+  let (visits_300, resident_300, anchor_300) = drive_one_catchup_over_n_stale_ready_dial_peers(300);
+  assert_eq!(
+    visits_300, cap,
+    "with a 300-entry stale ledger (300 >> the visit budget) the pass pops EXACTLY \
+       MAX_READY_DIAL_VISITS_PER_PASS={cap} peers — the visit budget binds, since a stale \
+       visit spends no dial budget; visited {visits_300}"
+  );
+  assert!(
+    visits_300 < 300,
+    "the drain must leave most of the 300-entry stale ledger unvisited; visited {visits_300}"
+  );
+  assert_eq!(
+    resident_300,
+    300 - visits_300 as usize,
+    "exactly the unvisited stale tail stays resident — each visited stale entry popped off \
+       the ledger and self-cleaned (no bucket, so no re-deposit)"
+  );
+  assert!(
+    resident_300 > 0,
+    "non-vacuous: a large stale tail remains resident to drain over later intervals"
+  );
+  assert!(
+    anchor_300,
+    "the resident stale tail keeps has_residue true, so advance_catchup_anchor leaves the \
+       sticky catch-up anchor armed"
+  );
+
+  // Double the stale ledger to 600: the per-catch-up visit count must stay FLAT.
+  let (visits_600, resident_600, anchor_600) = drive_one_catchup_over_n_stale_ready_dial_peers(600);
+  assert_eq!(
+    visits_600, visits_300,
+    "the per-catch-up visit count is bounded by the independent visit budget and is \
+       INDEPENDENT of the stale ledger size: 300 and 600 stale entries both visit \
+       {visits_300}. Dropping the visit budget makes this 300 vs 600 (scaling with the \
+       ledger — the O(ledger)-per-interval defect) and the equality fails"
+  );
+  assert_eq!(
+    visits_600, cap,
+    "the 600-entry stale ledger also pops exactly the visit budget; visited {visits_600}"
+  );
+  assert!(
+    resident_600 > resident_300,
+    "the larger stale ledger leaves a larger resident tail — the drain did not scale up its \
+       work to compensate; {resident_600} resident vs {resident_300}"
+  );
+  assert!(
+    anchor_600,
+    "the 600-entry stale residue also keeps the anchor armed"
+  );
+}
+
+/// A LIVE budget-deferred ready-dial peer placed BEHIND a large STALE prefix is still
+/// serviced within a bounded number of catch-up intervals — nothing strands behind the
+/// visit bound. The visit budget defers the live peer past the first interval (it stops
+/// the pass inside the stale prefix), but the stale prefix SELF-CLEANS (popped, never
+/// re-deposited) so it shrinks by up to the visit budget per interval; the live peer
+/// moves to the front and is reached as soon as the prefix ahead of it is gone.
+///
+/// Mutation-verify: drop the visit budget (revert to the `remaining_visits = len()`
+/// bound). One pass then walks the whole ledger and services the live peer in the FIRST
+/// interval, so the "still parked after one catch-up" assertion fails.
+#[test]
+fn catchup_ready_dial_drain_reaches_live_peer_behind_stale_prefix_no_strand() {
+  let a_addr: SocketAddr = "127.0.0.1:8390".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: every wake is provably a bounded ready-dial catch-up (no membership
+  // tick), so the ledger drains solely through the drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  // A large STALE prefix — peers resident in the ledger with NO parked bucket, the state
+  // a direct `service_peer_bucket` wake leaves after emptying a deposited bucket — seeded
+  // FIRST so they sit ahead of the live peer.
+  const STALE_PREFIX: usize = 300;
+  let stale: Vec<SocketAddr> = (0..STALE_PREFIX)
+    .map(|i| format!("127.0.0.12:{}", 9000 + i).parse().unwrap())
+    .collect();
+  for &peer in &stale {
+    a.ready_dial_peers.insert(peer);
+  }
+  // One LIVE deferred peer with a non-empty creditable bucket, inserted LAST so it sits
+  // at the BACK, behind the whole stale prefix. An expired entry is the cheapest
+  // creditable bucket (retires on service); "serviced" = its bucket drains and leaves
+  // `dial_parked`, the observable no-strand signal — the per-peer visit order and budget
+  // consumption match a mint bucket.
+  let live: SocketAddr = "127.0.0.9:9999".parse().unwrap();
+  let elapsed = now - Duration::from_secs(1);
+  a.dial_parked
+    .entry(live)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(90_000),
+      peer: live,
+      deadline: elapsed,
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  a.ready_dial_peers.insert(live);
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    STALE_PREFIX + 1,
+    "stale prefix + the one live peer seeded into the ledger"
+  );
+  assert!(
+    a.dial_parked.contains_key(&live),
+    "test precondition: the live peer starts with a non-empty parked bucket behind the \
+       stale prefix"
+  );
+
+  // Arm the sticky anchor as `reconcile_catchup_anchor` would, then drive the strict
+  // poll-surface cadence: poll_timeout -> advance to the anchor -> handle_timeout.
+  a.next_catchup_at = Some(now + super::CATCHUP_INTERVAL);
+
+  // First interval: the visit budget stops the pass INSIDE the stale prefix, before the
+  // live peer — so the live peer must still be parked afterwards. A len()-only bound
+  // would walk the whole ledger and service the live peer here, failing this assertion.
+  let wake0 = a
+    .poll_timeout()
+    .expect("a non-empty ready-dial residue schedules a catch-up wake");
+  a.handle_timeout(wake0);
+  assert!(
+    a.dial_parked.contains_key(&live),
+    "after ONE catch-up the visit budget has cleared only a stale-prefix chunk; the live \
+       peer behind it is still parked (a len()-only bound would have serviced it already)"
+  );
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "stale entries remain resident to drain over further intervals"
+  );
+
+  // Keep driving: the stale prefix self-cleans at the visit budget per interval, so the
+  // live peer is reached within a bounded number of further intervals — nothing strands.
+  let mut intervals = 1usize;
+  while a.dial_parked.contains_key(&live) {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    intervals += 1;
+    assert!(
+      intervals <= 5,
+      "the live peer behind a {STALE_PREFIX}-entry stale prefix must be serviced within a \
+         bounded number of catch-up intervals; still parked after {intervals}"
+    );
+  }
+  // ceil(300 / visit budget) stale-clearing intervals, and the last of those reaches the
+  // live peer in the same pass that clears the final stale chunk ahead of it.
+  assert!(
+    intervals <= 3,
+    "the stale prefix self-cleans at the visit budget per interval, so the live peer is \
+       reached as soon as the prefix ahead of it is gone; took {intervals} intervals"
+  );
+  assert!(
+    !a.dial_parked.contains_key(&live),
+    "the live peer's bucket was serviced — it did not strand behind the stale prefix"
+  );
+}
+
 /// The per-peer reliable user-message admission cap refuses a `start_user_message`
 /// once `max_pending_user_dials_per_peer` intents are already OUTSTANDING to that
 /// peer, and the refused call is a pure no-op.
