@@ -20,8 +20,8 @@ mod transport_mode;
 #[cfg(feature = "tls")]
 pub use config::{QuicConfigError, QuicConfigOptions};
 pub use crypto::{
-  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_QUIC_CONNECTIONS,
-  DEFAULT_MAX_QUIC_INBOUND_STREAMS, QuicOptions,
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS, QuicOptions, QuicOptionsError,
 };
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
@@ -41,7 +41,7 @@ use smallvec_wrapper::{MediumVec, SmallVec};
 use crate::{
   FxHashSet,
   endpoint::Endpoint,
-  error::{Error, StreamError},
+  error::{Error, StreamError, UserDialBacklogFull},
   event::{
     Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeStatus, PushPullKind, StreamId,
     Transmit,
@@ -618,6 +618,21 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// contribute zero by construction, so this counter is touched only at the
   /// `dial_pending` FIFO push and drain sites.
   unattempted_dial_count: usize,
+  /// Incremental per-peer count of RESIDENT reliable user-message dial intents —
+  /// [`PendingDial`]s of kind [`ExchangeKind::UserMessage`] currently living in
+  /// [`Self::dial_pending`] or a [`Self::dial_parked`] bucket — that
+  /// [`Self::start_user_message`]'s admission gate reads to bound one peer's
+  /// OUTSTANDING reliable backlog at
+  /// [`QuicOptions::max_pending_user_dials_per_peer`](crate::quic::QuicOptions::max_pending_user_dials_per_peer).
+  /// Maintained symmetrically at every UserMessage `PendingDial` create/consume
+  /// site (see [`Self::note_user_dial_enqueued`] / [`Self::note_user_dial_dequeued`]):
+  /// the entry's stamped `kind` is the single source of truth, so this counter
+  /// equals the brute-force filter over both dial structures at all times. Push/pull
+  /// and reliable-ping intents are exempt and never counted. A peer's entry is
+  /// removed at zero (mirroring `mem_ingress_per_peer`) so no dead peer accumulates,
+  /// and the map is lookup-only — its iteration order drives nothing, so VOPR
+  /// determinism is unaffected.
+  user_dial_backlog: HashMap<SocketAddr, usize>,
   /// Most recent `now: Instant` injected by `handle_udp` / `handle_timeout` /
   /// any high-level `start_*` wrapper. Used by [`Self::poll_timeout`] as the
   /// known-past anchor for the immediate-due wake of an unattempted
@@ -981,6 +996,7 @@ impl<I, R> QuicEndpoint<I, R> {
       dial_pending: VecDeque::new(),
       dial_parked: IndexMap::default(),
       unattempted_dial_count: 0,
+      user_dial_backlog: HashMap::new(),
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
@@ -1575,6 +1591,48 @@ impl<I, R> QuicEndpoint<I, R> {
     self.encryption = encryption;
   }
 
+  /// Record that a reliable user-message [`PendingDial`] ENTERED
+  /// [`Self::dial_pending`] or a [`Self::dial_parked`] bucket, bumping the peer's
+  /// [`Self::user_dial_backlog`] count. Only [`ExchangeKind::UserMessage`] intents
+  /// are counted — push/pull and reliable-ping are exempt (protocol-paced,
+  /// liveness-critical) — so every enqueue site passes the entry's stamped `kind`
+  /// and this decides. Called from the direct-path wrapper, the tick sieve, the
+  /// two bypass intakes, and a re-park; paired with [`Self::note_user_dial_dequeued`].
+  #[inline]
+  fn note_user_dial_enqueued(&mut self, peer: SocketAddr, kind: ExchangeKind) {
+    if matches!(kind, ExchangeKind::UserMessage) {
+      *self.user_dial_backlog.entry(peer).or_insert(0) += 1;
+    }
+  }
+
+  /// Record that a reliable user-message [`PendingDial`] LEFT
+  /// [`Self::dial_pending`] / a [`Self::dial_parked`] bucket without re-entering
+  /// one, decrementing the peer's [`Self::user_dial_backlog`] count and removing
+  /// the entry at zero (mirroring `mem_ingress_per_peer` so no dead peer
+  /// accumulates). Only [`ExchangeKind::UserMessage`] intents are counted. Called
+  /// from [`Self::process_dial_entry`]'s take-out and the leave-time
+  /// [`Self::purge_dial_entry`]; a re-park pairs its own
+  /// [`Self::note_user_dial_enqueued`] against `process_dial_entry`'s release here,
+  /// so a reparked UserMessage intent nets to a single resident count. The
+  /// `Occupied` guard makes a decrement for a peer with no counted entry a safe
+  /// no-op (e.g. a test that injected a `PendingDial` directly, bypassing the
+  /// enqueue sites).
+  #[inline]
+  fn note_user_dial_dequeued(&mut self, peer: SocketAddr, kind: ExchangeKind) {
+    if !matches!(kind, ExchangeKind::UserMessage) {
+      return;
+    }
+    if let std::collections::hash_map::Entry::Occupied(mut slot) =
+      self.user_dial_backlog.entry(peer)
+    {
+      let n = slot.get_mut();
+      *n -= 1;
+      if *n == 0 {
+        slot.remove();
+      }
+    }
+  }
+
   /// Re-queue an event for observation by a later [`Self::poll_event`]
   /// (the sieving public drain).
   ///
@@ -1635,6 +1693,9 @@ impl<I, R> QuicEndpoint<I, R> {
         // A freshly-deposited intent is unattempted; bump the incremental count
         // `refresh_immediate_due` reads for its immediate-due wake.
         self.unattempted_dial_count += 1;
+        // A UserMessage intent now resides in `dial_pending`; count it against the
+        // peer's admission backlog (a non-UserMessage kind is a no-op).
+        self.note_user_dial_enqueued(peer, kind);
         // Register the intent's own deadline; the unattempted immediate-due
         // half is folded live by `refresh_immediate_due`.
         self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
@@ -1671,6 +1732,9 @@ impl<I, R> QuicEndpoint<I, R> {
           // A freshly-sieved intent is unattempted; bump the incremental count
           // `refresh_immediate_due` reads for its immediate-due wake.
           self.unattempted_dial_count += 1;
+          // A UserMessage intent now resides in `dial_pending`; count it against
+          // the peer's admission backlog (a non-UserMessage kind is a no-op).
+          self.note_user_dial_enqueued(peer, kind);
           // Register the intent's own deadline; the unattempted immediate-due
           // half is folded live by `refresh_immediate_due`.
           self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
@@ -2040,6 +2104,50 @@ impl<I, R> QuicEndpoint<I, R> {
        dial_pending FIFO"
     );
     self.dial_pending.iter().filter(|d| !d.attempted).count()
+  }
+
+  /// Test-only: the incremental per-peer reliable user-message dial-backlog count
+  /// the admission gate reads.
+  #[cfg(test)]
+  fn user_dial_backlog(&self, peer: &SocketAddr) -> usize {
+    self.user_dial_backlog.get(peer).copied().unwrap_or(0)
+  }
+
+  /// Test-only brute-force recount of resident reliable user-message dial intents,
+  /// grouped by peer, read straight from `dial_pending` + `dial_parked` filtering
+  /// [`ExchangeKind::UserMessage`]. The invariant is `user_dial_backlog == this map`
+  /// at all times; a missed increment/decrement at any create/consume site makes
+  /// them diverge, so [`Self::assert_user_dial_backlog_exact`] cross-checks after
+  /// every operation. Only UserMessage intents appear (push/pull and reliable-ping
+  /// are exempt), mirroring the `unattempted_dial_recount` idiom.
+  #[cfg(test)]
+  fn user_dial_backlog_bruteforce(&self) -> HashMap<SocketAddr, usize> {
+    let mut recount: HashMap<SocketAddr, usize> = HashMap::new();
+    for d in &self.dial_pending {
+      if matches!(d.kind, ExchangeKind::UserMessage) {
+        *recount.entry(d.peer).or_insert(0) += 1;
+      }
+    }
+    for bucket in self.dial_parked.values() {
+      for d in bucket {
+        if matches!(d.kind, ExchangeKind::UserMessage) {
+          *recount.entry(d.peer).or_insert(0) += 1;
+        }
+      }
+    }
+    recount
+  }
+
+  /// Test-only cross-check: the incremental `user_dial_backlog` map equals the
+  /// brute-force recount exactly — same peers, same counts, and (because both
+  /// remove a peer at zero) no stale zero entries on either side.
+  #[cfg(test)]
+  fn assert_user_dial_backlog_exact(&self) {
+    assert_eq!(
+      self.user_dial_backlog,
+      self.user_dial_backlog_bruteforce(),
+      "user_dial_backlog drifted from the brute-force recount over dial_pending + dial_parked"
+    );
   }
 
   /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
@@ -2522,6 +2630,9 @@ impl<I, R> QuicEndpoint<I, R> {
           // Keep the unattempted count exact even mid-sieve; `service_dials`
           // resets it to 0 at its `mem::take` immediately after this call.
           self.unattempted_dial_count += 1;
+          // A UserMessage intent now resides in `dial_pending`; count it against
+          // the peer's admission backlog (a non-UserMessage kind is a no-op).
+          self.note_user_dial_enqueued(peer, kind);
         }
         other => others.push(other),
       }
@@ -2900,13 +3011,21 @@ where
   /// [`TimerKey::Dial`] deadline key would fire stale `run_tick`-driving wakes for
   /// an intent that no longer exists.
   fn purge_dial_entry(&mut self, entry: PendingDial, now: Instant) {
-    let PendingDial { id, attempted, .. } = entry;
+    let PendingDial {
+      id,
+      peer,
+      attempted,
+      kind,
+      ..
+    } = entry;
     // Mirror `process_dial_entry`'s `dial_pending`-exit bookkeeping: release the
-    // incremental unattempted unit (saturating) and drop the deadline key. Unlike
-    // `process_dial_entry` there is no re-park, so the key is dropped for good.
+    // incremental unattempted unit (saturating), release the peer's admission
+    // backlog unit, and drop the deadline key. Unlike `process_dial_entry` there is
+    // no re-park, so both counters and the key are dropped for good.
     if !attempted {
       self.unattempted_dial_count = self.unattempted_dial_count.saturating_sub(1);
     }
+    self.note_user_dial_dequeued(peer, kind);
     self.deadline_index.set(TimerKey::Dial(id), None);
     // Resolve a parked waiter: drains `pending_outbound_kinds` / `_peers`, emits a
     // terminal `Failed` `ExchangeCompleted` for a UserMessage / PushPull (the
@@ -3162,6 +3281,10 @@ where
       bucket.push_back(entry);
     }
     self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
+    // The intent re-enters a `dial_parked` bucket: re-count it against the peer's
+    // admission backlog. `process_dial_entry` released it on take-out, so a
+    // re-park nets to one resident count (a non-UserMessage kind is a no-op).
+    self.note_user_dial_enqueued(peer, kind);
     DialAttempt::Reparked
   }
 
@@ -3209,6 +3332,11 @@ where
     if !attempted {
       self.unattempted_dial_count = self.unattempted_dial_count.saturating_sub(1);
     }
+    // This entry left `dial_pending` / its `dial_parked` bucket: release its unit
+    // of the peer's admission backlog. A branch below that re-parks re-counts it
+    // via `repark_blocked_dial`, so a re-park nets to one resident count while a
+    // mint/retire nets to zero (a non-UserMessage kind is a no-op).
+    self.note_user_dial_dequeued(peer, kind);
     // `mem::take` removed this entry from `dial_pending`; drop its deadline
     // key. A branch that requeues re-registers it below, so after the loop
     // the `Dial` keys match the surviving intents exactly.
@@ -4463,6 +4591,19 @@ where
     payload: Bytes,
     now: Instant,
   ) -> Result<StreamId, Error> {
+    // Admission gate on the node's OWN reliable user-message load: past
+    // `max_pending_user_dials_per_peer` OUTSTANDING (still-dialing) intents to this
+    // peer, refuse with visible backpressure instead of parking yet another intent
+    // toward its dial deadline. Checked BEFORE any state mutation — including
+    // `last_now` and the machine intent — so a refused call is a pure no-op (no id
+    // allocated, no `pending_outbound_*` entry, no Dial key, no backlog change).
+    // Only UserMessage intents are counted; push/pull and reliable-ping are exempt.
+    let limit = self.cfg.max_pending_user_dials_per_peer();
+    if self.user_dial_backlog.get(&peer).copied().unwrap_or(0) >= limit {
+      return Err(Error::UserDialBacklogFull(UserDialBacklogFull::new(
+        peer, limit,
+      )));
+    }
     self.last_now = Some(now);
     let (id, intent) = self.ep.start_user_message_direct(peer, payload, now)?;
     let entry = PendingDial {
@@ -4474,6 +4615,12 @@ where
     };
     self.pending_outbound_kinds.insert(id, intent.kind());
     self.pending_outbound_peers.insert(id, peer);
+    // Count this intent against the peer's admission backlog before servicing it.
+    // `service_started_exchange` routes the entry through `process_dial_entry`,
+    // which releases this unit on take-out; a re-park (cold / credit-blocked peer)
+    // re-counts it, so the intent contributes exactly one resident count while it
+    // remains parked and zero once it mints or retires.
+    self.note_user_dial_enqueued(peer, entry.kind);
     self.service_started_exchange(entry, now);
     Ok(id)
   }

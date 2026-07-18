@@ -208,6 +208,11 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicOptions {
     "localhost",
     UnreliableTransport::Datagram,
   )
+  // The conformance suite exercises reliable-dial requeuing under stream-credit
+  // pressure with large user-message bursts (well above the default per-peer
+  // admission cap). That cap is exercised on its own in the proto crate; here it
+  // must not throttle the conformance bursts, so set it effectively unbounded.
+  .with_max_pending_user_dials_per_peer(usize::MAX)
 }
 
 /// `quic`-gated deterministic conformance harness. Accessor-only; no `pub`

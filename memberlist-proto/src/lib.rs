@@ -35,9 +35,9 @@ mod quic;
 #[cfg(feature = "quic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use quic::{
-  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_QUIC_CONNECTIONS,
-  DEFAULT_MAX_QUIC_INBOUND_STREAMS, DatagramSendStatus, QuicEndpoint, QuicOptions,
-  UnreliableTransport,
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS, DatagramSendStatus, QuicEndpoint,
+  QuicOptions, QuicOptionsError, UnreliableTransport,
 };
 #[cfg(all(feature = "quic", feature = "tls"))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "quic", feature = "tls"))))]
@@ -152,7 +152,7 @@ pub use cidr::{CidrAnd, CidrPolicy};
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
-pub use error::{EndpointInitError, Error, SizeExceeded, StreamError};
+pub use error::{EndpointInitError, Error, SizeExceeded, StreamError, UserDialBacklogFull};
 // The RNG vocabulary backing the `Endpoint<I, A, R>` type parameter (defaulting
 // to `SmallRng`), re-exported so a driver can name the trait bound, seed a
 // `SmallRng`, and inject it without taking its own direct `rand` dependency.

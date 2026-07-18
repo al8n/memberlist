@@ -126,6 +126,16 @@ pub struct QuicOptions {
   /// connection; this bounds the inbound bridge population summed across all of
   /// them. See [`Self::max_inbound_streams`] for the default and rationale.
   max_inbound_streams: Option<usize>,
+  /// Per-peer ceiling on OUTSTANDING (still-dialing) reliable user-message dial
+  /// intents. Past this many parked intents to one peer,
+  /// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message)
+  /// refuses a further send with a `Busy`-class error instead of parking another
+  /// intent — admission control on the node's own application load. Unlike the
+  /// `Option<usize>` transport caps above there is no `None` (unbounded) form: an
+  /// admission bound is always in effect, and a value of 0 is rejected by
+  /// [`Self::validate`]. Push/pull and reliable-ping dials are exempt. See
+  /// [`Self::max_pending_user_dials_per_peer`] for the default and rationale.
+  max_pending_user_dials_per_peer: usize,
 }
 
 /// Default global QUIC connection ceiling installed by [`QuicOptions::new`].
@@ -182,6 +192,38 @@ pub const DEFAULT_MAX_QUIC_INBOUND_STREAMS: usize = 1024;
 const _: () = assert!(
   DEFAULT_MAX_QUIC_INBOUND_STREAMS > 0,
   "the default QUIC inbound-stream ceiling must be nonzero"
+);
+
+/// Default per-peer reliable user-message dial-backlog ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// Bounds the number of OUTSTANDING (still-dialing) reliable user-message
+/// intents the coordinator will hold for a single peer before
+/// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message)
+/// refuses a further send with visible backpressure. An application that queues
+/// reliable messages to one peer faster than that peer establishes or grants
+/// stream credit would otherwise park an unbounded number of intents (each
+/// toward its dial deadline), learning of the overload only via delayed deadline
+/// failures. The bound makes the overload visible at the call site instead.
+///
+/// A legitimate application sends a handful of concurrent reliable messages to
+/// any one peer; a pooled connection that is answering mints each immediately, so
+/// a healthy peer never accumulates backlog at all (only a peer that cannot yet
+/// open a stream parks). `32` is an order of magnitude above the legitimate
+/// working set while keeping the per-peer parked-intent footprint hard-bounded.
+/// Push/pull and reliable-ping dials are exempt (protocol-paced,
+/// liveness-critical) and never counted. Raise it via
+/// [`QuicOptions::with_max_pending_user_dials_per_peer`] for a bursty reliable
+/// workload.
+pub const DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER: usize = 32;
+
+// A ceiling of 0 would refuse EVERY reliable user-message dial (the admission
+// gate refuses when `backlog >= limit`, and an empty backlog is already `>= 0`),
+// silently disabling reliable user messages. Keep the default a usable nonzero
+// bound; `QuicOptions::validate` rejects an operator-supplied 0 at construction.
+const _: () = assert!(
+  DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER >= 1,
+  "the default per-peer reliable user-message dial-backlog ceiling must be >= 1"
 );
 
 impl QuicOptions {
@@ -369,6 +411,7 @@ impl QuicOptions {
       max_quic_connections: Some(DEFAULT_MAX_QUIC_CONNECTIONS),
       max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
       max_inbound_streams: Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
+      max_pending_user_dials_per_peer: DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
     }
   }
 
@@ -402,6 +445,19 @@ impl QuicOptions {
   #[inline(always)]
   pub fn with_max_inbound_streams(mut self, max: Option<usize>) -> Self {
     self.max_inbound_streams = max;
+    self
+  }
+
+  /// Override the per-peer reliable user-message dial-backlog ceiling. A value of
+  /// `0` disables reliable user messages entirely and is rejected by
+  /// [`Self::validate`] at construction. Bounds the OUTSTANDING (still-dialing)
+  /// reliable user-message intents to any one peer; a further send past the
+  /// ceiling is refused with backpressure. Defaults to
+  /// [`DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_pending_user_dials_per_peer(mut self, max: usize) -> Self {
+    self.max_pending_user_dials_per_peer = max;
     self
   }
 
@@ -477,6 +533,46 @@ impl QuicOptions {
   pub const fn max_inbound_streams(&self) -> Option<usize> {
     self.max_inbound_streams
   }
+
+  /// The per-peer reliable user-message dial-backlog ceiling the coordinator
+  /// enforces in
+  /// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message).
+  /// Defaults to [`DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER`]; see that constant
+  /// for the rationale.
+  #[inline(always)]
+  pub const fn max_pending_user_dials_per_peer(&self) -> usize {
+    self.max_pending_user_dials_per_peer
+  }
+
+  /// Validate operator-supplied option values, rejecting a configuration the
+  /// coordinator cannot service. Reject rather than panic or silently ship a
+  /// footgun (mirrors [`Endpoint::try_new_at`](crate::endpoint::Endpoint::try_new_at)'s
+  /// operator-misconfiguration guards).
+  ///
+  /// Currently the single guard: `max_pending_user_dials_per_peer` must be `>= 1`,
+  /// since a `0` ceiling refuses every reliable user-message dial (the admission
+  /// gate refuses when `backlog >= limit`, and an empty backlog already satisfies
+  /// `>= 0`). Callers that assemble a [`QuicOptions`] from operator input run this
+  /// before handing it to the coordinator.
+  pub const fn validate(&self) -> Result<(), QuicOptionsError> {
+    if self.max_pending_user_dials_per_peer == 0 {
+      return Err(QuicOptionsError::MaxPendingUserDialsPerPeerZero);
+    }
+    Ok(())
+  }
+}
+
+/// Error returned by [`QuicOptions::validate`] when an operator-supplied option
+/// value is unusable. `#[non_exhaustive]`: further option guards may be added
+/// without a breaking change.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum QuicOptionsError {
+  /// `max_pending_user_dials_per_peer` was set to `0`, which would refuse every
+  /// reliable user-message dial (the admission gate refuses when
+  /// `backlog >= limit`). Set it to `>= 1`.
+  #[error("max_pending_user_dials_per_peer must be >= 1")]
+  MaxPendingUserDialsPerPeerZero,
 }
 
 #[cfg(test)]

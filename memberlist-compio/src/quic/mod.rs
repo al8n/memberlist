@@ -184,6 +184,12 @@ where
         "quic_config required",
       ))
     })?;
+    // Reject an unusable QUIC options bundle (a zero per-peer reliable-dial
+    // ceiling) at transport construction, so the misconfiguration fails fast
+    // rather than silently disabling reliable user messages later.
+    quic_config.validate().map_err(|e| {
+      MemberlistError::Io(std::io::Error::new(ErrorKind::InvalidInput, e.to_string()))
+    })?;
 
     let advertise_socket = match &advertise_input {
       MaybeResolved::Resolved(s) => *s,

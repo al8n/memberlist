@@ -146,6 +146,15 @@ pub enum Error {
   #[error(transparent)]
   EndpointInit(#[from] memberlist_proto::EndpointInitError),
 
+  /// The QUIC coordinator rejected the supplied [`QuicOptions`](memberlist_proto::QuicOptions)
+  /// at construction — currently a zero per-peer reliable user-message dial
+  /// ceiling, which would disable reliable user messages entirely. Surfaced from
+  /// the constructor instead of silently shipping the misconfiguration.
+  #[cfg(feature = "quic")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+  #[error(transparent)]
+  QuicOptionsInit(#[from] memberlist_proto::QuicOptionsError),
+
   /// The supplied node metadata exceeds the wire ceiling
   /// ([`Meta::MAX_SIZE`](memberlist_proto::typed::Meta::MAX_SIZE)) and was
   /// rejected before any coordinator mutation.

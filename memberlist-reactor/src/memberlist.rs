@@ -810,6 +810,10 @@ where
     // cannot diverge.
     let label = ml_opts.label().map(bytes::Bytes::copy_from_slice);
 
+    // Reject an unusable QUIC options bundle (a zero per-peer reliable-dial
+    // ceiling) at construction, mirroring the machine's `Endpoint::try_new`
+    // options guard above.
+    quic_config.validate()?;
     // `mut` only when at least one transform setter below is built in; with no
     // backend the endpoint is moved straight into `with_label` unmutated.
     #[cfg_attr(not(any(compression, checksum, encryption)), allow(unused_mut))]

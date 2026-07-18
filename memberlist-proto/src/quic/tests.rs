@@ -10047,3 +10047,322 @@ fn flush_outbound_drains_ready_dial_ledger_before_finalize() {
     "the flush-all drains B's whole deferred tail (unbounded budget)"
   );
 }
+
+/// The per-peer reliable user-message admission cap refuses a `start_user_message`
+/// once `max_pending_user_dials_per_peer` intents are already OUTSTANDING to that
+/// peer, and the refused call is a pure no-op.
+///
+/// Fills a cold (never-answering) peer to exactly the default cap `K = 32` — each
+/// `start_user_message` re-parks the still-handshaking dial — then the `K+1`th
+/// returns [`Error::UserDialBacklogFull`] carrying the peer and the limit, having
+/// mutated nothing (backlog still `K`, parked bucket still `K`, no new
+/// `pending_outbound_*` entry).
+///
+/// Mutation-verify: remove the admission gate in `start_user_message` — the `K+1`th
+/// call then returns `Ok`, so `expect_err` fails.
+#[test]
+fn user_dial_backlog_cap_refuses_past_the_limit() {
+  let a_addr: SocketAddr = "127.0.0.1:8600".parse().unwrap();
+  // A port nothing listens on: the pooled connection never leaves handshaking, so
+  // every reliable user-message dial re-parks (the outstanding-backlog state the
+  // cap bounds).
+  let cold: SocketAddr = "127.0.0.9:8601".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  assert_eq!(
+    a.cfg.max_pending_user_dials_per_peer(),
+    32,
+    "test precondition: the default per-peer reliable-dial cap is 32"
+  );
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for i in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .unwrap_or_else(|e| panic!("send {i} under the cap must be admitted, got {e:?}"));
+    // Drain owed transmits so `out` does not grow unboundedly; the payloads are
+    // never delivered, so every dial stays parked.
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "K admitted cold-peer dials must all be parked and counted"
+  );
+  assert_eq!(
+    a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0),
+    k,
+    "test precondition: all K intents re-parked on the cold peer's bucket"
+  );
+  a.assert_user_dial_backlog_exact();
+
+  // Snapshot the state the refused call must NOT touch.
+  let kinds_before = a.pending_outbound_kinds.len();
+  let peers_before = a.pending_outbound_peers.len();
+  let parked_before = a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0);
+
+  let err = a
+    .start_user_message(cold, payload.clone(), now)
+    .expect_err("the K+1th send must be refused with backpressure");
+  match err {
+    crate::error::Error::UserDialBacklogFull(full) => {
+      assert_eq!(full.peer(), cold, "the error names the overloaded peer");
+      assert_eq!(full.limit(), k, "the error names the configured limit");
+    }
+    other => panic!("expected UserDialBacklogFull, got {other:?}"),
+  }
+
+  // Pure no-op: no machine intent, no id, no pending_outbound_* entry, no Dial key
+  // (the parked bucket, which owns each intent's Dial key, is unchanged), and the
+  // backlog is untouched.
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "a refused call must not change the backlog"
+  );
+  assert_eq!(
+    a.pending_outbound_kinds.len(),
+    kinds_before,
+    "a refused call must register no outbound-kind entry"
+  );
+  assert_eq!(
+    a.pending_outbound_peers.len(),
+    peers_before,
+    "a refused call must register no outbound-peer entry"
+  );
+  assert_eq!(
+    a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0),
+    parked_before,
+    "a refused call must park no new intent"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// Retiring the outstanding intents at their dial deadline releases the backlog, so
+/// a fresh `start_user_message` to the same peer is admitted again.
+///
+/// Mutation-verify: drop the `note_user_dial_dequeued` release in
+/// `process_dial_entry` — the retired intents leave the count stuck at `K`, so the
+/// post-retirement backlog assertion fails (and the fresh send would wrongly be
+/// refused).
+#[test]
+fn user_dial_backlog_releases_when_intents_retire() {
+  let a_addr: SocketAddr = "127.0.0.1:8610".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8611".parse().unwrap();
+  let now = Instant::now();
+  // No periodic schedulers, so advancing the clock to the dial deadline drives a
+  // pure catch-up/tick that services (and retires) the parked dials with no
+  // scheduler noise.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial under the cap is admitted");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(a.user_dial_backlog(&cold), k, "the cap is filled");
+
+  // Advance past the parked intents' `now + stream_timeout` (default 10s) deadline
+  // and tick: `service_dials` retires each expired intent, releasing its backlog
+  // unit.
+  let later = now + Duration::from_secs(30);
+  a.handle_timeout(later);
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    0,
+    "retiring every expired intent must drain the peer's backlog to 0"
+  );
+  assert!(
+    a.dial_parked
+      .get(&cold)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the expired bucket is drained (and removed) at retirement"
+  );
+  a.assert_user_dial_backlog_exact();
+
+  // A fresh send is admitted again now the backlog has drained.
+  a.start_user_message(cold, payload.clone(), later)
+    .expect("a fresh send is admitted once the backlog has drained");
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    1,
+    "the fresh send re-parks and is counted"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// Push/pull and reliable-ping dials are EXEMPT from the cap: they are admitted at
+/// a full user-message backlog and are never counted against it.
+///
+/// Mutation-verify: count push/pull (or reliable-ping) into `user_dial_backlog` —
+/// the backlog climbs past `K`, so the "unchanged at K" assertion and the
+/// brute-force cross-check fail.
+#[test]
+fn push_pull_and_reliable_ping_exempt_from_user_dial_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8620".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8621".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial under the cap is admitted");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "the user-message backlog is full"
+  );
+
+  // A push/pull to the SAME peer at a full user-message cap still registers its
+  // intent — the cap gates only reliable user messages.
+  let pp_id = a.start_push_pull(cold, PushPullKind::Join, now);
+  while a.poll_transmit().is_some() {}
+  assert_eq!(
+    a.pending_outbound_kinds.get(&pp_id),
+    Some(&super::ExchangeKind::PushPull),
+    "a push/pull intent is created even at a full user-message backlog"
+  );
+
+  // A reliable-ping fallback likewise registers its intent.
+  let rp_id = a.start_reliable_ping(
+    SmolStr::new("b"),
+    cold,
+    1,
+    now + Duration::from_secs(5),
+    now,
+  );
+  while a.poll_transmit().is_some() {}
+  assert_eq!(
+    a.pending_outbound_kinds.get(&rp_id),
+    Some(&super::ExchangeKind::ReliablePing),
+    "a reliable-ping intent is created even at a full user-message backlog"
+  );
+
+  // Neither exempt dial touched the user-message backlog.
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "push/pull and reliable-ping must not be counted against the user-message cap"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// The incremental `user_dial_backlog` map equals the brute-force recount over
+/// `dial_pending` + `dial_parked` at every step of a scripted sequence that
+/// exercises the mint, park/re-park, tick-reservice, and leave-purge paths.
+///
+/// Mutation-verify: skip the `note_user_dial_enqueued` re-increment in
+/// `repark_blocked_dial` — the tick that re-parks the cold-peer intents drops their
+/// counts, so the incremental map drifts below the brute-force recount and
+/// `assert_user_dial_backlog_exact` fails.
+#[test]
+fn user_dial_backlog_incremental_matches_bruteforce() {
+  let a_addr: SocketAddr = "127.0.0.1:8630".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8631".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8632".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  a.assert_user_dial_backlog_exact();
+
+  // (1) Park several reliable user messages on a cold peer (each re-parks).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..5 {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial admitted");
+    while a.poll_transmit().is_some() {}
+    a.assert_user_dial_backlog_exact();
+  }
+  assert_eq!(a.user_dial_backlog(&cold), 5);
+
+  // (2) Establish B and mint several reliable user messages to it: each opens a
+  // bridge immediately, so it enters and leaves the pipeline within the call and
+  // contributes ZERO resident backlog.
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  for _ in 0..3 {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("established-peer dial mints a bridge");
+    while a.poll_transmit().is_some() {}
+    a.assert_user_dial_backlog_exact();
+  }
+  assert_eq!(
+    a.user_dial_backlog(&b_addr),
+    0,
+    "minted (non-parked) intents contribute no backlog"
+  );
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    5,
+    "the cold-peer backlog is unchanged"
+  );
+
+  // (3) Tick while the cold intents are still within their deadline: `service_dials`
+  // re-processes each parked entry (release on take-out, re-park re-counts), so the
+  // backlog is stable and the incremental map still matches the recount.
+  a.handle_timeout(now);
+  a.assert_user_dial_backlog_exact();
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    5,
+    "a re-park nets to one resident count, so the backlog holds across a tick"
+  );
+
+  // (4) Leave: the reliable-dial purge drains both structures; every counted intent
+  // is released and the map empties.
+  a.leave(now)
+    .expect("leave initiates the reliable-dial purge");
+  a.assert_user_dial_backlog_exact();
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    0,
+    "the leave purge releases every counted intent"
+  );
+  assert!(
+    a.user_dial_backlog.is_empty(),
+    "no dead peer entry survives the purge"
+  );
+}
+
+/// Config validation rejects a zero per-peer reliable-dial ceiling at the
+/// `QuicOptions::validate` chokepoint, and the default is 32.
+///
+/// Mutation-verify: drop the `max_pending_user_dials_per_peer == 0` guard in
+/// `QuicOptions::validate` — the zero config then validates `Ok`, so the
+/// `expect_err` fails.
+#[test]
+fn quic_options_validate_rejects_zero_user_dial_cap() {
+  assert_eq!(
+    test_config().max_pending_user_dials_per_peer(),
+    super::DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+    "the default per-peer reliable-dial ceiling is the documented default"
+  );
+  assert_eq!(
+    super::DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+    32,
+    "the documented default is 32"
+  );
+
+  let err = test_config()
+    .with_max_pending_user_dials_per_peer(0)
+    .validate()
+    .expect_err("a zero per-peer reliable-dial ceiling must be rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::MaxPendingUserDialsPerPeerZero),
+    "the rejection names the zero-ceiling guard, got {err:?}"
+  );
+
+  test_config()
+    .with_max_pending_user_dials_per_peer(1)
+    .validate()
+    .expect("a ceiling of 1 is the minimum usable value and validates");
+  test_config()
+    .validate()
+    .expect("the default config validates");
+}
