@@ -724,7 +724,6 @@ where
     // `encrypt_gossip` a copy; a transient `send_to` error (ENOBUFS / ICMP
     // unreachable surfacing as a syscall error) is non-fatal per the gossip
     // drop discipline.
-    let mut needs_flush = false;
     let mut sent = 0;
     while sent < budget {
       let Some(transmit) = self.endpoint.poll_memberlist_transmit() else {
@@ -792,13 +791,14 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendStatus::Queued => needs_flush = true,
-            // NotReady may mean queue_unreliable_datagram just initiated a cold
-            // dial; flush this tick so the connection's Initial is emitted now
-            // (else the connection does not warm until the next driver wake). The
-            // gossip itself still goes out immediately over the UDP fallback.
+            // The queue call self-flushes: it collects this connection's owed
+            // transmits (the queued datagram, and a cold dial's Initial) into
+            // the outbound queue before returning, so no per-pass flush follows.
+            DatagramSendStatus::Queued => {}
+            // NotReady may mean the queue call just initiated a cold dial; its
+            // inline collect already emitted the connection's Initial this tick.
+            // The gossip itself still goes out immediately over the UDP fallback.
             DatagramSendStatus::NotReady => {
-              needs_flush = true;
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
                 // is lossy and the next probe/gossip round recovers.
@@ -806,7 +806,7 @@ where
               }
             }
             // TooLarge: the connection is already Established (max_size was Some),
-            // so there is no pending Initial to flush; just fall back to UDP.
+            // so there is no pending Initial; just fall back to UDP.
             DatagramSendStatus::TooLarge => {
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
@@ -820,14 +820,6 @@ where
     }
     worked |= sent > 0;
     more |= sent == budget;
-
-    // Flush any datagrams queued above into `out` THIS poll so the raw-QUIC
-    // loop below sends them now — a datagram-borne probe whose timeout is armed
-    // this same tick must not wait for the next driver wake (that wake can be
-    // the timeout).
-    if needs_flush {
-      self.endpoint.flush_outbound_transmits(now);
-    }
 
     // Raw QUIC datagrams: already wire-framed by quinn-proto, no codec wrap.
     let mut raw_sent = 0;

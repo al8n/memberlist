@@ -2560,6 +2560,17 @@ impl<I, R> QuicEndpoint<I, R> {
   /// membership signal: a `NotReady`/dropped datagram becomes a probe timeout,
   /// not a `Suspect`. The driver falls back to plain UDP on a non-`Queued`
   /// outcome so dissemination is not starved.
+  ///
+  /// The send is self-flushing: before returning it collects the target
+  /// connection's owed transmits — the just-queued datagram, and the Initial of
+  /// a cold dial `get_or_dial` minted — into the queue
+  /// [`poll_transmit`](Self::poll_transmit) drains, so a driver needs no flush
+  /// call after an unreliable send.
+  /// [`flush_outbound_transmits`](Self::flush_outbound_transmits) stays the
+  /// deliberate flush-all. Collecting per send trades away cross-datagram
+  /// batching within one driver pass — each send drains its own connection
+  /// immediately — which is accepted: quinn's per-connection `poll_transmit`
+  /// packing is unchanged.
   pub fn queue_unreliable_datagram(
     &mut self,
     peer: SocketAddr,
@@ -2587,10 +2598,12 @@ impl<I, R> QuicEndpoint<I, R> {
       // A dial that cannot even be initiated (ConnectError) — best effort.
       Err(conn::DialError::Connect(_)) => return DatagramSendStatus::NotReady,
     };
-    // Compute the outcome, then unconditionally refresh the connection's
-    // deadline key below: `get_or_dial` may have created a fresh connection and
-    // `datagrams().send` rearms its transmit timer, and no servicing tick
-    // follows this call to refresh it via `collect_transmits`.
+    // Compute the outcome, then unconditionally collect this connection's owed
+    // transmits below: `get_or_dial` may have created a fresh connection whose
+    // Initial must be emitted, and `datagrams().send` queued the datagram, and
+    // no servicing tick follows this call to drain them. `collect_conn_transmits`
+    // drains `poll_transmit` into `out` and refreshes the connection's deadline
+    // key, so the send is self-flushing on its own connection.
     let status = match self.conns.get_mut(ch) {
       None => DatagramSendStatus::NotReady,
       Some(e) => {
@@ -2625,7 +2638,7 @@ impl<I, R> QuicEndpoint<I, R> {
         }
       }
     };
-    self.index_conn(ch);
+    self.collect_conn_transmits(ch, now);
     status
   }
 }

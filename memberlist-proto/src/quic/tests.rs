@@ -1123,10 +1123,10 @@ fn closing_a_pooled_connection_does_not_change_membership() {
 
 /// Offering an unreliable datagram to a peer that already holds an
 /// Established pooled connection enqueues it on that connection
-/// (`DatagramSendStatus::Queued`). The datagram does not surface on
-/// `poll_transmit` synchronously — it rides out via the normal
-/// `service_quinn -> poll_transmit` pump on a later tick — so the contract
-/// asserted here is the `Queued` outcome, not an immediate transmit.
+/// (`DatagramSendStatus::Queued`) and self-flushes: the send collects that
+/// connection's owed transmits inline, so the datagram surfaces on
+/// `poll_transmit` immediately, with no `flush_outbound_transmits` or
+/// `handle_timeout` call.
 #[test]
 fn queue_unreliable_datagram_to_established_peer_is_queued() {
   let a_addr: SocketAddr = "127.0.0.1:7951".parse().unwrap();
@@ -1187,8 +1187,102 @@ fn queue_unreliable_datagram_to_established_peer_is_queued() {
        offering an unreliable datagram"
   );
 
+  // Drain any residual handshake transmits so the surfacing assertion below
+  // observes only the datagram the send itself flushes.
+  while a.poll_transmit().is_some() {}
+
   let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
   assert_eq!(outcome, super::DatagramSendStatus::Queued);
+  // Self-flushing: the datagram surfaces on poll_transmit immediately — no
+  // flush_outbound_transmits or handle_timeout call precedes this poll.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == b_addr),
+    "a queued unreliable datagram must self-flush and surface on poll_transmit; got {surfaced:?}"
+  );
+}
+
+/// The unreliable send does O(target connection) work: it self-flushes ONLY the
+/// addressed connection and services no other connection, regardless of how many
+/// connections the sender pools. With an established A↔B plus K additional
+/// established connections on A, one datagram to B surfaces on `poll_transmit`
+/// (T1) while `connection_visits` stays at zero (T2) — the inline collect is a
+/// transmit-collect, not a `service_one_conn`.
+///
+/// Mutation-verify (T1): remove the inline collect in `queue_unreliable_datagram`
+/// — the datagram never surfaces. Mutation-verify (T2): replace the inline collect
+/// with `flush_outbound(now)` — `connection_visits` jumps to the pool size.
+#[test]
+fn unreliable_send_flushes_only_its_target_connection() {
+  let now = Instant::now();
+  let a_addr: SocketAddr = "127.0.0.1:8410".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8411".parse().unwrap();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // K additional established connections on A, so the pool is large enough that a
+  // full-table service (the flush-all mutation) would be conspicuous.
+  const EXTRA_CONNS: usize = 50;
+  for i in 0..EXTRA_CONNS {
+    let c_addr: SocketAddr = format!("127.0.0.1:{}", 8412 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), c_addr, now);
+    establish(&mut a, &mut c, a_addr, c_addr, now);
+    // `c` drops here; A's established connection to it persists as A-side state.
+  }
+  assert!(
+    a.conns.iter_handles().len() > EXTRA_CONNS,
+    "A must pool the target plus every extra connection"
+  );
+
+  // Start from a drained outbound queue and a zeroed visit counter so the two
+  // assertions below observe only the effect of the single send.
+  while a.poll_transmit().is_some() {}
+  a.counters.connection_visits = 0;
+
+  let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
+  assert_eq!(outcome, super::DatagramSendStatus::Queued);
+
+  // T2: no connection was serviced — the inline collect drains transmits, it does
+  // not run `service_one_conn`.
+  assert_eq!(
+    a.counters.connection_visits,
+    0,
+    "the send must not service any connection; a full-table flush would visit all {}",
+    EXTRA_CONNS + 1
+  );
+  // T1: the datagram self-flushed onto the target connection and surfaces now.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == b_addr),
+    "the queued datagram must surface on poll_transmit with no flush; got {surfaced:?}"
+  );
+}
+
+/// A cold-dial unreliable send self-flushes the fresh connection's Initial: the
+/// send mints the connection via `get_or_dial`, returns `NotReady` (datagrams are
+/// not negotiated mid-handshake), and its inline collect emits the Initial so the
+/// handshake warms this tick — no flush or timeout needed.
+///
+/// Mutation-verify: gate the inline collect to the `Queued` arm only — the cold
+/// dial's Initial then never surfaces.
+#[test]
+fn cold_dial_unreliable_send_self_flushes_the_connection_initial() {
+  let now = Instant::now();
+  let a_addr: SocketAddr = "127.0.0.1:8480".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.1:8481".parse().unwrap();
+  let mut a = make_endpoint("a", a_addr, now);
+  while a.poll_transmit().is_some() {}
+
+  let outcome = a.queue_unreliable_datagram(cold, Bytes::from_static(b"\x01g"), now);
+  assert_eq!(outcome, super::DatagramSendStatus::NotReady);
+
+  // Self-flushing cold dial: the fresh connection's Initial surfaces now.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == cold),
+    "the cold dial's Initial must surface on poll_transmit with no flush; got {surfaced:?}"
+  );
 }
 
 /// A received application datagram surfaces through the SAME

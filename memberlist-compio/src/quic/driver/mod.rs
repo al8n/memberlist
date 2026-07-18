@@ -1554,7 +1554,6 @@ where
     //    policy. An empty encryption config makes `encrypt_gossip` a copy; a
     //    transient `send_to` error (ENOBUFS / ICMP unreachable surfacing as a
     //    syscall error) is non-fatal per the gossip drop discipline.
-    let mut needs_flush = false;
     while let Some(transmit) = state.endpoint.poll_memberlist_transmit() {
       iter_progress = true;
       let (peer, plain) = match transmit {
@@ -1622,20 +1621,21 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendStatus::Queued => needs_flush = true,
-            // NotReady may mean queue_unreliable_datagram just initiated a cold
-            // dial; flush this tick so the connection's Initial is emitted now
-            // (else the connection does not warm until the next driver wake). The
-            // gossip itself still goes out immediately over the UDP fallback.
+            // The queue call self-flushes: it collects this connection's owed
+            // transmits (the queued datagram, and a cold dial's Initial) into
+            // the outbound queue before returning, so no per-pass flush follows.
+            DatagramSendStatus::Queued => {}
+            // NotReady may mean the queue call just initiated a cold dial; its
+            // inline collect already emitted the connection's Initial this tick.
+            // The gossip itself still goes out immediately over the UDP fallback.
             DatagramSendStatus::NotReady => {
-              needs_flush = true;
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
               // lossy and the next probe/gossip round recovers.
               let _ = res;
             }
             // TooLarge: the connection is already Established (max_size was Some),
-            // so there is no pending Initial to flush; just fall back to UDP.
+            // so there is no pending Initial; just fall back to UDP.
             DatagramSendStatus::TooLarge => {
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
@@ -1645,13 +1645,6 @@ where
           }
         }
       }
-    }
-
-    // Flush any datagrams queued above into `out` THIS tick so Section 3 sends
-    // them now — a datagram-borne probe whose timeout is armed this same tick
-    // must not wait for the next driver wake (that wake can be the timeout).
-    if needs_flush {
-      state.endpoint.flush_outbound_transmits(now);
     }
 
     // 3. Raw QUIC datagrams (handshake, acks, application stream
