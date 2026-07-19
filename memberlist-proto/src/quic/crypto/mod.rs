@@ -147,8 +147,9 @@ pub struct QuicOptions {
   /// How far before a parked dial's deadline the coordinator schedules that dial's
   /// pre-deadline SERVICE wake, so a budget-deferred but still-creditable dial is
   /// attempted while `now < deadline` — and minted — rather than retired at the
-  /// deadline. See [`Self::dial_service_margin`] for the default and the safety
-  /// floor.
+  /// deadline. [`Self::validate`] pins it to the range `[catchup_interval,
+  /// 2 * catchup_interval]`. See [`Self::dial_service_margin`] for the default and the
+  /// range's rationale.
   dial_service_margin: Duration,
   /// Maximum liveness-critical reliable-ping fallback dials the coordinator attempts
   /// PAST a per-pass dial-attempt budget, per peer bucket per pass. See
@@ -272,7 +273,12 @@ pub const MAX_CATCHUP_INTERVAL: Duration = Duration::from_secs(1);
 /// Set to two [`DEFAULT_CATCHUP_INTERVAL`]s: one interval of driver-timer jitter
 /// allowance plus one chained mid-window service tick, so a budget-deferred but
 /// still-creditable dial is attempted (and minted) strictly before its deadline
-/// rather than retired at it. Tune via [`QuicOptions::with_dial_service_margin`].
+/// rather than retired at it. This is also the MAXIMUM ratio [`QuicOptions::validate`]
+/// permits — it pins the margin to `[catchup_interval, 2 * catchup_interval]` because
+/// each interval of margin is one full O(N) tick per interval in a blocked dial's final
+/// window, so bounding the ratio keeps that count a small constant (`1 + ceil(margin /
+/// interval) <= 3`). Tune via [`QuicOptions::with_dial_service_margin`] (raise
+/// [`QuicOptions::with_catchup_interval`] in step to widen the absolute margin).
 pub const DEFAULT_DIAL_SERVICE_MARGIN: Duration = super::DIAL_SERVICE_MARGIN;
 
 /// Default per-pass reliable-ping exempt-pop cap installed by [`QuicOptions::new`].
@@ -560,9 +566,12 @@ impl QuicOptions {
 
   /// Override the dial service margin — how far before a parked dial's deadline the
   /// coordinator schedules its pre-deadline service wake. Must be `>=`
-  /// [`Self::catchup_interval`], enforced by [`Self::validate`] (a smaller margin
-  /// could let the deadline fire before any pre-deadline service tick lands).
-  /// Defaults to [`DEFAULT_DIAL_SERVICE_MARGIN`].
+  /// [`Self::catchup_interval`] and `<=` twice it, enforced by [`Self::validate`]: a
+  /// smaller margin could let the deadline fire before any pre-deadline service tick
+  /// lands, and a ratio above two would let a blocked dial fire ~`margin / interval`
+  /// full ticks over its final window. Widen the absolute margin by raising
+  /// [`Self::with_catchup_interval`] in step. Defaults to
+  /// [`DEFAULT_DIAL_SERVICE_MARGIN`].
   #[must_use]
   #[inline(always)]
   pub const fn with_dial_service_margin(mut self, margin: Duration) -> Self {
@@ -681,11 +690,13 @@ impl QuicOptions {
   /// coordinator schedules that dial's pre-deadline SERVICE wake, so a
   /// budget-deferred but still-creditable dial is attempted (and minted) while
   /// `now < deadline` rather than retired at the deadline. Defaults to
-  /// [`DEFAULT_DIAL_SERVICE_MARGIN`] (two catch-up intervals). [`Self::validate`]
-  /// rejects a value below [`Self::catchup_interval`]: a smaller margin could let the
-  /// deadline fire before any pre-deadline service tick landed in the window,
-  /// silently reopening the spurious-retire-under-capacity failure this margin
-  /// closes.
+  /// [`DEFAULT_DIAL_SERVICE_MARGIN`] (two catch-up intervals). [`Self::validate`] pins
+  /// it to `[catchup_interval, 2 * catchup_interval]`: a value below
+  /// [`Self::catchup_interval`] could let the deadline fire before any pre-deadline
+  /// service tick landed in the window (silently reopening the
+  /// spurious-retire-under-capacity failure this margin closes), while a value above
+  /// twice the interval would let a blocked dial fire ~`margin / interval` full O(N)
+  /// ticks over its final window instead of a small constant.
   #[inline(always)]
   pub const fn dial_service_margin(&self) -> Duration {
     self.dial_service_margin
@@ -727,7 +738,11 @@ impl QuicOptions {
   /// * `dial_service_margin` must be `>=` `catchup_interval` — a smaller margin could
   ///   let a parked dial's deadline fire before any pre-deadline service tick landed
   ///   in the window, silently reopening the spurious-retire-under-capacity failure
-  ///   the margin exists to close. Cross-field: checked against `catchup_interval`.
+  ///   the margin exists to close — and `<=` `2 * catchup_interval`: the margin/interval
+  ///   ratio bounds a blocked dial's phased service-wake chain to `1 + ceil(margin /
+  ///   interval) <= 3` full O(N) ticks over its final window, so an unbounded ratio would
+  ///   let one blocked dial fire ~`margin / interval` full ticks. Cross-field: both bounds
+  ///   are checked against `catchup_interval`.
   /// * `max_reliable_ping_exempt_pops_per_pass` must be `>= 1` — a `0` cap defers
   ///   every over-budget reliable-ping fallback to its cumulative deadline, a false
   ///   Suspect of a live peer.
@@ -746,6 +761,17 @@ impl QuicOptions {
     }
     if self.dial_service_margin.as_nanos() < self.catchup_interval.as_nanos() {
       return Err(QuicOptionsError::DialServiceMarginBelowCatchupInterval);
+    }
+    // Overflow-safe by construction: a `Duration`'s nanoseconds always fit in a `u128`
+    // with ample room to double (a `u64::MAX`-second `Duration` is ~1.8e28 ns, and
+    // `* 2` stays far below `u128::MAX`), so this multiply cannot overflow — no
+    // `saturating_mul` needed. Pinning the margin to `<= 2 * catchup_interval` bounds a
+    // blocked dial's phased service-wake chain to `1 + ceil(M / I) <= 3` full O(N) ticks
+    // over its final window; an unbounded M/I ratio would instead let one blocked dial
+    // fire ~`M / I` full ticks. Checked AFTER the lower-bound guard so a below-interval
+    // margin reports that error, not this one.
+    if self.dial_service_margin.as_nanos() > self.catchup_interval.as_nanos() * 2 {
+      return Err(QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval);
     }
     if self.max_reliable_ping_exempt_pops_per_pass == 0 {
       return Err(QuicOptionsError::MaxReliablePingExemptPopsPerPassZero);
@@ -780,6 +806,13 @@ pub enum QuicOptionsError {
   /// catchup_interval`.
   #[error("dial_service_margin must be >= catchup_interval")]
   DialServiceMarginBelowCatchupInterval,
+  /// `dial_service_margin` exceeds twice `catchup_interval`. The margin/interval ratio
+  /// bounds a blocked dial's phased service-wake chain to `1 + ceil(margin / interval)`
+  /// full O(N) ticks over its final window, so an unbounded ratio would let one blocked
+  /// dial fire ~`margin / interval` full ticks. Set it to `<= 2 * catchup_interval`
+  /// (widen the absolute margin by raising `catchup_interval` in step).
+  #[error("dial_service_margin must be <= 2 * catchup_interval")]
+  DialServiceMarginExceedsTwiceCatchupInterval,
   /// `max_reliable_ping_exempt_pops_per_pass` was set to `0`, which would defer every
   /// over-budget reliable-ping fallback to its cumulative deadline (a false Suspect).
   /// Set it to `>= 1` (and `>=` the membership awareness max).

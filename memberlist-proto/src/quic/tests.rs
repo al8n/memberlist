@@ -11634,6 +11634,133 @@ fn retire_pre_check_uses_deadline_not_service_wake() {
   );
 }
 
+/// Drive ONE never-creditable blocked reliable dial (B grants zero bidi credit) from park
+/// to its retire deadline via the strict poll surface, returning the number of full
+/// `run_tick`s its phased service-wake chain drove (the `membership_time_advances` delta,
+/// incremented once per `run_tick`). Periodic schedulers are off and the established
+/// connection is idle (20s idle timeout), so the ONLY scheduled `TimerKey` due inside the
+/// window is the dial's own `TimerKey::Dial`: the delta is exactly the phased chain's
+/// full-tick count, `1 + ceil(margin / interval)`.
+fn blocked_dial_full_run_ticks(
+  stream_timeout: Duration,
+  catchup_interval: Duration,
+  margin: Duration,
+) -> u64 {
+  let a_addr: SocketAddr = "127.0.0.1:8460".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8461".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(stream_timeout);
+  let a_qc = test_config()
+    .with_catchup_interval(catchup_interval)
+    .with_dial_service_margin(margin);
+  // Every ratio this harness drives is one `validate` accepts — guard against an
+  // accidentally out-of-range knob masking the property under test.
+  a_qc
+    .validate()
+    .expect("the harness margin/interval ratio is valid");
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+  // B grants ZERO bidi credit, so every attempt re-parks (established, never creditable)
+  // and rides its phased wake to the deadline — no handshake timers, no capacity.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  a.start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()),
+    "the dial re-parks behind zero bidi credit"
+  );
+
+  // Strict-poll drive: advance ONLY via poll_timeout/handle_timeout, following the wake
+  // chain to the deadline, counting full run_ticks. The generous cap lets an
+  // unbounded-ratio mutation (which fires ~min(M, life)/interval ticks) run to completion
+  // so its explosion is observed rather than truncated.
+  let before = a.membership_time_advances();
+  for _ in 0..4096 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a parked dial always schedules a wake");
+    a.handle_timeout(wake);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the blocked dial must retire at its deadline (never strand)"
+  );
+  a.membership_time_advances() - before
+}
+
+/// A single never-creditable blocked reliable dial fires a CONSTANT number of full
+/// `run_tick`s over its whole life — `1 + ceil(M / I)`, which the `M <= 2 * I` validation
+/// bound pins to at most 3 — INDEPENDENT of both the dial's `stream_timeout` (its life)
+/// and the absolute interval. The service phase places exactly one pre-deadline wake and
+/// the chained phase spans only the final `M` window, so the pre-deadline life contributes
+/// no phased ticks: growing the life leaves the count flat. This is the honest-load bound
+/// the `dial_service_margin <= 2 * catchup_interval` guard restores over an unbounded
+/// margin/interval ratio.
+///
+/// Mutation-verify (remove the upper-bound guard in `QuicOptions::validate` and drive
+/// `M = 100 * I` with a proportional life): the chained phase then spans the whole
+/// `min(M, life)` window and fires ~`min(M, life) / I` full ticks (about 100), scaling with
+/// the life and the interval — the flat-count assertions below fail.
+#[test]
+fn phased_wake_full_tick_count_is_flat_across_dial_life() {
+  let i = Duration::from_millis(10);
+  let m = i * 2; // the MAX ratio `validate` permits (also the default margin/interval).
+
+  // Independent of the dial's life: a ~16x-longer stream_timeout yields the same count.
+  let short_life = blocked_dial_full_run_ticks(Duration::from_millis(30), i, m);
+  let long_life = blocked_dial_full_run_ticks(Duration::from_millis(500), i, m);
+  assert_eq!(
+    short_life, long_life,
+    "the full run_tick count must be flat across the dial's life (short={short_life}, \
+       long={long_life}); an unbounded M/I ratio would make the longer life scale"
+  );
+
+  // Independent of the absolute interval: scaling I and M together (ratio held at 2) over
+  // a proportionally wider window yields the same count.
+  let scaled = blocked_dial_full_run_ticks(
+    Duration::from_millis(500),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+  );
+  assert_eq!(
+    scaled, long_life,
+    "the full run_tick count must be flat across the absolute interval \
+       (scaled={scaled}, base={long_life})"
+  );
+
+  // The pinned constant: 1 + ceil(M / I) = 1 + 2 = 3 at the max allowed ratio.
+  assert!(
+    (1..=3).contains(&long_life),
+    "a blocked dial fires 1..=1+ceil(M/I) = 1..=3 full ticks at the max allowed ratio, \
+       got {long_life}"
+  );
+}
+
 /// T8 (oracle invariance under the folded wake). Re-parked dials carry a PHASED wake,
 /// and the after-every-operation deadline-index oracle folds `entry.wake` — exactly
 /// what each `TimerKey::Dial` key is set to — so the incremental index and the
@@ -12043,7 +12170,9 @@ fn quic_options_catchup_interval_default_and_validation() {
     .expect("a ceiling interval with a matching margin validates");
 }
 
-/// Config knob: `dial_service_margin` default and the cross-field floor (>= interval).
+/// Config knob: `dial_service_margin` default and the cross-field range
+/// `[catchup_interval, 2 * catchup_interval]` — both the floor (>= interval) and the
+/// ceiling (<= twice interval, which bounds a blocked dial's phased-wake tick chain).
 #[test]
 fn quic_options_dial_service_margin_default_and_validation() {
   assert_eq!(
@@ -12055,7 +12184,9 @@ fn quic_options_dial_service_margin_default_and_validation() {
     Duration::from_millis(20)
   );
 
-  // Below the default catch-up interval (10ms) is rejected by the cross-field guard.
+  let interval = test_config().catchup_interval();
+
+  // Below the catch-up interval (10ms) is rejected by the lower-bound guard.
   let err = test_config()
     .with_dial_service_margin(Duration::from_millis(5))
     .validate()
@@ -12069,11 +12200,57 @@ fn quic_options_dial_service_margin_default_and_validation() {
   );
 
   // Exactly one interval is the floor and validates.
-  let interval = test_config().catchup_interval();
   test_config()
     .with_dial_service_margin(interval)
     .validate()
     .expect("a margin equal to the catch-up interval validates");
+
+  // Exactly twice the interval is the ceiling and validates; the default sits here.
+  test_config()
+    .with_dial_service_margin(interval * 2)
+    .validate()
+    .expect("a margin equal to twice the catch-up interval validates");
+  assert_eq!(
+    super::DEFAULT_DIAL_SERVICE_MARGIN,
+    interval * 2,
+    "the default margin sits exactly at the enforced ceiling"
+  );
+
+  // Just above twice the interval is rejected by the upper-bound guard.
+  let err = test_config()
+    .with_dial_service_margin(interval * 2 + Duration::from_millis(1))
+    .validate()
+    .expect_err("a margin above twice the catch-up interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // The finding's exact shape: a large absolute margin (10s) against the default 10ms
+  // interval is a ratio far above two, so it is rejected — an unbounded ratio is what
+  // would let one blocked dial fire ~stream_timeout/interval full O(N) ticks.
+  let err = test_config()
+    .with_dial_service_margin(Duration::from_secs(10))
+    .validate()
+    .expect_err("a 10s margin against the 10ms interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // Configurability preserved: the ratio is bounded, not the absolute margin. A 200ms
+  // margin is reachable by raising the interval to 100ms so the ratio stays <= 2.
+  test_config()
+    .with_catchup_interval(Duration::from_millis(100))
+    .with_dial_service_margin(Duration::from_millis(200))
+    .validate()
+    .expect("a 200ms margin validates when the interval is raised to 100ms (ratio 2)");
 }
 
 /// Config knob: `max_reliable_ping_exempt_pops_per_pass` default and zero rejection.

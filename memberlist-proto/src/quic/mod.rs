@@ -295,6 +295,14 @@ const _: () = assert!(
   "the default dial service margin must be >= the default catch-up interval"
 );
 
+// The margin/interval ratio bounds a blocked dial's phased service-wake chain to
+// `1 + ceil(M / I) <= 3` full ticks over its final window; `QuicOptions::validate` caps
+// operator-supplied margins at twice the interval, asserted here for the defaults.
+const _: () = assert!(
+  DIAL_SERVICE_MARGIN.as_nanos() <= CATCHUP_INTERVAL.as_nanos() * 2,
+  "the default dial service margin must be <= twice the default catch-up interval"
+);
+
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
 /// frame) into the shared coordinator ingress queue, enforcing the per-peer
 /// standing-share cap AND the node-global cap so neither source can exceed the
@@ -3547,16 +3555,19 @@ where
   ///   preserving the user-visible `dial_failed` timing.
   ///
   /// Cost: a dial that rides its whole final window blocked fires up to
-  /// `1 + ceil(M / I)` full ticks (three at the defaults) instead of today's one
-  /// at-deadline tick. Honest N-staggered blocked cohorts inherit their per-park
-  /// stagger, so the bound is "≤ 3× the existing at-deadline O(N) tick count for a
-  /// blocked cohort", NOT a new asymptotic class and NOT attacker-drivable: dial keys
-  /// exist only for locally-created intents, and an inbound datagram re-parks the same
-  /// count of entries it does today. The residual — a dial whose capacity FIRST
-  /// appears inside its last chained gap, after its final attempt at `t_attempt`, so
-  /// never creditable at any tick `<= min(deadline, t_attempt + I)` — is irreducible
-  /// for any budgeted pass and retriable by contract (the `Failed` completion lets the
-  /// caller redial with a fresh deadline).
+  /// `1 + ceil(M / I)` full ticks instead of today's one at-deadline tick.
+  /// [`QuicOptions::validate`](crate::quic::QuicOptions::validate) pins `M` to
+  /// `[I, 2 * I]`, so that count is `<= 3` for EVERY valid config (not merely the
+  /// defaults) — an unbounded `M / I` ratio would instead let one blocked dial fire
+  /// ~`M / I` full ticks over its final window. Honest N-staggered blocked cohorts
+  /// inherit their per-park stagger, so the bound is "≤ 3× the existing at-deadline O(N)
+  /// tick count for a blocked cohort", NOT a new asymptotic class and NOT
+  /// attacker-drivable: dial keys exist only for locally-created intents, and an inbound
+  /// datagram re-parks the same count of entries it does today. The residual — a dial
+  /// whose capacity FIRST appears inside its last chained gap, after its final attempt
+  /// at `t_attempt`, so never creditable at any tick `<= min(deadline, t_attempt + I)` —
+  /// is irreducible for any budgeted pass and retriable by contract (the `Failed`
+  /// completion lets the caller redial with a fresh deadline).
   fn dial_wake(&self, deadline: Instant, now: Instant) -> Instant {
     let margin = self.cfg.dial_service_margin();
     match deadline.checked_sub(margin) {
