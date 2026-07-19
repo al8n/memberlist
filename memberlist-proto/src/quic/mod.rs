@@ -20,8 +20,11 @@ mod transport_mode;
 #[cfg(feature = "tls")]
 pub use config::{QuicConfigError, QuicConfigOptions};
 pub use crypto::{
+  DEFAULT_CATCHUP_INTERVAL, DEFAULT_DIAL_SERVICE_MARGIN,
   DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
-  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS, QuicOptions, QuicOptionsError,
+  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS,
+  DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS, MAX_CATCHUP_INTERVAL, QuicOptions,
+  QuicOptionsError,
 };
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
@@ -261,7 +264,36 @@ const C_OUT: usize = 256;
 /// while guaranteeing the wake lands far inside any exchange deadline. Throttled
 /// (a future instant), not immediate, so one datagram cannot re-chunk its residue
 /// into O(K) work across a driver's re-polls.
+///
+/// This is the DEFAULT cadence (published as
+/// [`DEFAULT_CATCHUP_INTERVAL`](crate::quic::DEFAULT_CATCHUP_INTERVAL)); the value
+/// read at every servicing site is the per-instance
+/// [`QuicOptions::catchup_interval`](crate::quic::QuicOptions::catchup_interval), so
+/// an operator can retune the cadence. The internal name is retained as the single
+/// source of the default and the anchor for the cadence references throughout this
+/// module.
 const CATCHUP_INTERVAL: core::time::Duration = core::time::Duration::from_millis(10);
+
+/// The DEFAULT dial service margin — how far before a parked dial's deadline the
+/// coordinator schedules that dial's pre-deadline SERVICE wake. Published as
+/// [`DEFAULT_DIAL_SERVICE_MARGIN`](crate::quic::DEFAULT_DIAL_SERVICE_MARGIN); read at
+/// every site as the per-instance
+/// [`QuicOptions::dial_service_margin`](crate::quic::QuicOptions::dial_service_margin).
+///
+/// Two [`CATCHUP_INTERVAL`]s: one interval of driver-timer jitter allowance plus one
+/// chained mid-window service tick, so a budget-deferred still-creditable dial is
+/// attempted (and minted) strictly before its deadline. The margin is only ever the
+/// pre-deadline half of a parked dial's wake — the deadline itself stays the retire
+/// authority, unmoved.
+const DIAL_SERVICE_MARGIN: core::time::Duration = core::time::Duration::from_millis(20);
+
+// One pre-deadline service tick must land in the margin window, so the margin must be
+// at least one catch-up interval; the same floor `QuicOptions::validate` enforces on
+// operator-supplied values, asserted here for the defaults.
+const _: () = assert!(
+  DIAL_SERVICE_MARGIN.as_nanos() >= CATCHUP_INTERVAL.as_nanos(),
+  "the default dial service margin must be >= the default catch-up interval"
+);
 
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
 /// frame) into the shared coordinator ingress queue, enforcing the per-peer
@@ -320,6 +352,21 @@ struct PendingDial {
   id: StreamId,
   peer: SocketAddr,
   deadline: Instant,
+  /// The instant this entry's [`TimerKey::Dial`] deadline key is registered at —
+  /// the entry's SERVICE wake, distinct from its retire authority `deadline`.
+  ///
+  /// A parked dial owes TWO different wakes: a pre-deadline SERVICE wake (attempt the
+  /// dial while `now < deadline`, so it can still mint against arrived capacity) and
+  /// the at-`deadline` RETIRE wake (fail the waiter at exactly the deadline). A single
+  /// key cannot be both, so this field holds the SERVICE-wake instant the key is set
+  /// to, while `deadline` remains the retire authority the `now >= deadline`
+  /// pre-check reads. For a FRESH entry (never re-parked) the two coincide — the key
+  /// is the deadline and an unattempted entry additionally rides the immediate-due
+  /// anchor — so only a re-parked/deferred entry carries a phased wake, computed once
+  /// per re-park by [`Self::dial_wake`]. The `#[cfg(test)]` deadline-index oracle
+  /// folds this field (not `deadline`) so the index cross-check tracks exactly what
+  /// each key is set to.
+  wake: Instant,
   attempted: bool,
   /// The originating [`ExchangeKind`], carried on the entry so
   /// [`QuicEndpoint::process_dial_entry`]'s reliable-ping `C_OUT` outbound-cap
@@ -438,9 +485,31 @@ impl PeerResidue {
   /// re-deposited after its bucket exhausted the interval dial budget rotates BEHIND
   /// the still-resident tail, so [`QuicEndpoint::catchup_service`] round-robins the
   /// whole ledger across successive intervals instead of re-servicing the same head.
+  ///
+  /// The round-robin fairness has ONE exception, [`Self::insert_front`]: a peer whose
+  /// front dial is near its deadline is deposited at the FRONT so the next catch-up
+  /// pass reaches it first. That makes the urgent lane LIFO among simultaneously
+  /// urgent peers, and a raised-cap urgent monopolist that re-front-inserts every
+  /// interval can starve the FIFO tail — accepted because the front-deposit is
+  /// latency-only: the phased dial service wake mints every parked dial before its
+  /// deadline regardless of ledger position, so correctness never rests on ledger
+  /// order.
   fn insert(&mut self, peer: SocketAddr) {
     if self.seen.insert(peer) {
       self.order.push_back(peer);
+    }
+  }
+
+  /// Queue `peer` at the FRONT so the budgeted catch-up drain reaches it before the
+  /// FIFO tail — the urgent-lane exception to [`Self::insert`]'s round-robin, used
+  /// only for a peer whose front dial is near its deadline. Ignores a repeat in O(1):
+  /// a peer already queued keeps its current position (relocating it would be O(n),
+  /// and the phased dial service wake already backstops a mid-queue urgent peer). Only
+  /// [`QuicEndpoint::ready_dial_peers`] uses this; the order-agnostic
+  /// [`QuicEndpoint::slot_freed_peers`] never does.
+  fn insert_front(&mut self, peer: SocketAddr) {
+    if self.seen.insert(peer) {
+      self.order.push_front(peer);
     }
   }
 
@@ -1827,6 +1896,9 @@ impl<I, R> QuicEndpoint<I, R> {
           id,
           peer,
           deadline,
+          // Fresh entry: the wake IS the deadline (an unattempted entry additionally
+          // rides the immediate-due anchor); only a re-park phases it.
+          wake: deadline,
           attempted: false,
           kind,
         });
@@ -1870,6 +1942,9 @@ impl<I, R> QuicEndpoint<I, R> {
             id,
             peer,
             deadline,
+            // Fresh entry: the wake IS the deadline (an unattempted entry additionally
+            // rides the immediate-due anchor); only a re-park phases it.
+            wake: deadline,
             attempted: false,
             kind,
           });
@@ -2174,18 +2249,21 @@ impl<I, R> QuicEndpoint<I, R> {
     }
     let mut has_unattempted = false;
     for entry in &self.dial_pending {
-      let t = entry.deadline;
+      // Fold the entry's registered SERVICE wake — what its `Dial` key is set to —
+      // not its retire `deadline`; for a fresh `dial_pending` entry the two coincide.
+      let t = entry.wake;
       best = Some(best.map_or(t, |b| b.min(t)));
       if !entry.attempted {
         has_unattempted = true;
       }
     }
-    // Parked (attempted) intents own the same `Dial` deadline key as fresh ones,
-    // so fold their deadlines too; they never contribute an immediate-due wake
-    // (they are all `attempted`).
+    // Parked (attempted) intents own a phased `Dial` wake (`deadline - M`, or a
+    // chained instant in the final window); fold that stored wake — exactly what the
+    // key holds — so the cross-check tracks the phased registration. They never
+    // contribute an immediate-due wake (they are all `attempted`).
     for bucket in self.dial_parked.values() {
       for entry in bucket {
-        let t = entry.deadline;
+        let t = entry.wake;
         best = Some(best.map_or(t, |b| b.min(t)));
       }
     }
@@ -2768,6 +2846,9 @@ impl<I, R> QuicEndpoint<I, R> {
             id,
             peer,
             deadline,
+            // Fresh entry: the wake IS the deadline (an unattempted entry additionally
+            // rides the immediate-due anchor); only a re-park phases it.
+            wake: deadline,
             attempted: false,
             kind,
           });
@@ -3302,7 +3383,54 @@ where
     // re-parked. Both drive the ledger deposit below.
     let mut attempted_any = false;
     let mut last_was_reparked = false;
-    while *dial_budget > 0 {
+    // A liveness-critical reliable-ping fallback at the FRONT of the bucket is
+    // attempted PAST an exhausted pass budget — the pass-budget twin of the
+    // reliable-ping outbound-cap exemption — up to this cap, so an honest FSM ping is
+    // never deferred to its cumulative probe deadline (a false Suspect) behind a
+    // user-message flood. The cap MUST be >= the membership awareness max (which
+    // bounds how many same-peer fallbacks stack); see
+    // [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`].
+    let exempt_cap = self.cfg.max_reliable_ping_exempt_pops_per_pass();
+    let mut exempt_pops = 0usize;
+    loop {
+      if *dial_budget == 0 {
+        // Budget exhausted (or zero on arrival). Only a FRONT reliable-ping is popped
+        // here, up to the exempt cap; anything else ends the pass with the creditable
+        // tail resident for the ledger deposit below. This exempt pop does NOT set
+        // `attempted_any` and does NOT touch `dial_budget`, so a zero-budget arrival
+        // that services only front pings still deposits its non-ping tail via the
+        // `!attempted_any` arm — the tail's slot-free / ledger wake is not consumed.
+        // A ping always front-parks, so "the ping's whole peer is deferred" presents
+        // it at depth 1, and the parked-ping population is FSM/probe-bounded (never
+        // datagram-mintable), so this adds no per-datagram-inflatable work.
+        if exempt_pops >= exempt_cap {
+          break;
+        }
+        let popped = match self.dial_parked.get_mut(&peer) {
+          Some(bucket)
+            if bucket
+              .front()
+              .is_some_and(|e| matches!(e.kind, ExchangeKind::ReliablePing)) =>
+          {
+            bucket.pop_front()
+          }
+          _ => break,
+        };
+        let Some(entry) = popped else {
+          break;
+        };
+        exempt_pops += 1;
+        match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
+          // Minted/Retired consumed the ping terminally; a later front entry may be
+          // another stacked exempt ping — keep popping up to the cap.
+          DialAttempt::Minted | DialAttempt::Retired => {}
+          // Re-parked to the FRONT (a ping always front-parks): stop before re-popping
+          // it. Leaving `attempted_any` / `last_was_reparked` untouched preserves the
+          // zero-budget deposit for the tail below.
+          DialAttempt::Reparked => break,
+        }
+        continue;
+      }
       // O(1) `get_mut` then O(1) `pop_front` detaches one entry from the front
       // while the tail stays resident — no whole-bucket take, no tail copy. The
       // borrow is released with this `let`, so `process_dial_entry` (which
@@ -3374,7 +3502,24 @@ where
       .get(&peer)
       .is_some_and(|bucket| !bucket.is_empty());
     if bucket_nonempty && (!attempted_any || !last_was_reparked) {
-      self.ready_dial_peers.insert(peer);
+      // Urgent front-deposit (latency-only): if the bucket's front dial is within two
+      // catch-up intervals of its DEADLINE, deposit at the FRONT so the next catch-up
+      // pass services this peer before the FIFO tail. Correctness never depends on
+      // this ordering — the phased dial service wake already guarantees a
+      // pre-deadline attempt for a mid-ledger peer — so a re-park rotation that makes
+      // the front-peek merely conservative is harmless. The urgent lane is the
+      // round-robin exception documented on `PeerResidue::insert`; `slot_freed_peers`
+      // (order-agnostic) never front-inserts.
+      let urgent = self
+        .dial_parked
+        .get(&peer)
+        .and_then(VecDeque::front)
+        .is_some_and(|e| e.deadline < now + self.cfg.catchup_interval() * 2);
+      if urgent {
+        self.ready_dial_peers.insert_front(peer);
+      } else {
+        self.ready_dial_peers.insert(peer);
+      }
     }
     ServicedDials {
       minted_bridges: minted,
@@ -3382,18 +3527,66 @@ where
     }
   }
 
+  /// The SERVICE wake for a parked dial with retire `deadline`, re-parked at `now`
+  /// (which the caller guarantees is `< deadline`). Splits the dial's single
+  /// [`TimerKey::Dial`] into a pre-deadline service wake and the at-deadline retire:
+  ///
+  /// * **service phase** — while more than one margin of life remains
+  ///   (`now < deadline - M`), wake at `deadline - M` (`M` =
+  ///   [`QuicOptions::dial_service_margin`](crate::quic::QuicOptions::dial_service_margin)).
+  ///   That wake is a genuine timer, so `handle_timeout` runs the full
+  ///   [`Self::run_tick`] whose UNBUDGETED [`Self::service_dials`] drain attempts this
+  ///   dial at `now < deadline`, POSITION-INDEPENDENTLY of ledger depth, bucket order,
+  ///   or which budget deferred it — so any dial whose capacity exists at that instant
+  ///   mints instead of retiring at its deadline.
+  /// * **chained phase** — inside the final margin (`now >= deadline - M`), wake at
+  ///   `min(deadline, now + I)` (`I` =
+  ///   [`QuicOptions::catchup_interval`](crate::quic::QuicOptions::catchup_interval)):
+  ///   strictly future (the caller owns `now < deadline`), so no hot loop, and the
+  ///   chain lands its LAST wake exactly on `deadline`, where the retire fires —
+  ///   preserving the user-visible `dial_failed` timing.
+  ///
+  /// Cost: a dial that rides its whole final window blocked fires up to
+  /// `1 + ceil(M / I)` full ticks (three at the defaults) instead of today's one
+  /// at-deadline tick. Honest N-staggered blocked cohorts inherit their per-park
+  /// stagger, so the bound is "≤ 3× the existing at-deadline O(N) tick count for a
+  /// blocked cohort", NOT a new asymptotic class and NOT attacker-drivable: dial keys
+  /// exist only for locally-created intents, and an inbound datagram re-parks the same
+  /// count of entries it does today. The residual — a dial whose capacity FIRST
+  /// appears inside its last chained gap, after its final attempt at `t_attempt`, so
+  /// never creditable at any tick `<= min(deadline, t_attempt + I)` — is irreducible
+  /// for any budgeted pass and retriable by contract (the `Failed` completion lets the
+  /// caller redial with a fresh deadline).
+  fn dial_wake(&self, deadline: Instant, now: Instant) -> Instant {
+    let margin = self.cfg.dial_service_margin();
+    match deadline.checked_sub(margin) {
+      // Service phase: a pre-deadline tick at `deadline - M` while more than one
+      // margin of life remains, so the unbudgeted full-drain attempts the dial then.
+      Some(service_at) if now < service_at => service_at,
+      // Chained phase: step at the catch-up interval through the final window; the
+      // last step lands on `deadline`, where the retire fires.
+      _ => core::cmp::min(deadline, now + self.cfg.catchup_interval()),
+    }
+  }
+
   /// Re-park a still-blocked dial intent onto its peer's [`Self::dial_parked`]
-  /// bucket and restore its [`TimerKey::Dial`] deadline key. The single re-park
-  /// primitive shared by every re-park cause in [`Self::process_dial_entry`] — the
-  /// local `C_OUT` outbound-cap gate and the handshake-blocked / peer-credit-
-  /// exhausted `open(Bi) == None` paths: an intent that could not open a stream
-  /// this pass but whose deadline is still in the future waits for the next
-  /// per-peer readiness or slot-free wake.
+  /// bucket and restore its [`TimerKey::Dial`] deadline key at the phased SERVICE
+  /// wake ([`Self::dial_wake`]). The single re-park primitive shared by every re-park
+  /// cause in [`Self::process_dial_entry`] — the local `C_OUT` outbound-cap gate and
+  /// the handshake-blocked / peer-credit-exhausted `open(Bi) == None` paths: an intent
+  /// that could not open a stream this pass but whose deadline is still in the future
+  /// waits for the next per-peer readiness or slot-free wake — or its own pre-deadline
+  /// service wake.
   ///
   /// `attempted = true` so it no longer contributes an immediate-due wake.
-  /// Re-registering the `Dial` deadline keeps the tick's exact-at-deadline
-  /// retirement wake firing for the parked intent. The caller MUST have confirmed
-  /// `now < deadline`.
+  /// Re-registering the `Dial` key at the phased SERVICE wake keeps the pre-deadline
+  /// service tick (and, in the final window, the exact-at-deadline retirement wake)
+  /// firing for the parked intent. This is the SOLE site that phases the wake: every
+  /// other `PendingDial` construction site stores `wake == deadline` (a fresh entry
+  /// is immediate-due-covered), and only a re-park needs the pre-deadline service
+  /// wake. The caller MUST have confirmed `now < deadline` — the retire pre-check
+  /// above every re-park cause guarantees it — which is exactly [`Self::dial_wake`]'s
+  /// precondition.
   ///
   /// A reliable-ping `kind` places a liveness-critical intent at the FRONT of its
   /// bucket, so a `C_OUT`-blocked user-message head can never shadow it behind the
@@ -3409,14 +3602,27 @@ where
     peer: SocketAddr,
     deadline: Instant,
     kind: ExchangeKind,
+    now: Instant,
   ) -> DialAttempt {
+    // Phase the wake here (the caller owns `now < deadline`): the key is set to the
+    // pre-deadline service wake, while `deadline` stays the retire authority. Store
+    // the same instant on the entry so the deadline-index oracle folds it exactly.
+    let wake = self.dial_wake(deadline, now);
     let entry = PendingDial {
       id,
       peer,
       deadline,
+      wake,
       attempted: true,
       kind,
     };
+    // Register the `Dial` key at exactly the entry's stored service wake, read off the
+    // entry itself: the entry's `wake` is the source of truth and the index key its
+    // cache, the equality the deadline-index oracle folds `entry.wake` to cross-check.
+    // Done before the entry moves into the bucket below.
+    self
+      .deadline_index
+      .set(TimerKey::Dial(id), Some(entry.wake));
     let exempt = matches!(kind, ExchangeKind::ReliablePing);
     let bucket = self.dial_parked.entry(peer).or_default();
     if exempt {
@@ -3424,7 +3630,6 @@ where
     } else {
       bucket.push_back(entry);
     }
-    self.deadline_index.set(TimerKey::Dial(id), Some(deadline));
     // The intent re-enters a `dial_parked` bucket: re-count it against the peer's
     // admission backlog. `process_dial_entry` released it on take-out, so a
     // re-park nets to one resident count (a non-UserMessage kind is a no-op).
@@ -3462,6 +3667,10 @@ where
       id,
       peer,
       deadline,
+      // The stored SERVICE wake is not read here: a re-park recomputes it from
+      // `deadline` and the current `now` via `repark_blocked_dial`, and a mint/retire
+      // drops the key entirely. Ignored explicitly so a new field forces a revisit.
+      wake: _,
       attempted,
       kind,
     } = entry;
@@ -3567,7 +3776,7 @@ where
         {
           // `is_reliable_ping` is false on this arm (the gate exempts it), so this
           // re-park always appends at the BACK; the kind is threaded uniformly.
-          return self.repark_blocked_dial(id, peer, deadline, kind);
+          return self.repark_blocked_dial(id, peer, deadline, kind, now);
         }
         if let Some(e) = self.conns.get_mut(ch) {
           match e.conn_mut().streams().open(Dir::Bi) {
@@ -3741,7 +3950,7 @@ where
                 // this intent via `service_peer_bucket`. A reliable-ping fallback
                 // parks at the FRONT so it is not shadowed behind a C_OUT-blocked
                 // user-message head at the next bucket service.
-                self.repark_blocked_dial(id, peer, deadline, kind)
+                self.repark_blocked_dial(id, peer, deadline, kind, now)
               } else {
                 self.retire_failed_dial(
                   id,
@@ -4145,7 +4354,7 @@ where
     if !self.has_residue() {
       self.next_catchup_at = None;
     } else if self.next_catchup_at.is_none() {
-      self.next_catchup_at = Some(now + CATCHUP_INTERVAL);
+      self.next_catchup_at = Some(now + self.cfg.catchup_interval());
     }
   }
 
@@ -4160,7 +4369,7 @@ where
     self.next_catchup_at = if !self.has_residue() {
       None
     } else {
-      Some(now + CATCHUP_INTERVAL)
+      Some(now + self.cfg.catchup_interval())
     };
   }
 
@@ -4736,6 +4945,9 @@ where
           id,
           peer,
           deadline: intent.deadline(),
+          // Fresh entry serviced in-band; a re-park (cold / credit-blocked peer)
+          // phases the wake. Until then the wake IS the deadline.
+          wake: intent.deadline(),
           attempted: true,
           kind: intent.kind(),
         };
@@ -4784,6 +4996,9 @@ where
           id,
           peer: peer_addr,
           deadline: intent.deadline(),
+          // Fresh entry serviced in-band; a re-park (cold / credit-blocked peer)
+          // phases the wake. Until then the wake IS the deadline.
+          wake: intent.deadline(),
           attempted: true,
           kind: intent.kind(),
         };
@@ -4829,6 +5044,9 @@ where
       id,
       peer,
       deadline: intent.deadline(),
+      // Fresh entry serviced in-band; a re-park (cold / credit-blocked peer) phases
+      // the wake. Until then the wake IS the deadline.
+      wake: intent.deadline(),
       attempted: true,
       kind: intent.kind(),
     };

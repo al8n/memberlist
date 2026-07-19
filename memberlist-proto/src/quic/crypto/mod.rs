@@ -65,7 +65,7 @@
 //! ring backend. Behavioral determinism comes from the injected virtual
 //! clock, not from any test-only crypto hook.
 
-use core::net::SocketAddr;
+use core::{net::SocketAddr, time::Duration};
 use std::sync::Arc;
 
 use super::UnreliableTransport;
@@ -136,6 +136,25 @@ pub struct QuicOptions {
   /// [`Self::validate`]. Push/pull and reliable-ping dials are exempt. See
   /// [`Self::max_pending_user_dials_per_peer`] for the default and rationale.
   max_pending_user_dials_per_peer: usize,
+  /// Cadence of the coordinator's budget-deferred residue catch-up, and the width
+  /// of the sub-interval window a near-deadline dial can miss. A smaller interval
+  /// drains a deferred residue faster and shrinks the residual window; a larger one
+  /// lowers the idle scheduled-tick rate at the cost of a wider residual. Governs the
+  /// ready-bridge / ready-dial catch-up anchor cadence, the chained dial
+  /// service-wake spacing, and the urgent front-deposit horizon. See
+  /// [`Self::catchup_interval`] for the default and validation bounds.
+  catchup_interval: Duration,
+  /// How far before a parked dial's deadline the coordinator schedules that dial's
+  /// pre-deadline SERVICE wake, so a budget-deferred but still-creditable dial is
+  /// attempted while `now < deadline` — and minted — rather than retired at the
+  /// deadline. See [`Self::dial_service_margin`] for the default and the safety
+  /// floor.
+  dial_service_margin: Duration,
+  /// Maximum liveness-critical reliable-ping fallback dials the coordinator attempts
+  /// PAST a per-pass dial-attempt budget, per peer bucket per pass. See
+  /// [`Self::max_reliable_ping_exempt_pops_per_pass`] for the default and the safety
+  /// floor.
+  max_reliable_ping_exempt_pops_per_pass: usize,
 }
 
 /// Default global QUIC connection ceiling installed by [`QuicOptions::new`].
@@ -224,6 +243,56 @@ pub const DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER: usize = 32;
 const _: () = assert!(
   DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER >= 1,
   "the default per-peer reliable user-message dial-backlog ceiling must be >= 1"
+);
+
+/// Default catch-up servicing cadence installed by [`QuicOptions::new`] — the
+/// interval the coordinator paces its budget-deferred residue drain at.
+///
+/// The residue-drain and near-deadline-dial machinery is a fixed, table-independent
+/// rate: each catch-up interval the coordinator pumps one budget-sized chunk of
+/// deferred bridges and services one budget-sized chunk of budget-deferred parked
+/// dials, so the per-interval work stays constant regardless of the residue size.
+/// `10ms` is far inside any reliable-exchange deadline (seconds) while keeping the
+/// idle scheduled-tick rate low. Tune via [`QuicOptions::with_catchup_interval`].
+pub const DEFAULT_CATCHUP_INTERVAL: Duration = super::CATCHUP_INTERVAL;
+
+/// Upper bound [`QuicOptions::validate`] accepts for
+/// [`QuicOptions::catchup_interval`].
+///
+/// A catch-up interval beyond this would pace the residue drain so slowly that a
+/// budget-deferred bridge or parked dial could strand past its exchange deadline
+/// before the next catch-up pass ran. `1s` is already an order of magnitude above
+/// the `10ms` default, leaving generous headroom for a deliberately slack cadence
+/// while keeping the drain bounded well inside a reliable-exchange deadline.
+pub const MAX_CATCHUP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default dial service margin installed by [`QuicOptions::new`] — how far before a
+/// parked dial's deadline the coordinator schedules its pre-deadline service wake.
+///
+/// Set to two [`DEFAULT_CATCHUP_INTERVAL`]s: one interval of driver-timer jitter
+/// allowance plus one chained mid-window service tick, so a budget-deferred but
+/// still-creditable dial is attempted (and minted) strictly before its deadline
+/// rather than retired at it. Tune via [`QuicOptions::with_dial_service_margin`].
+pub const DEFAULT_DIAL_SERVICE_MARGIN: Duration = super::DIAL_SERVICE_MARGIN;
+
+/// Default per-pass reliable-ping exempt-pop cap installed by [`QuicOptions::new`].
+///
+/// The pass-budget twin of the reliable-ping outbound-cap exemption: a
+/// liveness-critical reliable-ping fallback at the front of a peer's parked bucket is
+/// attempted even when a pass's shared dial-attempt budget is spent, so it is never
+/// deferred to its cumulative probe deadline (a false-positive Dead) behind a
+/// user-message flood. `8` equals the membership `awareness_max_multiplier` default —
+/// the bound on how many same-peer reliable-ping fallbacks can stack at once — so an
+/// honest fallback is never deferred at the default configuration. See
+/// [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`] for the safety floor.
+pub const DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS: usize = 8;
+
+// A zero exempt-pop cap would defer EVERY reliable-ping fallback that arrives on a
+// budget-spent pass to its cumulative deadline — a false Suspect of a live peer.
+// Keep the default a usable nonzero cap; `QuicOptions::validate` rejects a supplied 0.
+const _: () = assert!(
+  DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS >= 1,
+  "the default reliable-ping exempt-pop cap must be >= 1"
 );
 
 impl QuicOptions {
@@ -426,6 +495,9 @@ impl QuicOptions {
       max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
       max_inbound_streams: Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
       max_pending_user_dials_per_peer: DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+      catchup_interval: DEFAULT_CATCHUP_INTERVAL,
+      dial_service_margin: DEFAULT_DIAL_SERVICE_MARGIN,
+      max_reliable_ping_exempt_pops_per_pass: DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS,
     }
   }
 
@@ -472,6 +544,41 @@ impl QuicOptions {
   #[inline(always)]
   pub const fn with_max_pending_user_dials_per_peer(mut self, max: usize) -> Self {
     self.max_pending_user_dials_per_peer = max;
+    self
+  }
+
+  /// Override the catch-up servicing cadence (residue-drain interval, chained
+  /// service-wake spacing, and urgent front-deposit horizon). Must be `> 0` and
+  /// `<=` [`MAX_CATCHUP_INTERVAL`], enforced by [`Self::validate`]. Defaults to
+  /// [`DEFAULT_CATCHUP_INTERVAL`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_catchup_interval(mut self, interval: Duration) -> Self {
+    self.catchup_interval = interval;
+    self
+  }
+
+  /// Override the dial service margin — how far before a parked dial's deadline the
+  /// coordinator schedules its pre-deadline service wake. Must be `>=`
+  /// [`Self::catchup_interval`], enforced by [`Self::validate`] (a smaller margin
+  /// could let the deadline fire before any pre-deadline service tick lands).
+  /// Defaults to [`DEFAULT_DIAL_SERVICE_MARGIN`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_dial_service_margin(mut self, margin: Duration) -> Self {
+    self.dial_service_margin = margin;
+    self
+  }
+
+  /// Override the per-pass reliable-ping exempt-pop cap. A value of `0` disables the
+  /// exemption and is rejected by [`Self::validate`]. It MUST stay `>=` the
+  /// membership `awareness_max_multiplier` or honest reliable-ping fallbacks defer to
+  /// a false Suspect — see [`Self::max_reliable_ping_exempt_pops_per_pass`]. Defaults
+  /// to [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_reliable_ping_exempt_pops_per_pass(mut self, max: usize) -> Self {
+    self.max_reliable_ping_exempt_pops_per_pass = max;
     self
   }
 
@@ -558,19 +665,90 @@ impl QuicOptions {
     self.max_pending_user_dials_per_peer
   }
 
+  /// The catch-up servicing cadence the coordinator paces its budget-deferred
+  /// residue drain at, and the width of the sub-interval window a near-deadline dial
+  /// can miss. Governs the ready-bridge / ready-dial catch-up anchor, the chained
+  /// dial service-wake spacing, and the urgent front-deposit horizon. Defaults to
+  /// [`DEFAULT_CATCHUP_INTERVAL`]; [`Self::validate`] rejects a zero (which would
+  /// break the residual-window anchor) or a value above [`MAX_CATCHUP_INTERVAL`]
+  /// (which would strand residue past its deadline).
+  #[inline(always)]
+  pub const fn catchup_interval(&self) -> Duration {
+    self.catchup_interval
+  }
+
+  /// The dial service margin — how far before a parked dial's deadline the
+  /// coordinator schedules that dial's pre-deadline SERVICE wake, so a
+  /// budget-deferred but still-creditable dial is attempted (and minted) while
+  /// `now < deadline` rather than retired at the deadline. Defaults to
+  /// [`DEFAULT_DIAL_SERVICE_MARGIN`] (two catch-up intervals). [`Self::validate`]
+  /// rejects a value below [`Self::catchup_interval`]: a smaller margin could let the
+  /// deadline fire before any pre-deadline service tick landed in the window,
+  /// silently reopening the spurious-retire-under-capacity failure this margin
+  /// closes.
+  #[inline(always)]
+  pub const fn dial_service_margin(&self) -> Duration {
+    self.dial_service_margin
+  }
+
+  /// The per-pass reliable-ping exempt-pop cap: the maximum liveness-critical
+  /// reliable-ping fallback dials the coordinator attempts past a peer bucket's
+  /// per-pass dial-attempt budget. A reliable-ping fallback deferred to its
+  /// cumulative probe deadline yields a false-positive Dead, so this exemption keeps
+  /// an honest fallback from stranding behind a user-message flood. Defaults to
+  /// [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
+  ///
+  /// SAFETY FLOOR: keep this `>=` the membership `awareness_max_multiplier` (config
+  /// default 8), which bounds how many same-peer reliable-ping fallbacks can stack at
+  /// once. A smaller cap would defer honest fallbacks past the budget and risk a
+  /// false Suspect. The coordinator cannot cheaply read the membership awareness
+  /// bound at runtime (the composed endpoint exposes no accessor for it), so
+  /// [`Self::validate`] only rejects a zero cap; the default matches the awareness
+  /// default so the floor holds unless an operator lowers one without the other.
+  #[inline(always)]
+  pub const fn max_reliable_ping_exempt_pops_per_pass(&self) -> usize {
+    self.max_reliable_ping_exempt_pops_per_pass
+  }
+
   /// Validate operator-supplied option values, rejecting a configuration the
   /// coordinator cannot service. Reject rather than panic or silently ship a
   /// footgun (mirrors [`Endpoint::try_new_at`](crate::endpoint::Endpoint::try_new_at)'s
   /// operator-misconfiguration guards).
   ///
-  /// Currently the single guard: `max_pending_user_dials_per_peer` must be `>= 1`,
-  /// since a `0` ceiling refuses every reliable user-message dial (the admission
-  /// gate refuses when `backlog >= limit`, and an empty backlog already satisfies
-  /// `>= 0`). Callers that assemble a [`QuicOptions`] from operator input run this
-  /// before handing it to the coordinator.
+  /// The guards, each rejecting a value that would break a coordinator invariant:
+  ///
+  /// * `max_pending_user_dials_per_peer` must be `>= 1` — a `0` ceiling refuses every
+  ///   reliable user-message dial (the admission gate refuses when `backlog >=
+  ///   limit`, and an empty backlog already satisfies `>= 0`).
+  /// * `catchup_interval` must be `> 0` — a zero interval would collapse the
+  ///   residual-window anchor and the chained service-wake spacing — and `<=`
+  ///   [`MAX_CATCHUP_INTERVAL`] — a larger cadence could strand residue past its
+  ///   exchange deadline.
+  /// * `dial_service_margin` must be `>=` `catchup_interval` — a smaller margin could
+  ///   let a parked dial's deadline fire before any pre-deadline service tick landed
+  ///   in the window, silently reopening the spurious-retire-under-capacity failure
+  ///   the margin exists to close. Cross-field: checked against `catchup_interval`.
+  /// * `max_reliable_ping_exempt_pops_per_pass` must be `>= 1` — a `0` cap defers
+  ///   every over-budget reliable-ping fallback to its cumulative deadline, a false
+  ///   Suspect of a live peer.
+  ///
+  /// Callers that assemble a [`QuicOptions`] from operator input run this before
+  /// handing it to the coordinator.
   pub const fn validate(&self) -> Result<(), QuicOptionsError> {
     if self.max_pending_user_dials_per_peer == 0 {
       return Err(QuicOptionsError::MaxPendingUserDialsPerPeerZero);
+    }
+    if self.catchup_interval.is_zero() {
+      return Err(QuicOptionsError::CatchupIntervalZero);
+    }
+    if self.catchup_interval.as_nanos() > MAX_CATCHUP_INTERVAL.as_nanos() {
+      return Err(QuicOptionsError::CatchupIntervalTooLarge);
+    }
+    if self.dial_service_margin.as_nanos() < self.catchup_interval.as_nanos() {
+      return Err(QuicOptionsError::DialServiceMarginBelowCatchupInterval);
+    }
+    if self.max_reliable_ping_exempt_pops_per_pass == 0 {
+      return Err(QuicOptionsError::MaxReliablePingExemptPopsPerPassZero);
     }
     Ok(())
   }
@@ -587,6 +765,26 @@ pub enum QuicOptionsError {
   /// `backlog >= limit`). Set it to `>= 1`.
   #[error("max_pending_user_dials_per_peer must be >= 1")]
   MaxPendingUserDialsPerPeerZero,
+  /// `catchup_interval` was set to `0`, which would collapse the residue-drain
+  /// cadence and the chained dial service-wake spacing. Set it to `> 0`.
+  #[error("catchup_interval must be > 0")]
+  CatchupIntervalZero,
+  /// `catchup_interval` exceeds [`MAX_CATCHUP_INTERVAL`], a cadence so slack a
+  /// budget-deferred residue could strand past its exchange deadline. Set it to
+  /// `<= 1s`.
+  #[error("catchup_interval must be <= 1s")]
+  CatchupIntervalTooLarge,
+  /// `dial_service_margin` is smaller than `catchup_interval`, so a parked dial's
+  /// deadline could fire before any pre-deadline service tick landed in the window —
+  /// reopening the spurious-retire-under-capacity failure. Set it to `>=
+  /// catchup_interval`.
+  #[error("dial_service_margin must be >= catchup_interval")]
+  DialServiceMarginBelowCatchupInterval,
+  /// `max_reliable_ping_exempt_pops_per_pass` was set to `0`, which would defer every
+  /// over-budget reliable-ping fallback to its cumulative deadline (a false Suspect).
+  /// Set it to `>= 1` (and `>=` the membership awareness max).
+  #[error("max_reliable_ping_exempt_pops_per_pass must be >= 1")]
+  MaxReliablePingExemptPopsPerPassZero,
 }
 
 #[cfg(test)]

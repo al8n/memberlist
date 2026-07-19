@@ -35,9 +35,11 @@ mod quic;
 #[cfg(feature = "quic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub use quic::{
+  DEFAULT_CATCHUP_INTERVAL, DEFAULT_DIAL_SERVICE_MARGIN,
   DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
-  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS, DatagramSendStatus, QuicEndpoint,
-  QuicOptions, QuicOptionsError, UnreliableTransport,
+  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS,
+  DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS, DatagramSendStatus, MAX_CATCHUP_INTERVAL,
+  QuicEndpoint, QuicOptions, QuicOptionsError, UnreliableTransport,
 };
 #[cfg(all(feature = "quic", feature = "tls"))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "quic", feature = "tls"))))]

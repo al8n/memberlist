@@ -6420,6 +6420,7 @@ fn poll_timeout_does_not_scan_dial_pending() {
       id: StreamId::from_raw(i as u64),
       peer,
       deadline: now + Duration::from_secs(30),
+      wake: now + Duration::from_secs(30),
       attempted: true,
       kind: super::ExchangeKind::UserMessage,
     });
@@ -6448,6 +6449,7 @@ fn poll_timeout_does_not_scan_dial_pending() {
     id: StreamId::from_raw(parked as u64),
     peer: "127.0.0.2:9999".parse().unwrap(),
     deadline: now + Duration::from_secs(30),
+    wake: now + Duration::from_secs(30),
     attempted: false,
     kind: super::ExchangeKind::UserMessage,
   });
@@ -6632,6 +6634,7 @@ fn establishment_services_only_its_peer_bucket() {
           id: StreamId::from_raw(next_id),
           peer,
           deadline: now + Duration::from_secs(30),
+          wake: now + Duration::from_secs(30),
           attempted: true,
           kind: super::ExchangeKind::UserMessage,
         });
@@ -6786,6 +6789,7 @@ fn reliable_start_touches_constant_entries_regardless_of_table_size() {
           id: StreamId::from_raw(base_id + p as u64),
           peer,
           deadline: now + Duration::from_secs(30),
+          wake: now + Duration::from_secs(30),
           attempted: true,
           kind: super::ExchangeKind::UserMessage,
         });
@@ -7039,6 +7043,7 @@ fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
         id: StreamId::from_raw(20_000 + i as u64),
         peer: cold_peer,
         deadline,
+        wake: deadline,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -7270,6 +7275,7 @@ fn expired_prefix_pass_attempts_at_most_the_budget() {
         id: StreamId::from_raw(40_000 + i as u64),
         peer,
         deadline: elapsed,
+        wake: elapsed,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -7530,6 +7536,7 @@ fn service_peer_bucket_leaves_tail_resident_no_move() {
         id: StreamId::from_raw(50_000 + i as u64),
         peer: cold_peer,
         deadline,
+        wake: deadline,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -8849,6 +8856,7 @@ fn post_leave_purges_reliable_dial_pipeline() {
         id,
         peer,
         deadline,
+        wake: deadline,
         attempted: true,
         kind,
       });
@@ -8942,6 +8950,7 @@ fn no_immediate_due_wake_after_leave() {
     id,
     peer,
     deadline,
+    wake: deadline,
     attempted: false,
     kind: super::ExchangeKind::UserMessage,
   });
@@ -8999,6 +9008,7 @@ fn leave_purge_drops_dial_deadline_keys() {
         id,
         peer,
         deadline,
+        wake: deadline,
         attempted: false,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -9011,6 +9021,7 @@ fn leave_purge_drops_dial_deadline_keys() {
           id,
           peer,
           deadline,
+          wake: deadline,
           attempted: true,
           kind: super::ExchangeKind::PushPull,
         });
@@ -9890,6 +9901,7 @@ fn zero_attempt_deposit_arms_catchup_for_starved_slot_free_peer() {
         id: StreamId::from_raw(95_000 + i),
         peer: b_addr,
         deadline,
+        wake: deadline,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -10076,6 +10088,7 @@ fn drive_one_catchup_over_n_deferred_ready_dial_peers(n: usize) -> (u64, u64, us
         id: StreamId::from_raw(60_000 + i as u64),
         peer,
         deadline: elapsed,
+        wake: elapsed,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -10189,19 +10202,34 @@ fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
   let now = Instant::now();
   // Schedulers OFF: every wake is provably a bounded ready-dial catch-up (no membership
   // tick), so the ledger drains solely through the drain under test.
-  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  // A global connection cap of 0 makes every cold dial retire via `AtGlobalCap` — the
+  // cheapest bucket-draining population — WITHOUT an expired deadline, so the entries
+  // keep a far-future (NON-URGENT) deadline. That is load-bearing here: an expired
+  // deadline is trivially within the urgent front-deposit horizon, so mechanism (c)
+  // would front-deposit the head monopolist and defeat the round-robin under test;
+  // non-urgent entries take the BACK re-deposit path, exercising PURE round-robin.
+  // Schedulers OFF so every wake is a bounded ready-dial catch-up, never a full tick.
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
 
   // A HEAD peer with a bucket three interval-budgets deep, inserted FIRST so it sits at
-  // the ledger front, plus one interval-budget's worth of single-entry TAIL peers.
-  // Expired entries are the cheapest population (retire on service); the drain's
-  // per-peer visit ORDER and budget consumption match a mint bucket, so this exercises
-  // round-robin fairness without real connections.
+  // the ledger front, plus one interval-budget's worth of single-entry TAIL peers. The
+  // drain's per-peer visit ORDER and budget consumption match a mint bucket, so this
+  // exercises round-robin fairness without real connections.
   const HEAD_ENTRIES: usize = 3 * super::MAX_DIAL_ATTEMPTS_PER_PASS;
   let tails: Vec<SocketAddr> = (0..super::MAX_DIAL_ATTEMPTS_PER_PASS)
     .map(|i| format!("127.0.0.10:{}", 9000 + i).parse().unwrap())
     .collect();
   let head: SocketAddr = "127.0.0.9:9500".parse().unwrap();
-  let elapsed = now - Duration::from_secs(1);
+  let far = now + Duration::from_secs(30);
   for i in 0..HEAD_ENTRIES {
     a.dial_parked
       .entry(head)
@@ -10209,7 +10237,8 @@ fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
       .push_back(super::PendingDial {
         id: StreamId::from_raw(70_000 + i as u64),
         peer: head,
-        deadline: elapsed,
+        deadline: far,
+        wake: far,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -10222,7 +10251,8 @@ fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
       .push_back(super::PendingDial {
         id: StreamId::from_raw(80_000 + i as u64),
         peer,
-        deadline: elapsed,
+        deadline: far,
+        wake: far,
         attempted: true,
         kind: super::ExchangeKind::UserMessage,
       });
@@ -10450,6 +10480,7 @@ fn catchup_ready_dial_drain_reaches_live_peer_behind_stale_prefix_no_strand() {
       id: StreamId::from_raw(90_000),
       peer: live,
       deadline: elapsed,
+      wake: elapsed,
       attempted: true,
       kind: super::ExchangeKind::UserMessage,
     });
@@ -11198,4 +11229,879 @@ fn released_wedge_drains_parked_dials_to_completion() {
     "release must let parked exchanges reach a SUCCEEDED terminus (got {succeeded}); \
        withholding B -> A instead fails every exchange at its deadline"
   );
+}
+
+// ============================================================================
+// Deadline-phased dial wakes: a budget-deferred but still-creditable parked dial
+// gets a pre-deadline SERVICE wake (mechanism (a)), a liveness-critical reliable-ping
+// fallback pops past a spent budget (mechanism (b)), and a near-deadline peer is
+// front-deposited into the catch-up ledger (mechanism (c)).
+// ============================================================================
+
+/// Inject `count` real reliable user-message dial intents parked on `peer` as the
+/// post-re-park state a budget-deferred burst reaches on a since-established, amply
+/// credited connection: each carries a real machine intent (so `dial_succeeded`
+/// resolves it into a `Stream`), `attempted = true`, its PHASED service wake computed
+/// via the production [`QuicEndpoint::dial_wake`] (so a `dial_wake ≡ deadline` mutation
+/// propagates into the injected keys and the test observably fails), and its
+/// `TimerKey::Dial` key registered at that wake. Bypasses the coordinator admission
+/// gate via the raw endpoint. Returns the common deadline (`now + stream_timeout`).
+fn park_phased_user_dials(
+  a: &mut QuicEndpoint<SmolStr>,
+  peer: SocketAddr,
+  count: usize,
+  now: Instant,
+) -> Instant {
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..count {
+    a.endpoint_mut()
+      .start_user_message(peer, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    count,
+    "all injected intents sieve into dial_pending"
+  );
+  a.unattempted_dial_count = 0;
+  let mut deadline = now;
+  for mut pd in pending {
+    pd.attempted = true;
+    deadline = pd.deadline;
+    let wake = a.dial_wake(pd.deadline, now);
+    pd.wake = wake;
+    let id = pd.id;
+    a.dial_parked.entry(peer).or_default().push_back(pd);
+    a.deadline_index.set(super::TimerKey::Dial(id), Some(wake));
+  }
+  while a.poll_event().is_some() {}
+  deadline
+}
+
+/// Quiesce a coordinator's handshake-queued pending events so no ImmediateDue anchor
+/// competes with the phased dial wakes during a strict-poll drive.
+fn quiesce(a: &mut QuicEndpoint<SmolStr>, now: Instant) {
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+}
+
+/// T1 (single-peer, deep ledger). A budget-deferred creditable tail parked ~one
+/// stream-timeout deep on ONE amply-credited peer is minted before its deadline by the
+/// phased pre-deadline SERVICE wake — position-independently of the ledger depth. The
+/// ledger is deliberately DEEP (reach latency `ceil(200/64)=4` intervals = 40ms > the
+/// 30ms deadline), so the FIFO catch-up alone cannot drain the tail in time: only the
+/// phased wake's unbudgeted full-drain can. That defeats the empty-window trap where a
+/// shallow ledger drains within the margin and a `dial_wake ≡ deadline` mutation
+/// falsely passes.
+///
+/// Mutation (reverting the phased wake so `dial_wake` returns `deadline`): the injected
+/// keys and the production re-park land at the deadline, so the tail the catch-up cannot reach in
+/// four-intervals-worth of budget retires at 30ms — `saw_failure` trips and the minted
+/// count falls short of `M`.
+#[test]
+fn phased_wake_mints_deep_single_peer_tail_before_deadline() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8400".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8401".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1024),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: the warm-up mints no bridge"
+  );
+
+  const M: usize = 200;
+  let deadline = park_phased_user_dials(&mut a, b_addr, M, now);
+  assert_eq!(deadline, now + Duration::from_millis(30));
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the ledger is deeper than the per-pass budget"
+  );
+  a.ready_dial_peers.insert(b_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty parked-dial cohort always schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "every deep-ledger dial is minted before its deadline via the phased service wake"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "all M dials minted a real bridge (none retired despite capacity)"
+  );
+  assert!(
+    !saw_failure,
+    "no dial retired to Failed — the phased wake attempts the whole table before the deadline"
+  );
+}
+
+/// T2 (multi-peer burst). The phased wake's full-drain is position-independent ACROSS
+/// peers: two amply-credited peers each carry a budget-deferred creditable tail in one
+/// shared ledger, and every dial on BOTH peers mints before its deadline. The shared
+/// per-pass budget cannot finish both buckets in the deadline window, so a
+/// `dial_wake ≡ deadline` mutation strands whichever bucket the FIFO catch-up did not
+/// reach — the multi-bucket twin of T1.
+///
+/// The same reverted phased wake fails it identically: the tail of the peer the
+/// catch-up reaches second retires at its deadline.
+#[test]
+fn phased_wake_mints_multi_peer_burst_before_deadline() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8404".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8405".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:8406".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1024),
+    b_addr,
+    now,
+  );
+  let mut c = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("c"), c_addr),
+    test_config_bidi_limit(1024),
+    c_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  establish(&mut a, &mut c, a_addr, c_addr, now);
+  quiesce(&mut a, now);
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: no bridge minted in the warm-up"
+  );
+
+  // Each bucket deeper than the shared budget, so one shared per-pass budget cannot
+  // finish both within the deadline window.
+  const PER_PEER: usize = 120;
+  let d_b = park_phased_user_dials(&mut a, b_addr, PER_PEER, now);
+  let d_c = park_phased_user_dials(&mut a, c_addr, PER_PEER, now);
+  assert_eq!(d_b, now + Duration::from_millis(30));
+  assert_eq!(d_c, now + Duration::from_millis(30));
+  a.ready_dial_peers.insert(b_addr);
+  a.ready_dial_peers.insert(c_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    let b_done = a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true);
+    let c_done = a
+      .dial_parked
+      .get(&c_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true);
+    if b_done && c_done {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ledger schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    2 * PER_PEER,
+    "every dial on both peers minted before its deadline"
+  );
+  assert!(
+    !saw_failure,
+    "no dial on either peer retired despite capacity"
+  );
+}
+
+/// T6 (no busy loop, no re-chunk). A never-creditable blocked dial fires at most
+/// `ceil(M/I) + 1` full ticks across its final window (the chained phase spaces its
+/// wakes at least one interval apart and lands the last exactly on the deadline), and
+/// repeated `poll_timeout` without advancing time returns a constant future instant.
+///
+/// Mutation (phase 2 → naive `deadline - M`): after the `deadline - M` service tick
+/// re-parks, the wake is re-registered at `deadline - M`, now in the PAST, so
+/// `poll_timeout` returns a past instant and the strict-poll loop spins at the same
+/// instant without ever advancing to the deadline — the invocation count explodes past
+/// the bound and the dial never retires.
+#[test]
+fn phased_wake_chained_phase_does_not_busy_loop() {
+  let a_addr: SocketAddr = "127.0.0.1:8408".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8409".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  // B grants ZERO bidi credit, so every dial re-parks (established, never creditable)
+  // and rides its phased wake to the deadline — no handshake timers, no capacity.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  // One reliable user-message dial re-parks on B (0 credit) with its phased wake.
+  let id = a
+    .start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()),
+    "the dial re-parks behind zero bidi credit"
+  );
+  assert!(
+    !a.bridges.contains_key(&id),
+    "no bridge minted at zero credit"
+  );
+
+  // Repeated poll_timeout without advancing time returns a CONSTANT future instant.
+  let w1 = a.poll_timeout().expect("a parked dial schedules a wake");
+  let w2 = a.poll_timeout().expect("a parked dial schedules a wake");
+  assert_eq!(
+    w1, w2,
+    "repeated poll_timeout without time advance is constant"
+  );
+  assert!(
+    w1 > now,
+    "the service wake is strictly future — no busy loop"
+  );
+
+  // Strict-poll drive; count handle_timeout invocations. The chained phase spaces the
+  // wakes at >= one interval, so the dial converges in a few ticks and retires at the
+  // deadline. A past-instant phase-2 wake (the naive `deadline - M`) would spin here to
+  // the bound.
+  let mut ticks = 0usize;
+  let mut retired = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      retired = true;
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    ticks += 1;
+  }
+  assert!(
+    retired,
+    "the blocked dial retires at its deadline (never strands)"
+  );
+  // M / I + 2 = 20/10 + 2 = 4; the phased chain fires at ~D-20, D-10, D.
+  assert!(
+    ticks <= 4,
+    "the chained phase fires at most M/I + 2 ticks in the final window, got {ticks}; a naive \
+       past-instant phase-2 wake would spin to the loop bound"
+  );
+}
+
+/// T7 (retire-timing authority). The retire pre-check reads the true `deadline`, never
+/// the phased service `wake`: a never-creditable blocked dial's Failed completion
+/// surfaces at exactly the deadline, not at the earlier `deadline - M` service wake.
+///
+/// Mutation (pre-check reads `now >= wake` instead of `now >= deadline`): the very first service wake at
+/// `deadline - M` retires the dial early, so the Failed completion surfaces a full
+/// margin before the true deadline.
+#[test]
+fn retire_pre_check_uses_deadline_not_service_wake() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8412".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8413".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_millis(30);
+  let service_wake = a.dial_wake(deadline, now);
+  assert_eq!(
+    service_wake,
+    now + Duration::from_millis(10),
+    "the first service wake is one margin before the deadline"
+  );
+  let id = a
+    .start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()));
+
+  let mut failed_at: Option<Instant> = None;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed && p.eid() == crate::event::ExchangeId::from(id) {
+          failed_at = Some(wake);
+        }
+      }
+    }
+  }
+  assert_eq!(
+    failed_at,
+    Some(deadline),
+    "the Failed completion surfaces at exactly the deadline, never at the earlier service wake"
+  );
+}
+
+/// T8 (oracle invariance under the folded wake). Re-parked dials carry a PHASED wake,
+/// and the after-every-operation deadline-index oracle folds `entry.wake` — exactly
+/// what each `TimerKey::Dial` key is set to — so the incremental index and the
+/// brute-force fold agree. This is the missed-registration-site guard.
+///
+/// Mutation (the missed-site class): register the `Dial` key at `deadline` while the
+/// entry stores the phased `wake` (or fold `entry.deadline` in the oracle) — the index
+/// then diverges from the fold and `assert_deadline_index_matches` fails.
+#[test]
+fn deadline_index_oracle_folds_phased_dial_wake() {
+  let a_addr: SocketAddr = "127.0.0.1:8416".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8417".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(50));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+  assert_deadline_index_matches(&mut a, "after establish + quiesce");
+
+  // Several reliable dials re-park on B (0 credit), each registering a phased wake.
+  for _ in 0..4 {
+    a.start_user_message(b_addr, Bytes::from_static(b"x"), now)
+      .expect("A schedules a reliable user-message dial");
+    while a.poll_transmit().is_some() {}
+    assert_deadline_index_matches(&mut a, "after a phased re-park");
+  }
+
+  // Advance across the phased service window; each re-park re-registers a fresh phased
+  // wake, and the oracle must track it after every tick.
+  for _ in 0..8 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+    assert_deadline_index_matches(&mut a, "after a phased-wake tick");
+  }
+}
+
+/// T3 (mechanism (b): reliable-ping exempt-pop past a spent budget). A liveness-critical
+/// reliable-ping fallback at the FRONT of a peer's bucket mints even when the pass's
+/// shared dial budget is already ZERO — the pass-budget twin of the reliable-ping
+/// outbound-cap exemption — so an honest FSM ping is never deferred to its cumulative
+/// probe deadline (a false Suspect) behind a user-message flood on other peers.
+///
+/// Mutation (removing the reliable-ping exempt-pop): with a zero budget the pass makes no attempt,
+/// the front ping stays parked, and no bridge mints.
+#[test]
+fn reliable_ping_front_mints_past_zero_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:8420".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8421".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config_bidi_limit(64),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  // Inject a machine-internal reliable-ping parked at the FRONT of Y's bucket, near its
+  // cumulative deadline (as the probe FSM's escalation leaves it).
+  let deadline = now + Duration::from_millis(5);
+  let ping_id = a
+    .endpoint_mut()
+    .start_reliable_ping(SmolStr::new("y"), y_addr, 7, deadline);
+  a.sieve_dial_events();
+  let mut pd = a
+    .dial_pending
+    .pop_front()
+    .expect("the reliable-ping sieved into dial_pending");
+  a.unattempted_dial_count = 0;
+  assert!(
+    matches!(pd.kind, super::ExchangeKind::ReliablePing),
+    "the sieved intent is stamped ReliablePing"
+  );
+  pd.attempted = true;
+  pd.wake = a.dial_wake(pd.deadline, now);
+  let wake = pd.wake;
+  a.dial_parked.entry(y_addr).or_default().push_front(pd);
+  a.deadline_index
+    .set(super::TimerKey::Dial(ping_id), Some(wake));
+  while a.poll_event().is_some() {}
+  assert!(
+    !a.bridges.contains_key(&ping_id),
+    "precondition: the ping has not opened yet"
+  );
+
+  // Service Y with a ZERO budget (the shared budget spent by other peers this pass).
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the front reliable-ping mints even at zero budget (mechanism (b)); removing the \
+       exempt-pop parks it to a false Suspect"
+  );
+}
+
+/// T4 (mechanism (c): urgent front-deposit ordering). A budget-deferred peer whose front
+/// dial is within two catch-up intervals of its DEADLINE is deposited at the FRONT of
+/// the ready-dial ledger, ahead of a pre-existing non-urgent peer, so the next catch-up
+/// pass reaches it first.
+///
+/// Mutation (reverting the urgent front-deposit: `insert_front` -> `insert`): the urgent peer is queued at the
+/// BACK, so the pre-existing peer stays at the front of the ledger and the pop order
+/// reverses.
+#[test]
+fn urgent_near_deadline_peer_front_deposits_ahead_of_ledger() {
+  let a_addr: SocketAddr = "127.0.0.1:8424".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+
+  // A pre-existing non-urgent peer P already at the front of the ledger.
+  let p_addr: SocketAddr = "127.0.0.9:9800".parse().unwrap();
+  a.ready_dial_peers.insert(p_addr);
+
+  // A budget-deferred peer U with a NEAR-deadline front dial (no connection needed — a
+  // zero-budget pass makes no attempt, it only reaches the deposit chokepoint).
+  let u_addr: SocketAddr = "127.0.0.9:9801".parse().unwrap();
+  a.dial_parked
+    .entry(u_addr)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(130_000),
+      peer: u_addr,
+      deadline: now + Duration::from_millis(5),
+      wake: now + Duration::from_millis(5),
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(u_addr, now, &mut budget);
+
+  assert_eq!(a.ready_dial_peers.len(), 2, "both peers are queued");
+  assert_eq!(
+    a.ready_dial_peers.pop_front(),
+    Some(u_addr),
+    "the near-deadline peer front-deposits ahead of the FIFO tail (mechanism (c)); a \
+       plain back-insert leaves P at the front"
+  );
+  assert_eq!(a.ready_dial_peers.pop_front(), Some(p_addr));
+}
+
+/// T5 (stale-prefix interaction). Front-depositing an urgent LIVE peer ahead of a long
+/// STALE prefix (peers resident in the ledger with an ABSENT bucket) neither dodges the
+/// per-pass visit budget nor reopens the O(ledger) stale walk: one catch-up services the
+/// urgent peer, self-cleans stale entries up to the visit cap, and pops at most the cap.
+#[test]
+fn urgent_front_deposit_over_stale_prefix_respects_visit_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8428".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
+
+  // An urgent peer U (front-deposited); its dial retires via the global connection cap
+  // when serviced, which is enough to prove the catch-up REACHED it in the first pass.
+  let u_addr: SocketAddr = "127.0.0.9:9900".parse().unwrap();
+  a.dial_parked
+    .entry(u_addr)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(140_000),
+      peer: u_addr,
+      deadline: now + Duration::from_millis(5),
+      wake: now + Duration::from_millis(5),
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(u_addr, now, &mut budget);
+  assert_eq!(
+    a.ready_dial_peers.pop_front(),
+    Some(u_addr),
+    "the urgent peer is front-deposited"
+  );
+  // Re-establish the ledger for the drive: U at front, then a long stale prefix.
+  a.ready_dial_peers.insert(u_addr);
+  const STALE: usize = 150;
+  for i in 0..STALE {
+    let s: SocketAddr = format!("127.0.0.10:{}", 10_000 + i).parse().unwrap();
+    a.ready_dial_peers.insert(s);
+  }
+  assert_eq!(a.ready_dial_peers.len(), 1 + STALE);
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  assert!(
+    visits <= super::MAX_READY_DIAL_VISITS_PER_PASS as u64,
+    "one catch-up pops at most the visit cap ({}), got {visits} — the front-insert does not \
+       dodge the visit budget",
+    super::MAX_READY_DIAL_VISITS_PER_PASS
+  );
+  assert!(
+    !a.dial_parked.contains_key(&u_addr),
+    "the urgent peer, front-deposited, is serviced in the first interval (its bucket drains)"
+  );
+  assert!(
+    a.ready_dial_peers.len() < 1 + STALE,
+    "stale entries self-clean during the pass (they never re-deposit)"
+  );
+}
+
+/// T10 (budget negative control). With NO front ping, `service_peer_bucket` attempts at
+/// most the pass budget: the exempt-pop is strictly kind-gated to reliable-ping.
+///
+/// Mutation (dropping the reliable-ping kind gate, exempting EVERY front entry): the pass pops up
+/// to the exempt cap of extra user-message entries past the budget, so the attempt count
+/// exceeds the budget.
+#[test]
+fn service_peer_bucket_without_pings_attempts_at_most_the_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:8432".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  // A zero global connection cap retires every dial via `AtGlobalCap` (no repark), so the
+  // whole budget is spent and the exempt branch is reached with a non-ping front.
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
+  let peer: SocketAddr = "127.0.0.9:9950".parse().unwrap();
+  let far = now + Duration::from_secs(30);
+  const N: usize = 100;
+  for i in 0..N {
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(150_000 + i as u64),
+        peer,
+        deadline: far,
+        wake: far,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  let before = a.counters.dial_entries_serviced;
+  let mut budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(peer, now, &mut budget);
+  let attempts = a.counters.dial_entries_serviced - before;
+  assert_eq!(
+    attempts,
+    super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "with no front reliable-ping the pass attempts exactly the budget; a kind-less \
+       exempt-pop attempts up to the exempt cap more"
+  );
+  assert_eq!(budget, 0, "the whole budget is spent");
+}
+
+/// (c) fairness backstop (§ round-robin urgent-lane exception). The urgent front-deposit
+/// makes the ready-dial lane LIFO and a deep near-deadline monopolist can starve the FIFO
+/// tail — accepted because correctness rests on (a), not on ledger order. With two small
+/// urgent peers plus a deep near-deadline monopolist, every dial STILL mints before its
+/// deadline via the phased service wake, whatever churn (c) causes in the ledger.
+#[test]
+fn urgent_lane_monopolist_does_not_starve_correctness() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8436".parse().unwrap();
+  let m_addr: SocketAddr = "127.0.0.1:8437".parse().unwrap();
+  let u1_addr: SocketAddr = "127.0.0.1:8438".parse().unwrap();
+  let u2_addr: SocketAddr = "127.0.0.1:8439".parse().unwrap();
+  let now = Instant::now();
+  // A near deadline (15ms) makes every re-deposit urgent, so the deep monopolist
+  // re-front-inserts every interval — the LIFO-starvation shape (c) permits.
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(15));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut m = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("m"), m_addr),
+    test_config_bidi_limit(1024),
+    m_addr,
+    now,
+  );
+  let mut u1 = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("u1"), u1_addr),
+    test_config_bidi_limit(64),
+    u1_addr,
+    now,
+  );
+  let mut u2 = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("u2"), u2_addr),
+    test_config_bidi_limit(64),
+    u2_addr,
+    now,
+  );
+  establish(&mut a, &mut m, a_addr, m_addr, now);
+  establish(&mut a, &mut u1, a_addr, u1_addr, now);
+  establish(&mut a, &mut u2, a_addr, u2_addr, now);
+  quiesce(&mut a, now);
+
+  const MONOPOLIST: usize = 200;
+  const SMALL: usize = 5;
+  let _ = park_phased_user_dials(&mut a, m_addr, MONOPOLIST, now);
+  let _ = park_phased_user_dials(&mut a, u1_addr, SMALL, now);
+  let _ = park_phased_user_dials(&mut a, u2_addr, SMALL, now);
+  a.ready_dial_peers.insert(m_addr);
+  a.ready_dial_peers.insert(u1_addr);
+  a.ready_dial_peers.insert(u2_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    let done = [m_addr, u1_addr, u2_addr]
+      .iter()
+      .all(|p| a.dial_parked.get(p).map(|q| q.is_empty()).unwrap_or(true));
+    if done {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ledger schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    MONOPOLIST + 2 * SMALL,
+    "every dial — monopolist AND both small urgent peers — mints before its deadline; (a) \
+       backstops the urgent-lane starvation (c) permits"
+  );
+  assert!(!saw_failure, "no dial retired despite capacity");
+}
+
+/// Config knob: `catchup_interval` default and validation (zero and over-ceiling).
+#[test]
+fn quic_options_catchup_interval_default_and_validation() {
+  assert_eq!(
+    test_config().catchup_interval(),
+    super::DEFAULT_CATCHUP_INTERVAL,
+    "the accessor returns the documented default"
+  );
+  assert_eq!(super::DEFAULT_CATCHUP_INTERVAL, Duration::from_millis(10));
+
+  let err = test_config()
+    .with_catchup_interval(Duration::ZERO)
+    .validate()
+    .expect_err("a zero catch-up interval is rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::CatchupIntervalZero),
+    "got {err:?}"
+  );
+
+  let err = test_config()
+    .with_catchup_interval(super::MAX_CATCHUP_INTERVAL + Duration::from_millis(1))
+    .validate()
+    .expect_err("a catch-up interval above the ceiling is rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::CatchupIntervalTooLarge),
+    "got {err:?}"
+  );
+
+  // At the ceiling validates when the margin is raised to keep margin >= interval.
+  test_config()
+    .with_catchup_interval(super::MAX_CATCHUP_INTERVAL)
+    .with_dial_service_margin(super::MAX_CATCHUP_INTERVAL)
+    .validate()
+    .expect("a ceiling interval with a matching margin validates");
+}
+
+/// Config knob: `dial_service_margin` default and the cross-field floor (>= interval).
+#[test]
+fn quic_options_dial_service_margin_default_and_validation() {
+  assert_eq!(
+    test_config().dial_service_margin(),
+    super::DEFAULT_DIAL_SERVICE_MARGIN
+  );
+  assert_eq!(
+    super::DEFAULT_DIAL_SERVICE_MARGIN,
+    Duration::from_millis(20)
+  );
+
+  // Below the default catch-up interval (10ms) is rejected by the cross-field guard.
+  let err = test_config()
+    .with_dial_service_margin(Duration::from_millis(5))
+    .validate()
+    .expect_err("a margin below the catch-up interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginBelowCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // Exactly one interval is the floor and validates.
+  let interval = test_config().catchup_interval();
+  test_config()
+    .with_dial_service_margin(interval)
+    .validate()
+    .expect("a margin equal to the catch-up interval validates");
+}
+
+/// Config knob: `max_reliable_ping_exempt_pops_per_pass` default and zero rejection.
+#[test]
+fn quic_options_ping_exempt_cap_default_and_validation() {
+  assert_eq!(
+    test_config().max_reliable_ping_exempt_pops_per_pass(),
+    super::DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS
+  );
+  assert_eq!(super::DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS, 8);
+
+  let err = test_config()
+    .with_max_reliable_ping_exempt_pops_per_pass(0)
+    .validate()
+    .expect_err("a zero exempt-pop cap is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::MaxReliablePingExemptPopsPerPassZero
+    ),
+    "got {err:?}"
+  );
+
+  test_config()
+    .with_max_reliable_ping_exempt_pops_per_pass(1)
+    .validate()
+    .expect("a cap of 1 validates");
+  test_config()
+    .validate()
+    .expect("the default config validates");
 }
