@@ -10,9 +10,47 @@ use quinn_proto::{Connection, ConnectionEvent, ConnectionHandle, Endpoint as Qui
 use slab::Slab;
 use smallvec_wrapper::MediumVec;
 
+/// Which side opened a pooled connection. Only inbound (server-accepted)
+/// connections consume a source's per-source pending allowance: a local
+/// outbound dial to a peer must never charge against that peer's inbound cap,
+/// or simultaneous bidirectional dialing wedges (each side's own outbound to
+/// the peer would block the peer's inbound Initial).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ConnDirection {
+  /// Locally initiated via [`ConnTable::get_or_dial`].
+  Outbound,
+  /// Peer-initiated, accepted by the server endpoint via
+  /// [`ConnTable::insert_accepted`].
+  Inbound,
+}
+
+/// Why [`ConnTable::get_or_dial`] could not return a connection handle.
+///
+/// Both variants are terminal for the dial attempt; the caller routes the
+/// failure the same way it routes a bare dial error — retire the reliable
+/// intent through `dial_failed`, or drop a best-effort datagram.
+#[derive(Debug)]
+pub(crate) enum DialError {
+  /// quinn refused to initiate the connection, before any I/O — e.g. CIDs
+  /// exhausted or a malformed remote address.
+  Connect(quinn_proto::ConnectError),
+  /// The global `max_quic_connections` cap is already reached, so NO new
+  /// outbound connection may be created. Fires only on the no-reusable-entry
+  /// branch: reuse of an existing usable pooled connection (or of a cached
+  /// closed handle awaiting its drained-reap) returns before this check, so the
+  /// cap bounds total tracked connections without blocking traffic on an
+  /// already-pooled peer.
+  AtGlobalCap,
+}
+
 pub(crate) struct ConnEntry {
   conn: Connection,
   peer: SocketAddr,
+  /// Which side opened this connection — [`ConnDirection::Outbound`] for a local
+  /// dial, [`ConnDirection::Inbound`] for a server-accepted peer dial. The
+  /// per-source pending cap counts inbound connections only (see
+  /// [`ConnTable::pending_inbound_from`]).
+  direction: ConnDirection,
   /// `true` once the connection has been observed Established
   /// (`!is_handshaking() && !is_closed()`) at least once. Sticky — never
   /// reset. Distinguishes a previously-healthy pooled connection now in
@@ -23,11 +61,35 @@ pub(crate) struct ConnEntry {
   /// failure indefinitely — the existing `dial_failed` path is the right
   /// outcome).
   established_at_least_once: bool,
+  /// `true` while this entry contributes one unit to its source's
+  /// [`ConnTable::pending_inbound`] index. Set exactly once — when an INBOUND
+  /// connection is inserted by [`ConnTable::insert_accepted`] (an outbound dial
+  /// is never indexed) — and cleared exactly once, whichever comes first:
+  /// [`ConnTable::reconcile_pending_inbound`] observes it establish, or
+  /// [`ConnTable::reap_if_drained`] removes it while still un-established. It is
+  /// the single source of truth the index decrement is guarded on, so every
+  /// increment is matched by exactly one decrement (no leak, no double-count)
+  /// independent of how many servicing passes run between accept and
+  /// establishment or reap.
+  pending_indexed: bool,
   /// `ConnectionEvent`s produced by `quinn_proto::Endpoint::handle_event`
   /// during one `service_quinn` iteration on this connection, queued for
   /// delivery on the NEXT iteration of THIS connection. See
   /// [`Self::queue_pending_event`] / [`Self::take_pending_events`].
   pending_events: VecDeque<ConnectionEvent>,
+  /// Count of live DIALER (locally opened via `open(Dir::Bi)`) bidi bridges
+  /// currently riding this connection. A bridge is a dialer iff its bridge-side
+  /// `eager_outbound_label` is `true`; the coordinator increments this at every
+  /// dial mint and decrements it at every dialer-bridge reap under that SAME
+  /// predicate, so the count returns to 0 once a connection's dialer bridges
+  /// have all reaped (and is discarded with the entry if the connection is
+  /// dropped wholesale). It bounds the LOCAL outbound half of quinn's
+  /// `connection_blocked` set: the coordinator admission-gates `open(Dir::Bi)`
+  /// at `super::C_OUT`, so a peer advertising an enormous MAX_STREAMS cannot
+  /// make this node hold an attacker-scaled outbound bidi-stream population.
+  /// Independent of the coordinator's separate `inbound_bridge_count` (which
+  /// counts accepted bridges); a bridge contributes to exactly one of the two.
+  outbound_bridge_count: usize,
 }
 
 impl ConnEntry {
@@ -46,6 +108,17 @@ impl ConnEntry {
   #[inline(always)]
   pub(crate) fn conn_ref(&self) -> &Connection {
     &self.conn
+  }
+
+  /// Whether this connection has been observed Established at least once. The
+  /// sticky flag set lazily by [`Self::conn_mut`]; an immutable read that does
+  /// NOT itself force the observation (the caller reads the value as of the last
+  /// mutable touch). The datagram-servicing path samples it before and after
+  /// [`super::QuicEndpoint::service_one_conn`] to detect the establishment
+  /// transition that unblocks a pooled dial.
+  #[inline(always)]
+  pub(crate) fn established_at_least_once(&self) -> bool {
+    self.established_at_least_once
   }
 
   pub(crate) fn peer(&self) -> SocketAddr {
@@ -105,11 +178,49 @@ impl ConnEntry {
   pub(crate) fn pending_events_len(&self) -> usize {
     self.pending_events.len()
   }
+
+  /// Live count of DIALER (we-opened, `eager_outbound_label`) bidi bridges on
+  /// this connection — the outbound half of quinn's `connection_blocked` set the
+  /// coordinator's `open(Dir::Bi)` admission gate bounds. See the field docs.
+  #[inline(always)]
+  pub(crate) fn outbound_bridge_count(&self) -> usize {
+    self.outbound_bridge_count
+  }
+
+  /// Record one newly minted dialer bridge on this connection. Paired 1:1 with
+  /// [`Self::dec_outbound_bridge_count`] under the coordinator's
+  /// `eager_outbound_label` predicate, so every increment is matched by exactly
+  /// one decrement (or discarded whole with the entry on connection reap).
+  #[inline(always)]
+  pub(crate) fn inc_outbound_bridge_count(&mut self) {
+    self.outbound_bridge_count += 1;
+  }
+
+  /// Release one reaped dialer bridge's unit of this connection's outbound
+  /// count. Debug-asserts against underflow: a decrement with no matching mint
+  /// is a predicate mismatch between the mint and reap sites (the exact fault an
+  /// `eager_outbound_label`-vs-`pending_outbound_kinds` keying error would cause).
+  #[inline(always)]
+  pub(crate) fn dec_outbound_bridge_count(&mut self) {
+    debug_assert!(
+      self.outbound_bridge_count > 0,
+      "outbound_bridge_count underflow: a dialer-bridge reap has no matching mint"
+    );
+    self.outbound_bridge_count = self.outbound_bridge_count.saturating_sub(1);
+  }
 }
 
 pub(crate) struct ConnTable {
   conns: Slab<ConnEntry>,
   peers: HashMap<SocketAddr, ConnectionHandle>,
+  /// Per-source count of INBOUND connections that have not yet established — the
+  /// half-open population the coordinator's per-source pending cap bounds. Kept
+  /// as an index so admission is an O(1) lookup ([`Self::pending_inbound_from`])
+  /// instead of a scan of the whole connection slab: at connection-table
+  /// saturation an attacker flooding fresh-DCID Initials would otherwise force
+  /// an O(total connections) scan per rejected datagram. A source with zero
+  /// pending inbound connections has no entry (the map never stores a zero).
+  pending_inbound: HashMap<SocketAddr, usize>,
 }
 
 impl ConnTable {
@@ -117,6 +228,7 @@ impl ConnTable {
     Self {
       conns: Slab::new(),
       peers: HashMap::new(),
+      pending_inbound: HashMap::new(),
     }
   }
 
@@ -165,6 +277,17 @@ impl ConnTable {
   /// live); this is by design — `peers[peer]` always points at the live
   /// one for new outbound exchanges, and `reap_if_drained` clears the old
   /// slab slot when its `Drained` state is reached.
+  ///
+  /// **Global connection cap covers outbound dials too.** `max_connections`
+  /// (the coordinator's `max_quic_connections`) is enforced right before a NEW
+  /// outbound `quinn.connect` commits a fresh slab slot — the no-reusable-entry
+  /// branch only. Without it, `max_quic_connections` would bound inbound
+  /// Initials while a large or attacker-influenced membership address set could
+  /// still grow the slab past the cap through reliable dials and datagram
+  /// fallbacks (both reach here). Every early-return reuse path above (a usable
+  /// pooled connection, or a cached closed-never-Established handle) returns
+  /// BEFORE the check, so reusing a slot is never blocked — only a genuinely
+  /// new connection is refused, with [`DialError::AtGlobalCap`].
   pub(crate) fn get_or_dial(
     &mut self,
     quinn: &mut QuinnEndpoint,
@@ -172,7 +295,8 @@ impl ConnTable {
     client: quinn_proto::ClientConfig,
     peer: SocketAddr,
     server_name: &str,
-  ) -> Result<ConnectionHandle, quinn_proto::ConnectError> {
+    max_connections: Option<usize>,
+  ) -> Result<ConnectionHandle, DialError> {
     if let Some(ch) = self.peers.get(&peer).copied() {
       let (reusable, was_established) = match self.conns.get(ch.0) {
         Some(e) => (!e.conn.is_closed(), e.established_at_least_once),
@@ -194,6 +318,14 @@ impl ConnTable {
       }
       self.peers.remove(&peer);
     }
+    // Global connection cap — enforced ONLY here, on the no-reusable-entry
+    // branch that is about to create a fresh slab slot. A reused connection
+    // returned above without reaching this check. `len()` counts every tracked
+    // slab entry (handshaking, established, draining), so this caps the total
+    // outbound + inbound connection population at `max_connections`.
+    if max_connections.is_some_and(|max| self.conns.len() >= max) {
+      return Err(DialError::AtGlobalCap);
+    }
     // `server_name` is the rustls verification identity for the peer's
     // cert — supplied by the driver's SNI provider so the verification
     // name is keyed on the membership address (not a hardcoded constant).
@@ -201,12 +333,19 @@ impl ConnTable {
     // `config.crypto.start_session(version, server_name, ...)`; the
     // rustls-backed `start_session` parses it via `ServerName::try_from`
     // and feeds the result to the configured `ServerCertVerifier`.
-    let (ch, conn) = quinn.connect(now.into_std(), client, peer, server_name)?;
+    let (ch, conn) = quinn
+      .connect(now.into_std(), client, peer, server_name)
+      .map_err(DialError::Connect)?;
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
+      direction: ConnDirection::Outbound,
       established_at_least_once: false,
+      // A local outbound dial is never counted against the peer's inbound
+      // pending allowance (see `pending_inbound_from`), so it is not indexed.
+      pending_indexed: false,
       pending_events: VecDeque::new(),
+      outbound_bridge_count: 0,
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
     self.peers.insert(peer, ch);
@@ -256,13 +395,24 @@ impl ConnTable {
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
+      direction: ConnDirection::Inbound,
       established_at_least_once: false,
+      // A freshly accepted inbound connection is un-established, so it enters
+      // the per-source pending index. Paired with the decrement in
+      // `reconcile_pending_inbound` (on establishment) or `reap_if_drained`
+      // (on removal while still un-established).
+      pending_indexed: true,
       pending_events: VecDeque::new(),
+      // An inbound (server-accepted) connection can still be the canonical
+      // handle a later local dial rides (simultaneous bidirectional dial), so a
+      // dialer bridge may be opened on it — start the outbound count at zero.
+      outbound_bridge_count: 0,
     });
     assert_eq!(
       slot, ch.0,
       "accepted connection slab slot must equal ConnectionHandle"
     );
+    *self.pending_inbound.entry(peer).or_insert(0) += 1;
     let existing_usable = self
       .peers
       .get(&peer)
@@ -310,11 +460,147 @@ impl ConnTable {
     // practice and no further connection-level work is owed.
     let _ = quinn.handle_event(ch, quinn_proto::EndpointEvent::drained());
     if let Some(e) = self.conns.try_remove(ch.0) {
+      // A still-indexed entry is an inbound connection removed before it ever
+      // established: release its unit of the source's pending allowance. An
+      // entry that established already had its unit released by
+      // `reconcile_pending_inbound`, so `pending_indexed` is false and this is
+      // skipped — the decrement happens exactly once.
+      if e.pending_indexed {
+        Self::release_pending_inbound(&mut self.pending_inbound, e.peer);
+      }
       if self.peers.get(&e.peer).copied() == Some(ch) {
         self.peers.remove(&e.peer);
       }
     }
     true
+  }
+
+  /// Release one unit of `peer`'s pending-inbound index. The single decrement
+  /// primitive: every caller has already confirmed the entry was indexed
+  /// (`pending_indexed`), so the source MUST have a positive count here. Removes
+  /// the map entry at zero so an idle source leaves no residue.
+  fn release_pending_inbound(pending_inbound: &mut HashMap<SocketAddr, usize>, peer: SocketAddr) {
+    match pending_inbound.get_mut(&peer) {
+      Some(count) => {
+        debug_assert!(*count > 0, "pending-inbound index underflow for {peer}");
+        *count -= 1;
+        if *count == 0 {
+          pending_inbound.remove(&peer);
+        }
+      }
+      None => debug_assert!(
+        false,
+        "pending-inbound index missing an indexed entry for {peer}"
+      ),
+    }
+  }
+
+  /// Observe whether an inbound connection has established and, if so, release
+  /// its unit of the per-source pending index exactly once. Called once per
+  /// connection per servicing pass from `service_quinn`: a still-handshaking or
+  /// never-indexed (outbound / already-released) entry is a no-op, so the index
+  /// tracks the live half-open population without a scan.
+  ///
+  /// Establishment is authoritative via the sticky `established_at_least_once`
+  /// flag (set the first tick the connection is observed
+  /// `!is_handshaking() && !is_closed()`); this forces that observation current
+  /// before reading it, so an establishment reached earlier in the same tick is
+  /// caught here rather than lingering in the index until the next pass.
+  pub(crate) fn reconcile_pending_inbound(&mut self, ch: ConnectionHandle) {
+    let released_peer = {
+      let Some(entry) = self.conns.get_mut(ch.0) else {
+        return;
+      };
+      if !entry.pending_indexed {
+        return;
+      }
+      // Only inbound connections ever enter the pending index (`insert_accepted`
+      // is the sole increment site); an outbound dial is never charged.
+      debug_assert_eq!(
+        entry.direction,
+        ConnDirection::Inbound,
+        "only inbound connections may be pending-indexed"
+      );
+      // `conn_mut()` performs the sticky establishment observation.
+      let _ = entry.conn_mut();
+      if !entry.established_at_least_once {
+        return;
+      }
+      entry.pending_indexed = false;
+      entry.peer
+    };
+    Self::release_pending_inbound(&mut self.pending_inbound, released_peer);
+  }
+
+  /// Total number of connections currently tracked — every slab entry,
+  /// counting handshaking, established, and still-draining connections alike.
+  /// The global QUIC connection cap is enforced against this before an inbound
+  /// Initial commits new state.
+  pub(crate) fn len(&self) -> usize {
+    self.conns.len()
+  }
+
+  /// Number of inbound (server-accepted) connections from `source` that have
+  /// not yet established — still handshaking, OR handshake-failed and awaiting
+  /// their drained-reap. This is the half-open state the per-source pending cap
+  /// bounds before an unauthenticated inbound Initial commits new state.
+  ///
+  /// Two properties the cap depends on:
+  ///
+  /// - Direction: a LOCAL outbound dial to `source` is NOT counted. Counting it
+  ///   would wedge simultaneous bidirectional dialing — each side's own
+  ///   handshaking outbound to the peer would block the peer's inbound Initial,
+  ///   so neither exchange completes.
+  /// - Never-established: a failed inbound handshake becomes non-handshaking but
+  ///   its closed/draining slab entry lingers until [`Self::reap_if_drained`]
+  ///   frees it. It stays charged here (still `pending_indexed`) so a source
+  ///   cannot exceed the cap by repeatedly opening handshakes that fail — its
+  ///   closed-but-undrained entries still consume the allowance. An inbound
+  ///   connection that DID establish has graduated out of the half-open budget
+  ///   (its unit was released by [`Self::reconcile_pending_inbound`]) and is not
+  ///   counted.
+  ///
+  /// O(1): a direct read of the [`Self::pending_inbound`] index, not a scan of
+  /// the connection slab — so a rejected inbound Initial at connection-table
+  /// saturation cannot be amplified into O(total connections) work.
+  pub(crate) fn pending_inbound_from(&self, source: &SocketAddr) -> usize {
+    self.pending_inbound.get(source).copied().unwrap_or(0)
+  }
+
+  /// Inbound (server-accepted) connections from `source` that have left the
+  /// handshaking phase WITHOUT ever establishing — the failed/closed-but-
+  /// undrained population [`Self::pending_inbound_from`] must keep charged
+  /// (the state an `is_handshaking()`-only count would wrongly free). Distinct
+  /// from still-handshaking entries; used by the regression test that a failed
+  /// inbound handshake does not release the source's allowance before its reap.
+  #[cfg(test)]
+  pub(crate) fn failed_never_established_inbound_from(&self, source: &SocketAddr) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| {
+        e.peer == *source
+          && e.direction == ConnDirection::Inbound
+          && !e.established_at_least_once
+          && !e.conn.is_handshaking()
+      })
+      .count()
+  }
+
+  /// Independent recount of the connections currently indexed under `source`
+  /// (`pending_indexed`), read straight from the slab rather than the index.
+  /// The index invariant is `pending_inbound_from == this recount` for every
+  /// source at all times: a missed increment/decrement or a decrement that did
+  /// not clear the bit makes the two diverge, so the counter-maintenance test
+  /// asserts their equality after every accept / establish / reap to catch a
+  /// leak, underflow, or double-count.
+  #[cfg(test)]
+  pub(crate) fn indexed_inbound_recount(&self, source: &SocketAddr) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| e.peer == *source && e.pending_indexed)
+      .count()
   }
 
   /// Snapshot of all live connection handles, for driver polling loops.

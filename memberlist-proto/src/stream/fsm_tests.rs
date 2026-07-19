@@ -19,6 +19,12 @@ fn addr(port: u16) -> SocketAddr {
   SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+/// Concatenate the `Bytes` chunk chain `poll_transmit` drains into, for
+/// byte-level assertions.
+fn concat(chunks: &VecDeque<Bytes>) -> Vec<u8> {
+  chunks.iter().flat_map(|c| c.iter().copied()).collect()
+}
+
 /// Build a `Stream` directly in the named phase. Fields are `pub(crate)`,
 /// so the FSM can be exercised in isolation from the bridge/endpoint —
 /// mirroring `Endpoint::dial_succeeded` / `accept_stream`'s literals.
@@ -109,13 +115,15 @@ fn poll_timeout_live_then_none_on_terminal() {
 fn poll_transmit_terminal_emits_nothing() {
   let t0 = Instant::now();
   let mut done = stream_in(StreamPhase::Done, None);
-  done.output_buf.extend([1u8, 2, 3]);
-  let mut out = Vec::new();
+  done
+    .output_buf
+    .push_back(Bytes::copy_from_slice(&[1, 2, 3]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(done.poll_transmit(t0, &mut out), None);
   assert!(out.is_empty());
 
   let mut failed = stream_in(StreamPhase::Failed(StreamError::Timeout), None);
-  failed.output_buf.extend([4u8, 5]);
+  failed.output_buf.push_back(Bytes::copy_from_slice(&[4, 5]));
   assert_eq!(failed.poll_transmit(t0, &mut out), None);
   assert!(out.is_empty());
 }
@@ -130,8 +138,8 @@ fn poll_transmit_past_deadline_fails_and_emits_nothing() {
     StreamPhase::OutboundSendingRequest(OutboundKind::UserMessage),
     Some(dl),
   );
-  s.output_buf.extend([9u8, 9, 9]);
-  let mut out = Vec::new();
+  s.output_buf.push_back(Bytes::copy_from_slice(&[9, 9, 9]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(
     s.poll_transmit(dl + Duration::from_millis(1), &mut out),
     None
@@ -151,11 +159,12 @@ fn poll_transmit_user_message_drains_to_done_closed() {
     StreamPhase::OutboundSendingRequest(OutboundKind::UserMessage),
     Some(t0 + Duration::from_secs(5)),
   );
-  s.output_buf.extend([1u8, 2, 3, 4]);
-  let mut out = Vec::new();
+  s.output_buf
+    .push_back(Bytes::copy_from_slice(&[1, 2, 3, 4]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   let n = s.poll_transmit(t0, &mut out).expect("bytes drained");
   assert_eq!(n, 4);
-  assert_eq!(out, [1, 2, 3, 4]);
+  assert_eq!(concat(&out), [1, 2, 3, 4]);
   assert!(s.is_done());
   assert!(matches!(s.poll_event(), Some(StreamEvent::Closed)));
 }
@@ -169,8 +178,8 @@ fn poll_transmit_push_pull_request_awaits_response() {
     StreamPhase::OutboundSendingRequest(OutboundKind::PushPull(PushPullKind::Join)),
     Some(t0 + Duration::from_secs(5)),
   );
-  s.output_buf.extend([5u8, 6, 7]);
-  let mut out = Vec::new();
+  s.output_buf.push_back(Bytes::copy_from_slice(&[5, 6, 7]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(s.poll_transmit(t0, &mut out), Some(3));
   assert!(matches!(
     s.phase,
@@ -188,8 +197,8 @@ fn poll_transmit_inbound_response_drains_to_done_closed() {
     StreamPhase::InboundSendingResponse,
     Some(t0 + Duration::from_secs(5)),
   );
-  s.output_buf.extend([8u8]);
-  let mut out = Vec::new();
+  s.output_buf.push_back(Bytes::copy_from_slice(&[8]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(s.poll_transmit(t0, &mut out), Some(1));
   assert!(s.is_done());
   assert!(matches!(s.poll_event(), Some(StreamEvent::Closed)));
@@ -204,8 +213,8 @@ fn poll_transmit_non_write_phase_restores_phase() {
     StreamPhase::OutboundAwaitingResponse(OutboundKind::UserMessage),
     Some(t0 + Duration::from_secs(5)),
   );
-  s.output_buf.extend([1u8, 1]);
-  let mut out = Vec::new();
+  s.output_buf.push_back(Bytes::copy_from_slice(&[1, 1]));
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(s.poll_transmit(t0, &mut out), Some(2));
   assert!(matches!(
     s.phase,
@@ -221,7 +230,7 @@ fn poll_transmit_empty_buffer_returns_none() {
     StreamPhase::OutboundSendingRequest(OutboundKind::UserMessage),
     Some(t0 + Duration::from_secs(5)),
   );
-  let mut out = Vec::new();
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   assert_eq!(s.poll_transmit(t0, &mut out), None);
   assert!(matches!(
     s.phase,
@@ -589,11 +598,11 @@ fn inbound_ping_for_us_encodes_ack() {
   assert!(s.poll_endpoint_event().is_none(), "Ack is self-contained");
   assert!(matches!(s.phase, StreamPhase::InboundSendingResponse));
   // The encoded Ack is queued for transmit.
-  let mut out = Vec::new();
+  let mut out: VecDeque<Bytes> = VecDeque::new();
   let n = s.poll_transmit(t0, &mut out).expect("ack bytes queued");
   assert!(n > 0);
   assert_eq!(
-    out[0],
+    concat(&out)[0],
     Message::<SmolStr, SocketAddr>::Ack(Ack::new(77)).tag()
   );
   // Draining the response moves to Done.

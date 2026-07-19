@@ -456,7 +456,7 @@ fn labeled_exchange_same_label_both_validate() {
   // The staged bytes must be the expected label frame.
   let expected_frame = build_label_header(b"cluster-x");
   assert_eq!(
-    acceptor.pending_out_bytes(),
+    acceptor.pending_out_bytes().as_slice(),
     expected_frame.as_slice(),
     "acceptor pending_out must contain the label frame after lazy release"
   );
@@ -733,7 +733,9 @@ fn fin_observers_are_noops_on_terminal_phase() {
 #[test]
 fn fail_stopped_already_retired_sets_transport_failure_and_is_sticky() {
   let mut bridge = make_plain_bridge();
-  bridge.pending_out.extend_from_slice(b"stale outbound tail");
+  bridge
+    .pending_out
+    .push_back(Bytes::from_static(b"stale outbound tail"));
   bridge.fail_stopped_already_retired(quinn_proto::VarInt::from_u32(7));
   assert!(
     matches!(bridge.phase, LinkState::Failed(BridgeFailure::Transport(_))),
@@ -1431,6 +1433,78 @@ fn pump_in_truncated_unit_at_fin_fails_decode() {
   );
 }
 
+/// `pump_in` over a live quinn stream: a label header split across TWO STREAM
+/// frames of one flight validates in a SINGLE pump. The dialer's label frame is
+/// written in two pieces, each flushed as its own frame, so the server's
+/// assembler holds two separate chunks; the first is a partial label header
+/// (`classify_header` => `Incomplete`) and the second completes it. One
+/// `pump_in` must read BOTH chunks — the `Incomplete` arm has to `continue`
+/// accumulating rather than `break` the chunk loop.
+///
+/// This is the soundness precondition of the coordinator's deduplicated ready
+/// set: several coalesced readability wakes collapse into ONE pump, so a pump
+/// that stopped at the partial first chunk would strand the second with no
+/// further event to re-read it — a false `Failed(Timeout)` for a compliant peer.
+///
+/// Mutation-verify: revert the `Incomplete` arm to `break` the chunk loop — the
+/// single pump reads only the partial first chunk, `inbound_label_validated`
+/// stays false, and this assertion fails.
+#[test]
+fn split_label_header_validates_in_a_single_pump() {
+  let mut pair = RawQuicPair::handshaked();
+  let sid = pair.client_open_bi();
+
+  // Build the dialer's label frame, then deliver it in two frames whose split
+  // falls INSIDE the label bytes: the first chunk is a partial header
+  // (`Incomplete`), the second completes it.
+  let label = Bytes::from_static(b"cluster-label-that-is-split-in-two");
+  let mut frame = Vec::new();
+  encode_label_prefix(&label, &mut frame);
+  let split = frame.len() / 2;
+  assert!(
+    split > 2 && split < frame.len(),
+    "the split must land inside the label bytes so chunk 1 is a partial header"
+  );
+  // Two separate client writes, each ferried before the next, so quinn stores
+  // them as two distinct assembler chunks (a small frame never defragments).
+  pair.client_write(sid, &frame[..split]);
+  pair.ferry();
+  pair.client_write(sid, &frame[split..]);
+  pair.ferry();
+
+  // A LABELED acceptor bridge over the accepted stream: it validates the peer's
+  // label off the head of `recv_accum` before any reliable unit.
+  let server_sid = pair.server_accept_bi();
+  let mut ep = make_server_endpoint();
+  let stream = ep
+    .accept_stream(CLIENT_ADDR, Instant::from_std(pair.now))
+    .expect("node is running");
+  let mut bridge = Bridge::new(
+    stream,
+    pair.server_ch,
+    server_sid,
+    crate::CompressionOptions::new(),
+    crate::EncryptionOptions::new(),
+    ep.max_stream_frame_size(),
+    Some(label.clone()),
+    false,
+    false,
+  );
+  assert!(
+    !bridge.inbound_label_validated,
+    "an acceptor with a label starts with the inbound label unvalidated"
+  );
+
+  // ONE pump, with BOTH chunks already buffered in the assembler.
+  let _ = bridge.pump_in(&mut pair.server_conns, Instant::from_std(pair.now));
+  assert!(
+    bridge.inbound_label_validated,
+    "a label split across two STREAM frames must validate within a SINGLE pump: \
+       the `Incomplete` arm must `continue` accumulating the later chunk, not \
+       `break` and strand it"
+  );
+}
+
 /// `pump_in` over a live quinn stream: the peer FINs while the bridge's FSM
 /// still expects inbound bytes (the request stream is opened and FINned with
 /// NO data). The `fin_seen && handle_data(&[]).is_err()` premature-FIN arm
@@ -1861,7 +1935,9 @@ fn pump_out_deadline_with_pending_out_tail_fails_timeout() {
 
   // Stage a back-pressured tail and pin the inner stream's deadline in the
   // past so the pre-write deadline check fires on the next pump_out.
-  bridge.pending_out.extend_from_slice(b"back-pressured tail");
+  bridge
+    .pending_out
+    .push_back(Bytes::from_static(b"back-pressured tail"));
   let past = Instant::from_std(pair.now);
   // The inner FSM's deadline must be `Some` and `<= now`. A fresh inbound
   // accept_stream carries an exchange deadline at `now + stream_timeout`; we
@@ -1929,7 +2005,9 @@ fn pump_out_blocked_pending_out_flush_retains_tail_and_waits() {
   }
 
   // Stage a back-pressured tail and pump BEFORE the exchange deadline.
-  bridge.pending_out.extend_from_slice(b"back-pressured tail");
+  bridge
+    .pending_out
+    .push_back(Bytes::from_static(b"back-pressured tail"));
   let result = bridge.pump_out(&mut pair.server_conns, Instant::from_std(pair.now));
 
   assert_eq!(
@@ -1938,7 +2016,7 @@ fn pump_out_blocked_pending_out_flush_retains_tail_and_waits() {
     "a flow-control-blocked flush waits for credit; it does not fail"
   );
   assert_eq!(
-    bridge.pending_out_bytes(),
+    bridge.pending_out_bytes().as_slice(),
     b"back-pressured tail",
     "the blocked flush retains the staged tail intact — no loss, no growth, no duplication"
   );
@@ -1989,7 +2067,7 @@ fn pump_out_back_pressured_unit_streams_across_windows_and_reassembles() {
     "the unit must span several windows to exercise back-pressure ({} bytes)",
     unit.len()
   );
-  bridge.pending_out.extend_from_slice(&unit);
+  bridge.pending_out.push_back(Bytes::copy_from_slice(&unit));
 
   // Flush up to a window, ferry it to the peer, the peer reads (granting
   // credit), repeat until pending_out drains.
@@ -2326,7 +2404,9 @@ fn pump_out_pending_flush_write_error_fails_transport() {
   let mut ep = make_server_endpoint();
   let mut bridge = pair.server_bridge(&mut ep, server_open_sid);
   // Stage a back-pressured tail so the leading `pending_out` flush runs.
-  bridge.pending_out.extend_from_slice(b"flush-me");
+  bridge
+    .pending_out
+    .push_back(Bytes::from_static(b"flush-me"));
 
   // RESET the bridge's send half out from under it, so the flush write returns
   // `WriteError::ClosedStream`.
@@ -2533,4 +2613,194 @@ fn pump_out_done_stream_unflushed_tail_past_deadline_fails_timeout() {
        got {:?}",
     bridge.phase
   );
+}
+
+/// K concurrent inbound push/pull responses served against a large membership
+/// view share ONE backing allocation — the endpoint's cached response `Bytes` —
+/// rather than each holding its own Θ(members) copy. Every bridge stages its
+/// reliable-unit body chunk (`pending_out`) as the SAME allocation the cache
+/// holds, so total resident response memory is Θ(members), not Θ(K·members)
+/// under an attack that opens K concurrent requests.
+///
+/// Mutation check: revert `Stream::output_buf` to `VecDeque<u8>` (+ `extend` in
+/// `stream_load_response`). `poll_transmit` then copies the bytes into a fresh
+/// per-stream buffer, `reliable_unit` wraps that fresh buffer, and each bridge's
+/// staged body is a distinct allocation — the `as_ptr()` equality below fails
+/// (and resident memory scales K·members).
+#[test]
+fn pushpull_response_serve_shares_one_buffer() {
+  const K: usize = 12;
+
+  // A tiny stream window so the bridge's first `write_chunks` sees zero credit
+  // and RETAINS the staged `[header, body]` in `pending_out` untouched (the body
+  // chunk keeps the cache's `as_ptr()`) rather than advancing/flushing it.
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.stream_receive_window(VarInt::from_u32(256));
+  let mut pair = RawQuicPair::handshaked_with_transport(transport);
+
+  // Make the response genuinely large (a big local-state snapshot stands in for
+  // a large member table — the cache path is identical) so shared-vs-copied is
+  // a meaningful distinction.
+  let mut ep = make_server_endpoint();
+  ep.set_local_state_snapshot(Bytes::from(vec![0x5a_u8; 40 * 1024]))
+    .expect("snapshot within frame bound");
+  // Rebuild the cache under the new snapshot (the periodic tick's job).
+  let now = Instant::from_std(pair.now);
+  ep.handle_timeout(now);
+
+  let cache_ptr = ep.cached_pushpull_response().as_ptr();
+
+  let mut body_ptrs = Vec::with_capacity(K);
+  for _ in 0..K {
+    // Open a server-side bidi and saturate its send window so the bridge's flush
+    // blocks with zero credit.
+    let sid = {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      e.conn_mut()
+        .streams()
+        .open(Dir::Bi)
+        .expect("server opens a bidi")
+    };
+    let big = vec![0u8; 64 * 1024];
+    loop {
+      let e = pair
+        .server_conns
+        .get_mut(pair.server_ch)
+        .expect("server connection present");
+      match e.conn_mut().send_stream(sid).write(&big) {
+        Ok(_) => continue,
+        Err(quinn_proto::WriteError::Blocked) => break,
+        Err(other) => panic!("saturation write failed: {other:?}"),
+      }
+    }
+
+    let mut bridge = pair.server_bridge(&mut ep, sid);
+    // Stand the inner stream in the phase a decoded inbound request leaves it,
+    // then load the endpoint's serve-ready cache clone — the exact `Bytes`
+    // `handle_stream_event` hands the responder — and mark it pre-compressed
+    // exactly as the real `SendPushPullResponse` arm does.
+    bridge.stream.phase = crate::stream::StreamPhase::InboundSendingResponse;
+    Endpoint::<SmolStr, SocketAddr>::stream_load_response(
+      &mut bridge.stream,
+      ep.cached_pushpull_response(),
+      now + Duration::from_secs(60),
+    );
+    #[cfg(compression)]
+    {
+      bridge.response_precompressed = true;
+    }
+
+    // Pump: the body is encoded into `pending_out` as a reliable unit, then the
+    // zero-credit flush blocks and retains it.
+    let _ = bridge.pump_out(&mut pair.server_conns, now);
+
+    let body = bridge
+      .pending_out
+      .back()
+      .expect("staged response body chunk");
+    assert!(
+      body.len() > 32 * 1024,
+      "the staged body chunk is the large response, not the tiny length header"
+    );
+    body_ptrs.push(body.as_ptr());
+  }
+
+  for (i, &p) in body_ptrs.iter().enumerate() {
+    assert_eq!(
+      p, cache_ptr,
+      "bridge {i}'s staged response body must be the cache's shared allocation, \
+         not a per-request copy — resident memory is Θ(members), not Θ(K·members)"
+    );
+  }
+}
+
+/// The wire bytes a served push/pull response puts on the transport are
+/// byte-identical to a per-request `encode_reliable_unit`, with compression OFF
+/// and ON. The serve-ready body is the endpoint's cache (compressed once per
+/// tick when enabled); the bridge wraps it in the SAME `[unit_len][payload]`
+/// framing, never re-compressing it.
+#[test]
+fn pushpull_response_wire_identical() {
+  use crate::encode_reliable_unit;
+  let now = Instant::now();
+
+  // A minimal bridge whose only role here is to run `reliable_unit`; the
+  // `ch`/`sid` are unused by the encode.
+  fn make_bridge(
+    ep: &mut Endpoint<SmolStr, SocketAddr>,
+    compression: crate::CompressionOptions,
+    now: Instant,
+  ) -> Bridge<SmolStr, SocketAddr> {
+    let stream = ep.accept_stream(CLIENT_ADDR, now).expect("node is running");
+    Bridge::new(
+      stream,
+      ConnectionHandle(0),
+      QuicSid::new(Side::Client, Dir::Bi, 0),
+      #[cfg(compression)]
+      compression,
+      #[cfg(encryption)]
+      crate::EncryptionOptions::new(),
+      ep.max_stream_frame_size(),
+      None,
+      false,
+      false,
+    )
+  }
+
+  // ── Compression OFF ──────────────────────────────────────────────────
+  {
+    let mut ep = make_server_endpoint();
+    // With compression disabled the cache is the raw response frame.
+    let framed = ep.cached_pushpull_response();
+    let mut bridge = make_bridge(&mut ep, crate::CompressionOptions::new(), now);
+    #[cfg(compression)]
+    {
+      bridge.response_precompressed = true;
+    }
+    let (header, payload) = bridge.reliable_unit(framed.clone()).expect("encode ok");
+    let mut got = header.to_vec();
+    got.extend_from_slice(&payload);
+    let want = encode_reliable_unit(&crate::CompressionOptions::new(), &framed);
+    assert_eq!(
+      got, want,
+      "compression-off response wire bytes must be identical to a per-request encode"
+    );
+  }
+
+  // ── Compression ON ───────────────────────────────────────────────────
+  #[cfg(feature = "lz4")]
+  {
+    use crate::{CompressAlgorithm, CompressionOptions};
+    let opts = CompressionOptions::new()
+      .with_algorithm(CompressAlgorithm::Lz4)
+      .with_threshold(8);
+    let mut ep = make_server_endpoint();
+    // Grow the response so compression actually shrinks it.
+    ep.set_local_state_snapshot(Bytes::from(vec![0x33u8; 4096]))
+      .expect("snapshot within frame bound");
+    ep.handle_timeout(now);
+    // The still-default-disabled cache is the raw response frame.
+    let framed = ep.cached_pushpull_response();
+    // Enable compression on the endpoint's cache; re-read the serve-ready body.
+    ep.set_response_compression(opts);
+    let serve_ready = ep.cached_pushpull_response();
+    assert_ne!(
+      serve_ready.as_ptr(),
+      framed.as_ptr(),
+      "the cache must be rebuilt (compressed) under the new policy"
+    );
+    let mut bridge = make_bridge(&mut ep, opts, now);
+    bridge.response_precompressed = true;
+    let (header, payload) = bridge.reliable_unit(serve_ready).expect("encode ok");
+    let mut got = header.to_vec();
+    got.extend_from_slice(&payload);
+    let want = encode_reliable_unit(&opts, &framed);
+    assert_eq!(
+      got, want,
+      "compression-on response wire bytes must be identical to a per-request encode"
+    );
+  }
 }

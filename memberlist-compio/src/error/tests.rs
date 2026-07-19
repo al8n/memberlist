@@ -69,7 +69,9 @@ fn every_variant_displays_and_debugs() {
 
   let variants = [
     MemberlistError::Io(io::Error::other("disk")),
+    #[cfg(encryption)]
     MemberlistError::Encryption(memberlist_proto::EncryptionError::AuthFailed),
+    #[cfg(checksum)]
     MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch),
     MemberlistError::Frame(memberlist_proto::FrameError::Empty),
     MemberlistError::Resolve(io::Error::other("dns")),
@@ -114,10 +116,12 @@ fn transparent_variants_delegate_display() {
     MemberlistError::Io(io::Error::other("boom")).to_string(),
     io::Error::other("boom").to_string()
   );
+  #[cfg(encryption)]
   assert_eq!(
     MemberlistError::Encryption(memberlist_proto::EncryptionError::AuthFailed).to_string(),
     memberlist_proto::EncryptionError::AuthFailed.to_string()
   );
+  #[cfg(checksum)]
   assert_eq!(
     MemberlistError::Checksum(memberlist_proto::ChecksumError::Mismatch).to_string(),
     memberlist_proto::ChecksumError::Mismatch.to_string()
@@ -134,10 +138,14 @@ fn from_conversions_select_the_right_variant() {
   let from_io: MemberlistError = io::Error::other("boom").into();
   assert!(matches!(from_io, MemberlistError::Io(_)));
 
+  #[cfg(encryption)]
   let from_enc: MemberlistError = memberlist_proto::EncryptionError::AuthFailed.into();
+  #[cfg(encryption)]
   assert!(matches!(from_enc, MemberlistError::Encryption(_)));
 
+  #[cfg(checksum)]
   let from_checksum: MemberlistError = memberlist_proto::ChecksumError::Mismatch.into();
+  #[cfg(checksum)]
   assert!(matches!(from_checksum, MemberlistError::Checksum(_)));
 
   let from_frame: MemberlistError = memberlist_proto::FrameError::Empty.into();

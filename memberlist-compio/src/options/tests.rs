@@ -448,6 +448,7 @@ fn memberlist_options_builders_round_trip() {
 
 // The compression / encryption policy builders replace the stored policy;
 // the accessors hand back a borrow of it.
+#[cfg(all(compression, encryption))]
 #[test]
 fn memberlist_options_compression_and_encryption_round_trip() {
   let opts = MemberlistOptions::new()
@@ -599,6 +600,7 @@ fn validate_gossip_mtu_enforces_floor_and_ceiling() {
 // (both `aes-gcm` and `chacha20-poly1305` are on, so
 // every `SecretKey` variant has a present backend) — it would require a build
 // missing one AEAD feature, i.e. fault injection at the feature level.
+#[cfg(all(feature = "aes-gcm", feature = "chacha20-poly1305"))]
 #[test]
 fn validate_encryption_options_accepts_usable_policies() {
   use memberlist_proto::{Keyring, SecretKey};

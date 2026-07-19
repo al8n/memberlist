@@ -628,6 +628,7 @@ async fn send_many_reliable_empty_is_ok_noop() {
 
 /// `set_compression_options` on a LIVE (running) node succeeds: the change
 /// takes effect on the next outbound datagram, and the reply is `Ok(())`.
+#[cfg(compression)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_compression_options_on_live_node_succeeds() {
   use memberlist_reactor::CompressionOptions;

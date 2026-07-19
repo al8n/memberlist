@@ -12,10 +12,13 @@
 use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use memberlist_proto::{
-  ChecksumOptions, CompressionOptions, EncryptionOptions, Keyring,
-  typed::{Meta, NodeState},
-};
+#[cfg(checksum)]
+use memberlist_proto::ChecksumOptions;
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+use memberlist_proto::typed::{Meta, NodeState};
+#[cfg(encryption)]
+use memberlist_proto::{EncryptionOptions, Keyring};
 use memberlist_reactor::{Delegate, MemberlistOptions};
 use memberlist_test_suite::{Captures, NodeConfig, PingObservation};
 use smol_str::SmolStr;
@@ -95,12 +98,15 @@ pub fn memberlist_options(cfg: &NodeConfig) -> MemberlistOptions {
   if let Some(state) = &cfg.local_state {
     mopts = mopts.with_initial_local_state(state.clone());
   }
+  #[cfg(compression)]
   if let Some(algorithm) = cfg.compression {
     mopts = mopts.with_compression(CompressionOptions::new().with_algorithm(algorithm));
   }
+  #[cfg(checksum)]
   if let Some(algorithm) = cfg.checksum {
     mopts = mopts.with_checksum(ChecksumOptions::new().with_algorithm(algorithm));
   }
+  #[cfg(encryption)]
   if let Some(key) = cfg.encryption_key {
     mopts = mopts.with_encryption(EncryptionOptions::new().with_keyring(Keyring::new(key)));
   }

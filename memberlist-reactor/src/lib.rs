@@ -73,6 +73,9 @@ pub use snapshot::MemberlistSnapshot;
   doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
 )]
 pub use delegate::{Delegate, VoidDelegate};
+#[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+pub use error::UserDialBacklogFull;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 #[cfg_attr(
   docsrs,
@@ -85,9 +88,6 @@ pub use events::EventStream;
   doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
 )]
 pub use memberlist::Memberlist;
-#[cfg(feature = "quic")]
-#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
-pub use memberlist_proto::QuicOptions;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use memberlist_proto::TlsOptions;
@@ -138,6 +138,9 @@ pub use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
   doc(cfg(any(feature = "quic", feature = "tcp", feature = "tls")))
 )]
 pub use memberlist_proto::{Node, typed::NodeState};
+#[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+pub use memberlist_proto::{QuicOptions, QuicOptionsError};
 
 /// The node-identity bound shared across the driver and handle — everything the
 /// machine's `Endpoint<I, _>` requires of the identity type `I`. A blanket impl

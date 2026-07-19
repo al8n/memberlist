@@ -51,7 +51,7 @@ use crate::{
     SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
   driver::join_reply,
-  error::{Error, JoinFailed},
+  error::{Error, JoinFailed, UserDialBacklogFull},
   observation::observation_payload_bytes,
   shared::Shared,
   snapshot::snapshot_of,
@@ -429,19 +429,47 @@ where
           let _ = reply.send(Err(Error::SendFailed));
           return;
         }
+        // Whole-batch admission preflight. The coordinator bounds one peer's
+        // outstanding reliable user-message dials, and `start_user_message`
+        // refuses past that ceiling. Admit the ENTIRE batch atomically here,
+        // before starting any exchange, so a batch that would cross the ceiling
+        // is reported as backpressure with nothing started — rather than
+        // starting a prefix and failing mid-loop, which would strand
+        // already-started exchanges behind an unregistered waiter. This is
+        // backpressure on this node's own load, not a delivery failure: retry
+        // once the peer drains.
+        if !self.endpoint.can_admit_user_dials(to, payloads.len()) {
+          let limit = self.endpoint.max_pending_user_dials_per_peer();
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.send(Err(Error::UserDialBacklogFull(UserDialBacklogFull::new(
+            to, limit,
+          ))));
+          return;
+        }
         let mut pending = HashSet::with_capacity(payloads.len());
         for payload in payloads {
-          // `QuicEndpoint::start_user_message` calls `service_dials` +
-          // `flush_outbound` in-band (no separate `poll_action` loop needed,
-          // unlike the stream driver). The returned `StreamId` coerces to the
-          // `ExchangeId` that the bridge-reap path stamps on
-          // `Event::ExchangeCompleted(UserMessage)`.
+          // A reliable `start_user_message` services only its own new exchange
+          // in-band (no separate `poll_action` loop, unlike the stream driver);
+          // the returned `StreamId` coerces to the `ExchangeId` the bridge-reap
+          // path stamps on `Event::ExchangeCompleted(UserMessage)`. The preflight
+          // admitted the whole batch and this single task drives the coordinator,
+          // so every per-call admission gate here is guaranteed to pass. The
+          // `Err` arm is unreachable defense-in-depth: it must never panic the
+          // driver task. An already-started exchange left without a registered
+          // waiter completes as a clean no-op in `account_event` (its
+          // `ExchangeCompleted` matches no `PendingUserSend`), so abandoning the
+          // started prefix cannot hang a caller.
           // Ignoring StreamId: only ExchangeId::from is needed for correlation.
-          let stream_id = self
-            .endpoint
-            .start_user_message(to, payload, now)
-            .expect("issued while running");
-          pending.insert(ExchangeId::from(stream_id));
+          match self.endpoint.start_user_message(to, payload, now) {
+            Ok(stream_id) => {
+              pending.insert(ExchangeId::from(stream_id));
+            }
+            Err(e) => {
+              // Ignoring Err: the caller dropped its reply receiver.
+              let _ = reply.send(Err(Error::from(e)));
+              return;
+            }
+          }
         }
         self.pending_user_sends.push(PendingUserSend {
           pending,
@@ -724,7 +752,6 @@ where
     // `encrypt_gossip` a copy; a transient `send_to` error (ENOBUFS / ICMP
     // unreachable surfacing as a syscall error) is non-fatal per the gossip
     // drop discipline.
-    let mut needs_flush = false;
     let mut sent = 0;
     while sent < budget {
       let Some(transmit) = self.endpoint.poll_memberlist_transmit() else {
@@ -792,13 +819,14 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendStatus::Queued => needs_flush = true,
-            // NotReady may mean queue_unreliable_datagram just initiated a cold
-            // dial; flush this tick so the connection's Initial is emitted now
-            // (else the connection does not warm until the next driver wake). The
-            // gossip itself still goes out immediately over the UDP fallback.
+            // The queue call self-flushes: it collects this connection's owed
+            // transmits (the queued datagram, and a cold dial's Initial) into
+            // the outbound queue before returning, so no per-pass flush follows.
+            DatagramSendStatus::Queued => {}
+            // NotReady may mean the queue call just initiated a cold dial; its
+            // inline collect already emitted the connection's Initial this tick.
+            // The gossip itself still goes out immediately over the UDP fallback.
             DatagramSendStatus::NotReady => {
-              needs_flush = true;
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
                 // is lossy and the next probe/gossip round recovers.
@@ -806,7 +834,7 @@ where
               }
             }
             // TooLarge: the connection is already Established (max_size was Some),
-            // so there is no pending Initial to flush; just fall back to UDP.
+            // so there is no pending Initial; just fall back to UDP.
             DatagramSendStatus::TooLarge => {
               if let Some(socket) = self.socket.as_ref() {
                 // Ignoring Poll: a transient UDP send error is non-fatal — gossip
@@ -820,14 +848,6 @@ where
     }
     worked |= sent > 0;
     more |= sent == budget;
-
-    // Flush any datagrams queued above into `out` THIS poll so the raw-QUIC
-    // loop below sends them now — a datagram-borne probe whose timeout is armed
-    // this same tick must not wait for the next driver wake (that wake can be
-    // the timeout).
-    if needs_flush {
-      self.endpoint.flush_outbound_transmits(now);
-    }
 
     // Raw QUIC datagrams: already wire-framed by quinn-proto, no codec wrap.
     let mut raw_sent = 0;
@@ -963,13 +983,32 @@ where
 
     // Shutdown: best-effort leave, flush to quiescence, fail any parked waiters, stop.
     if this.shared.is_shutdown() {
+      // Fail the parked reliable-exchange waiters with `Shutdown` BEFORE the
+      // best-effort leave below. `leave()` purges the QUIC coordinator's reliable
+      // dial pipeline and emits a terminal `Failed` `ExchangeCompleted` for every
+      // parked push/pull and reliable user-send so a graceful (non-shutdown) leave
+      // resolves those waiters instead of leaving them to hang. On the SHUTDOWN
+      // path the caller must instead learn the node is tearing down, so drain these
+      // two waiter sets to `Shutdown` here; the purge's completions then find no
+      // parked waiter and `account_event` no-ops them.
+      for (_, mut pj) in this.pending_joins.drain() {
+        // Ignoring Err: the join caller dropped its reply receiver.
+        // Carry the addresses already reached before shutdown raced this waiter —
+        // callers see the partial contacted set, not empty.
+        let _ = pj
+          .reply
+          .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
+      }
+      for ps in this.pending_user_sends.drain(..) {
+        // Ignoring Err: the send_reliable caller dropped its reply receiver.
+        let _ = ps.reply.send(Err(Error::Shutdown));
+      }
       // Ignoring Err: best-effort leave during shutdown.
       let _ = this.endpoint.leave(Instant::now());
-      // Drain endpoint events to quiescence before reaping pending_joins: a
-      // single drain_surfaces pass is capped at transmit_batch, so a large
-      // batch of already-queued ExchangeCompleted events would be partially
-      // skipped, leaving contacted addresses unaccounted in the Err tuple.
-      // Loop until drain_surfaces reports no remaining work.
+      // Drain endpoint surfaces to quiescence: flush the leave's dead-self gossip
+      // transmits and drain any trailing events. The join / user-send waiters were
+      // already failed with `Shutdown` above, so the leave purge's `Failed`
+      // completions (and any other queued events) resolve no waiter here.
       loop {
         let (_, more) = this.drain_surfaces(cx);
         if !more {
@@ -1038,14 +1077,6 @@ where
           }
         }
       }
-      for (_, mut pj) in this.pending_joins.drain() {
-        // Ignoring Err: the join caller dropped its reply receiver.
-        // Carry the addresses already reached before shutdown raced
-        // this waiter — callers see the partial contacted set, not empty.
-        let _ = pj
-          .reply
-          .send(Err((std::mem::take(&mut pj.contacted), Error::Shutdown)));
-      }
       if let Some(pl) = this.pending_leave.take() {
         for replier in pl.repliers {
           // Ignoring Err: the leave caller dropped its reply receiver.
@@ -1055,10 +1086,6 @@ where
       for pp in this.pending_pings.drain(..) {
         // Ignoring Err: the ping caller dropped its reply receiver.
         let _ = pp.reply.send(Err(Error::Shutdown));
-      }
-      for ps in this.pending_user_sends.drain(..) {
-        // Ignoring Err: the send_reliable caller dropped its reply receiver.
-        let _ = ps.reply.send(Err(Error::Shutdown));
       }
       // Release the bound port BEFORE acking the shutdown caller. Drop the UDP
       // socket, closing its FD synchronously (the agnostic `UdpSocket` has no

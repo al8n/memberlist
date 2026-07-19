@@ -481,6 +481,52 @@ fn push_pull_scale_above_threshold() {
   assert_eq!(push_pull_scale(sec, 65), Duration::from_secs(3));
 }
 
+/// The event-emitting `start_push_pull` and the descriptor-returning
+/// `start_push_pull_direct` are the SAME surface: from an identical fresh endpoint
+/// and identical args, the old method's `DialRequested` and the direct method's
+/// `DialIntent` carry the same id / peer / deadline — but the direct method
+/// enqueues NO event.
+///
+/// Mutation-verify: make the direct method also push the `DialRequested` (or the
+/// old wrapper drop it) — the "no DialRequested from the direct path" assertion (or
+/// the old-surface `expect`) then fails.
+#[test]
+fn start_push_pull_direct_matches_event_emitting_surface() {
+  use crate::event::ExchangeKind;
+  let t0 = Instant::now();
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+
+  // OLD method: enqueues a DialRequested carrying (id, peer, deadline).
+  let mut e_old: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
+  let id_old = e_old.start_push_pull(peer, PushPullKind::Refresh, t0);
+  let dial = core::iter::from_fn(|| e_old.poll_event())
+    .find_map(|ev| match ev {
+      Event::DialRequested(p) => Some(p),
+      _ => None,
+    })
+    .expect("the event-emitting start_push_pull enqueues a DialRequested");
+  assert_eq!(dial.id(), id_old);
+  assert_eq!(dial.peer_ref(), &peer);
+  let deadline = dial.deadline();
+
+  // DIRECT method: same id / peer / deadline, and NO event.
+  let mut e_new: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
+  let (id_new, intent) = e_new.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  let intent = intent.expect("a running endpoint returns Some(DialIntent)");
+  assert_eq!(
+    id_new, id_old,
+    "same id from the same fresh endpoint + args"
+  );
+  assert_eq!(intent.id(), id_old);
+  assert_eq!(intent.peer_ref(), &peer);
+  assert_eq!(intent.deadline(), deadline);
+  assert_eq!(intent.kind(), ExchangeKind::PushPull);
+  assert!(
+    !core::iter::from_fn(|| e_new.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    "start_push_pull_direct must enqueue NO DialRequested"
+  );
+}
+
 #[test]
 fn update_meta_emits_node_updated_and_increments_incarnation() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
@@ -3556,7 +3602,9 @@ fn start_push_pull_emits_dial_requested_and_dial_succeeded_returns_stream() {
 
   // Stream's output_buf should contain encoded PushPull bytes.
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes expected");
+  let n = stream
+    .poll_transmit_vec(t0, &mut buf)
+    .expect("bytes expected");
   assert!(n > 0, "expected non-empty encoded PushPull");
 
   // First byte is PUSH_PULL_MESSAGE_TAG = 8.
@@ -3612,7 +3660,7 @@ fn outbound_push_pull_decode_and_merge() {
   let mut _req_buf = Vec::new();
   // Draining the request via the public API auto-advances the phase to
   // OutboundAwaitingResponse.
-  stream.poll_transmit(t0, &mut _req_buf);
+  stream.poll_transmit_vec(t0, &mut _req_buf);
 
   // Simulate peer's PushPull reply — contains "carol" as a member.
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
@@ -3703,12 +3751,8 @@ fn inbound_push_pull_decode_and_response_bytes() {
 
   match cmd {
     StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      // local_states is already in wire-format PushNodeState (with the
-      // local node's tracked incarnation), so we hand it straight to the
-      // encoder.
-      let encoded =
-        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
+      // The response is the endpoint's pre-encoded, cached membership frame.
+      let encoded = resp.into_encoded();
       assert!(!encoded.is_empty(), "encoded response must be non-empty");
       assert_eq!(encoded[0], 8u8, "first byte must be PUSH_PULL_MESSAGE_TAG");
 
@@ -3718,7 +3762,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
         t0 + Duration::from_secs(5),
       );
       let mut out = Vec::new();
-      let n = stream.poll_transmit(t0, &mut out).expect("bytes");
+      let n = stream.poll_transmit_vec(t0, &mut out).expect("bytes");
       assert!(n > 0);
     }
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
@@ -3786,7 +3830,7 @@ fn post_leave_push_pull_reply_does_not_merge() {
   while e.poll_event().is_some() {}
   let mut stream = e.dial_succeeded(id, t0).expect("stream");
   let mut req_buf = Vec::new();
-  stream.poll_transmit(t0, &mut req_buf);
+  stream.poll_transmit_vec(t0, &mut req_buf);
 
   // ...then the node leaves before the peer's reply lands. The in-flight reply
   // must not re-establish membership during the drain.
@@ -4214,7 +4258,9 @@ fn start_reliable_ping_emits_dial_requested() {
   // Dial succeeds — stream output_buf must contain an encoded Ping.
   let mut stream = e.dial_succeeded(id, t0).expect("stream expected");
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes expected");
+  let n = stream
+    .poll_transmit_vec(t0, &mut buf)
+    .expect("bytes expected");
   assert!(n > 0, "expected non-empty encoded Ping");
   // First byte is PING_MESSAGE_TAG = 2.
   assert_eq!(buf[0], 2u8, "first byte must be PING_MESSAGE_TAG");
@@ -4363,7 +4409,7 @@ fn inbound_reliable_ping_encodes_ack() {
   // Stream should have Ack in output_buf.
   let mut out = Vec::new();
   let n = stream
-    .poll_transmit(t0, &mut out)
+    .poll_transmit_vec(t0, &mut out)
     .expect("ack bytes expected");
   assert!(n > 0, "expected non-empty Ack response");
   // First byte is ACK_MESSAGE_TAG = 4.
@@ -4388,7 +4434,10 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   while e.poll_event().is_some() {}
   let mut s_out = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  assert!(s_out.poll_transmit(t0, &mut buf).is_some(), "request bytes");
+  assert!(
+    s_out.poll_transmit_vec(t0, &mut buf).is_some(),
+    "request bytes"
+  );
   assert!(
     matches!(s_out.phase, StreamPhase::OutboundAwaitingResponse(_)),
     "drain must advance OutboundSendingRequest → OutboundAwaitingResponse"
@@ -4415,19 +4464,19 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   let cmd = e.handle_stream_event(ep_ev, t0).expect("StreamCommand");
   match cmd {
     StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      let enc =
-        Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       Endpoint::<SmolStr, SocketAddr>::stream_load_response(
         &mut s_in,
-        enc,
+        resp.into_encoded(),
         t0 + Duration::from_secs(5),
       );
     }
     StreamCommand::Close => panic!("expected SendPushPullResponse"),
   }
   buf.clear();
-  assert!(s_in.poll_transmit(t0, &mut buf).is_some(), "response bytes");
+  assert!(
+    s_in.poll_transmit_vec(t0, &mut buf).is_some(),
+    "response bytes"
+  );
   assert!(
     s_in.is_done(),
     "draining the response must advance InboundSendingResponse → Done"
@@ -4454,7 +4503,7 @@ fn outbound_reliable_ping_rejects_wrong_ack_seq() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  s.poll_transmit(t0, &mut buf); // drain ping ⇒ OutboundAwaitingResponse
+  s.poll_transmit_vec(t0, &mut buf); // drain ping ⇒ OutboundAwaitingResponse
 
   let wrong = crate::wire::encode_message::<SmolStr, SocketAddr>(
     &Message::<SmolStr, SocketAddr>::Ack(Ack::new(9999)),
@@ -4493,7 +4542,7 @@ fn inbound_reliable_ping_rejects_wrong_target() {
   );
   let mut out = Vec::new();
   assert!(
-    s.poll_transmit(t0, &mut out).is_none(),
+    s.poll_transmit_vec(t0, &mut out).is_none(),
     "no Ack must be queued for a misrouted ping"
   );
 }
@@ -4887,7 +4936,7 @@ fn start_user_message_encodes_user_data() {
 
   let mut stream = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
-  let n = stream.poll_transmit(t0, &mut buf).expect("bytes");
+  let n = stream.poll_transmit_vec(t0, &mut buf).expect("bytes");
   assert!(n > 0);
   // First byte is USER_DATA_MESSAGE_TAG = 9.
   assert_eq!(buf[0], 9u8);
@@ -5022,7 +5071,7 @@ fn timed_out_stream_never_transmits_queued_bytes() {
   // cleared (`poll_transmit` must not drain it after the stream fails).
   let mut buf = Vec::new();
   assert!(
-    stream.poll_transmit(deadline, &mut buf).is_none(),
+    stream.poll_transmit_vec(deadline, &mut buf).is_none(),
     "a timed-out stream must transmit nothing"
   );
   assert!(
@@ -5345,7 +5394,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   // Driver polls transmit AT the deadline, before any handle_timeout.
   let mut buf = Vec::new();
   assert!(
-    s.poll_transmit(t0 + Duration::from_millis(100), &mut buf)
+    s.poll_transmit_vec(t0 + Duration::from_millis(100), &mut buf)
       .is_none(),
     "a stream past its deadline must transmit nothing"
   );
@@ -5361,7 +5410,7 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
   );
   // Idempotent.
   assert!(
-    s.poll_transmit(t0 + Duration::from_millis(200), &mut buf)
+    s.poll_transmit_vec(t0 + Duration::from_millis(200), &mut buf)
       .is_none()
   );
 }
@@ -5393,7 +5442,7 @@ fn eof_before_response_fails_peer_closed() {
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut buf = Vec::new();
   assert!(
-    s.poll_transmit(t0, &mut buf).is_some(),
+    s.poll_transmit_vec(t0, &mut buf).is_some(),
     "request drains ⇒ OutboundAwaitingResponse"
   );
 
@@ -5639,7 +5688,7 @@ fn trailing_bytes_after_outbound_done_fails_decode() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
-  s.poll_transmit(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
+  s.poll_transmit_vec(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
   assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Build a legitimate reply followed by junk bytes in a SINGLE
@@ -5742,7 +5791,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
-  s.poll_transmit(t0, &mut _req_buf);
+  s.poll_transmit_vec(t0, &mut _req_buf);
   assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Chunk 1: the legitimate reply (FSM → Done).
@@ -6017,7 +6066,7 @@ fn end_to_end_push_pull_membership_convergence() {
   let mut stream_a = a.dial_succeeded(id_a, t0).expect("A stream");
   let mut a_request = Vec::new();
   stream_a
-    .poll_transmit(t0, &mut a_request)
+    .poll_transmit_vec(t0, &mut a_request)
     .expect("A request bytes");
   assert!(!a_request.is_empty(), "request must be non-empty");
   assert_eq!(a_request[0], 8u8, "must start with PUSH_PULL_MESSAGE_TAG");
@@ -6053,10 +6102,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // ── Step 3: B encodes its response and loads it into stream_b ─────────
   let encoded_b = match cmd_b {
-    StreamCommand::SendPushPullResponse(resp) => {
-      let (local_states, user_data) = resp.into_parts();
-      Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false)
-    }
+    StreamCommand::SendPushPullResponse(resp) => resp.into_encoded(),
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
   };
   assert!(!encoded_b.is_empty(), "B response must be non-empty");
@@ -6074,7 +6120,7 @@ fn end_to_end_push_pull_membership_convergence() {
   // Drain B's response bytes (simulating the driver sending them to A).
   let mut b_response = Vec::new();
   stream_b
-    .poll_transmit(t0, &mut b_response)
+    .poll_transmit_vec(t0, &mut b_response)
     .expect("B response bytes");
   assert!(!b_response.is_empty(), "B response bytes must be non-empty");
 
@@ -10094,5 +10140,779 @@ fn indirect_helper_selection_is_uniform_over_distinct_addresses() {
      ({a_frac:.3}); uniform-over-distinct expects ~0.5, an alias-multiplicity bias \
      would push it toward {:.3}",
     M as f64 / (M as f64 + 1.0)
+  );
+}
+
+// ─── incremental suspicion-deadline index (oracle-checked) ───────────────────
+//
+// Each test asserts EXACT equality `poll_timeout() == suspicion_deadline_bruteforce()`
+// (the old member-list fold), never `<=`: a stale index returns the wrong
+// instant, which an inequality assertion would silently admit. No scheduler is
+// started and no probe / forward / intent is in flight in these tests, so the
+// suspicion minimum is the whole of `poll_timeout` and the two must match
+// exactly. `earliest() == fold` is additionally asserted directly — it holds in
+// every lifecycle state, unlike `poll_timeout`, which is gated to `None` when
+// the endpoint is not Running.
+
+/// Count of members currently carrying a live suspicion — the size the index
+/// must have, with no tombstones.
+fn live_suspicion_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.members.iter().filter(|m| m.suspicion().is_some()).count()
+}
+
+/// The always-valid half of the invariant: the index's earliest equals the
+/// member-list fold, and its storage carries exactly the live suspicions (no
+/// tombstones). Holds in every lifecycle state.
+fn assert_index_consistent(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.suspicion_deadlines.earliest(),
+    e.suspicion_deadline_bruteforce(),
+    "index earliest must equal the member-list fold",
+  );
+  let live = live_suspicion_count(e);
+  assert_eq!(
+    e.suspicion_deadlines.entry_count(),
+    live,
+    "ordered-map storage must equal the live-suspicion count (no tombstones)",
+  );
+  assert_eq!(
+    e.suspicion_deadlines.live_key_count(),
+    live,
+    "authority-map size must equal the live-suspicion count",
+  );
+}
+
+/// The Running-state half: with no probe / forward / intent / scheduler timer
+/// armed, `poll_timeout` surfaces exactly the suspicion minimum.
+fn assert_poll_is_suspicion_min(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.poll_timeout(),
+    e.suspicion_deadline_bruteforce(),
+    "poll_timeout must equal the suspicion fold when no other timer is armed",
+  );
+}
+
+/// An installed suspicion becomes the new earliest, through BOTH ingress paths
+/// — a direct `process_suspect` and a `merge_state` Suspect.
+#[test]
+fn suspicion_index_install_becomes_new_earliest_via_both_ingress_paths() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t_early = Instant::from_origin(Duration::from_secs(10));
+  let t_late = Instant::from_origin(Duration::from_secs(20));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t_early);
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, t_early);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // no suspicion yet ⇒ None
+
+  // Direct ingress: suspect carol at the LATER instant — the only suspicion so
+  // far, hence the minimum.
+  e.process_suspect(suspect("carol", "x", 1), t_late);
+  let carol_dl = e
+    .members
+    .get(&SmolStr::new("carol"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(carol_dl));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+
+  // Merge ingress: a Suspect for bob arriving through `merge_state`, stamped at
+  // the EARLIER instant, installs a smaller deadline and becomes the new
+  // earliest.
+  e.merge_state(&[pns("bob", 7001, 1, State::Suspect)], t_early);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert!(
+    bob_dl < carol_dl,
+    "bob suspected earlier ⇒ smaller deadline"
+  );
+  assert_eq!(
+    e.suspicion_deadlines.earliest(),
+    Some(bob_dl),
+    "the merge-path install is the new earliest",
+  );
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("carol")));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// A confirmation accelerating a suspicion moves the poll minimum strictly
+/// inward — the mutant an existing `<=` assertion admits. The threshold
+/// `k` (`suspicion_mult - 2`) needs `n >= suspicion_mult`, so five members give
+/// `k = 2` and the timer starts at max.
+#[test]
+fn suspicion_index_confirm_accelerate_moves_the_min() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_suspicion_mult(4)
+      .with_suspicion_max_timeout_mult(6),
+  );
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  for (i, name) in ["bob", "carol", "dave", "erin"].iter().enumerate() {
+    process_alive_auto(&mut e, alive(name, 7001 + i as u16, 1), false, t0);
+  }
+  // A (bob) and B (erin) both suspected at t0 ⇒ both start at max ⇒ equal
+  // deadlines, so the minimum is t0 + max.
+  e.process_suspect(suspect("bob", "s1", 1), t0);
+  e.process_suspect(suspect("erin", "s2", 1), t0);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+  let before = e.poll_timeout().expect("a suspicion deadline is armed");
+
+  // A distinct suspector confirms A, pulling its deadline strictly below B's.
+  e.process_suspect(suspect("bob", "s3", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  let after = e
+    .poll_timeout()
+    .expect("a suspicion deadline is still armed");
+  assert!(
+    after < before,
+    "the confirmation must pull the minimum strictly inward: {after:?} !< {before:?}",
+  );
+  assert_eq!(after, bob_dl, "the new minimum is A's accelerated deadline");
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+  assert_poll_is_suspicion_min(&e); // == oracle
+  // The in-place confirm update left no tombstone.
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 2);
+}
+
+/// A superseding Alive removes the suspicion (falls back to the next term); a
+/// non-superseding Alive leaves it — the negative half.
+#[test]
+fn suspicion_index_clear_via_alive_superseding_removes_non_superseding_leaves() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+
+  // NEGATIVE: a non-superseding Alive (incarnation <= local) returns before the
+  // clear, so the suspicion and its index entry survive.
+  e.process_alive_decided(alive("bob", 7001, 1), false, t0);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "a non-superseding Alive must not clear the suspicion",
+  );
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+
+  // POSITIVE: a superseding Alive (incarnation > local) refutes the suspicion
+  // and removes its index entry.
+  e.process_alive_decided(alive("bob", 7001, 2), false, t0);
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Alive),
+    "a superseding Alive clears the suspicion",
+  );
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// A Dead clears the suspicion and removes its index entry.
+#[test]
+fn suspicion_index_clear_via_dead_removes() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_poll_is_suspicion_min(&e);
+
+  e.process_dead(dead("bob", "carol", 1), t0);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_eq!(e.suspicion_deadlines.earliest(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // == None
+}
+
+/// An expired suspicion (fired via `handle_timeout`) is popped, so
+/// `poll_timeout` stops returning the now-past deadline — the driver-busy-loop
+/// mutant killer.
+#[test]
+fn suspicion_index_expire_stops_returning_the_past_instant() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.poll_timeout(), Some(bob_dl));
+
+  // Fire the timer well past the deadline: the suspicion expires (→ Dead) and
+  // its index entry is popped (the remote-clear path, via the Dead synthesized
+  // by `fire_expired_suspicions`).
+  e.handle_timeout(bob_dl + Duration::from_secs(1));
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_ne!(
+    e.poll_timeout(),
+    Some(bob_dl),
+    "a fired suspicion must not remain the poll deadline (busy-loop mutant)",
+  );
+  assert_eq!(e.poll_timeout(), None);
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e);
+}
+
+/// Reclaiming a long-dead member via `reset_nodes` leaves no index entry (the
+/// suspicion was already cleared by the preceding Dead — the removal theorem).
+#[test]
+fn suspicion_index_reset_nodes_removal_leaves_no_entry() {
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(Duration::from_millis(1)));
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  assert!(e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  // Dead clears the suspicion — the entry is gone BEFORE reclaim, so
+  // `reset_nodes`' debug_assert (entry already absent) holds.
+  e.process_dead(dead("bob", "carol", 1), t0);
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+
+  // Reclaim the long-dead member; removal must not resurrect an index entry.
+  e.reset_nodes(t0 + Duration::from_secs(1));
+  assert!(
+    e.member(&SmolStr::new("bob")).is_none(),
+    "the long-dead member is reclaimed",
+  );
+  assert!(!e.suspicion_deadlines.contains(&SmolStr::new("bob")));
+  assert_index_consistent(&e);
+  assert_poll_is_suspicion_min(&e); // == None
+}
+
+/// A leaving endpoint gates `poll_timeout` to `None`, but leave mutates no peer
+/// suspicion, so the index still tracks it underneath and still equals the fold.
+#[test]
+fn suspicion_index_leave_drain_gates_poll_but_index_tracks_underneath() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  e.process_suspect(suspect("bob", "x", 1), t0);
+  let bob_dl = e
+    .members
+    .get(&SmolStr::new("bob"))
+    .unwrap()
+    .suspicion()
+    .unwrap()
+    .deadline();
+  assert_eq!(e.poll_timeout(), Some(bob_dl));
+
+  e.leave(t0).expect("leave ok");
+  assert_eq!(
+    e.poll_timeout(),
+    None,
+    "a leaving endpoint reports no deadline"
+  );
+  assert!(
+    e.suspicion_deadlines.contains(&SmolStr::new("bob")),
+    "the entry lingers consistently during the drain",
+  );
+  // earliest() == fold underneath (both Some(bob_dl)); the oracle debug_assert
+  // inside poll_timeout, run above before the gate, would already have fired
+  // otherwise.
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.earliest(), Some(bob_dl));
+}
+
+/// Through install → a confirmation flood → clear → a second install → clear,
+/// storage stays exactly equal to the live-suspicion count — the no-tombstone
+/// space proof at the FSM level.
+#[test]
+fn suspicion_index_structural_churn_keeps_storage_at_live_suspicions() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_suspicion_mult(4)
+      .with_suspicion_max_timeout_mult(6),
+  );
+  let t0 = Instant::from_origin(Duration::from_secs(10));
+  for (i, name) in ["bob", "carol", "dave", "erin"].iter().enumerate() {
+    process_alive_auto(&mut e, alive(name, 7001 + i as u16, 1), false, t0);
+  }
+  assert_index_consistent(&e); // 0 live
+
+  // Install bob (1 live), then a flood of confirmations from distinct sources.
+  // Each accepted confirmation is an in-place deadline update; none may accrete
+  // a tombstone.
+  e.process_suspect(suspect("bob", "s0", 1), t0);
+  assert_index_consistent(&e);
+  for s in ["s1", "s2", "s3", "s4", "s5"] {
+    e.process_suspect(suspect("bob", s, 1), t0);
+    assert_index_consistent(&e); // entry_count == live_key_count == 1 throughout
+  }
+  assert_eq!(
+    e.suspicion_deadlines.entry_count(),
+    1,
+    "a confirmation flood must not grow storage",
+  );
+
+  // Install carol (2 live).
+  e.process_suspect(suspect("carol", "s0", 1), t0);
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 2);
+
+  // Clear bob via a superseding Alive (1 live).
+  e.process_alive_decided(alive("bob", 7001, 9), false, t0);
+  assert_index_consistent(&e);
+  assert_eq!(e.suspicion_deadlines.entry_count(), 1);
+
+  // Clear carol via Dead (0 live).
+  e.process_dead(dead("carol", "z", 1), t0);
+  assert_index_consistent(&e);
+  assert!(e.suspicion_deadlines.is_empty());
+  assert_eq!(e.suspicion_deadlines.entry_count(), 0);
+  assert_poll_is_suspicion_min(&e);
+}
+
+// ─── incremental pending-dial-intent index (oracle-checked) ──────────────────
+//
+// The intent-plane twin of the suspicion-index section above. Every mutation of
+// `pending_stream_intents` must mirror into `intent_deadlines` through the
+// `insert_intent` / `remove_intent` chokepoints (and `leave` clears both), so
+// `poll_timeout`'s intent term is an O(log n) index read rather than an
+// O(intents) fold an attacker could inflate by parking many dials.
+
+/// The always-valid half of the invariant: the intent index's earliest equals
+/// the pending-intent fold, and its storage carries exactly the parked intents
+/// (no tombstones). Reads via `earliest_uncounted` so it never perturbs the
+/// scan-count measurement.
+fn assert_intent_index_consistent(e: &Endpoint<SmolStr, SocketAddr>) {
+  assert_eq!(
+    e.intent_deadlines.earliest_uncounted(),
+    e.pending_stream_intents.values().map(|i| i.deadline).min(),
+    "intent index earliest must equal the pending-intent fold",
+  );
+  let live = e.pending_stream_intents.len();
+  assert_eq!(
+    e.intent_deadlines.entry_count(),
+    live,
+    "ordered-map storage must equal the pending-intent count (no tombstones)",
+  );
+  assert_eq!(
+    e.intent_deadlines.live_key_count(),
+    live,
+    "authority-map size must equal the pending-intent count",
+  );
+}
+
+/// A datagram flood that inflates the parked-dial-intent count must not turn
+/// `poll_timeout` into an O(intents) scan. Parks many pending stream intents
+/// through the public dial API, then asserts a single `poll_timeout` examines a
+/// small constant number of intent-index entries that does NOT scale with the
+/// intent count — the property that denies an attacker O(intents) work per
+/// driver re-poll.
+///
+/// Mutation-verify: reverting the intent term of `poll_timeout` to the old
+/// `pending_stream_intents.values().map(|i| i.deadline).min()` fold never calls
+/// `DeadlineIndex::earliest`, so `entities_scanned` stays `0` and the `>= 1`
+/// assertion fails — the fold's O(intents) work per poll is exactly what this
+/// guards against.
+#[test]
+fn poll_timeout_intent_term_scans_o1_regardless_of_intent_count() {
+  use crate::event::PushPullKind;
+
+  fn scanned_for(n: usize) -> (u64, usize) {
+    let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+    let t0 = Instant::now();
+    while e.poll_event().is_some() {}
+    // Park `n` pending dial intents: each `start_push_pull` to a distinct peer
+    // queues an intent that stays parked (no dial_succeeded / dial_failed), so
+    // `pending_stream_intents` — and the mirrored `intent_deadlines` index —
+    // grows to `n`.
+    for i in 0..n {
+      let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 20000 + i as u16);
+      let _ = e.start_push_pull(peer, PushPullKind::Join, t0);
+    }
+    assert_eq!(e.pending_stream_intents.len(), n, "all intents parked");
+    // Settle, then measure exactly one poll in isolation.
+    let _ = e.poll_timeout();
+    e.intent_deadlines.reset_entities_scanned();
+    let _ = e.poll_timeout();
+    (
+      e.intent_deadlines.entities_scanned(),
+      e.pending_stream_intents.len(),
+    )
+  }
+
+  let (small, small_n) = scanned_for(8);
+  let (large, large_n) = scanned_for(512);
+  assert_eq!(small_n, 8);
+  assert_eq!(large_n, 512);
+  assert!(
+    small >= 1,
+    "poll_timeout must consult the intent index — reverting it to the O(intents) \
+     fold never calls earliest(), leaving this 0"
+  );
+  assert!(
+    small <= 2,
+    "one poll must examine O(1) intent-index entries, not scale with the parked \
+     intents; examined {small}"
+  );
+  assert_eq!(
+    large, small,
+    "intent-term examination count must not grow with the {large_n} parked intents \
+     (was {large}, single-baseline {small})"
+  );
+}
+
+/// Every intent maintenance chokepoint keeps `intent_deadlines` in lockstep with
+/// `pending_stream_intents`: the three inserts (`start_push_pull` /
+/// `start_reliable_ping` / `start_user_message`) and the removes via
+/// `dial_succeeded` and `dial_failed`. The consistency oracle is asserted after
+/// each step.
+#[test]
+fn intent_index_tracks_pending_intents_through_dial_lifecycle() {
+  use crate::{error::StreamError, event::PushPullKind};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  assert_intent_index_consistent(&e); // 0 intents
+
+  let p = |port: u16| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+
+  // Insert via all three start_* chokepoints, each with a distinct deadline so
+  // the surfaced minimum is unambiguous.
+  let id_pp = e.start_push_pull(p(7101), PushPullKind::Join, t0);
+  assert_intent_index_consistent(&e);
+  let id_rp = e.start_reliable_ping(SmolStr::new("bob"), p(7102), 7, t0 + Duration::from_secs(5));
+  assert_intent_index_consistent(&e);
+  let id_um = e
+    .start_user_message(p(7103), bytes::Bytes::from_static(b"hi"), t0)
+    .expect("running node accepts a user message");
+  assert_intent_index_consistent(&e);
+  assert_eq!(e.pending_stream_intents.len(), 3);
+  assert_eq!(e.intent_deadlines.entry_count(), 3);
+
+  // Remove one via dial_succeeded (promoted to a live stream)...
+  let _stream = e.dial_succeeded(id_pp, t0).expect("dial within deadline");
+  assert!(!e.pending_stream_intents.contains_key(&id_pp));
+  assert_intent_index_consistent(&e);
+
+  // ...one via dial_failed...
+  e.dial_failed(id_um, StreamError::DialFailed("refused".into()), t0);
+  assert!(!e.pending_stream_intents.contains_key(&id_um));
+  assert_intent_index_consistent(&e);
+
+  // ...leaving only the reliable-ping intent parked.
+  assert!(e.pending_stream_intents.contains_key(&id_rp));
+  assert_eq!(e.pending_stream_intents.len(), 1);
+  assert_eq!(e.intent_deadlines.entry_count(), 1);
+  assert_intent_index_consistent(&e);
+}
+
+/// `leave()` drops all parked intents and must clear the mirrored index in
+/// lockstep, leaving no stale earliest-intent deadline behind. The oracle in
+/// `poll_timeout` runs before the lifecycle gate, so it also checks the index
+/// against the (now empty) fold in the Leaving state.
+#[test]
+fn intent_index_cleared_on_leave() {
+  use crate::event::PushPullKind;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+
+  for i in 0..4u16 {
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7201 + i);
+    let _ = e.start_push_pull(peer, PushPullKind::Join, t0);
+  }
+  assert_eq!(e.intent_deadlines.entry_count(), 4);
+  assert_intent_index_consistent(&e);
+
+  e.leave(t0).expect("leave ok");
+
+  assert!(
+    e.pending_stream_intents.is_empty(),
+    "leave drops all intents"
+  );
+  assert!(
+    e.intent_deadlines.is_empty(),
+    "leave clears the intent index"
+  );
+  assert_eq!(e.intent_deadlines.entry_count(), 0);
+  assert_eq!(e.intent_deadlines.live_key_count(), 0);
+  // Oracle still holds in the Leaving state (both empty).
+  assert_intent_index_consistent(&e);
+  let _ = e.poll_timeout();
+}
+
+// ── Inbound push/pull response cache: O(1) per-request servicing ─────────────
+
+fn sock(port: u16) -> SocketAddr {
+  SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+fn inbound_pushpull_request(
+  peer: SocketAddr,
+  states: Vec<PushNodeState<SmolStr, SocketAddr>>,
+  stream_id: u64,
+) -> EndpointEvent<SmolStr, SocketAddr> {
+  EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
+    peer,
+    states,
+    Bytes::new(),
+    PushPullKind::Join,
+    StreamId::from_raw(stream_id),
+  ))
+}
+
+fn pushpull_response_bytes(cmd: Option<StreamCommand<SmolStr, SocketAddr>>) -> Bytes {
+  match cmd {
+    Some(StreamCommand::SendPushPullResponse(resp)) => resp.into_encoded(),
+    other => panic!("expected SendPushPullResponse, got {other:?}"),
+  }
+}
+
+fn decode_pushpull(bytes: &Bytes) -> crate::typed::PushPull<SmolStr, SocketAddr> {
+  let (_, msg) = crate::wire::decode_message::<SmolStr, SocketAddr>(bytes)
+    .expect("cached push/pull response must decode");
+  match msg {
+    crate::typed::Message::PushPull(pp) => {
+      assert!(
+        !pp.join(),
+        "a push/pull response always clears the join flag"
+      );
+      pp
+    }
+    other => panic!("expected a PushPull response frame, got {other:?}"),
+  }
+}
+
+fn decode_pushpull_response(
+  cmd: Option<StreamCommand<SmolStr, SocketAddr>>,
+) -> crate::typed::PushPull<SmolStr, SocketAddr> {
+  decode_pushpull(&pushpull_response_bytes(cmd))
+}
+
+fn reply_member_ids(cmd: Option<StreamCommand<SmolStr, SocketAddr>>) -> Vec<SmolStr> {
+  decode_pushpull_response(cmd)
+    .states_slice()
+    .iter()
+    .map(|s| s.id_ref().cheap_clone())
+    .collect()
+}
+
+/// The completed inbound push/pull path serves a cached, pre-encoded response:
+/// the O(members) fold+encode runs once per membership-changing tick, never per
+/// request. Drives many requests against a static member table and asserts the
+/// build counter stays flat, then grows the table and asserts a single tick
+/// rebuilds exactly once — the counter scales with neither request count nor
+/// member count.
+#[test]
+fn pushpull_response_cache_built_once_per_membership_change_not_per_request() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+
+  // Grow a large member table.
+  const N: u16 = 60;
+  for i in 0..N {
+    process_alive_auto(&mut e, alive(&format!("m{i}"), 9000 + i, 1), false, t0);
+  }
+  // Publish the current membership into the response cache (the schedule-fired
+  // tick is the only place the O(members) response is (re)built).
+  e.handle_timeout(t0);
+  assert_eq!(e.num_members(), N as usize + 1);
+  let builds_before = e.pushpull_response_builds();
+
+  // Drive many inbound requests against STATIC membership. Each pushes a state
+  // we already hold at the same incarnation (a no-op merge → no version bump),
+  // so the cache is served, never rebuilt.
+  let peer = sock(9500);
+  // The served frame is an O(1) clone of the cache: every request shares the
+  // SAME underlying buffer. A rebuild — extracted or inlined — allocates a fresh
+  // frame at a different address, so a stable pointer proves no per-request fold
+  // ran (complementing the build counter below).
+  let mut cache_ptr: Option<*const u8> = None;
+  for req_i in 0..200u64 {
+    let bytes = pushpull_response_bytes(e.handle_stream_event(
+      inbound_pushpull_request(peer, vec![pns("m0", 9000, 1, State::Alive)], req_i + 1),
+      t0,
+    ));
+    match cache_ptr {
+      None => cache_ptr = Some(bytes.as_ptr()),
+      Some(p) => assert_eq!(
+        bytes.as_ptr(),
+        p,
+        "each response must be an O(1) clone of the same cached buffer, not a rebuild"
+      ),
+    }
+    assert_eq!(
+      decode_pushpull(&bytes).states_slice().len(),
+      e.num_members(),
+      "every response is complete (carries all members)"
+    );
+  }
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_before,
+    "the per-request path must never rebuild the response (O(1) clone per request)"
+  );
+
+  // Grow again + a single tick → exactly one more build, regardless of the 200
+  // requests already served or the member count.
+  for i in N..(2 * N) {
+    process_alive_auto(&mut e, alive(&format!("m{i}"), 9000 + i, 1), false, t0);
+  }
+  e.handle_timeout(t0);
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_before + 1,
+    "one membership-changing tick rebuilds exactly once"
+  );
+
+  // Still O(1) at the larger size: a fresh cache buffer (from the grow tick),
+  // again shared across every request.
+  let builds_after_grow = e.pushpull_response_builds();
+  let mut cache_ptr2: Option<*const u8> = None;
+  for req_i in 0..200u64 {
+    let bytes = pushpull_response_bytes(e.handle_stream_event(
+      inbound_pushpull_request(peer, vec![pns("m0", 9000, 1, State::Alive)], 1000 + req_i),
+      t0,
+    ));
+    match cache_ptr2 {
+      None => cache_ptr2 = Some(bytes.as_ptr()),
+      Some(p) => assert_eq!(bytes.as_ptr(), p),
+    }
+    assert_eq!(
+      decode_pushpull(&bytes).states_slice().len(),
+      e.num_members()
+    );
+  }
+  assert_eq!(
+    e.pushpull_response_builds(),
+    builds_after_grow,
+    "requests remain O(1) after the table grows"
+  );
+}
+
+/// The cached response reflects membership as of the last tick: a change applied
+/// between ticks is at most one tick stale (absent until the next refresh), and
+/// present afterward. Proves the staleness bound is exactly one tick.
+#[test]
+fn pushpull_response_reflects_membership_change_only_after_the_next_tick() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  process_alive_auto(&mut e, alive("known", 9001, 1), false, t0);
+  e.handle_timeout(t0); // cache: [local, known]
+
+  // Add "late" WITHOUT an intervening tick.
+  process_alive_auto(&mut e, alive("late", 9002, 1), false, t0);
+  assert!(
+    e.member(&SmolStr::new("late")).is_some(),
+    "late is a member immediately (the merge/insert is not tick-gated)"
+  );
+
+  // A request BEFORE the next tick serves the pre-change cache: local + known,
+  // but NOT late.
+  let peer = sock(9500);
+  let ids = reply_member_ids(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0));
+  assert!(
+    ids.iter().any(|id| id == &SmolStr::new("known")),
+    "the reply carries the last-tick view of known, got {ids:?}"
+  );
+  assert!(
+    !ids.iter().any(|id| id == &SmolStr::new("late")),
+    "late (added since the last tick) is at most one tick stale, not yet in the reply: {ids:?}"
+  );
+
+  // After a tick, a fresh request reflects late.
+  e.handle_timeout(t0);
+  let ids2 = reply_member_ids(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 2), t0));
+  assert!(
+    ids2.iter().any(|id| id == &SmolStr::new("late")),
+    "after a tick the reply reflects late: {ids2:?}"
+  );
+}
+
+/// A Leaving/Left node closes an inbound push/pull rather than serving a stale
+/// live snapshot: the lifecycle gate precedes the cached-response path.
+#[test]
+fn pushpull_response_left_node_closes_and_never_serves_the_cache() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.leave(t0).expect("leave ok");
+  assert!(e.is_left());
+
+  let peer = sock(9500);
+  let cmd = e.handle_stream_event(
+    inbound_pushpull_request(peer, vec![pns("carol", 9003, 1, State::Alive)], 1),
+    t0,
+  );
+  assert!(
+    matches!(cmd, Some(StreamCommand::Close)),
+    "a left node must Close an inbound push/pull, never serve a live snapshot, got {cmd:?}"
+  );
+}
+
+/// `set_local_state_snapshot` mutates the response body (the local application
+/// state) WITHOUT moving `snapshot_version`, so it marks the cache dirty; the
+/// next tick then rebuilds the response with the new snapshot.
+#[test]
+fn pushpull_response_cache_dirtied_by_set_local_state_snapshot() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let t0 = Instant::now();
+  while e.poll_event().is_some() {}
+  e.handle_timeout(t0); // cache built with the initial (empty) snapshot
+
+  e.set_local_state_snapshot(Bytes::from_static(b"app-state-v2"))
+    .expect("set_local_state_snapshot ok");
+
+  // A request BEFORE a tick still serves the old cache (empty snapshot): the
+  // dirty flag defers the rebuild to the tick.
+  let peer = sock(9500);
+  let before =
+    decode_pushpull_response(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0))
+      .user_data_bytes();
+  assert!(
+    before.is_empty(),
+    "pre-tick reply carries the old (empty) snapshot: {before:?}"
+  );
+
+  // After a tick, the dirty flag forces a rebuild reflecting the new snapshot,
+  // even though `snapshot_version` never moved.
+  e.handle_timeout(t0);
+  let after =
+    decode_pushpull_response(e.handle_stream_event(inbound_pushpull_request(peer, vec![], 2), t0))
+      .user_data_bytes();
+  assert_eq!(
+    after.as_ref(),
+    b"app-state-v2",
+    "the dirty flag makes the next tick rebuild the cache with the new snapshot"
   );
 }

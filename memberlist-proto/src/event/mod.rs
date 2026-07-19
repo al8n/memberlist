@@ -6,7 +6,7 @@ use std::{string::String, vec::Vec};
 
 use crate::typed::{Message, NodeState, PushNodeState};
 use bytes::Bytes;
-use core::time::Duration;
+use core::{marker::PhantomData, time::Duration};
 use smallvec_wrapper::TinyVec;
 
 /// A coordinator-allocated handle for one in-flight reliable exchange,
@@ -265,6 +265,11 @@ impl StreamId {
     self.0
   }
 }
+
+// A `Copy` `u64` newtype: cloning is a constant-time bit copy, so it satisfies
+// `CheapClone`. Lets a `StreamId` key the `Endpoint`'s incremental
+// pending-dial-intent `DeadlineIndex`, which clones its key on insert.
+impl crate::CheapClone for StreamId {}
 
 /// A single message destined for one peer (one plain-frame datagram).
 #[derive(Debug)]
@@ -654,6 +659,73 @@ impl<A> DialRequested<A> {
   #[inline(always)]
   pub fn into_parts(self) -> (StreamId, A, crate::Instant) {
     (self.id, self.peer, self.deadline)
+  }
+}
+
+/// The dial descriptor returned by the machine's start-with-intent methods
+/// ([`Endpoint::start_push_pull_direct`], [`Endpoint::start_reliable_ping_direct`],
+/// [`Endpoint::start_user_message_direct`]).
+///
+/// Those methods create exactly the same stream intent as their event-emitting
+/// siblings ([`Endpoint::start_push_pull`] etc.) but, instead of enqueueing an
+/// [`Event::DialRequested`] onto `poll_event`, hand this descriptor straight back
+/// to the caller. A driver that owns its dial servicing (the composed QUIC
+/// coordinator) can then act on the dial in-band without draining and re-queueing
+/// the machine's whole application-event backlog to extract the one dial request.
+///
+/// The descriptor carries everything the event carries — `id`, `peer`, `deadline`
+/// — plus the originating [`ExchangeKind`], which the event does not: a caller
+/// that needs the kind (e.g. to apply the reliable-ping outbound-cap exemption)
+/// reads it here rather than looking it up out of band.
+#[derive(Debug)]
+pub struct DialIntent<A> {
+  id: StreamId,
+  peer: A,
+  deadline: crate::Instant,
+  kind: ExchangeKind,
+}
+
+impl<A> DialIntent<A> {
+  /// Construct a new descriptor.
+  #[inline(always)]
+  pub const fn new(id: StreamId, peer: A, deadline: crate::Instant, kind: ExchangeKind) -> Self {
+    Self {
+      id,
+      peer,
+      deadline,
+      kind,
+    }
+  }
+
+  /// The stream ID to report back in `dial_succeeded` / `dial_failed`. Identical
+  /// to the `StreamId` the start method also returns alongside this descriptor.
+  #[inline(always)]
+  pub const fn id(&self) -> StreamId {
+    self.id
+  }
+
+  /// The peer to dial.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// Deadline by which the dial (and full exchange) must complete.
+  #[inline(always)]
+  pub const fn deadline(&self) -> crate::Instant {
+    self.deadline
+  }
+
+  /// The originating exchange kind (push/pull, reliable ping, or user message).
+  #[inline(always)]
+  pub const fn kind(&self) -> ExchangeKind {
+    self.kind
+  }
+
+  /// Consume the descriptor into its (id, peer, deadline, kind) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (StreamId, A, crate::Instant, ExchangeKind) {
+    (self.id, self.peer, self.deadline, self.kind)
   }
 }
 
@@ -1052,44 +1124,50 @@ pub enum EndpointEvent<I, A> {
   UserDataReceived(UserDataReceived<A>),
 }
 
-/// Payload for [`StreamCommand::SendPushPullResponse`]: the local node's state
-/// snapshot to ship back as the response to an inbound push/pull.
+/// Payload for [`StreamCommand::SendPushPullResponse`]: the local node's
+/// fully-encoded push/pull response frame, ready to load into the responding
+/// stream's output buffer.
+///
+/// The frame is the local node's entire membership view (every member as a
+/// wire-format `PushNodeState`, carrying incarnation, live state, and
+/// protocol/delegate versions) plus the local application-state snapshot, with
+/// the push/pull `join` flag cleared. That body is independent of the request
+/// that triggered it, so the [`Endpoint`](crate::endpoint::Endpoint) builds and
+/// encodes it once per membership change and hands each requester an O(1)
+/// [`Bytes`] clone — a completed inbound exchange never re-folds the member
+/// table. The bytes are byte-identical to a
+/// [`Endpoint::encode_push_pull_response`](crate::endpoint::Endpoint::encode_push_pull_response)
+/// over the same membership.
 #[derive(Debug)]
 pub struct SendPushPullResponse<I, A> {
-  local_states: Vec<PushNodeState<I, A>>,
-  user_data: Bytes,
+  encoded: Bytes,
+  _marker: PhantomData<(I, A)>,
 }
 
 impl<I, A> SendPushPullResponse<I, A> {
-  /// Construct a new payload.
+  /// Construct a new payload from the pre-encoded response frame.
   #[inline(always)]
-  pub const fn new(local_states: Vec<PushNodeState<I, A>>, user_data: Bytes) -> Self {
+  pub const fn new(encoded: Bytes) -> Self {
     Self {
-      local_states,
-      user_data,
+      encoded,
+      _marker: PhantomData,
     }
   }
 
-  /// The local node's view of cluster state to ship back, in wire-format
-  /// `PushNodeState` (carries incarnation, state, protocol/delegate
-  /// versions). The Endpoint builds this from each `LocalNodeState`
-  /// before handing it off; the driver passes it directly to
-  /// `Endpoint::encode_push_pull_response`.
+  /// The pre-encoded push/pull response frame to write back to the requesting
+  /// peer. The driver loads these bytes into the responding stream's output
+  /// buffer via
+  /// [`Endpoint::stream_load_response`](crate::endpoint::Endpoint::stream_load_response)
+  /// unchanged.
   #[inline(always)]
-  pub fn local_states_slice(&self) -> &[PushNodeState<I, A>] {
-    self.local_states.as_slice()
+  pub const fn encoded_ref(&self) -> &Bytes {
+    &self.encoded
   }
 
-  /// Application-level payload to ship alongside.
+  /// Consume the payload into the pre-encoded response frame.
   #[inline(always)]
-  pub const fn user_data_ref(&self) -> &Bytes {
-    &self.user_data
-  }
-
-  /// Consume the payload into its (local_states, user_data) parts.
-  #[inline(always)]
-  pub fn into_parts(self) -> (Vec<PushNodeState<I, A>>, Bytes) {
-    (self.local_states, self.user_data)
+  pub fn into_encoded(self) -> Bytes {
+    self.encoded
   }
 }
 

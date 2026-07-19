@@ -494,6 +494,7 @@ async fn gossip_mtu_at_ceiling_constructs() {
 /// A `gossip_mtu` one byte above the ceiling is rejected at construction with
 /// the typed `Error::InvalidGossipMtu`, carrying the configured value and the
 /// ceiling — the reactor parity with compio / embedded / smoltcp.
+#[cfg(all(encryption, checksum))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gossip_mtu_above_ceiling_is_rejected() {
   use memberlist_reactor::Error;

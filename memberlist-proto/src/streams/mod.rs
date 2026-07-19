@@ -873,9 +873,18 @@ where
     sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
     peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
     compression: CompressionOptions,
-  ) -> Self {
+  ) -> Self
+  where
+    I: crate::Id,
+    A: crate::CheapClone + crate::Data + PartialEq + 'static,
+  {
     let mut this = Self::new(ep, cfg, sni_provider, peer_to_socket);
     this.compression = compression;
+    // Fold the same compression into the endpoint's serve-ready push/pull
+    // response cache so an inbound reply is compressed once per membership
+    // change and served to every requester by refcount, byte-identical to a
+    // per-request bridge encode.
+    this.ep.set_response_compression(compression);
     this
   }
 
@@ -1366,8 +1375,15 @@ where
       feature = "brotli"
     )))
   )]
-  pub fn set_compression_options(&mut self, compression: CompressionOptions) {
+  pub fn set_compression_options(&mut self, compression: CompressionOptions)
+  where
+    I: crate::Id,
+    A: crate::CheapClone + crate::Data + PartialEq + 'static,
+  {
     self.compression = compression;
+    // Rebuild the endpoint's serve-ready response cache under the new policy so
+    // the reply stays byte-identical to what the bridges now encode.
+    self.ep.set_response_compression(compression);
     for id in self.conns.ids() {
       let Some(bridge) = self.conns.get_mut(id) else {
         continue;

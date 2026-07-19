@@ -33,6 +33,52 @@ fn test_config() -> QuicOptions {
   test_config_with_mode(UnreliableTransport::Datagram)
 }
 
+/// Like [`test_config`] but with a SMALL connection-level `receive_window` (the
+/// binding flow-control constraint, released only via MAX_DATA/ACK) and a LARGE
+/// per-stream `stream_receive_window` (never the constraint, so no
+/// MAX_STREAM_DATA is ever sent). A peer receiving a large reliable message under
+/// this config back-pressures the sender at the CONNECTION level and drains it in
+/// window-sized MAX_DATA increments — the setup for the partial-write flush
+/// regression.
+fn test_config_small_conn_window() -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.receive_window(quinn_proto::VarInt::from_u32(16 * 1024));
+  transport.stream_receive_window(quinn_proto::VarInt::from_u32(4 * 1024 * 1024));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
+/// Like [`test_config_small_conn_window`] but also RAISING the peer's
+/// concurrent-bidi-stream limit, so a sender can open MANY reliable exchanges at
+/// once and have them all back-pressure at the CONNECTION window — the setup for
+/// the connection-window Writable-storm that a single MAX_DATA releases.
+fn test_config_small_conn_window_bidi(bidi: u32) -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.receive_window(quinn_proto::VarInt::from_u32(16 * 1024));
+  transport.stream_receive_window(quinn_proto::VarInt::from_u32(4 * 1024 * 1024));
+  transport.max_concurrent_bidi_streams(quinn_proto::VarInt::from_u32(bidi));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
 fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
   let cfg = EndpointOptions::new(SmolStr::new(id), addr);
   let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
@@ -56,6 +102,41 @@ fn make_endpoint_udp(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<S
   let mut seed = [0u8; 32];
   seed[..2].copy_from_slice(&addr.port().to_le_bytes());
   QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
+}
+
+/// Build a coordinator from explicit membership + QUIC configs, so a test can
+/// set caps ([`EndpointOptions::with_max_inbound_streams`],
+/// [`QuicOptions::with_max_quic_connections`],
+/// [`QuicOptions::with_max_pending_connections_per_source`]) that
+/// [`make_endpoint`] leaves at their defaults. Same fixed RNG-seed derivation
+/// as [`make_endpoint`] so behaviour stays deterministic.
+fn make_endpoint_full(
+  cfg: EndpointOptions<SmolStr, SocketAddr>,
+  qc: QuicOptions,
+  addr: SocketAddr,
+  now: Instant,
+) -> QuicEndpoint<SmolStr> {
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+  ep.start_scheduling(now);
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+  QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
+}
+
+/// Like [`make_endpoint`] but with every periodic membership scheduler disabled
+/// (probe / gossip / push-pull interval = 0, so [`Endpoint::start_scheduling`]
+/// arms none of them). A residue-drain test can then drive `handle_timeout` at the
+/// sticky catch-up anchor across several `CATCHUP_INTERVAL` steps with NO
+/// randomly-staggered membership timer ever falling due inside the drain window,
+/// so every wake is provably a BOUNDED catch-up (never a scheduled full tick)
+/// regardless of the membership RNG stagger. The QUIC transport config is the
+/// default [`test_config`]; only the periodic schedulers change.
+fn make_endpoint_no_schedulers(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
+  let cfg = EndpointOptions::new(SmolStr::new(id), addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  make_endpoint_full(cfg, test_config(), addr, now)
 }
 
 /// A `MergeDelegate` that rejects every inbound merge, driving
@@ -491,6 +572,7 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
       a.cfg.client().clone(),
       c_addr,
       "localhost",
+      None,
     )
     .expect("fresh dial after reap succeeds");
   assert_eq!(
@@ -1041,10 +1123,10 @@ fn closing_a_pooled_connection_does_not_change_membership() {
 
 /// Offering an unreliable datagram to a peer that already holds an
 /// Established pooled connection enqueues it on that connection
-/// (`DatagramSendStatus::Queued`). The datagram does not surface on
-/// `poll_transmit` synchronously — it rides out via the normal
-/// `service_quinn -> poll_transmit` pump on a later tick — so the contract
-/// asserted here is the `Queued` outcome, not an immediate transmit.
+/// (`DatagramSendStatus::Queued`) and self-flushes: the send collects that
+/// connection's owed transmits inline, so the datagram surfaces on
+/// `poll_transmit` immediately, with no `flush_outbound_transmits` or
+/// `handle_timeout` call.
 #[test]
 fn queue_unreliable_datagram_to_established_peer_is_queued() {
   let a_addr: SocketAddr = "127.0.0.1:7951".parse().unwrap();
@@ -1105,8 +1187,102 @@ fn queue_unreliable_datagram_to_established_peer_is_queued() {
        offering an unreliable datagram"
   );
 
+  // Drain any residual handshake transmits so the surfacing assertion below
+  // observes only the datagram the send itself flushes.
+  while a.poll_transmit().is_some() {}
+
   let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
   assert_eq!(outcome, super::DatagramSendStatus::Queued);
+  // Self-flushing: the datagram surfaces on poll_transmit immediately — no
+  // flush_outbound_transmits or handle_timeout call precedes this poll.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == b_addr),
+    "a queued unreliable datagram must self-flush and surface on poll_transmit; got {surfaced:?}"
+  );
+}
+
+/// The unreliable send does O(target connection) work: it self-flushes ONLY the
+/// addressed connection and services no other connection, regardless of how many
+/// connections the sender pools. With an established A↔B plus K additional
+/// established connections on A, one datagram to B surfaces on `poll_transmit`
+/// (T1) while `connection_visits` stays at zero (T2) — the inline collect is a
+/// transmit-collect, not a `service_one_conn`.
+///
+/// Mutation-verify (T1): remove the inline collect in `queue_unreliable_datagram`
+/// — the datagram never surfaces. Mutation-verify (T2): replace the inline collect
+/// with `flush_outbound(now)` — `connection_visits` jumps to the pool size.
+#[test]
+fn unreliable_send_flushes_only_its_target_connection() {
+  let now = Instant::now();
+  let a_addr: SocketAddr = "127.0.0.1:8410".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8411".parse().unwrap();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // K additional established connections on A, so the pool is large enough that a
+  // full-table service (the flush-all mutation) would be conspicuous.
+  const EXTRA_CONNS: usize = 50;
+  for i in 0..EXTRA_CONNS {
+    let c_addr: SocketAddr = format!("127.0.0.1:{}", 8412 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), c_addr, now);
+    establish(&mut a, &mut c, a_addr, c_addr, now);
+    // `c` drops here; A's established connection to it persists as A-side state.
+  }
+  assert!(
+    a.conns.iter_handles().len() > EXTRA_CONNS,
+    "A must pool the target plus every extra connection"
+  );
+
+  // Start from a drained outbound queue and a zeroed visit counter so the two
+  // assertions below observe only the effect of the single send.
+  while a.poll_transmit().is_some() {}
+  a.counters.connection_visits = 0;
+
+  let outcome = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01gossip"), now);
+  assert_eq!(outcome, super::DatagramSendStatus::Queued);
+
+  // T2: no connection was serviced — the inline collect drains transmits, it does
+  // not run `service_one_conn`.
+  assert_eq!(
+    a.counters.connection_visits,
+    0,
+    "the send must not service any connection; a full-table flush would visit all {}",
+    EXTRA_CONNS + 1
+  );
+  // T1: the datagram self-flushed onto the target connection and surfaces now.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == b_addr),
+    "the queued datagram must surface on poll_transmit with no flush; got {surfaced:?}"
+  );
+}
+
+/// A cold-dial unreliable send self-flushes the fresh connection's Initial: the
+/// send mints the connection via `get_or_dial`, returns `NotReady` (datagrams are
+/// not negotiated mid-handshake), and its inline collect emits the Initial so the
+/// handshake warms this tick — no flush or timeout needed.
+///
+/// Mutation-verify: gate the inline collect to the `Queued` arm only — the cold
+/// dial's Initial then never surfaces.
+#[test]
+fn cold_dial_unreliable_send_self_flushes_the_connection_initial() {
+  let now = Instant::now();
+  let a_addr: SocketAddr = "127.0.0.1:8480".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.1:8481".parse().unwrap();
+  let mut a = make_endpoint("a", a_addr, now);
+  while a.poll_transmit().is_some() {}
+
+  let outcome = a.queue_unreliable_datagram(cold, Bytes::from_static(b"\x01g"), now);
+  assert_eq!(outcome, super::DatagramSendStatus::NotReady);
+
+  // Self-flushing cold dial: the fresh connection's Initial surfaces now.
+  let surfaced = a.poll_transmit();
+  assert!(
+    matches!(surfaced, Some((to, _)) if to == cold),
+    "the cold dial's Initial must surface on poll_transmit with no flush; got {surfaced:?}"
+  );
 }
 
 /// A received application datagram surfaces through the SAME
@@ -1741,9 +1917,9 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   let mut a = make_endpoint("a", a_addr, now);
 
   // `start_user_message` registers the intent, dials in-band, and (the
-  // connection is still handshaking) requeues the intent onto
-  // `dial_pending` with deadline `now + stream_timeout`. The returned
-  // `StreamId` is the correlation handle the QUIC driver coerces to its
+  // connection is still handshaking) re-parks the intent into
+  // `dial_parked[unreachable]` with deadline `now + stream_timeout`. The
+  // returned `StreamId` is the correlation handle the QUIC driver coerces to its
   // parked `ExchangeId`.
   let id = a
     .start_user_message(unreachable, Bytes::from_static(b"hello"), now)
@@ -1751,15 +1927,19 @@ fn expired_user_message_dial_emits_failed_exchange_completed() {
   let expected_eid = ExchangeId::from(id);
 
   assert_eq!(
-    a.dial_pending.len(),
+    a.dial_parked
+      .get(&unreachable)
+      .map(|b| b.len())
+      .unwrap_or(0),
     1,
-    "test precondition: the in-band dial must requeue the still-handshaking \
-       UserMessage intent onto `dial_pending`"
+    "test precondition: the in-band dial must re-park the still-handshaking \
+       UserMessage intent into `dial_parked`"
   );
   let entry = a
-    .dial_pending
-    .front_mut()
-    .expect("dial_pending non-empty per the preceding assertion");
+    .dial_parked
+    .get_mut(&unreachable)
+    .and_then(|b| b.front_mut())
+    .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
     "the requeued entry MUST carry the registered intent's id"
@@ -1838,22 +2018,26 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   let mut a = make_endpoint("a", a_addr, now);
 
   // `start_push_pull` on the coordinator registers the intent, dials
-  // in-band, and (the connection is still handshaking) requeues the
-  // intent onto `dial_pending`. The returned `StreamId` is the
+  // in-band, and (the connection is still handshaking) re-parks the
+  // intent into `dial_parked[unreachable]`. The returned `StreamId` is the
   // correlation handle the QUIC driver coerces to its parked
   // `ExchangeId`.
   let id = a.start_push_pull(unreachable, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
   assert_eq!(
-    a.dial_pending.len(),
+    a.dial_parked
+      .get(&unreachable)
+      .map(|b| b.len())
+      .unwrap_or(0),
     1,
-    "test precondition: the in-band dial must requeue the still-handshaking \
-       PushPull intent onto `dial_pending`"
+    "test precondition: the in-band dial must re-park the still-handshaking \
+       PushPull intent into `dial_parked`"
   );
   let entry = a
-    .dial_pending
-    .front_mut()
-    .expect("dial_pending non-empty per the preceding assertion");
+    .dial_parked
+    .get_mut(&unreachable)
+    .and_then(|b| b.front_mut())
+    .expect("dial_parked bucket non-empty per the preceding assertion");
   assert_eq!(
     entry.id, id,
     "the requeued entry MUST carry the registered intent's id"
@@ -3223,11 +3407,11 @@ fn try_open_uni_stream_to_unknown_peer_is_false() {
 }
 
 /// `start_reliable_ping` is the reliable-fallback dial wrapper: it records the
-/// exchange kind/peer, sieves the inner `DialRequested` into `dial_pending`,
-/// and attempts the dial in-band. Against a cold peer the handshake is not yet
-/// complete, so no bridge opens this tick but a quinn Initial is emitted on
-/// the outbound path (the dial was attempted). Covers the wrapper body and
-/// the `service_dials` cold-dial requeue arm.
+/// exchange kind/peer and services its dial from the returned `DialIntent` in-band
+/// (no event-queue sieve). Against a cold peer the handshake is not yet complete,
+/// so no bridge opens this tick but a quinn Initial is emitted on the outbound path
+/// (the dial was attempted). Covers the wrapper body and the `process_dial_entry`
+/// cold-dial requeue arm.
 #[test]
 fn start_reliable_ping_attempts_dial_in_band() {
   let self_addr: SocketAddr = "127.0.0.1:7790".parse().unwrap();
@@ -3445,10 +3629,14 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
   let mut a = make_endpoint("self", self_addr, now);
 
   // Register a push/pull intent + dial in-band; the still-handshaking
-  // connection requeues the intent onto `dial_pending`.
+  // connection re-parks the intent into `dial_parked[peer]`.
   let id = a.start_push_pull(peer, PushPullKind::Refresh, now);
   let expected_eid = ExchangeId::from(id);
-  assert_eq!(a.dial_pending.len(), 1, "precondition: intent requeued");
+  assert_eq!(
+    a.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+    1,
+    "precondition: intent re-parked"
+  );
 
   // Drive the pooled connection to Closed WITHOUT it ever reaching
   // Established (the never-Established closed-cache signature that
@@ -3465,7 +3653,11 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
 
   // Keep the standing entry's deadline in the future so the closed-arm (not
   // the deadline-elapsed arm) is the one that fires.
-  a.dial_pending.front_mut().unwrap().deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .get_mut(&peer)
+    .and_then(|b| b.front_mut())
+    .unwrap()
+    .deadline = now + Duration::from_secs(30);
 
   a.service_dials(now);
 
@@ -3486,8 +3678,8 @@ fn service_dials_retires_intent_when_cached_connection_is_closed() {
   );
   assert_eq!(payload.outcome(), ExchangeStatus::Failed);
   assert!(
-    a.dial_pending.is_empty(),
-    "the retired intent must not be requeued onto dial_pending"
+    a.dial_pending.is_empty() && a.dial_parked.is_empty(),
+    "the retired intent must not be requeued onto dial_pending or re-parked"
   );
 }
 
@@ -3922,4 +4114,8171 @@ fn rejected_merge_terminalizes_responder_bridge_via_pump_bridges_close_arm() {
     0,
     "the Close arm must reap B's responder bridge in the same tick (no leak)"
   );
+}
+
+/// The QUIC bidi-accept loop admission-gates inbound streams against the
+/// coordinator-wide `QuicOptions::max_inbound_streams` ceiling, exactly as the
+/// stream (TCP/TLS) coordinator's `accept_connection` does. This pins the FULL
+/// contract, not merely "at least one rejection" (which a mutation that rejected
+/// EVERY stream would also satisfy): exactly `CAP` concurrent inbound exchanges
+/// are admitted AND complete, the excess (`OPENED - CAP`) is rejected, the PEAK
+/// concurrent inbound bridge population equals `CAP` (never exceeds it, and
+/// reaches it), and after the admitted batch releases its bridges a fresh
+/// exchange is admitted and completes.
+///
+/// The cap is set via `QuicOptions` (the QUIC-specific option), NOT the shared
+/// TCP/TLS `EndpointOptions::max_inbound_streams` (left at its unlimited
+/// default): if the accept loop read the endpoint option instead of `self.cfg`,
+/// `CAP` would have no effect and all `OPENED` streams would be admitted.
+///
+/// A drives `OPENED` push/pull exchanges to B over one pooled connection. Once
+/// Established, one `service_dials` pass opens all their bidi streams together,
+/// so B's accept loop sees them concurrently — before any admitted exchange can
+/// complete-and-reap (completion needs a further round trip), so the first `CAP`
+/// are admitted and the rest reset in one drained accept pass.
+///
+/// Negative controls, each breaking a distinct assertion: (a) reverting the gate
+/// to admit every stream drives the peak to `OPENED` and rejections to 0; (b)
+/// rejecting every stream drives the peak to 0 and admits/completes nothing; (c)
+/// an off-by-one (`>` for `>=`) drives the peak to `CAP + 1`; (d) reading
+/// `self.ep.max_inbound_streams()` (endpoint default `None`) instead of
+/// `self.cfg` admits all `OPENED`.
+#[test]
+fn quic_accept_enforces_max_inbound_streams_admit_cap_reject_excess() {
+  use crate::event::ExchangeKind;
+  let a_addr: SocketAddr = "127.0.0.1:7940".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7941".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  const CAP: usize = 3;
+  const OPENED: usize = 8;
+  // B caps concurrent inbound reliable streams at CAP via the QUIC option
+  // (endpoint-level `max_inbound_streams` is left at its unlimited default).
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_inbound_streams(Some(CAP)),
+    b_addr,
+    now,
+  );
+
+  for _ in 0..OPENED {
+    // Ignoring StreamId: the test asserts on metrics/completions, not handles.
+    let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  }
+
+  let mut a_succeeded: usize = 0;
+  for _ in 0..400 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded += 1;
+      }
+    }
+    if b.metrics().inbound_streams_rejected >= (OPENED - CAP) as u64 && a_succeeded >= CAP {
+      break;
+    }
+  }
+
+  // Peak concurrent inbound bridges equals the ceiling: never exceeds it, AND
+  // reaches it. Off-by-one shows CAP+1, admit-all shows OPENED, reject-all 0.
+  assert_eq!(
+    b.counters.max_inbound_bridges_live, CAP,
+    "peak concurrent inbound bridges on B must equal the ceiling {CAP}; observed {}",
+    b.counters.max_inbound_bridges_live
+  );
+  // Only the excess over the ceiling was rejected — not more (reject-all) and
+  // not fewer.
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    (OPENED - CAP) as u64,
+    "exactly the excess {} inbound streams over the ceiling must be rejected",
+    OPENED - CAP
+  );
+  // Exactly CAP below-ceiling exchanges were admitted AND completed.
+  assert_eq!(
+    a_succeeded, CAP,
+    "exactly {CAP} admitted inbound exchanges must complete (Succeeded); observed \
+       {a_succeeded}"
+  );
+
+  // Capacity released: a fresh exchange after the batch is admitted and
+  // completes, and is NOT rejected. This also proves the admitted bridges reaped
+  // (the ceiling gates concurrency, not exchange lifetime) — without a reap the
+  // new inbound stream would hit the full ceiling and be rejected.
+  let rejected_after_batch = b.metrics().inbound_streams_rejected;
+  let succeeded_after_batch = a_succeeded;
+  // Ignoring StreamId: the test asserts on completion, not the handle.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  let mut post_release_succeeded = false;
+  for _ in 0..200 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded += 1;
+      }
+    }
+    if a_succeeded > succeeded_after_batch {
+      post_release_succeeded = true;
+      break;
+    }
+  }
+  assert!(
+    post_release_succeeded,
+    "after the admitted batch releases its bridges, a new inbound exchange must \
+       be admitted and complete"
+  );
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    rejected_after_batch,
+    "the post-release exchange is within the ceiling and must not be rejected"
+  );
+  assert_eq!(
+    b.counters.max_inbound_bridges_live, CAP,
+    "the ceiling must continue to hold across the post-release exchange (peak \
+       still {CAP})"
+  );
+}
+
+/// `handle_udp` MUST run a per-connection servicing pass ONLY when the datagram
+/// resolves to a connection. A `Some` from `quinn_proto::Endpoint::handle` does
+/// NOT: a discarded datagram (`None`), a stateless `Response` (version
+/// negotiation / retry / stateless reset — attacker-triggerable), an over-cap or
+/// failed `accept`, and a `ConnectionEvent` for an unknown handle all resolve to
+/// no connection, so `route_datagram_event` returns `None` and no
+/// `service_connection` runs.
+///
+/// The `quic_inbound_servicings` test counter increments once per
+/// `service_connection` call. This covers three cases against a POPULATED
+/// connection table: establishing the connection (a `NewConnection` accept plus
+/// applied `ConnectionEvent`s) DID service; a discarded `None` datagram and a
+/// version-negotiation `Response` (both attacker-shaped) do NOT; a real datagram
+/// addressing the established connection DOES. (The over-cap case is covered by
+/// `quic_new_connection_refused_over_global_cap`.)
+///
+/// Negative control: service on every `handle` result (or unconditionally) — the
+/// `Response` case (and, if unconditional, the `None` case) then advances the
+/// counter and those assertions fail.
+#[test]
+fn inert_quic_datagram_skips_coordinator_servicing() {
+  let a_addr: SocketAddr = "127.0.0.1:7942".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7943".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7944".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Establish a real A<->B connection so B holds connection (and transiently
+  // bridge) state a servicing pass would pump/scan.
+  // Ignoring StreamId: the test asserts on the servicing counter, not handles.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && !moved && b.counters.endpoint_events_processed > 0 {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "test precondition: B must hold an established connection to A"
+  );
+  // (0) Establishing the connection accepted a NewConnection and applied
+  // ConnectionEvents on B, each of which DID advance state and service.
+  assert!(
+    b.counters.quic_inbound_servicings > 0,
+    "a real NewConnection accept and its applied ConnectionEvents MUST service"
+  );
+
+  // (1) Inert datagram: first byte 0x40 (FIXED_BIT set) classifies as
+  // `Class::Quic`, but the packet is truncated far below a parseable short
+  // header (and far below the stateless-reset minimum), so `handle` returns
+  // `None` — no connection or stream state created or advanced.
+  let before = b.counters.quic_inbound_servicings;
+  let inert: [u8; 5] = [0x40, 0x00, 0x00, 0x00, 0x00];
+  b.handle_udp(a_addr, &inert, now);
+  assert_eq!(
+    b.counters.quic_inbound_servicings, before,
+    "an inert QUIC-classified datagram that quinn discards (handle -> None) \
+       must NOT trigger a coordinator servicing pass; the counter advanced from \
+       {before} to {}",
+    b.counters.quic_inbound_servicings
+  );
+
+  // (2) Response-class datagram against the POPULATED table: a real Initial from
+  // a third endpoint whose 4-byte version field (bytes [1..5] of the QUIC long
+  // header) is overwritten with an unsupported version, forcing quinn to emit a
+  // Version Negotiation `Response`. `handle` returns `Some(DatagramEvent::
+  // Response)` — attacker-triggerable, commits no connection state — so it must
+  // NOT service, yet it IS a `Some` (proving this exercises the Some-but-inert
+  // path, distinct from the `None` case above): B queues the VN datagram back.
+  let mut c = make_endpoint("c", c_addr, now);
+  // Ignoring StreamId: only c's on-wire Initial is used.
+  let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+  let mut vn_trigger = drain_first_datagram_to(&mut c, b_addr);
+  vn_trigger[1..5].copy_from_slice(&[0x1a, 0x2a, 0x3a, 0x4a]);
+  // Drain B's outbound so the only datagram queued after the VN feed is the VN.
+  while b.poll_transmit().is_some() {}
+  let before_vn = b.counters.quic_inbound_servicings;
+  b.handle_udp(c_addr, &vn_trigger, now);
+  assert_eq!(
+    b.counters.quic_inbound_servicings, before_vn,
+    "a version-negotiation Response (Some(DatagramEvent::Response)) commits no \
+       connection state and must NOT trigger a servicing pass"
+  );
+  let mut vn_emitted = false;
+  while let Some((to, _)) = b.poll_transmit() {
+    if to == c_addr {
+      vn_emitted = true;
+    }
+  }
+  assert!(
+    vn_emitted,
+    "quinn must have emitted a Version Negotiation datagram to the source — \
+       proving `handle` returned Some(Response), so this is the Some-but-inert \
+       path, not the None-discard path"
+  );
+
+  // (3) A real datagram that advances the established connection must still be
+  // serviced. Drive one more exchange and confirm the counter advances on a
+  // datagram delivered to B.
+  let before_real = b.counters.quic_inbound_servicings;
+  // Ignoring StreamId: the test asserts on the servicing counter, not handles.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Refresh, now);
+  let mut serviced = false;
+  for _ in 0..50 {
+    let mut delivered_to_b = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        delivered_to_b = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    if delivered_to_b && b.counters.quic_inbound_servicings > before_real {
+      serviced = true;
+      break;
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+  }
+  assert!(
+    serviced,
+    "a real datagram that advances a connection (handle -> Some) MUST still \
+       trigger a servicing pass; the counter never advanced"
+  );
+}
+
+/// An unauthenticated inbound Initial past the global `max_quic_connections`
+/// ceiling MUST be refused before any
+/// connection-table state is committed, and bump `quic_connections_rejected`.
+///
+/// B caps total QUIC connections at 1. A1 establishes the one allowed
+/// connection; A2's Initial (a distinct source) is then refused — no
+/// connection-table entry is created for it and A1's connection is unaffected.
+///
+/// Negative control: revert the global-cap branch in the `NewConnection` arm —
+/// A2's Initial is accepted, `quic_connections_rejected` stays 0, and the
+/// assertion fails.
+#[test]
+fn quic_new_connection_refused_over_global_cap() {
+  let a1_addr: SocketAddr = "127.0.0.1:7944".parse().unwrap();
+  let a2_addr: SocketAddr = "127.0.0.1:7945".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7946".parse().unwrap();
+  let now = Instant::now();
+  let mut a1 = make_endpoint("a1", a1_addr, now);
+  let mut a2 = make_endpoint("a2", a2_addr, now);
+  // B: global ceiling of exactly one QUIC connection.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_quic_connections(Some(1)),
+    b_addr,
+    now,
+  );
+
+  // A1 dials B and B commits the single allowed connection.
+  // Ignoring StreamId: the test asserts on connection state, not handles.
+  let _ = a1.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a1.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a1_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a1_addr {
+        a1.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a1.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a1_addr) >= 1 {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a1_addr) >= 1,
+    "test precondition: B must have committed A1's connection (the one allowed)"
+  );
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "no refusal should have occurred while committing the first connection"
+  );
+
+  // A2 dials B: its Initial must be refused at the global cap.
+  let rejected_before = b.metrics().quic_connections_rejected;
+  // An over-cap Initial is `ignore`d before committing state — no servicing pass
+  // is owed for it. Capture the counter so the refused datagrams below can be
+  // shown not to advance it (Finding 1's over-cap case).
+  let servicings_before_a2 = b.counters.quic_inbound_servicings;
+  // Ignoring StreamId: the test asserts on the rejection metric, not handles.
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a2.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a2_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a2_addr {
+        a2.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a2.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.metrics().quic_connections_rejected > rejected_before {
+      break;
+    }
+  }
+  assert!(
+    b.metrics().quic_connections_rejected > rejected_before,
+    "an inbound Initial past the global `max_quic_connections` cap must be \
+       refused and bump `quic_connections_rejected`"
+  );
+  assert_eq!(
+    b.live_connections_to(a2_addr),
+    0,
+    "no connection-table entry may be created for the refused source"
+  );
+  assert!(
+    b.live_connections_to(a1_addr) >= 1,
+    "the pre-existing connection must be unaffected by the refusal"
+  );
+  // The refused over-cap Initials committed no state, so none triggered a
+  // servicing pass: `route_datagram_event` returns `None` for an over-cap
+  // `ignore`, so `handle_udp` runs no `service_connection`. Servicing on every
+  // `handle` result would advance this counter for each over-cap Initial an
+  // attacker sends at full occupancy.
+  assert_eq!(
+    b.counters.quic_inbound_servicings, servicings_before_a2,
+    "an over-cap Initial is ignored before committing state and must NOT trigger \
+       a servicing pass"
+  );
+}
+
+/// Concurrent *pending* (handshaking) connections from a single source address
+/// are bounded by
+/// `max_pending_connections_per_source`. An Initial from a source already at the
+/// ceiling MUST be refused before committing state, bumping
+/// `quic_connections_rejected`, so one source cannot pin unbounded half-open
+/// handshake state.
+///
+/// Two distinct valid Initials (different connection IDs, minted by two
+/// endpoints) are delivered to B under the SAME source address — the shape of a
+/// single source opening many half-open handshakes. With a per-source ceiling of
+/// 1 and a high global cap, the first is accepted (a pending connection) and the
+/// second is refused.
+///
+/// Negative control: revert the per-source branch in the `NewConnection` arm —
+/// the second Initial is accepted, `quic_connections_rejected` stays 0, and the
+/// assertion fails.
+#[test]
+fn quic_new_connection_refused_over_per_source_pending_cap() {
+  let a1_addr: SocketAddr = "127.0.0.1:7947".parse().unwrap();
+  let a2_addr: SocketAddr = "127.0.0.1:7948".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7949".parse().unwrap();
+  // The single source address both Initials appear to come from.
+  let src: SocketAddr = "127.0.0.1:60001".parse().unwrap();
+  let now = Instant::now();
+  // Two endpoints, used only to mint two valid Initials with distinct DCIDs.
+  let mut a1 = make_endpoint("a1", a1_addr, now);
+  let mut a2 = make_endpoint("a2", a2_addr, now);
+  // B: per-source pending ceiling of 1, global cap high enough not to interfere.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config()
+      .with_max_pending_connections_per_source(Some(1))
+      .with_max_quic_connections(Some(64)),
+    b_addr,
+    now,
+  );
+
+  // Mint each endpoint's first Initial (destined to B).
+  // Ignoring StreamId: the test drives raw Initials, not exchange handles.
+  let _ = a1.start_push_pull(b_addr, PushPullKind::Join, now);
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  let init1 = drain_first_datagram_to(&mut a1, b_addr);
+  let init2 = drain_first_datagram_to(&mut a2, b_addr);
+
+  // First Initial from `src`: accepted, creating one pending (handshaking)
+  // connection. B's handshake response goes to `src` and is never answered, so
+  // the connection stays pending.
+  b.handle_udp(src, &init1, now);
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "the first Initial from a source must be accepted (under the per-source cap)"
+  );
+  assert!(
+    b.live_connections_to(src) >= 1,
+    "the first Initial must create one pending connection for the source"
+  );
+
+  // Second Initial (distinct DCID) from the SAME source: at the per-source
+  // pending ceiling of 1, it must be refused.
+  let rejected_before = b.metrics().quic_connections_rejected;
+  b.handle_udp(src, &init2, now);
+  assert!(
+    b.metrics().quic_connections_rejected > rejected_before,
+    "a second concurrent handshake from a source already at \
+       `max_pending_connections_per_source` must be refused and bump \
+       `quic_connections_rejected`"
+  );
+}
+
+/// Drain `ep`'s outbound queue until the first datagram destined to `dst`,
+/// returning its bytes. Used to lift a freshly-dialed endpoint's Initial off
+/// the wire so a test can replay it under a chosen source address.
+fn drain_first_datagram_to(ep: &mut QuicEndpoint<SmolStr>, dst: SocketAddr) -> Vec<u8> {
+  for _ in 0..64 {
+    while let Some((to, bytes)) = ep.poll_transmit() {
+      if to == dst {
+        return bytes.to_vec();
+      }
+    }
+    // Nothing queued yet on this drain; the start-time flush should have emitted
+    // the Initial already, but tolerate a couple of empty polls defensively.
+  }
+  panic!("endpoint emitted no datagram destined to {dst}");
+}
+
+/// Simultaneous bidirectional dial at per-source pending cap 1: `start_push_pull`
+/// attempts each dial and flushes its Initial synchronously, so BEFORE any
+/// delivery each side already holds a handshaking OUTBOUND connection to the
+/// other. Because the per-source cap counts inbound connections only, that local
+/// outbound does NOT consume the peer's inbound allowance — each side accepts the
+/// other's Initial and BOTH push/pull exchanges complete.
+///
+/// Negative control: drop the `direction == Inbound` filter in
+/// `pending_inbound_from` (count outbound dials too) — B's own handshaking
+/// outbound to A fills its cap of 1, so B refuses A's inbound Initial (and vice
+/// versa); neither outbound handshake gets a server side, so neither exchange
+/// completes and both `*_succeeded` assertions fail (with `now` fixed, the
+/// stranded exchanges never even fail by timeout — they simply never complete).
+#[test]
+fn simultaneous_dial_at_per_source_cap_one_both_exchanges_succeed() {
+  use crate::event::ExchangeKind;
+  let a_addr: SocketAddr = "127.0.0.1:7960".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7961".parse().unwrap();
+  let now = Instant::now();
+  // Both endpoints cap concurrent pending inbound handshakes per source at 1.
+  let mut a = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("a"), a_addr),
+    test_config().with_max_pending_connections_per_source(Some(1)),
+    a_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_pending_connections_per_source(Some(1)),
+    b_addr,
+    now,
+  );
+
+  // Simultaneous dial: each side attempts its outbound (and flushes the Initial)
+  // before any delivery, so each holds a handshaking outbound to the other when
+  // the peer's inbound Initial arrives.
+  // Ignoring StreamId: the test asserts on exchange completion, not handles.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  let _ = b.start_push_pull(a_addr, PushPullKind::Join, now);
+
+  let mut a_succeeded = false;
+  let mut b_succeeded = false;
+  for _ in 0..400 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        a_succeeded = true;
+      }
+    }
+    while let Some(ev) = b.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev
+        && p.kind() == ExchangeKind::PushPull
+        && p.outcome().is_succeeded()
+      {
+        b_succeeded = true;
+      }
+    }
+    if a_succeeded && b_succeeded {
+      break;
+    }
+  }
+  assert!(
+    a_succeeded,
+    "A's push/pull to B must complete (Succeeded) under simultaneous dial at \
+       per-source cap 1 — A's local outbound dial to B must not block B's inbound \
+       Initial"
+  );
+  assert!(
+    b_succeeded,
+    "B's push/pull to A must complete (Succeeded) under simultaneous dial at \
+       per-source cap 1"
+  );
+}
+
+/// The production-default QUIC config (`QuicOptions::new`, no explicit cap set)
+/// MUST install a bounded, nonzero coordinator-wide inbound-stream ceiling. A
+/// default of `None` (unlimited) lets each of up to `max_quic_connections`
+/// connections open its full bidi allowance and mint an unbounded number of
+/// inbound bridges. The accept loop's behavioural enforcement of this QUIC option
+/// is pinned by `quic_accept_enforces_max_inbound_streams_admit_cap_reject_excess`
+/// (which sets the cap via `QuicOptions`, not the endpoint option); together they
+/// show the default config behaviourally bounds inbound streams.
+///
+/// Negative control: revert the `QuicOptions::new` default to `None` — the first
+/// assertion fails.
+#[test]
+fn production_default_quic_config_bounds_inbound_streams() {
+  use crate::quic::DEFAULT_MAX_QUIC_INBOUND_STREAMS;
+  let qc = test_config();
+  assert_eq!(
+    qc.max_inbound_streams(),
+    Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
+    "the production-default QUIC config must bound inbound streams (not None)"
+  );
+  // The ceiling being nonzero (a `Some(0)` default would reject every inbound
+  // stream) is guarded at compile time next to the constant's definition.
+  // The shared TCP/TLS endpoint-level default is deliberately unchanged
+  // (unlimited): the QUIC bound is QUIC-specific, so TCP/TLS behaviour is intact.
+  let ep = EndpointOptions::new(
+    SmolStr::new("x"),
+    "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
+  );
+  assert_eq!(
+    ep.max_inbound_streams(),
+    None,
+    "the shared TCP/TLS endpoint-level inbound-stream default must remain \
+       unlimited — the QUIC-specific bound must not change it"
+  );
+}
+
+/// The global connection cap is checked BEFORE the per-source pending-index
+/// lookup and short-circuits. An inbound Initial
+/// refused at connection-table saturation must not perform the per-source
+/// lookup at all, so a flood of fresh-DCID Initials at saturation cannot be
+/// amplified into per-datagram admission work beyond the O(1) global check.
+///
+/// B caps total connections at 1. A1 establishes the one allowed connection (its
+/// Initial passes the global check and reaches — and increments — the per-source
+/// check). A2's Initial is then over the global cap: it must be refused WITHOUT
+/// the per-source lookup, so `quic_pending_inbound_checks` does not advance while
+/// `quic_connections_rejected` does.
+///
+/// Negative control: revert to the eager `over_global || over_per_source` form
+/// (per-source computed unconditionally) — A2's Initial then performs the
+/// per-source lookup, `quic_pending_inbound_checks` advances, and the
+/// flat-counter assertion fails.
+#[test]
+fn over_global_cap_skips_per_source_pending_lookup() {
+  let a1_addr: SocketAddr = "127.0.0.1:7980".parse().unwrap();
+  let a2_addr: SocketAddr = "127.0.0.1:7981".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7982".parse().unwrap();
+  let now = Instant::now();
+  let mut a1 = make_endpoint("a1", a1_addr, now);
+  let mut a2 = make_endpoint("a2", a2_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config().with_max_quic_connections(Some(1)),
+    b_addr,
+    now,
+  );
+
+  // A1 establishes the single allowed connection.
+  // Ignoring StreamId: the test asserts on counters, not handles.
+  let _ = a1.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a1.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a1_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a1_addr {
+        a1.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a1.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a1_addr) >= 1 {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a1_addr) >= 1,
+    "test precondition: B committed A1's connection (the one allowed)"
+  );
+
+  // At the global cap now. A2's over-cap Initials must be refused by the global
+  // check WITHOUT reaching the per-source lookup.
+  let checks_before = b.counters.quic_pending_inbound_checks;
+  let rejected_before = b.metrics().quic_connections_rejected;
+  // Ignoring StreamId: the test asserts on counters, not handles.
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..20 {
+    while let Some((to, bytes)) = a2.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a2_addr, &bytes, now);
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a2_addr {
+        a2.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a2.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.metrics().quic_connections_rejected > rejected_before {
+      break;
+    }
+  }
+  assert!(
+    b.metrics().quic_connections_rejected > rejected_before,
+    "A2's over-cap Initial must be refused at the global cap"
+  );
+  assert_eq!(
+    b.counters.quic_pending_inbound_checks, checks_before,
+    "an Initial refused at the global cap must NOT perform the per-source \
+       pending lookup (global-first short-circuit); the per-source check counter \
+       advanced from {checks_before} to {}",
+    b.counters.quic_pending_inbound_checks
+  );
+}
+
+/// At per-source saturation, with a POPULATED connection table, a rejected
+/// Initial performs exactly ONE O(1) per-source index lookup
+/// and NO coordinator servicing pass. The per-source count is an indexed read,
+/// not a scan of the connection slab, so the admission decision does not scale
+/// with the number of tracked connections and does not run the O(connections +
+/// streams) tick.
+///
+/// B's per-source pending cap is 3 (global cap high). Three inbound Initials
+/// under source S plus two under other sources populate the table with five
+/// pending connections; S is then at its cap. A sixth Initial under S is
+/// refused. Across that one refused Initial the per-source check counter
+/// advances by exactly one (a single index probe) and the servicing counter
+/// does not advance at all.
+///
+/// Negative control: reverting the servicing gate (service on every `Some`)
+/// makes the servicing counter advance on the refused Initial; reverting the
+/// global/per-source structure so the per-source lookup runs more than once per
+/// Initial breaks the exact `+1` check-count assertion.
+#[test]
+fn rejected_initial_at_per_source_cap_is_one_indexed_probe_no_servicing() {
+  let b_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config()
+      .with_max_pending_connections_per_source(Some(3))
+      .with_max_quic_connections(Some(64)),
+    b_addr,
+    now,
+  );
+
+  // Source S: three distinct valid Initials (distinct DCIDs, minted by three
+  // endpoints) delivered under the same source address — three pending inbound.
+  let src_s: SocketAddr = "127.0.0.1:61000".parse().unwrap();
+  for port in [8001u16, 8002, 8003] {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut c = make_endpoint(&format!("c{port}"), addr, now);
+    // Ignoring StreamId: only c's on-wire Initial is used.
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    let init = drain_first_datagram_to(&mut c, b_addr);
+    b.handle_udp(src_s, &init, now);
+  }
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "the three Initials up to the per-source cap must all be accepted"
+  );
+
+  // Two more pending inbound from OTHER sources, so the table is populated with
+  // entries the admission decision for S must not scan.
+  for (port, src) in [(8101u16, "127.0.0.1:61101"), (8102, "127.0.0.1:61102")] {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let src: SocketAddr = src.parse().unwrap();
+    let mut c = make_endpoint(&format!("c{port}"), addr, now);
+    // Ignoring StreamId: only c's on-wire Initial is used.
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    let init = drain_first_datagram_to(&mut c, b_addr);
+    b.handle_udp(src, &init, now);
+  }
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    0,
+    "the five accepted Initials (three under S at the cap, two under other \
+       sources) must all be accepted; none exceeds a cap yet"
+  );
+
+  // A fourth Initial under S — that S is at its cap of 3 is proven below by this
+  // Initial being refused (had S held fewer than 3, it would be accepted).
+  // Measure
+  // the per-source check and servicing counters across ONLY this datagram.
+  let mut c = make_endpoint("c-over", "127.0.0.1:8004".parse().unwrap(), now);
+  // Ignoring StreamId: only c's on-wire Initial is used.
+  let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+  let over = drain_first_datagram_to(&mut c, b_addr);
+  let checks_before = b.counters.quic_pending_inbound_checks;
+  let servicings_before = b.counters.quic_inbound_servicings;
+  let rejected_before = b.metrics().quic_connections_rejected;
+  b.handle_udp(src_s, &over, now);
+  assert_eq!(
+    b.metrics().quic_connections_rejected,
+    rejected_before + 1,
+    "the over-cap Initial under S must be refused"
+  );
+  assert_eq!(
+    b.counters.quic_pending_inbound_checks,
+    checks_before + 1,
+    "the refused Initial must perform exactly one O(1) per-source index lookup, \
+       independent of the populated table"
+  );
+  assert_eq!(
+    b.counters.quic_inbound_servicings, servicings_before,
+    "a refused Initial commits no state and must NOT run a servicing pass"
+  );
+}
+
+/// A corrupted (AEAD-tag-flipped, DCID intact) or replayed (duplicate packet
+/// number) datagram at an established live CID is routed to that ONE connection
+/// and serviced — but it advances no stream state, so it fires no readiness
+/// trigger and pumps NONE of that connection's bridges: the pass-scoped ready
+/// queue drains empty. With K live bridges standing on the attacked connection,
+/// per-datagram `connection_visits` stays exactly `1` (the addressed connection)
+/// and `bridge_visits` stays exactly `0` — the pump set is precisely the bridges
+/// the datagram's frames advanced, and a discarded datagram advances none.
+///
+/// Non-vacuity control: a genuinely-advancing datagram (a real response STREAM
+/// frame from the peer) DOES pump its bridge, so `bridge_visits` climbs above `0`
+/// — the zero above is the ready set filtering garbage, not a pump path that
+/// never runs.
+///
+/// Negative control: pump every bridge on the addressed connection (the former
+/// all-bridges-on-`ch` pump) instead of draining the ready queue — each flooded
+/// datagram then pumps all K of A's live bridges, so `bridge_visits` climbs to K
+/// and the `== 0` assertions fail.
+#[test]
+fn corrupted_or_replayed_packet_services_only_its_connection() {
+  let b_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+  let c1_addr: SocketAddr = "127.0.0.1:7972".parse().unwrap();
+  let c2_addr: SocketAddr = "127.0.0.1:7973".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut c1 = make_endpoint("c1", c1_addr, now);
+  let mut c2 = make_endpoint("c2", c2_addr, now);
+
+  // Establish A, C1, C2 -> B (each dials B; B pools an inbound connection to
+  // each), giving B a multi-connection table.
+  for (caddr, c) in [(a_addr, &mut a), (c1_addr, &mut c1), (c2_addr, &mut c2)] {
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(caddr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == caddr {
+          c.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      c.handle_timeout(now);
+      b.handle_timeout(now);
+      if b.live_connections_to(caddr) >= 1 && !moved {
+        break;
+      }
+    }
+    assert!(
+      b.live_connections_to(caddr) >= 1,
+      "test precondition: B must pool a connection to {caddr}"
+    );
+  }
+  assert!(
+    b.conns.iter_handles().len() >= 3,
+    "test precondition: B must hold several connections so the O(1) claim is non-vacuous"
+  );
+
+  let ch_a = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let bridges_on = |ep: &QuicEndpoint<SmolStr>, ch: quinn_proto::ConnectionHandle| {
+    ep.bridges.values().filter(|br| br.ch() == ch).count()
+  };
+
+  // Hold ONE live bridge on B's connection to C1 (a connection OTHER than the
+  // flooded one): B initiates a push/pull to the established C1, and C1 is never
+  // ferried, so the bridge stays live. A former all-bridges scan would visit it.
+  let _ = b.start_push_pull(c1_addr, PushPullKind::Refresh, now);
+  while b.poll_transmit().is_some() {}
+
+  // Stand K live bridges ON THE ATTACKED connection (B initiates K push/pulls to
+  // the established A, opening K outbound bidis on B's connection to A). Hold B's
+  // request datagrams to A instead of delivering them, so the bridges stay live
+  // awaiting a response — and so a genuine round below can advance them.
+  const K: usize = 3;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  let mut held_b_to_a: Vec<Vec<u8>> = Vec::new();
+  while let Some((to, bytes)) = b.poll_transmit() {
+    if to == a_addr {
+      held_b_to_a.push(bytes.to_vec());
+    }
+    // Datagrams to C1 (and any other peer) are dropped so C1's bridge stays live.
+  }
+  let live_on_a = bridges_on(&b, ch_a);
+  assert!(
+    live_on_a >= 2,
+    "test precondition: the attacked connection must hold multiple live bridges so \
+       `== 0` is non-vacuous (former design would pump all {live_on_a}); got {live_on_a}"
+  );
+
+  // Capture a genuine A->B 1-RTT gossip datagram (a DATAGRAM frame, so it pumps
+  // no bridge — it is unreliable, not stream data).
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"gossip-probe-payload"), now);
+  a.flush_outbound_transmits(now);
+  let pristine = drain_first_datagram_to(&mut a, b_addr);
+  while a.poll_transmit().is_some() {}
+
+  // Corrupted flood: flip the AEAD tag (last byte); the plaintext DCID is intact,
+  // so quinn routes it to B's connection-to-A and discards it on auth failure.
+  // Each such datagram services ONLY A's connection and pumps NONE of its bridges.
+  let mut corrupt = pristine.clone();
+  let last = corrupt.len() - 1;
+  corrupt[last] ^= 0xff;
+  for _ in 0..4 {
+    b.counters.connection_visits = 0;
+    b.counters.bridge_visits = 0;
+    b.handle_udp(a_addr, &corrupt, now);
+    assert_eq!(
+      b.counters.connection_visits,
+      1,
+      "a corrupted datagram at A's live CID must service exactly A's connection, \
+         not scale with the {}-connection table",
+      b.conns.iter_handles().len()
+    );
+    assert_eq!(
+      b.counters.bridge_visits, 0,
+      "a corrupted datagram advances no stream state and must pump ZERO bridges, \
+         not the {live_on_a} live bridges standing on A's connection"
+    );
+  }
+
+  // Replayed flood: deliver the genuine datagram once (B extracts it), then
+  // re-deliver the SAME bytes — a duplicate packet number quinn discards. The
+  // duplicate still services ONLY A's connection and pumps no bridge.
+  b.handle_udp(a_addr, &pristine, now);
+  while b.poll_transmit().is_some() {}
+  b.counters.connection_visits = 0;
+  b.counters.bridge_visits = 0;
+  b.handle_udp(a_addr, &pristine, now);
+  assert_eq!(
+    b.counters.connection_visits, 1,
+    "a replayed (duplicate packet number) datagram must service exactly A's connection"
+  );
+  assert_eq!(
+    b.counters.bridge_visits, 0,
+    "a replayed datagram advances no stream state and must pump ZERO bridges"
+  );
+
+  // Non-vacuity: a GENUINE advancing datagram DOES pump a bridge. Deliver B's held
+  // requests to A so it accepts the inbound streams and responds, then ferry
+  // A->B; a real response STREAM frame (or a refusal STOP_SENDING) makes B's
+  // bridge readable and the ready-set drain pumps it. `bridge_visits` is reset
+  // immediately before each A->B delivery so the count reflects that datagram
+  // alone (not the per-iteration `handle_timeout` global pump).
+  for bytes in &held_b_to_a {
+    a.handle_udp(b_addr, bytes, now);
+  }
+  let mut genuine_pumped = false;
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.counters.bridge_visits = 0;
+        b.handle_udp(a_addr, &bytes, now);
+        if b.counters.bridge_visits > 0 {
+          genuine_pumped = true;
+        }
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if genuine_pumped {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    genuine_pumped,
+    "a genuinely-advancing datagram (a real response STREAM frame) must pump its \
+       bridge — `bridge_visits` climbing above 0 proves the ready set filters \
+       garbage rather than never pumping"
+  );
+}
+
+/// A reliable exchange back-pressured at the CONNECTION window — released ONLY
+/// via MAX_DATA/ACK (a partial-window release, never MAX_STREAM_DATA) — completes
+/// under a strict-poll (datagram-only) driver. The sender's `pending_out` flush
+/// must LOOP until it re-blocks so quinn re-registers the stream and re-emits
+/// `StreamEvent::Writable` on each credit release; a single write that partially
+/// accepts restored connection-window credit without re-blocking leaves the tail
+/// un-registered, no further `Writable` fires, and the strict-poll driver never
+/// re-pumps the bridge until its exchange deadline (a false Timeout).
+///
+/// A sends a message several times B's small connection `receive_window`, so the
+/// tail drains in multiple MAX_DATA increments — each needing a fresh `Writable`.
+/// B's large `stream_receive_window` guarantees the per-stream window is never
+/// the constraint, so no MAX_STREAM_DATA is ever sent: the ONLY re-wake is the
+/// connection-window `Writable`. The whole DATA phase is driven with `handle_udp`
+/// only (never `handle_timeout`), so the global pump-all cannot mask a missing
+/// `Writable`; time never advances, so the bridge deadline never fires and the
+/// exchange can only complete via the looped flush's re-registration.
+///
+/// Mutation-verify: revert `Bridge::pump_out`'s `pending_out` flush to a single
+/// write (drop the loop) — after the first partial-credit `Writable` pump the
+/// stream is no longer registered, no further `Writable` fires, and the ferry
+/// stalls with B never receiving the full message; the length assertion fails.
+#[test]
+fn connection_window_backpressured_exchange_completes_under_strict_poll() {
+  let a_addr: SocketAddr = "127.0.0.1:7982".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7983".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B advertises a small connection window (MAX_DATA-bound) but a large
+  // per-stream window (never the constraint).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window(), b_addr, now);
+
+  // Establish A -> B with a normal (timer-driven) ferry; the user-message bridge
+  // that carries the back-pressured payload is opened AFTER this, so the global
+  // pump here cannot mask the data-phase behaviour under test.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1,
+    "test precondition: A and B must be connected before the back-pressured send"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A one-way reliable message several times B's 16 KiB connection window, so its
+  // single reliable unit cannot fit the window and drains only in MAX_DATA-sized
+  // increments.
+  let payload = Bytes::from(vec![0xA7u8; 200 * 1024]);
+  let _ = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A starts a reliable user message to the established B");
+
+  // STRICT-POLL data ferry: `handle_udp` only, NEVER `handle_timeout`, and time
+  // never advances. Progress is possible only if each MAX_DATA re-emits a
+  // `Writable` that re-pumps A's blocked flush.
+  let mut b_got_len: Option<usize> = None;
+  for _ in 0..1000 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some(ev) = b.poll_event() {
+      if let Event::UserPacket(p) = ev {
+        b_got_len = Some(p.data_ref().as_ref().len());
+      }
+    }
+    while a.poll_event().is_some() {}
+    if b_got_len.is_some() {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert_eq!(
+    b_got_len,
+    Some(payload.len()),
+    "a connection-window-back-pressured reliable message must complete under a \
+       strict-poll driver via MAX_DATA-only credit: the looped `pending_out` \
+       flush re-registers the stream on each partial release so `Writable` \
+       re-pumps the bridge. A single-write flush stalls the tail (no re-wake) and \
+       B never receives the full {}-byte payload.",
+    payload.len()
+  );
+}
+
+/// One connection-level flow-control window increase (a single MAX_DATA — one
+/// attacker byte) makes quinn-proto emit `StreamEvent::Writable` for EVERY stream
+/// blocked on the connection window, and the datagram `poll()` drain enqueues
+/// each owning bridge. Without a bound the pass would then pump ALL of them (up to
+/// `max_inbound_streams`, ~1024) for that ONE datagram. The pass budget caps that:
+/// a single service pass pumps at most `MAX_BRIDGE_PUMPS_PER_PASS` ready bridges;
+/// the overflow stays queued and drains on a later pass or the un-budgeted tick,
+/// deferred but never dropped.
+///
+/// Construction: A opens MANY reliable exchanges to B, all back-pressured at B's
+/// small connection window (so they stay live with un-flushed `pending_out`). The
+/// Writable-storm enqueue is reproduced by enqueuing every live bridge via the
+/// same `enqueue_ready_bridge` the `poll()` drain uses, then ONE service pass runs
+/// over that full queue.
+///
+/// Mutation-verify: set the pass budget to `usize::MAX` (pump-to-empty) — the one
+/// pass then pumps all ~N bridges, so `bridge_visits` jumps to N and the
+/// `<= MAX_BRIDGE_PUMPS_PER_PASS` assertion fails.
+#[test]
+fn writable_storm_pass_pumps_at_most_the_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7991".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic membership schedulers are disabled so the multi-step catch-up
+  // drain below can advance the clock past several `CATCHUP_INTERVAL`s with no
+  // membership timer ever falling due — every wake is then a bounded catch-up.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  // B advertises a SMALL connection window (so A's sends back-pressure at the
+  // connection level) and a HIGH bidi-stream limit (so A can open ~200 exchanges
+  // at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A opens N reliable user-message exchanges to B. Each opens a bidi and buffers
+  // its payload; B's 16 KiB connection window admits only the first few, so the
+  // rest stay live with un-flushed `pending_out`. Held (never ferried) so all
+  // stay live.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let live = a.bridges.len();
+  assert!(
+    live >= 128,
+    "test precondition: A must hold many concurrent connection-window-blocked \
+       bridges so the budget is the binding constraint; got {live}"
+  );
+
+  // Reproduce the Writable storm: enqueue every live bridge onto the pass-scoped
+  // ready queue via the SAME helper the `poll()` drain uses on each MAX_DATA
+  // Writable. `flush_outbound`'s `finalize_tick` cleared the queue after the last
+  // `start_user_message`, so this is a clean enqueue of the full storm set.
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  let enqueued = a.ready_bridges.len();
+  assert!(
+    enqueued > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "the storm must exceed the pass budget for the cap to be non-vacuous \
+       (enqueued {enqueued}, budget {})",
+    super::MAX_BRIDGE_PUMPS_PER_PASS
+  );
+
+  // ONE service pass over the full ready queue (the per-datagram path).
+  a.counters.bridge_visits = 0;
+  a.service_connection(ch, now);
+  let one_pass = a.counters.bridge_visits;
+  assert!(
+    one_pass <= super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "one service pass must pump at most MAX_BRIDGE_PUMPS_PER_PASS={} bridges, not \
+       the {enqueued} Writable-storm bridges; pumped {one_pass} (pump-to-empty \
+       would pump ~{enqueued})",
+    super::MAX_BRIDGE_PUMPS_PER_PASS
+  );
+  assert!(
+    one_pass >= 1,
+    "non-vacuous: the budgeted pass must still pump at least one bridge"
+  );
+  // The un-pumped remainder stays QUEUED (deferred, not dropped).
+  let residue = a.ready_bridges.len();
+  assert_eq!(
+    residue,
+    enqueued - one_pass as usize,
+    "exactly the un-pumped remainder rides to the next pass / tick"
+  );
+  assert!(
+    residue > 0,
+    "test precondition: the storm must leave a residue so liveness is non-vacuous"
+  );
+
+  // Liveness: the deferred residue is never dropped. A driver re-polls the earliest
+  // wake (`poll_timeout`) and services it; the sticky catch-up anchor is the
+  // earliest wake, so the first wake is a BOUNDED, membership-flat catch-up. Later
+  // chunks may drain via a scheduled tick once the connection's transport timer
+  // comes due (the anchor advances past it) — which is correct: nothing is dropped.
+  a.counters.bridge_visits = 0;
+  assert_eq!(
+    a.poll_timeout(),
+    a.next_catchup_at,
+    "the sticky catch-up anchor is the earliest wake while a residue waits"
+  );
+  let mut catchup_steps = 0usize;
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    let memb_before = a.membership_time_advances();
+    let before = a.ready_bridges.len();
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    let drained = before - a.ready_bridges.len();
+    if a.membership_time_advances() == memb_before {
+      // A Catchup-only wake: no membership tick, and it pumps at most one budget
+      // chunk (a full tick would drain the whole residue at once).
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake pumps at most the budget ({}); a step drained {drained}",
+        super::MAX_BRIDGE_PUMPS_PER_PASS
+      );
+    }
+    steps += 1;
+    assert!(
+      steps <= residue + 2,
+      "the deferred residue must converge, never strand; still {} queued after \
+         {steps} steps",
+      a.ready_bridges.len()
+    );
+  }
+  assert!(
+    catchup_steps >= 1,
+    "the residue must drain via at least one BOUNDED catch-up wake; reverting \
+       handle_timeout to an unconditional run_tick makes every wake a full \
+       membership tick and leaves this 0"
+  );
+  assert!(
+    a.counters.bridge_visits >= residue as u64,
+    "the catch-up must pump the whole {residue}-bridge residue (deferred, not \
+       dropped); visited {}",
+    a.counters.bridge_visits
+  );
+}
+
+/// Admitting N distinct below-cap Initials is O(N) total servicing work, not
+/// O(N^2). Each accepted Initial services ONLY the freshly-accepted connection,
+/// so total `connection_visits` across every `handle_udp` is bounded by the
+/// number of datagrams fed (at most one connection touched per datagram) rather
+/// than the sum(1..N) a global-tick-per-accept would run.
+///
+/// Negative control: restore the global tick on the datagram path — the k-th
+/// datagram then services all k connections accepted so far, so total
+/// `connection_visits` grows quadratically and exceeds the datagram count.
+#[test]
+fn admitting_n_initials_is_o_n_not_o_n2() {
+  let now = Instant::now();
+  let b_addr: SocketAddr = "127.0.0.1:7980".parse().unwrap();
+  let mut b = make_endpoint("b", b_addr, now);
+
+  const N: usize = 48;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..N {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7981 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+
+  // Feed each client's handshake datagrams to B and drain B's replies back,
+  // WITHOUT ever calling `b.handle_timeout`: the global timer tick would service
+  // every connection and mask the O(N)-vs-O(N^2) distinction. B accepts and
+  // drives each handshake purely on the per-connection datagram path.
+  b.counters.connection_visits = 0;
+  let mut datagrams_to_b: u64 = 0;
+  for _ in 0..40 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(*caddr, &bytes, now);
+          datagrams_to_b += 1;
+        }
+      }
+      c.handle_timeout(now);
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(b_addr, &bytes, now);
+      }
+    }
+  }
+
+  let pooled = clients
+    .iter()
+    .filter(|(a, _)| b.live_connections_to(*a) >= 1)
+    .count();
+  assert!(
+    pooled >= N - 4,
+    "test precondition: B must pool essentially all {N} client connections; pooled {pooled}"
+  );
+  // O(1) per datagram: every inbound datagram serviced exactly its addressed
+  // connection, so total visits never exceed the datagram count.
+  assert!(
+    b.counters.connection_visits <= datagrams_to_b,
+    "admitting {N} initials must be O(N): total connection_visits {} exceeded the \
+       {datagrams_to_b} datagrams fed — the global tick is running per datagram",
+    b.counters.connection_visits
+  );
+  // Non-vacuous: each pooled connection was serviced at least once.
+  assert!(
+    b.counters.connection_visits >= pooled as u64,
+    "each accepted connection must have been serviced at least once (visits {}, pooled {pooled})",
+    b.counters.connection_visits
+  );
+}
+
+/// A stateless reset delivered to an already-Closed connection reaps its slab
+/// entry and frees its global-cap slot in the SAME servicing call — no unrelated
+/// timer. quinn routes the reset to the connection as a `ConnectionEvent`; it
+/// carries no protocol frame and the connection was already closed, so the former
+/// "authenticated progress" gate treated it as inert and skipped servicing,
+/// stranding the drained connection in the slab until an unrelated timer fired.
+/// Bounding servicing to the addressed connection instead makes the reap happen
+/// the moment the reset arrives.
+///
+/// Negative control: restore that progress gate — the reset is a no-frame event
+/// on an already-closed connection, so servicing is skipped, the connection is
+/// never `reap_if_drained`'d on this datagram, and the slab-length assertion
+/// (`len` drops to 0) fails.
+#[test]
+fn closed_to_drained_stateless_reset_reaps() {
+  let a_addr: SocketAddr = "127.0.0.1:7940".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7941".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Establish A <-> B.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1,
+    "test precondition: A and B must both hold an established connection"
+  );
+
+  // Capture a large genuine A->B 1-RTT datagram to use later as the reset
+  // trigger (large enough that B will answer an unknown-CID packet with a
+  // stateless reset rather than dropping it).
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from(vec![0xABu8; 240]), now);
+  a.flush_outbound_transmits(now);
+  let trigger = drain_first_datagram_to(&mut a, b_addr);
+  while a.poll_transmit().is_some() {}
+
+  // Reap B's connection to A (close it and advance B's clock to drained-reap),
+  // WITHOUT delivering B's CONNECTION_CLOSE to A — so a later unknown-CID packet
+  // makes B emit a stateless reset rather than a graceful close.
+  let ch_b = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  b.conns
+    .get_mut(ch_b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  for _ in 0..8 {
+    let due = b
+      .conns
+      .get_mut(ch_b)
+      .and_then(|e| e.conn_mut().poll_timeout());
+    match due {
+      Some(due) => b.handle_timeout(crate::Instant::from_std(due)),
+      None => b.handle_timeout(now),
+    }
+    if b.conns.handle_for(&a_addr).is_none() {
+      break;
+    }
+  }
+  while b.poll_transmit().is_some() {}
+  assert!(
+    b.conns.handle_for(&a_addr).is_none(),
+    "test precondition: B must have reaped its connection to A"
+  );
+
+  // Close A's connection to B: it is now in `Closed` (is_closed, not yet
+  // drained). This is the state the reset must drive to drained-and-reaped.
+  let ch_a = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.conns
+      .get(ch_a)
+      .map(|e| e.conn_ref().is_closed())
+      .unwrap_or(false)
+      && !a
+        .conns
+        .get(ch_a)
+        .map(|e| e.conn_ref().is_drained())
+        .unwrap_or(true),
+    "test precondition: A's connection must be Closed but not yet Drained"
+  );
+  let len_before = a.conns.iter_handles().len();
+  assert_eq!(len_before, 1, "A holds exactly its one (closed) connection");
+
+  // Feed the captured A->B packet to B (which no longer knows the CID) so B emits
+  // a stateless reset back to A.
+  b.handle_udp(a_addr, &trigger, now);
+  let mut reset: Option<Vec<u8>> = None;
+  while let Some((to, bytes)) = b.poll_transmit() {
+    if to == a_addr {
+      reset = Some(bytes.to_vec());
+    }
+  }
+  let reset = reset.expect("B must emit a stateless reset to A for the unknown-CID packet");
+
+  // Deliver the stateless reset to A on the datagram path, with NO handle_timeout:
+  // the reset arrives as a ConnectionEvent to A's (already-closed) connection,
+  // drives it to Drained, and `service_connection` reaps its slab entry in this
+  // same call.
+  let membership_before = a.membership_time_advances();
+  a.handle_udp(b_addr, &reset, now);
+  assert_eq!(
+    a.membership_time_advances(),
+    membership_before,
+    "the datagram-path reap must not advance any membership timer"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "the stateless reset must reap A's closed connection's slab entry in the same \
+       servicing call (was {len_before} before the reset)"
+  );
+  assert!(
+    a.conns.handle_for(&b_addr).is_none(),
+    "the reaped connection's peer mapping must be cleared too"
+  );
+}
+
+/// The three incremental bridge indexes — [`QuicEndpoint::bridges_by_conn`],
+/// [`QuicEndpoint::bridge_by_conn_sid`], and
+/// [`QuicEndpoint::inbound_bridge_count`] — must each equal their brute-force
+/// fold over `bridges` at every step, the guard that a bridge mint or reap site
+/// missed its index maintenance. Drives a real A<->B push/pull (outbound +
+/// inbound bridges minted and reaped) plus a connection teardown, cross-checking
+/// after every servicing operation.
+#[test]
+fn bridges_by_conn_index_matches_bruteforce() {
+  let a_addr: SocketAddr = "127.0.0.1:7930".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7931".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  let check = |ep: &QuicEndpoint<SmolStr>, label: &str| {
+    let mut brute: std::collections::HashMap<
+      quinn_proto::ConnectionHandle,
+      std::collections::HashSet<StreamId>,
+    > = std::collections::HashMap::new();
+    for (id, br) in ep.bridges.iter() {
+      brute.entry(br.ch()).or_default().insert(*id);
+    }
+    let mut index: std::collections::HashMap<
+      quinn_proto::ConnectionHandle,
+      std::collections::HashSet<StreamId>,
+    > = std::collections::HashMap::new();
+    for (ch, ids) in ep.bridges_by_conn.iter() {
+      assert!(
+        !ids.is_empty(),
+        "bridges_by_conn must never hold an empty entry (after: {label})"
+      );
+      index.insert(*ch, ids.iter().copied().collect());
+    }
+    assert_eq!(
+      index, brute,
+      "bridges_by_conn diverged from the brute-force filter after: {label}"
+    );
+    // conn_slot back-pointers: the bridge at position `p` of `ch`'s bucket must
+    // record `conn_slot == p`, so a reap's `swap_remove(conn_slot)` drops that
+    // exact bridge in O(1). A missed mint-time record or a missed sibling fixup
+    // leaves the back-pointer stale.
+    for (ch, ids) in ep.bridges_by_conn.iter() {
+      for (p, id) in ids.iter().enumerate() {
+        let br = ep.bridges.get(id).unwrap_or_else(|| {
+          panic!("bridges_by_conn[{ch:?}][{p}] = {id:?} absent from bridges (after: {label})")
+        });
+        assert_eq!(
+          br.conn_slot(),
+          p,
+          "conn_slot back-pointer diverged from bucket position for {id:?} after: {label}"
+        );
+      }
+    }
+    // bridge_by_conn_sid: the finer-grained (ch, sid) -> id reverse index.
+    let mut brute_sid: std::collections::HashMap<
+      (quinn_proto::ConnectionHandle, quinn_proto::StreamId),
+      StreamId,
+    > = std::collections::HashMap::new();
+    for (id, br) in ep.bridges.iter() {
+      brute_sid.insert((br.ch(), br.sid()), *id);
+    }
+    assert_eq!(
+      ep.bridge_by_conn_sid, brute_sid,
+      "bridge_by_conn_sid diverged from the brute-force (ch, sid) -> id map after: {label}"
+    );
+    // inbound_bridge_count: live bridges absent from pending_outbound_kinds.
+    assert_eq!(
+      ep.inbound_bridge_count(),
+      ep.inbound_bridge_count_recount(),
+      "inbound_bridge_count diverged from the brute-force filter after: {label}"
+    );
+  };
+
+  check(&a, "construction (a)");
+  check(&b, "construction (b)");
+
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  check(&a, "a.start_push_pull");
+  for _ in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        check(&b, "b.handle_udp");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        check(&a, "a.handle_udp");
+      }
+    }
+    a.handle_timeout(now);
+    check(&a, "a.handle_timeout");
+    b.handle_timeout(now);
+    check(&b, "b.handle_timeout");
+  }
+
+  // Teardown: force-close A's connection and advance to drained-reap, so the
+  // connection-loss bridge reap path exercises the index too.
+  if let Some(ch) = a.conns.handle_for(&b_addr) {
+    a.conns
+      .get_mut(ch)
+      .unwrap()
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), Bytes::new());
+    for _ in 0..8 {
+      let due = a
+        .conns
+        .get_mut(ch)
+        .and_then(|e| e.conn_mut().poll_timeout());
+      match due {
+        Some(due) => a.handle_timeout(crate::Instant::from_std(due)),
+        None => a.handle_timeout(now),
+      }
+      check(&a, "a.handle_timeout(teardown)");
+      if a.conns.handle_for(&b_addr).is_none() {
+        break;
+      }
+    }
+  }
+  assert!(
+    a.bridges_by_conn.is_empty(),
+    "the index must be empty once every bridge is reaped"
+  );
+}
+
+/// A dial parked while its TARGET PEER's connection was handshaking must open its
+/// bridge AND flush the first request bytes to that peer within the single
+/// `handle_udp` that establishes the connection — not stall until the next global
+/// tick.
+///
+/// N dials cold B: the in-band `service_dials` creates a handshaking connection
+/// and re-parks the intent on `dial_parked[b_addr]` (no bridge yet). Ferrying the
+/// handshake WITHOUT `n.handle_timeout`, the inbound datagram that drives N's
+/// connection to B to Established runs `service_connection`'s scoped
+/// establishment branch → `service_peer_bucket(b_addr)`, which opens the parked
+/// dial's bridge on that same connection and pumps its first request bytes onto
+/// the wire in that same pass.
+///
+/// Mutation-verify: drop step (c)'s bucket service (or its minted-bridge enqueue
+/// and ready-queue drain), so the parked dial is never opened on the establishing
+/// pass — no bridge mints until a later `handle_timeout` and `minted_same_pass`
+/// stays false.
+#[test]
+fn parked_dial_mints_and_flushes_on_its_peer_establishment() {
+  let n_addr: SocketAddr = "127.0.0.1:7920".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7921".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // N dials cold B: the in-band `service_dials` creates a handshaking connection
+  // and re-parks the intent on B's bucket. No bridge is minted while B handshakes.
+  let _ = n.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert!(
+    n.dial_parked.contains_key(&b_addr),
+    "test precondition: the dial to still-handshaking B must re-park on B's bucket"
+  );
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: no bridge is minted while B is still handshaking"
+  );
+
+  // Ferry the handshake one datagram at a time WITHOUT `n.handle_timeout` (a
+  // global tick would service the parked dial through the full drain, defeating
+  // the same-pass-as-establishment claim). The `n.handle_udp` that establishes
+  // N's connection to B must service `dial_parked[b_addr]`, mint its bridge, and
+  // flush the first request bytes to B in that same pass.
+  let mut minted_same_pass = false;
+  'outer: for _ in 0..400 {
+    // N -> B (Initial, then handshake continuation).
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      b.handle_udp(n_addr, &dg, now);
+    }
+    // B -> N: the datagram that drives N's connection to Established mints the
+    // parked dial's bridge in that same `handle_udp` pass.
+    let mut b_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        b_out.push(bytes.to_vec());
+      }
+    }
+    for dg in b_out {
+      let before = n.live_bridge_count();
+      n.handle_udp(b_addr, &dg, now);
+      if before == 0 && n.live_bridge_count() >= 1 {
+        minted_same_pass = true;
+        // The freshly-minted bridge's first request bytes must be on N's outbound
+        // queue to B this same pass — not stalled to a future tick.
+        let mut sent_to_b = false;
+        while let Some((to, _)) = n.poll_transmit() {
+          if to == b_addr {
+            sent_to_b = true;
+          }
+        }
+        assert!(
+          sent_to_b,
+          "the minted bridge's first request bytes must flush to B within the \
+             establishing pass"
+        );
+        break 'outer;
+      }
+    }
+    // Advance only B's timers; N must NOT tick (that would service the parked
+    // dial through the global full drain, defeating the same-pass claim).
+    b.handle_timeout(now);
+  }
+
+  assert!(
+    minted_same_pass,
+    "the dial parked on N's connection to B must open its bridge within the single \
+       handle_udp that established that connection — a scoped establishment must \
+       not defer the parked dial to the next global tick"
+  );
+}
+
+/// Assert the incremental [`super::DeadlineIndex`] behind
+/// [`QuicEndpoint::poll_timeout`] returns exactly what a brute-force fold of the
+/// same sources ([`QuicEndpoint::recompute_earliest_bruteforce`]) would — the
+/// guard that catches a missed `set` at any deadline-mutating site. Also
+/// cross-checks the incremental `unattempted_dial_count` against its brute-force
+/// recount, so a drifting counter at any `dial_pending` mutation site (which
+/// feeds the immediate-due half of the same fold) is caught here too.
+fn assert_deadline_index_matches(ep: &mut QuicEndpoint<SmolStr>, label: &str) {
+  assert_eq!(
+    ep.unattempted_dial_count(),
+    ep.unattempted_dial_recount(),
+    "unattempted_dial_count diverged from the brute-force recount after: {label}"
+  );
+  let want = ep.recompute_earliest_bruteforce();
+  let got = ep.poll_timeout();
+  assert_eq!(
+    got, want,
+    "deadline index diverged from the brute-force fold after: {label}"
+  );
+}
+
+/// The whole risk of the O(1) `poll_timeout` redesign is a missed `set` at some
+/// deadline-mutating site, which would leave the index stale. This drives a full
+/// coordinator lifecycle — public push/pull dial, a real A<->B handshake, an
+/// inbound stream exchange, connection-touching side channels
+/// (`queue_unreliable_datagram`, `try_open_uni_stream_to`), membership
+/// pass-throughs, leave, and idle-timeout drained-reap — and after EVERY public
+/// operation asserts `poll_timeout()` equals the brute-force fold. A stale key
+/// (missed insert, missed clear-on-reap, or wrong immediate-due aggregate) is
+/// caught as a divergence at the offending step.
+#[test]
+fn deadline_index_matches_bruteforce_across_operations() {
+  use crate::{
+    Node,
+    typed::{Alive, Meta, Suspect},
+  };
+
+  let a_addr: SocketAddr = "127.0.0.1:7860".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7861".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7862".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  assert_deadline_index_matches(&mut a, "construction (a)");
+  assert_deadline_index_matches(&mut b, "construction (b)");
+
+  // Public in-band push/pull: services its dial from the returned descriptor (no
+  // event-queue sieve), attempts the dial, mints an outbound bridge, and flushes —
+  // exercising the Dial, Conn, and Bridge keys plus the immediate-due term in one
+  // call.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert_deadline_index_matches(&mut a, "a.start_push_pull");
+
+  // Ferry the handshake + push/pull to completion. Assert after every
+  // handle_udp (route_datagram_event -> service_connection: accept, live-conn
+  // event, or no-op) and every handle_timeout (full tick: pump, service_quinn
+  // mint + conn-lost reap, service_dials, finalize reap, collect_transmits).
+  for round in 0..300 {
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        assert_deadline_index_matches(&mut b, "b.handle_udp");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        assert_deadline_index_matches(&mut a, "a.handle_udp");
+      }
+    }
+    // Mid-handshake, exercise the connection-touching public surfaces that run
+    // no servicing tick (must self-index their Conn key).
+    if round == 5 {
+      let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"gossip"), now);
+      assert_deadline_index_matches(&mut a, "a.queue_unreliable_datagram");
+      let _ = a.try_open_uni_stream_to(b_addr, now);
+      assert_deadline_index_matches(&mut a, "a.try_open_uni_stream_to");
+    }
+    a.handle_timeout(now);
+    assert_deadline_index_matches(&mut a, "a.handle_timeout");
+    b.handle_timeout(now);
+    assert_deadline_index_matches(&mut b, "b.handle_timeout");
+  }
+
+  // Membership pass-throughs that mutate the inner endpoint's timers (the
+  // Endpoint term is refreshed live at the read point).
+  let _ = a.start_probe(now);
+  assert_deadline_index_matches(&mut a, "a.start_probe");
+  let alive = Alive::new(1, Node::new(SmolStr::new("c"), c_addr)).with_meta(Meta::empty());
+  a.handle_alive(c_addr, alive, now);
+  assert_deadline_index_matches(&mut a, "a.handle_alive");
+  let suspect = Suspect::new(1, SmolStr::new("c"), SmolStr::new("a"));
+  a.handle_suspect(c_addr, suspect, now);
+  assert_deadline_index_matches(&mut a, "a.handle_suspect");
+  let _ = a.ping(Node::new(SmolStr::new("c"), c_addr), now);
+  assert_deadline_index_matches(&mut a, "a.ping");
+  let _ = a.send_user_packets(b_addr, &[Bytes::from_static(b"x")]);
+  assert_deadline_index_matches(&mut a, "a.send_user_packets");
+  // Drain the unreliable transmit surface (it ticks the inner endpoint's
+  // leave-completion boundary).
+  while a.poll_memberlist_transmit().is_some() {
+    assert_deadline_index_matches(&mut a, "a.poll_memberlist_transmit");
+  }
+
+  // Leave, then advance far past the QUIC idle timeout so the pooled connection
+  // reaches drained-reap and its Conn key is cleared — asserting throughout.
+  let _ = a.leave(now);
+  assert_deadline_index_matches(&mut a, "a.leave");
+  let mut later = now;
+  for _ in 0..60 {
+    later += Duration::from_secs(1);
+    a.handle_timeout(later);
+    assert_deadline_index_matches(&mut a, "a.handle_timeout(post-leave)");
+    b.handle_timeout(later);
+    assert_deadline_index_matches(&mut b, "b.handle_timeout(post-leave)");
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, later);
+        assert_deadline_index_matches(&mut b, "b.handle_udp(teardown)");
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, later);
+        assert_deadline_index_matches(&mut a, "a.handle_udp(teardown)");
+      }
+    }
+  }
+}
+
+/// `poll_timeout` must examine O(1) heap entries regardless of how many
+/// connections the table holds — the property that denies an attacker an O(N)
+/// re-poll per inbound receive batch. Populates a server with several real
+/// pooled connections, then asserts a single `poll_timeout` examines a small
+/// constant number of index entries (`>= 1`, so it truly consulted the index)
+/// that does not scale with the connection count.
+///
+/// Mutation-verify: reverting `QuicEndpoint::poll_timeout` to the old O(N) fold
+/// never calls `DeadlineIndex::earliest`, so `entities_scanned` stays `0` and
+/// the `>= 1` assertion fails.
+#[test]
+fn poll_timeout_scans_o1_regardless_of_connection_count() {
+  let now = Instant::now();
+  let s_addr: SocketAddr = "127.0.0.1:7870".parse().unwrap();
+  let mut s = make_endpoint("s", s_addr, now);
+
+  let n = 8usize;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..n {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7871 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(s_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+
+  // Interleaved ferry so the server accepts and pools every client connection.
+  for _ in 0..600 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == s_addr {
+          s.handle_udp(*caddr, &bytes, now);
+        }
+      }
+    }
+    while let Some((to, bytes)) = s.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(s_addr, &bytes, now);
+      }
+    }
+    for (_, c) in clients.iter_mut() {
+      c.handle_timeout(now);
+    }
+    s.handle_timeout(now);
+  }
+
+  let conn_count: usize = clients.iter().map(|(a, _)| s.live_connections_to(*a)).sum();
+  assert!(
+    conn_count >= 6,
+    "expected the server to pool most client connections; got {conn_count}"
+  );
+
+  // Settle the index, then measure one poll in isolation.
+  let _ = s.poll_timeout();
+  s.deadline_index.reset_entities_scanned();
+  let _ = s.poll_timeout();
+  let scanned = s.deadline_index.entities_scanned();
+  assert!(
+    scanned >= 1,
+    "poll_timeout must consult the deadline index — reverting it to the O(N) \
+     fold never calls earliest(), leaving this 0"
+  );
+  assert!(
+    scanned <= 4,
+    "poll_timeout must examine O(1) heap entries, not scale with the \
+     {conn_count} pooled connections; examined {scanned}"
+  );
+}
+
+/// A connection-level loss must reap only ITS connection's bridges, via the
+/// per-connection index, never a scan of the whole bridge table. B holds live
+/// bridges on two connections; a peer `CONNECTION_CLOSE` arriving on one of them
+/// (the datagram path) reaps that connection's bridges — the `bridge_scan_visits`
+/// counter stays bounded by that connection's bridge count, well under the total.
+///
+/// Mutation-verify: restore the global `self.bridges.iter().filter(ch)` scan (and
+/// count each examined entry) — the reap then examines every bridge in the table,
+/// so `bridge_scan_visits` climbs to the total and the `< total` assertion fails.
+#[test]
+fn connection_lost_reap_scans_only_its_own_connections_bridges() {
+  let b_addr: SocketAddr = "127.0.0.1:7690".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7691".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7692".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut c = make_endpoint("c", c_addr, now);
+
+  // Establish A -> B and C -> B (each dials B; B pools one inbound connection to
+  // each).
+  for (caddr, peer) in [(a_addr, &mut a), (c_addr, &mut c)] {
+    let _ = peer.start_push_pull(b_addr, PushPullKind::Join, now);
+    for _ in 0..200 {
+      let mut moved = false;
+      while let Some((to, bytes)) = peer.poll_transmit() {
+        if to == b_addr {
+          b.handle_udp(caddr, &bytes, now);
+          moved = true;
+        }
+      }
+      while let Some((to, bytes)) = b.poll_transmit() {
+        if to == caddr {
+          peer.handle_udp(b_addr, &bytes, now);
+          moved = true;
+        }
+      }
+      peer.handle_timeout(now);
+      b.handle_timeout(now);
+      if b.live_connections_to(caddr) >= 1 && !moved {
+        break;
+      }
+    }
+    assert!(
+      b.live_connections_to(caddr) >= 1,
+      "test precondition: B must pool a connection to {caddr}"
+    );
+  }
+
+  // Open FEW live outbound bridges on B's connection to A (the loss target) and
+  // MANY on B's connection to C, so the whole bridge table is much larger than
+  // A's connection's share. The peers are never ferried again, so every bridge
+  // stays live (waiting on a response) until the loss.
+  for _ in 0..2 {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  for _ in 0..6 {
+    let _ = b.start_push_pull(c_addr, PushPullKind::Refresh, now);
+  }
+  while b.poll_transmit().is_some() {}
+
+  let ch_x = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let x_bridges = b.bridges.values().filter(|br| br.ch() == ch_x).count();
+  let total_before = b.live_bridge_count();
+  assert!(
+    x_bridges >= 1,
+    "test precondition: the loss-target connection must hold at least one bridge"
+  );
+  assert!(
+    total_before > x_bridges,
+    "test precondition: the table ({total_before}) must be larger than the target \
+       connection's share ({x_bridges}) so the O(ch) vs O(total) claim is non-vacuous"
+  );
+
+  // A closes its connection to B; ferry the CONNECTION_CLOSE datagram to B. It
+  // arrives on the datagram path, so `service_connection` reaps A's connection's
+  // bridges in that pass via the per-connection index.
+  let ch_a2b = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a2b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  a.flush_outbound_transmits(now);
+  let close_dg = drain_first_datagram_to(&mut a, b_addr);
+
+  b.counters.bridge_scan_visits = 0;
+  b.handle_udp(a_addr, &close_dg, now);
+
+  let visits = b.counters.bridge_scan_visits;
+  assert!(
+    visits >= x_bridges as u64,
+    "the lost connection's {x_bridges} bridges must have been reaped (visits {visits})"
+  );
+  assert!(
+    visits < total_before as u64,
+    "the ConnectionLost reap must examine only the lost connection's bridges \
+       (O(ch)), not scan the whole {total_before}-bridge table; examined {visits}"
+  );
+}
+
+/// Losing a connection holding K bridges drops them from `bridges_by_conn` in one
+/// whole-bucket map remove followed by a per-bridge bucketless deindex — O(K)
+/// SmallVec work, never O(K²). `bridge_bucket_scan_ops` counts per-element bucket
+/// surgery; the bucketless loss path performs none, so it stays at 0 across the
+/// loss (well within the O(K) bound).
+///
+/// Mutation-verify: revert the loss path to a per-bridge `retain` deindex (the
+/// former O(K)-per-reap bucket scan) — reaping the shrinking bucket K times scans
+/// K + (K-1) + ... elements, so `bridge_bucket_scan_ops` climbs to O(K²) and the
+/// `<= K` assertion fails.
+#[test]
+fn connection_lost_reap_is_linear_in_bucket() {
+  let b_addr: SocketAddr = "127.0.0.1:7693".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7694".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Establish A -> B (A dials; B pools an inbound connection to A).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "precondition: B must pool a connection to A"
+  );
+
+  // Open K live outbound bridges on B's connection to A; never ferry them, so
+  // every one stays live (awaiting a response) until the loss.
+  const K: usize = 8;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  while b.poll_transmit().is_some() {}
+  let ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let k_live = b.bridges.values().filter(|br| br.ch() == ch).count();
+  assert!(
+    k_live >= 4,
+    "precondition: enough sibling bridges to make O(K) vs O(K²) non-vacuous (got {k_live})"
+  );
+
+  // A closes its connection to B; ferry the CONNECTION_CLOSE to B on the datagram
+  // path, so `service_connection`'s loss reap runs the bucketless whole-bucket
+  // deindex in that pass.
+  let ch_a2b = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  a.conns
+    .get_mut(ch_a2b)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  a.flush_outbound_transmits(now);
+  let close_dg = drain_first_datagram_to(&mut a, b_addr);
+
+  b.counters.bridge_bucket_scan_ops = 0;
+  b.handle_udp(a_addr, &close_dg, now);
+
+  assert_eq!(
+    b.bridges.values().filter(|br| br.ch() == ch).count(),
+    0,
+    "every bridge on the lost connection must be reaped"
+  );
+  assert!(
+    !b.bridges_by_conn.contains_key(&ch),
+    "the lost connection's bucket must be gone"
+  );
+  let ops = b.counters.bridge_bucket_scan_ops;
+  assert!(
+    ops <= k_live as u64,
+    "the connection-loss reap of {k_live} bridges must do O(K) SmallVec work \
+       (the shipped bucketless whole-bucket remove does 0; got {ops}); a per-bridge \
+       retain deindex would scan the shrinking bucket K times → O(K²)"
+  );
+}
+
+/// Each single-bridge reap drops the bridge from its `bridges_by_conn` bucket in
+/// O(1) via one `swap_remove`, so reaping K sibling bridges on a live connection
+/// costs O(K) SmallVec work, not O(K²). `bridge_bucket_scan_ops` (one per
+/// swap_remove) therefore equals the reaped count after all siblings reap through
+/// the pump path.
+///
+/// Mutation-verify: revert `index_bridge_reap`'s `swap_remove` to the former
+/// `retain` (counting each scanned element) — reaping the shrinking bucket scans
+/// K + (K-1) + ... elements, so the counter climbs to O(K²) and the equality
+/// assertion fails.
+#[test]
+fn sibling_bridge_reap_is_o1_per_bridge() {
+  let b_addr: SocketAddr = "127.0.0.1:7696".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7697".parse().unwrap();
+  let now = Instant::now();
+  let mut b = make_endpoint("b", b_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Establish B -> A and let the join push/pull settle so B holds a pooled
+  // connection to A with no live bridge.
+  let _ = b.start_push_pull(a_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    b.handle_timeout(now);
+    a.handle_timeout(now);
+    if b.live_connections_to(a_addr) >= 1 && b.live_bridge_count() == 0 && !moved {
+      break;
+    }
+  }
+  assert!(
+    b.live_connections_to(a_addr) >= 1,
+    "precondition: B must pool a connection to A"
+  );
+  assert_eq!(
+    b.live_bridge_count(),
+    0,
+    "precondition: the join push/pull must have settled"
+  );
+  while b.poll_transmit().is_some() {}
+
+  // Open K sibling bridges on B's one connection to A; never ferry them, so they
+  // share one exchange deadline and reap together on a timeout tick via the pump
+  // path — each through a single O(1) `swap_remove`.
+  const K: usize = 8;
+  for _ in 0..K {
+    let _ = b.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  }
+  let ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a connection to A");
+  let opened = b.bridges.values().filter(|br| br.ch() == ch).count();
+  assert!(
+    opened >= 4,
+    "precondition: enough sibling bridges (got {opened})"
+  );
+
+  // The multi-element bucket must carry exact conn_slot back-pointers — the
+  // lifecycle cross-check only ever sees size-1 buckets, so this is where the
+  // mint-time recording is checked non-vacuously. A broken swap_remove fixup
+  // would additionally trip `index_bridge_reap`'s `debug_assert` mid-reap below.
+  {
+    let bucket = b
+      .bridges_by_conn
+      .get(&ch)
+      .expect("the sibling bucket exists");
+    for (p, id) in bucket.iter().enumerate() {
+      assert_eq!(
+        b.bridges.get(id).unwrap().conn_slot(),
+        p,
+        "conn_slot must equal the bucket position for sibling {id:?}"
+      );
+    }
+  }
+
+  while b.poll_transmit().is_some() {}
+
+  // Advance to the bridges' exchange deadline; the pump reaps each via
+  // `index_bridge_reap`'s O(1) swap_remove. Keep advancing to the reported
+  // deadline until the bucket empties (an intervening connection PTO/timer may be
+  // earlier); the connection outlives the bridges (idle timeout 20 s > the
+  // exchange deadline), so every reap goes through the pump path, never the
+  // bucketless connection-loss path.
+  b.counters.bridge_bucket_scan_ops = 0;
+  b.counters.bridge_pump_path_reaps = 0;
+  let mut guard = 0;
+  while b.bridges.values().any(|br| br.ch() == ch) {
+    let due = b
+      .poll_timeout()
+      .expect("live bridges contribute a deadline");
+    b.handle_timeout(due + Duration::from_millis(1));
+    guard += 1;
+    assert!(
+      guard < 128,
+      "sibling bridges failed to reap within the deadline horizon"
+    );
+  }
+
+  // Each single-bridge pump-path reap performs exactly one O(1) bucket
+  // swap_remove, so the two counters stay equal however many bridges churn
+  // through the reap: advancing membership time escalates B's probe of the
+  // unreachable A and opens extra reliable-fallback-ping bridges that also reap,
+  // but those track together in both counters. The sibling bucket (>= 4 deep)
+  // makes the equality discriminating — the former O(bucket) retain would scan
+  // 4 + 3 + ... elements per reap, pushing the scan-op count above the reap count.
+  let scan_ops = b.counters.bridge_bucket_scan_ops;
+  let reaps = b.counters.bridge_pump_path_reaps;
+  assert!(
+    reaps >= opened as u64,
+    "the {opened} sibling bridges must have reaped through the pump path (reaps {reaps})"
+  );
+  assert_eq!(
+    scan_ops, reaps,
+    "each pump-path reap must cost exactly one O(1) swap_remove (scan_ops {scan_ops} \
+       vs reaps {reaps}); the former O(bucket) retain would push scan_ops above the \
+       reap count"
+  );
+}
+
+/// `poll_timeout` must answer "is any dial unattempted?" from the O(1)
+/// `unattempted_dial_count`, never by scanning `dial_pending`. With many
+/// already-attempted dials parked, repeated `poll_timeout` calls examine zero
+/// dial entries.
+///
+/// Mutation-verify: revert `refresh_immediate_due` to
+/// `dial_pending.iter().any(|d| !d.attempted)` (counting each visited entry) —
+/// the examined count then scales with the parked-dial count times the poll
+/// count and the `== 0` assertion fails.
+#[test]
+fn poll_timeout_does_not_scan_dial_pending() {
+  let n_addr: SocketAddr = "127.0.0.1:7695".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  // Anchor `last_now` (and run one empty tick) so the immediate-due term is
+  // well-defined.
+  n.handle_timeout(now);
+
+  // Park MANY already-attempted dials directly in `dial_pending` — the steady
+  // state a flooded dial queue reaches after its first service pass. Attempted
+  // entries do not contribute to `unattempted_dial_count`, so it stays 0.
+  let parked = 4096usize;
+  for i in 0..parked {
+    let peer: SocketAddr = format!("127.0.0.2:{}", 1000 + (i % 60000)).parse().unwrap();
+    n.dial_pending.push_back(super::PendingDial {
+      id: StreamId::from_raw(i as u64),
+      peer,
+      deadline: now + Duration::from_secs(30),
+      wake: now + Duration::from_secs(30),
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  }
+  assert_eq!(n.unattempted_dial_count(), 0);
+  assert_eq!(
+    n.unattempted_dial_recount(),
+    0,
+    "all parked dials are attempted, so the brute-force recount is 0"
+  );
+
+  // The O(1) path reads the counter and never iterates the parked dials.
+  n.counters.dial_pending_scan_visits = 0;
+  for _ in 0..16 {
+    let _ = n.poll_timeout();
+  }
+  assert_eq!(
+    n.counters.dial_pending_scan_visits, 0,
+    "poll_timeout must read unattempted_dial_count, not scan the {parked} parked \
+       dials; reverting refresh_immediate_due to a dial_pending scan makes this climb"
+  );
+
+  // Sanity: an unattempted dial DOES flip the immediate-due term on — still with
+  // no scan.
+  n.dial_pending.push_back(super::PendingDial {
+    id: StreamId::from_raw(parked as u64),
+    peer: "127.0.0.2:9999".parse().unwrap(),
+    deadline: now + Duration::from_secs(30),
+    wake: now + Duration::from_secs(30),
+    attempted: false,
+    kind: super::ExchangeKind::UserMessage,
+  });
+  n.unattempted_dial_count += 1;
+  assert_eq!(n.unattempted_dial_count(), n.unattempted_dial_recount());
+  n.counters.dial_pending_scan_visits = 0;
+  let due = n.poll_timeout();
+  assert_eq!(
+    due,
+    Some(now),
+    "an unattempted dial forces an immediate-due wake at last_now"
+  );
+  assert_eq!(
+    n.counters.dial_pending_scan_visits, 0,
+    "reading the immediate-due term must still not scan dial_pending"
+  );
+}
+
+/// The global `max_quic_connections` cap must bound OUTBOUND dials too — both
+/// reliable dials and the datagram-fallback dial route through `get_or_dial`, so
+/// neither may grow the connection table past the cap.
+///
+/// Mutation-verify: remove the cap check on the new-connection branch of
+/// `get_or_dial` — the outbound dials then create a fresh connection each and the
+/// `<= cap` assertion fails.
+#[test]
+fn outbound_dials_cannot_exceed_global_connection_cap() {
+  let s_addr: SocketAddr = "127.0.0.1:7699".parse().unwrap();
+  let now = Instant::now();
+  let cap = 3usize;
+  let cfg = EndpointOptions::new(SmolStr::new("s"), s_addr);
+  let qc = test_config().with_max_quic_connections(Some(cap));
+  let mut s = make_endpoint_full(cfg, qc, s_addr, now);
+
+  // Fire cap + surplus reliable dials to DISTINCT cold peers (none answer, so
+  // each created connection stays handshaking and holds its slab slot).
+  let surplus = 3usize;
+  for i in 0..(cap + surplus) {
+    let peer: SocketAddr = format!("127.0.0.3:{}", 4000 + i).parse().unwrap();
+    let _ = s.start_push_pull(peer, PushPullKind::Join, now);
+    assert!(
+      s.conns.iter_handles().len() <= cap,
+      "outbound reliable dials must never push the table past the cap {cap}; got {} \
+         after {} dials",
+      s.conns.iter_handles().len(),
+      i + 1
+    );
+  }
+  assert_eq!(
+    s.conns.iter_handles().len(),
+    cap,
+    "the first {cap} distinct-peer dials should have filled the table exactly"
+  );
+
+  // A datagram-fallback dial to yet another cold peer is refused at the cap
+  // (best-effort NotReady) and creates no connection.
+  let dg_peer: SocketAddr = "127.0.0.3:4100".parse().unwrap();
+  let status = s.queue_unreliable_datagram(dg_peer, Bytes::from_static(b"gossip"), now);
+  assert_eq!(
+    status,
+    super::DatagramSendStatus::NotReady,
+    "a datagram-fallback dial at the cap must report NotReady"
+  );
+  assert_eq!(
+    s.live_connections_to(dg_peer),
+    0,
+    "the refused fallback dial must create no connection"
+  );
+  assert!(
+    s.conns.iter_handles().len() <= cap,
+    "the datagram-fallback dial must not exceed the cap either"
+  );
+
+  // Every dial refused at the cap (the reliable surplus + the fallback) is
+  // counted against the connection-cap metric.
+  let rejected = s.metrics().quic_connections_rejected;
+  assert!(
+    rejected >= (surplus + 1) as u64,
+    "each dial refused at the cap must be counted (>= {} expected, got {rejected})",
+    surplus + 1
+  );
+}
+
+/// A cold dial (to a peer with NO established connection) that `service_dials`
+/// attempts must flush its Initial AND register its deadline key in the same call
+/// — even though it mints no bridge (its `open(Bi)` returns `None`, still
+/// handshaking) and merely re-parks on the peer's bucket. The touched-but-
+/// bridgeless connection is the case the full `service_dials` (run in-band by
+/// every `start_*` wrapper) must still flush and index the same pass.
+///
+/// Mutation-verify: revert the touched-conns flush to collect only minted-bridge
+/// connections — C mints no bridge, so its Initial is never flushed within the
+/// `start_push_pull` call and `flushed_to_c` stays false.
+#[test]
+fn cold_dial_touched_flushes_initial_same_pass() {
+  let n_addr: SocketAddr = "127.0.0.1:7710".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:7711".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  // C is never instantiated — N only ever cold-dials its address.
+
+  // Dial the COLD peer C in-band: `start_push_pull` runs the full `service_dials`
+  // and `flush_outbound`. C has no established connection, so `get_or_dial`
+  // creates a fresh handshaking connection whose `open(Bi)` returns `None` — no bridge
+  // minted, the intent re-parks on C's bucket. That connection is nonetheless
+  // TOUCHED: its Initial and deadline key must emerge within this same call.
+  let _ = n.start_push_pull(c_addr, PushPullKind::Join, now);
+
+  let mut flushed_to_c = false;
+  while let Some((to, _)) = n.poll_transmit() {
+    if to == c_addr {
+      flushed_to_c = true;
+    }
+  }
+  assert!(
+    flushed_to_c,
+    "the cold dial to C (no bridge minted) must flush its Initial to C within the \
+       single start_push_pull call — a touched-but-bridgeless connection must not \
+       stall until the next global tick"
+  );
+
+  // The still-handshaking intent re-parked on C's bucket, and its connection's
+  // deadline key was registered THIS call — a cold-dial connection is indexed
+  // only by the touched-conns flush, not by `get_or_dial`.
+  assert!(
+    n.dial_parked.contains_key(&c_addr),
+    "the still-handshaking cold dial must re-park on C's bucket"
+  );
+  assert_eq!(n.live_bridge_count(), 0, "a cold dial mints no bridge");
+  let ch_c = n
+    .conns
+    .handle_for(&c_addr)
+    .expect("the cold dial created N's connection to C");
+  assert!(
+    n.deadline_index
+      .contains_key(super::deadline::TimerKey::Conn(ch_c)),
+    "the cold-dialed connection's deadline key must be registered the same call \
+       its Initial is flushed"
+  );
+}
+
+/// Establishment is SCOPED: when one connection completes its handshake,
+/// `service_connection` services ONLY that peer's parked-dial bucket, never the
+/// whole dial queue. Many peers hold parked dials; N's connection to A
+/// establishes; the `dial_entries_serviced` counter must advance by exactly A's
+/// bucket size, and every other peer's bucket must remain untouched.
+///
+/// Mutation-verify: revert step (c) to the whole-queue `service_dials` drain — it
+/// processes every parked bucket, so the counter jumps by the TOTAL parked-dial
+/// count (and drains the other buckets away), failing both assertions.
+#[test]
+fn establishment_services_only_its_peer_bucket() {
+  let n_addr: SocketAddr = "127.0.0.1:7730".parse().unwrap();
+  let a_addr: SocketAddr = "127.0.0.1:7731".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Two REAL dials to A, issued while A is still cold: each re-parks on A's bucket
+  // (the connection is handshaking, `open(Bi)` returns None).
+  let _ = n.start_push_pull(a_addr, PushPullKind::Join, now);
+  let _ = n.start_push_pull(a_addr, PushPullKind::Refresh, now);
+  let a_bucket = n.dial_parked.get(&a_addr).map(|b| b.len()).unwrap_or(0);
+  assert_eq!(
+    a_bucket, 2,
+    "test precondition: both dials to still-handshaking A re-park on A's bucket"
+  );
+
+  // MANY parked dials on OTHER cold peers, injected directly. They target
+  // never-answered addresses, so even a whole-queue drain only re-parks them
+  // (open(Bi) None, handshaking); the scoped path never touches them at all.
+  let other_peers = 5usize;
+  let per_peer = 8usize;
+  let mut next_id = 10_000u64;
+  for p in 0..other_peers {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+    for _ in 0..per_peer {
+      n.dial_parked
+        .entry(peer)
+        .or_default()
+        .push_back(super::PendingDial {
+          id: StreamId::from_raw(next_id),
+          peer,
+          deadline: now + Duration::from_secs(30),
+          wake: now + Duration::from_secs(30),
+          attempted: true,
+          kind: super::ExchangeKind::UserMessage,
+        });
+      next_id += 1;
+    }
+  }
+  let total_parked = a_bucket + other_peers * per_peer;
+
+  // Drive N's handshake to A one inbound datagram at a time WITHOUT
+  // n.handle_timeout (a global tick would full-drain every bucket). The
+  // handle_udp that establishes N's connection to A must service ONLY A's bucket.
+  let mut asserted = false;
+  'outer: for _ in 0..400 {
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == a_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      a.handle_udp(n_addr, &dg, now);
+    }
+    let mut a_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == n_addr {
+        a_out.push(bytes.to_vec());
+      }
+    }
+    for dg in a_out {
+      let before = n.counters.dial_entries_serviced;
+      let had_a_bucket = n.dial_parked.contains_key(&a_addr);
+      n.handle_udp(a_addr, &dg, now);
+      // A's bucket drains (its dials open) exactly on the establishing pass.
+      if had_a_bucket && !n.dial_parked.contains_key(&a_addr) {
+        let delta = n.counters.dial_entries_serviced - before;
+        assert_eq!(
+          delta, a_bucket as u64,
+          "establishment must service ONLY A's bucket ({a_bucket} dials); a \
+             whole-queue drain would process all {total_parked} parked dials"
+        );
+        // Every OTHER peer's bucket is untouched — still parked in full.
+        for p in 0..other_peers {
+          let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+          assert_eq!(
+            n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+            per_peer,
+            "a peer whose connection did NOT establish must keep its full bucket"
+          );
+        }
+        asserted = true;
+        break 'outer;
+      }
+    }
+    a.handle_timeout(now);
+  }
+
+  assert!(
+    asserted,
+    "N's connection to A must establish and service A's bucket within the ferry"
+  );
+}
+
+/// A reliable-send entry point (`start_user_message` / `start_push_pull` /
+/// `start_reliable_ping`) must do work bounded by its OWN new exchange — never
+/// O(parked dials + bridges + connections). Pre-populate all three tables (many
+/// parked dials on cold peers, many live back-pressured bridges on an established
+/// connection), then issue ONE `start_user_message` to a fresh peer and prove the
+/// three servicing-visit counters advance by their O(1) amounts — exactly one
+/// fresh dial entry, ZERO connection services, ZERO bridge pumps — independent of
+/// the table sizes. Growing the parked-dial table then leaves the fresh-dial count
+/// unchanged, proving the per-request work does not scale.
+///
+/// Mutation-verify: restore the former `self.service_dials(now);
+/// self.flush_outbound(now)` pair in `service_started_exchange`. `service_dials`
+/// then drains every parked bucket, so `dial_entries_serviced` jumps by the whole
+/// parked population; `flush_outbound`'s `service_quinn` visits every connection
+/// (so `connection_visits` scales with the connection table) and its two
+/// `pump_bridges` calls visit every live bridge twice (so `bridge_visits` scales
+/// with the bridge table) — failing all three assertions.
+#[test]
+fn reliable_start_touches_constant_entries_regardless_of_table_size() {
+  let a_addr: SocketAddr = "127.0.0.1:7810".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7811".parse().unwrap();
+  let now = Instant::now();
+  // No periodic schedulers on A, so the ONLY `DialRequested` it ever emits is the
+  // one each explicit `start_*` call queues — the fresh-dial count stays exact.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  // B advertises a SMALL connection window (so A's exchanges back-pressure and
+  // stay live) and a HIGH bidi-stream limit (so A can open many at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // Populate the BRIDGE table: open many reliable user-message exchanges to B.
+  // B's small connection window admits only the first few, so the rest stay live
+  // with un-flushed `pending_out`. Held (never ferried) so all stay live.
+  const BRIDGES: usize = 200;
+  let payload = Bytes::from(vec![0xB4u8; 4096]);
+  for _ in 0..BRIDGES {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let live_bridges = a.bridges.len();
+  assert!(
+    live_bridges >= 128,
+    "test precondition: A must hold many concurrent connection-window-blocked \
+       bridges so the bridge-table scan is non-vacuous; got {live_bridges}"
+  );
+
+  // Populate the DIAL table: inject parked dials on distinct cold peers (targeting
+  // never-answered addresses so even a whole-queue drain only re-parks them; the
+  // scoped path never touches them at all).
+  let park = |a: &mut QuicEndpoint<SmolStr>, peers: core::ops::Range<usize>, base_id: u64| {
+    for p in peers {
+      let peer: SocketAddr = format!("127.0.0.9:{}", 6000 + p).parse().unwrap();
+      a.dial_parked
+        .entry(peer)
+        .or_default()
+        .push_back(super::PendingDial {
+          id: StreamId::from_raw(base_id + p as u64),
+          peer,
+          deadline: now + Duration::from_secs(30),
+          wake: now + Duration::from_secs(30),
+          attempted: true,
+          kind: super::ExchangeKind::UserMessage,
+        });
+    }
+  };
+  const PARKED: usize = 200;
+  park(&mut a, 0..PARKED, 10_000);
+
+  // One reliable send to a FRESH cold peer (no pooled connection, no parked bucket)
+  // must service ONLY its own new dial intent.
+  let fresh: SocketAddr = "127.0.0.8:5000".parse().unwrap();
+  a.counters.dial_entries_serviced = 0;
+  a.counters.connection_visits = 0;
+  a.counters.bridge_visits = 0;
+  let _ = a
+    .start_user_message(fresh, payload.clone(), now)
+    .expect("A starts a reliable user message to a fresh peer");
+
+  assert_eq!(
+    a.counters.dial_entries_serviced, 1,
+    "a reliable start must service ONLY its own fresh dial intent (1), never the \
+       {PARKED} parked dials a whole-queue `service_dials` drain would process"
+  );
+  assert_eq!(
+    a.counters.connection_visits,
+    0,
+    "a reliable start runs no `service_quinn`, so it services ZERO connections; a \
+       global `flush_outbound` would visit every one of the {} live connections",
+    a.live_connections_to(b_addr)
+  );
+  assert_eq!(
+    a.counters.bridge_visits, 0,
+    "a reliable start to a fresh cold peer mints no bridge, so it pumps ZERO \
+       bridges; a global `flush_outbound` would pump every one of the \
+       {live_bridges} live bridges twice"
+  );
+
+  // Grow the parked-dial table and re-verify the per-request fresh-dial count does
+  // NOT scale with it.
+  const GROWN: usize = 400;
+  park(&mut a, PARKED..GROWN, 30_000);
+  let fresh2: SocketAddr = "127.0.0.8:5001".parse().unwrap();
+  a.counters.dial_entries_serviced = 0;
+  let _ = a
+    .start_user_message(fresh2, payload.clone(), now)
+    .expect("A starts a second reliable user message to another fresh peer");
+  assert_eq!(
+    a.counters.dial_entries_serviced, 1,
+    "doubling the parked-dial table to {GROWN} must not change the O(1) per-request \
+       fresh-dial count"
+  );
+}
+
+/// Like [`test_config`] but limiting each connection to `limit` concurrent
+/// remote-opened bidi streams, so a peer that pins that many bidi streams
+/// exhausts the credit — the setup for the credit-exhaustion / MAX_STREAMS-restore
+/// (`StreamEvent::Available`) path.
+fn test_config_bidi_limit(limit: u32) -> QuicOptions {
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  transport.max_concurrent_bidi_streams(quinn_proto::VarInt::from_u32(limit));
+  QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  )
+}
+
+/// A dial requeued because the peer's bidi-stream credit was exhausted must retry
+/// — and open its bridge — the moment the peer raises its MAX_STREAMS bidi limit
+/// (a `StreamEvent::Available { dir: Bi }`) delivered via `handle_udp` before the
+/// dial's deadline. Without the `Available` arm the dial waits to its deadline and
+/// fails.
+///
+/// Construction: N and B allow only ONE concurrent bidi stream. N establishes a
+/// pooled connection to B, opens exchange 1 (consuming the single credit), then
+/// dials again — `open(Bi)` returns None (credit exhausted) so the dial re-parks
+/// on B's bucket. Ferrying exchange 1 to completion frees B's stream slot; B sends
+/// MAX_STREAMS, and the datagram carrying it drives N's `Available` arm, which
+/// services B's bucket and opens the parked dial's bridge in that same pass.
+///
+/// Mutation-verify: revert the `Available { dir: Bi }` arm to `_ => {}`. The
+/// MAX_STREAMS still raises the limit, but nothing services the bucket, so the
+/// parked dial never opens within the ferry (which never ticks N) and this fails.
+#[test]
+fn credit_restored_available_retries_parked_dial() {
+  let n_addr: SocketAddr = "127.0.0.1:7740".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7741".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(1),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up (no bidi consumed) so the first
+  // reliable dial opens immediately rather than parking on the handshake.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  // Quiesce so the exchange-1 setup is deterministic.
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+
+  // Exchange 1 opens the single available bidi (credit 1/1 used). Its request is
+  // queued in `out` but NOT delivered yet, so the bridge stays alive.
+  let _id1 = n.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert_eq!(
+    n.live_bridge_count(),
+    1,
+    "test precondition: exchange 1 opens the single bidi credit"
+  );
+  // Exchange 2 finds the credit exhausted -> re-parks on B's bucket, no bridge.
+  let id2 = n.start_push_pull(b_addr, PushPullKind::Refresh, now);
+  assert_eq!(
+    n.dial_parked.get(&b_addr).map(|b| b.len()).unwrap_or(0),
+    1,
+    "test precondition: the second dial re-parks on B's bucket (credit exhausted)"
+  );
+  assert!(
+    !n.bridges.contains_key(&id2),
+    "test precondition: the credit-exhausted dial mints no bridge yet"
+  );
+
+  // Ferry exchange 1 to completion WITHOUT n.handle_timeout: as B reaps its
+  // inbound bridge it frees the slot and sends MAX_STREAMS. The datagram carrying
+  // MAX_STREAMS drives N's `Available` arm, which services B's bucket and opens
+  // the parked dial's bridge in that same handle_udp.
+  //
+  // Advance `now` per iteration so N's connection ACK/loss timers fire — but only
+  // via `handle_udp` (which runs the connection's `handle_timeout` internally),
+  // never via `n.handle_timeout`, which would run a global tick and full-drain
+  // the parked dial regardless of the `Available` arm. The advance stays far
+  // under the dial's stream-timeout deadline so it is the credit restore, not the
+  // deadline, that resolves the parked dial.
+  let mut retried = false;
+  let mut t = now;
+  'outer: for _ in 0..200 {
+    t += Duration::from_millis(20);
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      b.handle_udp(n_addr, &dg, t);
+    }
+    let mut b_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        b_out.push(bytes.to_vec());
+      }
+    }
+    for dg in b_out {
+      n.handle_udp(b_addr, &dg, t);
+      if n.bridges.contains_key(&id2) {
+        retried = true;
+        assert!(
+          !n.dial_parked.contains_key(&b_addr),
+          "the retried dial must leave B's parked bucket once it opens"
+        );
+        break 'outer;
+      }
+    }
+    // Advance only B's coordinator tick (never N's) so the parked dial can open
+    // ONLY via N's `Available` arm, never a global tick's full drain.
+    b.handle_timeout(t);
+  }
+
+  assert!(
+    retried,
+    "the credit-exhausted parked dial must open its bridge on the MAX_STREAMS \
+       (Available) arriving via handle_udp — not wait for its deadline; reverting \
+       the Available arm leaves it parked and this fails"
+  );
+}
+
+/// A single-credit `MAX_STREAMS` restore (`StreamEvent::Available { dir: Bi }`)
+/// services a peer's parked-dial bucket in O(1), NOT O(bucket):
+/// `service_peer_bucket` stops at the FIRST re-park. Every entry in one peer's
+/// bucket shares that peer's single pooled connection and its one bidi-credit
+/// pool, so once an attempt re-parks (credit exhausted or still handshaking)
+/// every later entry would re-park identically. Re-attempting the whole bucket
+/// per credit is O(bucket) per credit, so K single-credit frames (K small
+/// packets) cost O(K^2); stopping after the first re-park makes each restore
+/// O(1), so K restores cost O(K).
+///
+/// Construction: park M attempted intents on ONE never-answered peer. Its pooled
+/// connection stays handshaking, so every attempt's `open(Bi)` returns `None` and
+/// re-parks. Drive `service_peer_bucket` K times (each call is one single-credit
+/// `Available`; a real `MAX_STREAMS` datagram reaches the same arm) and assert
+/// each call attempts exactly ONE entry — independent of the M-entry bucket.
+///
+/// Mutation-verify: drop the `break` on `DialAttempt::Reparked` (drain the whole
+/// bucket per credit) — each call then attempts all M entries, so the per-call
+/// delta jumps to M and the `<= 1` assertion fails on the first restore.
+#[test]
+fn single_credit_available_services_bucket_in_o_1_not_o_bucket() {
+  let n_addr: SocketAddr = "127.0.0.1:7760".parse().unwrap();
+  let cold_peer: SocketAddr = "127.0.0.9:7761".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+
+  // Park M attempted intents on ONE cold peer. The first `service_peer_bucket`
+  // attempt dials it — creating a single pooled, still-handshaking connection —
+  // and `open(Bi)` returns `None`, so the entry re-parks. All M target the SAME
+  // pooled connection.
+  const M: usize = 24;
+  let deadline = now + Duration::from_secs(30);
+  for i in 0..M {
+    n.dial_parked
+      .entry(cold_peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(20_000 + i as u64),
+        peer: cold_peer,
+        deadline,
+        wake: deadline,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  assert_eq!(
+    n.dial_parked.get(&cold_peer).map(|b| b.len()).unwrap_or(0),
+    M,
+    "test precondition: all M intents park on the one cold peer's bucket"
+  );
+
+  // K single-credit restores. Each `service_peer_bucket` must attempt exactly ONE
+  // entry (the first re-parks, the drain breaks) — O(1) per credit, independent
+  // of the M-entry bucket. The whole-bucket drain would attempt all M per call.
+  const K: usize = 24;
+  let base = n.counters.dial_entries_serviced;
+  for i in 0..K {
+    let before = n.counters.dial_entries_serviced;
+    // A fresh full dial budget per restore: each call must still stop at the first
+    // re-park (O(1)), independent of the budget.
+    let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+    n.service_peer_bucket(cold_peer, now, &mut dial_budget);
+    let delta = n.counters.dial_entries_serviced - before;
+    assert!(
+      delta <= 1,
+      "single-credit Available restore #{i} on an M={M} handshake-blocked bucket \
+         must attempt O(1) entries (stop at the first re-park), not the whole \
+         bucket; attempted {delta} — reverting the `break` makes this {M}"
+    );
+  }
+
+  // The bucket is intact: nothing minted (still handshaking) and nothing dropped —
+  // every intent still awaits the tick's full drain or a real credit.
+  assert_eq!(
+    n.dial_parked.get(&cold_peer).map(|b| b.len()).unwrap_or(0),
+    M,
+    "the handshake-blocked bucket retains all M entries across the K restores"
+  );
+  // Cumulative: K restores attempted O(K) entries total, never O(K*M).
+  assert!(
+    n.counters.dial_entries_serviced - base <= K as u64,
+    "K={K} single-credit restores must be O(K)={K} total dial attempts, not \
+       O(K*M)={}",
+    K * M
+  );
+}
+
+/// A single `Available` (or handshake completion) that unblocks a peer's parked
+/// bucket where every entry MINTS must not let ONE datagram drive O(bucket) dial
+/// work: `service_peer_bucket` attempts at most `MAX_DIAL_ATTEMPTS_PER_PASS`
+/// entries per pass, then defers the untouched tail. A K-credit `MAX_STREAMS`
+/// grant (or a handshake granting a large initial bidi credit) makes every bucket
+/// entry return `Minted`, so — unlike the credit-exhausted case that stops at the
+/// first re-park — nothing bounds the drain except this budget.
+///
+/// Construction: establish N -> B with a large bidi credit via a datagram warm-up
+/// (no bidi consumed, no bridge minted), then inject M REAL dial intents parked on
+/// B's bucket (registered on the raw endpoint so `dial_succeeded` resolves each,
+/// then moved to `dial_parked` as attempted — the state a burst reaches after
+/// parking on a since-established, amply-credited connection). ONE
+/// `service_peer_bucket` then mints at most the budget and re-parks the rest.
+///
+/// Mutation-verify: remove the `MAX_DIAL_ATTEMPTS_PER_PASS` cap (keep only the
+/// `Reparked` break) — the amply-credited bucket never re-parks, so the pass mints
+/// all M and the `<= budget` assertion fails.
+#[test]
+fn established_bucket_pass_mints_at_most_the_budget() {
+  let n_addr: SocketAddr = "127.0.0.1:7780".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7781".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(512),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up: no bidi credit is consumed and no
+  // bridge is minted, so the pooled connection is Established with its full
+  // 512-stream initial bidi credit and N holds zero bridges before the injection.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while n.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: the datagram warm-up mints no bridge"
+  );
+
+  // Inject M REAL parked intents on B's bucket. Register each on the raw endpoint
+  // (so `dial_succeeded` resolves it into a real `Stream`) WITHOUT servicing, sieve
+  // the emitted `DialRequested`s into `dial_pending`, then move them onto
+  // `dial_parked[b]` as attempted — the post-parking state under test.
+  const M: usize = 256;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    n.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  n.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = n.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    M,
+    "test precondition: all M intents sieve into dial_pending"
+  );
+  // They are now parked-attempted, not unattempted-pending.
+  n.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    n.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  let parked_before = n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the cap to be \
+       non-vacuous"
+  );
+
+  // ONE service_peer_bucket pass mints at most the budget, then defers the tail.
+  let before = n.counters.dial_entries_serviced;
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(b_addr, now, &mut dial_budget);
+  let attempts = n.counters.dial_entries_serviced - before;
+  assert!(
+    attempts <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "one service_peer_bucket pass on an amply-credited bucket must attempt at most \
+       MAX_DIAL_ATTEMPTS_PER_PASS={}, not the {M}-entry bucket; attempted {attempts} \
+       (removing the cap mints all {M})",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  // Every budgeted attempt minted a REAL bridge (not a retire): the mint path — not
+  // the expired/retire path — is what the drain must bound here.
+  assert_eq!(
+    n.live_bridge_count(),
+    attempts as usize,
+    "every budgeted attempt opened a real outbound bridge on the amply-credited \
+       established connection"
+  );
+  // Exactly the un-attempted tail rides on the bucket, untouched (nothing dropped).
+  let tail = n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - attempts as usize,
+    "exactly the un-attempted tail (M - budget) stays parked for the next drain"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // Liveness: the un-budgeted full drain mints the whole deferred tail on the
+  // established connection's remaining credit — nothing is stranded.
+  let _ = n.service_dials(now);
+  assert_eq!(
+    n.dial_parked.get(&b_addr).map(|x| x.len()).unwrap_or(0),
+    0,
+    "the un-budgeted service_dials drains the whole deferred tail, leaving the \
+       bucket empty (nothing lost)"
+  );
+}
+
+/// A long expired prefix in one peer's parked bucket must not let a single
+/// `Available` (or establishment) drive O(bucket) dial retirements:
+/// `service_peer_bucket` attempts at most `MAX_DIAL_ATTEMPTS_PER_PASS` entries per
+/// pass REGARDLESS of outcome. An expired entry takes the deadline-elapsed retire
+/// branch (no connection dialed, no credit consumed, no re-park), so — like the
+/// mint case, and unlike the credit-exhausted case — nothing but this budget stops
+/// the drain scanning the whole expired prefix.
+///
+/// Construction: park M expired intents (deadline already elapsed) on ONE peer.
+/// Drive ONE `service_peer_bucket` and assert it attempted at most the budget,
+/// deferring the rest as an untouched parked tail.
+///
+/// Mutation-verify: remove the `MAX_DIAL_ATTEMPTS_PER_PASS` cap (keep only the
+/// `Reparked` break) — an expired prefix never re-parks, so the pass retires all M
+/// and the `<= budget` assertion fails.
+#[test]
+fn expired_prefix_pass_attempts_at_most_the_budget() {
+  let n_addr: SocketAddr = "127.0.0.1:7790".parse().unwrap();
+  let peer: SocketAddr = "127.0.0.9:7791".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint("n", n_addr, now);
+
+  // Park M expired intents (deadline in the past) on ONE peer. Each attempt hits
+  // the deadline-elapsed retire branch, so the drain continues through the whole
+  // prefix unless the per-pass budget stops it. Fake ids are sound here: the retire
+  // path routes through `dial_failed`, a no-op for an unregistered intent.
+  const M: usize = 256;
+  let elapsed = now - Duration::from_secs(1);
+  for i in 0..M {
+    n.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(40_000 + i as u64),
+        peer,
+        deadline: elapsed,
+        wake: elapsed,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  let parked_before = n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the cap to be \
+       non-vacuous"
+  );
+
+  // ONE pass: attempts at most the budget, then defers the untouched tail.
+  let before = n.counters.dial_entries_serviced;
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(peer, now, &mut dial_budget);
+  let attempted = n.counters.dial_entries_serviced - before;
+  assert!(
+    attempted <= super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "one service_peer_bucket pass must attempt at most \
+       MAX_DIAL_ATTEMPTS_PER_PASS={}, not the {M}-entry expired prefix; attempted \
+       {attempted} (removing the cap retires all {M})",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  let tail = n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - attempted as usize,
+    "exactly the un-attempted tail stays parked for the next drain"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // Liveness: the un-budgeted full drain retires everything the budget deferred.
+  let _ = n.service_dials(now);
+  assert_eq!(
+    n.dial_parked.get(&peer).map(|b| b.len()).unwrap_or(0),
+    0,
+    "the un-budgeted service_dials drains the whole deferred tail (expired intents \
+       retired), leaving the bucket empty"
+  );
+}
+
+/// A per-peer readiness event that services a large parked bucket must leave the
+/// unprocessed tail RESIDENT in the same allocation — the resident-tail
+/// bounded-prefix bound. `service_peer_bucket` detaches a bounded front-prefix
+/// with O(1) `pop_front` and never moves, collects, or re-inserts the tail, so
+/// one datagram's dial work is O(min(budget, bucket)) with no per-datagram copy
+/// of the tail back into a recreated bucket.
+///
+/// Phase 1 (mint): an established, amply-credited connection mints the budget's
+/// worth of entries off the front; the M - budget tail stays parked with its
+/// backing storage untouched — the SAME back-element address and the SAME
+/// `VecDeque` capacity across the pass.
+///
+/// Phase 2 (handshake-blocked): the first entry re-parks and the drain stops; it
+/// rotates to the BACK of the resident bucket (front-pop, back-repark) while
+/// every other entry stays parked in place, so nothing is dropped and the bucket
+/// keeps all M entries.
+///
+/// Mutation-verify: restore the whole-bucket take with a `collect()` + `extend()`
+/// tail move — Phase 1's back-element-address assertion fails (the tail is
+/// relocated into a fresh allocation), and Phase 2's rotated-order assertion
+/// fails (a front re-insert leaves the re-parked entry at the FRONT).
+#[test]
+fn service_peer_bucket_leaves_tail_resident_no_move() {
+  // ---- Phase 1: established + amply-credited -> the budget mints off the front,
+  //      the un-processed tail stays resident in the same allocation. ----
+  let n_addr: SocketAddr = "127.0.0.1:7800".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7801".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(512),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+
+  // Establish N -> B via a datagram warm-up: no bidi credit is consumed and no
+  // bridge is minted, so the pooled connection is Established with its full
+  // 512-stream initial bidi credit.
+  let _ = n.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  n.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(n_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        n.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    n.handle_timeout(now);
+    b.handle_timeout(now);
+    if n.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    n.live_connections_to(b_addr) >= 1,
+    "test precondition: N must hold an established pooled connection to B"
+  );
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while n.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    n.live_bridge_count(),
+    0,
+    "test precondition: the datagram warm-up mints no bridge"
+  );
+
+  // Inject M REAL parked intents on B's bucket (registered on the raw endpoint so
+  // `dial_succeeded` resolves each), marked attempted — the post-parking state a
+  // burst reaches on a since-established, amply-credited connection.
+  const M: usize = 256;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    n.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  n.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = n.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    M,
+    "test precondition: all M intents sieve into dial_pending"
+  );
+  n.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    n.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  let parked_before = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.len())
+    .unwrap_or(0);
+  assert!(
+    parked_before > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket ({parked_before}) must exceed the budget for the resident tail to \
+       be non-vacuous"
+  );
+
+  // Witness the resident tail's backing storage BEFORE the pass: the physical
+  // address of the back element and the bucket's capacity. Popping off the FRONT
+  // never relocates the back element or reallocates the ring buffer; a
+  // `collect()` + `extend()` tail move would rebuild the tail into a fresh
+  // allocation, relocating the back element.
+  let tail_ptr_before: *const super::PendingDial = n
+    .dial_parked
+    .get(&b_addr)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry as *const super::PendingDial)
+    .expect("the parked bucket has a resident back element");
+  let cap_before = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.capacity())
+    .expect("the parked bucket is present");
+
+  // ONE service_peer_bucket pass mints the budget's prefix, then defers the tail.
+  let before = n.counters.dial_entries_serviced;
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n.service_peer_bucket(b_addr, now, &mut dial_budget);
+  let processed = (n.counters.dial_entries_serviced - before) as usize;
+
+  // (a) the pass attempts at most the budget.
+  assert!(
+    processed <= super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "one pass must attempt at most MAX_DIAL_ATTEMPTS_PER_PASS={}, attempted {processed}",
+    super::MAX_DIAL_ATTEMPTS_PER_PASS
+  );
+  assert!(
+    processed > 0,
+    "non-vacuous: the pass must have minted a prefix"
+  );
+  // Every budgeted attempt opened a REAL bridge (the mint path, not a retire), so
+  // the prefix was consumed off the front rather than dropped.
+  assert_eq!(
+    n.live_bridge_count(),
+    processed,
+    "every budgeted attempt opened a real outbound bridge off the front"
+  );
+
+  // (b) the bucket still holds exactly the un-processed tail (M - processed).
+  let tail = n
+    .dial_parked
+    .get(&b_addr)
+    .map(|bucket| bucket.len())
+    .unwrap_or(0);
+  assert_eq!(
+    tail,
+    M - processed,
+    "exactly the un-processed tail (M - processed) stays resident"
+  );
+  assert!(
+    tail > 0,
+    "non-vacuous: the budget must have deferred a tail"
+  );
+
+  // (c) the resident tail was neither relocated nor rebuilt: the same back
+  // element lives at the same address, in a bucket of the same capacity. A
+  // `collect()` + `extend()` tail move relocates the back element into a fresh
+  // allocation, so this fails under that mutation.
+  let tail_ptr_after: *const super::PendingDial = n
+    .dial_parked
+    .get(&b_addr)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry as *const super::PendingDial)
+    .expect("the resident tail still has a back element");
+  assert_eq!(
+    tail_ptr_before, tail_ptr_after,
+    "the resident tail's back element must not be relocated (no collect()+extend() rebuild)"
+  );
+  assert_eq!(
+    n.dial_parked
+      .get(&b_addr)
+      .map(|bucket| bucket.capacity())
+      .expect("the resident tail's bucket is present"),
+    cap_before,
+    "the resident tail's backing VecDeque must not be reallocated"
+  );
+
+  // ---- Phase 2: handshake-blocked -> the first entry re-parks and the drain
+  //      stops; it rotates to the BACK while the resident tail stays in place. ----
+  let n2_addr: SocketAddr = "127.0.0.1:7802".parse().unwrap();
+  let cold_peer: SocketAddr = "127.0.0.9:7803".parse().unwrap();
+  let mut n2 = make_endpoint("n2", n2_addr, now);
+
+  // Park M attempted intents on ONE never-answered peer. The first
+  // `service_peer_bucket` attempt dials it — a single still-handshaking
+  // connection — and `open(Bi)` returns None, so the entry re-parks; every later
+  // entry shares that connection and would re-park identically, so the drain
+  // stops at the first.
+  const HB_M: usize = 256;
+  let deadline = now + Duration::from_secs(30);
+  let first_id = StreamId::from_raw(50_000);
+  let second_id = StreamId::from_raw(50_001);
+  for i in 0..HB_M {
+    n2.dial_parked
+      .entry(cold_peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(50_000 + i as u64),
+        peer: cold_peer,
+        deadline,
+        wake: deadline,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+
+  let before2 = n2.counters.dial_entries_serviced;
+  let mut dial_budget2 = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = n2.service_peer_bucket(cold_peer, now, &mut dial_budget2);
+  let processed2 = n2.counters.dial_entries_serviced - before2;
+  assert_eq!(
+    processed2, 1,
+    "a handshake-blocked bucket must stop at the first re-park (O(1), not O(bucket))"
+  );
+  // Nothing dropped: the re-parked entry rode back into the same bucket, so all M
+  // stay parked.
+  assert_eq!(
+    n2.dial_parked
+      .get(&cold_peer)
+      .map(|bucket| bucket.len())
+      .unwrap_or(0),
+    HB_M,
+    "the re-park returns the entry to the bucket, so all M stay parked"
+  );
+  // Front-pop + back-repark: the first entry rotated to the BACK, so the new
+  // front is the SECOND parked entry and the back is the FIRST. A front re-insert
+  // (the old collect()+extend() shape) would instead leave the first entry at the
+  // FRONT.
+  let front_id = n2
+    .dial_parked
+    .get(&cold_peer)
+    .and_then(|bucket| bucket.front())
+    .map(|entry| entry.id)
+    .expect("the resident bucket has a front element");
+  let back_id = n2
+    .dial_parked
+    .get(&cold_peer)
+    .and_then(|bucket| bucket.back())
+    .map(|entry| entry.id)
+    .expect("the resident bucket has a back element");
+  assert_eq!(
+    front_id, second_id,
+    "front-pop rotates the re-parked entry off the front; the second entry leads"
+  );
+  assert_eq!(
+    back_id, first_id,
+    "the re-parked first entry rides at the back of the resident bucket"
+  );
+}
+
+/// One connection-window MAX_DATA makes quinn emit `StreamEvent::Writable` for
+/// EVERY connection-window-blocked stream in a SINGLE `poll()` drain. The arm
+/// acts on EVERY edge — no per-pass enqueue cap — because quinn clears
+/// `connection_blocked` on this yield and never re-adds it, so a skipped edge
+/// would strand a still-blocked bridge to its exchange deadline. Bounding the
+/// storm is instead the local `C_OUT` outbound cap: the blocked set is our
+/// inbound accepts (config) plus at most `C_OUT` dialer streams, so acting on
+/// every edge is O(config), not O(the attacker's stream count).
+///
+/// Unlike `writable_storm_pass_pumps_at_most_the_budget` (which bounds the DRAIN,
+/// enqueuing the storm synthetically), this drives a REAL MAX_DATA: A opens N
+/// connection-window-blocked DIALER bridges (N < `C_OUT`, so all open), B reads
+/// A's data and emits MAX_DATA, and A's `poll()` then storms `Writable`. The
+/// per-pass ENQUEUE count is asserted to EQUAL the events seen (no skip).
+///
+/// Mutation-verify: restore a `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
+/// skip — the storm pass then enqueues at most the budget while seeing ~N
+/// events, so `writable_bridges_enqueued < writable_events_seen` and the
+/// `enqueued == seen` assertion fails on that pass.
+#[test]
+fn writable_storm_arm_caps_enqueues() {
+  let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B: small connection window (so A's sends back-pressure at the connection level)
+  // and a high bidi-stream limit (so A can open many exchanges at once).
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B (timer-driven ferry).
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected before opening the exchanges"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // A opens N reliable exchanges; B's 16 KiB connection window admits only a few,
+  // so the rest stay connection-window-blocked (in quinn's connection_blocked set)
+  // — each a bridge that will receive a `Writable` when a MAX_DATA arrives.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  let live = a.bridges.len();
+  assert!(
+    live > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "test precondition: A must hold more connection-window-blocked bridges ({live}) \
+       than the budget so the storm is non-vacuous"
+  );
+
+  // Deliver A's blocked sends to B and let B read them and emit MAX_DATA, but do
+  // NOT deliver B's output back to A yet — so all N blocked bridges accumulate on A
+  // before any MAX_DATA reaches it, landing the whole storm in one A pass.
+  let mut b_to_a: Vec<Vec<u8>> = Vec::new();
+  let mut t = now;
+  for _ in 0..80 {
+    t += Duration::from_millis(5);
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, t);
+        moved = true;
+      }
+    }
+    b.handle_timeout(t);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        b_to_a.push(bytes.to_vec());
+      }
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    !b_to_a.is_empty(),
+    "B must emit datagrams (a MAX_DATA raising the connection window) after reading \
+       A's back-pressured data"
+  );
+
+  // Measured phase: deliver B's datagrams to A ONE AT A TIME. Each `handle_udp` is
+  // one service pass = one `Writable`-arm run. Reset the counters before each and
+  // assert the arm acts on EVERY edge (enqueued == seen, no skip) and that the
+  // blocked set the storm delivers stays bounded by the local `C_OUT` cap (all of
+  // A's blocked streams are dialers). The storm pass proves this is non-vacuous
+  // (it SEES far more Writables than the OLD per-pass budget).
+  let mut max_events_seen = 0u64;
+  for dg in &b_to_a {
+    a.counters.writable_events_seen = 0;
+    a.counters.writable_bridges_enqueued = 0;
+    a.handle_udp(b_addr, dg, t);
+    let seen = a.counters.writable_events_seen;
+    let enqueued = a.counters.writable_bridges_enqueued;
+    max_events_seen = max_events_seen.max(seen);
+    assert_eq!(
+      enqueued, seen,
+      "the Writable arm must act on EVERY edge (no per-pass skip): a dropped edge \
+         strands a bridge whose `connection_blocked` entry quinn cleared on yield; \
+         seen {seen}, enqueued {enqueued} (restoring a per-pass cap makes enqueued \
+         fall below seen on the storm pass)"
+    );
+    assert!(
+      seen <= super::C_OUT as u64,
+      "the blocked set one MAX_DATA storms ({seen}) must stay bounded by the local \
+         outbound cap C_OUT={} — all of A's blocked streams are dialers, so the \
+         per-datagram Writable work is O(config), not O(the peer's advertised \
+         MAX_STREAMS)",
+      super::C_OUT
+    );
+  }
+  assert!(
+    max_events_seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "non-vacuous: one service pass must have seen more Writable events \
+       ({max_events_seen}) than the old per-pass budget, so acting on every edge \
+       (not the reverted skip) is what is under test"
+  );
+}
+
+/// A budget-deferred bridge residue holds no `TimerKey::Bridge` deadline until its
+/// first pump, and `poll_timeout` deliberately ignores `ready_bridges`. With
+/// membership (probe/gossip) and connection transport timers all far, the residue
+/// would then get no timely wake and strand. The fix is a STICKY Catchup anchor:
+/// `poll_timeout` publishes the `next_catchup_at` field verbatim while a residue
+/// waits — armed ONCE when the residue first appeared and advanced only after a
+/// catch-up step runs — and `handle_timeout` services a due Catchup-only wake in
+/// BOUNDED steps (not a full O(N) membership tick), so a driver waking at the
+/// anchor drains one budget-sized chunk per interval and converges.
+///
+/// Construction: A opens N connection-window-blocked bridges to B (far exchange
+/// deadlines, quiescent connection — no near transport timer), then ONE service
+/// pass over the enqueued storm leaves a residue > budget. A's periodic membership
+/// schedulers are disabled so no staggered timer falls due in the drain window.
+///
+/// Mutation-verify (i): skip setting `TimerKey::Catchup` in `poll_timeout` — it
+/// then returns the far exchange/idle minimum (or None), so the `<= now +
+/// CATCHUP_INTERVAL` assertion fails; the `earliest_excluding_2` check proves every
+/// scheduled timer is strictly later, so the Catchup term is load-bearing.
+///
+/// Mutation-verify (ii): drop the Catchup DUE-gate in `handle_timeout` (revert to
+/// running the full `run_tick` on any anchor-only wake) — a Catchup wake then
+/// drains the WHOLE residue in one tick (a step drains more than the budget) AND
+/// advances membership time, so the per-step budget bound and the flat-membership
+/// assertions fail.
+#[test]
+fn budget_deferred_residue_drains_via_throttled_catchup_wake() {
+  let a_addr: SocketAddr = "127.0.0.1:7994".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7995".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic membership schedulers are disabled so the multi-step catch-up
+  // drain advances the clock with no membership timer ever falling due — every
+  // wake is then provably a bounded catch-up, and membership time stays flat.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  // Open N connection-window-blocked bridges (far exchange deadlines), then enqueue
+  // them all and run ONE service pass so the pump budget leaves a residue > budget.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  let residue0 = a.ready_bridges.len();
+  assert!(
+    residue0 > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "test precondition: one pass must leave a residue exceeding the budget so the \
+       catch-up needs multiple bounded steps; residue {residue0}"
+  );
+
+  // (i) A wake IS scheduled no later than `now + CATCHUP_INTERVAL` (the sticky
+  // anchor armed when `service_connection` left the residue), and it is the
+  // EARLIEST wake — every scheduled (non-anchor) timer is strictly later, so the
+  // Catchup term is load-bearing (skipping it returns that far minimum, and the
+  // primary assertion below fails).
+  let catchup_deadline = now + super::CATCHUP_INTERVAL;
+  let wake = a
+    .poll_timeout()
+    .expect("a non-empty residue must schedule a catch-up wake");
+  assert!(
+    wake <= catchup_deadline,
+    "poll_timeout must return the sticky catch-up wake no later than now + \
+       CATCHUP_INTERVAL while a residue waits; got {wake:?} vs {catchup_deadline:?}"
+  );
+  let non_catchup = a.deadline_index.earliest_excluding_2(
+    super::deadline::TimerKey::Catchup,
+    super::deadline::TimerKey::ImmediateDue,
+  );
+  assert!(
+    non_catchup.is_none_or(|t| t > catchup_deadline),
+    "non-vacuous: every scheduled (non-anchor) timer must be strictly later than \
+       the catch-up deadline, so removing the Catchup term would return a later \
+       wake (or None); got {non_catchup:?}"
+  );
+
+  // (ii) A driver re-polls the earliest wake (`poll_timeout`) and services it. The
+  // sticky catch-up anchor is the earliest wake, so the first wake is a BOUNDED,
+  // membership-flat catch-up that pumps one budget chunk and advances the anchor
+  // one interval. As the anchor advances past the connection's transport timer
+  // (armed by the in-flight data of the first pump), later chunks drain via a
+  // scheduled tick — correct, and nothing is stranded. A step that does NOT advance
+  // membership is a Catchup-only wake and MUST be bounded.
+  let first_anchor = a
+    .next_catchup_at
+    .expect("a non-empty residue keeps the sticky catch-up anchor armed");
+  assert_eq!(
+    a.poll_timeout(),
+    Some(first_anchor),
+    "the sticky catch-up anchor is the earliest wake while a residue waits"
+  );
+  let mut catchup_steps = 0usize;
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    let memb_before = a.membership_time_advances();
+    let before = a.ready_bridges.len();
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    let drained = before - a.ready_bridges.len();
+    if a.membership_time_advances() == memb_before {
+      // A Catchup-only wake: no membership tick, at most one budget chunk (dropping
+      // the Catchup due-gate would run the full tick and drain it all at once).
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake must pump at most the budget ({}); a step drained {drained}",
+        super::MAX_BRIDGE_PUMPS_PER_PASS
+      );
+    }
+    steps += 1;
+    assert!(
+      steps <= residue0 + 2,
+      "the catch-up must converge, never strand; still {} queued after {steps} steps",
+      a.ready_bridges.len()
+    );
+  }
+  assert!(
+    catchup_steps >= 1,
+    "non-vacuous: the residue must drain via at least one BOUNDED catch-up wake; \
+       dropping the Catchup due-gate so every anchor-only wake runs run_tick leaves \
+       this 0 (every wake becomes a membership tick)"
+  );
+}
+
+/// Establish `a` (periodic membership schedulers disabled) to `b`, open `N`
+/// connection-window-blocked reliable bridges, enqueue them all, and run ONE
+/// budgeted service pass — leaving a `ready_bridges` residue > budget with the
+/// sticky catch-up anchor armed at `now + CATCHUP_INTERVAL`. Returns `a` and the
+/// residue size (`b` is dropped: `a` holds the established connection state and the
+/// sticky-anchor regressions drive only `a`).
+fn a_with_budget_deferred_residue(
+  a_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) -> (QuicEndpoint<SmolStr>, usize) {
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "setup: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  let residue = a.ready_bridges.len();
+  assert!(
+    residue > super::MAX_BRIDGE_PUMPS_PER_PASS,
+    "setup: one budgeted pass must leave a residue exceeding the budget; got {residue}"
+  );
+  (a, residue)
+}
+
+/// An ImmediateDue-only wake — a connection carrying a deferred `ConnectionEvent`
+/// backlog, the shape a peer's `RETIRE_CONNECTION_ID` flood produces via the
+/// requeued `NewIdentifiers` — must do BOUNDED work: service ONLY the pending-event
+/// connections, never a full O(all connections) tick. The server pools many
+/// connections but exactly one carries a backlog; one `handle_timeout` at the
+/// ImmediateDue anchor (no scheduled timer due) visits exactly that one connection
+/// and does NOT advance membership time.
+///
+/// Mutation-verify: revert `handle_timeout` to the 2-way `if !non_catchup_due {
+/// run_tick }` dispatch — the present ImmediateDue term makes `non_catchup_due`
+/// true, so it runs the full `run_tick`, whose `service_quinn` visits EVERY pooled
+/// connection (`connection_visits` jumps to the pool size) AND advances membership
+/// time, so both the `== 1` visit assertion and the flat-membership assertion fail.
+#[test]
+fn immediate_due_wake_services_only_pending_connections_not_full_tick() {
+  let now = Instant::now();
+  let s_addr: SocketAddr = "127.0.0.1:7780".parse().unwrap();
+  // Schedulers disabled so no membership timer is ever due — the wake this test
+  // drives is provably ImmediateDue-only, not a scheduled tick.
+  let mut s = make_endpoint_no_schedulers("s", s_addr, now);
+
+  let n = 8usize;
+  let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
+  for i in 0..n {
+    let addr: SocketAddr = format!("127.0.0.1:{}", 7781 + i).parse().unwrap();
+    let mut c = make_endpoint(&format!("c{i}"), addr, now);
+    let _ = c.start_push_pull(s_addr, PushPullKind::Join, now);
+    clients.push((addr, c));
+  }
+  for _ in 0..600 {
+    for (caddr, c) in clients.iter_mut() {
+      while let Some((to, bytes)) = c.poll_transmit() {
+        if to == s_addr {
+          s.handle_udp(*caddr, &bytes, now);
+        }
+      }
+    }
+    while let Some((to, bytes)) = s.poll_transmit() {
+      if let Some((_, c)) = clients.iter_mut().find(|(a, _)| *a == to) {
+        c.handle_udp(s_addr, &bytes, now);
+      }
+    }
+    for (_, c) in clients.iter_mut() {
+      c.handle_timeout(now);
+    }
+    s.handle_timeout(now);
+    while s.poll_event().is_some() {}
+  }
+  let pooled = s.conns.iter_handles().len();
+  assert!(
+    pooled >= 6,
+    "test precondition: the server must pool most client connections; got {pooled}"
+  );
+
+  // Drain any handshake-queued pending events so the set starts empty and the
+  // single flag below is the ONLY pending-event connection.
+  for _ in 0..10 {
+    if s.conns_with_pending_events.is_empty() {
+      break;
+    }
+    s.handle_timeout(now);
+    while s.poll_transmit().is_some() {}
+    while s.poll_event().is_some() {}
+  }
+  assert!(
+    s.conns_with_pending_events.is_empty(),
+    "test setup: the handshake pending-event backlog must be drained first"
+  );
+
+  // Simulate the RETIRE→NewIdentifiers requeue: flag exactly ONE pooled connection
+  // as carrying a deferred backlog. This arms the ImmediateDue anchor.
+  let target = s
+    .conns
+    .iter_handles()
+    .first()
+    .copied()
+    .expect("the server holds at least one pooled connection");
+  s.conns_with_pending_events.insert(target);
+
+  // Precondition: no scheduled (non-anchor) timer is due, so the wake is
+  // ImmediateDue-only and must divert to the bounded per-connection servicing.
+  let _ = s.poll_timeout();
+  assert!(
+    s.deadline_index
+      .earliest_excluding_2(
+        super::deadline::TimerKey::Catchup,
+        super::deadline::TimerKey::ImmediateDue,
+      )
+      .is_none_or(|t| t > now),
+    "test setup: no scheduled timer may be due at the wake instant"
+  );
+
+  let memb_before = s.membership_time_advances();
+  s.counters.connection_visits = 0;
+  s.handle_timeout(now);
+
+  assert_eq!(
+    s.counters.connection_visits, 1,
+    "an ImmediateDue-only wake must visit ONLY the one pending-event connection, \
+       not all {pooled} pooled connections; the 2-way dispatch runs the full tick \
+       and visits every connection"
+  );
+  assert_eq!(
+    s.membership_time_advances(),
+    memb_before,
+    "an ImmediateDue-only wake must NOT advance membership time (no full tick)"
+  );
+  assert!(
+    s.conns_with_pending_events.is_empty(),
+    "servicing the pending connection drains its backlog and clears its flag \
+       (the set self-drains)"
+  );
+}
+
+/// The EITHER/OR precedence: when a GENUINE scheduled timer is due, `handle_timeout`
+/// MUST run the full `run_tick` (advancing membership time) even if the sticky
+/// Catchup anchor AND the ImmediateDue anchor are ALSO due — the scheduled tick
+/// subsumes both bounded paths and is the ONLY path that advances membership.
+///
+/// Mutation-verify: reorder the dispatch to prefer the anchors over the scheduled
+/// timer — an anchor-only bounded step then runs instead of `run_tick`, membership
+/// time never advances, and the `> before` assertion fails.
+#[test]
+fn due_scheduled_timer_takes_precedence_over_both_anchors() {
+  let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+  let now = Instant::now();
+  // Default schedulers so the membership endpoint arms a real periodic timer.
+  let mut a = make_endpoint("a", a_addr, now);
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(b_cfg, test_config_small_conn_window_bidi(400), b_addr, now);
+
+  // Establish A -> B.
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_connections_to(b_addr) >= 1 && b.live_connections_to(a_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A and B must be connected"
+  );
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  // Drain handshake pending events so the insert below is the deliberate anchor.
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+
+  // Build a residue (arms the sticky Catchup anchor).
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to the established B");
+  }
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a connection to B");
+  let ids: Vec<StreamId> = a.bridges.keys().copied().collect();
+  for id in &ids {
+    super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, *id);
+  }
+  a.service_connection(ch, now);
+  assert!(!a.ready_bridges.is_empty(), "the residue must be present");
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the residue arms the sticky Catchup anchor"
+  );
+
+  // AND a pending-event backlog (arms the ImmediateDue anchor).
+  a.conns_with_pending_events.insert(ch);
+
+  // Pick a wake instant at which the membership timer AND both anchors are due.
+  let memb_deadline = a
+    .endpoint_ref()
+    .poll_timeout()
+    .expect("default schedulers arm a membership timer");
+  let due = memb_deadline.max(now + super::CATCHUP_INTERVAL);
+  let memb_before = a.membership_time_advances();
+  a.handle_timeout(due);
+
+  assert!(
+    a.membership_time_advances() > memb_before,
+    "a due scheduled timer must run the full run_tick (membership advances) even \
+       with the Catchup and ImmediateDue anchors also due; preferring the anchors \
+       would skip membership time"
+  );
+  // The full tick subsumes both bounded paths: it drains the residue and the
+  // pending backlog and clears the sticky anchor.
+  assert!(
+    a.ready_bridges.is_empty() && a.next_catchup_at.is_none(),
+    "run_tick drains the residue and clears the sticky catch-up anchor"
+  );
+  assert!(
+    a.conns_with_pending_events.is_empty(),
+    "run_tick services the pending connection and clears its flag"
+  );
+}
+
+/// The sticky catch-up wake is NOT attacker-pushable. `poll_timeout` publishes the
+/// `next_catchup_at` field VERBATIM, and the field is armed independently of
+/// `last_now`; an inbound datagram bumps `last_now` (even a rejected one) but must
+/// NOT move the wake. So a peer flooding datagrams faster than `CATCHUP_INTERVAL`
+/// cannot push the residue-drain wake forward forever and strand it.
+///
+/// Mutation-verify: revert `poll_timeout` to arm Catchup at `last_now +
+/// CATCHUP_INTERVAL` — each flood datagram bumps `last_now`, so `poll_timeout` then
+/// returns a wake that ADVANCES past every datagram and the "same deadline"
+/// assertion fails on the first flooded datagram.
+#[test]
+fn sticky_catchup_wake_is_not_pushed_by_datagram_flood() {
+  let a_addr: SocketAddr = "127.0.0.1:7998".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
+  let now = Instant::now();
+  let (mut a, residue) = a_with_budget_deferred_residue(a_addr, b_addr, now);
+
+  // The residue armed the sticky anchor at now + CATCHUP_INTERVAL.
+  let pinned = a
+    .next_catchup_at
+    .expect("a budget-deferred residue arms the sticky catch-up anchor");
+  assert_eq!(
+    pinned,
+    now + super::CATCHUP_INTERVAL,
+    "the anchor was armed one interval after the residue-creating pass"
+  );
+  assert_eq!(
+    a.poll_timeout(),
+    Some(pinned),
+    "poll_timeout publishes the sticky anchor as the earliest wake"
+  );
+
+  // Flood: bump `last_now` via rejected (empty) datagrams every < CATCHUP_INTERVAL.
+  // The sticky anchor must stay PINNED — a datagram cannot move it.
+  for i in 1..10u64 {
+    let t = now + Duration::from_millis(i);
+    // An empty datagram classifies as Reject: `handle_udp` bumps `last_now` to `t`
+    // and drops it, touching neither `ready_bridges` nor the sticky anchor.
+    a.handle_udp(b_addr, &[], t);
+    assert_eq!(
+      a.poll_timeout(),
+      Some(pinned),
+      "a datagram flood must NOT push the sticky catch-up wake forward; the \
+         last_now-derived arming would move it to (now + {i}ms) + CATCHUP_INTERVAL"
+    );
+    assert!(
+      !a.ready_bridges.is_empty(),
+      "a rejected flood datagram must not drain or grow the residue"
+    );
+  }
+
+  // The pinned wake is actionable: re-polling the earliest wake drains the residue
+  // to empty, never stranded. The first wake (still the sticky anchor) is a BOUNDED,
+  // membership-flat catch-up; later chunks may drain via a scheduled tick once the
+  // connection's transport timer comes due.
+  let mut catchup_steps = 0usize;
+  let mut steps = 0usize;
+  while !a.ready_bridges.is_empty() {
+    let memb_before = a.membership_time_advances();
+    let before = a.ready_bridges.len();
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    let drained = before - a.ready_bridges.len();
+    if a.membership_time_advances() == memb_before {
+      catchup_steps += 1;
+      assert!(
+        drained <= super::MAX_BRIDGE_PUMPS_PER_PASS,
+        "a Catchup-only wake pumps at most the budget; a step drained {drained}"
+      );
+    }
+    steps += 1;
+    assert!(
+      steps <= residue + 2,
+      "the residue must converge, never strand"
+    );
+  }
+  assert!(
+    catchup_steps >= 1,
+    "the residue must drain via at least one bounded catch-up wake"
+  );
+}
+
+/// Ferry a datagram warm-up A->B->A until A holds an established pooled connection
+/// to B (no bidi stream consumed), so a subsequent reliable dial opens immediately
+/// rather than parking on the handshake. Quiesces both transmit queues on return.
+fn establish(
+  a: &mut QuicEndpoint<SmolStr>,
+  b: &mut QuicEndpoint<SmolStr>,
+  a_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  a.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "establish: A must hold an established pooled connection to B"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+}
+
+/// The per-connection outbound-stream cap bounds the number of live DIALER bridges
+/// on a pooled connection at `C_OUT`, regardless of how large a `MAX_STREAMS`
+/// limit the PEER advertises. Excess dials re-park (they are not retired) so they
+/// open as slots free. This is the local bound that keeps quinn's
+/// `connection_blocked` set — and thus the Writable-arm work per MAX_DATA —
+/// config-bounded rather than peer-controlled.
+///
+/// Construction: B advertises a bidi limit far above `C_OUT`, so credit is never
+/// the binding constraint. A opens `C_OUT + EXTRA` outbound user-message dials to
+/// B WITHOUT ferrying (their payloads never leave A, so every bridge stays live).
+///
+/// Mutation-verify: remove the `C_OUT` gate in `process_dial_entry` — all
+/// `C_OUT + EXTRA` dials then open (credit allows), so `outbound_bridge_count`
+/// climbs to `C_OUT + EXTRA` and the `== C_OUT` assertion fails.
+#[test]
+fn outbound_cap_bounds_live_dialer_bridges() {
+  let a_addr: SocketAddr = "127.0.0.1:8200".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8201".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // B advertises a bidi limit WAY above C_OUT, so the local cap — not the peer's
+  // credit — is the binding constraint that parks the excess.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const EXTRA: usize = 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..(super::C_OUT + EXTRA) {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to the established B");
+    // Drain A's owed transmits so `out` does not grow unboundedly; the payloads
+    // are discarded (never delivered to B), so every opened bridge stays live.
+    while a.poll_transmit().is_some() {}
+  }
+
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "the connection must hold exactly C_OUT live dialer bridges — the excess dials \
+       park behind the local cap, NOT the peer's credit"
+  );
+  assert_eq!(
+    a.bridges.len(),
+    super::C_OUT,
+    "exactly C_OUT dialer bridges are live on A (B dials nothing back)"
+  );
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    EXTRA,
+    "the EXTRA dials past the cap must re-park on B's bucket (a NEW re-park cause), \
+       not retire — so they open as slots free"
+  );
+}
+
+/// The outbound-count balance across mint and single reap, keyed on the DIALER
+/// role (`eager_outbound_label`) and NOT on `pending_outbound_kinds`. A GOSSIP
+/// push/pull — a dialer that is ABSENT from `pending_outbound_kinds` (it never
+/// went through the driver `start_push_pull` wrapper) — MUST still be counted at
+/// mint and decremented at reap, or the counter leaks on every gossip dial until
+/// the connection permanently refuses all dials (a silent cluster brick).
+///
+/// Mutation-verify: key the mint increment off `pending_outbound_kinds` — the
+/// gossip dial (absent) is then not counted and the `== 1` assertion fails. Key
+/// the reap decrement off `pending_outbound_kinds` — the gossip dial is then not
+/// decremented and the post-reap `== 0` assertion fails (the leak).
+#[test]
+fn outbound_count_counts_and_decrements_gossip_dial() {
+  let a_addr: SocketAddr = "127.0.0.1:8210".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8211".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+
+  // Inject a GOSSIP push/pull directly on the inner endpoint — this bypasses the
+  // quic-level `start_push_pull` wrapper, so the dial's id is NEVER inserted into
+  // `pending_outbound_kinds` (exactly an internally-scheduled gossip dial).
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+
+  // Ferry until the dial opens its bridge; break WHILE it is still live.
+  let mut ch = None;
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_bridge_count() >= 1 {
+      ch = a.conns.handle_for(&b_addr);
+      break;
+    }
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+  }
+  let ch = ch.expect("A's gossip dial must open a bridge on a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    a.live_bridge_count(),
+    "the gossip dialer bridge (absent from pending_outbound_kinds) MUST be counted \
+       — keying the increment off pending_outbound_kinds leaves this 0"
+  );
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() >= 1,
+    "the gossip dial is counted against the connection's outbound cap"
+  );
+
+  // Ferry the exchange to completion; the bridge reaps via the single-reap pump
+  // path on the SURVIVING connection.
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if a.live_bridge_count() == 0 {
+      break;
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "the gossip exchange must complete and reap its bridge on the surviving connection"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    0,
+    "the reaped gossip dialer bridge MUST decrement the outbound count back to 0 — \
+       keying the decrement off pending_outbound_kinds leaks the counter (a silent brick)"
+  );
+}
+
+/// A connection-level loss reaps every DIALER bridge on the connection AND removes
+/// the whole `ConnEntry`, so the outbound count is discarded wholesale with no
+/// leak — the bulk-reap decrement is balanced (its debug-assert would fire on an
+/// underflow) and the entry is gone.
+#[test]
+fn outbound_count_discarded_with_connentry_on_connection_loss() {
+  let a_addr: SocketAddr = "127.0.0.1:8220".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8221".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Open a few live dialer bridges (payloads never delivered, so they stay live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..3 {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() >= 3,
+    "the three dialer bridges are counted before the loss"
+  );
+
+  // Force the pooled connection to drained-loss WITHOUT elapsing the bridges' own
+  // exchange deadlines: the bulk reap runs (decrementing the count per dialer
+  // bridge) and `reap_if_drained` removes the whole entry this same tick.
+  a.conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  let close_due = a
+    .conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .poll_timeout()
+    .expect("close arms the Close timer");
+  a.handle_timeout(crate::Instant::from_std(close_due));
+
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "every dialer bridge riding the lost connection must be reaped this tick"
+  );
+  assert!(
+    a.conns.handle_for(&b_addr).is_none() && a.conns.get(ch).is_none(),
+    "the whole ConnEntry (with its outbound count) must be gone — no counter leak"
+  );
+}
+
+/// A reliable-ping fallback is EXEMPT from the `C_OUT` outbound cap: it is a rare,
+/// single-stream, liveness-critical failure-detection dial, and parking it behind
+/// a user-message flood could miss the probe's cumulative deadline and yield a
+/// false-positive Dead. It opens even when the connection is already at `C_OUT`
+/// dialer bridges (and still increments the count, for accounting).
+///
+/// Mutation-verify: gate reliable-ping like every other dial — it then re-parks at
+/// the cap (no bridge minted), so the `bridges.contains_key(ping_id)` assertion
+/// fails and it would instead sit in `dial_parked` until its probe deadline.
+#[test]
+fn reliable_ping_exempt_from_outbound_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8230".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8231".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap with user-message dials (payloads never delivered → all live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is exactly at the C_OUT cap"
+  );
+
+  // A reliable-ping dial to the SAME peer at the cap must OPEN (exempt), not park.
+  let ping_id = a.start_reliable_ping(
+    SmolStr::new("b"),
+    b_addr,
+    7,
+    now + Duration::from_secs(5),
+    now,
+  );
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the reliable-ping dial MUST open its bridge even at the C_OUT cap (exempt) — \
+       gating it too would leave it parked and risk a false-positive Dead"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT + 1,
+    "the exempt reliable-ping still increments the outbound count, for accounting"
+  );
+
+  // A further USER-MESSAGE dial at the cap DOES park (the exemption is scoped to
+  // reliable-ping only).
+  let over_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules one more user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    !a.bridges.contains_key(&over_id),
+    "a NON-reliable-ping dial past the cap must NOT open (it parks) — the exemption \
+       is reliable-ping-only"
+  );
+}
+
+/// A per-request reliable `start_*` does ZERO event-queue work: it services its
+/// dial straight from the [`crate::DialIntent`] the machine returns, never draining
+/// and re-queueing the whole application-event backlog to sieve out the one dial
+/// request. Seed a large non-dial backlog, run many `start_user_message` calls, and
+/// assert `sieve_dial_events` moved nothing — and that the backlog stays observable
+/// in its original order.
+///
+/// Mutation-verify: revert the wrapper to the event-emitting `start_user_message`
+/// plus a `sieve_dial_events` call — the sieve then re-traverses the whole backlog
+/// on every start and `events_resieved` climbs to `N * B`, failing the `== 0`
+/// assertion.
+#[test]
+fn reliable_start_does_no_event_queue_work() {
+  let a_addr: SocketAddr = "127.0.0.1:8260".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // Clear any construction-time events so the backlog below is exactly the seeded
+  // NodeJoined set.
+  while a.poll_event().is_some() {}
+
+  // Seed a large non-dial backlog: B distinct alives, each emitting a NodeJoined
+  // that stays queued in the inner endpoint (never drained via poll_event).
+  const B: usize = 64;
+  let mut expected_ids: Vec<SmolStr> = Vec::with_capacity(B);
+  for i in 0..B {
+    let id = SmolStr::new(format!("peer-{i}"));
+    let peer: SocketAddr = format!("127.0.0.2:{}", 9000 + i).parse().unwrap();
+    let alive = crate::typed::Alive::new(1, crate::Node::new(id.clone(), peer))
+      .with_meta(crate::typed::Meta::empty());
+    a.handle_alive(peer, alive, now);
+    expected_ids.push(id);
+  }
+
+  // Run many reliable starts to a cold peer. Each services its own dial from the
+  // returned descriptor; none touches the inner event queue.
+  a.counters.events_resieved = 0;
+  const N: usize = 8;
+  let target: SocketAddr = "127.0.0.3:9500".parse().unwrap();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..N {
+    a.start_user_message(target, payload.clone(), now)
+      .expect("A schedules a reliable user-message dial");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.counters.events_resieved, 0,
+    "a reliable start must move no events through sieve_dial_events; reverting a \
+       wrapper to the event-emitting method + sieve makes this climb to N*B"
+  );
+
+  // The backlog is intact and still observed in its original FIFO order.
+  let mut seen: Vec<SmolStr> = Vec::new();
+  while let Some(ev) = a.poll_event() {
+    if let Event::NodeJoined(ns) = ev {
+      seen.push(ns.id_ref().clone());
+    }
+  }
+  assert_eq!(
+    seen, expected_ids,
+    "every backlog NodeJoined must still be observable in its original order"
+  );
+}
+
+/// The machine-INTERNAL reliable-ping escalation gets the `C_OUT` outbound-cap
+/// exemption even though it never passes through the coordinator start wrapper (so
+/// it populates no `pending_outbound_kinds` entry). The probe FSM emits its
+/// reliable-ping `DialRequested` inside `ep.handle_timeout`; the tick's
+/// `service_dials` sieve stamps the kind via `Endpoint::intent_kind` and
+/// `process_dial_entry` reads it off the entry. Here the escalation's exact
+/// `DialRequested` is injected via the raw endpoint's `start_reliable_ping` (the
+/// same OLD method the probe FSM calls) and then serviced by one `run_tick` — the
+/// same sieve path — so a saturated cap cannot strand the liveness-critical
+/// fallback to its probe deadline (a false Suspect of a live peer).
+///
+/// Mutation-verify: re-source the exemption to
+/// `pending_outbound_kinds.get(&id) == Some(ReliablePing)` — the injected ping has
+/// no such map entry, so it is gated at the cap, parks, and its bridge never mints;
+/// both the `contains_key` and the `> C_OUT` assertions then fail.
+#[test]
+fn machine_internal_reliable_ping_exempt_from_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8262".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8263".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Saturate A's outbound cap to B with user-message dials (payloads never
+  // delivered → all live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message dial to B");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is exactly at the C_OUT cap"
+  );
+
+  // Inject the machine-internal reliable-ping the way the probe FSM does: the OLD
+  // `start_reliable_ping` on the raw endpoint enqueues an `Event::DialRequested`
+  // and registers an `OutboundKind::ReliablePing` intent, but populates NO
+  // coordinator `pending_outbound_kinds` entry — exactly the escalation's state.
+  let deadline = now + Duration::from_secs(5);
+  let ping_id = a
+    .endpoint_mut()
+    .start_reliable_ping(SmolStr::new("b"), b_addr, 7, deadline);
+  assert!(
+    !a.pending_outbound_kinds.contains_key(&ping_id),
+    "precondition: the machine-internal ping has no pending_outbound_kinds entry"
+  );
+
+  // One tick sieves that DialRequested (service_dials → intent_kind stamps the
+  // ReliablePing kind onto the entry), and process_dial_entry exempts it.
+  a.run_tick(now);
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the machine-internal reliable-ping MUST open its bridge despite the saturated \
+       cap — the exemption is read off the entry's kind, not pending_outbound_kinds"
+  );
+  assert!(
+    a.conns.get(ch).unwrap().outbound_bridge_count() > super::C_OUT,
+    "the exempt reliable-ping opened PAST the cap; only an exempt dial can"
+  );
+  assert!(
+    !a.dial_parked
+      .get(&b_addr)
+      .is_some_and(|bucket| !bucket.is_empty()),
+    "no reliable-ping intent parked behind the saturated cap"
+  );
+}
+
+/// An inert post-leave `start_push_pull` (the endpoint is no longer running, so the
+/// machine registers no intent and queues no event) must NOT leak a
+/// `pending_outbound_*` entry — no bridge is ever created for the id to reap it —
+/// and must emit a SYNCHRONOUS `Failed` `ExchangeCompleted` for the returned id so a
+/// join waiter parked on it resolves immediately instead of hanging to its timeout.
+///
+/// Mutation-verify: restore the unconditional `pending_outbound_*` insert on the
+/// inert path — the `!contains_key` leak assertions then fail.
+#[test]
+fn inert_push_pull_after_leave_no_map_leak_and_synchronous_failed() {
+  use crate::event::{ExchangeId, ExchangeKind, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8266".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  a.leave(now).expect("leave succeeds");
+  // Clear the leave's own events so the completion below is unambiguous.
+  while a.poll_event().is_some() {}
+
+  let peer: SocketAddr = "127.0.0.3:9600".parse().unwrap();
+  let id = a.start_push_pull(peer, PushPullKind::Refresh, now);
+  assert!(
+    !a.pending_outbound_kinds.contains_key(&id),
+    "an inert post-leave push/pull must insert no pending_outbound_kinds entry"
+  );
+  assert!(
+    !a.pending_outbound_peers.contains_key(&id),
+    "an inert post-leave push/pull must insert no pending_outbound_peers entry"
+  );
+
+  let mut saw_failed = false;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(c) = ev {
+      if c.eid() == ExchangeId::from(id) {
+        assert_eq!(c.outcome(), ExchangeStatus::Failed);
+        assert_eq!(c.kind(), ExchangeKind::PushPull);
+        saw_failed = true;
+      }
+    }
+  }
+  assert!(
+    saw_failed,
+    "an inert post-leave push/pull must emit a synchronous Failed ExchangeCompleted \
+       for its id so a parked join waiter resolves immediately"
+  );
+}
+
+/// The leave chokepoint purges the coordinator-private RELIABLE dial pipeline:
+/// after `leave`, `dial_pending`, every `dial_parked` bucket, and the ready-dial
+/// ledger are empty, no subsequent tick opens a fresh outbound connection to a
+/// parked peer, and each purged UserMessage / PushPull intent surfaces a terminal
+/// `Failed` `ExchangeCompleted` so a parked join / reliable-send waiter resolves.
+///
+/// Mutation-verify: remove the purge call from `leave_with` — the surviving parked
+/// dials ride the next un-gated tick's `service_dials`, whose `get_or_dial` opens
+/// a fresh post-leave connection to each cold peer, so the flat-conns assertion
+/// fails.
+#[test]
+fn post_leave_purges_reliable_dial_pipeline() {
+  use crate::event::{ExchangeId, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8300".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Inject parked reliable dials on distinct cold peers (never-answered
+  // addresses). Each mirrors a real park: an entry in its peer bucket with
+  // `attempted = true`, its `TimerKey::Dial` deadline key registered, and its
+  // `pending_outbound_{kinds,peers}` staged (as a `start_*` wrapper would) so the
+  // purge's `retire_failed_dial` can surface a Failed completion. No connection is
+  // opened for these peers — the assertion below is that leave keeps it that way.
+  let deadline = now + Duration::from_secs(30);
+  let kinds = [
+    super::ExchangeKind::UserMessage,
+    super::ExchangeKind::PushPull,
+  ];
+  let mut expected: Vec<(StreamId, SocketAddr)> = Vec::new();
+  for i in 0..6u64 {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9000 + i).parse().unwrap();
+    let id = StreamId::from_raw(1_000 + i);
+    let kind = kinds[(i % 2) as usize];
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id,
+        peer,
+        deadline,
+        wake: deadline,
+        attempted: true,
+        kind,
+      });
+    a.deadline_index
+      .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+    a.pending_outbound_kinds.insert(id, kind);
+    a.pending_outbound_peers.insert(id, peer);
+    expected.push((id, peer));
+  }
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "test precondition: no connections before leave"
+  );
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running(), "after leave the endpoint is not running");
+
+  // The pipeline is empty the moment leave returns.
+  assert!(a.dial_pending.is_empty(), "leave drains dial_pending");
+  assert!(
+    a.dial_parked.is_empty(),
+    "leave drains every dial_parked bucket"
+  );
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "leave clears the ready-dial ledger"
+  );
+
+  // Each purged UserMessage / PushPull intent surfaced a Failed completion.
+  let mut failed: Vec<ExchangeId> = Vec::new();
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(c) = ev {
+      if c.outcome() == ExchangeStatus::Failed {
+        failed.push(c.eid());
+      }
+    }
+  }
+  for (id, _peer) in &expected {
+    assert!(
+      failed.contains(&ExchangeId::from(*id)),
+      "each purged reliable intent must surface a Failed ExchangeCompleted so its \
+       parked waiter resolves; missing id {id:?}"
+    );
+  }
+
+  // Run several ticks: none opens a fresh connection to any parked peer.
+  for _ in 0..3 {
+    a.handle_timeout(now);
+  }
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    0,
+    "no post-leave tick may open a fresh outbound connection — the reliable dial \
+     pipeline was purged at the leave chokepoint"
+  );
+  for (_id, peer) in &expected {
+    assert!(
+      a.conns.handle_for(peer).is_none(),
+      "no pooled connection to a purged parked peer may exist post-leave"
+    );
+  }
+}
+
+/// The purge releases `unattempted_dial_count` for every unattempted entry it
+/// drains, so a fresh (never-attempted) dial that survived into `dial_pending`
+/// cannot arm a permanent post-leave immediate-due busy-wake. Before leave the
+/// unattempted dial forces `poll_timeout` to an immediate-due wake at `last_now`;
+/// after leave the count is 0 and no such wake is sourced from the dial term.
+///
+/// Mutation-verify: drop the `unattempted_dial_count` decrement from
+/// `purge_dial_entry` — the count stays >= 1 (while `dial_pending` is emptied), so
+/// `unattempted_dial_count() == 0` fails and `poll_timeout` re-arms the
+/// immediate-due wake at `last_now`.
+#[test]
+fn no_immediate_due_wake_after_leave() {
+  let a_addr: SocketAddr = "127.0.0.1:8310".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  // Anchor `last_now` (and run one empty tick) so the immediate-due term is
+  // well-defined.
+  a.handle_timeout(now);
+
+  // Seed ONE unattempted fresh dial directly into `dial_pending` (bypassing the
+  // intake route), mirroring a real sieve deposit: `attempted = false`, the
+  // incremental count bumped, and its Dial deadline key registered.
+  let peer: SocketAddr = "127.0.0.9:9100".parse().unwrap();
+  let id = StreamId::from_raw(2_000);
+  let deadline = now + Duration::from_secs(30);
+  a.dial_pending.push_back(super::PendingDial {
+    id,
+    peer,
+    deadline,
+    wake: deadline,
+    attempted: false,
+    kind: super::ExchangeKind::UserMessage,
+  });
+  a.unattempted_dial_count += 1;
+  a.deadline_index
+    .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+  assert_eq!(a.unattempted_dial_count(), a.unattempted_dial_recount());
+  assert_eq!(
+    a.poll_timeout(),
+    Some(now),
+    "test precondition: an unattempted dial forces an immediate-due wake at last_now"
+  );
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  // The busy-wake kill: the unattempted unit was released, so the count is 0 (and
+  // agrees with the brute-force recount), and `poll_timeout` no longer returns the
+  // immediate-due wake sourced from the dial term.
+  assert_eq!(
+    a.unattempted_dial_count(),
+    0,
+    "the purge must release every unattempted unit so ImmediateDue is not armed"
+  );
+  assert_eq!(a.unattempted_dial_count(), a.unattempted_dial_recount());
+  assert_ne!(
+    a.poll_timeout(),
+    Some(now),
+    "post-leave poll_timeout must not return an immediate-due wake driven by the \
+     purged dial half"
+  );
+}
+
+/// The purge drops every drained intent's `TimerKey::Dial` deadline key, so no
+/// orphan Dial key survives leave to fire a stale `run_tick`-driving wake. Reads
+/// the deadline-index oracle (`contains_key`) directly.
+///
+/// Mutation-verify: drop the `deadline_index.set(TimerKey::Dial(id), None)` from
+/// `purge_dial_entry` — each drained intent's Dial key survives leave; the
+/// `contains_key` assertion then finds an orphan and fails.
+#[test]
+fn leave_purge_drops_dial_deadline_keys() {
+  let a_addr: SocketAddr = "127.0.0.1:8320".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let deadline = now + Duration::from_secs(30);
+  // A mix: unattempted entries in `dial_pending` and attempted parked entries,
+  // each with its Dial key registered as a real intake / park would.
+  let mut ids: Vec<StreamId> = Vec::new();
+  for i in 0..4u64 {
+    let id = StreamId::from_raw(3_000 + i);
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9200 + i).parse().unwrap();
+    if i % 2 == 0 {
+      a.dial_pending.push_back(super::PendingDial {
+        id,
+        peer,
+        deadline,
+        wake: deadline,
+        attempted: false,
+        kind: super::ExchangeKind::UserMessage,
+      });
+      a.unattempted_dial_count += 1;
+    } else {
+      a.dial_parked
+        .entry(peer)
+        .or_default()
+        .push_back(super::PendingDial {
+          id,
+          peer,
+          deadline,
+          wake: deadline,
+          attempted: true,
+          kind: super::ExchangeKind::PushPull,
+        });
+    }
+    a.deadline_index
+      .set(super::deadline::TimerKey::Dial(id), Some(deadline));
+    ids.push(id);
+  }
+  for id in &ids {
+    assert!(
+      a.deadline_index
+        .contains_key(super::deadline::TimerKey::Dial(*id)),
+      "test precondition: Dial key registered"
+    );
+  }
+
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  for id in &ids {
+    assert!(
+      !a.deadline_index
+        .contains_key(super::deadline::TimerKey::Dial(*id)),
+      "the purge must drop every drained intent's TimerKey::Dial; an orphan key \
+       fires stale post-leave wakes forever"
+    );
+  }
+}
+
+/// The coordinator `requeue_event`'s `DialRequested` arm is gated on the running
+/// state: a `DialRequested` re-queued after leave is DROPPED before any deposit,
+/// matching `Endpoint::requeue_event`'s own not-running gate that the
+/// coordinator's interception would otherwise bypass.
+///
+/// Mutation-verify: remove the `if !self.ep.is_running() { return; }` gate — the
+/// requeued dial deposits into `dial_pending` (bumps the count, sets a Dial key);
+/// the empty-pipeline assertions then fail.
+#[test]
+fn post_leave_requeue_dial_requested_dropped() {
+  use crate::event::DialRequested;
+  let a_addr: SocketAddr = "127.0.0.1:8330".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  a.leave(now).expect("leave initiates the flush");
+  assert!(!a.is_running());
+
+  let id = StreamId::from_raw(4_000);
+  let peer: SocketAddr = "127.0.0.9:9300".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  let before_count = a.unattempted_dial_count();
+  a.requeue_event(
+    Event::DialRequested(DialRequested::new(id, peer, deadline)),
+    now,
+  );
+
+  assert!(
+    a.dial_pending.is_empty(),
+    "a DialRequested re-queued after leave must be dropped, not deposited into \
+     dial_pending"
+  );
+  assert_eq!(
+    a.unattempted_dial_count(),
+    before_count,
+    "the dropped requeue must not bump the unattempted count"
+  );
+  assert!(
+    !a.deadline_index
+      .contains_key(super::deadline::TimerKey::Dial(id)),
+    "the dropped requeue must register no Dial deadline key"
+  );
+}
+
+/// The slot-free wake fires from `catchup_service`: when a DIALER bridge reaps
+/// inside the catch-up pump it frees a `C_OUT` slot, and the same catch-up pass
+/// services the peer's parked bucket so a `C_OUT`-parked dial opens — rather than
+/// stranding to its deadline while only `catchup_service` runs (no datagrams, no
+/// due timer).
+///
+/// Mutation-verify: drop the slot-free servicing from `catchup_service` — the
+/// reap inside the catch-up pump frees the slot but nothing services the parked
+/// dial, so `parked_id` stays in `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_wake_from_catchup_opens_parked_dial() {
+  let a_addr: SocketAddr = "127.0.0.1:8240".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8241".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap, then one more dial parks behind it (a genuine C_OUT re-park).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap with user-message dials");
+    while a.poll_transmit().is_some() {}
+  }
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  while a.poll_transmit().is_some() {}
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().any(|d| d.id == parked_id))
+      .unwrap_or(false),
+    "test precondition: the extra dial parked behind the cap"
+  );
+
+  // Force ONE live dialer bridge terminal and enqueue ONLY it, then run a
+  // catch-up pass: pumping it reaps a dialer bridge (freeing a slot), and the
+  // same catch-up services B's bucket so the parked dial opens.
+  let victim = *a
+    .bridges
+    .keys()
+    .find(|id| **id != parked_id)
+    .expect("A holds live dialer bridges");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+  super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, victim);
+  a.catchup_service(now);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the forced-terminal dialer bridge must reap inside the catch-up pump"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot the catch-up reap freed — dropping \
+       the slot-free wake from catchup_service strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "one dialer reaped (-1) and the parked dial opened (+1): the count returns to C_OUT"
+  );
+}
+
+/// `flush_outbound` owns NO `service_dials`, so a DIALER bridge reaped by its pumps
+/// frees a `C_OUT` slot that no dial-servicing on that path re-attempts — only the
+/// unified `service_slot_freed_peers` consume (after the last pump, before
+/// `finalize_tick`) opens the `C_OUT`-parked dial. Without it `finalize_tick`
+/// silently clears the freed-peer accumulator and the parked dial strands to its
+/// dial deadline.
+///
+/// Construction: A fills the `C_OUT` cap with un-ferried user-message dialers to B,
+/// then forces one live dialer terminal (NOT enqueued). A `start_user_message`
+/// (for B') parks B' behind the still-full cap — the scoped start pumps only its
+/// own minted bridge, and the capped B' mints none, so the victim stays live. The
+/// driver's explicit `flush_outbound_transmits` then runs `flush_outbound`, whose
+/// first `pump_bridges` reaps the victim and whose slot-free consume opens B' the
+/// same call.
+///
+/// Mutation-verify: drop the `service_slot_freed_peers` call from `flush_outbound` —
+/// the victim still reaps, but nothing services B's freed slot, so B' stays in
+/// `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_serviced_after_late_flush_pump() {
+  let a_addr: SocketAddr = "127.0.0.1:8260".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8261".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Fill the cap with un-ferried dialers (their payloads never leave A, so every
+  // bridge stays live).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap with user-message dials");
+    while a.poll_transmit().is_some() {}
+  }
+  let ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap"
+  );
+
+  // Force ONE live dialer terminal WITHOUT enqueuing it: `flush_outbound`'s first
+  // `pump_bridges` (which pumps every bridge) reaps it below.
+  let victim = *a
+    .bridges
+    .keys()
+    .next()
+    .expect("A holds live dialer bridges");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+
+  // The scoped `start_user_message` parks B' behind the still-full cap (it pumps
+  // only its own minted bridge, and the capped B' mints none), leaving the victim
+  // live. The driver's explicit `flush_outbound_transmits` then runs `flush_outbound`,
+  // whose first `pump_bridges` reaps the victim and whose slot-free consume opens B'.
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  a.flush_outbound_transmits(now);
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the forced-terminal dialer must reap inside flush_outbound's pump"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot flush_outbound's pump freed — \
+       dropping the slot-free consume from flush_outbound strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert_eq!(
+    a.conns.get(ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "one dialer reaped (-1) and the parked dial opened (+1): count returns to C_OUT"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "flush_outbound must drain the freed-peer accumulator before finalize"
+  );
+}
+
+/// `service_slot_freed_peers` LOOPS TO A FIXPOINT: pumping a freed peer's bucket can
+/// reap another DIALER bridge (a synchronous failure) whose reap re-populates
+/// `slot_freed_peers`, so a single non-looped pass would leave the set non-empty and
+/// strand the re-populated peer's parked dial. The loop drains it to empty.
+///
+/// Construction: A holds a live dialer to B; it is forced terminal and enqueued, and
+/// B is seeded into `slot_freed_peers` (as a prior reap would have). Servicing B
+/// drains the ready queue, reaping the forced-terminal dialer, whose reap re-queues
+/// B into `slot_freed_peers` — the reentrancy the loop must absorb.
+///
+/// Mutation-verify: replace the fixpoint loop with a single non-looped pass — the
+/// reentrant reap leaves `slot_freed_peers` non-empty on return, so this assertion
+/// fails (and on the tick / `flush_outbound` paths `finalize_tick`'s `debug_assert!`
+/// would fire).
+#[test]
+fn slot_free_fixpoint_reentrant() {
+  let a_addr: SocketAddr = "127.0.0.1:8270".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8271".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // One live dialer bridge to B; force it terminal and enqueue it so the helper's
+  // drain reaps it — the reap re-queues B into `slot_freed_peers`.
+  let payload = Bytes::from_static(b"x");
+  a.start_user_message(b_addr, payload, now)
+    .expect("A opens one user-message dialer to B");
+  while a.poll_transmit().is_some() {}
+  let victim = *a.bridges.keys().next().expect("A holds one dialer bridge");
+  a.bridges.get_mut(&victim).unwrap().fail_connection_lost();
+  super::enqueue_ready_bridge(&mut a.bridges, &mut a.ready_bridges, victim);
+
+  // Seed the set as a prior-pass reap would have, so the helper enters its loop.
+  a.slot_freed_peers.insert(b_addr);
+
+  let mut budget = super::MAX_BRIDGE_PUMPS_PER_PASS;
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_slot_freed_peers(now, &mut budget, &mut dial_budget);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the enqueued forced-terminal dialer must reap inside the helper's drain"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "the fixpoint must drain slot_freed_peers to empty even when a reap during the \
+       drain re-populates it; a single non-looped pass leaves B queued and would \
+       trip finalize_tick's debug_assert"
+  );
+}
+
+/// The global tick's second `pump_bridges` (step 5.5) runs AFTER step 5's
+/// `service_dials` full-drain, so a DIALER bridge that reaps there frees a `C_OUT`
+/// slot `service_dials` already passed — its `C_OUT`-parked dial strands unless the
+/// step (5.6) `service_slot_freed_peers` consume (before `finalize_tick`) services
+/// the freed peer. This is the tick twin of the `flush_outbound` case.
+///
+/// Construction: A holds a live victim dialer to B whose OPENING is delivered to B's
+/// quinn (so B knows the stream) but never read; A fills the rest of the `C_OUT` cap
+/// and parks B'. B issues STOP_SENDING for the victim's stream, harvested into A's
+/// connection as a STAGED `ConnectionEvent` (NOT applied). Running the tick then
+/// applies it in step (4), which fails+enqueues the victim; step (2)'s earlier pump
+/// left it live, so it reaps only in step (5.5) — after `service_dials` — and the
+/// step (5.6) consume opens B'.
+///
+/// Mutation-verify: drop the `service_slot_freed_peers` call from the tick — the
+/// victim still reaps in step (5.5) but `finalize_tick` clears the freed-peer
+/// accumulator, so B' stays in `dial_parked` and never opens; this fails.
+#[test]
+fn slot_free_serviced_after_late_tick_pump() {
+  use bytes::BytesMut;
+  use quinn_proto::{DatagramEvent, VarInt};
+
+  let a_addr: SocketAddr = "127.0.0.1:8280".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8281".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic schedulers off so the tick's step (3) fires no membership timer
+  // that could reap or redial independently of the slot-free consume under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  let a_ch = a
+    .conns
+    .handle_for(&b_addr)
+    .expect("A holds a pooled connection to B");
+  let b_ch = b
+    .conns
+    .handle_for(&a_addr)
+    .expect("B holds a pooled connection to A");
+
+  // Open the victim dialer and capture its ids. Deliver its opening datagrams to B's
+  // quinn ONLY (no coordinator read), so B's `Connection` knows the stream — and can
+  // STOP it — while the recv half stays unconsumed.
+  let payload = Bytes::from_static(b"victim");
+  a.start_user_message(b_addr, payload.clone(), now)
+    .expect("A opens the victim user-message dialer to B");
+  let victim = *a.bridges.keys().next().expect("A holds the victim bridge");
+  let vsid = a.bridges.get(&victim).unwrap().sid();
+  {
+    let mut scratch = Vec::new();
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        if let Some(DatagramEvent::ConnectionEvent(ch, cev)) = b.quinn.handle(
+          now.into_std(),
+          a_addr,
+          None,
+          None,
+          BytesMut::from(&bytes[..]),
+          &mut scratch,
+        ) {
+          b.conns.get_mut(ch).unwrap().conn_mut().handle_event(cev);
+        }
+      }
+    }
+  }
+
+  // Fill the rest of the C_OUT cap with un-ferried dialers, then park B'.
+  for _ in 1..super::C_OUT {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A fills the C_OUT cap");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.conns.get(a_ch).unwrap().outbound_bridge_count(),
+    super::C_OUT,
+    "test precondition: the connection is at the C_OUT cap (victim + fillers)"
+  );
+  let parked_id = a
+    .start_user_message(b_addr, payload.clone(), now)
+    .expect("A schedules the dial that parks behind the cap");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().any(|d| d.id == parked_id))
+      .unwrap_or(false),
+    "test precondition: B' parked behind the cap"
+  );
+
+  // B issues STOP_SENDING for the victim's recv half; harvest its datagrams into A's
+  // connection as STAGED pending events (NOT applied) so they take effect only in the
+  // tick's step (4).
+  let _ = b
+    .conns
+    .get_mut(b_ch)
+    .unwrap()
+    .conn_mut()
+    .recv_stream(vsid)
+    .stop(VarInt::from_u32(7));
+  let mut stop_dgs: Vec<Vec<u8>> = Vec::new();
+  {
+    let mut buf = Vec::new();
+    while let Some(tr) =
+      b.conns
+        .get_mut(b_ch)
+        .unwrap()
+        .conn_mut()
+        .poll_transmit(now.into_std(), 1, &mut buf)
+    {
+      stop_dgs.push(buf[..tr.size].to_vec());
+      buf.clear();
+    }
+  }
+  assert!(
+    !stop_dgs.is_empty(),
+    "B must emit a STOP_SENDING datagram for the victim's stream"
+  );
+  {
+    let mut scratch = Vec::new();
+    for dg in &stop_dgs {
+      if let Some(DatagramEvent::ConnectionEvent(ch, cev)) = a.quinn.handle(
+        now.into_std(),
+        b_addr,
+        None,
+        None,
+        BytesMut::from(&dg[..]),
+        &mut scratch,
+      ) {
+        a.conns.get_mut(ch).unwrap().queue_pending_event(cev);
+      }
+    }
+  }
+  assert!(
+    a.bridges.contains_key(&victim),
+    "test precondition: the victim is still live entering the tick (step 2 has not \
+       yet applied the staged STOP)"
+  );
+
+  // Run the tick: step (4) applies the staged STOP (fails+enqueues the victim), step
+  // (5) `service_dials` re-parks B' (cap still full), step (5.5) reaps the victim,
+  // and step (5.6)'s consume opens B' on the freed slot.
+  a.run_tick(now);
+
+  assert!(
+    !a.bridges.contains_key(&victim),
+    "the victim must reap in the tick's second pump (after service_dials)"
+  );
+  assert!(
+    a.bridges.contains_key(&parked_id),
+    "the C_OUT-parked dial MUST open on the slot the step-(5.5) reap freed — dropping \
+       the tick's step-(5.6) slot-free consume strands it in dial_parked"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.iter().all(|d| d.id != parked_id))
+      .unwrap_or(true),
+    "the opened dial must leave B's parked bucket"
+  );
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "the tick must drain the freed-peer accumulator before finalize (finalize asserts it)"
+  );
+}
+
+/// Deleting the Writable skip means the arm acts on EVERY connection-window edge,
+/// so a bridge blocked past the OLD per-pass budget is still enqueued and pumps
+/// within the catch-up cadence — never stranded to its exchange deadline (quinn
+/// clears `connection_blocked` on yield and never re-adds it, so a dropped edge
+/// would be permanent).
+///
+/// Construction: A opens N connection-window-blocked bridges (N far above the pump
+/// budget). B reads A's data and emits MAX_DATA; delivering it storms `Writable`
+/// for all N. Draining the catch-up cadence (with a data ferry, never advancing to
+/// the ~5s exchange deadline) reaps ALL N.
+///
+/// Mutation-verify: restore the `writable_enqueues >= MAX_BRIDGE_PUMPS_PER_PASS`
+/// skip — the storm pass then enqueues at most the pump budget and pumps exactly
+/// that many, so NO residue forms (the past-budget edges are dropped, never
+/// enqueued) and the `after > before` assertion fails; a dropped edge is
+/// permanent because quinn cleared `connection_blocked` on the yield.
+#[test]
+fn writable_edge_not_dropped_bridge_enqueues_and_drains_via_catchup() {
+  let a_addr: SocketAddr = "127.0.0.1:8250".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8251".parse().unwrap();
+  let now = Instant::now();
+  // A's periodic schedulers off so the residue drains via bounded catch-up wakes
+  // rather than a full tick that would pump every bridge regardless.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_small_conn_window_bidi(super::C_OUT as u32 + 64),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Open N connection-window-blocked DIALER bridges — far above the pump budget so
+  // one MAX_DATA storms more Writables than the budget — but under C_OUT so all
+  // open.
+  const N: usize = 200;
+  let payload = Bytes::from(vec![0xC3u8; 4096]);
+  for _ in 0..N {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("A opens a reliable user-message exchange to B");
+  }
+  let live0 = a.bridges.len();
+  assert!(
+    live0 > super::MAX_BRIDGE_PUMPS_PER_PASS && live0 <= super::C_OUT,
+    "test precondition: A holds more blocked bridges ({live0}) than the pump budget \
+       but under C_OUT (so all open)"
+  );
+
+  // Deliver A's blocked sends to B and let B read them and emit MAX_DATA; do NOT
+  // deliver B's output back to A yet, so the storm concentrates in one A pass.
+  let mut b_to_a: Vec<Vec<u8>> = Vec::new();
+  let mut t = now;
+  for _ in 0..120 {
+    t += Duration::from_millis(5);
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, t);
+        moved = true;
+      }
+    }
+    b.handle_timeout(t);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        b_to_a.push(bytes.to_vec());
+      }
+    }
+    if !moved {
+      break;
+    }
+  }
+  assert!(
+    !b_to_a.is_empty(),
+    "B must emit MAX_DATA datagrams after reading A's data"
+  );
+
+  // Deliver B's MAX_DATA to A one datagram = one service pass at a time. On the
+  // pass that storms MORE Writables than the pump budget, the arm must enqueue ALL
+  // of them: the pass pumps at most the budget and leaves the excess as RESIDUE
+  // (`after > before`). The skip caps the enqueues at the budget, so that same
+  // pass leaves NO residue and the excess edges are dropped forever.
+  let mut storm_seen = 0u64;
+  let mut storm_residue_grew = false;
+  for dg in &b_to_a {
+    a.counters.writable_events_seen = 0;
+    let before = a.ready_bridges.len();
+    a.handle_udp(b_addr, dg, t);
+    let seen = a.counters.writable_events_seen;
+    let after = a.ready_bridges.len();
+    if seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64 {
+      storm_seen = storm_seen.max(seen);
+      if after > before {
+        storm_residue_grew = true;
+      }
+    }
+    // Drain the residue via the sticky catch-up cadence before the next datagram,
+    // so each pass's residue growth is measured cleanly. The catch-up pumps the
+    // enqueued bridges (proving they are pumped, never stranded); it converges
+    // because no new MAX_DATA arrives during the drain.
+    let mut steps = 0usize;
+    while !a.ready_bridges.is_empty() {
+      let wake = a
+        .poll_timeout()
+        .expect("a non-empty residue always schedules a wake");
+      a.handle_timeout(wake);
+      steps += 1;
+      assert!(steps <= N, "the residue must drain in bounded steps");
+    }
+  }
+  assert!(
+    storm_seen > super::MAX_BRIDGE_PUMPS_PER_PASS as u64,
+    "non-vacuous: one pass must storm more Writable edges ({storm_seen}) than the \
+       pump budget, so the past-budget edges are what the skip would drop"
+  );
+  assert!(
+    storm_residue_grew,
+    "the storm pass must ENQUEUE more bridges than it pumps this pass, leaving a \
+       residue (after > before) — proof every edge past the pump budget was acted \
+       on. Restoring the enqueue skip caps enqueues at the budget so no residue \
+       forms and the past-budget bridges are stranded."
+  );
+}
+
+/// The class-closure anchor test: a BOUNDED servicing pass that budget-defers a
+/// creditable parked-dial tail deposits the peer into the ready-dial ledger, arming
+/// the sticky catch-up anchor, so a STRICT-POLL driver (advancing only via
+/// `poll_timeout` / `handle_timeout`) mints every deferred intent BEFORE its dial
+/// deadline — no reliable send expires despite available capacity.
+///
+/// Construction: establish A -> B with ample bidi credit, quiesce so no ImmediateDue
+/// anchor competes, inject `M > MAX_DIAL_ATTEMPTS_PER_PASS` real creditable intents
+/// parked on B's bucket, then run ONE budgeted `service_peer_bucket` pass (the
+/// establishment/credit path a datagram drives) which mints the budget and DEFERS a
+/// creditable tail. The minted bridges are left un-enqueued so the SOLE residue is
+/// the ready-dial deposit — the anchor is armed by the dial ledger alone.
+///
+/// Mutations that must each fail this test (only (a) is exercised in CI; (b) and (c)
+/// are stated as the contract):
+///   (a) remove the ready-dial deposit in `service_peer_bucket` — the ledger stays
+///       empty, so `reconcile_catchup_anchor` never arms `next_catchup_at` and the
+///       pre-drive assertions fail; were the drive reached, the tail would strand.
+///   (b) drop `ready_dial_peers` from `has_residue` — `reconcile_catchup_anchor`
+///       sees no residue and clears the anchor, same failure.
+///   (c) make `catchup_service` skip the ready-dial drain — the anchor fires but
+///       drains nothing, so the tail never mints and the post-drive assertions fail.
+#[test]
+fn budget_deferred_parked_dial_mints_before_deadline_via_catchup() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8300".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8301".parse().unwrap();
+  let now = Instant::now();
+  // A: periodic membership schedulers disabled so no staggered timer falls due in the
+  // drain window — every wake is provably the bounded catch-up (never a full tick that
+  // would `service_dials` full-drain the tail regardless of the ledger).
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  // Quiesce any handshake-queued pending events so no ImmediateDue anchor (an
+  // earlier-than-catch-up wake) competes with the catch-up during the strict-poll
+  // drive.
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "test precondition: the warm-up mints no bridge"
+  );
+
+  // Inject M real creditable intents parked on B's bucket: register each on the raw
+  // endpoint (so `dial_succeeded` resolves it into a real Stream), sieve the emitted
+  // DialRequested into dial_pending, then move them onto dial_parked[B] as attempted —
+  // the post-parking state a burst reaches on a since-established, amply-credited
+  // connection.
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  assert_eq!(pending.len(), M, "all M intents sieve into dial_pending");
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the bucket must exceed the budget so the pass defers a creditable tail"
+  );
+  while a.poll_event().is_some() {}
+
+  // ONE budgeted pass (the datagram establishment/credit path): mint the budget,
+  // DEFER the tail, DEPOSIT B into the ready-dial ledger. The minted bridges are left
+  // un-enqueued so the ledger is the SOLE residue that arms the anchor.
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(b_addr, now, &mut dial_budget);
+  let minted_first = a.live_bridge_count();
+  assert_eq!(
+    minted_first,
+    super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the budgeted pass mints exactly the budget"
+  );
+  let deferred = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+  assert_eq!(
+    deferred,
+    M - minted_first,
+    "exactly the creditable tail stays parked"
+  );
+  assert!(deferred > 0, "non-vacuous: a creditable tail was deferred");
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the budget-deferred tail deposits B into the ready-dial ledger (removing the \
+       deposit — mutation a — leaves it empty)"
+  );
+  // Arm the sticky anchor for the ledger residue — the reconcile step every bounded
+  // caller runs after `service_peer_bucket`. Removing the deposit (mutation a) or
+  // dropping ready_dial_peers from `has_residue` (mutation b) leaves this `None`.
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the ready-dial residue must arm the sticky catch-up anchor"
+  );
+
+  // Strict-poll drive: advance ONLY via poll_timeout/handle_timeout. Every deferred
+  // intent must mint (open a real bridge) before its dial deadline, with zero
+  // ExchangeCompleted failures.
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ready-dial residue always schedules a catch-up wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "every deferred parked dial must mint before its deadline via the catch-up wake; \
+       removing the deposit / the has_residue inclusion / the catchup drain strands it"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "all M intents minted a real bridge (none retired despite available capacity)"
+  );
+  assert!(
+    !saw_failure,
+    "no deferred dial may retire to ExchangeCompleted::Failed — capacity was available"
+  );
+}
+
+/// The tick's step (5.6) and `flush_outbound` thread `usize::MAX` as the DIAL budget
+/// into `service_slot_freed_peers`, so those O(N) paths can NEVER budget-exit a freed
+/// peer's bucket with a creditable tail — the property that makes `finalize_tick`'s
+/// "ready_dial_peers empty" debug-assert sound. This pins that an unbounded dial
+/// budget fully drains a `> budget` freed bucket WITHOUT depositing into the ledger.
+///
+/// Construction: establish A -> B with ample credit, inject `> budget` real creditable
+/// intents parked on B, seed B into `slot_freed_peers` (as a dialer reap would), then
+/// run the slot-free consume with the tick's `usize::MAX` budgets.
+///
+/// Mutation (stated): pass `MAX_DIAL_ATTEMPTS_PER_PASS` at step (5.6) instead of
+/// `usize::MAX` — the freed bucket budget-exits, deposits B into `ready_dial_peers`
+/// (as `established_bucket_pass_mints_at_most_the_budget` shows a finite budget does),
+/// and `finalize_tick`'s debug-assert fires on the tick's own path.
+#[test]
+fn slot_free_unbounded_dial_budget_drains_without_deposit() {
+  let a_addr: SocketAddr = "127.0.0.1:8310".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8311".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("register a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "non-vacuous: the freed bucket exceeds the budget, so a finite budget would deposit"
+  );
+  while a.poll_event().is_some() {}
+
+  // The tick's step (5.6) threading: unbounded pump AND dial budgets. B is the freed
+  // peer. The unbounded dial budget must fully drain B's `> budget` bucket with NO
+  // ready-dial deposit, so `finalize_tick`'s empty-ledger assert holds on the tick path.
+  a.slot_freed_peers.insert(b_addr);
+  let mut pump_budget = usize::MAX;
+  let mut dial_budget = usize::MAX;
+  let _ = a.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget);
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the unbounded dial budget fully drains the > budget freed bucket in one pass"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "every deferred intent minted — so the bucket WAS creditable and a finite budget \
+       would have deposited a creditable tail"
+  );
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "the unbounded dial budget never budget-exits, so it deposits nothing — the \
+       property finalize_tick's ready_dial_peers-empty assert relies on"
+  );
+}
+
+/// The zero-attempt deposit arm: a BOUNDED pass whose shared dial budget is already
+/// exhausted when the slot-free fixpoint reaches a freed peer's bucket must STILL
+/// deposit that peer into the ready-dial ledger — the peer was already taken out of
+/// `slot_freed_peers`, so absent a deposit its wake is consumed and the bucket strands.
+///
+/// Construction: seed B into `slot_freed_peers` with a non-empty parked bucket, then
+/// run `service_slot_freed_peers` with the dial budget already at ZERO (the state the
+/// fixpoint reaches after an earlier ready-dial drain in the same pass spent it).
+///
+/// Mutation (stated): require an attempt was made (drop the zero-attempt arm —
+/// `bucket_nonempty && attempted_any && !last_was_reparked`) — the zero-budget bucket
+/// then deposits nothing, so `reconcile_catchup_anchor` leaves `next_catchup_at`
+/// `None` and `poll_timeout` returns only the far dial/idle deadline, stranding B.
+#[test]
+fn zero_attempt_deposit_arms_catchup_for_starved_slot_free_peer() {
+  let a_addr: SocketAddr = "127.0.0.1:8320".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8321".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  while a.poll_event().is_some() {}
+
+  // A non-empty parked bucket on B (fake ids suffice — a zero-budget pass never
+  // attempts them, so they are never resolved). This is the tail an earlier ready-dial
+  // drain in the same interval deferred.
+  let deadline = now + Duration::from_secs(30);
+  for i in 0..4u64 {
+    a.dial_parked
+      .entry(b_addr)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(95_000 + i),
+        peer: b_addr,
+        deadline,
+        wake: deadline,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+
+  // Seed B as a freed peer and run the slot-free consume with the shared dial budget
+  // ALREADY exhausted. B is `mem::take`n out of `slot_freed_peers`; the zero-attempt
+  // deposit is the ONLY thing that keeps its wake alive.
+  a.slot_freed_peers.insert(b_addr);
+  let mut pump_budget = super::MAX_BRIDGE_PUMPS_PER_PASS;
+  let mut dial_budget = 0usize;
+  let _ = a.service_slot_freed_peers(now, &mut pump_budget, &mut dial_budget);
+  assert!(
+    a.slot_freed_peers.is_empty(),
+    "B was taken out of slot_freed_peers by the fixpoint"
+  );
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the zero-attempt arm deposits B into the ready-dial ledger even though the budget \
+       was spent before reaching its bucket (dropping the arm strands B)"
+  );
+  // The reconcile step every bounded caller runs: the ledger residue arms the anchor.
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the zero-attempt deposit arms the sticky catch-up anchor"
+  );
+  assert_eq!(
+    a.poll_timeout(),
+    Some(now + super::CATCHUP_INTERVAL),
+    "poll_timeout returns the armed catch-up anchor — nearer than the far dial/idle \
+       deadlines; dropping the zero-attempt arm returns only that far deadline"
+  );
+}
+
+/// Front-park: a reliable-ping-exempt dial that re-parks (its connection still
+/// handshaking, `open(Bi) == None`) lands at the FRONT of its peer's bucket, ahead of
+/// the ordinary user-message dials that re-parked at the BACK — so a `C_OUT`-blocked
+/// user-message head can never shadow the liveness-critical probe fallback behind the
+/// `service_peer_bucket` stop-on-`Reparked` break.
+///
+/// Construction: three dials to a never-answered peer (its connection stays
+/// handshaking, so every `open(Bi)` returns `None` and re-parks): two user messages,
+/// then one reliable ping. The ping is exempt, so it front-parks.
+///
+/// Mutation (stated): revert the exempt re-park to `push_back` — the ping lands at the
+/// BACK, behind the user-message head; on the next bucket service a `C_OUT`-blocked
+/// user-message head would re-park and break before the ping is popped, stranding it.
+#[test]
+fn reliable_ping_reparks_at_front_of_bucket() {
+  let a_addr: SocketAddr = "127.0.0.1:8330".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8331".parse().unwrap();
+  let now = Instant::now();
+  // No B endpoint: B never answers, so A's connection to B stays handshaking and every
+  // dial re-parks via the `open(Bi) == None` path.
+  let mut a = make_endpoint("a", a_addr, now);
+
+  // Two user-message dials re-park at the BACK while B handshakes.
+  let u1 = a
+    .start_user_message(b_addr, Bytes::from_static(b"u1"), now)
+    .expect("A registers the first user-message dial");
+  let u2 = a
+    .start_user_message(b_addr, Bytes::from_static(b"u2"), now)
+    .expect("A registers the second user-message dial");
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    2,
+    "both user-message dials re-park while B handshakes"
+  );
+
+  // The reliable-ping dial is exempt, so it re-parks at the FRONT, ahead of the
+  // user-message head — the bucket order becomes [ping, u1, u2].
+  let deadline = now + Duration::from_secs(5);
+  let ping = a.start_reliable_ping(SmolStr::new("b"), b_addr, 7, deadline, now);
+  let order: Vec<StreamId> = a
+    .dial_parked
+    .get(&b_addr)
+    .expect("B's parked bucket holds all three dials")
+    .iter()
+    .map(|d| d.id)
+    .collect();
+  assert_eq!(
+    order,
+    vec![ping, u1, u2],
+    "the reliable-ping re-parks at the FRONT (exempt) ahead of the user-message head, \
+       which stays behind it in arrival order; reverting the exempt re-park to \
+       push_back would order it [u1, u2, ping] and a C_OUT-blocked user-message head \
+       would shadow the ping behind the stop-on-Reparked break"
+  );
+}
+
+/// `flush_outbound` fully drains the ready-dial ledger BEFORE `finalize_tick`, so a
+/// budget-deferred deposit an earlier BOUNDED pass left cannot survive a flush-all
+/// into the finalize empty-ledger assert.
+///
+/// Construction: establish A -> B, inject `> budget` creditable intents parked on B,
+/// run ONE budgeted `service_peer_bucket` pass that deposits B into the ledger, then
+/// `flush_outbound_transmits`.
+///
+/// Mutation (stated): remove flush_outbound's ready-dial consume — the deposit
+/// survives into `finalize_tick`, whose `debug_assert!(ready_dial_peers.is_empty())`
+/// then fires (this test panics in a debug build).
+#[test]
+fn flush_outbound_drains_ready_dial_ledger_before_finalize() {
+  let a_addr: SocketAddr = "127.0.0.1:8340".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8341".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(512),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+
+  const M: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS + 16;
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..M {
+    a.endpoint_mut()
+      .start_user_message(b_addr, payload.clone(), now)
+      .expect("register a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  a.unattempted_dial_count = 0;
+  for mut pd in pending {
+    pd.attempted = true;
+    a.dial_parked.entry(b_addr).or_default().push_back(pd);
+  }
+  while a.poll_event().is_some() {}
+
+  // One budgeted pass deposits B into the ready-dial ledger (mint the budget, defer
+  // the creditable tail).
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(b_addr, now, &mut dial_budget);
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "the bounded pass deposits B into the ready-dial ledger"
+  );
+
+  // A flush-all must consume the ledger fully before finalize; the finalize
+  // empty-ledger debug-assert would fire (panic) if the deposit survived.
+  a.flush_outbound_transmits(now);
+  assert!(
+    a.ready_dial_peers.is_empty(),
+    "flush_outbound consumes the ready-dial ledger fully before finalize_tick; removing \
+       that consume trips finalize_tick's ready_dial_peers-empty debug-assert"
+  );
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the flush-all drains B's whole deferred tail (unbounded budget)"
+  );
+}
+
+/// Populate the ready-dial ledger with `n` distinct budget-deferred peers, each
+/// holding one non-empty parked bucket, then run ONE [`QuicEndpoint::catchup_service`]
+/// and return `(peer visits, dial attempts, resident ledger len after, anchor armed)`.
+///
+/// One EXPIRED entry per peer is the cheapest creditable bucket: the drain pops the
+/// peer, `service_peer_bucket` attempts (retires) the single entry under the shared
+/// dial budget and empties the bucket — exercising the drain's per-peer VISIT and
+/// attempt accounting without standing up `n` real established connections. The
+/// per-peer visit order and per-peer budget consumption are identical to a mint
+/// bucket, so this faithfully bounds the drain's visit count. No `TimerKey::Dial`
+/// keys are registered, so nothing counts as a due scheduled timer.
+fn drive_one_catchup_over_n_deferred_ready_dial_peers(n: usize) -> (u64, u64, usize, bool) {
+  let a_addr: SocketAddr = "127.0.0.1:8360".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: `catchup_service` is invoked directly and no membership timer
+  // interferes with the ledger drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  let elapsed = now - Duration::from_secs(1);
+  for i in 0..n {
+    let peer: SocketAddr = format!("127.0.0.9:{}", 9000 + i).parse().unwrap();
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(60_000 + i as u64),
+        peer,
+        deadline: elapsed,
+        wake: elapsed,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    n,
+    "all {n} distinct peers seeded into the ready-dial ledger"
+  );
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  let attempts_before = a.counters.dial_entries_serviced;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  let attempts = a.counters.dial_entries_serviced - attempts_before;
+  (
+    visits,
+    attempts,
+    a.ready_dial_peers.len(),
+    a.next_catchup_at.is_some(),
+  )
+}
+
+/// The budgeted catch-up ready-dial drain visits at most a budget-sized front-prefix
+/// of the ledger — its work is O(interval dial budget), INDEPENDENT of how many peers
+/// the ledger holds — leaving the untouched tail resident and the sticky anchor armed
+/// for the next interval. This is the bound the residue ledger exists to uphold, now
+/// enforced in the ledger's own drain: the former whole-ledger `take` detached and
+/// visited EVERY peer even after the budget hit zero (hashing, bucket-calling, and
+/// re-depositing each), making the drain scale with the ledger table.
+///
+/// Mutation-verify: revert the drain to `for peer in self.ready_dial_peers.take()` —
+/// it visits all `n` peers, so `visits` climbs to the ledger size (300, then 600) and
+/// both the `<= budget` and the "does not scale with the peer count" assertions fail.
+#[test]
+fn catchup_ready_dial_drain_visits_are_budget_bounded_not_ledger_sized() {
+  let budget = super::MAX_DIAL_ATTEMPTS_PER_PASS as u64;
+
+  // 300 deferred peers: ONE catch-up visits at most a budget-sized prefix, not 300.
+  let (visits_300, attempts_300, resident_300, anchor_300) =
+    drive_one_catchup_over_n_deferred_ready_dial_peers(300);
+  assert!(
+    attempts_300 <= budget,
+    "one catch-up attempts at most MAX_DIAL_ATTEMPTS_PER_PASS={budget} dials; attempted {attempts_300}"
+  );
+  assert!(
+    visits_300 <= budget,
+    "the bounded-prefix drain VISITS at most a budget-sized prefix (each visited peer's \
+       single-entry bucket consumes one budget unit), not all 300 ledger peers; visited \
+       {visits_300}"
+  );
+  assert!(
+    visits_300 < 300,
+    "the drain must leave most of the 300-peer ledger unvisited; visited {visits_300}"
+  );
+  assert_eq!(
+    resident_300,
+    300 - visits_300 as usize,
+    "exactly the unvisited tail stays resident — each visited peer's single-entry bucket \
+       emptied and left the ledger, nothing else moved"
+  );
+  assert!(
+    resident_300 > 0,
+    "non-vacuous: a large tail remains resident for the next interval"
+  );
+  assert!(
+    anchor_300,
+    "the resident tail keeps has_residue true, so advance_catchup_anchor leaves the sticky \
+       catch-up anchor armed"
+  );
+
+  // Double the ledger to 600: the per-catch-up visit count must NOT scale with it.
+  let (visits_600, _attempts_600, resident_600, anchor_600) =
+    drive_one_catchup_over_n_deferred_ready_dial_peers(600);
+  assert_eq!(
+    visits_600, visits_300,
+    "the per-catch-up visit count is bounded by the interval dial budget and is INDEPENDENT \
+       of the ledger size: 300 and 600 peers both visit {visits_300}. Reverting to the \
+       whole-ledger `take` makes this 300 vs 600 (scaling with the table) and the equality fails"
+  );
+  assert!(
+    visits_600 <= budget,
+    "the 600-peer ledger still visits at most the budget; visited {visits_600}"
+  );
+  assert!(
+    resident_600 > resident_300,
+    "the larger ledger leaves a larger resident tail — the drain did not scale up its work to \
+       compensate; {resident_600} resident vs {resident_300}"
+  );
+  assert!(
+    anchor_600,
+    "the 600-peer residue also keeps the anchor armed"
+  );
+}
+
+/// The budgeted catch-up ready-dial drain is fair: a peer re-deposited after it
+/// exhausts the interval dial budget rotates to the BACK of the ledger, so successive
+/// catch-up intervals round-robin the whole ledger to empty and nothing strands. A
+/// large-bucket HEAD peer that re-deposits every interval must not shadow the resident
+/// tail — after the head is serviced once it drops behind the tail, so the next
+/// interval reaches every tail peer.
+///
+/// Mutation-verify: make the re-deposit push to the FRONT (`push_front` in
+/// `PeerResidue::insert`) — the head stays at the ledger front and is re-serviced
+/// every interval while the tail starves, so the "every tail peer serviced after two
+/// intervals" assertion fails.
+#[test]
+fn catchup_ready_dial_drain_round_robins_the_whole_ledger_no_strand() {
+  let a_addr: SocketAddr = "127.0.0.1:8370".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: every wake is provably a bounded ready-dial catch-up (no membership
+  // tick), so the ledger drains solely through the drain under test.
+  // A global connection cap of 0 makes every cold dial retire via `AtGlobalCap` — the
+  // cheapest bucket-draining population — WITHOUT an expired deadline, so the entries
+  // keep a far-future (NON-URGENT) deadline. That is load-bearing here: an expired
+  // deadline is trivially within the urgent front-deposit horizon, so mechanism (c)
+  // would front-deposit the head monopolist and defeat the round-robin under test;
+  // non-urgent entries take the BACK re-deposit path, exercising PURE round-robin.
+  // Schedulers OFF so every wake is a bounded ready-dial catch-up, never a full tick.
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
+
+  // A HEAD peer with a bucket three interval-budgets deep, inserted FIRST so it sits at
+  // the ledger front, plus one interval-budget's worth of single-entry TAIL peers. The
+  // drain's per-peer visit ORDER and budget consumption match a mint bucket, so this
+  // exercises round-robin fairness without real connections.
+  const HEAD_ENTRIES: usize = 3 * super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let tails: Vec<SocketAddr> = (0..super::MAX_DIAL_ATTEMPTS_PER_PASS)
+    .map(|i| format!("127.0.0.10:{}", 9000 + i).parse().unwrap())
+    .collect();
+  let head: SocketAddr = "127.0.0.9:9500".parse().unwrap();
+  let far = now + Duration::from_secs(30);
+  for i in 0..HEAD_ENTRIES {
+    a.dial_parked
+      .entry(head)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(70_000 + i as u64),
+        peer: head,
+        deadline: far,
+        wake: far,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  a.ready_dial_peers.insert(head);
+  for (i, &peer) in tails.iter().enumerate() {
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(80_000 + i as u64),
+        peer,
+        deadline: far,
+        wake: far,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    1 + tails.len(),
+    "head + tail peers seeded into the ledger"
+  );
+
+  // Arm the sticky anchor as `reconcile_catchup_anchor` would, then drive the strict
+  // poll-surface cadence: poll_timeout -> advance to the anchor -> handle_timeout.
+  a.next_catchup_at = Some(now + super::CATCHUP_INTERVAL);
+  let memb0 = a.membership_time_advances();
+  for _ in 0..2 {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ready-dial residue schedules a catch-up wake");
+    assert_eq!(
+      Some(wake),
+      a.next_catchup_at,
+      "the catch-up anchor is the earliest wake while a ready-dial residue waits"
+    );
+    a.handle_timeout(wake);
+    assert_eq!(
+      a.membership_time_advances(),
+      memb0,
+      "a ready-dial catch-up wake is a BOUNDED catch-up, not a full tick: it advances no \
+         membership time"
+    );
+  }
+  let serviced_after_two = tails
+    .iter()
+    .filter(|p| !a.dial_parked.contains_key(*p))
+    .count();
+  assert_eq!(
+    serviced_after_two,
+    tails.len(),
+    "after two catch-up intervals every tail peer's bucket is serviced: the head re-deposited \
+       to the BACK after interval 1, so interval 2 round-robins to the tail. A FRONT re-deposit \
+       keeps the head at the front and leaves the tail unserviced here"
+  );
+
+  // Liveness: keep driving; the whole ledger drains to empty within a bounded number of
+  // intervals (ceil(HEAD_ENTRIES / budget) dominates) — nothing strands.
+  let mut intervals = 2usize;
+  while !a.ready_dial_peers.is_empty() {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    intervals += 1;
+    assert!(
+      intervals <= 8,
+      "the ready-dial ledger must converge to empty, never strand; {} peers still queued",
+      a.ready_dial_peers.len()
+    );
+  }
+  assert!(
+    a.dial_parked.is_empty(),
+    "every parked bucket drained across the round-robin intervals — nothing stranded"
+  );
+  assert!(
+    a.next_catchup_at.is_none(),
+    "the emptied ledger clears the sticky catch-up anchor"
+  );
+}
+
+/// Populate the ready-dial ledger with `n` distinct STALE entries — peers resident in
+/// [`QuicEndpoint::ready_dial_peers`] whose [`QuicEndpoint::dial_parked`] bucket is
+/// ABSENT — then run ONE [`QuicEndpoint::catchup_service`] and return
+/// `(peer visits, resident ledger len after, anchor armed)`.
+///
+/// A stale entry reproduces the ledger state left after a DIRECT `service_peer_bucket`
+/// wake (an establishment / `MAX_STREAMS` `Available` / slot-free wake) drained a
+/// deposited peer's bucket to empty and dropped it from `dial_parked` WITHOUT removing
+/// the peer from the ledger. Inserting straight into `ready_dial_peers` with no parked
+/// bucket is exactly that state, deterministic and with no connections to stand up.
+/// Servicing a stale entry pops an empty/absent bucket, so it attempts ZERO dials —
+/// spending a VISIT but no dial budget. No `TimerKey::Dial` keys are registered, so
+/// nothing counts as a due scheduled timer.
+fn drive_one_catchup_over_n_stale_ready_dial_peers(n: usize) -> (u64, usize, bool) {
+  let a_addr: SocketAddr = "127.0.0.1:8380".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: `catchup_service` is invoked directly and no membership timer
+  // interferes with the ledger drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  for i in 0..n {
+    let peer: SocketAddr = format!("127.0.0.11:{}", 9000 + i).parse().unwrap();
+    // STALE: resident in the ledger with NO `dial_parked` bucket — the state a direct
+    // `service_peer_bucket` wake leaves after emptying a deposited peer's bucket.
+    a.ready_dial_peers.insert(peer);
+  }
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    n,
+    "all {n} distinct stale peers seeded into the ready-dial ledger"
+  );
+  assert!(
+    a.dial_parked.is_empty(),
+    "test precondition: every seeded entry is STALE — no dial_parked bucket backs it"
+  );
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  (
+    visits,
+    a.ready_dial_peers.len(),
+    a.next_catchup_at.is_some(),
+  )
+}
+
+/// The budgeted catch-up ready-dial drain pops at most a CONSTANT number of peers even
+/// when a long prefix of the ledger is STALE — entries whose parked bucket a direct
+/// `service_peer_bucket` wake already emptied, so servicing them attempts zero dials
+/// and spends NO dial budget. The dial-attempt budget cannot bound such a pass (a stale
+/// visit costs no dial unit), so the independent [`MAX_READY_DIAL_VISITS_PER_PASS`]
+/// visit budget is what holds the pop count constant. The visited stale entries
+/// self-clean (popped, never re-deposited), the unvisited stale tail stays resident for
+/// the next interval, and the sticky anchor stays armed.
+///
+/// Mutation-verify: drop the visit budget (revert the loop to the `remaining_visits =
+/// len()` bound alone). A stale visit spends no dial budget, so the loop walks the WHOLE
+/// stale ledger: `visits` climbs to 300 then 600 (the ledger size), so both the
+/// `== MAX_READY_DIAL_VISITS_PER_PASS` and the "flat across ledger size" assertions
+/// fail.
+#[test]
+fn catchup_ready_dial_drain_visits_are_visit_bounded_over_a_stale_prefix() {
+  let cap = super::MAX_READY_DIAL_VISITS_PER_PASS as u64;
+
+  // 300 stale entries: ONE catch-up pops at most the visit budget, not 300.
+  let (visits_300, resident_300, anchor_300) = drive_one_catchup_over_n_stale_ready_dial_peers(300);
+  assert_eq!(
+    visits_300, cap,
+    "with a 300-entry stale ledger (300 >> the visit budget) the pass pops EXACTLY \
+       MAX_READY_DIAL_VISITS_PER_PASS={cap} peers — the visit budget binds, since a stale \
+       visit spends no dial budget; visited {visits_300}"
+  );
+  assert!(
+    visits_300 < 300,
+    "the drain must leave most of the 300-entry stale ledger unvisited; visited {visits_300}"
+  );
+  assert_eq!(
+    resident_300,
+    300 - visits_300 as usize,
+    "exactly the unvisited stale tail stays resident — each visited stale entry popped off \
+       the ledger and self-cleaned (no bucket, so no re-deposit)"
+  );
+  assert!(
+    resident_300 > 0,
+    "non-vacuous: a large stale tail remains resident to drain over later intervals"
+  );
+  assert!(
+    anchor_300,
+    "the resident stale tail keeps has_residue true, so advance_catchup_anchor leaves the \
+       sticky catch-up anchor armed"
+  );
+
+  // Double the stale ledger to 600: the per-catch-up visit count must stay FLAT.
+  let (visits_600, resident_600, anchor_600) = drive_one_catchup_over_n_stale_ready_dial_peers(600);
+  assert_eq!(
+    visits_600, visits_300,
+    "the per-catch-up visit count is bounded by the independent visit budget and is \
+       INDEPENDENT of the stale ledger size: 300 and 600 stale entries both visit \
+       {visits_300}. Dropping the visit budget makes this 300 vs 600 (scaling with the \
+       ledger — the O(ledger)-per-interval defect) and the equality fails"
+  );
+  assert_eq!(
+    visits_600, cap,
+    "the 600-entry stale ledger also pops exactly the visit budget; visited {visits_600}"
+  );
+  assert!(
+    resident_600 > resident_300,
+    "the larger stale ledger leaves a larger resident tail — the drain did not scale up its \
+       work to compensate; {resident_600} resident vs {resident_300}"
+  );
+  assert!(
+    anchor_600,
+    "the 600-entry stale residue also keeps the anchor armed"
+  );
+}
+
+/// A LIVE budget-deferred ready-dial peer placed BEHIND a large STALE prefix is still
+/// serviced within a bounded number of catch-up intervals — nothing strands behind the
+/// visit bound. The visit budget defers the live peer past the first interval (it stops
+/// the pass inside the stale prefix), but the stale prefix SELF-CLEANS (popped, never
+/// re-deposited) so it shrinks by up to the visit budget per interval; the live peer
+/// moves to the front and is reached as soon as the prefix ahead of it is gone.
+///
+/// Mutation-verify: drop the visit budget (revert to the `remaining_visits = len()`
+/// bound). One pass then walks the whole ledger and services the live peer in the FIRST
+/// interval, so the "still parked after one catch-up" assertion fails.
+#[test]
+fn catchup_ready_dial_drain_reaches_live_peer_behind_stale_prefix_no_strand() {
+  let a_addr: SocketAddr = "127.0.0.1:8390".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers OFF: every wake is provably a bounded ready-dial catch-up (no membership
+  // tick), so the ledger drains solely through the drain under test.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  // A large STALE prefix — peers resident in the ledger with NO parked bucket, the state
+  // a direct `service_peer_bucket` wake leaves after emptying a deposited bucket — seeded
+  // FIRST so they sit ahead of the live peer.
+  const STALE_PREFIX: usize = 300;
+  let stale: Vec<SocketAddr> = (0..STALE_PREFIX)
+    .map(|i| format!("127.0.0.12:{}", 9000 + i).parse().unwrap())
+    .collect();
+  for &peer in &stale {
+    a.ready_dial_peers.insert(peer);
+  }
+  // One LIVE deferred peer with a non-empty creditable bucket, inserted LAST so it sits
+  // at the BACK, behind the whole stale prefix. An expired entry is the cheapest
+  // creditable bucket (retires on service); "serviced" = its bucket drains and leaves
+  // `dial_parked`, the observable no-strand signal — the per-peer visit order and budget
+  // consumption match a mint bucket.
+  let live: SocketAddr = "127.0.0.9:9999".parse().unwrap();
+  let elapsed = now - Duration::from_secs(1);
+  a.dial_parked
+    .entry(live)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(90_000),
+      peer: live,
+      deadline: elapsed,
+      wake: elapsed,
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  a.ready_dial_peers.insert(live);
+  assert_eq!(
+    a.ready_dial_peers.len(),
+    STALE_PREFIX + 1,
+    "stale prefix + the one live peer seeded into the ledger"
+  );
+  assert!(
+    a.dial_parked.contains_key(&live),
+    "test precondition: the live peer starts with a non-empty parked bucket behind the \
+       stale prefix"
+  );
+
+  // Arm the sticky anchor as `reconcile_catchup_anchor` would, then drive the strict
+  // poll-surface cadence: poll_timeout -> advance to the anchor -> handle_timeout.
+  a.next_catchup_at = Some(now + super::CATCHUP_INTERVAL);
+
+  // First interval: the visit budget stops the pass INSIDE the stale prefix, before the
+  // live peer — so the live peer must still be parked afterwards. A len()-only bound
+  // would walk the whole ledger and service the live peer here, failing this assertion.
+  let wake0 = a
+    .poll_timeout()
+    .expect("a non-empty ready-dial residue schedules a catch-up wake");
+  a.handle_timeout(wake0);
+  assert!(
+    a.dial_parked.contains_key(&live),
+    "after ONE catch-up the visit budget has cleared only a stale-prefix chunk; the live \
+       peer behind it is still parked (a len()-only bound would have serviced it already)"
+  );
+  assert!(
+    !a.ready_dial_peers.is_empty(),
+    "stale entries remain resident to drain over further intervals"
+  );
+
+  // Keep driving: the stale prefix self-cleans at the visit budget per interval, so the
+  // live peer is reached within a bounded number of further intervals — nothing strands.
+  let mut intervals = 1usize;
+  while a.dial_parked.contains_key(&live) {
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty residue always schedules a wake");
+    a.handle_timeout(wake);
+    intervals += 1;
+    assert!(
+      intervals <= 5,
+      "the live peer behind a {STALE_PREFIX}-entry stale prefix must be serviced within a \
+         bounded number of catch-up intervals; still parked after {intervals}"
+    );
+  }
+  // ceil(300 / visit budget) stale-clearing intervals, and the last of those reaches the
+  // live peer in the same pass that clears the final stale chunk ahead of it.
+  assert!(
+    intervals <= 3,
+    "the stale prefix self-cleans at the visit budget per interval, so the live peer is \
+       reached as soon as the prefix ahead of it is gone; took {intervals} intervals"
+  );
+  assert!(
+    !a.dial_parked.contains_key(&live),
+    "the live peer's bucket was serviced — it did not strand behind the stale prefix"
+  );
+}
+
+/// The per-peer reliable user-message admission cap refuses a `start_user_message`
+/// once `max_pending_user_dials_per_peer` intents are already OUTSTANDING to that
+/// peer, and the refused call is a pure no-op.
+///
+/// Fills a cold (never-answering) peer to exactly the default cap `K = 32` — each
+/// `start_user_message` re-parks the still-handshaking dial — then the `K+1`th
+/// returns [`Error::UserDialBacklogFull`] carrying the peer and the limit, having
+/// mutated nothing (backlog still `K`, parked bucket still `K`, no new
+/// `pending_outbound_*` entry).
+///
+/// Mutation-verify: remove the admission gate in `start_user_message` — the `K+1`th
+/// call then returns `Ok`, so `expect_err` fails.
+#[test]
+fn user_dial_backlog_cap_refuses_past_the_limit() {
+  let a_addr: SocketAddr = "127.0.0.1:8600".parse().unwrap();
+  // A port nothing listens on: the pooled connection never leaves handshaking, so
+  // every reliable user-message dial re-parks (the outstanding-backlog state the
+  // cap bounds).
+  let cold: SocketAddr = "127.0.0.9:8601".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  assert_eq!(
+    a.cfg.max_pending_user_dials_per_peer(),
+    32,
+    "test precondition: the default per-peer reliable-dial cap is 32"
+  );
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for i in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .unwrap_or_else(|e| panic!("send {i} under the cap must be admitted, got {e:?}"));
+    // Drain owed transmits so `out` does not grow unboundedly; the payloads are
+    // never delivered, so every dial stays parked.
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "K admitted cold-peer dials must all be parked and counted"
+  );
+  assert_eq!(
+    a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0),
+    k,
+    "test precondition: all K intents re-parked on the cold peer's bucket"
+  );
+  a.assert_user_dial_backlog_exact();
+
+  // Snapshot the state the refused call must NOT touch.
+  let kinds_before = a.pending_outbound_kinds.len();
+  let peers_before = a.pending_outbound_peers.len();
+  let parked_before = a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0);
+
+  let err = a
+    .start_user_message(cold, payload.clone(), now)
+    .expect_err("the K+1th send must be refused with backpressure");
+  match err {
+    crate::error::Error::UserDialBacklogFull(full) => {
+      assert_eq!(full.peer(), cold, "the error names the overloaded peer");
+      assert_eq!(full.limit(), k, "the error names the configured limit");
+    }
+    other => panic!("expected UserDialBacklogFull, got {other:?}"),
+  }
+
+  // Pure no-op: no machine intent, no id, no pending_outbound_* entry, no Dial key
+  // (the parked bucket, which owns each intent's Dial key, is unchanged), and the
+  // backlog is untouched.
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "a refused call must not change the backlog"
+  );
+  assert_eq!(
+    a.pending_outbound_kinds.len(),
+    kinds_before,
+    "a refused call must register no outbound-kind entry"
+  );
+  assert_eq!(
+    a.pending_outbound_peers.len(),
+    peers_before,
+    "a refused call must register no outbound-peer entry"
+  );
+  assert_eq!(
+    a.dial_parked.get(&cold).map(|q| q.len()).unwrap_or(0),
+    parked_before,
+    "a refused call must park no new intent"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// Retiring the outstanding intents at their dial deadline releases the backlog, so
+/// a fresh `start_user_message` to the same peer is admitted again.
+///
+/// Mutation-verify: drop the `note_user_dial_dequeued` release in
+/// `process_dial_entry` — the retired intents leave the count stuck at `K`, so the
+/// post-retirement backlog assertion fails (and the fresh send would wrongly be
+/// refused).
+#[test]
+fn user_dial_backlog_releases_when_intents_retire() {
+  let a_addr: SocketAddr = "127.0.0.1:8610".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8611".parse().unwrap();
+  let now = Instant::now();
+  // No periodic schedulers, so advancing the clock to the dial deadline drives a
+  // pure catch-up/tick that services (and retires) the parked dials with no
+  // scheduler noise.
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial under the cap is admitted");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(a.user_dial_backlog(&cold), k, "the cap is filled");
+
+  // Advance past the parked intents' `now + stream_timeout` (default 10s) deadline
+  // and tick: `service_dials` retires each expired intent, releasing its backlog
+  // unit.
+  let later = now + Duration::from_secs(30);
+  a.handle_timeout(later);
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    0,
+    "retiring every expired intent must drain the peer's backlog to 0"
+  );
+  assert!(
+    a.dial_parked
+      .get(&cold)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the expired bucket is drained (and removed) at retirement"
+  );
+  a.assert_user_dial_backlog_exact();
+
+  // A fresh send is admitted again now the backlog has drained.
+  a.start_user_message(cold, payload.clone(), later)
+    .expect("a fresh send is admitted once the backlog has drained");
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    1,
+    "the fresh send re-parks and is counted"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// Push/pull and reliable-ping dials are EXEMPT from the cap: they are admitted at
+/// a full user-message backlog and are never counted against it.
+///
+/// Mutation-verify: count push/pull (or reliable-ping) into `user_dial_backlog` —
+/// the backlog climbs past `K`, so the "unchanged at K" assertion and the
+/// brute-force cross-check fail.
+#[test]
+fn push_pull_and_reliable_ping_exempt_from_user_dial_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8620".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8621".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  let k = a.cfg.max_pending_user_dials_per_peer();
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..k {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial under the cap is admitted");
+    while a.poll_transmit().is_some() {}
+  }
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "the user-message backlog is full"
+  );
+
+  // A push/pull to the SAME peer at a full user-message cap still registers its
+  // intent — the cap gates only reliable user messages.
+  let pp_id = a.start_push_pull(cold, PushPullKind::Join, now);
+  while a.poll_transmit().is_some() {}
+  assert_eq!(
+    a.pending_outbound_kinds.get(&pp_id),
+    Some(&super::ExchangeKind::PushPull),
+    "a push/pull intent is created even at a full user-message backlog"
+  );
+
+  // A reliable-ping fallback likewise registers its intent.
+  let rp_id = a.start_reliable_ping(
+    SmolStr::new("b"),
+    cold,
+    1,
+    now + Duration::from_secs(5),
+    now,
+  );
+  while a.poll_transmit().is_some() {}
+  assert_eq!(
+    a.pending_outbound_kinds.get(&rp_id),
+    Some(&super::ExchangeKind::ReliablePing),
+    "a reliable-ping intent is created even at a full user-message backlog"
+  );
+
+  // Neither exempt dial touched the user-message backlog.
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    k,
+    "push/pull and reliable-ping must not be counted against the user-message cap"
+  );
+  a.assert_user_dial_backlog_exact();
+}
+
+/// The incremental `user_dial_backlog` map equals the brute-force recount over
+/// `dial_pending` + `dial_parked` at every step of a scripted sequence that
+/// exercises the mint, park/re-park, tick-reservice, and leave-purge paths.
+///
+/// Mutation-verify: skip the `note_user_dial_enqueued` re-increment in
+/// `repark_blocked_dial` — the tick that re-parks the cold-peer intents drops their
+/// counts, so the incremental map drifts below the brute-force recount and
+/// `assert_user_dial_backlog_exact` fails.
+#[test]
+fn user_dial_backlog_incremental_matches_bruteforce() {
+  let a_addr: SocketAddr = "127.0.0.1:8630".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8631".parse().unwrap();
+  let cold: SocketAddr = "127.0.0.9:8632".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint_no_schedulers("a", a_addr, now);
+  let mut b = make_endpoint("b", b_addr, now);
+  a.assert_user_dial_backlog_exact();
+
+  // (1) Park several reliable user messages on a cold peer (each re-parks).
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..5 {
+    a.start_user_message(cold, payload.clone(), now)
+      .expect("cold-peer dial admitted");
+    while a.poll_transmit().is_some() {}
+    a.assert_user_dial_backlog_exact();
+  }
+  assert_eq!(a.user_dial_backlog(&cold), 5);
+
+  // (2) Establish B and mint several reliable user messages to it: each opens a
+  // bridge immediately, so it enters and leaves the pipeline within the call and
+  // contributes ZERO resident backlog.
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  for _ in 0..3 {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("established-peer dial mints a bridge");
+    while a.poll_transmit().is_some() {}
+    a.assert_user_dial_backlog_exact();
+  }
+  assert_eq!(
+    a.user_dial_backlog(&b_addr),
+    0,
+    "minted (non-parked) intents contribute no backlog"
+  );
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    5,
+    "the cold-peer backlog is unchanged"
+  );
+
+  // (3) Tick while the cold intents are still within their deadline: `service_dials`
+  // re-processes each parked entry (release on take-out, re-park re-counts), so the
+  // backlog is stable and the incremental map still matches the recount.
+  a.handle_timeout(now);
+  a.assert_user_dial_backlog_exact();
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    5,
+    "a re-park nets to one resident count, so the backlog holds across a tick"
+  );
+
+  // (4) Leave: the reliable-dial purge drains both structures; every counted intent
+  // is released and the map empties.
+  a.leave(now)
+    .expect("leave initiates the reliable-dial purge");
+  a.assert_user_dial_backlog_exact();
+  assert_eq!(
+    a.user_dial_backlog(&cold),
+    0,
+    "the leave purge releases every counted intent"
+  );
+  assert!(
+    a.user_dial_backlog.is_empty(),
+    "no dead peer entry survives the purge"
+  );
+}
+
+/// Config validation rejects a zero per-peer reliable-dial ceiling at the
+/// `QuicOptions::validate` chokepoint, and the default is 32.
+///
+/// Mutation-verify: drop the `max_pending_user_dials_per_peer == 0` guard in
+/// `QuicOptions::validate` — the zero config then validates `Ok`, so the
+/// `expect_err` fails.
+#[test]
+fn quic_options_validate_rejects_zero_user_dial_cap() {
+  assert_eq!(
+    test_config().max_pending_user_dials_per_peer(),
+    super::DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+    "the default per-peer reliable-dial ceiling is the documented default"
+  );
+  assert_eq!(
+    super::DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+    32,
+    "the documented default is 32"
+  );
+
+  let err = test_config()
+    .with_max_pending_user_dials_per_peer(0)
+    .validate()
+    .expect_err("a zero per-peer reliable-dial ceiling must be rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::MaxPendingUserDialsPerPeerZero),
+    "the rejection names the zero-ceiling guard, got {err:?}"
+  );
+
+  test_config()
+    .with_max_pending_user_dials_per_peer(1)
+    .validate()
+    .expect("a ceiling of 1 is the minimum usable value and validates");
+  test_config()
+    .validate()
+    .expect("the default config validates");
+}
+
+/// Establish `a -> b` via a datagram warm-up: the connection reaches Established
+/// with no bidi credit consumed and no bridge minted, so a boundedness test starts
+/// from a clean slate with the peer's full initial stream grant.
+fn establish_via_warmup(
+  a: &mut QuicEndpoint<SmolStr>,
+  a_addr: SocketAddr,
+  b: &mut QuicEndpoint<SmolStr>,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  let _ = a.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01warm"), now);
+  a.flush_outbound_transmits(now);
+  for _ in 0..300 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_connections_to(b_addr) >= 1 && !moved {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "precondition: A must establish a pooled connection to B"
+  );
+  while a.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+  while b.poll_event().is_some() {}
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: the datagram warm-up mints no bridge"
+  );
+}
+
+/// Supply bound under an honest wedge: with a peer that receives nothing back (an
+/// honest partition — a crashed / partitioned / wedged peer), the coordinator's
+/// per-connection resident dialer-bridge state and its total outbound-stream supply
+/// stay bounded by config constants, NOT by how many reliable user messages the
+/// application issues, and NOT growing across generations as bridges reap and
+/// re-mint.
+///
+/// `B` grants ample bidi credit (`C_OUT + 64`, so the LOCAL `C_OUT` cap — not the
+/// peer's `MAX_STREAMS` — binds the concurrent dialer set) behind a small
+/// connection window. After establishing via a datagram warm-up (no bridge minted,
+/// full bidi grant unconsumed), all `B -> A` datagrams are withheld: `A`'s outbound
+/// is drained and discarded so nothing crosses the partition and, crucially, `B`'s
+/// `MAX_STREAMS_BIDI` replenishments (which it would send as `A` resets timed-out
+/// streams) never reach `A`, freezing `A`'s peer-granted bidi credit at its initial
+/// grant. `A` then keeps issuing reliable user messages across several
+/// `stream_timeout` generations. The per-peer reliable-dial admission cap is raised
+/// far above the storm so admission never masks the QUIC-side supply bound.
+///
+/// Because each `open(Dir::Bi)` consumes one never-replenished bidi credit, the
+/// TOTAL dialer bridges opened over the whole wedge is bounded by the initial grant
+/// (a config constant) and the CONCURRENT resident set is bounded by `C_OUT` — with
+/// per-tick pump work bounded by the live set plus the pass budget in every
+/// generation, never scaling with the (raised, unbounded) parked-intent backlog.
+///
+/// The observable for total supply is the set of distinct bridge stream ids ever
+/// resident in `self.bridges` (a mint creates exactly one such id, and under the
+/// wedge a fresh mint survives — its deadline is in the future — until the next
+/// snapshot, so the union captures every mint); the concurrent bound is the
+/// `live_bridge_count` high-water.
+///
+/// Mutation-verify: disable the `C_OUT` pre-open gate in `process_dial_entry` — the
+/// resident dialer set then climbs to the peer's full granted bidi credit
+/// (`C_OUT + 64`, above `C_OUT`), so the `live_bridge_count` high-water passes
+/// `C_OUT + allowance` and that assertion fails.
+#[test]
+fn wedged_peer_supply_bounds_outbound_dialer_state() {
+  let a_addr: SocketAddr = "127.0.0.1:7838".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7839".parse().unwrap();
+  let mut now = Instant::now();
+
+  // A: periodic membership schedulers OFF (the user-message storm is the only
+  // dialer, so the observable is clean), a short `stream_timeout` (cheap
+  // virtual-time generations), and the per-peer reliable-dial admission cap raised
+  // far above the storm so admission never masks the QUIC-side bound.
+  const RAISED_ADMISSION: usize = 1 << 16;
+  let stream_timeout = Duration::from_millis(200);
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(stream_timeout);
+  let a_qc = test_config().with_max_pending_user_dials_per_peer(RAISED_ADMISSION);
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+
+  // B grants ample bidi credit (C_OUT + 64) behind a small connection window, so
+  // the LOCAL C_OUT cap binds the concurrent set while the connection window
+  // back-pressures the data.
+  const GRANTED_BIDI: u32 = super::C_OUT as u32 + 64;
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(
+    b_cfg,
+    test_config_small_conn_window_bidi(GRANTED_BIDI),
+    b_addr,
+    now,
+  );
+
+  establish_via_warmup(&mut a, a_addr, &mut b, b_addr, now);
+
+  // The wedge is now in force: from here NO `B -> A` byte is ever delivered. `A`'s
+  // outbound is drained and discarded so its `out` queue stays bounded, but B's
+  // stream-credit replenishments never reach A, freezing A's bidi grant.
+  const BATCH: usize = 512;
+  const GENERATIONS: usize = 4;
+  let payload = Bytes::from_static(b"reliable-user-message-under-honest-wedge");
+
+  let mut minted_ids: std::collections::HashSet<StreamId> = std::collections::HashSet::new();
+  let mut high_water_live = 0usize;
+  let mut ever_parked = false;
+  let mut total_started = 0usize;
+  // Allowance for rounding / a warm-up credit return / any exempt dial.
+  const ALLOWANCE: usize = 8;
+
+  for generation in 0..GENERATIONS {
+    // A keeps issuing reliable user messages to the wedged peer. Admission is
+    // raised sky-high, so each start registers an intent (minting a bridge if a
+    // C_OUT slot AND peer bidi credit are free, else parking) and is never refused.
+    for _ in 0..BATCH {
+      a.start_user_message(b_addr, payload.clone(), now)
+        .expect("raised admission never refuses under the wedge");
+      total_started += 1;
+    }
+    // Discard A's outbound: nothing crosses the partition, nothing returns.
+    while a.poll_transmit().is_some() {}
+    // Capture every bridge minted this generation before any reap can remove it.
+    for id in a.bridges.keys() {
+      minted_ids.insert(*id);
+    }
+    high_water_live = high_water_live.max(a.live_bridge_count());
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| !q.is_empty())
+      .unwrap_or(false)
+    {
+      ever_parked = true;
+    }
+    while a.poll_event().is_some() {}
+
+    // Advance one stream_timeout generation and tick. Expired bridges reap (freeing
+    // C_OUT slots) and the slot-free wake mints parked dials into the freed slots —
+    // but only up to the frozen bidi credit, so the supply cannot grow past the
+    // initial grant, and the resident set cannot exceed C_OUT.
+    now += stream_timeout + Duration::from_millis(1);
+    let bv_before = a.counters.bridge_visits;
+    a.handle_timeout(now);
+    let bv_delta = a.counters.bridge_visits - bv_before;
+    assert!(
+      bv_delta <= (super::C_OUT + super::MAX_BRIDGE_PUMPS_PER_PASS) as u64,
+      "generation {generation}: per-tick pump work must stay bounded by the live set plus \
+         the pass budget (<= C_OUT + budget = {}), never scaling with the parked \
+         backlog; got {bv_delta}",
+      super::C_OUT + super::MAX_BRIDGE_PUMPS_PER_PASS
+    );
+    // Capture any bridges the slot-free wake minted in this tick.
+    for id in a.bridges.keys() {
+      minted_ids.insert(*id);
+    }
+    high_water_live = high_water_live.max(a.live_bridge_count());
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+
+  let total_minted = minted_ids.len();
+
+  // Non-vacuity: the wedge genuinely parked excess dials, and issued far more starts
+  // than the bound allows to mint — so the bound actually bites.
+  assert!(
+    ever_parked,
+    "non-vacuous: the wedge must have parked excess dials"
+  );
+  assert!(
+    total_started >= BATCH * GENERATIONS,
+    "non-vacuous: every batch must have been issued"
+  );
+
+  // SUPPLY BOUND: over the whole wedge the coordinator opened at most a config
+  // constant of dialer bridges — the peer's initial (frozen, never-replenished)
+  // bidi grant plus a small allowance — NOT one per start_user_message.
+  let supply_bound = super::C_OUT + GRANTED_BIDI as usize + ALLOWANCE;
+  assert!(
+    total_minted <= supply_bound,
+    "supply bound: total distinct dialer bridges minted over the wedge ({total_minted}) \
+       must be <= C_OUT + granted_bidi + allowance = {supply_bound}"
+  );
+  assert!(
+    total_minted < total_started / 2,
+    "non-vacuous supply bound: {total_minted} mints must be far below the \
+       {total_started} starts issued (a per-start mint would explode past this)"
+  );
+
+  // CONCURRENT / RESIDENT BOUND (the C_OUT-gate-sensitive assertion): the resident
+  // dialer set never exceeded the local cap plus a small allowance across ANY
+  // generation — no per-generation growth in live bridge state.
+  assert!(
+    high_water_live <= super::C_OUT + ALLOWANCE,
+    "concurrent live dialer bridges high-water ({high_water_live}) must stay \
+       <= C_OUT + allowance = {} across every generation",
+    super::C_OUT + ALLOWANCE
+  );
+}
+
+/// Recovery drain: releasing an honest wedge does not disrupt the deadline
+/// machinery — the work parked during the partition drains (previously parked dials
+/// mint and their exchanges reach a terminal SUCCESS), driven purely by the poll
+/// surface, rather than stranding to a deadline failure.
+///
+/// Same wedge shape as `wedged_peer_supply_bounds_outbound_dialer_state`, with an
+/// ample `stream_timeout` so recovery has deadline headroom: `A` establishes to
+/// `B`, then — while `B -> A` is withheld — issues a batch exceeding `C_OUT` so a
+/// tail of dials parks (blocked, deadlines still in the future, nothing yet
+/// succeeded). The wedge is then RELEASED (bidirectional ferrying resumes) and the
+/// coordinators are driven purely by `poll_timeout` / `handle_timeout` (no manual
+/// servicing): `B`'s stream-credit replenishments reach `A`, the parked dials mint,
+/// the buffered payloads flush through the connection window, and the exchanges
+/// complete. Assertions are on COUNTERS and terminal outcomes, never wall-clock —
+/// the parked bucket drains to empty and the count of SUCCEEDED `ExchangeCompleted`
+/// events climbs above zero.
+///
+/// Mutation-verify: do NOT release — keep dropping the `B -> A` datagrams instead of
+/// ferrying them. The parked dials never regain stream credit, so no exchange
+/// reaches a SUCCEEDED terminus (each instead fails at its deadline) and the
+/// `succeeded > 0` assertion fails. (Surgically skipping a single `service_connection`
+/// is not cleanly mutable against the real poll surface, so dropping the release is
+/// the mutation, per the test contract.)
+#[test]
+fn released_wedge_drains_parked_dials_to_completion() {
+  let a_addr: SocketAddr = "127.0.0.1:7846".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7847".parse().unwrap();
+  let mut now = Instant::now();
+
+  // A: schedulers OFF (clean observation) with the DEFAULT stream_timeout, so the
+  // release has ample deadline headroom to complete the parked exchanges; admission
+  // raised so the wedge parks freely.
+  const RAISED_ADMISSION: usize = 1 << 16;
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let a_qc = test_config().with_max_pending_user_dials_per_peer(RAISED_ADMISSION);
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+
+  const GRANTED_BIDI: u32 = super::C_OUT as u32 + 64;
+  let b_cfg = EndpointOptions::new(SmolStr::new("b"), b_addr);
+  let mut b = make_endpoint_full(
+    b_cfg,
+    test_config_small_conn_window_bidi(GRANTED_BIDI),
+    b_addr,
+    now,
+  );
+
+  establish_via_warmup(&mut a, a_addr, &mut b, b_addr, now);
+
+  // WEDGE (no time advance): A issues a batch exceeding C_OUT so a tail parks.
+  // Small payloads so the release flushes them through the 16 KiB connection window
+  // in a few rounds. B -> A is withheld: A's transmits are discarded, so B never
+  // sees the messages and nothing completes yet.
+  const BATCH: usize = super::C_OUT + 128;
+  let payload = Bytes::from_static(b"recover");
+  for _ in 0..BATCH {
+    a.start_user_message(b_addr, payload.clone(), now)
+      .expect("raised admission never refuses");
+  }
+  while a.poll_transmit().is_some() {}
+  let parked_before = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+  assert!(
+    parked_before > 0,
+    "precondition: the wedge must park a tail of dials (issued {BATCH}, cap C_OUT={})",
+    super::C_OUT
+  );
+  // Nothing has completed under the wedge (B never received a message).
+  let mut succeeded = 0usize;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      assert!(
+        !ec.outcome().is_succeeded(),
+        "no exchange can succeed while B -> A is withheld"
+      );
+    }
+  }
+  while b.poll_event().is_some() {}
+
+  // RELEASE: resume bidirectional ferrying and drive purely via the poll surface
+  // (ferry + poll_timeout + handle_timeout). B's credit replenishments now reach A,
+  // the parked dials mint, and the exchanges flush and complete.
+  let mut steps = 0usize;
+  loop {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(ec) = ev {
+        if ec.outcome().is_succeeded() {
+          succeeded += 1;
+        }
+      }
+    }
+    while b.poll_event().is_some() {}
+
+    let parked = a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0);
+    if !moved && parked == 0 && a.live_bridge_count() == 0 {
+      break;
+    }
+    // Advance to the earliest scheduled wake (the poll surface drives the clock),
+    // never backwards and always strictly forward so an ACK/idle timer can fire.
+    let next = [a.poll_timeout(), b.poll_timeout()]
+      .into_iter()
+      .flatten()
+      .min()
+      .unwrap_or(now)
+      .max(now + Duration::from_millis(1));
+    now = next;
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+
+    steps += 1;
+    assert!(
+      steps < 20_000,
+      "the release drain must converge via the poll surface, not spin; still {} parked, \
+         {} live after {steps} steps",
+      a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+      a.live_bridge_count()
+    );
+  }
+
+  // The parked/blocked work drained — no strand.
+  assert_eq!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0),
+    0,
+    "release must drain the parked dial bucket to empty (no strand)"
+  );
+  // Release enabled real completions: exchanges reached a SUCCEEDED terminus within
+  // their deadline, driven purely by the poll surface. Dropping the release (the
+  // mutation) leaves this at zero.
+  assert!(
+    succeeded > 0,
+    "release must let parked exchanges reach a SUCCEEDED terminus (got {succeeded}); \
+       withholding B -> A instead fails every exchange at its deadline"
+  );
+}
+
+// ============================================================================
+// Deadline-phased dial wakes: a budget-deferred but still-creditable parked dial
+// gets a pre-deadline SERVICE wake (mechanism (a)), a liveness-critical reliable-ping
+// fallback pops past a spent budget (mechanism (b)), and a near-deadline peer is
+// front-deposited into the catch-up ledger (mechanism (c)).
+// ============================================================================
+
+/// Inject `count` real reliable user-message dial intents parked on `peer` as the
+/// post-re-park state a budget-deferred burst reaches on a since-established, amply
+/// credited connection: each carries a real machine intent (so `dial_succeeded`
+/// resolves it into a `Stream`), `attempted = true`, its PHASED service wake computed
+/// via the production [`QuicEndpoint::dial_wake`] (so a `dial_wake ≡ deadline` mutation
+/// propagates into the injected keys and the test observably fails), and its
+/// `TimerKey::Dial` key registered at that wake. Bypasses the coordinator admission
+/// gate via the raw endpoint. Returns the common deadline (`now + stream_timeout`).
+fn park_phased_user_dials(
+  a: &mut QuicEndpoint<SmolStr>,
+  peer: SocketAddr,
+  count: usize,
+  now: Instant,
+) -> Instant {
+  let payload = Bytes::from_static(b"x");
+  for _ in 0..count {
+    a.endpoint_mut()
+      .start_user_message(peer, payload.clone(), now)
+      .expect("the raw endpoint registers a reliable user-message dial intent");
+  }
+  a.sieve_dial_events();
+  let pending: Vec<super::PendingDial> = a.dial_pending.drain(..).collect();
+  assert_eq!(
+    pending.len(),
+    count,
+    "all injected intents sieve into dial_pending"
+  );
+  a.unattempted_dial_count = 0;
+  let mut deadline = now;
+  for mut pd in pending {
+    pd.attempted = true;
+    deadline = pd.deadline;
+    let wake = a.dial_wake(pd.deadline, now);
+    pd.wake = wake;
+    let id = pd.id;
+    a.dial_parked.entry(peer).or_default().push_back(pd);
+    a.deadline_index.set(super::TimerKey::Dial(id), Some(wake));
+  }
+  while a.poll_event().is_some() {}
+  deadline
+}
+
+/// Quiesce a coordinator's handshake-queued pending events so no ImmediateDue anchor
+/// competes with the phased dial wakes during a strict-poll drive.
+fn quiesce(a: &mut QuicEndpoint<SmolStr>, now: Instant) {
+  for _ in 0..10 {
+    if a.conns_with_pending_events.is_empty() {
+      break;
+    }
+    a.handle_timeout(now);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  while a.poll_transmit().is_some() {}
+  while a.poll_event().is_some() {}
+}
+
+/// T1 (single-peer, deep ledger). A budget-deferred creditable tail parked ~one
+/// stream-timeout deep on ONE amply-credited peer is minted before its deadline by the
+/// phased pre-deadline SERVICE wake — position-independently of the ledger depth. The
+/// ledger is deliberately DEEP (reach latency `ceil(200/64)=4` intervals = 40ms > the
+/// 30ms deadline), so the FIFO catch-up alone cannot drain the tail in time: only the
+/// phased wake's unbudgeted full-drain can. That defeats the empty-window trap where a
+/// shallow ledger drains within the margin and a `dial_wake ≡ deadline` mutation
+/// falsely passes.
+///
+/// Mutation (reverting the phased wake so `dial_wake` returns `deadline`): the injected
+/// keys and the production re-park land at the deadline, so the tail the catch-up cannot reach in
+/// four-intervals-worth of budget retires at 30ms — `saw_failure` trips and the minted
+/// count falls short of `M`.
+#[test]
+fn phased_wake_mints_deep_single_peer_tail_before_deadline() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8400".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8401".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1024),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: the warm-up mints no bridge"
+  );
+
+  const M: usize = 200;
+  let deadline = park_phased_user_dials(&mut a, b_addr, M, now);
+  assert_eq!(deadline, now + Duration::from_millis(30));
+  assert!(
+    a.dial_parked.get(&b_addr).map(|q| q.len()).unwrap_or(0) > super::MAX_DIAL_ATTEMPTS_PER_PASS,
+    "the ledger is deeper than the per-pass budget"
+  );
+  a.ready_dial_peers.insert(b_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty parked-dial cohort always schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "every deep-ledger dial is minted before its deadline via the phased service wake"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    M,
+    "all M dials minted a real bridge (none retired despite capacity)"
+  );
+  assert!(
+    !saw_failure,
+    "no dial retired to Failed — the phased wake attempts the whole table before the deadline"
+  );
+}
+
+/// T2 (multi-peer burst). The phased wake's full-drain is position-independent ACROSS
+/// peers: two amply-credited peers each carry a budget-deferred creditable tail in one
+/// shared ledger, and every dial on BOTH peers mints before its deadline. The shared
+/// per-pass budget cannot finish both buckets in the deadline window, so a
+/// `dial_wake ≡ deadline` mutation strands whichever bucket the FIFO catch-up did not
+/// reach — the multi-bucket twin of T1.
+///
+/// The same reverted phased wake fails it identically: the tail of the peer the
+/// catch-up reaches second retires at its deadline.
+#[test]
+fn phased_wake_mints_multi_peer_burst_before_deadline() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8404".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8405".parse().unwrap();
+  let c_addr: SocketAddr = "127.0.0.1:8406".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1024),
+    b_addr,
+    now,
+  );
+  let mut c = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("c"), c_addr),
+    test_config_bidi_limit(1024),
+    c_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  establish(&mut a, &mut c, a_addr, c_addr, now);
+  quiesce(&mut a, now);
+  assert_eq!(
+    a.live_bridge_count(),
+    0,
+    "precondition: no bridge minted in the warm-up"
+  );
+
+  // Each bucket deeper than the shared budget, so one shared per-pass budget cannot
+  // finish both within the deadline window.
+  const PER_PEER: usize = 120;
+  let d_b = park_phased_user_dials(&mut a, b_addr, PER_PEER, now);
+  let d_c = park_phased_user_dials(&mut a, c_addr, PER_PEER, now);
+  assert_eq!(d_b, now + Duration::from_millis(30));
+  assert_eq!(d_c, now + Duration::from_millis(30));
+  a.ready_dial_peers.insert(b_addr);
+  a.ready_dial_peers.insert(c_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    let b_done = a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true);
+    let c_done = a
+      .dial_parked
+      .get(&c_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true);
+    if b_done && c_done {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ledger schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    2 * PER_PEER,
+    "every dial on both peers minted before its deadline"
+  );
+  assert!(
+    !saw_failure,
+    "no dial on either peer retired despite capacity"
+  );
+}
+
+/// T6 (no busy loop, no re-chunk). A never-creditable blocked dial fires at most
+/// `ceil(M/I) + 1` full ticks across its final window (the chained phase spaces its
+/// wakes at least one interval apart and lands the last exactly on the deadline), and
+/// repeated `poll_timeout` without advancing time returns a constant future instant.
+///
+/// Mutation (phase 2 → naive `deadline - M`): after the `deadline - M` service tick
+/// re-parks, the wake is re-registered at `deadline - M`, now in the PAST, so
+/// `poll_timeout` returns a past instant and the strict-poll loop spins at the same
+/// instant without ever advancing to the deadline — the invocation count explodes past
+/// the bound and the dial never retires.
+#[test]
+fn phased_wake_chained_phase_does_not_busy_loop() {
+  let a_addr: SocketAddr = "127.0.0.1:8408".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8409".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  // B grants ZERO bidi credit, so every dial re-parks (established, never creditable)
+  // and rides its phased wake to the deadline — no handshake timers, no capacity.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  // One reliable user-message dial re-parks on B (0 credit) with its phased wake.
+  let id = a
+    .start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()),
+    "the dial re-parks behind zero bidi credit"
+  );
+  assert!(
+    !a.bridges.contains_key(&id),
+    "no bridge minted at zero credit"
+  );
+
+  // Repeated poll_timeout without advancing time returns a CONSTANT future instant.
+  let w1 = a.poll_timeout().expect("a parked dial schedules a wake");
+  let w2 = a.poll_timeout().expect("a parked dial schedules a wake");
+  assert_eq!(
+    w1, w2,
+    "repeated poll_timeout without time advance is constant"
+  );
+  assert!(
+    w1 > now,
+    "the service wake is strictly future — no busy loop"
+  );
+
+  // Strict-poll drive; count handle_timeout invocations. The chained phase spaces the
+  // wakes at >= one interval, so the dial converges in a few ticks and retires at the
+  // deadline. A past-instant phase-2 wake (the naive `deadline - M`) would spin here to
+  // the bound.
+  let mut ticks = 0usize;
+  let mut retired = false;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      retired = true;
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    ticks += 1;
+  }
+  assert!(
+    retired,
+    "the blocked dial retires at its deadline (never strands)"
+  );
+  // M / I + 2 = 20/10 + 2 = 4; the phased chain fires at ~D-20, D-10, D.
+  assert!(
+    ticks <= 4,
+    "the chained phase fires at most M/I + 2 ticks in the final window, got {ticks}; a naive \
+       past-instant phase-2 wake would spin to the loop bound"
+  );
+}
+
+/// T7 (retire-timing authority). The retire pre-check reads the true `deadline`, never
+/// the phased service `wake`: a never-creditable blocked dial's Failed completion
+/// surfaces at exactly the deadline, not at the earlier `deadline - M` service wake.
+///
+/// Mutation (pre-check reads `now >= wake` instead of `now >= deadline`): the very first service wake at
+/// `deadline - M` retires the dial early, so the Failed completion surfaces a full
+/// margin before the true deadline.
+#[test]
+fn retire_pre_check_uses_deadline_not_service_wake() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8412".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8413".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(30));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_millis(30);
+  let service_wake = a.dial_wake(deadline, now);
+  assert_eq!(
+    service_wake,
+    now + Duration::from_millis(10),
+    "the first service wake is one margin before the deadline"
+  );
+  let id = a
+    .start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()));
+
+  let mut failed_at: Option<Instant> = None;
+  for _ in 0..64 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed && p.eid() == crate::event::ExchangeId::from(id) {
+          failed_at = Some(wake);
+        }
+      }
+    }
+  }
+  assert_eq!(
+    failed_at,
+    Some(deadline),
+    "the Failed completion surfaces at exactly the deadline, never at the earlier service wake"
+  );
+}
+
+/// Drive ONE never-creditable blocked reliable dial (B grants zero bidi credit) from park
+/// to its retire deadline via the strict poll surface, returning the number of full
+/// `run_tick`s its phased service-wake chain drove (the `membership_time_advances` delta,
+/// incremented once per `run_tick`). Periodic schedulers are off and the established
+/// connection is idle (20s idle timeout), so the ONLY scheduled `TimerKey` due inside the
+/// window is the dial's own `TimerKey::Dial`: the delta is exactly the phased chain's
+/// full-tick count, `1 + ceil(margin / interval)`.
+fn blocked_dial_full_run_ticks(
+  stream_timeout: Duration,
+  catchup_interval: Duration,
+  margin: Duration,
+) -> u64 {
+  let a_addr: SocketAddr = "127.0.0.1:8460".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8461".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(stream_timeout);
+  let a_qc = test_config()
+    .with_catchup_interval(catchup_interval)
+    .with_dial_service_margin(margin);
+  // Every ratio this harness drives is one `validate` accepts — guard against an
+  // accidentally out-of-range knob masking the property under test.
+  a_qc
+    .validate()
+    .expect("the harness margin/interval ratio is valid");
+  let mut a = make_endpoint_full(a_cfg, a_qc, a_addr, now);
+  // B grants ZERO bidi credit, so every attempt re-parks (established, never creditable)
+  // and rides its phased wake to the deadline — no handshake timers, no capacity.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+
+  a.start_user_message(b_addr, Bytes::from_static(b"x"), now)
+    .expect("A schedules a reliable user-message dial");
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.dial_parked.get(&b_addr).is_some_and(|q| !q.is_empty()),
+    "the dial re-parks behind zero bidi credit"
+  );
+
+  // Strict-poll drive: advance ONLY via poll_timeout/handle_timeout, following the wake
+  // chain to the deadline, counting full run_ticks. The generous cap lets an
+  // unbounded-ratio mutation (which fires ~min(M, life)/interval ticks) run to completion
+  // so its explosion is observed rather than truncated.
+  let before = a.membership_time_advances();
+  for _ in 0..4096 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a parked dial always schedules a wake");
+    a.handle_timeout(wake);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+  }
+  assert!(
+    a.dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true),
+    "the blocked dial must retire at its deadline (never strand)"
+  );
+  a.membership_time_advances() - before
+}
+
+/// A single never-creditable blocked reliable dial fires a CONSTANT number of full
+/// `run_tick`s over its whole life — `1 + ceil(M / I)`, which the `M <= 2 * I` validation
+/// bound pins to at most 3 — INDEPENDENT of both the dial's `stream_timeout` (its life)
+/// and the absolute interval. The service phase places exactly one pre-deadline wake and
+/// the chained phase spans only the final `M` window, so the pre-deadline life contributes
+/// no phased ticks: growing the life leaves the count flat. This is the honest-load bound
+/// the `dial_service_margin <= 2 * catchup_interval` guard restores over an unbounded
+/// margin/interval ratio.
+///
+/// Mutation-verify (remove the upper-bound guard in `QuicOptions::validate` and drive
+/// `M = 100 * I` with a proportional life): the chained phase then spans the whole
+/// `min(M, life)` window and fires ~`min(M, life) / I` full ticks (about 100), scaling with
+/// the life and the interval — the flat-count assertions below fail.
+#[test]
+fn phased_wake_full_tick_count_is_flat_across_dial_life() {
+  let i = Duration::from_millis(10);
+  let m = i * 2; // the MAX ratio `validate` permits (also the default margin/interval).
+
+  // Independent of the dial's life: a ~16x-longer stream_timeout yields the same count.
+  let short_life = blocked_dial_full_run_ticks(Duration::from_millis(30), i, m);
+  let long_life = blocked_dial_full_run_ticks(Duration::from_millis(500), i, m);
+  assert_eq!(
+    short_life, long_life,
+    "the full run_tick count must be flat across the dial's life (short={short_life}, \
+       long={long_life}); an unbounded M/I ratio would make the longer life scale"
+  );
+
+  // Independent of the absolute interval: scaling I and M together (ratio held at 2) over
+  // a proportionally wider window yields the same count.
+  let scaled = blocked_dial_full_run_ticks(
+    Duration::from_millis(500),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+  );
+  assert_eq!(
+    scaled, long_life,
+    "the full run_tick count must be flat across the absolute interval \
+       (scaled={scaled}, base={long_life})"
+  );
+
+  // The pinned constant: 1 + ceil(M / I) = 1 + 2 = 3 at the max allowed ratio.
+  assert!(
+    (1..=3).contains(&long_life),
+    "a blocked dial fires 1..=1+ceil(M/I) = 1..=3 full ticks at the max allowed ratio, \
+       got {long_life}"
+  );
+}
+
+/// T8 (oracle invariance under the folded wake). Re-parked dials carry a PHASED wake,
+/// and the after-every-operation deadline-index oracle folds `entry.wake` — exactly
+/// what each `TimerKey::Dial` key is set to — so the incremental index and the
+/// brute-force fold agree. This is the missed-registration-site guard.
+///
+/// Mutation (the missed-site class): register the `Dial` key at `deadline` while the
+/// entry stores the phased `wake` (or fold `entry.deadline` in the oracle) — the index
+/// then diverges from the fold and `assert_deadline_index_matches` fails.
+#[test]
+fn deadline_index_oracle_folds_phased_dial_wake() {
+  let a_addr: SocketAddr = "127.0.0.1:8416".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8417".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(50));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(0),
+    b_addr,
+    now,
+  );
+  establish(&mut a, &mut b, a_addr, b_addr, now);
+  quiesce(&mut a, now);
+  assert_deadline_index_matches(&mut a, "after establish + quiesce");
+
+  // Several reliable dials re-park on B (0 credit), each registering a phased wake.
+  for _ in 0..4 {
+    a.start_user_message(b_addr, Bytes::from_static(b"x"), now)
+      .expect("A schedules a reliable user-message dial");
+    while a.poll_transmit().is_some() {}
+    assert_deadline_index_matches(&mut a, "after a phased re-park");
+  }
+
+  // Advance across the phased service window; each re-park re-registers a fresh phased
+  // wake, and the oracle must track it after every tick.
+  for _ in 0..8 {
+    if a
+      .dial_parked
+      .get(&b_addr)
+      .map(|q| q.is_empty())
+      .unwrap_or(true)
+    {
+      break;
+    }
+    let wake = a.poll_timeout().expect("a parked dial schedules a wake");
+    a.handle_timeout(wake);
+    while a.poll_transmit().is_some() {}
+    while a.poll_event().is_some() {}
+    assert_deadline_index_matches(&mut a, "after a phased-wake tick");
+  }
+}
+
+/// T3 (mechanism (b): reliable-ping exempt-pop past a spent budget). A liveness-critical
+/// reliable-ping fallback at the FRONT of a peer's bucket mints even when the pass's
+/// shared dial budget is already ZERO — the pass-budget twin of the reliable-ping
+/// outbound-cap exemption — so an honest FSM ping is never deferred to its cumulative
+/// probe deadline (a false Suspect) behind a user-message flood on other peers.
+///
+/// Mutation (removing the reliable-ping exempt-pop): with a zero budget the pass makes no attempt,
+/// the front ping stays parked, and no bridge mints.
+#[test]
+fn reliable_ping_front_mints_past_zero_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:8420".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8421".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config_bidi_limit(64),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  // Inject a machine-internal reliable-ping parked at the FRONT of Y's bucket, near its
+  // cumulative deadline (as the probe FSM's escalation leaves it).
+  let deadline = now + Duration::from_millis(5);
+  let ping_id = a
+    .endpoint_mut()
+    .start_reliable_ping(SmolStr::new("y"), y_addr, 7, deadline);
+  a.sieve_dial_events();
+  let mut pd = a
+    .dial_pending
+    .pop_front()
+    .expect("the reliable-ping sieved into dial_pending");
+  a.unattempted_dial_count = 0;
+  assert!(
+    matches!(pd.kind, super::ExchangeKind::ReliablePing),
+    "the sieved intent is stamped ReliablePing"
+  );
+  pd.attempted = true;
+  pd.wake = a.dial_wake(pd.deadline, now);
+  let wake = pd.wake;
+  a.dial_parked.entry(y_addr).or_default().push_front(pd);
+  a.deadline_index
+    .set(super::TimerKey::Dial(ping_id), Some(wake));
+  while a.poll_event().is_some() {}
+  assert!(
+    !a.bridges.contains_key(&ping_id),
+    "precondition: the ping has not opened yet"
+  );
+
+  // Service Y with a ZERO budget (the shared budget spent by other peers this pass).
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  while a.poll_transmit().is_some() {}
+  assert!(
+    a.bridges.contains_key(&ping_id),
+    "the front reliable-ping mints even at zero budget (mechanism (b)); removing the \
+       exempt-pop parks it to a false Suspect"
+  );
+}
+
+/// T4 (mechanism (c): urgent front-deposit ordering). A budget-deferred peer whose front
+/// dial is within two catch-up intervals of its DEADLINE is deposited at the FRONT of
+/// the ready-dial ledger, ahead of a pre-existing non-urgent peer, so the next catch-up
+/// pass reaches it first.
+///
+/// Mutation (reverting the urgent front-deposit: `insert_front` -> `insert`): the urgent peer is queued at the
+/// BACK, so the pre-existing peer stays at the front of the ledger and the pop order
+/// reverses.
+#[test]
+fn urgent_near_deadline_peer_front_deposits_ahead_of_ledger() {
+  let a_addr: SocketAddr = "127.0.0.1:8424".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+
+  // A pre-existing non-urgent peer P already at the front of the ledger.
+  let p_addr: SocketAddr = "127.0.0.9:9800".parse().unwrap();
+  a.ready_dial_peers.insert(p_addr);
+
+  // A budget-deferred peer U with a NEAR-deadline front dial (no connection needed — a
+  // zero-budget pass makes no attempt, it only reaches the deposit chokepoint).
+  let u_addr: SocketAddr = "127.0.0.9:9801".parse().unwrap();
+  a.dial_parked
+    .entry(u_addr)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(130_000),
+      peer: u_addr,
+      deadline: now + Duration::from_millis(5),
+      wake: now + Duration::from_millis(5),
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(u_addr, now, &mut budget);
+
+  assert_eq!(a.ready_dial_peers.len(), 2, "both peers are queued");
+  assert_eq!(
+    a.ready_dial_peers.pop_front(),
+    Some(u_addr),
+    "the near-deadline peer front-deposits ahead of the FIFO tail (mechanism (c)); a \
+       plain back-insert leaves P at the front"
+  );
+  assert_eq!(a.ready_dial_peers.pop_front(), Some(p_addr));
+}
+
+/// T5 (stale-prefix interaction). Front-depositing an urgent LIVE peer ahead of a long
+/// STALE prefix (peers resident in the ledger with an ABSENT bucket) neither dodges the
+/// per-pass visit budget nor reopens the O(ledger) stale walk: one catch-up services the
+/// urgent peer, self-cleans stale entries up to the visit cap, and pops at most the cap.
+#[test]
+fn urgent_front_deposit_over_stale_prefix_respects_visit_cap() {
+  let a_addr: SocketAddr = "127.0.0.1:8428".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
+
+  // An urgent peer U (front-deposited); its dial retires via the global connection cap
+  // when serviced, which is enough to prove the catch-up REACHED it in the first pass.
+  let u_addr: SocketAddr = "127.0.0.9:9900".parse().unwrap();
+  a.dial_parked
+    .entry(u_addr)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(140_000),
+      peer: u_addr,
+      deadline: now + Duration::from_millis(5),
+      wake: now + Duration::from_millis(5),
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(u_addr, now, &mut budget);
+  assert_eq!(
+    a.ready_dial_peers.pop_front(),
+    Some(u_addr),
+    "the urgent peer is front-deposited"
+  );
+  // Re-establish the ledger for the drive: U at front, then a long stale prefix.
+  a.ready_dial_peers.insert(u_addr);
+  const STALE: usize = 150;
+  for i in 0..STALE {
+    let s: SocketAddr = format!("127.0.0.10:{}", 10_000 + i).parse().unwrap();
+    a.ready_dial_peers.insert(s);
+  }
+  assert_eq!(a.ready_dial_peers.len(), 1 + STALE);
+
+  let visits_before = a.counters.ready_dial_peer_visits;
+  a.catchup_service(now);
+  let visits = a.counters.ready_dial_peer_visits - visits_before;
+  assert!(
+    visits <= super::MAX_READY_DIAL_VISITS_PER_PASS as u64,
+    "one catch-up pops at most the visit cap ({}), got {visits} — the front-insert does not \
+       dodge the visit budget",
+    super::MAX_READY_DIAL_VISITS_PER_PASS
+  );
+  assert!(
+    !a.dial_parked.contains_key(&u_addr),
+    "the urgent peer, front-deposited, is serviced in the first interval (its bucket drains)"
+  );
+  assert!(
+    a.ready_dial_peers.len() < 1 + STALE,
+    "stale entries self-clean during the pass (they never re-deposit)"
+  );
+}
+
+/// T10 (budget negative control). With NO front ping, `service_peer_bucket` attempts at
+/// most the pass budget: the exempt-pop is strictly kind-gated to reliable-ping.
+///
+/// Mutation (dropping the reliable-ping kind gate, exempting EVERY front entry): the pass pops up
+/// to the exempt cap of extra user-message entries past the budget, so the attempt count
+/// exceeds the budget.
+#[test]
+fn service_peer_bucket_without_pings_attempts_at_most_the_budget() {
+  let a_addr: SocketAddr = "127.0.0.1:8432".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  // A zero global connection cap retires every dial via `AtGlobalCap` (no repark), so the
+  // whole budget is spent and the exempt branch is reached with a non-ping front.
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_quic_connections(Some(0)),
+    a_addr,
+    now,
+  );
+  let peer: SocketAddr = "127.0.0.9:9950".parse().unwrap();
+  let far = now + Duration::from_secs(30);
+  const N: usize = 100;
+  for i in 0..N {
+    a.dial_parked
+      .entry(peer)
+      .or_default()
+      .push_back(super::PendingDial {
+        id: StreamId::from_raw(150_000 + i as u64),
+        peer,
+        deadline: far,
+        wake: far,
+        attempted: true,
+        kind: super::ExchangeKind::UserMessage,
+      });
+  }
+  let before = a.counters.dial_entries_serviced;
+  let mut budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(peer, now, &mut budget);
+  let attempts = a.counters.dial_entries_serviced - before;
+  assert_eq!(
+    attempts,
+    super::MAX_DIAL_ATTEMPTS_PER_PASS as u64,
+    "with no front reliable-ping the pass attempts exactly the budget; a kind-less \
+       exempt-pop attempts up to the exempt cap more"
+  );
+  assert_eq!(budget, 0, "the whole budget is spent");
+}
+
+/// (c) fairness backstop (§ round-robin urgent-lane exception). The urgent front-deposit
+/// makes the ready-dial lane LIFO and a deep near-deadline monopolist can starve the FIFO
+/// tail — accepted because correctness rests on (a), not on ledger order. With two small
+/// urgent peers plus a deep near-deadline monopolist, every dial STILL mints before its
+/// deadline via the phased service wake, whatever churn (c) causes in the ledger.
+#[test]
+fn urgent_lane_monopolist_does_not_starve_correctness() {
+  use crate::event::{Event, ExchangeStatus};
+  let a_addr: SocketAddr = "127.0.0.1:8436".parse().unwrap();
+  let m_addr: SocketAddr = "127.0.0.1:8437".parse().unwrap();
+  let u1_addr: SocketAddr = "127.0.0.1:8438".parse().unwrap();
+  let u2_addr: SocketAddr = "127.0.0.1:8439".parse().unwrap();
+  let now = Instant::now();
+  // A near deadline (15ms) makes every re-deposit urgent, so the deep monopolist
+  // re-front-inserts every interval — the LIFO-starvation shape (c) permits.
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO)
+    .with_stream_timeout(Duration::from_millis(15));
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut m = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("m"), m_addr),
+    test_config_bidi_limit(1024),
+    m_addr,
+    now,
+  );
+  let mut u1 = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("u1"), u1_addr),
+    test_config_bidi_limit(64),
+    u1_addr,
+    now,
+  );
+  let mut u2 = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("u2"), u2_addr),
+    test_config_bidi_limit(64),
+    u2_addr,
+    now,
+  );
+  establish(&mut a, &mut m, a_addr, m_addr, now);
+  establish(&mut a, &mut u1, a_addr, u1_addr, now);
+  establish(&mut a, &mut u2, a_addr, u2_addr, now);
+  quiesce(&mut a, now);
+
+  const MONOPOLIST: usize = 200;
+  const SMALL: usize = 5;
+  let _ = park_phased_user_dials(&mut a, m_addr, MONOPOLIST, now);
+  let _ = park_phased_user_dials(&mut a, u1_addr, SMALL, now);
+  let _ = park_phased_user_dials(&mut a, u2_addr, SMALL, now);
+  a.ready_dial_peers.insert(m_addr);
+  a.ready_dial_peers.insert(u1_addr);
+  a.ready_dial_peers.insert(u2_addr);
+  a.reconcile_catchup_anchor(now);
+
+  let mut saw_failure = false;
+  for _ in 0..64 {
+    let done = [m_addr, u1_addr, u2_addr]
+      .iter()
+      .all(|p| a.dial_parked.get(p).map(|q| q.is_empty()).unwrap_or(true));
+    if done {
+      break;
+    }
+    let wake = a
+      .poll_timeout()
+      .expect("a non-empty ledger schedules a wake");
+    a.handle_timeout(wake);
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(p) = ev {
+        if p.outcome() == ExchangeStatus::Failed {
+          saw_failure = true;
+        }
+      }
+    }
+  }
+  assert_eq!(
+    a.live_bridge_count(),
+    MONOPOLIST + 2 * SMALL,
+    "every dial — monopolist AND both small urgent peers — mints before its deadline; (a) \
+       backstops the urgent-lane starvation (c) permits"
+  );
+  assert!(!saw_failure, "no dial retired despite capacity");
+}
+
+/// Config knob: `catchup_interval` default and validation (zero and over-ceiling).
+#[test]
+fn quic_options_catchup_interval_default_and_validation() {
+  assert_eq!(
+    test_config().catchup_interval(),
+    super::DEFAULT_CATCHUP_INTERVAL,
+    "the accessor returns the documented default"
+  );
+  assert_eq!(super::DEFAULT_CATCHUP_INTERVAL, Duration::from_millis(10));
+
+  let err = test_config()
+    .with_catchup_interval(Duration::ZERO)
+    .validate()
+    .expect_err("a zero catch-up interval is rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::CatchupIntervalZero),
+    "got {err:?}"
+  );
+
+  let err = test_config()
+    .with_catchup_interval(super::MAX_CATCHUP_INTERVAL + Duration::from_millis(1))
+    .validate()
+    .expect_err("a catch-up interval above the ceiling is rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::CatchupIntervalTooLarge),
+    "got {err:?}"
+  );
+
+  // At the ceiling validates when the margin is raised to keep margin >= interval.
+  test_config()
+    .with_catchup_interval(super::MAX_CATCHUP_INTERVAL)
+    .with_dial_service_margin(super::MAX_CATCHUP_INTERVAL)
+    .validate()
+    .expect("a ceiling interval with a matching margin validates");
+}
+
+/// Config knob: `dial_service_margin` default and the cross-field range
+/// `[catchup_interval, 2 * catchup_interval]` — both the floor (>= interval) and the
+/// ceiling (<= twice interval, which bounds a blocked dial's phased-wake tick chain).
+#[test]
+fn quic_options_dial_service_margin_default_and_validation() {
+  assert_eq!(
+    test_config().dial_service_margin(),
+    super::DEFAULT_DIAL_SERVICE_MARGIN
+  );
+  assert_eq!(
+    super::DEFAULT_DIAL_SERVICE_MARGIN,
+    Duration::from_millis(20)
+  );
+
+  let interval = test_config().catchup_interval();
+
+  // Below the catch-up interval (10ms) is rejected by the lower-bound guard.
+  let err = test_config()
+    .with_dial_service_margin(Duration::from_millis(5))
+    .validate()
+    .expect_err("a margin below the catch-up interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginBelowCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // Exactly one interval is the floor and validates.
+  test_config()
+    .with_dial_service_margin(interval)
+    .validate()
+    .expect("a margin equal to the catch-up interval validates");
+
+  // Exactly twice the interval is the ceiling and validates; the default sits here.
+  test_config()
+    .with_dial_service_margin(interval * 2)
+    .validate()
+    .expect("a margin equal to twice the catch-up interval validates");
+  assert_eq!(
+    super::DEFAULT_DIAL_SERVICE_MARGIN,
+    interval * 2,
+    "the default margin sits exactly at the enforced ceiling"
+  );
+
+  // Just above twice the interval is rejected by the upper-bound guard.
+  let err = test_config()
+    .with_dial_service_margin(interval * 2 + Duration::from_millis(1))
+    .validate()
+    .expect_err("a margin above twice the catch-up interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // The finding's exact shape: a large absolute margin (10s) against the default 10ms
+  // interval is a ratio far above two, so it is rejected — an unbounded ratio is what
+  // would let one blocked dial fire ~stream_timeout/interval full O(N) ticks.
+  let err = test_config()
+    .with_dial_service_margin(Duration::from_secs(10))
+    .validate()
+    .expect_err("a 10s margin against the 10ms interval is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval
+    ),
+    "got {err:?}"
+  );
+
+  // Configurability preserved: the ratio is bounded, not the absolute margin. A 200ms
+  // margin is reachable by raising the interval to 100ms so the ratio stays <= 2.
+  test_config()
+    .with_catchup_interval(Duration::from_millis(100))
+    .with_dial_service_margin(Duration::from_millis(200))
+    .validate()
+    .expect("a 200ms margin validates when the interval is raised to 100ms (ratio 2)");
+}
+
+/// Config knob: `max_reliable_ping_exempt_pops_per_pass` default and zero rejection.
+#[test]
+fn quic_options_ping_exempt_cap_default_and_validation() {
+  assert_eq!(
+    test_config().max_reliable_ping_exempt_pops_per_pass(),
+    super::DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS
+  );
+  assert_eq!(super::DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS, 8);
+
+  let err = test_config()
+    .with_max_reliable_ping_exempt_pops_per_pass(0)
+    .validate()
+    .expect_err("a zero exempt-pop cap is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::MaxReliablePingExemptPopsPerPassZero
+    ),
+    "got {err:?}"
+  );
+
+  test_config()
+    .with_max_reliable_ping_exempt_pops_per_pass(1)
+    .validate()
+    .expect("a cap of 1 validates");
+  test_config()
+    .validate()
+    .expect("the default config validates");
 }

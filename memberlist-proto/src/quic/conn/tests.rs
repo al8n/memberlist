@@ -27,10 +27,24 @@ fn dial_inserts_then_reuse_returns_same_handle() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   let ch2 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(ch1, ch2, "second call reuses the peer connection");
   assert_eq!(t.handle_for(&peer), Some(ch1));
@@ -43,7 +57,14 @@ fn reap_if_drained_is_false_until_drained_then_removes() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert!(
     !t.reap_if_drained(&mut client, ch),
@@ -98,7 +119,14 @@ fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Synthesize "this connection has reached Established at least once"
   // — the runtime sets this on the same tick the conn transitions out
@@ -120,7 +148,14 @@ fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
 
   // Second dial in the closed-before-drained window: MUST redial.
   let ch_redial = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_ne!(
     ch_redial, ch1,
@@ -188,7 +223,14 @@ fn closed_never_established_does_not_redial() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Do NOT seed `established_at_least_once`: this represents a
   // handshake failure (the conn never reached Established).
@@ -202,7 +244,14 @@ fn closed_never_established_does_not_redial() {
   // Second dial: MUST return the cached `ch1` so the caller's
   // `dial_failed` path fires, not a fresh redial.
   let ch_same = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(
     ch_same, ch1,
@@ -224,7 +273,14 @@ fn established_flag_sticks_via_conn_mut_lazy_tracking() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert!(!t.conns.get(ch.0).unwrap().established_at_least_once);
   // `conn_mut` on a handshaking conn: flag stays `false`. The returned
@@ -291,7 +347,14 @@ fn closed_never_established_cached_does_not_hide_live_accepted_connection() {
   // `established_at_least_once` is left false to represent a
   // handshake failure / closed-before-Established cache.
   let ch1 = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(t.handle_for(&peer), Some(ch1));
   assert!(!t.conns.get(ch1.0).unwrap().established_at_least_once);
@@ -335,7 +398,14 @@ fn closed_never_established_cached_does_not_hide_live_accepted_connection() {
   // (5) Subsequent outbound dial returns the NEW canonical: outbound
   // exchanges ride the live accepted connection.
   let ch_after = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   assert_eq!(
     ch_after, new_ch,
@@ -383,7 +453,14 @@ fn reap_if_drained_handle_equality_guard_idempotent_when_peers_absent() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   // Drive the conn through `close` to `Drained`.
   t.get_mut(ch)
@@ -440,7 +517,14 @@ fn get_or_dial_returns_cached_handle_when_peers_points_at_vacated_slab_slot() {
   assert!(t.conns.get(phantom.0).is_none(), "slab slot is vacant");
 
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .expect("get_or_dial returns the cached handle");
   assert_eq!(
     ch, phantom,
@@ -482,7 +566,14 @@ fn conn_entry_observation_accessors_on_fresh_entry() {
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
-    .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
     .unwrap();
   let e = t.get_mut(ch).unwrap();
   assert_eq!(e.peer(), peer, "entry reports the dialed peer address");
@@ -497,4 +588,237 @@ fn conn_entry_observation_accessors_on_fresh_entry() {
     !e.has_pending_events(),
     "deque still empty after the no-op drain"
   );
+}
+
+/// The per-source pending cap counts INBOUND (server-accepted) connections
+/// only: a local OUTBOUND dial to a peer must not charge against that peer's
+/// inbound pending allowance. Counting it would wedge simultaneous
+/// bidirectional dialing — each side's own handshaking outbound to the peer
+/// would fill the cap and block the peer's inbound Initial, so neither exchange
+/// completes.
+///
+/// Negative control: set `pending_indexed: true` in `get_or_dial` (or increment
+/// the `pending_inbound` index there) — the outbound dial is then counted and
+/// the `== 0` assertion fails.
+#[test]
+fn pending_inbound_from_excludes_local_outbound_dial() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+  let ch = t
+    .get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+    )
+    .unwrap();
+  // A freshly-dialed outbound connection is handshaking and never established;
+  // it is not entered into the per-source pending index (`pending_indexed` is
+  // false for an outbound dial).
+  assert!(t.get(ch).unwrap().conn_ref().is_handshaking());
+  assert_eq!(
+    t.pending_inbound_from(&peer),
+    0,
+    "a local outbound dial must not consume the peer's inbound pending allowance \
+       (or simultaneous bidirectional dialing wedges)"
+  );
+}
+
+/// A failed inbound handshake becomes non-handshaking but its closed/draining
+/// slab entry lingers until its drained-reap. The pending index MUST keep it
+/// charged (its `pending_indexed` unit is released only on establishment or
+/// reap, never merely because the connection closed), so a source cannot exceed
+/// the per-source cap by repeatedly opening inbound handshakes that fail — the
+/// closed-but-undrained entries still consume its allowance.
+///
+/// A closed-before-Established connection is the observable state of a failed
+/// inbound TLS handshake (`is_closed() && !is_handshaking()`, established flag
+/// never set); `Connection::close` on a handshaking connection reproduces it
+/// exactly — the same modelling the closed-never-Established tests in this file
+/// use (`closed_never_established_cached_does_not_hide_live_accepted_connection`).
+///
+/// Negative control: release the index unit when a connection closes (e.g. clear
+/// `pending_indexed` on `is_closed()`) — the closed failed entries drop out and
+/// the final `== 2` assertion fails (the source's allowance is wrongly freed by
+/// handshakes that failed).
+#[test]
+fn pending_inbound_from_charges_failed_never_established_inbound() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let src: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+  // Two distinct inbound (server-accepted) connections attributed to `src`,
+  // minted on the same endpoint so their slab slots stay in lockstep with the
+  // local ConnTable (the accept-vs-dial origin is irrelevant to
+  // `insert_accepted`, which sets direction = Inbound and inserts — see
+  // `closed_never_established_cached_does_not_hide_live_accepted_connection`).
+  let a1: SocketAddr = "127.0.0.1:4500".parse().unwrap();
+  let a2: SocketAddr = "127.0.0.1:4501".parse().unwrap();
+  let (ch1, c1) = client
+    .connect(now.into_std(), cfg.client().clone(), a1, "localhost")
+    .unwrap();
+  t.insert_accepted(ch1, c1, src);
+  let (ch2, c2) = client
+    .connect(now.into_std(), cfg.client().clone(), a2, "localhost")
+    .unwrap();
+  t.insert_accepted(ch2, c2, src);
+  // Both handshaking → both charged; none has yet failed.
+  assert_eq!(t.pending_inbound_from(&src), 2);
+  assert_eq!(t.failed_never_established_inbound_from(&src), 0);
+  // Drive BOTH into Closed WITHOUT ever establishing — the failed-inbound
+  // signature: `is_closed() && !is_handshaking()`, established flag never set,
+  // and not yet drained (the 3xPTO close timer has not fired, so it lingers).
+  for ch in [ch1, ch2] {
+    t.get_mut(ch)
+      .unwrap()
+      .conn_mut()
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+    assert!(t.get(ch).unwrap().conn_ref().is_closed());
+    assert!(!t.get(ch).unwrap().conn_ref().is_handshaking());
+    assert!(!t.get(ch).unwrap().conn_ref().is_drained());
+  }
+  assert_eq!(
+    t.failed_never_established_inbound_from(&src),
+    2,
+    "both inbound entries left the handshaking phase without ever establishing"
+  );
+  assert_eq!(
+    t.pending_inbound_from(&src),
+    2,
+    "failed never-established inbound entries stay charged until their \
+       drained-reap; a source cannot exceed the per-source cap by opening \
+       inbound handshakes that fail"
+  );
+}
+
+/// Drive `ch` through its close timer until `is_drained()`, so `reap_if_drained`
+/// will remove it. Mirrors the drain loop in
+/// `reap_if_drained_is_false_until_drained_then_removes`.
+fn drive_to_drained(t: &mut ConnTable, ch: ConnectionHandle) {
+  for _ in 0..5000 {
+    if t.get(ch).is_none_or(|e| e.conn_ref().is_drained()) {
+      return;
+    }
+    match t.get_mut(ch).unwrap().conn_mut().poll_timeout() {
+      Some(d) => t.get_mut(ch).unwrap().conn_mut().handle_timeout(d),
+      None => return,
+    }
+  }
+}
+
+/// The per-source pending index maintains the increment/decrement invariant
+/// across the full inbound lifecycle — every accept increments exactly once and
+/// is matched by exactly one decrement, at establishment OR at reap-while-
+/// un-established, never both and never neither. `indexed_inbound_recount`
+/// (read straight from the slab) must equal `pending_inbound_from` (read from
+/// the index) after every step: any missed or doubled increment/decrement makes
+/// them diverge. This is the leak/underflow guard for the O(1) index.
+///
+/// Negative controls, each breaking a distinct step: (a) drop the increment in
+/// `insert_accepted` — the initial counts are wrong; (b) drop the establishment
+/// release in `reconcile_pending_inbound` — the count stays at 3 after
+/// establishment; (c) drop the reap release in `reap_if_drained` — the count
+/// stays at 2 after reaping the never-established entry; (d) release again when
+/// reaping the already-established entry (e.g. gate reap on
+/// `!established_at_least_once` instead of `pending_indexed`) — the count
+/// underflows below 1.
+#[test]
+fn pending_inbound_index_pairs_increment_with_exactly_one_decrement() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let s1: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+  let s2: SocketAddr = "127.0.0.1:5002".parse().unwrap();
+
+  // Mint 3 inbound from s1 and 2 from s2. Minted on the SAME endpoint and
+  // inserted in lockstep so the slab slots match the ConnectionHandles (the
+  // `insert_accepted` slot assertion) — the accept-vs-dial origin is irrelevant
+  // to `insert_accepted`.
+  let mut s1_handles = Vec::new();
+  for port in [5101u16, 5102, 5103] {
+    let dst: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let (ch, c) = client
+      .connect(now.into_std(), cfg.client().clone(), dst, "localhost")
+      .unwrap();
+    t.insert_accepted(ch, c, s1);
+    s1_handles.push(ch);
+  }
+  for port in [5201u16, 5202] {
+    let dst: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let (ch, c) = client
+      .connect(now.into_std(), cfg.client().clone(), dst, "localhost")
+      .unwrap();
+    t.insert_accepted(ch, c, s2);
+  }
+
+  // (a) Accept increments: index matches the independent recount for each source.
+  assert_eq!(t.pending_inbound_from(&s1), 3);
+  assert_eq!(t.pending_inbound_from(&s1), t.indexed_inbound_recount(&s1));
+  assert_eq!(t.pending_inbound_from(&s2), 2);
+  assert_eq!(t.pending_inbound_from(&s2), t.indexed_inbound_recount(&s2));
+
+  // (b) Establishment release: mark one s1 connection Established (as the runtime
+  // does on the establishing tick) and reconcile — exactly one unit released.
+  t.conns
+    .get_mut(s1_handles[0].0)
+    .unwrap()
+    .established_at_least_once = true;
+  t.reconcile_pending_inbound(s1_handles[0]);
+  assert_eq!(
+    t.pending_inbound_from(&s1),
+    2,
+    "establishment releases exactly one unit"
+  );
+  assert_eq!(t.pending_inbound_from(&s1), t.indexed_inbound_recount(&s1));
+
+  // Reconcile is idempotent — a second pass over the same established connection
+  // must not release again.
+  t.reconcile_pending_inbound(s1_handles[0]);
+  assert_eq!(
+    t.pending_inbound_from(&s1),
+    2,
+    "reconcile does not double-release an already-released connection"
+  );
+
+  // (c) Reap release for a NEVER-established connection: its unit is still
+  // charged, so reaping it releases exactly one.
+  let never_established = s1_handles[1];
+  t.get_mut(never_established).unwrap().conn_mut().close(
+    now.into_std(),
+    0u32.into(),
+    bytes::Bytes::new(),
+  );
+  drive_to_drained(&mut t, never_established);
+  assert!(t.reap_if_drained(&mut client, never_established));
+  assert_eq!(
+    t.pending_inbound_from(&s1),
+    1,
+    "reaping a never-established inbound connection releases its charged unit"
+  );
+  assert_eq!(t.pending_inbound_from(&s1), t.indexed_inbound_recount(&s1));
+
+  // (d) Reap of the ESTABLISHED connection: its unit was already released at
+  // establishment, so reaping it must NOT release again (no underflow).
+  let established = s1_handles[0];
+  t.get_mut(established).unwrap().conn_mut().close(
+    now.into_std(),
+    0u32.into(),
+    bytes::Bytes::new(),
+  );
+  drive_to_drained(&mut t, established);
+  assert!(t.reap_if_drained(&mut client, established));
+  assert_eq!(
+    t.pending_inbound_from(&s1),
+    1,
+    "reaping an already-released (established) connection must not double-release"
+  );
+  assert_eq!(t.pending_inbound_from(&s1), t.indexed_inbound_recount(&s1));
+
+  // s2 was never touched: its count and recount are unchanged throughout.
+  assert_eq!(t.pending_inbound_from(&s2), 2);
+  assert_eq!(t.pending_inbound_from(&s2), t.indexed_inbound_recount(&s2));
 }

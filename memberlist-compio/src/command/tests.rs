@@ -101,22 +101,28 @@ fn command_variants_construct_and_match() {
   });
   assert!(matches!(update_meta, Command::UpdateNodeMetadata(_)));
 
+  #[cfg(compression)]
   let set_comp = Command::<SmolStr>::SetCompressionOptions(SetCompressionOptionsCmd {
     opts: CompressionOptions::new(),
     reply: mk_unit(),
   });
+  #[cfg(compression)]
   assert!(matches!(set_comp, Command::SetCompressionOptions(_)));
 
+  #[cfg(checksum)]
   let set_checksum = Command::<SmolStr>::SetChecksumOptions(SetChecksumOptionsCmd {
     opts: ChecksumOptions::new(),
     reply: mk_unit(),
   });
+  #[cfg(checksum)]
   assert!(matches!(set_checksum, Command::SetChecksumOptions(_)));
 
+  #[cfg(encryption)]
   let set_enc = Command::<SmolStr>::SetEncryptionOptions(SetEncryptionOptionsCmd {
     opts: EncryptionOptions::new(),
     reply: mk_unit(),
   });
+  #[cfg(encryption)]
   assert!(matches!(set_enc, Command::SetEncryptionOptions(_)));
 
   let shutdown = Command::<SmolStr>::Shutdown(ShutdownCmd { reply: mk_unit() });

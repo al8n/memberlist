@@ -26,9 +26,9 @@ use crate::{
   delegate::{AliveDelegate, MergeDelegate},
   error::{EndpointInitError, Error, GossipMtuBound, MetaTooLarge, SizeExceeded},
   event::{
-    CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
-    PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse, Transmit,
-    UserPacket,
+    CompoundTransmit, DialIntent, DialRequested, Event, ExchangeKind, NodeConflict, PacketTransmit,
+    PingCompleted, PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse,
+    Transmit, UserPacket,
   },
   members::{LocalNodeState, Member, Members},
   metrics::Metrics,
@@ -36,6 +36,10 @@ use crate::{
   stream::{OutboundKind, Stream, StreamPhase},
   wire::{COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN},
 };
+
+mod deadline;
+
+use deadline::DeadlineIndex;
 
 #[cfg(test)]
 mod tests;
@@ -222,6 +226,13 @@ pub struct Endpoint<I, A, R = SmallRng> {
   /// [`Member::generation`](crate::members::Member::generation) for the invariant.
   next_member_generation: u64,
 
+  // Incremental index of active suspicion deadlines, keyed by member id. Kept
+  // in lockstep with `members`' per-member suspicion timers (every install /
+  // confirm-accelerate / clear routes through `install_suspicion` /
+  // `clear_suspicion` / the confirm hook) so `poll_timeout` reads the earliest
+  // suspicion deadline in O(log n) instead of folding the whole member list.
+  suspicion_deadlines: DeadlineIndex<I>,
+
   // Lifeguard.
   awareness: Awareness,
 
@@ -257,6 +268,45 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // Bookkeeping.
   incarnation: u32,
   local_state_snapshot: Bytes,
+  // Cached, serve-ready inbound push/pull RESPONSE body: our entire membership
+  // view (every member as a `PushNodeState`) plus `local_state_snapshot`, with
+  // `join` cleared, encoded and then run through the coordinator-uniform
+  // compression stage (`response_compression`). The body is request-independent,
+  // so it is folded, encoded, and compressed ONCE per membership change — on the
+  // schedule-fired tick via `refresh_pushpull_response_cache` — and served to
+  // every requester by an O(1) `Bytes::clone`, keeping the per-datagram
+  // servicing cost off the O(members) build. The transport bridge wraps it in
+  // its per-frame encryption + length prefix; the on-wire bytes are identical to
+  // encoding + compressing the frame per request. With compression disabled (or
+  // no backend) this is the raw `encode_push_pull_response` frame verbatim.
+  cached_pushpull_response: Bytes,
+  // The `snapshot_version` the cached response was last built at. A tick rebuilds
+  // the cache only when this differs from `snapshot_version` (which every
+  // membership / incarnation / liveness / health change bumps), so a
+  // static-membership tick is a single `u64` comparison.
+  cached_response_version: u64,
+  // Set when a response input that does NOT move `snapshot_version` changes.
+  // Today the sole such input is `set_local_state_snapshot` (the local
+  // application-state blob). Forces the next tick to rebuild the cache even
+  // though `snapshot_version` is unchanged.
+  cached_response_dirty: bool,
+  // Compression applied when building the serve-ready cached response. The
+  // reliable-unit transform pipeline is `compress -> encrypt -> length-delimit`;
+  // compression is coordinator-uniform (one policy for every peer) and
+  // deterministic, so it is amortized once per membership change here rather
+  // than recomputed per inbound request. Encryption stays per-bridge (a fresh
+  // per-frame nonce cannot be shared), so the cache stores only the compressed
+  // body and each transport bridge applies its own encryption + length prefix.
+  // A driver/coordinator opts in via `set_response_compression`; the default
+  // (disabled) leaves the cache byte-identical to the raw encoded frame.
+  #[cfg(compression)]
+  response_compression: crate::CompressionOptions,
+  // Counts the O(members) response builds (see `build_pushpull_response_bytes`).
+  // A regression test drives many inbound push/pull requests against a static
+  // member table and asserts this stays flat — proving the per-request path
+  // serves the cache and never re-folds the table.
+  #[cfg(test)]
+  pushpull_response_builds: u64,
   lifecycle: Lifecycle,
 
   // Output queues (drained via `poll_*`).
@@ -288,6 +338,15 @@ pub struct Endpoint<I, A, R = SmallRng> {
   /// Pending outbound dial intents, keyed by StreamId. Populated by
   /// `start_push_pull`, `start_reliable_ping`, `start_user_message`.
   pending_stream_intents: FxHashMap<StreamId, PendingStreamIntent<I, A>>,
+
+  /// Incremental index of `pending_stream_intents`' dial deadlines, keyed by
+  /// StreamId. Kept in lockstep with `pending_stream_intents` (every insert /
+  /// remove routes through `insert_intent` / `remove_intent`, and `leave`
+  /// clears both together) so `poll_timeout` reads the earliest pending-dial
+  /// deadline in O(log n) instead of folding every parked intent — a fold an
+  /// attacker could inflate by parking many dials (exhausting the transport's
+  /// stream budget) to force O(intents) work per driver re-poll.
+  intent_deadlines: DeadlineIndex<StreamId>,
 
   // App-pushed state (replaces EndpointHooks::ack_payload + disable_reliable_pings).
   ack_payload: Bytes,
@@ -496,6 +555,32 @@ impl<I, A, R> Endpoint<I, A, R> {
     id
   }
 
+  /// The [`ExchangeKind`] of the pending stream intent for `id`, or `None` when no
+  /// intent is resident.
+  ///
+  /// The [`Event::DialRequested`] payload carries `id`/`peer`/`deadline` but not the
+  /// originating kind. A driver that sieves dial requests out of `poll_event`
+  /// (rather than reading the kind off the [`DialIntent`] returned by the
+  /// `start_*_direct` methods) recovers the kind here. An intent is resident from
+  /// its start method until `dial_succeeded` / `dial_failed` / `leave`, so a sieve
+  /// running while the intent lives observes `Some`; `None` means the intent was
+  /// already consumed or cleared.
+  ///
+  /// Only the QUIC coordinator sieves dial events and needs the kind (for its
+  /// reliable-ping outbound-cap exemption); the stream coordinators read the kind
+  /// off their own staging map, so this is `quic`-gated to stay dead-code-free.
+  #[cfg(feature = "quic")]
+  pub(crate) fn intent_kind(&self, id: StreamId) -> Option<ExchangeKind> {
+    self
+      .pending_stream_intents
+      .get(&id)
+      .map(|intent| match intent.kind {
+        OutboundKind::PushPull(_) => ExchangeKind::PushPull,
+        OutboundKind::ReliablePing(_) => ExchangeKind::ReliablePing,
+        OutboundKind::UserMessage => ExchangeKind::UserMessage,
+      })
+  }
+
   /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
   /// admission filter. Called inline for every inbound alive; `None` (the
   /// default) admits all. The delegate must be pure/non-blocking — see the
@@ -535,6 +620,30 @@ impl<I, A, R> Endpoint<I, A, R> {
     self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
   }
 
+  /// Insert a pending stream-dial `intent` for `id`, mirroring its deadline into
+  /// the intent [`DeadlineIndex`]. The single chokepoint for *adding* a pending
+  /// intent, the intent-plane twin of
+  /// [`install_suspicion`](Self::install_suspicion): keeping the
+  /// `pending_stream_intents` write and the `intent_deadlines` write in one place
+  /// is what lets [`poll_timeout`](Self::poll_timeout) trust the index's
+  /// earliest-intent term. `intent.deadline` is `Copy`, so the index write reads
+  /// it before the intent moves into the map; the two fields are disjoint.
+  fn insert_intent(&mut self, id: StreamId, intent: PendingStreamIntent<I, A>) {
+    self.intent_deadlines.set(&id, Some(intent.deadline));
+    self.pending_stream_intents.insert(id, intent);
+  }
+
+  /// Remove the pending stream-dial intent for `id` from both
+  /// `pending_stream_intents` and the intent [`DeadlineIndex`], returning it if
+  /// present. The single chokepoint for *dropping* a pending intent, the twin of
+  /// [`clear_suspicion`](Self::clear_suspicion): the index remove is
+  /// unconditional (setting `None` on an absent id is a no-op), so the index can
+  /// never retain an earliest-intent entry for an id whose intent was removed.
+  fn remove_intent(&mut self, id: &StreamId) -> Option<PendingStreamIntent<I, A>> {
+    self.intent_deadlines.set(id, None);
+    self.pending_stream_intents.remove(id)
+  }
+
   /// Drop pending stream-dial intents whose deadline has elapsed without a
   /// `dial_succeeded` / `dial_failed` callback. A correct driver always reports
   /// a dial outcome, but a lost result would otherwise leak the intent — which
@@ -550,7 +659,7 @@ impl<I, A, R> Endpoint<I, A, R> {
       .map(|(id, _)| *id)
       .collect();
     for id in expired {
-      if let Some(intent) = self.pending_stream_intents.remove(&id) {
+      if let Some(intent) = self.remove_intent(&id) {
         if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
           self.retire_reliable_fallback(probe_seq);
         }
@@ -652,6 +761,32 @@ impl<I, A, R> Endpoint<I, A, R> {
   ///
   /// Returns `None` if all three sources are empty.
   pub fn poll_timeout(&self) -> Option<Instant> {
+    // The incremental suspicion- and intent-deadline indexes must each equal
+    // the old table fold at every poll. Checked before the lifecycle gate
+    // because the invariant holds in every lifecycle state (the gate hides the
+    // deadline from the driver, it does not desynchronize the indexes). This
+    // rides the conformance sim's per-step `poll_timeout` fold (a dev build has
+    // debug-assertions on) as millions of free oracle checks, and is compiled
+    // out entirely in release so VOPR throughput is unaffected. The oracles read
+    // `earliest_uncounted` so they do not perturb the `entities_scanned`
+    // measurement the O(1)-scan regression test takes through the production
+    // `earliest` path below.
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+      self.suspicion_deadlines.earliest_uncounted(),
+      self.suspicion_deadline_bruteforce(),
+      "suspicion-deadline index drifted from the member-list fold",
+    );
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+      self.intent_deadlines.earliest_uncounted(),
+      self
+        .pending_stream_intents
+        .values()
+        .map(|i| i.deadline)
+        .min(),
+      "intent-deadline index drifted from the pending-intent fold",
+    );
     // A Leaving/Left node reports no SWIM deadline: its probes, suspicions, and
     // indirect forwards are inert (handle_timeout fires none of them), so
     // surfacing their now-stale deadlines would spin the driver through
@@ -659,18 +794,18 @@ impl<I, A, R> Endpoint<I, A, R> {
     if self.lifecycle != Lifecycle::Running {
       return None;
     }
-    let suspicion_deadline = self
-      .members
-      .iter()
-      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
-      .min();
+    // O(log n) read of the earliest active suspicion deadline. Formerly a full
+    // `members.iter().filter_map(|m| m.suspicion()...).min()` scan — the sole
+    // Θ(cluster) term of this fold, now the incremental index minimum.
+    let suspicion_deadline = self.suspicion_deadlines.earliest();
     let probe_deadline = self.probes.values().map(|p| p.deadline()).min();
     let forward_deadline = self.indirect_forwards.values().map(|f| f.deadline).min();
-    let intent_deadline = self
-      .pending_stream_intents
-      .values()
-      .map(|i| i.deadline)
-      .min();
+    // O(log n) read of the earliest pending-dial-intent deadline. Formerly a
+    // full `pending_stream_intents.values().map(|i| i.deadline).min()` scan —
+    // an attacker could inflate the parked-intent count (exhaust the transport's
+    // stream budget so pooled dials park, each holding an intent) to force
+    // O(intents) work per driver re-poll; now the incremental index minimum.
+    let intent_deadline = self.intent_deadlines.earliest();
     [
       suspicion_deadline,
       probe_deadline,
@@ -683,6 +818,24 @@ impl<I, A, R> Endpoint<I, A, R> {
     .into_iter()
     .flatten()
     .min()
+  }
+
+  /// Brute-force recomputation of the earliest active suspicion deadline by
+  /// folding the whole member list — byte-for-byte the fold the incremental
+  /// [`DeadlineIndex`] replaced. The soundness oracle: the index's
+  /// [`earliest`](DeadlineIndex::earliest) must equal this at every poll.
+  ///
+  /// Gated on `debug_assertions` (not `test`) so it is compiled — and its
+  /// `debug_assert_eq!` in [`poll_timeout`](Self::poll_timeout) exercised —
+  /// across downstream dev builds such as the conformance simulation, while
+  /// being absent (zero cost) in release.
+  #[cfg(any(test, debug_assertions))]
+  fn suspicion_deadline_bruteforce(&self) -> Option<Instant> {
+    self
+      .members
+      .iter()
+      .filter_map(|m| m.suspicion().map(|s| s.deadline()))
+      .min()
   }
 
   /// Whether the endpoint has an in-progress SWIM operation that will, on its
@@ -707,7 +860,10 @@ impl<I, A, R> Endpoint<I, A, R> {
     !self.probes.is_empty()
       || !self.indirect_forwards.is_empty()
       || !self.pending_stream_intents.is_empty()
-      || self.members.iter().any(|m| m.suspicion().is_some())
+      // The incremental equivalent of the old
+      // `members.iter().any(|m| m.suspicion().is_some())` scan: the index is
+      // non-empty iff at least one member carries a live suspicion.
+      || !self.suspicion_deadlines.is_empty()
   }
 
   /// Number of broadcasts currently in the gossip queue.
@@ -740,7 +896,9 @@ impl<I, A, R> Endpoint<I, A, R> {
   }
 
   /// The optional concurrent inbound-stream ceiling. The stream coordinator uses
-  /// it to admission-gate inbound exchanges.
+  /// it to admission-gate inbound exchanges. The QUIC coordinator has its own
+  /// QUIC-specific ceiling ([`crate::QuicOptions::max_inbound_streams`]) with a
+  /// bounded default, so it does not consult this shared (TCP/TLS) option.
   #[cfg(any(feature = "tls", feature = "tcp"))]
   #[inline(always)]
   pub(crate) fn max_inbound_streams(&self) -> Option<usize> {
@@ -846,7 +1004,7 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// are silent at the machine level; the driver surfaces them through its own
   /// channel.
   pub fn dial_failed(&mut self, id: StreamId, _err: crate::error::StreamError, now: Instant) {
-    let Some(intent) = self.pending_stream_intents.remove(&id) else {
+    let Some(intent) = self.remove_intent(&id) else {
       return;
     };
     if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
@@ -879,15 +1037,15 @@ impl<I, A, R> Endpoint<I, A, R> {
     }
   }
 
-  /// Encode a `StreamCommand::SendPushPullResponse` into raw bytes suitable
-  /// for loading into a `Stream::output_buf`. The driver calls this after
-  /// receiving the command from `handle_stream_event`, then calls
-  /// `stream_load_response(stream, bytes, deadline)`.
+  /// Encode a push/pull response body into raw bytes suitable for loading into
+  /// a `Stream::output_buf`.
   ///
   /// Takes pre-built `PushNodeState` entries so incarnation numbers are
-  /// available (they live in `LocalNodeState`, not `NodeState`). The driver
-  /// may build them from the `StreamCommand::SendPushPullResponse.local_states`
-  /// slice using the incarnation values it tracks separately.
+  /// available (they live in `LocalNodeState`, not `NodeState`). Used internally
+  /// to build the cached response served via
+  /// [`StreamCommand::SendPushPullResponse`](crate::event::StreamCommand); the
+  /// bytes carried by that command are the output of this function over the full
+  /// membership, produced once per membership change.
   ///
   /// Standalone associated function; does not read or modify `Endpoint` state.
   pub fn encode_push_pull_response(
@@ -910,9 +1068,122 @@ impl<I, A, R> Endpoint<I, A, R> {
   /// write deadline. After this call `stream.poll_transmit()` will drain the
   /// encoded bytes. The stream must be in `InboundSendingResponse` phase when
   /// this is called.
-  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Vec<u8>, deadline: Instant) {
-    stream.output_buf.extend(encoded);
+  pub fn stream_load_response(stream: &mut Stream<I, A>, encoded: Bytes, deadline: Instant) {
+    // O(1) refcount push — the whole (possibly Θ(members)) response body is
+    // enqueued as a single shared chunk, never byte-copied. Every requester's
+    // stream holds a clone of the same backing allocation.
+    stream.output_buf.push_back(encoded);
     stream.deadline = Some(deadline);
+  }
+}
+
+impl<I, A, R> Endpoint<I, A, R>
+where
+  I: Id,
+  A: CheapClone + Data + PartialEq + 'static,
+{
+  /// Build and encode the inbound push/pull response frame from the CURRENT
+  /// membership: every member folded into a wire-format `PushNodeState` (live
+  /// liveness, tracked incarnation, meta, protocol/delegate versions) plus the
+  /// local application-state snapshot, with `join` cleared. This is the single
+  /// O(members) fold+encode behind the response cache;
+  /// [`refresh_pushpull_response_cache`](Self::refresh_pushpull_response_cache)
+  /// is its only steady-state caller (plus the one-time pre-build at
+  /// construction), so the per-request path never runs it.
+  fn build_pushpull_response_bytes(&mut self) -> Bytes {
+    let local_states: Vec<PushNodeState<I, A>> = self
+      .members
+      .iter()
+      .map(|m| {
+        let ls = m.state_ref();
+        let ns = ls.server_ref();
+        // Live liveness (`ls.state()`), not the frozen server snapshot
+        // (`ns.state()`) — see start_push_pull for the rationale.
+        PushNodeState::new(
+          ls.incarnation(),
+          ns.id_ref().cheap_clone(),
+          ns.address_ref().cheap_clone(),
+          ls.state(),
+        )
+        .with_meta(ns.meta_ref().cheap_clone())
+        .with_protocol_version(ns.protocol_version())
+        .with_delegate_version(ns.delegate_version())
+      })
+      .collect();
+    let framed =
+      Self::encode_push_pull_response(&local_states, self.local_state_snapshot.clone(), false);
+    // Fold the coordinator-uniform compression into the cache so it is paid once
+    // per membership change, not once per inbound request. `compress_reliable_payload`
+    // honors the don't-expand rule (a body that would not shrink is stored
+    // verbatim), so the serve-ready bytes are exactly what the transport bridge
+    // would have produced from the raw frame — the bridge then skips its own
+    // compression stage for this pre-compressed body and only applies its
+    // (per-frame-nonce) encryption + length prefix. With no compression backend,
+    // or compression disabled, the frame is stored unchanged.
+    #[cfg(compression)]
+    let serve_ready = Bytes::from(crate::compression::compress_reliable_payload(
+      &self.response_compression,
+      &framed,
+    ));
+    #[cfg(not(compression))]
+    let serve_ready = Bytes::from(framed);
+    #[cfg(test)]
+    {
+      self.pushpull_response_builds += 1;
+    }
+    serve_ready
+  }
+
+  /// Set the compression policy used to build the serve-ready cached push/pull
+  /// response, and rebuild the cache immediately under the new policy.
+  ///
+  /// Called by a transport coordinator whenever its compression configuration is
+  /// established or changed ([`crate::quic::QuicEndpoint::set_compression_options`]
+  /// and the stream-endpoint equivalent), so the cache stays byte-identical to
+  /// what that coordinator's bridges would encode. Encryption is deliberately NOT
+  /// folded in here — it carries a fresh per-frame nonce and so cannot be shared
+  /// across requests; each bridge applies it independently over this compressed
+  /// body.
+  #[cfg(compression)]
+  pub(crate) fn set_response_compression(&mut self, compression: crate::CompressionOptions) {
+    self.response_compression = compression;
+    // Force a rebuild now so an inbound exchange served before the next tick
+    // already reflects the new policy (no stale-policy window on the wire).
+    self.cached_response_dirty = true;
+    self.refresh_pushpull_response_cache();
+  }
+
+  /// Rebuild the cached inbound push/pull response IFF a response-relevant input
+  /// changed since the last build (`snapshot_version` moved, or a non-versioned
+  /// input set `cached_response_dirty`). This is the ONLY steady-state site that
+  /// runs the O(members) build+encode; every requester is then served an O(1)
+  /// `Bytes::clone`. Called on the schedule-fired tick
+  /// ([`handle_timeout`](Self::handle_timeout)) only — NEVER on the per-request
+  /// [`handle_stream_event`](Self::handle_stream_event) path — so however many
+  /// inbound exchanges complete in one datagram, none re-folds the table.
+  fn refresh_pushpull_response_cache(&mut self) {
+    if self.snapshot_version == self.cached_response_version && !self.cached_response_dirty {
+      return;
+    }
+    self.cached_pushpull_response = self.build_pushpull_response_bytes();
+    self.cached_response_version = self.snapshot_version;
+    self.cached_response_dirty = false;
+  }
+
+  /// Cumulative count of O(members) response builds. A build happens only at
+  /// construction and on a membership-changing tick, never per request.
+  #[cfg(test)]
+  pub(crate) const fn pushpull_response_builds(&self) -> u64 {
+    self.pushpull_response_builds
+  }
+
+  /// Clone the serve-ready cached push/pull response — the exact `Bytes`
+  /// [`handle_stream_event`](Self::handle_stream_event) hands each requester.
+  /// The clone shares the cache's backing allocation, so its `as_ptr()`
+  /// identifies that one buffer (used by the shared-buffer regression test).
+  #[cfg(test)]
+  pub(crate) fn cached_pushpull_response(&self) -> Bytes {
+    self.cached_pushpull_response.clone()
   }
 }
 
@@ -1205,6 +1476,10 @@ where
       rng,
       members,
       next_member_generation,
+      // No member carries a suspicion at construction (the local node is
+      // inserted Alive), so the index starts empty and is maintained by the
+      // suspicion lifecycle chokepoints thereafter.
+      suspicion_deadlines: DeadlineIndex::new(),
       awareness,
       broadcast,
       ack_registry: AckRegistry::new(),
@@ -1217,6 +1492,15 @@ where
       probes_since_reset: 0,
       incarnation: initial_incarnation,
       local_state_snapshot,
+      // Placeholder: the real self-only response is pre-built below (the forced
+      // `cached_response_dirty` makes the first `refresh` build it).
+      cached_pushpull_response: Bytes::new(),
+      cached_response_version: 0,
+      cached_response_dirty: true,
+      #[cfg(compression)]
+      response_compression: crate::CompressionOptions::new(),
+      #[cfg(test)]
+      pushpull_response_builds: 0,
       lifecycle: Lifecycle::Running,
       pending_events: VecDeque::new(),
       pending_transmits: VecDeque::new(),
@@ -1225,6 +1509,9 @@ where
       merge_delegate: None,
       next_stream_id: 1,
       pending_stream_intents: FxHashMap::default(),
+      // Starts empty (no dial intent at construction) and is maintained in
+      // lockstep by the `insert_intent` / `remove_intent` chokepoints.
+      intent_deadlines: DeadlineIndex::new(),
       ack_payload: Bytes::new(),
       reliable_pings_disabled: FxHashSet::default(),
       user_broadcasts,
@@ -1243,6 +1530,13 @@ where
     // directly, so emit its join explicitly here with the same `Arc<NodeState>`
     // payload the peer-join path uses.
     endpoint.emit_event(Event::NodeJoined(local_state.server_arc()));
+    // Pre-build the inbound push/pull response cache so the first inbound
+    // exchange — which can precede the first `handle_timeout` — is served an
+    // O(1) `Bytes` clone rather than an on-path member-table fold. The forced
+    // `cached_response_dirty` above makes this initial `refresh` build the
+    // self-only response; every later membership change rebuilds it on the next
+    // tick.
+    endpoint.refresh_pushpull_response_cache();
     Ok(endpoint)
   }
 
@@ -1342,6 +1636,36 @@ where
     }
   }
 
+  /// Install `suspicion` on `id`'s member record and mirror its deadline into
+  /// the suspicion [`DeadlineIndex`]. The single chokepoint for *arming* a
+  /// suspicion: keeping `Member::set_suspicion(Some(..))` and the index write
+  /// in one place is what lets [`poll_timeout`](Self::poll_timeout) trust the
+  /// index. A no-op if `id` is not a tracked member — callers only ever install
+  /// on a present member, but this keeps the index from indexing an absent id.
+  fn install_suspicion(&mut self, id: &I, suspicion: crate::suspicion::Suspicion<I>) {
+    let deadline = suspicion.deadline();
+    let Some(member) = self.members.get_mut(id) else {
+      return;
+    };
+    member.set_suspicion(Some(suspicion));
+    // The `&mut Member` borrow ends at its last use above; `suspicion_deadlines`
+    // is a disjoint field, so this second mutation is unambiguous.
+    self.suspicion_deadlines.set(id, Some(deadline));
+  }
+
+  /// Clear any suspicion on `id`'s member record and remove its suspicion
+  /// [`DeadlineIndex`] entry. The single chokepoint for *disarming* a
+  /// suspicion. The index remove is unconditional (setting `None` on an absent
+  /// id is a no-op), so the index can never retain an entry for a member whose
+  /// suspicion was cleared.
+  fn clear_suspicion(&mut self, id: &I) {
+    if let Some(member) = self.members.get_mut(id) {
+      member.set_suspicion(None);
+    }
+    // Disjoint field: the `&mut Member` borrow (if any) ends above.
+    self.suspicion_deadlines.set(id, None);
+  }
+
   /// Apply an incoming Suspect to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
@@ -1393,6 +1717,15 @@ where
         Some(s) => s.confirm(&from, now),
         None => crate::suspicion::Confirmation::Ignored,
       };
+      // Confirm-accelerate: `Suspicion::confirm` mutates the deadline in place
+      // with NO `set_suspicion` call, so neither chokepoint helper sees it — the
+      // index must be re-armed here. `Accepted` carries the freshly-pulled-in
+      // deadline for exactly this; `Ignored` (a duplicate, n >= k, or k == 0)
+      // left the deadline untouched, so no index write. Direction is irrelevant:
+      // `set` replaces the entry regardless.
+      if let crate::suspicion::Confirmation::Accepted(new_deadline) = confirmed {
+        self.suspicion_deadlines.set(&target, Some(new_deadline));
+      }
       if confirmed.is_accepted() {
         self.broadcast_message(
           target.cheap_clone(),
@@ -1422,8 +1755,10 @@ where
       0
     };
     let suspicion = crate::suspicion::Suspicion::new(from.cheap_clone(), k, min, max, now);
+    // Install: arm the suspicion and index its deadline through the chokepoint,
+    // then apply the Alive -> Suspect transition on a fresh borrow.
+    self.install_suspicion(&target, suspicion);
     let member = self.members.get_mut(&target).unwrap();
-    member.set_suspicion(Some(suspicion));
     let member_state = member.state_mut();
     member_state.set_incarnation(inc);
     member_state.set_state(State::Suspect, now);
@@ -1478,9 +1813,13 @@ where
         self.refute(inc);
         return;
       }
+      // Clear via Dead (self-leaving -> Left): disarm any suspicion through the
+      // chokepoint, then apply the Left transition on a fresh borrow. Self never
+      // carries a suspicion, so the index clear is a no-op in practice, kept
+      // unconditional for the invariant.
+      self.clear_suspicion(&target);
       {
         let m = self.members.get_mut(&target).unwrap();
-        m.set_suspicion(None);
         m.state_mut().set_incarnation(inc);
         m.state_mut().set_state(State::Left, now);
       }
@@ -1507,8 +1846,16 @@ where
       return;
     }
 
+    // Clear via Dead (remote): disarm any suspicion through the chokepoint, then
+    // apply the Dead/Left transition on a fresh borrow. This is ALSO the
+    // suspicion-expiry pop: `fire_expired_suspicions` synthesizes a Dead per
+    // expired member and routes it here, so the expired member's index entry is
+    // removed exactly once — here. None of process_dead's early-outs can skip
+    // this for a synthesized Dead (incarnation read off the member, so never
+    // stale; the member is Suspect, not Dead/Left; never self; lifecycle
+    // Running), so `fire_expired_suspicions` needs no index code of its own.
+    self.clear_suspicion(&target);
     if let Some(m) = self.members.get_mut(&target) {
-      m.set_suspicion(None);
       let current_state = m.state_mut();
       current_state.set_incarnation(inc);
       let new_state = if self_marked {
@@ -1818,6 +2165,11 @@ where
 
   /// Fire any expired suspicion timers, transitioning the peer to Dead.
   fn fire_expired_suspicions(&mut self, now: Instant) {
+    // No direct suspicion-deadline-index maintenance here: each expired member
+    // is transitioned by synthesizing a Dead and routing it through
+    // `process_dead`, whose remote-clear path removes the index entry. Removing
+    // it here too would double-remove.
+    //
     // Collect ids whose suspicion timer has expired. We do this in two
     // passes so we don't hold a borrow on members while calling
     // process_dead.
@@ -1872,7 +2224,7 @@ where
         ..
       }) => {
         if let Some(rid) = reliable_stream_id {
-          self.pending_stream_intents.remove(rid);
+          self.remove_intent(rid);
         }
         // Deduped distinct responders: a duplicate or late Nack never
         // entered `nacked_by`, so `expected - seen` cannot be driven to
@@ -2081,6 +2433,11 @@ where
     self.ensure_running()?;
     validate_local_state_snapshot::<I, A>(&bytes, self.cfg.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
+    // `local_state_snapshot` is part of the push/pull response body but is NOT
+    // covered by `snapshot_version` (which tracks membership / liveness), so mark
+    // the response cache dirty to force the next tick to rebuild it. Without this
+    // a request served after the change would ship the stale snapshot forever.
+    self.cached_response_dirty = true;
     Ok(())
   }
 
@@ -2770,23 +3127,36 @@ where
     Ok(PingId::new(seq))
   }
 
-  /// Initiate an outbound push/pull state exchange with `peer`.
+  /// Initiate an outbound push/pull state exchange with `peer`, returning the dial
+  /// descriptor directly instead of enqueueing an [`Event::DialRequested`].
   ///
-  /// Encodes the local membership state into a PushPull message immediately.
-  /// Returns the `StreamId` identifying this dial. The driver observes
-  /// `Event::DialRequested { id, peer, deadline }` from `poll_event()` and
-  /// dials accordingly.
+  /// The intent-creating core of [`Endpoint::start_push_pull`]: it allocates the
+  /// stream id, encodes the local membership state into a PushPull message, and
+  /// registers the pending intent EXACTLY as the event-emitting method does — but
+  /// hands the caller a [`DialIntent`] rather than queueing the dial request onto
+  /// `poll_event`. A driver that services its own dials in-band uses this to skip
+  /// the drain-and-requeue of the whole application-event backlog per reliable send.
+  ///
+  /// Returns `(id, None)` on the not-running inert-id path: a leaving/left node
+  /// registers no intent and emits no event, so there is no descriptor — the
+  /// returned id is inert, exactly as the event-emitting method leaves it.
+  /// Otherwise returns `(id, Some(intent))` with `intent.id() == id`.
   ///
   /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
   /// for periodic anti-entropy.
-  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+  pub fn start_push_pull_direct(
+    &mut self,
+    peer: A,
+    kind: PushPullKind,
+    now: Instant,
+  ) -> (StreamId, Option<DialIntent<A>>) {
     let id = self.allocate_stream_id();
     // A leaving/left node initiates no push/pull: it queues no dial intent and
     // emits no DialRequested, so it advertises none of its pre-leave Alive state
     // to a seed. The returned id is inert; the gated callers (join command
     // handlers and seed drains) never reach this once not Running.
     if !self.is_running() {
-      return id;
+      return (id, None);
     }
     let deadline = now + self.cfg.stream_timeout();
 
@@ -2823,7 +3193,7 @@ where
     let encoded = crate::wire::encode_message::<I, A>(&msg)
       .expect("PushPull encode cannot fail for well-formed data");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer.cheap_clone(),
@@ -2834,37 +3204,58 @@ where
       },
     );
 
-    // Signal the driver to dial.
-    self
-      .pending_events
-      .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
+    (
+      id,
+      Some(DialIntent::new(id, peer, deadline, ExchangeKind::PushPull)),
+    )
+  }
 
+  /// Initiate an outbound push/pull state exchange with `peer`.
+  ///
+  /// Encodes the local membership state into a PushPull message immediately.
+  /// Returns the `StreamId` identifying this dial. The driver observes
+  /// `Event::DialRequested { id, peer, deadline }` from `poll_event()` and
+  /// dials accordingly. See [`Endpoint::start_push_pull_direct`] for the variant
+  /// that returns the dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
+  /// for periodic anti-entropy.
+  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+    let (id, intent) = self.start_push_pull_direct(peer, kind, now);
+    if let Some(intent) = intent {
+      let (id, peer, deadline, _kind) = intent.into_parts();
+      self
+        .pending_events
+        .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
+    }
     id
   }
 
   /// Initiate a reliable-stream fallback ping for probe sequence number
-  /// `probe_seq`. Encodes a Ping message (source = local node, target = peer)
-  /// and queues a dial intent. Returns `StreamId`; the driver observes
-  /// `Event::DialRequested` from `poll_event()`. Opened concurrently with the
-  /// indirect fan-out by `probe_fan_out_indirect`.
+  /// `probe_seq`, returning the dial descriptor directly instead of enqueueing an
+  /// [`Event::DialRequested`].
+  ///
+  /// The intent-creating core of [`Endpoint::start_reliable_ping`]: it encodes the
+  /// Ping message and registers the pending intent identically, but hands back a
+  /// [`DialIntent`] rather than queueing the dial request onto `poll_event`.
+  /// Returns `(id, None)` on the not-running inert-id path (a leaving/left node
+  /// opens no fallback), else `(id, Some(intent))` with `intent.id() == id`.
   ///
   /// `deadline` is the owning probe's single cumulative deadline, NOT an
   /// independent stream timeout — the reliable fallback must race exactly
-  /// the same deadline as the indirect pings. This keeps a slow/skewed
-  /// `stream_timeout` from either killing the fallback before, or letting
-  /// it outlive, the probe.
-  pub fn start_reliable_ping(
+  /// the same deadline as the indirect pings.
+  pub fn start_reliable_ping_direct(
     &mut self,
     peer_id: I,
     peer_addr: A,
     probe_seq: u32,
     deadline: Instant,
-  ) -> StreamId {
+  ) -> (StreamId, Option<DialIntent<A>>) {
     let id = self.allocate_stream_id();
     // A leaving/left node opens no reliable-ping fallback. The returned id is
     // inert; the only caller is the probe FSM, gated by handle_timeout.
     if !self.is_running() {
-      return id;
+      return (id, None);
     }
 
     let local_id = self.cfg.local_id_ref().cheap_clone();
@@ -2879,7 +3270,7 @@ where
     let encoded = crate::wire::encode_message::<I, A>(&msg)
       .expect("Ping encode cannot fail for well-formed data");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer_addr.cheap_clone(),
@@ -2890,27 +3281,65 @@ where
       },
     );
 
-    self
-      .pending_events
-      .push_back(Event::DialRequested(DialRequested::new(
-        id, peer_addr, deadline,
-      )));
+    (
+      id,
+      Some(DialIntent::new(
+        id,
+        peer_addr,
+        deadline,
+        ExchangeKind::ReliablePing,
+      )),
+    )
+  }
 
+  /// Initiate a reliable-stream fallback ping for probe sequence number
+  /// `probe_seq`. Encodes a Ping message (source = local node, target = peer)
+  /// and queues a dial intent. Returns `StreamId`; the driver observes
+  /// `Event::DialRequested` from `poll_event()`. Opened concurrently with the
+  /// indirect fan-out by `probe_fan_out_indirect`. See
+  /// [`Endpoint::start_reliable_ping_direct`] for the variant that returns the
+  /// dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// `deadline` is the owning probe's single cumulative deadline, NOT an
+  /// independent stream timeout — the reliable fallback must race exactly
+  /// the same deadline as the indirect pings. This keeps a slow/skewed
+  /// `stream_timeout` from either killing the fallback before, or letting
+  /// it outlive, the probe.
+  pub fn start_reliable_ping(
+    &mut self,
+    peer_id: I,
+    peer_addr: A,
+    probe_seq: u32,
+    deadline: Instant,
+  ) -> StreamId {
+    let (id, intent) = self.start_reliable_ping_direct(peer_id, peer_addr, probe_seq, deadline);
+    if let Some(intent) = intent {
+      let (id, peer_addr, deadline, _kind) = intent.into_parts();
+      self
+        .pending_events
+        .push_back(Event::DialRequested(DialRequested::new(
+          id, peer_addr, deadline,
+        )));
+    }
     id
   }
 
-  /// Enqueue a reliable-stream delivery of `payload` to `peer`. Returns a
-  /// `StreamId`; the driver observes `Event::DialRequested` and dials. On
-  /// success the driver drains `stream.poll_transmit()`. No reply is expected;
-  /// the stream transitions to Done after bytes are drained.
+  /// Enqueue a reliable-stream delivery of `payload` to `peer`, returning the dial
+  /// descriptor directly instead of enqueueing an [`Event::DialRequested`].
+  ///
+  /// The intent-creating core of [`Endpoint::start_user_message`]: it encodes the
+  /// UserData message and registers the pending intent identically, but returns a
+  /// [`DialIntent`] rather than queueing the dial request onto `poll_event`. Errors
+  /// (rather than returning an inert id) once leaving/left — a departing node starts
+  /// no new reliable dial — so there is no `None`-descriptor path here.
   ///
   /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
-  pub fn start_user_message(
+  pub fn start_user_message_direct(
     &mut self,
     peer: A,
     payload: bytes::Bytes,
     now: Instant,
-  ) -> Result<StreamId, crate::error::Error> {
+  ) -> Result<(StreamId, DialIntent<A>), crate::error::Error> {
     // Reject once leaving/left: a departing node starts no new reliable dial.
     self.ensure_running()?;
     let id = self.allocate_stream_id();
@@ -2919,7 +3348,7 @@ where
     let msg = Message::<I, A>::UserData(payload);
     let encoded = crate::wire::encode_message::<I, A>(&msg).expect("UserData encode cannot fail");
 
-    self.pending_stream_intents.insert(
+    self.insert_intent(
       id,
       PendingStreamIntent {
         peer: peer.cheap_clone(),
@@ -2930,10 +3359,31 @@ where
       },
     );
 
+    Ok((
+      id,
+      DialIntent::new(id, peer, deadline, ExchangeKind::UserMessage),
+    ))
+  }
+
+  /// Enqueue a reliable-stream delivery of `payload` to `peer`. Returns a
+  /// `StreamId`; the driver observes `Event::DialRequested` and dials. On
+  /// success the driver drains `stream.poll_transmit()`. No reply is expected;
+  /// the stream transitions to Done after bytes are drained. See
+  /// [`Endpoint::start_user_message_direct`] for the variant that returns the
+  /// dial descriptor in-band instead of enqueueing the event.
+  ///
+  /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
+  pub fn start_user_message(
+    &mut self,
+    peer: A,
+    payload: bytes::Bytes,
+    now: Instant,
+  ) -> Result<StreamId, crate::error::Error> {
+    let (id, intent) = self.start_user_message_direct(peer, payload, now)?;
+    let (_, peer, deadline, _kind) = intent.into_parts();
     self
       .pending_events
       .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
-
     Ok(id)
   }
 
@@ -2944,7 +3394,7 @@ where
   ///
   /// Returns `None` if `id` is unknown (intent was already cancelled).
   pub fn dial_succeeded(&mut self, id: StreamId, now: Instant) -> Option<Stream<I, A>> {
-    let intent = self.pending_stream_intents.remove(&id)?;
+    let intent = self.remove_intent(&id)?;
     // Write-side deadline authority (symmetric to the read-side check in
     // `Stream::handle_data`): the WHOLE reliable exchange is bounded by
     // `deadline`, so a dial that only completes at/after the exchange
@@ -2969,7 +3419,14 @@ where
       }
       return None;
     }
-    let output_buf: std::collections::VecDeque<u8> = VecDeque::from(intent.encoded);
+    // The request frame is enqueued as a single refcounted chunk. An empty
+    // `encoded` (never produced by an intent, but defended against) would push
+    // a zero-length chunk that the transport's chunk writers must not observe,
+    // so skip it.
+    let mut output_buf: std::collections::VecDeque<Bytes> = VecDeque::new();
+    if !intent.encoded.is_empty() {
+      output_buf.push_back(Bytes::from(intent.encoded));
+    }
     let phase = StreamPhase::OutboundSendingRequest(intent.kind);
     Some(Stream {
       id,
@@ -3150,8 +3607,11 @@ where
     // Drop all pending outbound dial intents: a left node promotes none of them
     // (dial_succeeded refuses each kind once not Running). A push/pull would
     // advertise our pre-leave Alive, a reliable-ping is a detection fallback,
-    // and a user message is new I/O the post-leave contract forbids.
+    // and a user message is new I/O the post-leave contract forbids. Clear the
+    // mirrored intent index in lockstep so no stale earliest-intent deadline
+    // outlives the drained table.
     self.pending_stream_intents.clear();
+    self.intent_deadlines.clear();
     // Also drop any already-queued DialRequested events: a raw Endpoint driver
     // that polls events after leave must not still be told to dial. dial_succeeded
     // would refuse the promotion, but a driver opens the transport in response to
@@ -3492,14 +3952,21 @@ where
       is_new = true;
     }
 
-    // Re-fetch (insert_at_random_at may have moved indices).
+    // Re-fetch (insert_at_random_at may have moved indices). Read-only here: the
+    // suspicion clear and the state mutation below both run on fresh borrows, so
+    // every local read — incarnation, state, meta, and the protocol
+    // / delegate versions the is_local refute-guard compares — is captured up
+    // front, ending this borrow before `clear_suspicion` touches a disjoint
+    // field.
     let member = self
       .members
-      .get_mut(&alive_id)
+      .get(&alive_id)
       .expect("inserted above or pre-existing");
     let local_incarnation = member.state_ref().incarnation();
     let old_state = member.state_ref().state();
     let old_meta = member.state_ref().server_ref().meta_ref().cheap_clone();
+    let local_protocol = member.state_ref().server_ref().protocol_version();
+    let local_delegate = member.state_ref().server_ref().delegate_version();
 
     if !is_new && !updates_address && !is_local && alive_incarnation <= local_incarnation {
       return;
@@ -3509,13 +3976,18 @@ where
       return;
     }
 
-    member.set_suspicion(None);
+    // Clear via superseding Alive: a superseding Alive refutes any suspicion.
+    // Placed after the older/equal-incarnation early returns above (a
+    // non-superseding Alive returns before reaching here, correctly leaving the
+    // entry intact) and before the local-refute return below. The chokepoint
+    // clears both the member record and the index on a fresh borrow.
+    self.clear_suspicion(&alive_id);
 
     if !bootstrap && is_local {
       // Same incarnation + same server → idempotent, no-op.
       let same_meta = old_meta == alive_meta;
-      let same_pv = member.state_ref().server_ref().protocol_version() == alive_protocol;
-      let same_dv = member.state_ref().server_ref().delegate_version() == alive_delegate;
+      let same_pv = local_protocol == alive_protocol;
+      let same_dv = local_delegate == alive_delegate;
       if alive_incarnation == local_incarnation && same_meta && same_pv && same_dv {
         return;
       }
@@ -3658,6 +4130,12 @@ where
     self.fire_probe_scheduler(now);
     self.fire_gossip_scheduler(now);
     self.fire_pushpull_scheduler(now);
+    // Rebuild the inbound push/pull response cache once, AFTER this tick's
+    // membership transitions (suspicion expiry, probe-driven suspects, dead/left
+    // reaping) have settled, so a request served before the next tick is at most
+    // one tick stale. Gated internally on `snapshot_version` — a static-membership
+    // tick is a single comparison.
+    self.refresh_pushpull_response_cache();
   }
 
   /// Advance the probe FSM. `AwaitingDirectAck` probes whose deadline
@@ -4203,6 +4681,18 @@ where
       self.bump_snapshot_version();
     }
     for id in ids_to_remove {
+      // Member removal: only Dead/Left members are reclaimed here, and every
+      // Dead/Left transition already cleared this member's suspicion (via the
+      // Dead and superseding-Alive paths), so the index entry must already be
+      // absent. The unconditional remove keeps "index keys are a subset of
+      // members with a live suspicion" independent of that theorem; the
+      // debug_assert documents and guards it.
+      #[cfg(debug_assertions)]
+      debug_assert!(
+        !self.suspicion_deadlines.contains(&id),
+        "reclaimed member still carried a live suspicion-deadline index entry",
+      );
+      self.suspicion_deadlines.set(&id, None);
       self.members.remove(&id);
     }
     // Decorrelate probe order across rounds: without a reshuffle the round-robin
@@ -4302,27 +4792,17 @@ where
             originating_stream_id,
           )));
         }
-        let local_states: Vec<PushNodeState<I, A>> = self
-          .members
-          .iter()
-          .map(|m| {
-            let ls = m.state_ref();
-            let ns = ls.server_ref();
-            // Live liveness (`ls.state()`), not the frozen server snapshot
-            // (`ns.state()`) — see start_push_pull for the rationale.
-            PushNodeState::new(
-              ls.incarnation(),
-              ns.id_ref().cheap_clone(),
-              ns.address_ref().cheap_clone(),
-              ls.state(),
-            )
-            .with_meta(ns.meta_ref().cheap_clone())
-            .with_protocol_version(ns.protocol_version())
-            .with_delegate_version(ns.delegate_version())
-          })
-          .collect();
+        // Reply with OUR pre-encoded membership snapshot, built once per
+        // membership change on the schedule-fired tick (see
+        // `refresh_pushpull_response_cache`). The response body is
+        // request-independent, so serving it is an O(1) `Bytes::clone`: the
+        // completed exchange never re-folds the member table. The reply reflects
+        // membership as of the last tick, so this request's just-merged `states`
+        // surface in the next tick's rebuild — at most one tick later.
+        // `merge_state` above still applies the peer's push immediately; only
+        // the reflected-back copy is tick-quantized.
         Some(StreamCommand::SendPushPullResponse(
-          SendPushPullResponse::new(local_states, self.local_state_snapshot.clone()),
+          SendPushPullResponse::new(self.cached_pushpull_response.clone()),
         ))
       }
       // A Leaving/Left node processes no reliable-plane inbound: it completes no

@@ -55,7 +55,7 @@ use crate::{
     options::RuntimeOptions,
     shared::{ExchangeId, cidr_blocks, dispatch_event_delegate, join_reply},
   },
-  error::{JoinFailed, MemberlistError, Result},
+  error::{JoinFailed, MemberlistError, Result, UserDialBacklogFull},
   snapshot::{MemberlistSnapshot, SnapshotCell},
   transport::runtime::CidrFilter,
 };
@@ -1322,19 +1322,53 @@ async fn dispatch_command<I, G>(
         let _ = cmd.reply.send(Err(MemberlistError::SendFailed));
         return;
       }
-      let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(cmd.payloads().len());
-      for payload in cmd.payloads() {
-        // `QuicEndpoint::start_user_message` calls `service_dials` +
-        // `flush_outbound` in-band (no separate `poll_action` loop needed),
-        // unlike the stream driver. The returned `StreamId` coerces to the
-        // `ExchangeId` that the bridge-reap path stamps on
-        // `Event::ExchangeCompleted(UserMessage)`.
+      let peer = *cmd.to();
+      // Own the payloads so the reply channel can be moved out of `cmd` on any
+      // exit path below without conflicting with a borrow of `cmd`'s payload
+      // slice. Each payload is cloned exactly once here, in place of the former
+      // per-call clone.
+      let payloads = cmd.payloads().to_vec();
+      // Whole-batch admission preflight. The coordinator bounds one peer's
+      // outstanding reliable user-message dials, and `start_user_message`
+      // refuses past that ceiling. Admit the ENTIRE batch atomically here,
+      // before starting any exchange, so a batch that would cross the ceiling
+      // is reported as backpressure with nothing started — rather than starting
+      // a prefix and failing mid-loop, which would strand already-started
+      // exchanges behind an unregistered waiter. This is backpressure on this
+      // node's own load, not a delivery failure: retry once the peer drains.
+      if !endpoint.can_admit_user_dials(peer, payloads.len()) {
+        let limit = endpoint.max_pending_user_dials_per_peer();
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply.send(Err(MemberlistError::UserDialBacklogFull(
+          UserDialBacklogFull::new(peer, limit),
+        )));
+        return;
+      }
+      let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(payloads.len());
+      for payload in payloads {
+        // A reliable `start_user_message` services only its own new exchange
+        // in-band (no separate `poll_action` loop, unlike the stream driver);
+        // the returned `StreamId` coerces to the `ExchangeId` the bridge-reap
+        // path stamps on `Event::ExchangeCompleted(UserMessage)`. The preflight
+        // admitted the whole batch and this single task drives the coordinator,
+        // so every per-call admission gate here is guaranteed to pass. The
+        // `Err` arm is unreachable defense-in-depth: it must never panic the
+        // driver task. An already-started exchange left without a registered
+        // waiter completes as a clean no-op in the event drain (its
+        // `ExchangeCompleted` matches no `PendingUserSend`), so abandoning the
+        // started prefix cannot hang a caller.
         // Ignoring StreamId: the ExchangeId::from coercion below is the only
         // consumer; the raw StreamId is not needed after parking.
-        let stream_id = endpoint
-          .start_user_message(*cmd.to(), payload.clone(), now)
-          .expect("issued while running");
-        pending.insert(ExchangeId::from(stream_id));
+        match endpoint.start_user_message(peer, payload, now) {
+          Ok(stream_id) => {
+            pending.insert(ExchangeId::from(stream_id));
+          }
+          Err(e) => {
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = cmd.reply.send(Err(MemberlistError::from(e)));
+            return;
+          }
+        }
       }
       if pending.is_empty() {
         // No exchanges dispatched (empty payloads). Reply Ok immediately;
@@ -1554,7 +1588,6 @@ where
     //    policy. An empty encryption config makes `encrypt_gossip` a copy; a
     //    transient `send_to` error (ENOBUFS / ICMP unreachable surfacing as a
     //    syscall error) is non-fatal per the gossip drop discipline.
-    let mut needs_flush = false;
     while let Some(transmit) = state.endpoint.poll_memberlist_transmit() {
       iter_progress = true;
       let (peer, plain) = match transmit {
@@ -1622,20 +1655,21 @@ where
             .endpoint
             .queue_unreliable_datagram(peer, on_wire.clone(), now)
           {
-            DatagramSendStatus::Queued => needs_flush = true,
-            // NotReady may mean queue_unreliable_datagram just initiated a cold
-            // dial; flush this tick so the connection's Initial is emitted now
-            // (else the connection does not warm until the next driver wake). The
-            // gossip itself still goes out immediately over the UDP fallback.
+            // The queue call self-flushes: it collects this connection's owed
+            // transmits (the queued datagram, and a cold dial's Initial) into
+            // the outbound queue before returning, so no per-pass flush follows.
+            DatagramSendStatus::Queued => {}
+            // NotReady may mean the queue call just initiated a cold dial; its
+            // inline collect already emitted the connection's Initial this tick.
+            // The gossip itself still goes out immediately over the UDP fallback.
             DatagramSendStatus::NotReady => {
-              needs_flush = true;
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
               // lossy and the next probe/gossip round recovers.
               let _ = res;
             }
             // TooLarge: the connection is already Established (max_size was Some),
-            // so there is no pending Initial to flush; just fall back to UDP.
+            // so there is no pending Initial; just fall back to UDP.
             DatagramSendStatus::TooLarge => {
               let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
               // Ignoring Err: a transient UDP send error is non-fatal — gossip is
@@ -1645,13 +1679,6 @@ where
           }
         }
       }
-    }
-
-    // Flush any datagrams queued above into `out` THIS tick so Section 3 sends
-    // them now — a datagram-borne probe whose timeout is armed this same tick
-    // must not wait for the next driver wake (that wake can be the timeout).
-    if needs_flush {
-      state.endpoint.flush_outbound_transmits(now);
     }
 
     // 3. Raw QUIC datagrams (handshake, acks, application stream

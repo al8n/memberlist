@@ -80,6 +80,9 @@ pub use driver::options::{
   DEFAULT_ITER_DRAIN_CAP, DEFAULT_JOIN_DEADLINE, DEFAULT_LEAVE_TIMEOUT,
   DEFAULT_OBSERVATION_CHANNEL, DEFAULT_PEEK_BUDGET, RuntimeOptions, StreamTransportOptions,
 };
+#[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
+pub use error::UserDialBacklogFull;
 pub use error::{
   GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidGossipMtu, InvalidOption, JoinFailed,
   MemberlistError, Result,

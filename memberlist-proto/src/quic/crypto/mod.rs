@@ -65,7 +65,7 @@
 //! ring backend. Behavioral determinism comes from the injected virtual
 //! clock, not from any test-only crypto hook.
 
-use core::net::SocketAddr;
+use core::{net::SocketAddr, time::Duration};
 use std::sync::Arc;
 
 use super::UnreliableTransport;
@@ -106,7 +106,200 @@ pub struct QuicOptions {
   /// falls back to plain UDP. The driver reads this via
   /// [`Self::unreliable_transport`] to route unreliable sends.
   unreliable_transport: UnreliableTransport,
+  /// Global ceiling on the number of QUIC connections the coordinator will
+  /// track at once (handshaking + established + still-draining), or `None` for
+  /// no bound. An unauthenticated inbound Initial is refused before it commits
+  /// connection-table state once this many connections already exist. See
+  /// [`Self::max_quic_connections`] for the default and rationale.
+  max_quic_connections: Option<usize>,
+  /// Ceiling on the number of concurrent *pending* (handshaking) QUIC
+  /// connections a single source address may hold, or `None` for no bound. An
+  /// unauthenticated inbound Initial from a source already at this many
+  /// in-flight handshakes is refused. See
+  /// [`Self::max_pending_connections_per_source`] for the default and rationale.
+  max_pending_connections_per_source: Option<usize>,
+  /// Coordinator-wide ceiling on concurrently accepted INBOUND reliable-stream
+  /// exchanges (bridges) across all QUIC connections, or `None` for no bound. An
+  /// inbound bidi stream accepted beyond this many live inbound bridges is
+  /// refused (both halves reset) instead of minting a bridge. Distinct from
+  /// quinn's per-connection `max_concurrent_bidi_streams` — that bounds one
+  /// connection; this bounds the inbound bridge population summed across all of
+  /// them. See [`Self::max_inbound_streams`] for the default and rationale.
+  max_inbound_streams: Option<usize>,
+  /// Per-peer ceiling on OUTSTANDING (still-dialing) reliable user-message dial
+  /// intents. Past this many parked intents to one peer,
+  /// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message)
+  /// refuses a further send with a `Busy`-class error instead of parking another
+  /// intent — admission control on the node's own application load. Unlike the
+  /// `Option<usize>` transport caps above there is no `None` (unbounded) form: an
+  /// admission bound is always in effect, and a value of 0 is rejected by
+  /// [`Self::validate`]. Push/pull and reliable-ping dials are exempt. See
+  /// [`Self::max_pending_user_dials_per_peer`] for the default and rationale.
+  max_pending_user_dials_per_peer: usize,
+  /// Cadence of the coordinator's budget-deferred residue catch-up, and the width
+  /// of the sub-interval window a near-deadline dial can miss. A smaller interval
+  /// drains a deferred residue faster and shrinks the residual window; a larger one
+  /// lowers the idle scheduled-tick rate at the cost of a wider residual. Governs the
+  /// ready-bridge / ready-dial catch-up anchor cadence, the chained dial
+  /// service-wake spacing, and the urgent front-deposit horizon. See
+  /// [`Self::catchup_interval`] for the default and validation bounds.
+  catchup_interval: Duration,
+  /// How far before a parked dial's deadline the coordinator schedules that dial's
+  /// pre-deadline SERVICE wake, so a budget-deferred but still-creditable dial is
+  /// attempted while `now < deadline` — and minted — rather than retired at the
+  /// deadline. [`Self::validate`] pins it to the range `[catchup_interval,
+  /// 2 * catchup_interval]`. See [`Self::dial_service_margin`] for the default and the
+  /// range's rationale.
+  dial_service_margin: Duration,
+  /// Maximum liveness-critical reliable-ping fallback dials the coordinator attempts
+  /// PAST a per-pass dial-attempt budget, per peer bucket per pass. See
+  /// [`Self::max_reliable_ping_exempt_pops_per_pass`] for the default and the safety
+  /// floor.
+  max_reliable_ping_exempt_pops_per_pass: usize,
 }
+
+/// Default global QUIC connection ceiling installed by [`QuicOptions::new`].
+///
+/// The coordinator pools one QUIC connection per peer, idle-evicted by quinn's
+/// `max_idle_timeout`, so a node's steady-state connection set is bounded by its
+/// gossip/probe fan-out within one idle window — in practice far below the
+/// cluster size. `4096` leaves generous headroom for even a large LAN cluster's
+/// working set while bounding the connection-table slab (each entry owns a
+/// `quinn_proto::Connection`) to a survivable footprint against an Initial
+/// flood. Operators with an exceptional working set raise it (or pass `None`)
+/// via [`QuicOptions::with_max_quic_connections`].
+pub const DEFAULT_MAX_QUIC_CONNECTIONS: usize = 4096;
+
+/// Default per-source pending-handshake ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// A legitimate peer holds a single pooled connection per direction; transient
+/// duplicates arise only from the closed-before-drained redial window and
+/// simultaneous bidirectional dial (a small constant, and *pending* ones fewer
+/// still — typically one at a time). `16` is an order of magnitude above that
+/// legitimate maximum while capping the half-open handshake state one source
+/// address (including a spoofed one) can pin, so a single source cannot consume
+/// the global budget with half-open connections. Tunable via
+/// [`QuicOptions::with_max_pending_connections_per_source`].
+pub const DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE: usize = 16;
+
+/// Default coordinator-wide inbound reliable-stream ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// Each accepted inbound bidi stream mints a bridge that transiently pins up to
+/// ~3x `max_stream_frame_size` of reassembly buffer, so the coordinator bounds
+/// the inbound bridge population ACROSS all connections — quinn's per-connection
+/// `max_concurrent_bidi_streams` bounds only one connection, so without this a
+/// flood of connections (up to [`DEFAULT_MAX_QUIC_CONNECTIONS`]) could each open
+/// their full bidi allowance and mint an unbounded number of bridges.
+///
+/// Legitimate inbound reliable concurrency is the gossip/push-pull fan-in — in
+/// the low tens even for a large LAN cluster — so `1024` is one to two orders of
+/// magnitude of headroom while keeping the population hard-bounded. It sits below
+/// [`DEFAULT_MAX_QUIC_CONNECTIONS`] (a per-tracked-connection factor well under
+/// one), so a connection flood cannot multiply into an unbounded bridge
+/// population: the coordinator admits at most this many inbound bridges
+/// regardless of how many connections are open. With the default KB-scale
+/// push/pull frames the footprint is modest; an operator who raises
+/// `max_stream_frame_size` toward its ceiling should lower this correspondingly
+/// (the product is the worst-case transient reassembly footprint). `None` opts
+/// out of the bound; tune via [`QuicOptions::with_max_inbound_streams`].
+pub const DEFAULT_MAX_QUIC_INBOUND_STREAMS: usize = 1024;
+
+// A default of 0 would reject every inbound stream (the accept gate refuses when
+// `inbound_live >= max`), silently disabling inbound reliable exchanges. Keep the
+// default a usable nonzero bound.
+const _: () = assert!(
+  DEFAULT_MAX_QUIC_INBOUND_STREAMS > 0,
+  "the default QUIC inbound-stream ceiling must be nonzero"
+);
+
+/// Default per-peer reliable user-message dial-backlog ceiling installed by
+/// [`QuicOptions::new`].
+///
+/// Bounds the number of OUTSTANDING (still-dialing) reliable user-message
+/// intents the coordinator will hold for a single peer before
+/// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message)
+/// refuses a further send with visible backpressure. An application that queues
+/// reliable messages to one peer faster than that peer establishes or grants
+/// stream credit would otherwise park an unbounded number of intents (each
+/// toward its dial deadline), learning of the overload only via delayed deadline
+/// failures. The bound makes the overload visible at the call site instead.
+///
+/// A legitimate application sends a handful of concurrent reliable messages to
+/// any one peer; a pooled connection that is answering mints each immediately, so
+/// a healthy peer never accumulates backlog at all (only a peer that cannot yet
+/// open a stream parks). `32` is an order of magnitude above the legitimate
+/// working set while keeping the per-peer parked-intent footprint hard-bounded.
+/// Push/pull and reliable-ping dials are exempt (protocol-paced,
+/// liveness-critical) and never counted. Raise it via
+/// [`QuicOptions::with_max_pending_user_dials_per_peer`] for a bursty reliable
+/// workload.
+pub const DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER: usize = 32;
+
+// A ceiling of 0 would refuse EVERY reliable user-message dial (the admission
+// gate refuses when `backlog >= limit`, and an empty backlog is already `>= 0`),
+// silently disabling reliable user messages. Keep the default a usable nonzero
+// bound; `QuicOptions::validate` rejects an operator-supplied 0 at construction.
+const _: () = assert!(
+  DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER >= 1,
+  "the default per-peer reliable user-message dial-backlog ceiling must be >= 1"
+);
+
+/// Default catch-up servicing cadence installed by [`QuicOptions::new`] — the
+/// interval the coordinator paces its budget-deferred residue drain at.
+///
+/// The residue-drain and near-deadline-dial machinery is a fixed, table-independent
+/// rate: each catch-up interval the coordinator pumps one budget-sized chunk of
+/// deferred bridges and services one budget-sized chunk of budget-deferred parked
+/// dials, so the per-interval work stays constant regardless of the residue size.
+/// `10ms` is far inside any reliable-exchange deadline (seconds) while keeping the
+/// idle scheduled-tick rate low. Tune via [`QuicOptions::with_catchup_interval`].
+pub const DEFAULT_CATCHUP_INTERVAL: Duration = super::CATCHUP_INTERVAL;
+
+/// Upper bound [`QuicOptions::validate`] accepts for
+/// [`QuicOptions::catchup_interval`].
+///
+/// A catch-up interval beyond this would pace the residue drain so slowly that a
+/// budget-deferred bridge or parked dial could strand past its exchange deadline
+/// before the next catch-up pass ran. `1s` is already an order of magnitude above
+/// the `10ms` default, leaving generous headroom for a deliberately slack cadence
+/// while keeping the drain bounded well inside a reliable-exchange deadline.
+pub const MAX_CATCHUP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default dial service margin installed by [`QuicOptions::new`] — how far before a
+/// parked dial's deadline the coordinator schedules its pre-deadline service wake.
+///
+/// Set to two [`DEFAULT_CATCHUP_INTERVAL`]s: one interval of driver-timer jitter
+/// allowance plus one chained mid-window service tick, so a budget-deferred but
+/// still-creditable dial is attempted (and minted) strictly before its deadline
+/// rather than retired at it. This is also the MAXIMUM ratio [`QuicOptions::validate`]
+/// permits — it pins the margin to `[catchup_interval, 2 * catchup_interval]` because
+/// each interval of margin is one full O(N) tick per interval in a blocked dial's final
+/// window, so bounding the ratio keeps that count a small constant (`1 + ceil(margin /
+/// interval) <= 3`). Tune via [`QuicOptions::with_dial_service_margin`] (raise
+/// [`QuicOptions::with_catchup_interval`] in step to widen the absolute margin).
+pub const DEFAULT_DIAL_SERVICE_MARGIN: Duration = super::DIAL_SERVICE_MARGIN;
+
+/// Default per-pass reliable-ping exempt-pop cap installed by [`QuicOptions::new`].
+///
+/// The pass-budget twin of the reliable-ping outbound-cap exemption: a
+/// liveness-critical reliable-ping fallback at the front of a peer's parked bucket is
+/// attempted even when a pass's shared dial-attempt budget is spent, so it is never
+/// deferred to its cumulative probe deadline (a false-positive Dead) behind a
+/// user-message flood. `8` equals the membership `awareness_max_multiplier` default —
+/// the bound on how many same-peer reliable-ping fallbacks can stack at once — so an
+/// honest fallback is never deferred at the default configuration. See
+/// [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`] for the safety floor.
+pub const DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS: usize = 8;
+
+// A zero exempt-pop cap would defer EVERY reliable-ping fallback that arrives on a
+// budget-spent pass to its cumulative deadline — a false Suspect of a live peer.
+// Keep the default a usable nonzero cap; `QuicOptions::validate` rejects a supplied 0.
+const _: () = assert!(
+  DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS >= 1,
+  "the default reliable-ping exempt-pop cap must be >= 1"
+);
 
 impl QuicOptions {
   /// Build from a caller-built endpoint config, server config, client
@@ -147,6 +340,20 @@ impl QuicOptions {
   /// sender side once `state.next[Uni] >= state.max[Uni]`, and no
   /// `Recv` is ever allocated on the receiver for an unwelcome
   /// uni-stream frame, so no remote uni-stream state can accumulate.
+  ///
+  /// Configuration note on `receive_window`: the coordinator caps the outbound
+  /// reliable-stream population it opens per connection at a local constant
+  /// (`C_OUT`), so the stream set quinn re-enumerates on every connection-window
+  /// MAX_DATA is bounded by a config constant rather than by the peer's advertised
+  /// `MAX_STREAMS`. With the default (effectively unbounded) `receive_window` the
+  /// connection-level write limit reaches zero only under ACK starvation (a
+  /// crashed or partitioned peer), so that blocked set is touched only under peer
+  /// failure and self-frees when the connection is retired. Supplying a FINITE
+  /// `receive_window` on this `transport` makes ordinary connection-window
+  /// backpressure drive the same re-enumeration: it stays bounded by the same
+  /// config constant per blocked-episode, but is now exercised in normal operation
+  /// rather than only under a stalled peer. Lowering `receive_window` trades peak
+  /// per-connection memory for that per-episode re-enumeration cost.
   ///
   /// quinn-proto APIs used here:
   /// - `EndpointOptions::grease_quic_bit(bool) -> &mut Self`.
@@ -290,7 +497,98 @@ impl QuicOptions {
       client,
       sni_provider,
       unreliable_transport,
+      max_quic_connections: Some(DEFAULT_MAX_QUIC_CONNECTIONS),
+      max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
+      max_inbound_streams: Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
+      max_pending_user_dials_per_peer: DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
+      catchup_interval: DEFAULT_CATCHUP_INTERVAL,
+      dial_service_margin: DEFAULT_DIAL_SERVICE_MARGIN,
+      max_reliable_ping_exempt_pops_per_pass: DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS,
     }
+  }
+
+  /// Override the global QUIC connection ceiling (handshaking + established +
+  /// still-draining). `None` removes the bound. Enforced against an
+  /// unauthenticated inbound Initial before any connection-table state is
+  /// committed. Defaults to [`Some`]`(`[`DEFAULT_MAX_QUIC_CONNECTIONS`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_quic_connections(mut self, max: Option<usize>) -> Self {
+    self.max_quic_connections = max;
+    self
+  }
+
+  /// Override the per-source pending-handshake ceiling. `None` removes the
+  /// bound. Enforced against an unauthenticated inbound Initial before any
+  /// connection-table state is committed. Defaults to [`Some`]`(`[`DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_pending_connections_per_source(mut self, max: Option<usize>) -> Self {
+    self.max_pending_connections_per_source = max;
+    self
+  }
+
+  /// Override the coordinator-wide inbound reliable-stream ceiling. `None`
+  /// removes the bound. Bounds the inbound bridge population across all QUIC
+  /// connections (an inbound bidi stream accepted beyond the ceiling is refused
+  /// instead of minting a bridge). Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_INBOUND_STREAMS`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub fn with_max_inbound_streams(mut self, max: Option<usize>) -> Self {
+    self.max_inbound_streams = max;
+    self
+  }
+
+  /// Override the per-peer reliable user-message dial-backlog ceiling. A value of
+  /// `0` disables reliable user messages entirely and is rejected by
+  /// [`Self::validate`] at construction. Bounds the OUTSTANDING (still-dialing)
+  /// reliable user-message intents to any one peer; a further send past the
+  /// ceiling is refused with backpressure. Defaults to
+  /// [`DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_pending_user_dials_per_peer(mut self, max: usize) -> Self {
+    self.max_pending_user_dials_per_peer = max;
+    self
+  }
+
+  /// Override the catch-up servicing cadence (residue-drain interval, chained
+  /// service-wake spacing, and urgent front-deposit horizon). Must be `> 0` and
+  /// `<=` [`MAX_CATCHUP_INTERVAL`], enforced by [`Self::validate`]. Defaults to
+  /// [`DEFAULT_CATCHUP_INTERVAL`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_catchup_interval(mut self, interval: Duration) -> Self {
+    self.catchup_interval = interval;
+    self
+  }
+
+  /// Override the dial service margin — how far before a parked dial's deadline the
+  /// coordinator schedules its pre-deadline service wake. Must be `>=`
+  /// [`Self::catchup_interval`] and `<=` twice it, enforced by [`Self::validate`]: a
+  /// smaller margin could let the deadline fire before any pre-deadline service tick
+  /// lands, and a ratio above two would let a blocked dial fire ~`margin / interval`
+  /// full ticks over its final window. Widen the absolute margin by raising
+  /// [`Self::with_catchup_interval`] in step. Defaults to
+  /// [`DEFAULT_DIAL_SERVICE_MARGIN`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_dial_service_margin(mut self, margin: Duration) -> Self {
+    self.dial_service_margin = margin;
+    self
+  }
+
+  /// Override the per-pass reliable-ping exempt-pop cap. A value of `0` disables the
+  /// exemption and is rejected by [`Self::validate`]. It MUST stay `>=` the
+  /// membership `awareness_max_multiplier` or honest reliable-ping fallbacks defer to
+  /// a false Suspect — see [`Self::max_reliable_ping_exempt_pops_per_pass`]. Defaults
+  /// to [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_reliable_ping_exempt_pops_per_pass(mut self, max: usize) -> Self {
+    self.max_reliable_ping_exempt_pops_per_pass = max;
+    self
   }
 
   /// Resolve the TLS verification identity for an outbound dial to `peer`.
@@ -338,6 +636,188 @@ impl QuicOptions {
   pub fn unreliable_transport(&self) -> UnreliableTransport {
     self.unreliable_transport
   }
+
+  /// The global QUIC connection ceiling the coordinator enforces against
+  /// unauthenticated inbound Initials, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_CONNECTIONS`]`)`; see that constant for the
+  /// rationale.
+  #[inline(always)]
+  pub const fn max_quic_connections(&self) -> Option<usize> {
+    self.max_quic_connections
+  }
+
+  /// The per-source pending-handshake ceiling the coordinator enforces against
+  /// unauthenticated inbound Initials, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE`]`)`; see that
+  /// constant for the rationale.
+  #[inline(always)]
+  pub const fn max_pending_connections_per_source(&self) -> Option<usize> {
+    self.max_pending_connections_per_source
+  }
+
+  /// The coordinator-wide inbound reliable-stream ceiling the QUIC accept loop
+  /// enforces before minting a bridge, or `None` for no bound. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_QUIC_INBOUND_STREAMS`]`)`; see that constant for
+  /// the rationale.
+  #[inline(always)]
+  pub const fn max_inbound_streams(&self) -> Option<usize> {
+    self.max_inbound_streams
+  }
+
+  /// The per-peer reliable user-message dial-backlog ceiling the coordinator
+  /// enforces in
+  /// [`QuicEndpoint::start_user_message`](crate::quic::QuicEndpoint::start_user_message).
+  /// Defaults to [`DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER`]; see that constant
+  /// for the rationale.
+  #[inline(always)]
+  pub const fn max_pending_user_dials_per_peer(&self) -> usize {
+    self.max_pending_user_dials_per_peer
+  }
+
+  /// The catch-up servicing cadence the coordinator paces its budget-deferred
+  /// residue drain at, and the width of the sub-interval window a near-deadline dial
+  /// can miss. Governs the ready-bridge / ready-dial catch-up anchor, the chained
+  /// dial service-wake spacing, and the urgent front-deposit horizon. Defaults to
+  /// [`DEFAULT_CATCHUP_INTERVAL`]; [`Self::validate`] rejects a zero (which would
+  /// break the residual-window anchor) or a value above [`MAX_CATCHUP_INTERVAL`]
+  /// (which would strand residue past its deadline).
+  #[inline(always)]
+  pub const fn catchup_interval(&self) -> Duration {
+    self.catchup_interval
+  }
+
+  /// The dial service margin — how far before a parked dial's deadline the
+  /// coordinator schedules that dial's pre-deadline SERVICE wake, so a
+  /// budget-deferred but still-creditable dial is attempted (and minted) while
+  /// `now < deadline` rather than retired at the deadline. Defaults to
+  /// [`DEFAULT_DIAL_SERVICE_MARGIN`] (two catch-up intervals). [`Self::validate`] pins
+  /// it to `[catchup_interval, 2 * catchup_interval]`: a value below
+  /// [`Self::catchup_interval`] could let the deadline fire before any pre-deadline
+  /// service tick landed in the window (silently reopening the
+  /// spurious-retire-under-capacity failure this margin closes), while a value above
+  /// twice the interval would let a blocked dial fire ~`margin / interval` full O(N)
+  /// ticks over its final window instead of a small constant.
+  #[inline(always)]
+  pub const fn dial_service_margin(&self) -> Duration {
+    self.dial_service_margin
+  }
+
+  /// The per-pass reliable-ping exempt-pop cap: the maximum liveness-critical
+  /// reliable-ping fallback dials the coordinator attempts past a peer bucket's
+  /// per-pass dial-attempt budget. A reliable-ping fallback deferred to its
+  /// cumulative probe deadline yields a false-positive Dead, so this exemption keeps
+  /// an honest fallback from stranding behind a user-message flood. Defaults to
+  /// [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
+  ///
+  /// SAFETY FLOOR: keep this `>=` the membership `awareness_max_multiplier` (config
+  /// default 8), which bounds how many same-peer reliable-ping fallbacks can stack at
+  /// once. A smaller cap would defer honest fallbacks past the budget and risk a
+  /// false Suspect. The coordinator cannot cheaply read the membership awareness
+  /// bound at runtime (the composed endpoint exposes no accessor for it), so
+  /// [`Self::validate`] only rejects a zero cap; the default matches the awareness
+  /// default so the floor holds unless an operator lowers one without the other.
+  #[inline(always)]
+  pub const fn max_reliable_ping_exempt_pops_per_pass(&self) -> usize {
+    self.max_reliable_ping_exempt_pops_per_pass
+  }
+
+  /// Validate operator-supplied option values, rejecting a configuration the
+  /// coordinator cannot service. Reject rather than panic or silently ship a
+  /// footgun (mirrors [`Endpoint::try_new_at`](crate::endpoint::Endpoint::try_new_at)'s
+  /// operator-misconfiguration guards).
+  ///
+  /// The guards, each rejecting a value that would break a coordinator invariant:
+  ///
+  /// * `max_pending_user_dials_per_peer` must be `>= 1` — a `0` ceiling refuses every
+  ///   reliable user-message dial (the admission gate refuses when `backlog >=
+  ///   limit`, and an empty backlog already satisfies `>= 0`).
+  /// * `catchup_interval` must be `> 0` — a zero interval would collapse the
+  ///   residual-window anchor and the chained service-wake spacing — and `<=`
+  ///   [`MAX_CATCHUP_INTERVAL`] — a larger cadence could strand residue past its
+  ///   exchange deadline.
+  /// * `dial_service_margin` must be `>=` `catchup_interval` — a smaller margin could
+  ///   let a parked dial's deadline fire before any pre-deadline service tick landed
+  ///   in the window, silently reopening the spurious-retire-under-capacity failure
+  ///   the margin exists to close — and `<=` `2 * catchup_interval`: the margin/interval
+  ///   ratio bounds a blocked dial's phased service-wake chain to `1 + ceil(margin /
+  ///   interval) <= 3` full O(N) ticks over its final window, so an unbounded ratio would
+  ///   let one blocked dial fire ~`margin / interval` full ticks. Cross-field: both bounds
+  ///   are checked against `catchup_interval`.
+  /// * `max_reliable_ping_exempt_pops_per_pass` must be `>= 1` — a `0` cap defers
+  ///   every over-budget reliable-ping fallback to its cumulative deadline, a false
+  ///   Suspect of a live peer.
+  ///
+  /// Callers that assemble a [`QuicOptions`] from operator input run this before
+  /// handing it to the coordinator.
+  pub const fn validate(&self) -> Result<(), QuicOptionsError> {
+    if self.max_pending_user_dials_per_peer == 0 {
+      return Err(QuicOptionsError::MaxPendingUserDialsPerPeerZero);
+    }
+    if self.catchup_interval.is_zero() {
+      return Err(QuicOptionsError::CatchupIntervalZero);
+    }
+    if self.catchup_interval.as_nanos() > MAX_CATCHUP_INTERVAL.as_nanos() {
+      return Err(QuicOptionsError::CatchupIntervalTooLarge);
+    }
+    if self.dial_service_margin.as_nanos() < self.catchup_interval.as_nanos() {
+      return Err(QuicOptionsError::DialServiceMarginBelowCatchupInterval);
+    }
+    // Overflow-safe by construction: a `Duration`'s nanoseconds always fit in a `u128`
+    // with ample room to double (a `u64::MAX`-second `Duration` is ~1.8e28 ns, and
+    // `* 2` stays far below `u128::MAX`), so this multiply cannot overflow — no
+    // `saturating_mul` needed. Pinning the margin to `<= 2 * catchup_interval` bounds a
+    // blocked dial's phased service-wake chain to `1 + ceil(M / I) <= 3` full O(N) ticks
+    // over its final window; an unbounded M/I ratio would instead let one blocked dial
+    // fire ~`M / I` full ticks. Checked AFTER the lower-bound guard so a below-interval
+    // margin reports that error, not this one.
+    if self.dial_service_margin.as_nanos() > self.catchup_interval.as_nanos() * 2 {
+      return Err(QuicOptionsError::DialServiceMarginExceedsTwiceCatchupInterval);
+    }
+    if self.max_reliable_ping_exempt_pops_per_pass == 0 {
+      return Err(QuicOptionsError::MaxReliablePingExemptPopsPerPassZero);
+    }
+    Ok(())
+  }
+}
+
+/// Error returned by [`QuicOptions::validate`] when an operator-supplied option
+/// value is unusable. `#[non_exhaustive]`: further option guards may be added
+/// without a breaking change.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum QuicOptionsError {
+  /// `max_pending_user_dials_per_peer` was set to `0`, which would refuse every
+  /// reliable user-message dial (the admission gate refuses when
+  /// `backlog >= limit`). Set it to `>= 1`.
+  #[error("max_pending_user_dials_per_peer must be >= 1")]
+  MaxPendingUserDialsPerPeerZero,
+  /// `catchup_interval` was set to `0`, which would collapse the residue-drain
+  /// cadence and the chained dial service-wake spacing. Set it to `> 0`.
+  #[error("catchup_interval must be > 0")]
+  CatchupIntervalZero,
+  /// `catchup_interval` exceeds [`MAX_CATCHUP_INTERVAL`], a cadence so slack a
+  /// budget-deferred residue could strand past its exchange deadline. Set it to
+  /// `<= 1s`.
+  #[error("catchup_interval must be <= 1s")]
+  CatchupIntervalTooLarge,
+  /// `dial_service_margin` is smaller than `catchup_interval`, so a parked dial's
+  /// deadline could fire before any pre-deadline service tick landed in the window —
+  /// reopening the spurious-retire-under-capacity failure. Set it to `>=
+  /// catchup_interval`.
+  #[error("dial_service_margin must be >= catchup_interval")]
+  DialServiceMarginBelowCatchupInterval,
+  /// `dial_service_margin` exceeds twice `catchup_interval`. The margin/interval ratio
+  /// bounds a blocked dial's phased service-wake chain to `1 + ceil(margin / interval)`
+  /// full O(N) ticks over its final window, so an unbounded ratio would let one blocked
+  /// dial fire ~`margin / interval` full ticks. Set it to `<= 2 * catchup_interval`
+  /// (widen the absolute margin by raising `catchup_interval` in step).
+  #[error("dial_service_margin must be <= 2 * catchup_interval")]
+  DialServiceMarginExceedsTwiceCatchupInterval,
+  /// `max_reliable_ping_exempt_pops_per_pass` was set to `0`, which would defer every
+  /// over-budget reliable-ping fallback to its cumulative deadline (a false Suspect).
+  /// Set it to `>= 1` (and `>=` the membership awareness max).
+  #[error("max_reliable_ping_exempt_pops_per_pass must be >= 1")]
+  MaxReliablePingExemptPopsPerPassZero,
 }
 
 #[cfg(test)]
