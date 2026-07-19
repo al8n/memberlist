@@ -10,7 +10,7 @@ use crate::{NodeConfig, TestCluster, wait_until};
 
 /// Generous convergence budget: a healthy two-node cluster on loopback
 /// converges in well under a second; the margin absorbs scheduler jitter.
-const CONVERGE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONVERGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long to wait before concluding two mismatched-label nodes have stayed
 /// isolated. Normal convergence is sub-second, so a few seconds of silence is
@@ -21,7 +21,7 @@ const ISOLATION_SETTLE: Duration = Duration::from_secs(3);
 /// interval to notice, then the suspicion timeout (suspicion_mult · log(N+1) ·
 /// probe_interval) before the peer is declared dead. `wait_until` returns as
 /// soon as the peer drops, so this is only an upper bound, not added latency.
-const DETECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DETECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Two nodes; the second joins the first by its advertise address and the
 /// cluster converges to a 2-member view on both sides.

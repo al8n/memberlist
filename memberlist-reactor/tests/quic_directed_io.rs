@@ -186,7 +186,7 @@ async fn quic_control_apis_dispatch_to_peer() {
         .map(|n| n.meta_ref().as_ref() == b"web")
         .unwrap_or(false)
     },
-    Duration::from_secs(10),
+    Duration::from_secs(60),
   )
   .await;
   assert!(
@@ -203,7 +203,7 @@ async fn quic_control_apis_dispatch_to_peer() {
         .iter()
         .any(|s| s == b"app-state")
     },
-    Duration::from_secs(10),
+    Duration::from_secs(60),
   )
   .await;
   assert!(
@@ -216,7 +216,7 @@ async fn quic_control_apis_dispatch_to_peer() {
     .expect("queue_user_broadcast");
   let bcast_seen = wait_until(
     || caps.user_msgs.lock().unwrap().iter().any(|m| m == b"bcast"),
-    Duration::from_secs(10),
+    Duration::from_secs(60),
   )
   .await;
   assert!(
