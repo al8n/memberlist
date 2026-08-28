@@ -351,6 +351,28 @@ fn build_with_timeout_tuning_is_usable() {
 }
 
 #[test]
+fn build_forces_early_data_off_on_both_sides() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  // The managed builder must force QUIC 0-RTT (early data) OFF on both rustls
+  // configs it assembles, regardless of rustls's own defaults. Introspect the
+  // pair BEFORE quinn's `try_from` wrapping hides those fields.
+  let (server, client) = QuicConfigOptions::new(cert, key, ca)
+    .assemble_rustls_configs()
+    .expect("assembling the rustls pair should succeed");
+  assert!(
+    !client.enable_early_data,
+    "the managed build path must force client `enable_early_data = false`"
+  );
+  assert_eq!(
+    server.max_early_data_size, 0,
+    "the managed build path must force server `max_early_data_size = 0`"
+  );
+}
+
+#[test]
 fn build_missing_cert_file_errors() {
   install_provider();
   let dir = unique_dir();

@@ -94,6 +94,46 @@ pub(crate) fn test_client() -> quinn_proto::ClientConfig {
   quinn_proto::ClientConfig::new(Arc::new(qcc))
 }
 
+/// A shared quinn `QuicClientConfig` Arc whose underlying rustls `ClientConfig`
+/// has 0-RTT early data ENABLED (`enable_early_data = true`) and the default
+/// in-memory resumption store. Cloning the returned Arc into two
+/// `quinn_proto::ClientConfig`s shares ONE resumption store, so a session ticket
+/// a first connection stores becomes available to a second connection built from
+/// the same Arc — the setup a real 0-RTT resume needs in the coordinator harness.
+/// Test-only: production callers never opt into early data on the managed path.
+pub(crate) fn early_data_client_arc() -> Arc<quinn_proto::crypto::rustls::QuicClientConfig> {
+  let provider = Arc::new(rustls::crypto::ring::default_provider());
+  let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+    .with_protocol_versions(&[&TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(AnyServer))
+    .with_no_client_auth();
+  cfg.enable_early_data = true;
+  Arc::new(quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(cfg)).unwrap())
+}
+
+/// A test-only server config that ACCEPTS 0-RTT early data
+/// (`max_early_data_size = u32::MAX`). The default `std` server session storage
+/// is the stateful in-memory cache with `NeverProducesTickets`, which is exactly
+/// what rustls requires to advertise early data on a resumed session. Test-only:
+/// the managed [`QuicConfigOptions::build`](super::super::config::QuicConfigOptions::build)
+/// path forces `max_early_data_size = 0`.
+pub(crate) fn test_server_early() -> quinn_proto::ServerConfig {
+  let (chain, key) = self_signed();
+  let provider = Arc::new(rustls::crypto::ring::default_provider());
+  let mut rustls_server = rustls::ServerConfig::builder_with_provider(provider)
+    .with_protocol_versions(&[&TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(chain, key)
+    .unwrap();
+  rustls_server.max_early_data_size = u32::MAX;
+  let qsc =
+    quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(rustls_server)).unwrap();
+  quinn_proto::ServerConfig::with_crypto(Arc::new(qsc))
+}
+
 #[test]
 fn builds_a_usable_config_bundle() {
   let cfg = QuicOptions::new(

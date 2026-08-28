@@ -811,6 +811,19 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// bounded here by popping-and-dropping past either limit. Best-effort
   /// accounting only — never a membership signal.
   datagram_ingress_dropped: u64,
+  /// Count of inbound application datagrams the `service_quinn` receive drain
+  /// popped from quinn but DROPPED because the connection had not yet reached
+  /// its application-readiness boundary (`established_at_least_once()` still
+  /// false — the QUIC 0-RTT readiness gate). Distinct from
+  /// [`Self::datagram_ingress_dropped`], which counts drops past the ingress
+  /// cap: this counts drops that precede the connection's own establishment,
+  /// so a caller-enabled early-data datagram cannot reach `mem_ingress` before
+  /// the handshake completes. Zero on every non-early-data path (without
+  /// accepted 0-RTT no application datagram arrives pre-establishment). The
+  /// unreliable plane is loss-tolerant, so the drop is recovered by ordinary
+  /// gossip redundancy. Best-effort accounting only — never a membership
+  /// signal.
+  pre_established_datagrams_dropped: u64,
   /// Incremental earliest-deadline index backing [`Self::poll_timeout`]. Holds
   /// the next deadline for every connection, bridge, and pending dial (plus the
   /// membership endpoint and the immediate-due anchor) so `poll_timeout` reads
@@ -1173,6 +1186,7 @@ impl<I, R> QuicEndpoint<I, R> {
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
+      pre_established_datagrams_dropped: 0,
       deadline_index: DeadlineIndex::new(),
       conns_with_pending_events: HashSet::new(),
       next_catchup_at: None,
@@ -2949,6 +2963,15 @@ impl<I, R> QuicEndpoint<I, R> {
   #[cfg(test)]
   pub(crate) fn datagram_ingress_dropped(&self) -> u64 {
     self.datagram_ingress_dropped
+  }
+
+  /// Count of inbound application datagrams dropped by the receive drain
+  /// because the connection had not yet reached its application-readiness
+  /// boundary (the QUIC 0-RTT readiness gate; best-effort accounting; never a
+  /// membership signal).
+  #[cfg(test)]
+  pub(crate) fn pre_established_datagrams_dropped(&self) -> u64 {
+    self.pre_established_datagrams_dropped
   }
 
   /// Count of membership-time advances ([`Endpoint::handle_timeout`] calls).
@@ -5501,6 +5524,142 @@ where
     ready_peers
   }
 
+  /// Accept every un-accepted inbound bidi stream on connection `ch`, minting a
+  /// [`Bridge`] for each and enqueueing it for this pass's pump drain. Re-acquires
+  /// the `self.conns` borrow internally so it can run at either of its two call
+  /// sites in [`Self::service_one_conn`] (an already-established connection whose
+  /// one-shot `Opened` fired this pass, or the establishment chokepoint re-driving
+  /// a coalesced `Opened`) — both AFTER the poll loop releases its `e` borrow.
+  /// A no-op when quinn reports no acceptable stream (`accept` returns `None`).
+  ///
+  /// This is the accept-drain factored out of the `StreamEvent::Opened { dir: Bi }`
+  /// arm so it can be readiness-gated: it must run ONLY once the connection has
+  /// reached its application-readiness boundary (`established_at_least_once()`),
+  /// so a caller-enabled 0-RTT stream accepted while handshaking is left
+  /// quarantined inside quinn until the handshake completes.
+  fn accept_inbound_streams(&mut self, ch: ConnectionHandle, now: Instant) {
+    // Cross-connection inbound-stream cap. Each accepted bidi stream mints a
+    // Bridge that pins up to ~3x the max reliable frame size, so admission-gate
+    // every inbound bridge against the QUIC-specific
+    // `QuicOptions::max_inbound_streams` (a bounded nonzero default) BEFORE
+    // minting — the QUIC twin of the stream coordinator's `accept_connection`
+    // gate (`streams::StreamEndpoint`, which counts `exchanges.filter(|m|
+    // !m.outbound)`). The QUIC ceiling is its own option, not the shared TCP/TLS
+    // `EndpointOptions::max_inbound_streams` (which defaults to unlimited), so a
+    // default QUIC endpoint is bounded without changing TCP/TLS behaviour. This
+    // bounds inbound bridge state ACROSS all connections; quinn's per-connection
+    // `max_concurrent_bidi_streams` is a separate, per-connection limit.
+    let max_inbound = self.cfg.max_inbound_streams();
+    let Some(e) = self.conns.get_mut(ch) else {
+      return;
+    };
+    // `StreamEvent::Opened` is an idempotent signal ("one or more streams
+    // opened"), not a per-stream event, so accept until the peer's bidi backlog
+    // is drained — otherwise concurrently opened inbound exchanges are stranded
+    // with no further wake-up. quinn opens remote streams IMPLICITLY: one STREAM
+    // (or MAX_STREAM_DATA) frame naming a high in-credit index advances
+    // `next_remote`, so this loop can accept the whole remaining bidi window in a
+    // single datagram — up to the per-connection bidi credit, capped by the
+    // `max_inbound_streams` headroom above. That is a per-credit-window BATCH
+    // bound: config-bounded and independent of the connection/bridge tables, not
+    // amplifiable per datagram beyond the configured caps. An operator wanting a
+    // tighter per-datagram batch lowers quinn's `max_concurrent_bidi_streams` —
+    // gossip needs only a handful of concurrent reliable exchanges per
+    // connection. An outbound bridge is registered in `pending_outbound_kinds`
+    // for the life of its exchange and an accepted (inbound) bridge never is (see
+    // that field's docs), so the inbound population is exactly the bridges absent
+    // from that map — tracked incrementally as `inbound_bridge_count`. Read that
+    // O(1) count instead of filtering the whole bridge table on every peer-driven
+    // `Opened` (one datagram could otherwise force an O(all bridges) fold); the
+    // mint below bumps it in place, so a later connection's accept loop this same
+    // pass sees the updated total — the cap is ACROSS all connections. The
+    // `e = self.conns.get_mut(ch)` borrow is field-disjoint from every
+    // `self.<other field>` access below, exactly as when this loop ran inline in
+    // the poll loop.
+    while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
+      let peer = e.peer();
+      // At the inbound ceiling: refuse this stream instead of minting a
+      // bridge. Reset both halves so the peer is notified and quinn
+      // releases the stream slot, and bump `inbound_streams_rejected`.
+      // Ignoring Err: `ClosedStream` means the half is already gone,
+      // which is the desired end state.
+      if max_inbound.is_some_and(|max| self.inbound_bridge_count >= max) {
+        self.ep.metrics_mut().inbound_streams_rejected += 1;
+        let _ = e
+          .conn_mut()
+          .send_stream(sid)
+          .reset(quinn_proto::VarInt::from_u32(0));
+        let _ = e
+          .conn_mut()
+          .recv_stream(sid)
+          .stop(quinn_proto::VarInt::from_u32(0));
+        continue;
+      }
+      let Some(stream) = self.ep.accept_stream(peer, now) else {
+        // Leaving/Left: admit no new inbound reliable stream. Reset both
+        // halves of the just-accepted QUIC stream so the peer is notified
+        // and the connection's stream slot is released instead of left
+        // orphaned with no Bridge to own it. Ignoring Err: `ClosedStream`
+        // means the half is already gone, which is the desired end state.
+        let _ = e
+          .conn_mut()
+          .send_stream(sid)
+          .reset(quinn_proto::VarInt::from_u32(0));
+        let _ = e
+          .conn_mut()
+          .recv_stream(sid)
+          .stop(quinn_proto::VarInt::from_u32(0));
+        continue;
+      };
+      let id = stream.id();
+      let reliable_max = self.ep.max_stream_frame_size();
+      self.bridges.insert(
+        id,
+        Bridge::new(
+          stream,
+          ch,
+          sid,
+          #[cfg(compression)]
+          self.compression,
+          #[cfg(encryption)]
+          self.encryption.clone(),
+          reliable_max,
+          self.label.clone(),
+          self.skip_inbound_label_check,
+          false,
+        ),
+      );
+      // Mirror the mint into both bridge indexes (each borrows only its own
+      // field, disjoint from the live `e`/`self.conns` borrow), and bump
+      // the incremental inbound population this accept gate reads. An
+      // accepted bridge is never in `pending_outbound_kinds`, so the guard
+      // is always true here — but keeping the SAME `!contains` predicate the
+      // reap-time decrement uses makes the count provably balanced no matter
+      // how the id spaces evolve.
+      index_bridge_mint(&mut self.bridges, &mut self.bridges_by_conn, ch, id);
+      self.bridge_by_conn_sid.insert((ch, sid), id);
+      if !self.pending_outbound_kinds.contains_key(&id) {
+        self.inbound_bridge_count += 1;
+      }
+      #[cfg(test)]
+      {
+        self.counters.max_inbound_bridges_live = self
+          .counters
+          .max_inbound_bridges_live
+          .max(self.inbound_bridge_count);
+      }
+      // T1 (inbound mint): a freshly-accepted inbound bridge already holds
+      // its first request bytes in quinn's per-stream assembler (this
+      // datagram delivered them), yet a new remote stream's first frames
+      // set only the coalesced `Opened` flag and emit no `Readable`, so no
+      // later event re-announces those bytes. Enqueue it here so the pass
+      // drain pumps the buffered request the same pass it was accepted.
+      // Disjoint from the live `e`/`self.conns` borrow — see
+      // `enqueue_ready_bridge`.
+      enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, id);
+    }
+  }
+
   /// Service exactly one connection `ch`: apply its deferred feedback, drive its
   /// timers, drain its `poll()` (accepting inbound bidi streams into bridges,
   /// routing per-stream Finished/Stopped, reaping its bridges on a
@@ -5556,6 +5715,13 @@ where
     // raised its MAX_STREAMS bidi limit, so a dial requeued on this peer's
     // exhausted bidi credit can now open. Consumed after the borrow drops.
     let mut credit_restored = false;
+    // Set when this pass drains an inbound `StreamEvent::Opened { dir: Bi }`. The
+    // accept-drain it triggers needs `&mut self` (it re-borrows the connection
+    // table plus the endpoint and bridge tables), which cannot run while the
+    // outer `e` borrow of `self.conns` is held by this poll loop — so record the
+    // one-shot signal here and run the drain after the borrow releases, gated on
+    // the connection's application-readiness (the QUIC 0-RTT readiness gate).
+    let mut inbound_opened = false;
     while let Some(ev) = e.conn_mut().poll() {
       match ev {
         quinn_proto::Event::ConnectionLost { .. } => {
@@ -5565,124 +5731,19 @@ where
           lost = true;
         }
         quinn_proto::Event::Stream(quinn_proto::StreamEvent::Opened { dir: Dir::Bi }) => {
-          // `StreamEvent::Opened` is an idempotent signal ("one or more
-          // streams opened"), not a per-stream event, so accept until the
-          // peer's bidi backlog is drained — otherwise concurrently opened
-          // inbound exchanges are stranded with no further wake-up.
-          //
-          // Cross-connection inbound-stream cap. Each accepted bidi stream
-          // mints a Bridge that pins up to ~3x the max reliable frame size, so
-          // admission-gate every inbound bridge against the QUIC-specific
-          // `QuicOptions::max_inbound_streams` (a bounded nonzero default)
-          // BEFORE minting — the QUIC twin of the stream coordinator's
-          // `accept_connection` gate (`streams::StreamEndpoint`, which counts
-          // `exchanges.filter(|m| !m.outbound)`). The QUIC ceiling is its own
-          // option, not the shared TCP/TLS `EndpointOptions::max_inbound_streams`
-          // (which defaults to unlimited), so a default QUIC endpoint is bounded
-          // without changing TCP/TLS behaviour. This bounds inbound bridge state
-          // ACROSS all connections; quinn's per-connection
-          // `max_concurrent_bidi_streams` is a separate, per-connection limit.
-          // quinn opens remote streams IMPLICITLY: one STREAM (or MAX_STREAM_DATA)
-          // frame naming a high in-credit index advances `next_remote`, so this
-          // loop can accept the whole remaining bidi window in a single datagram —
-          // up to the per-connection bidi credit, capped by the `max_inbound_streams`
-          // headroom above. That is a per-credit-window BATCH bound: config-bounded
-          // and independent of the connection/bridge tables, not amplifiable per
-          // datagram beyond the configured caps. An operator wanting a tighter
-          // per-datagram batch lowers quinn's `max_concurrent_bidi_streams` — gossip
-          // needs only a handful of concurrent reliable exchanges per connection.
-          // An outbound bridge is registered in `pending_outbound_kinds` for
-          // the life of its exchange and an accepted (inbound) bridge never is
-          // (see that field's docs), so the inbound population is exactly the
-          // bridges absent from that map — tracked incrementally as
-          // `inbound_bridge_count`. Read that O(1) count instead of filtering
-          // the whole bridge table on every peer-driven `Opened` (one datagram
-          // could otherwise force an O(all bridges) fold); the mint below bumps
-          // it in place, so a later connection's accept loop this same pass sees
-          // the updated total — the cap is ACROSS all connections.
-          let max_inbound = self.cfg.max_inbound_streams();
-          while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
-            let peer = e.peer();
-            // At the inbound ceiling: refuse this stream instead of minting a
-            // bridge. Reset both halves so the peer is notified and quinn
-            // releases the stream slot, and bump `inbound_streams_rejected`.
-            // Ignoring Err: `ClosedStream` means the half is already gone,
-            // which is the desired end state.
-            if max_inbound.is_some_and(|max| self.inbound_bridge_count >= max) {
-              self.ep.metrics_mut().inbound_streams_rejected += 1;
-              let _ = e
-                .conn_mut()
-                .send_stream(sid)
-                .reset(quinn_proto::VarInt::from_u32(0));
-              let _ = e
-                .conn_mut()
-                .recv_stream(sid)
-                .stop(quinn_proto::VarInt::from_u32(0));
-              continue;
-            }
-            let Some(stream) = self.ep.accept_stream(peer, now) else {
-              // Leaving/Left: admit no new inbound reliable stream. Reset both
-              // halves of the just-accepted QUIC stream so the peer is notified
-              // and the connection's stream slot is released instead of left
-              // orphaned with no Bridge to own it. Ignoring Err: `ClosedStream`
-              // means the half is already gone, which is the desired end state.
-              let _ = e
-                .conn_mut()
-                .send_stream(sid)
-                .reset(quinn_proto::VarInt::from_u32(0));
-              let _ = e
-                .conn_mut()
-                .recv_stream(sid)
-                .stop(quinn_proto::VarInt::from_u32(0));
-              continue;
-            };
-            let id = stream.id();
-            let reliable_max = self.ep.max_stream_frame_size();
-            self.bridges.insert(
-              id,
-              Bridge::new(
-                stream,
-                ch,
-                sid,
-                #[cfg(compression)]
-                self.compression,
-                #[cfg(encryption)]
-                self.encryption.clone(),
-                reliable_max,
-                self.label.clone(),
-                self.skip_inbound_label_check,
-                false,
-              ),
-            );
-            // Mirror the mint into both bridge indexes (each borrows only its own
-            // field, disjoint from the live `e`/`self.conns` borrow), and bump
-            // the incremental inbound population this accept gate reads. An
-            // accepted bridge is never in `pending_outbound_kinds`, so the guard
-            // is always true here — but keeping the SAME `!contains` predicate the
-            // reap-time decrement uses makes the count provably balanced no matter
-            // how the id spaces evolve.
-            index_bridge_mint(&mut self.bridges, &mut self.bridges_by_conn, ch, id);
-            self.bridge_by_conn_sid.insert((ch, sid), id);
-            if !self.pending_outbound_kinds.contains_key(&id) {
-              self.inbound_bridge_count += 1;
-            }
-            #[cfg(test)]
-            {
-              self.counters.max_inbound_bridges_live = self
-                .counters
-                .max_inbound_bridges_live
-                .max(self.inbound_bridge_count);
-            }
-            // T1 (inbound mint): a freshly-accepted inbound bridge already holds
-            // its first request bytes in quinn's per-stream assembler (this
-            // datagram delivered them), yet a new remote stream's first frames
-            // set only the coalesced `Opened` flag and emit no `Readable`, so no
-            // later event re-announces those bytes. Enqueue it here so the pass
-            // drain pumps the buffered request the same pass it was accepted.
-            // Disjoint from the live `e`/`self.conns` borrow — see
-            // `enqueue_ready_bridge`.
-            enqueue_ready_bridge(&mut self.bridges, &mut self.ready_bridges, id);
-          }
+          // `StreamEvent::Opened` is an idempotent one-shot signal ("one or more
+          // streams opened"), NOT a per-stream event: it fires once and is not
+          // re-raised while un-accepted streams remain. Record it and drain after
+          // the poll loop releases `e` (see `accept_inbound_streams`) — gated on
+          // the connection's application-readiness. While the connection is still
+          // handshaking (the QUIC 0-RTT readiness gate), the accept-drain does
+          // NOT run: quinn holds the un-accepted bidi streams, bounded by the
+          // connection's own `max_concurrent_bidi_streams` credit and discarded
+          // with the connection on loss (quinn IS the quarantine — no new
+          // buffer). The one-shot signal is re-driven at the establishment
+          // chokepoint so a stream opened pre-establishment is still accepted and
+          // pumped the pass the handshake completes.
+          inbound_opened = true;
         }
         quinn_proto::Event::Stream(quinn_proto::StreamEvent::Readable { id: sid }) => {
           // T2 (readable): new inbound data, a peer FIN, or a peer RESET for a
@@ -5876,21 +5937,47 @@ where
     // another peer's probe Ack. recv() returns an owned Bytes, so the
     // e.conn_mut() borrow releases before the disjoint-field pushes.
     let peer = e.peer();
+    // QUIC 0-RTT readiness gate (datagram plane). Sample the connection's
+    // application-readiness ONCE before the drain: a caller who enables rustls
+    // early data can have quinn accept 0-RTT DATAGRAM frames while this
+    // connection is still handshaking (before it emits `Event::Connected`), so
+    // an ungated push would commit probe/membership/user effects with no
+    // rollback if the handshake later fails (the crash-stop trigger). The
+    // sticky flag is monotonic — `established_before` implies it — and every
+    // `conn_mut()` above has had its chance to flip it, so this reflects the
+    // connection's final state for the pass.
+    let established = established_before || e.established_at_least_once();
     while let Some(payload) = e.conn_mut().datagrams().recv() {
-      // Pop quinn to empty so a zero-length-frame flood cannot accumulate
-      // inside quinn; admission (per-peer + global caps, dropped+counted past
-      // either bound so one flooding peer cannot fill the shared queue and
-      // starve another peer's probe Ack) is enforced by the shared helper —
-      // the SAME bound `handle_memberlist_udp` applies, so neither source can
-      // exceed it. The three `&mut self.<field>` args are disjoint from the
-      // `self.conns` borrow `e` holds.
-      push_mem_ingress_capped(
-        &mut self.mem_ingress,
-        &mut self.mem_ingress_per_peer,
-        &mut self.datagram_ingress_dropped,
-        peer,
-        move || payload,
-      );
+      // Pop quinn to EMPTY regardless of readiness so a zero-length-frame flood
+      // cannot accumulate inside quinn (the DoS bound). Only the disposition of
+      // each popped payload is gated.
+      if established {
+        // Pop quinn to empty so a zero-length-frame flood cannot accumulate
+        // inside quinn; admission (per-peer + global caps, dropped+counted past
+        // either bound so one flooding peer cannot fill the shared queue and
+        // starve another peer's probe Ack) is enforced by the shared helper —
+        // the SAME bound `handle_memberlist_udp` applies, so neither source can
+        // exceed it. The three `&mut self.<field>` args are disjoint from the
+        // `self.conns` borrow `e` holds.
+        push_mem_ingress_capped(
+          &mut self.mem_ingress,
+          &mut self.mem_ingress_per_peer,
+          &mut self.datagram_ingress_dropped,
+          peer,
+          move || payload,
+        );
+      } else {
+        // Pre-establishment 0-RTT datagram: DROP and count on the dedicated
+        // metric (distinct from `datagram_ingress_dropped`, which means "ingress
+        // cap exceeded"). Quarantine-and-release is rejected — the unreliable
+        // plane is loss-tolerant, so ordinary gossip redundancy re-delivers
+        // within a round; a release buffer would add an adversarial lifecycle
+        // for one saved gossip round on a rare opt-in config. `payload` is
+        // dropped here. The `&mut self.<field>` bump is disjoint from the
+        // `self.conns` borrow `e` holds.
+        self.pre_established_datagrams_dropped =
+          self.pre_established_datagrams_dropped.saturating_add(1);
+      }
     }
     // Also reap when the connection has reached `is_drained()` even if
     // `poll()` never yielded `Event::ConnectionLost` for it in this
@@ -5919,6 +6006,25 @@ where
     // still-handshaking connection.
     if established_transition {
       self.conns.on_established_transition(ch);
+    }
+    // Inbound accept-drain (QUIC 0-RTT readiness gate), run now that `e`'s borrow
+    // of `self.conns` is released so the `&mut self` method can re-borrow the
+    // connection table plus the endpoint and bridge tables. Two triggers, both
+    // requiring the connection to have reached its application-readiness
+    // boundary:
+    //   * `inbound_opened && established_before`: a one-shot `Opened` fired this
+    //     pass on an already-established connection — the normal 1-RTT inbound
+    //     accept. (When still handshaking, `inbound_opened` alone does NOT drain:
+    //     quinn quarantines the streams until the handshake completes.)
+    //   * `established_transition`: the handshake completed THIS pass, so re-drive
+    //     the coalesced one-shot `Opened` that fired while handshaking and never
+    //     re-fires — mint AND enqueue the quarantined streams at the establishment
+    //     boundary (the T1 first-frames-emit-no-Readable rationale applies
+    //     verbatim). An empty `accept` here is a no-op.
+    // Placed before the `lost || drained` reap so any bridge minted here is swept
+    // into that connection's O(K) reap if the connection also failed this pass.
+    if (inbound_opened && established_before) || established_transition {
+      self.accept_inbound_streams(ch, now);
     }
     if lost || drained {
       // Mark every bridge on this connection fatal AND complete its D1
