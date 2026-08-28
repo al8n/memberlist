@@ -6534,21 +6534,22 @@ fn outbound_dials_cannot_exceed_global_connection_cap() {
   );
 }
 
-/// A reliable dial refused at the global cap must REPARK — retried on the next
-/// tick after a closing connection reaps and frees its slot — while its deadline
-/// holds and a reapable (closed-but-not-reaped) connection exists, rather than
-/// being retired one tick early. Driven through `service_peer_bucket`, which
-/// runs the `process_dial_entry` at-cap arm; a reparked intent stays on its
-/// `dial_parked` bucket, a retired one is consumed.
+/// A reliable dial refused at the global connection cap FAILS FAST: it is
+/// retired (not queued), the `quic_connections_rejected` metric is bumped, and
+/// the reliable-send waiter is resolved by a Failed `ExchangeCompleted`. The cap
+/// is a hard operator ceiling and the coordinator sheds rather than queues at its
+/// bounds; a slot already freed by a drained connection is harvested before dial
+/// servicing (tick step 4.5), so this arm fires only when the table is genuinely
+/// full.
 ///
-/// Mutation-verify: revert the `Err(AtGlobalCap)` arm to an immediate
-/// `retire_failed_dial` — the intent is consumed, its bucket empties, and the
-/// `dial_parked` length assertion fails.
-///
-/// (A permanently-full table — no reapable connection — still retires
-/// immediately, as the `max_quic_connections(0)` catch-up tests require.)
+/// Mutation-verify: restore an at-cap repark (return `repark_blocked_dial`
+/// instead of `retire_failed_dial` in the `Err(AtGlobalCap)` arm) — the intent is
+/// parked instead of resolved, so no Failed `ExchangeCompleted` is emitted and
+/// the `found` assertion fails.
 #[test]
-fn at_cap_reliable_dial_reparks_while_a_slot_is_about_to_free() {
+fn at_cap_reliable_dial_retires_and_resolves_the_waiter() {
+  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeStatus};
+
   let a_addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
   let now = Instant::now();
   let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr);
@@ -6559,8 +6560,8 @@ fn at_cap_reliable_dial_reparks_while_a_slot_is_about_to_free() {
     now,
   );
 
-  // Fill the single-connection cap, then CLOSE that connection so it is closed
-  // (reapable) but not yet reaped — a slot about to free this tick.
+  // Fill the single-connection cap with a closed (not-yet-drained, so unreaped)
+  // connection, so the table is genuinely full when the reliable dial is made.
   let filler: SocketAddr = "127.0.0.3:4000".parse().unwrap();
   let ch = a
     .conns
@@ -6586,36 +6587,48 @@ fn at_cap_reliable_dial_reparks_while_a_slot_is_about_to_free() {
     1,
     "the table is at the cap of 1"
   );
+  let rejected_before = a.metrics().quic_connections_rejected;
 
-  // A reliable intent to a DIFFERENT fresh peer, deadline in the future. Its R7
-  // dial hits `AtGlobalCap` (table full); a reapable connection exists, so it
-  // must repark rather than retire.
-  let fresh: SocketAddr = "127.0.0.9:5000".parse().unwrap();
-  let deadline = now + Duration::from_secs(30);
-  a.dial_parked
-    .entry(fresh)
-    .or_default()
-    .push_back(super::PendingDial {
-      id: StreamId::from_raw(200_000),
-      peer: fresh,
-      deadline,
-      wake: deadline,
-      attempted: true,
-      kind: super::ExchangeKind::UserMessage,
-    });
-  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
-  let _ = a.service_peer_bucket(fresh, now, &mut dial_budget);
+  // A reliable user-message dial to a fresh peer: its in-band R7 dial hits the
+  // cap and is retired, resolving the parked send waiter.
+  let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let id = a
+    .start_user_message(y, Bytes::from_static(b"hi"), now)
+    .expect("issued while running");
+  let expected_eid = ExchangeId::from(id);
 
-  assert_eq!(
-    a.dial_parked.get(&fresh).map(|b| b.len()).unwrap_or(0),
-    1,
-    "the cap-blocked reliable intent reparks (retried next tick), not retired one tick early"
+  assert!(
+    a.metrics().quic_connections_rejected > rejected_before,
+    "the at-cap refusal bumps quic_connections_rejected"
   );
   assert_eq!(
-    a.conns.iter_handles().len(),
-    1,
+    a.dial_parked.get(&y).map(|b| b.len()).unwrap_or(0),
+    0,
+    "a cap-refused reliable dial is retired (fail-fast), not queued"
+  );
+  assert_eq!(
+    a.live_connections_to(y),
+    0,
     "no new connection was created at the cap"
   );
+
+  // The reliable-send waiter is resolved by a Failed ExchangeCompleted.
+  let mut found = None;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(payload) = ev
+      && payload.eid() == expected_eid
+    {
+      found = Some(payload);
+      break;
+    }
+  }
+  let payload = found.expect(
+    "a reliable dial refused at the global cap MUST resolve its parked waiter \
+       via Event::ExchangeCompleted(Failed) — without it the send hangs forever",
+  );
+  assert_eq!(payload.kind(), ExchangeKind::UserMessage);
+  assert_eq!(payload.outcome(), ExchangeStatus::Failed);
+  assert_eq!(payload.peer(), &y);
 }
 
 /// FIX for the strict-poll cap-recovery gap: a reliable dial parked at the global

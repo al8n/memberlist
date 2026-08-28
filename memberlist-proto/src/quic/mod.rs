@@ -3988,31 +3988,29 @@ where
         }
       }
       Err(conn::DialError::AtGlobalCap) => {
-        // The global connection cap is reached: this new outbound peer gets no
-        // connection this tick. Count it against the same connection-cap metric
-        // the inbound Initial path uses.
+        // The global connection cap is reached: this reliable dial fails fast.
+        // The cap is an operator ceiling, and the coordinator sheds rather than
+        // queues at its bounds. A slot already freed by a drained connection was
+        // harvested before dial servicing (the tick's step 4.5 reap), so this arm
+        // fires only when the table is genuinely full. The cost is at worst a
+        // transient false Suspect of a not-yet-connected peer at cap saturation,
+        // which the failure detector's next interval, indirect probes, and
+        // incarnation refutation heal (refutation does not depend on this node's
+        // connection-table capacity). Retaining intents against future capacity
+        // would need a deduplicated capacity-wait ledger with reap-triggered
+        // wakes — deliberately not built for this corner.
+        //
+        // Count the refusal against the same connection-cap metric the inbound
+        // Initial path uses, then retire the intent through the standard
+        // pre-bridge failure path (a Failed `ExchangeCompleted` for a UserMessage
+        // / PushPull dial resolves the parked waiter).
         self.ep.metrics_mut().quic_connections_rejected += 1;
-        // A just-closed connection still counts against the cap until
-        // `finalize_tick` reaps it later THIS tick, so a fresh dial can hit the
-        // cap on a slot that is about to free. If such a reapable connection
-        // exists and the intent's deadline still holds, repark (same front/back
-        // discipline as the handshaking / credit-exhausted paths) so the next
-        // tick — after the closing connection reaps and frees its slot — retries
-        // the dial rather than abandoning a recoverable intent one tick early;
-        // the tick's unconditional full-drain of parked buckets is the retry
-        // backstop (there is no global-cap-freed wake). Retire when the table is
-        // permanently full (no reapable connection, so no slot is coming) or the
-        // deadline has passed.
-        if now < deadline && self.conns.has_reapable_connection() {
-          self.repark_blocked_dial(id, peer, deadline, kind, now)
-        } else {
-          self.retire_failed_dial(
-            id,
-            StreamError::DialFailed("quic connection table at capacity".into()),
-            now,
-          );
-          DialAttempt::Retired
-        }
+        self.retire_failed_dial(
+          id,
+          StreamError::DialFailed("quic connection table at capacity".into()),
+          now,
+        );
+        DialAttempt::Retired
       }
       Err(conn::DialError::Connect(e)) => {
         self.retire_failed_dial(id, StreamError::DialFailed(e.to_string().into()), now);
@@ -5327,12 +5325,10 @@ where
     // serviced there regardless.
     let _ready_peers = self.service_quinn(now);
     // (4.5) Reap connections that reached `is_drained()` this tick BEFORE dial
-    // servicing, so a global-cap slot a reap frees is available to the same
-    // tick's fresh dial. Otherwise a reliable intent parked at the cap (its slot
-    // held by a now-draining connection) would re-park this tick and wait for its
-    // own pre-deadline service wake before retrying — under a strict-poll driver
-    // that wake can land only a service margin before the deadline, too late for
-    // a fresh handshake to complete, yielding a false Suspect of a live peer.
+    // servicing, so a global-cap slot a reap frees is available to the SAME
+    // tick's fresh dials. A reliable dial is therefore never refused at the cap
+    // for a slot that has already freed; the at-cap fail-fast in
+    // `process_dial_entry` fires only when the table is genuinely full.
     self.reap_drained_connections();
     // (5) Dial requests emitted by (3) or by accept-events, plus every parked
     // bucket (the liveness backstop for expiry and handshake-failure retirement).

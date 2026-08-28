@@ -325,15 +325,6 @@ impl ConnTable {
     }
   }
 
-  /// `true` iff the table currently holds at least one closed connection whose
-  /// drained-reap will free a global-cap slot. A `dial_fresh` refused at the
-  /// global cap is recoverable only while such a connection exists (the slot is
-  /// about to free); a permanently-full table (every connection live) has no
-  /// slot coming, so the intent is retired rather than reparked.
-  pub(crate) fn has_reapable_connection(&self) -> bool {
-    self.conns.iter().any(|(_, e)| e.conn.is_closed())
-  }
-
   pub(crate) fn get_mut(&mut self, ch: ConnectionHandle) -> Option<&mut ConnEntry> {
     self.conns.get_mut(ch.0)
   }
