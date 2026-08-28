@@ -626,6 +626,22 @@ where
   /// inline D1 drain + `StreamErrored` reap runs as for any other
   /// transport error.
   pub(crate) fn fail_connection_lost(&mut self) {
+    // Connection loss is orthogonal to a completed exchange: if both FINs
+    // were already exchanged (`BothClosed`), the exchange was delivered
+    // before the loss, so preserve the clean terminal state rather than
+    // overwriting it to `Failed(ConnectionLost)` — otherwise the same-pass
+    // connection-loss sweep in `service_one_conn` (which yields
+    // `StreamEvent::Finished` → `BothClosed`, only enqueued, then
+    // `Event::ConnectionLost` in the same pass) would mis-report a delivered
+    // push/pull as `SendFailed` / zero-contact. Scoped to connection loss
+    // ONLY: an application-level merge rejection (`AdmissionClosed`, routed
+    // through `fail_with_retire` during `drain_then_reap`) must still flip a
+    // `BothClosed` bridge to `Failed` — `BothClosed` means the QUIC streams
+    // closed cleanly, NOT that the merge was accepted — so the generic
+    // `fail()` is deliberately not sticky for `BothClosed`.
+    if matches!(self.phase, LinkState::BothClosed) {
+      return;
+    }
     self.fail(BridgeFailure::ConnectionLost);
   }
 
