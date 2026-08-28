@@ -6534,6 +6534,90 @@ fn outbound_dials_cannot_exceed_global_connection_cap() {
   );
 }
 
+/// A reliable dial refused at the global cap must REPARK — retried on the next
+/// tick after a closing connection reaps and frees its slot — while its deadline
+/// holds and a reapable (closed-but-not-reaped) connection exists, rather than
+/// being retired one tick early. Driven through `service_peer_bucket`, which
+/// runs the `process_dial_entry` at-cap arm; a reparked intent stays on its
+/// `dial_parked` bucket, a retired one is consumed.
+///
+/// Mutation-verify: revert the `Err(AtGlobalCap)` arm to an immediate
+/// `retire_failed_dial` — the intent is consumed, its bucket empties, and the
+/// `dial_parked` length assertion fails.
+///
+/// (A permanently-full table — no reapable connection — still retires
+/// immediately, as the `max_quic_connections(0)` catch-up tests require.)
+#[test]
+fn at_cap_reliable_dial_reparks_while_a_slot_is_about_to_free() {
+  let a_addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
+  let now = Instant::now();
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(1)),
+    a_addr,
+    now,
+  );
+
+  // Fill the single-connection cap, then CLOSE that connection so it is closed
+  // (reapable) but not yet reaped — a slot about to free this tick.
+  let filler: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+  let ch = a
+    .conns
+    .get_or_dial(
+      &mut a.quinn,
+      now,
+      a.cfg.client().clone(),
+      filler,
+      "localhost",
+      Some(1),
+      super::conn::Reliability::Reliable,
+    )
+    .unwrap();
+  a.conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  assert!(a.conns.get(ch).unwrap().conn_ref().is_closed());
+  assert!(!a.conns.get(ch).unwrap().conn_ref().is_drained());
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "the table is at the cap of 1"
+  );
+
+  // A reliable intent to a DIFFERENT fresh peer, deadline in the future. Its R7
+  // dial hits `AtGlobalCap` (table full); a reapable connection exists, so it
+  // must repark rather than retire.
+  let fresh: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .entry(fresh)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(200_000),
+      peer: fresh,
+      deadline,
+      wake: deadline,
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+  let mut dial_budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  let _ = a.service_peer_bucket(fresh, now, &mut dial_budget);
+
+  assert_eq!(
+    a.dial_parked.get(&fresh).map(|b| b.len()).unwrap_or(0),
+    1,
+    "the cap-blocked reliable intent reparks (retried next tick), not retired one tick early"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "no new connection was created at the cap"
+  );
+}
+
 /// A cold dial (to a peer with NO established connection) that `service_dials`
 /// attempts must flush its Initial AND register its deadline key in the same call
 /// — even though it mints no bridge (its `open(Bi)` returns `None`, still

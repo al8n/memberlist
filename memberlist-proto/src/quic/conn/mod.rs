@@ -90,6 +90,15 @@ pub(crate) struct ConnEntry {
   /// Independent of the coordinator's separate `inbound_bridge_count` (which
   /// counts accepted bridges); a bridge contributes to exactly one of the two.
   outbound_bridge_count: usize,
+  /// Monotonic creation stamp, drawn from [`ConnTable::next_gen`] the moment
+  /// this entry is created (in `dial_fresh` and `insert_accepted`) and never
+  /// mutated. Orders connections by recency of CREATION — a later-created
+  /// connection always has a strictly greater generation. This is the correct
+  /// freshness signal for choosing among same-class connections to one peer:
+  /// unlike establishment time (which a delayed handshake distorts), creation
+  /// order cannot be reordered by a slow handshake, so a fresh post-restart
+  /// connection always outranks a stale pre-restart one.
+  generation: u64,
 }
 
 impl ConnEntry {
@@ -285,6 +294,11 @@ pub(crate) struct ConnTable {
   /// an O(total connections) scan per rejected datagram. A source with zero
   /// pending inbound connections has no entry (the map never stores a zero).
   pending_inbound: HashMap<SocketAddr, usize>,
+  /// The next connection generation to hand out. Increments on every connection
+  /// creation ([`Self::next_gen`]), so each connection's stamp is strictly
+  /// greater than every connection created before it. A `u64` never wraps in
+  /// practice (one increment per connection created for the process's life).
+  next_generation: u64,
 }
 
 impl ConnTable {
@@ -293,7 +307,40 @@ impl ConnTable {
       conns: Slab::new(),
       peer_routes: HashMap::new(),
       pending_inbound: HashMap::new(),
+      next_generation: 0,
     }
+  }
+
+  /// Return the next connection generation and advance the counter. Each call
+  /// yields a strictly greater value than the previous, so a later-created
+  /// connection always outranks an earlier one by generation.
+  fn next_gen(&mut self) -> u64 {
+    let g = self.next_generation;
+    debug_assert!(
+      self.next_generation != u64::MAX,
+      "connection generation counter must not wrap"
+    );
+    self.next_generation = self.next_generation.wrapping_add(1);
+    g
+  }
+
+  /// The fresher (higher-generation) of two tracked handles — the tiebreak used
+  /// when both candidates in the same selection class are usable, so a fresh
+  /// post-restart connection outranks a same-class zombie. A slab-gone handle
+  /// has generation `0` and loses to any live one.
+  fn fresher(&self, a: ConnectionHandle, b: ConnectionHandle) -> ConnectionHandle {
+    let ga = self.conns.get(a.0).map_or(0, |e| e.generation);
+    let gb = self.conns.get(b.0).map_or(0, |e| e.generation);
+    if ga >= gb { a } else { b }
+  }
+
+  /// `true` iff the table currently holds at least one closed connection whose
+  /// drained-reap will free a global-cap slot. A `dial_fresh` refused at the
+  /// global cap is recoverable only while such a connection exists (the slot is
+  /// about to free); a permanently-full table (every connection live) has no
+  /// slot coming, so the intent is retired rather than reparked.
+  pub(crate) fn has_reapable_connection(&self) -> bool {
+    self.conns.iter().any(|(_, e)| e.conn.is_closed())
   }
 
   pub(crate) fn get_mut(&mut self, ch: ConnectionHandle) -> Option<&mut ConnEntry> {
@@ -333,7 +380,9 @@ impl ConnTable {
   /// The best usable handle for `peer` — the derived selection an observer
   /// (`live_connections_to`, `try_open_uni_stream_to`, datagram sizing) rides,
   /// with NO dial side effect. Prefers an established connection, then a
-  /// handshaking one; outbound before inbound within each. A closed/terminal
+  /// handshaking one; within the first satisfied class, when BOTH the outbound
+  /// and inbound match, returns the fresher (higher-generation) one so a fresh
+  /// post-restart connection outranks a same-class zombie. A closed/terminal
   /// handle is never usable, so this returns `None` for a peer whose only
   /// tracked connections are draining or handshake-failed. At most one handle
   /// (0 or 1 per peer).
@@ -341,10 +390,17 @@ impl ConnTable {
     let route = self.peer_routes.get(peer)?;
     let candidates = [route.outbound, route.inbound];
     for want in [HandleClass::Established, HandleClass::Handshaking] {
+      let mut best: Option<ConnectionHandle> = None;
       for ch in candidates.into_iter().flatten() {
         if self.classify(ch) == want {
-          return Some(ch);
+          best = Some(match best {
+            None => ch,
+            Some(b) => self.fresher(b, ch),
+          });
         }
+      }
+      if best.is_some() {
+        return best;
       }
     }
     None
@@ -458,6 +514,7 @@ impl ConnTable {
     let (ch, conn) = quinn
       .connect(now.into_std(), client, peer, server_name)
       .map_err(DialError::Connect)?;
+    let generation = self.next_gen();
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
@@ -468,6 +525,7 @@ impl ConnTable {
       pending_indexed: false,
       pending_events: VecDeque::new(),
       outbound_bridge_count: 0,
+      generation,
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
     self.peer_routes.entry(peer).or_default().outbound = Some(ch);
@@ -485,7 +543,8 @@ impl ConnTable {
   /// `route.outbound` (`O`) and `route.inbound` (`I`), then applies the table
   /// for `reliability`:
   ///
-  /// **Reliable** (first matching row): R1 `O` Established → `O`; R2 `I`
+  /// **Reliable** (first matching row): both Established → the fresher by
+  /// generation; R1 `O` Established → `O`; R2 `I`
   /// Established → `I`; R3 `O` Handshaking → `O`; R4 `O` TerminalOutbound + `I`
   /// Handshaking → `I`; R5 `O` TerminalOutbound + no `I` → `O` (downstream
   /// `dial_failed`, anti-storm); R6 no `O` + `I` Handshaking → dial fresh under
@@ -493,7 +552,8 @@ impl ConnTable {
   /// — return the live inbound and repark, never propagate); R7 no `O`, no `I`
   /// → dial fresh under cap, else propagate the dial error.
   ///
-  /// **Unreliable** (first matching row): U1 `O` Established → `O`; U2 `I`
+  /// **Unreliable** (first matching row): both Established → the fresher by
+  /// generation; U1 `O` Established → `O`; U2 `I`
   /// Established → `I`; U3 `O` Handshaking → `O`; U4 `I` Handshaking → `I` (no
   /// companion dial); U5 `O` TerminalOutbound + no `I` → `O`; U6 no `O`, no `I`
   /// → cold-dial under cap, else the dial error (the datagram caller maps every
@@ -526,6 +586,16 @@ impl ConnTable {
     let ic = inbound.map(|ch| self.classify(ch));
     match reliability {
       Reliability::Reliable => {
+        if oc == Some(Established) && ic == Some(Established) {
+          // Both established: return the fresher by generation so a fresh
+          // post-restart connection outranks a same-class zombie (e.g. an
+          // established inbound from a restarted peer beats a locally-still-
+          // Established outbound to its dead prior instance).
+          return Ok(self.fresher(
+            outbound.expect("Established outbound handle present"),
+            inbound.expect("Established inbound handle present"),
+          ));
+        }
         if oc == Some(Established) {
           return Ok(outbound.expect("Established outbound handle present")); // R1
         }
@@ -565,6 +635,14 @@ impl ConnTable {
         self.dial_fresh(quinn, now, client, peer, server_name, max_connections)
       }
       Reliability::Unreliable => {
+        if oc == Some(Established) && ic == Some(Established) {
+          // Both established: the fresher by generation (same tiebreak as the
+          // reliable plane) — a fresh post-restart connection outranks a zombie.
+          return Ok(self.fresher(
+            outbound.expect("Established outbound handle present"),
+            inbound.expect("Established inbound handle present"),
+          ));
+        }
         if oc == Some(Established) {
           return Ok(outbound.expect("Established outbound handle present")); // U1
         }
@@ -597,21 +675,44 @@ impl ConnTable {
 
   /// Establishment-chokepoint promotion. Called the pass a connection's sticky
   /// `established_at_least_once` flips `false → true`. A newly-established
-  /// INBOUND becomes `route.inbound` unconditionally (newest-established-inbound
-  /// wins): a completed fresh handshake means the peer deliberately redialed, so
-  /// its previous inbound is dead/draining on its side, and the displaced entry
-  /// stays slab-serviced until reaped. Touches only `.inbound` (never displaces
-  /// a self-initiated outbound). A newly-established OUTBOUND must already be its
-  /// peer's tracked `route.outbound` (an establishing outbound is `!closed`, so
-  /// the pre-pass never cleared it) — asserted, not written.
+  /// INBOUND becomes `route.inbound` only when the current inbound is `None` or
+  /// this connection is at least as fresh by generation
+  /// (`ch.generation >= current.generation`). Freshness is CREATION order, not
+  /// establishment order: a delayed pre-crash inbound whose handshake finishes
+  /// *after* a fresher post-restart inbound is already tracked has an older
+  /// generation, so it is REJECTED here and never overwrites the fresher one.
+  /// Touches only `.inbound` (never displaces a self-initiated outbound). A
+  /// newly-established OUTBOUND must already be its peer's tracked
+  /// `route.outbound` (an establishing outbound is `!closed`, so the pre-pass
+  /// never cleared it) — asserted, not written.
+  ///
+  /// Bounded self-healing residual (a per-peer generation high-watermark
+  /// surviving route removal would close it but adds unbounded per-peer state —
+  /// the bounded window is the deliberate tradeoff): if the freshest inbound
+  /// reaps and empties the route, and only THEN a much-older pre-crash inbound
+  /// finally establishes, that stale inbound is promoted into the now-empty
+  /// route and selected until it idle-kills (~`max_idle_timeout`), after which
+  /// the route empties and a fresh dial proceeds. This is a narrow multi-event
+  /// window that self-heals.
   pub(crate) fn on_established_transition(&mut self, ch: ConnectionHandle) {
-    let (peer, direction) = match self.conns.get(ch.0) {
-      Some(e) => (e.peer, e.direction),
+    let (peer, direction, generation) = match self.conns.get(ch.0) {
+      Some(e) => (e.peer, e.direction, e.generation),
       None => return,
     };
     match direction {
       ConnDirection::Inbound => {
-        self.peer_routes.entry(peer).or_default().inbound = Some(ch);
+        // Promote only when this connection is at least as fresh as the current
+        // tracked inbound; a stale delayed establishment is rejected.
+        let promote = match self.peer_routes.get(&peer).and_then(|r| r.inbound) {
+          None => true,
+          Some(cur) => self
+            .conns
+            .get(cur.0)
+            .is_none_or(|e| generation >= e.generation),
+        };
+        if promote {
+          self.peer_routes.entry(peer).or_default().inbound = Some(ch);
+        }
       }
       ConnDirection::Outbound => {
         debug_assert!(
@@ -626,13 +727,15 @@ impl ConnTable {
   ///
   /// The accepted connection is always inserted into the slab (so quinn can
   /// drive it and its inbound bidi streams are serviced). It is written into
-  /// `route.inbound` iff the current inbound is `None` or classifies closed —
-  /// NEVER into `route.outbound`. An accept can therefore never displace a
-  /// self-initiated outbound: were the peer-initiated connection to become the
-  /// slot our outbound exchanges select while the peer binds its accept side to
-  /// the other connection, the exchange would wedge (the peer wrongly never
-  /// confirmed → false Suspect). Keeping the two directions in separate fields
-  /// makes that wedge-avoidance structural.
+  /// `route.inbound` when the current inbound is `None`, classifies closed, or
+  /// is older by generation — so an accept tracks the freshest inbound (this
+  /// connection is newest-created, so a newer accept always wins over a live
+  /// older one). NEVER written into `route.outbound`: an accept can therefore
+  /// never displace a self-initiated outbound, else the peer-initiated
+  /// connection would become the slot our outbound exchanges select while the
+  /// peer binds its accept side to the other connection, wedging the exchange
+  /// (the peer wrongly never confirmed → false Suspect). Keeping the two
+  /// directions in separate fields makes that wedge-avoidance structural.
   ///
   /// The displaced (previous) inbound, if any, stays in the slab until its
   /// drained-reap; its handle is no longer in `route.inbound`, so the
@@ -645,6 +748,7 @@ impl ConnTable {
     conn: Connection,
     peer: SocketAddr,
   ) {
+    let generation = self.next_gen();
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
@@ -660,21 +764,25 @@ impl ConnTable {
       // handle a later local dial rides (simultaneous bidirectional dial), so a
       // dialer bridge may be opened on it — start the outbound count at zero.
       outbound_bridge_count: 0,
+      generation,
     });
     assert_eq!(
       slot, ch.0,
       "accepted connection slab slot must equal ConnectionHandle"
     );
     *self.pending_inbound.entry(peer).or_insert(0) += 1;
-    // Set `route.inbound` iff the current inbound is None or closed; never
-    // touch `route.outbound`.
-    let inbound_usable = self
-      .peer_routes
-      .get(&peer)
-      .and_then(|r| r.inbound)
-      .and_then(|existing| self.conns.get(existing.0))
-      .is_some_and(|e| !e.conn.is_closed());
-    if !inbound_usable {
+    // Track the freshest inbound: set `route.inbound` when the current inbound
+    // is None/closed, or when this newly-created (hence newest-generation)
+    // connection is fresher than the one currently tracked. Never touch
+    // `route.outbound`.
+    let replace = match self.peer_routes.get(&peer).and_then(|r| r.inbound) {
+      None => true,
+      Some(cur) => self
+        .conns
+        .get(cur.0)
+        .is_none_or(|e| e.conn.is_closed() || generation > e.generation),
+    };
+    if replace {
       self.peer_routes.entry(peer).or_default().inbound = Some(ch);
     }
   }

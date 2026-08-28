@@ -968,30 +968,27 @@ fn establish_inbound(
   ich
 }
 
-/// Drive a full QUIC handshake so `t` (acting as CLIENT, on `client_ep`) holds a
-/// freshly ESTABLISHED OUTBOUND dialed to `peer`. The peer is a throwaway
-/// server-side `ConnTable` on `server_ep`. Returns the outbound handle in `t`.
-fn establish_outbound(
+/// Drive `ch` — a CLIENT-role connection already inserted in `t` (dialed on
+/// `client_ep` to `remote`) — through a full QUIC handshake to Established by
+/// ferrying datagrams against a throwaway server endpoint built internally, so
+/// callers holding several client-role connections on one `client_ep` (hence one
+/// slab lockstep) can each be established independently.
+fn ferry_client_conn_to_established(
   t: &mut ConnTable,
   client_ep: &mut QuinnEndpoint,
-  server_ep: &mut QuinnEndpoint,
   cfg: &QuicOptions,
-  peer: SocketAddr,
-) -> ConnectionHandle {
+  ch: ConnectionHandle,
+  remote: SocketAddr,
+) {
   use quinn_proto::DatagramEvent;
   let client_addr: SocketAddr = FERRY_CLIENT_ADDR.parse().unwrap();
   let now = Instant::now().into_std();
-  let ch = t
-    .get_or_dial(
-      client_ep,
-      Instant::from_std(now),
-      cfg.client().clone(),
-      peer,
-      "localhost",
-      None,
-      Reliability::Reliable,
-    )
-    .unwrap();
+  let mut server_ep = QuinnEndpoint::new(
+    cfg.endpoint_arc(),
+    Some(cfg.server_arc()),
+    true,
+    Some([0x5a; 32]),
+  );
   let mut server_conns = ConnTable::new();
   let mut server_ch: Option<ConnectionHandle> = None;
   for _ in 0..200 {
@@ -1034,7 +1031,7 @@ fn establish_outbound(
         let data = bytes::BytesMut::from(&sbuf[..tr.size]);
         let mut scratch = Vec::new();
         if let Some(DatagramEvent::ConnectionEvent(rch, cev)) =
-          client_ep.handle(now, peer, None, None, data, &mut scratch)
+          client_ep.handle(now, remote, None, None, data, &mut scratch)
           && rch == ch
         {
           t.get_mut(ch).unwrap().conn_mut().handle_event(cev);
@@ -1090,9 +1087,52 @@ fn establish_outbound(
     }
   }
   assert!(
-    !t.get(ch).unwrap().conn_ref().is_handshaking(),
-    "the outbound must reach Established"
+    !t.get(ch).unwrap().conn_ref().is_handshaking() && !t.get(ch).unwrap().conn_ref().is_closed(),
+    "the connection must reach Established"
   );
+}
+
+/// Establish a real OUTBOUND connection in `t` (t as CLIENT) dialed to `peer`.
+fn establish_outbound(
+  t: &mut ConnTable,
+  client_ep: &mut QuinnEndpoint,
+  cfg: &QuicOptions,
+  peer: SocketAddr,
+) -> ConnectionHandle {
+  let now = Instant::now();
+  let ch = t
+    .get_or_dial(
+      client_ep,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+      Reliability::Reliable,
+    )
+    .unwrap();
+  ferry_client_conn_to_established(t, client_ep, cfg, ch, peer);
+  ch
+}
+
+/// Establish a real connection in `t` that is LABELLED inbound (via
+/// `insert_accepted`) but dialed on `client_ep` to `remote`, so it can coexist
+/// with a client-dialed outbound in the SAME `t` under one slab lockstep. Used
+/// to build a peer whose route holds BOTH an established outbound and an
+/// established inbound.
+fn establish_client_dialed_as_inbound(
+  t: &mut ConnTable,
+  client_ep: &mut QuinnEndpoint,
+  cfg: &QuicOptions,
+  peer: SocketAddr,
+  remote: SocketAddr,
+) -> ConnectionHandle {
+  let now = Instant::now().into_std();
+  let (ch, conn) = client_ep
+    .connect(now, cfg.client().clone(), remote, "localhost")
+    .expect("client dial for the inbound-labelled connection");
+  t.insert_accepted(ch, conn, peer);
+  ferry_client_conn_to_established(t, client_ep, cfg, ch, remote);
   ch
 }
 
@@ -1157,21 +1197,19 @@ fn closed_inbound_is_non_authoritative_and_triggers_a_fresh_outbound_dial() {
   );
 }
 
-/// Establishment-chokepoint promotion (the crash-restart class). An inbound X
-/// is the tracked inbound; a NEW inbound Y accepted while X is live is declined
-/// at accept (X stays the tracked inbound); when Y establishes the promotion
-/// sets `route.inbound = Y` (newest-established-inbound wins), so the derived
-/// selection surfaces Y — not the stale X — and Y stays discoverable after X is
-/// reaped.
+/// An accept tracks the freshest inbound by generation: a newer inbound Y
+/// accepted while an older X is live becomes `route.inbound` immediately (Y is
+/// newest-created), the derived selection surfaces Y (not the stale X), the
+/// establishment chokepoint keeps Y, and Y stays discoverable after X is reaped.
 ///
-/// Negative controls: without the establishment write (revert the inbound arm
-/// of `on_established_transition`), the selection keeps surfacing the stale X;
-/// without the accept guard (`insert_accepted` always overwrites), Y would
-/// wrongly become the tracked inbound the moment it is accepted. (The
-/// end-to-end established-selection is additionally covered by
+/// Negative control: revert `insert_accepted` to never overwrite a live inbound
+/// — Y is not tracked at accept and the `route.inbound == Y` assertion fails.
+/// (The delayed-establishment freshness guard is pinned separately by
+/// `on_established_transition_rejects_a_delayed_older_inbound`; the end-to-end
+/// established-selection by
 /// `established_inbound_selected_and_promotion_supersedes_the_prior_one`.)
 #[test]
-fn establishment_promotes_the_newest_inbound_over_a_live_prior_one() {
+fn accept_tracks_the_freshest_inbound_by_generation() {
   let (mut client, _server, cfg) = quinn_pair();
   let mut t = ConnTable::new();
   let now = Instant::now();
@@ -1188,7 +1226,8 @@ fn establishment_promotes_the_newest_inbound_over_a_live_prior_one() {
   assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(x));
   assert_eq!(t.handle_for(&peer), Some(x));
 
-  // A NEW inbound Y accepted while X is live (not closed) → declined at accept.
+  // A NEWER inbound Y accepted while X is live (not closed) → tracked at accept
+  // (Y is newest-created, so it is fresher than the live older X).
   let y = accept_inbound(
     &mut t,
     &mut client,
@@ -1197,24 +1236,27 @@ fn establishment_promotes_the_newest_inbound_over_a_live_prior_one() {
     peer,
     "127.0.0.1:4501".parse().unwrap(),
   );
+  assert!(
+    t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation,
+    "the later accept has a strictly greater generation"
+  );
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
-    Some(x),
-    "a new inbound accepted while an inbound is live is declined at accept"
+    Some(y),
+    "the freshest inbound is tracked at accept, displacing the older live one"
+  );
+  assert_eq!(
+    t.handle_for(&peer),
+    Some(y),
+    "selection surfaces the freshest inbound"
   );
 
-  // Y reaches the establishment chokepoint → promotion sets route.inbound = Y.
+  // Y reaches the establishment chokepoint → promotion keeps route.inbound = Y.
   t.on_established_transition(y);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(y),
-    "the newly-established inbound is promoted over the prior one"
-  );
-  // The derived selection surfaces the promoted Y, not the stale X.
-  assert_eq!(
-    t.handle_for(&peer),
-    Some(y),
-    "selection surfaces the promoted inbound, not the stale one"
+    "establishment keeps the freshest inbound tracked"
   );
 
   // After X is removed, Y is still discoverable.
@@ -1227,7 +1269,61 @@ fn establishment_promotes_the_newest_inbound_over_a_live_prior_one() {
   assert_eq!(
     t.handle_for(&peer),
     Some(y),
-    "the promoted inbound remains discoverable after the prior one is reaped"
+    "the freshest inbound remains discoverable after the older one is reaped"
+  );
+}
+
+/// F1 delayed-pre-crash: a delayed pre-crash inbound X (older generation) that
+/// finishes its handshake AFTER a fresher post-restart inbound Y is already
+/// tracked must NOT overwrite Y. Freshness is CREATION order, not establishment
+/// order — `on_established_transition` rejects the stale late establishment.
+///
+/// Negative control: drop the `>=` generation guard in the inbound arm of
+/// `on_established_transition` (unconditional set) — the late X overwrites Y and
+/// both the `route.inbound == Y` and `handle_for == Y` assertions fail.
+#[test]
+fn on_established_transition_rejects_a_delayed_older_inbound() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+  // X accepted first (older generation) — the pre-crash inbound.
+  let x = accept_inbound(
+    &mut t,
+    &mut client,
+    &cfg,
+    now,
+    peer,
+    "127.0.0.1:4500".parse().unwrap(),
+  );
+  // Y accepted second (newer generation) — the post-restart inbound; tracked.
+  let y = accept_inbound(
+    &mut t,
+    &mut client,
+    &cfg,
+    now,
+    peer,
+    "127.0.0.1:4501".parse().unwrap(),
+  );
+  assert!(t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation);
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(y));
+
+  // Y establishes → stays tracked.
+  t.on_established_transition(y);
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(y));
+
+  // X's handshake finishes LATE (older generation) → rejected, does NOT
+  // overwrite the fresher Y.
+  t.on_established_transition(x);
+  assert_eq!(
+    t.peer_routes.get(&peer).and_then(|r| r.inbound),
+    Some(y),
+    "a delayed older inbound must not overwrite the fresher tracked inbound"
+  );
+  assert_eq!(
+    t.handle_for(&peer),
+    Some(y),
+    "selection stays on the fresher inbound"
   );
 }
 
@@ -1283,12 +1379,12 @@ fn reliable_r6_at_cap_returns_the_live_inbound_not_an_error() {
 /// matched, the reliable table trips its fresh-dial guard, and `sel == o` fails.
 #[test]
 fn established_outbound_precedes_a_live_inbound() {
-  let (mut client, mut server, cfg) = quinn_pair();
+  let (mut client, _server, cfg) = quinn_pair();
   let mut t = ConnTable::new();
   let now = Instant::now();
   let peer: SocketAddr = FERRY_SERVER_ADDR.parse().unwrap();
   // A real established outbound O (drives a full handshake).
-  let o = establish_outbound(&mut t, &mut client, &mut server, &cfg, peer);
+  let o = establish_outbound(&mut t, &mut client, &cfg, peer);
   // A live handshaking inbound I for the same peer.
   let i = accept_inbound(
     &mut t,
@@ -1304,6 +1400,61 @@ fn established_outbound_precedes_a_live_inbound() {
   assert_eq!(
     sel, o,
     "R1 (established outbound) is selected over a live inbound; no wedge"
+  );
+}
+
+/// F2 both-established hard-restart: a peer whose route holds an established
+/// OUTBOUND with an OLDER generation (a zombie to the peer's dead prior instance)
+/// and an established INBOUND with a NEWER generation (from the restarted peer).
+/// The freshest-usable tiebreak must return the fresher inbound on the reliable
+/// plane, the unreliable plane, and `handle_for` — not the stale outbound that
+/// R1 would rank first.
+///
+/// Negative control: remove the both-established generation tiebreak (R1/U1
+/// unconditional; `handle_for` fixed outbound-before-inbound) — every selection
+/// returns the stale outbound and the `== i` assertions fail.
+#[test]
+fn freshest_established_wins_over_a_same_class_zombie() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new();
+  let now = Instant::now();
+  let peer: SocketAddr = FERRY_SERVER_ADDR.parse().unwrap();
+  // Older established outbound O (created first → lower generation).
+  let o = establish_outbound(&mut t, &mut client, &cfg, peer);
+  // Newer established inbound I for the SAME peer (created second → higher
+  // generation), dialed to a distinct transport address but labelled inbound.
+  let remote_i: SocketAddr = "127.0.0.1:5002".parse().unwrap();
+  let i = establish_client_dialed_as_inbound(&mut t, &mut client, &cfg, peer, remote_i);
+  assert!(
+    t.conns.get(i.0).unwrap().generation > t.conns.get(o.0).unwrap().generation,
+    "the inbound was created later, so it is fresher"
+  );
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.outbound), Some(o));
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(i));
+
+  assert_eq!(
+    dial_reliable(&mut t, &mut client, &cfg, now, peer).unwrap(),
+    i,
+    "reliable selection returns the fresher established inbound, not the zombie outbound"
+  );
+  assert_eq!(
+    t.get_or_dial(
+      &mut client,
+      now,
+      cfg.client().clone(),
+      peer,
+      "localhost",
+      None,
+      Reliability::Unreliable,
+    )
+    .unwrap(),
+    i,
+    "unreliable selection returns the fresher established inbound"
+  );
+  assert_eq!(
+    t.handle_for(&peer),
+    Some(i),
+    "handle_for returns the fresher established inbound"
   );
 }
 
@@ -1346,26 +1497,28 @@ fn established_inbound_selected_and_promotion_supersedes_the_prior_one() {
     "U2 selects the established inbound"
   );
 
-  // A NEW inbound Y establishes while X is live → declined at accept.
+  // A NEWER inbound Y establishes while X is live → tracked at accept (freshest
+  // by generation), so selection follows to Y over the older established X.
   let y = establish_inbound(&mut t, &mut server, &mut client, &cfg);
   assert_ne!(x, y);
+  assert!(t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
-    Some(x),
-    "a new inbound accepted while X is live is declined at accept"
+    Some(y),
+    "the freshest inbound is tracked at accept over the older live one"
   );
 
-  // Y reaches the establishment chokepoint → promotion sets route.inbound = Y.
+  // The establishment chokepoint keeps the freshest inbound.
   t.on_established_transition(y);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(y),
-    "the newly-established inbound is promoted over the prior one"
+    "establishment keeps the freshest inbound tracked"
   );
   let sel2 = dial_reliable(&mut t, &mut client, &cfg, now, peer).unwrap();
   assert_eq!(
     sel2, y,
-    "selection follows to the promoted established inbound (R2), not the stale X"
+    "selection follows to the freshest established inbound (R2), not the older X"
   );
 }
 

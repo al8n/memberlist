@@ -3978,18 +3978,31 @@ where
         }
       }
       Err(conn::DialError::AtGlobalCap) => {
-        // The global connection cap is reached: this new outbound peer gets
-        // no connection. Count it against the same connection-cap metric the
-        // inbound Initial path uses, and retire the intent through the
-        // standard pre-bridge failure path (a Failed ExchangeCompleted for a
-        // UserMessage / PushPull dial resolves the parked waiter).
+        // The global connection cap is reached: this new outbound peer gets no
+        // connection this tick. Count it against the same connection-cap metric
+        // the inbound Initial path uses.
         self.ep.metrics_mut().quic_connections_rejected += 1;
-        self.retire_failed_dial(
-          id,
-          StreamError::DialFailed("quic connection table at capacity".into()),
-          now,
-        );
-        DialAttempt::Retired
+        // A just-closed connection still counts against the cap until
+        // `finalize_tick` reaps it later THIS tick, so a fresh dial can hit the
+        // cap on a slot that is about to free. If such a reapable connection
+        // exists and the intent's deadline still holds, repark (same front/back
+        // discipline as the handshaking / credit-exhausted paths) so the next
+        // tick — after the closing connection reaps and frees its slot — retries
+        // the dial rather than abandoning a recoverable intent one tick early;
+        // the tick's unconditional full-drain of parked buckets is the retry
+        // backstop (there is no global-cap-freed wake). Retire when the table is
+        // permanently full (no reapable connection, so no slot is coming) or the
+        // deadline has passed.
+        if now < deadline && self.conns.has_reapable_connection() {
+          self.repark_blocked_dial(id, peer, deadline, kind, now)
+        } else {
+          self.retire_failed_dial(
+            id,
+            StreamError::DialFailed("quic connection table at capacity".into()),
+            now,
+          );
+          DialAttempt::Retired
+        }
       }
       Err(conn::DialError::Connect(e)) => {
         self.retire_failed_dial(id, StreamError::DialFailed(e.to_string().into()), now);
