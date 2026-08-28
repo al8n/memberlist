@@ -226,6 +226,101 @@ impl<A> ExchangeCompleted<A> {
   }
 }
 
+/// Why a [`StreamId`] was retired before any [`StreamAction::Connect`] was
+/// surfaced, carried on [`Event::DialAborted`].
+///
+/// [`StreamAction::Connect`]: crate::streams::StreamAction::Connect
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DialAbortReason {
+  /// The dial intent's deadline had already elapsed when the coordinator
+  /// serviced it, so no connection was opened.
+  DeadlineElapsed,
+  /// The per-dial record-layer context was rejected (e.g. the TLS SNI provider
+  /// returned `None` for this peer).
+  DialContext,
+  /// The dialer record layer could not be constructed (a misconfigured
+  /// transport cannot dial).
+  RecordLayer,
+  /// The endpoint is leaving or has left, so no dial was initiated for the
+  /// (inert) id the `start_*` call returned.
+  NotRunning,
+  /// The dial was cancelled by a graceful leave that began after it was started:
+  /// its `Connect` was queued but never drained by the driver, so the leave
+  /// retires the id here. Distinct from [`Self::NotRunning`], which is a dial
+  /// started while the endpoint was already leaving/left.
+  Leaving,
+}
+
+/// Payload for [`Event::DialAborted`]: a [`StreamId`] returned by a `start_*`
+/// call was retired before any [`StreamAction::Connect`] surfaced for it, so no
+/// bridge, [`ExchangeId`], or [`Event::ExchangeCompleted`] will ever refer to
+/// it. Keyed by the originating [`StreamId`] (not an [`ExchangeId`], which is
+/// allocated only once a dial reaches `Connect`), it makes the stream-backend
+/// lifecycle total: a driver correlating a `start_*` handle sees exactly one
+/// terminal outcome per id.
+///
+/// Emitted by the STREAM-transport coordinator only. The QUIC coordinator
+/// reports its pre-`Connect` dial failures as a `Failed`
+/// [`Event::ExchangeCompleted`] keyed `ExchangeId::from(stream_id)` instead
+/// (`retire_failed_dial`).
+///
+/// [`StreamAction::Connect`]: crate::streams::StreamAction::Connect
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DialAborted<A> {
+  stream_id: StreamId,
+  peer: A,
+  kind: ExchangeKind,
+  reason: DialAbortReason,
+}
+
+impl<A> DialAborted<A> {
+  /// Construct a new payload. Crate-internal: only the stream coordinator's
+  /// dial-service path produces it, so the constructor has no caller without
+  /// `tcp` / `tls`.
+  #[cfg_attr(
+    not(any(feature = "tls", feature = "tcp")),
+    allow(dead_code, reason = "only constructed by the stream coordinator")
+  )]
+  #[inline(always)]
+  pub(crate) const fn new(
+    stream_id: StreamId,
+    peer: A,
+    kind: ExchangeKind,
+    reason: DialAbortReason,
+  ) -> Self {
+    Self {
+      stream_id,
+      peer,
+      kind,
+      reason,
+    }
+  }
+
+  /// The originating `start_*` [`StreamId`] that was retired.
+  #[inline(always)]
+  pub const fn stream_id(&self) -> StreamId {
+    self.stream_id
+  }
+
+  /// The peer the aborted dial targeted.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// The originating exchange kind.
+  #[inline(always)]
+  pub const fn kind(&self) -> ExchangeKind {
+    self.kind
+  }
+
+  /// Why the dial was aborted.
+  #[inline(always)]
+  pub const fn reason(&self) -> DialAbortReason {
+    self.reason
+  }
+}
+
 /// Correlation token for an application ping (`Endpoint::ping`), echoed on the
 /// terminal `Event::PingCompleted` / `Event::PingFailed`. Mirrors how
 /// `StreamId` correlates reliable exchanges.
@@ -391,10 +486,12 @@ impl<I, A> NodeConflict<I, A> {
 /// Payload for [`Event::UserPacket`]: an application-level user-data packet.
 #[derive(Debug)]
 pub struct UserPacket<A> {
-  /// The logical peer identity the packet arrived from — the membership
-  /// address, a best-effort transport-origin hint. It is explicitly NOT the raw
-  /// post-migration transport 4-tuple: a QUIC connection may migrate its egress
-  /// path, but the identity here stays the membership address the connection was
+  /// The peer address this packet arrived on — a best-effort transport-origin
+  /// hint, direction-aware: for a reliable delivery, the advertised membership
+  /// address we dialed (outbound) or the accept-time transport source
+  /// (inbound); for an unreliable delivery, the datagram source socket. It is
+  /// explicitly NOT the raw post-migration transport 4-tuple: a QUIC connection
+  /// may migrate its egress path, but this stays the address the connection was
   /// keyed on. Identity-critical routing uses the advertised SWIM-payload
   /// address rather than this hint.
   from: A,
@@ -443,6 +540,15 @@ impl<A> UserPacket<A> {
 /// Surfaces the `user_data` the FSM layer does not itself consult, so the
 /// driver can hand it to the application (the Sans-I/O analog of Go
 /// memberlist's `MergeRemoteState`).
+///
+/// The [`peer`](Self::peer_ref) address is direction-aware: the address the
+/// delivering connection was keyed on — the advertised membership address we
+/// dialed for an OUTBOUND exchange, the accept-time transport source (typically
+/// the peer's ephemeral socket) for an INBOUND one. It is a best-effort
+/// transport-origin hint, stable for the connection's life and immutable under
+/// QUIC migration. Identity-critical consumers use the push/pull payload
+/// `states` (each entry carries its own advertised address) and
+/// [`originating_stream_id`](Self::originating_stream_id), never this hint.
 #[derive(Debug)]
 pub struct RemoteStateReceived<A> {
   peer: A,
@@ -478,7 +584,12 @@ impl<A> RemoteStateReceived<A> {
     }
   }
 
-  /// The peer that supplied the state.
+  /// The peer address this merge's connection was keyed on: the advertised
+  /// membership address we dialed for an OUTBOUND exchange, the accept-time
+  /// transport source (typically the peer's ephemeral socket) for an INBOUND
+  /// one — a best-effort transport-origin hint. Identity-critical consumers use
+  /// the push/pull payload `states` and
+  /// [`originating_stream_id`](Self::originating_stream_id), never this hint.
   #[inline(always)]
   pub const fn peer_ref(&self) -> &A {
     &self.peer
@@ -736,6 +847,10 @@ impl<A> DialIntent<A> {
 }
 
 /// Application-facing event drained from [`Endpoint::poll_event`].
+///
+/// This enum is deliberately exhaustive and gains variants in 0.x minor
+/// releases; match it exhaustively so a new lifecycle event is a compile-time
+/// decision at upgrade, never a silently discarded runtime event.
 #[derive(Debug)]
 pub enum Event<I, A> {
   /// A peer transitioned `Dead`/`Left` → `Alive`, or appeared for the first time.
@@ -781,6 +896,31 @@ pub enum Event<I, A> {
   /// emit this event — synchronous-join drivers observe only their
   /// own outbound exchange's terminal outcome.
   ExchangeCompleted(ExchangeCompleted<A>),
+  /// A `start_*`-returned [`StreamId`] was retired before its
+  /// [`StreamAction::Connect`] was drained by the driver (expired intent,
+  /// rejected record-layer context, dialer construction failure, a not-running
+  /// endpoint, or a graceful leave that cancels a still-queued `Connect`).
+  /// Emitted by the STREAM-transport coordinator ONLY.
+  ///
+  /// This is one arm of the stream backend's TOTALITY guarantee: every
+  /// `start_*`-returned [`StreamId`] receives exactly one machine-emitted
+  /// terminal — a synchronous `Err` (`start_user_message` only), a
+  /// [`Event::DialAborted`] (retired before its `Connect` was drained, including
+  /// a leave that cancels a still-queued `Connect`), or — once its `Connect` has
+  /// been drained — exactly one `eid`-keyed [`Event::ExchangeCompleted`].
+  /// Correlate by draining [`poll_action`](crate::streams::StreamEndpoint::poll_action)
+  /// after each `start_*` (the `Connect` is queued in-band within the call). The
+  /// guarantee is emission into the event queue; a driver that stops polling
+  /// forfeits delivery.
+  ///
+  /// The QUIC coordinator instead reports a pre-bridge dial failure as a
+  /// `Failed` [`Event::ExchangeCompleted`] keyed `ExchangeId::from(stream_id)`
+  /// (`retire_failed_dial`), so it never emits this. Machine-scheduled dials
+  /// (anti-entropy push/pull, probe fallbacks with no staged kind) carry no
+  /// public start id and do NOT emit it; they self-heal on their schedulers.
+  ///
+  /// [`StreamAction::Connect`]: crate::streams::StreamAction::Connect
+  DialAborted(DialAborted<A>),
 }
 
 /// Payload for [`EndpointEvent::PushPullRequestReceived`]: an inbound

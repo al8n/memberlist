@@ -18,6 +18,21 @@ machine, with the async runtime concerns moved into thin per-runtime drivers.
 This release line forms new↔new clusters only; it does not interoperate on the
 wire with the legacy `0.x` hand-rolled codec below.
 
+### API notes
+
+- `Event` gains a `DialAborted` variant (with a `DialAborted<A>` payload and a
+  `DialAbortReason` enum). It completes the stream backend's dial-lifecycle
+  totality: every `start_*`-returned `StreamId` now receives exactly one
+  machine-emitted terminal — a synchronous `Err`, a `DialAborted` (retired
+  before its `Connect` was drained, including a graceful leave that cancels a
+  still-queued `Connect`), or an `eid`-keyed `ExchangeCompleted` once the
+  `Connect` has been drained. A graceful `leave` now also promptly terminalizes
+  every cancelled outbound reliable exchange (`ExchangeCompleted(Failed)` for a
+  drained `Connect`, `DialAborted(Leaving)` for a still-queued one) so a parked
+  reliable-send / join waiter resolves at leave rather than hanging until
+  shutdown. `Event` is deliberately exhaustive and gains variants in `0.x`
+  minor releases; match it exhaustively.
+
 ## 0.6.0
 
 ### Features

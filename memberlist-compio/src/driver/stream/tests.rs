@@ -1050,6 +1050,108 @@ async fn drain_events_drops_on_closed_obs_channel_but_still_drains() {
   );
 }
 
+/// A parked reliable directed send resolves `Err(SendFailed)` PROMPTLY at
+/// `leave()` — NOT only at shutdown. The send parks a `PendingUserSend` and
+/// leaves its request queued in `out_transmit`; `leave()` then cancels the
+/// unsent exchange and terminalizes it (`ExchangeCompleted(Failed,
+/// UserMessage)`), which `drain_events`'s synchronous accounting folds into the
+/// waiter.
+#[compio::test]
+async fn leave_resolves_parked_reliable_send_as_send_failed() {
+  let mut endpoint = test_endpoint();
+  let mut pending = empty_pending();
+
+  let (tx, rx) = unit_reply();
+  dispatch_one(
+    &mut endpoint,
+    &mut pending,
+    Command::SendReliable(SendReliableCmd::new(
+      addr(7250),
+      vec![Bytes::from_static(b"reliable")],
+      tx,
+    )),
+  )
+  .await;
+  assert_eq!(pending.user_sends.len(), 1, "the send parked one waiter");
+
+  // Leave (NOT shutdown) cancels the unsent exchange and terminalizes it Failed.
+  endpoint.leave(Instant::now()).expect("leave");
+
+  let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
+  let observation_dropped = Cell::new(0u64);
+  let obs_payload_bytes = Rc::new(Cell::new(0u64));
+  drain_events::<SmolStr, SocketAddr, RawRecords, _>(
+    &mut endpoint,
+    &obs_tx,
+    &observation_dropped,
+    &obs_payload_bytes,
+    None,
+    &mut pending,
+  )
+  .await;
+
+  assert!(
+    pending.user_sends.is_empty(),
+    "leave resolved the parked send"
+  );
+  assert!(
+    matches!(rx.await, Ok(Err(MemberlistError::SendFailed))),
+    "leave resolves the parked reliable send as SendFailed",
+  );
+}
+
+/// A parked wait-`join` resolves PROMPTLY at `leave()` with its partial
+/// contacted set — NOT only at shutdown. Both seeds' push/pull exchanges are
+/// cancelled + terminalized `Failed` by `leave()`, so the contacted set is empty
+/// and `join_reply` yields `Err((empty, JoinFailed))`, folded in by
+/// `drain_events`.
+#[compio::test]
+async fn leave_resolves_parked_wait_join_with_partial_set() {
+  let mut endpoint = test_endpoint();
+  let mut pending = empty_pending();
+
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
+  dispatch_one(
+    &mut endpoint,
+    &mut pending,
+    Command::Join(JoinCmd {
+      addrs: vec![addr(7260), addr(7261)],
+      kind: JoinKind::WaitForCompletion(WaitForCompletionArgs {
+        deadline: Instant::now() + Duration::from_secs(30),
+      }),
+      reply: tx,
+    }),
+  )
+  .await;
+  assert_eq!(pending.joins.len(), 1, "wait-join parked one waiter");
+
+  endpoint.leave(Instant::now()).expect("leave");
+
+  let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
+  let observation_dropped = Cell::new(0u64);
+  let obs_payload_bytes = Rc::new(Cell::new(0u64));
+  drain_events::<SmolStr, SocketAddr, RawRecords, _>(
+    &mut endpoint,
+    &obs_tx,
+    &observation_dropped,
+    &obs_payload_bytes,
+    None,
+    &mut pending,
+  )
+  .await;
+
+  assert!(pending.joins.is_empty(), "leave resolved the parked join");
+  match rx.await {
+    Ok(Err((set, MemberlistError::JoinFailed(_)))) => {
+      assert!(
+        set.is_empty(),
+        "the leave-cancelled join has an empty partial set"
+      );
+    }
+    other => panic!("expected JoinFailed with an empty set, got {other:?}"),
+  }
+}
+
 /// `reap_pending_leave` replies `LeaveTimeout` to every joined replier once
 /// the deadline elapses and clears the slot; a not-yet-expired leave stays
 /// parked with no reply.

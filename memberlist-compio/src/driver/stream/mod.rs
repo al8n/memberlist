@@ -2617,6 +2617,23 @@ where
         }
       }
     }
+    // Pre-connect dial abort: the coordinator retired a `start_*` id before any
+    // `Connect`. No synchronous waiter is keyed on a `StreamId` — the join /
+    // send waiter tables are `ExchangeId`-keyed and capture their ids from the
+    // surfaced `Connect` — so a `DialAborted` never resolves one and
+    // double-reporting is structurally impossible. Trace it; the event still
+    // flows to the observation task below.
+    if let Event::DialAborted(ref _p) = ev {
+      // `A` is generic here with no `Display`/`Debug` bound, so the peer is not
+      // formatted; the concrete `stream_id`/`kind`/`reason` identify the abort.
+      #[cfg(feature = "tracing")]
+      tracing::trace!(
+        stream_id = _p.stream_id().as_u64(),
+        kind = ?_p.kind(),
+        reason = ?_p.reason(),
+        "stream dial aborted before Connect",
+      );
+    }
     // Payload-bearing events (`UserPacket` / `RemoteStateReceived`) can each
     // own up to `max_stream_frame_size` bytes; size this one for the byte
     // backstop (`None` for small membership / control events).
