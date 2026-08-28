@@ -2804,3 +2804,131 @@ fn pushpull_response_wire_identical() {
     );
   }
 }
+
+/// A `BothClosed` bridge is a clean terminus — both FINs exchanged, the
+/// exchange fully delivered. A subsequent connection-level loss (the
+/// same-pass sweep in `service_one_conn` calls `fail_connection_lost`
+/// on every bridge in a lost connection's bucket) must NOT flip that
+/// completed exchange to `Failed`: the outcome would become a false
+/// `SendFailed` for an exchange the peer fully received. This pins the
+/// `BothClosed` guard in `fail_connection_lost`.
+#[test]
+fn connection_loss_does_not_fail_a_completed_bothclosed_bridge() {
+  let mut bridge = make_plain_bridge();
+  // Active → RecvClosed (peer FIN consumed) → BothClosed (our FIN acked).
+  bridge.observe_recv_fin();
+  bridge.observe_send_fin();
+  assert!(
+    matches!(bridge.phase, LinkState::BothClosed),
+    "both FINs exchanged puts the bridge in BothClosed"
+  );
+
+  bridge.fail_connection_lost();
+
+  assert!(
+    matches!(bridge.phase, LinkState::BothClosed),
+    "a connection-level loss must not overwrite a completed exchange — \
+       BothClosed is sticky, like Failed"
+  );
+  assert!(
+    bridge.is_terminal(),
+    "BothClosed is terminal and stays terminal"
+  );
+  assert!(
+    !bridge.is_phase_failed(),
+    "a completed exchange must not report phase-failed, or \
+       `outcome_for_terminal` would emit a false SendFailed"
+  );
+}
+
+/// First-failure-wins for nonterminal bridges is preserved: an `Active`
+/// bridge (and, separately, a `SendClosed` bridge — which is NOT
+/// terminal) hit by a connection loss becomes `Failed(ConnectionLost)`.
+#[test]
+fn connection_loss_fails_a_nonterminal_bridge() {
+  // Active: no half retired yet.
+  let mut active = make_plain_bridge();
+  assert!(matches!(active.phase, LinkState::Active));
+  active.fail_connection_lost();
+  assert!(
+    matches!(
+      active.phase,
+      LinkState::Failed(BridgeFailure::ConnectionLost)
+    ),
+    "an Active bridge takes the connection-loss failure"
+  );
+
+  // SendClosed: our FIN acked, peer FIN not yet observed — nonterminal.
+  let mut send_closed = make_plain_bridge();
+  send_closed.observe_send_fin();
+  assert!(
+    matches!(send_closed.phase, LinkState::SendClosed),
+    "one FIN alone (send) is not terminal"
+  );
+  send_closed.fail_connection_lost();
+  assert!(
+    matches!(
+      send_closed.phase,
+      LinkState::Failed(BridgeFailure::ConnectionLost)
+    ),
+    "a SendClosed bridge is nonterminal and takes the connection-loss failure"
+  );
+}
+
+/// First-failure-wins across `Failed` states: once a bridge is `Failed`
+/// the original cause is preserved through any later failure call, so a
+/// downstream `StreamErrored` notice reports the first transport cause.
+#[test]
+fn first_failure_wins_preserves_the_original_cause() {
+  let mut bridge = make_plain_bridge();
+  bridge.fail(BridgeFailure::Decode);
+  assert!(matches!(
+    bridge.phase,
+    LinkState::Failed(BridgeFailure::Decode)
+  ));
+
+  bridge.fail_connection_lost();
+  assert!(
+    matches!(bridge.phase, LinkState::Failed(BridgeFailure::Decode)),
+    "a later failure must not overwrite the first cause"
+  );
+}
+
+/// `BothClosed` means the QUIC streams closed cleanly, NOT that the
+/// application-level merge was accepted. A rejecting `MergeDelegate`
+/// returns `StreamCommand::Close`, whose `drain_then_reap` arm calls
+/// `fail_with_retire(conns, BridgeFailure::AdmissionClosed)` on a bridge
+/// that has already reached `BothClosed` (request FIN acked, complete
+/// reply + EOF delivered). That rejection MUST flip the phase to
+/// `Failed(AdmissionClosed)` — otherwise `outcome_for_terminal` reports
+/// `Succeeded` and a rejected push/pull seed is counted as contacted with
+/// none of its state applied. The `BothClosed` stickiness is therefore
+/// scoped to connection loss (`fail_connection_lost`) and must NOT live in
+/// the generic `fail`, which this exercises via `fail_with_retire`.
+#[test]
+fn merge_rejection_flips_a_completed_bothclosed_bridge_to_failed() {
+  let mut bridge = make_plain_bridge();
+  bridge.observe_recv_fin();
+  bridge.observe_send_fin();
+  assert!(
+    matches!(bridge.phase, LinkState::BothClosed),
+    "both FINs exchanged puts the bridge in BothClosed"
+  );
+
+  let mut conns = ConnTable::new();
+  bridge.fail_with_retire(&mut conns, BridgeFailure::AdmissionClosed);
+
+  assert!(
+    matches!(
+      bridge.phase,
+      LinkState::Failed(BridgeFailure::AdmissionClosed)
+    ),
+    "a merge rejection on a BothClosed bridge must flip it to \
+       Failed(AdmissionClosed), not leave it BothClosed"
+  );
+  assert!(
+    bridge.is_phase_failed(),
+    "the rejected exchange must report phase-failed so \
+       `outcome_for_terminal` emits Failed, not a false Succeeded"
+  );
+}
