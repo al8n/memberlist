@@ -244,6 +244,11 @@ pub enum DialAbortReason {
   /// The endpoint is leaving or has left, so no dial was initiated for the
   /// (inert) id the `start_*` call returned.
   NotRunning,
+  /// The dial was cancelled by a graceful leave that began after it was started:
+  /// its `Connect` was queued but never drained by the driver, so the leave
+  /// retires the id here. Distinct from [`Self::NotRunning`], which is a dial
+  /// started while the endpoint was already leaving/left.
+  Leaving,
 }
 
 /// Payload for [`Event::DialAborted`]: a [`StreamId`] returned by a `start_*`
@@ -842,6 +847,10 @@ impl<A> DialIntent<A> {
 }
 
 /// Application-facing event drained from [`Endpoint::poll_event`].
+///
+/// This enum is deliberately exhaustive and gains variants in 0.x minor
+/// releases; match it exhaustively so a new lifecycle event is a compile-time
+/// decision at upgrade, never a silently discarded runtime event.
 #[derive(Debug)]
 pub enum Event<I, A> {
   /// A peer transitioned `Dead`/`Left` → `Alive`, or appeared for the first time.
@@ -887,16 +896,25 @@ pub enum Event<I, A> {
   /// emit this event — synchronous-join drivers observe only their
   /// own outbound exchange's terminal outcome.
   ExchangeCompleted(ExchangeCompleted<A>),
-  /// A `start_*`-returned [`StreamId`] was retired before any
-  /// [`StreamAction::Connect`] surfaced for it (expired intent, rejected
-  /// record-layer context, dialer construction failure, or a not-running
-  /// endpoint). Emitted by the STREAM-transport coordinator ONLY, exactly once
-  /// per such id — so the stream lifecycle is total: every `start_*` id reaches
-  /// exactly one of `Connect` (whose terminal later arrives as
-  /// [`Event::ExchangeCompleted`]), [`Event::DialAborted`], or — for
-  /// `start_user_message` only — a synchronous `Err`. The QUIC coordinator
-  /// instead reports a pre-bridge dial failure as a `Failed`
-  /// [`Event::ExchangeCompleted`] keyed `ExchangeId::from(stream_id)`
+  /// A `start_*`-returned [`StreamId`] was retired before its
+  /// [`StreamAction::Connect`] was drained by the driver (expired intent,
+  /// rejected record-layer context, dialer construction failure, a not-running
+  /// endpoint, or a graceful leave that cancels a still-queued `Connect`).
+  /// Emitted by the STREAM-transport coordinator ONLY.
+  ///
+  /// This is one arm of the stream backend's TOTALITY guarantee: every
+  /// `start_*`-returned [`StreamId`] receives exactly one machine-emitted
+  /// terminal — a synchronous `Err` (`start_user_message` only), a
+  /// [`Event::DialAborted`] (retired before its `Connect` was drained, including
+  /// a leave that cancels a still-queued `Connect`), or — once its `Connect` has
+  /// been drained — exactly one `eid`-keyed [`Event::ExchangeCompleted`].
+  /// Correlate by draining [`poll_action`](crate::streams::StreamEndpoint::poll_action)
+  /// after each `start_*` (the `Connect` is queued in-band within the call). The
+  /// guarantee is emission into the event queue; a driver that stops polling
+  /// forfeits delivery.
+  ///
+  /// The QUIC coordinator instead reports a pre-bridge dial failure as a
+  /// `Failed` [`Event::ExchangeCompleted`] keyed `ExchangeId::from(stream_id)`
   /// (`retire_failed_dial`), so it never emits this. Machine-scheduled dials
   /// (anti-entropy push/pull, probe fallbacks with no staged kind) carry no
   /// public start id and do NOT emit it; they self-heal on their schedulers.

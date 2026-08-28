@@ -17,9 +17,11 @@ mod tcp {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
+  use std::collections::HashMap;
+
   use crate::{
     RawRecords,
-    event::{DialAbortReason, Event, ExchangeKind, PushPullKind, StreamId},
+    event::{DialAbortReason, Event, ExchangeKind, ExchangeStatus, PushPullKind, StreamId},
     streams::{
       LabelOptions, StreamAction, StreamEndpoint,
       bridge::StreamBridge,
@@ -704,6 +706,212 @@ mod tcp {
     assert!(
       coord.poll_action().is_none(),
       "no Connect surfaces for the expired kind-None dial",
+    );
+  }
+
+  /// Leave terminality (drained-Connect path): two outbound exchanges whose
+  /// `Connect` the driver has already drained (observed) are, on `leave()`,
+  /// terminalized as exactly one `ExchangeCompleted(Failed, kind)` each — the
+  /// driver holds each `eid`, so its parked waiter resolves at leave — plus one
+  /// `Abort` teardown; NO `DialAborted`.
+  #[test]
+  fn leave_after_draining_connects_terminalizes_each_unsent_exchange_as_failed() {
+    let now = Instant::now();
+    let mut coord = coord(7130);
+    let um_sid = coord
+      .start_user_message(addr(7001), Bytes::from_static(b"m"), now)
+      .expect("issued while running");
+    let pp_sid = coord.start_push_pull(addr(7002), PushPullKind::Join, now);
+
+    // Drain (observe) the Connect actions, recording each StreamId -> ExchangeId.
+    let mut eid_by_sid = HashMap::new();
+    while let Some(a) = coord.poll_action() {
+      if let StreamAction::Connect(info) = a {
+        eid_by_sid.insert(info.stream_id(), info.id());
+      }
+    }
+    assert_eq!(eid_by_sid.len(), 2, "both dials surfaced a Connect");
+
+    coord.leave(now).expect("leave from a running node");
+
+    let mut completed = Vec::new();
+    let mut aborts = 0;
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::ExchangeCompleted(c) => completed.push((c.eid(), c.outcome(), c.kind())),
+        Event::DialAborted(_) => aborts += 1,
+        _ => {}
+      }
+    }
+    assert_eq!(
+      aborts, 0,
+      "a drained-Connect exchange completes, never DialAborted"
+    );
+    completed.sort_by_key(|(eid, _, _)| eid.get());
+    // Exactly one Failed completion per exchange, carrying the originating kind.
+    assert_eq!(
+      completed.len(),
+      2,
+      "exactly one terminal per drained exchange"
+    );
+    let um_eid = eid_by_sid[&um_sid];
+    let pp_eid = eid_by_sid[&pp_sid];
+    assert!(
+      completed.iter().any(|&(e, s, k)| e == um_eid
+        && s == ExchangeStatus::Failed
+        && k == ExchangeKind::UserMessage),
+      "the user-message exchange completed Failed with its kind",
+    );
+    assert!(
+      completed.iter().any(|&(e, s, k)| e == pp_eid
+        && s == ExchangeStatus::Failed
+        && k == ExchangeKind::PushPull),
+      "the push/pull exchange completed Failed with its kind",
+    );
+
+    // One Abort teardown per cancelled exchange; nothing further.
+    let mut abort_actions = 0;
+    while let Some(a) = coord.poll_action() {
+      match a {
+        StreamAction::Abort(_) => abort_actions += 1,
+        StreamAction::Connect(_) => panic!("a left node surfaces no Connect"),
+        _ => {}
+      }
+    }
+    assert_eq!(
+      abort_actions, 2,
+      "one Abort teardown per cancelled exchange"
+    );
+    assert_eq!(coord.live_bridge_count(), 0, "no bridge survives the leave");
+  }
+
+  /// Leave terminality (queued-Connect path): two outbound exchanges whose
+  /// `Connect` the driver has NEVER drained are, on `leave()`, terminalized as
+  /// exactly one `DialAborted { Leaving }` each (keyed by the originating
+  /// `StreamId`); NO `ExchangeCompleted`, and no `Connect` ever surfaces.
+  #[test]
+  fn leave_without_draining_connects_aborts_each_with_leaving_reason() {
+    let now = Instant::now();
+    let mut coord = coord(7131);
+    let um_sid = coord
+      .start_user_message(addr(7001), Bytes::from_static(b"m"), now)
+      .expect("issued while running");
+    let pp_sid = coord.start_push_pull(addr(7002), PushPullKind::Join, now);
+
+    // Do NOT drain the Connect actions: they stay queued until leave.
+    coord.leave(now).expect("leave from a running node");
+
+    let mut completed = 0;
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::ExchangeCompleted(_) => completed += 1,
+        Event::DialAborted(a) => aborts.push((a.stream_id(), a.kind(), a.reason())),
+        _ => {}
+      }
+    }
+    assert_eq!(
+      completed, 0,
+      "a still-queued Connect is DialAborted, never completed"
+    );
+    assert_eq!(aborts.len(), 2, "exactly one DialAborted per started id");
+    assert!(
+      aborts.contains(&(um_sid, ExchangeKind::UserMessage, DialAbortReason::Leaving)),
+      "the user-message id was aborted with the Leaving reason",
+    );
+    assert!(
+      aborts.contains(&(pp_sid, ExchangeKind::PushPull, DialAbortReason::Leaving)),
+      "the push/pull id was aborted with the Leaving reason",
+    );
+
+    while let Some(a) = coord.poll_action() {
+      assert!(
+        !matches!(a, StreamAction::Connect(_)),
+        "a left node surfaces no Connect for a still-queued dial",
+      );
+    }
+    assert_eq!(coord.live_bridge_count(), 0, "no bridge survives the leave");
+  }
+
+  /// Totality invariant across a mixed interleaving: every kind-bearing
+  /// `StreamId` receives EXACTLY ONE machine-emitted terminal at leave — an
+  /// `ExchangeCompleted(Failed)` for an exchange whose `Connect` was drained, a
+  /// `DialAborted(Leaving)` for one whose `Connect` was still queued.
+  #[test]
+  fn leave_emits_exactly_one_terminal_per_kind_bearing_stream_id() {
+    let now = Instant::now();
+    let mut coord = coord(7140);
+
+    // Two exchanges whose Connect the driver drains (observes) before leave.
+    let drained = [
+      coord
+        .start_user_message(addr(7001), Bytes::from_static(b"a"), now)
+        .expect("issued while running"),
+      coord.start_push_pull(addr(7002), PushPullKind::Join, now),
+    ];
+    let mut eid_by_sid = HashMap::new();
+    while let Some(a) = coord.poll_action() {
+      if let StreamAction::Connect(info) = a {
+        eid_by_sid.insert(info.stream_id(), info.id());
+      }
+    }
+
+    // Two more started AFTER that drain: their Connect stays queued at leave.
+    let queued = [
+      coord
+        .start_user_message(addr(7003), Bytes::from_static(b"c"), now)
+        .expect("issued while running"),
+      coord.start_push_pull(addr(7004), PushPullKind::Refresh, now),
+    ];
+
+    coord.leave(now).expect("leave from a running node");
+
+    let mut completed_eids = Vec::new();
+    let mut aborted_sids = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::ExchangeCompleted(c) if c.outcome() == ExchangeStatus::Failed => {
+          completed_eids.push(c.eid());
+        }
+        Event::DialAborted(a) if a.reason() == DialAbortReason::Leaving => {
+          aborted_sids.push(a.stream_id());
+        }
+        _ => {}
+      }
+    }
+
+    // Each drained sid: exactly one ExchangeCompleted(Failed) via its eid, and
+    // never a DialAborted.
+    for sid in drained {
+      let eid = eid_by_sid[&sid];
+      assert_eq!(
+        completed_eids.iter().filter(|&&e| e == eid).count(),
+        1,
+        "a drained-Connect id completes exactly once",
+      );
+      assert!(
+        !aborted_sids.contains(&sid),
+        "a drained-Connect id is not also DialAborted",
+      );
+    }
+    // Each queued sid: exactly one DialAborted(Leaving); its eid was never
+    // allocated to the driver, so it cannot appear as a completion.
+    for sid in queued {
+      assert_eq!(
+        aborted_sids.iter().filter(|&&s| s == sid).count(),
+        1,
+        "a queued-Connect id is aborted exactly once",
+      );
+      assert!(
+        !eid_by_sid.contains_key(&sid),
+        "a queued-Connect id never surfaced an eid",
+      );
+    }
+    // Exactly four terminals — one per started kind-bearing StreamId.
+    assert_eq!(
+      completed_eids.len() + aborted_sids.len(),
+      4,
+      "exactly one machine terminal per kind-bearing StreamId",
     );
   }
 }

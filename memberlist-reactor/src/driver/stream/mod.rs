@@ -1490,8 +1490,11 @@ where
       // `accept_shutdown_tx` still being `Some`; taking it below clears the guard so
       // this runs once.
       if this.accept_shutdown_tx.is_some() {
-        // Ignoring Err: best-effort leave during shutdown.
-        let _ = this.endpoint.leave(Instant::now());
+        // Ignoring Err: best-effort leave during shutdown. `leave_silent` cancels
+        // every unsent outbound exchange WITHOUT emitting its application terminal
+        // — the shutdown reap below fails each parked waiter with `Shutdown`, which
+        // a leave-cancel `SendFailed` / `JoinFailed` would otherwise preempt.
+        let _ = this.endpoint.leave_silent(Instant::now());
         // FREEZE every live bridge. `cancel_tx.send(())` resolves each bridge's
         // biased-first cancel arm, so a bridge about to read breaks BEFORE it can
         // fold a racing peer-FIN into a fabricated EOF, and a bridge stalled

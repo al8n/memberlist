@@ -1187,6 +1187,80 @@ async fn shutdown_fails_parked_reliable_send() {
   );
 }
 
+/// A parked reliable directed send resolves `Err(SendFailed)` PROMPTLY at
+/// `leave()` — NOT only at shutdown. When the send and the leave land in the
+/// same command drain, `leave` sees the request still queued in `out_transmit`,
+/// cancels the exchange, and terminalizes it (`ExchangeCompleted(Failed,
+/// UserMessage)`), which `account_event` folds into the waiter in the same
+/// poll. The dial targets an unreachable address (RFC 5737 TEST-NET-1) so the
+/// eventual dial teardown is a no-op on the already-cancelled exchange, leaving
+/// the leave terminal the sole resolver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_resolves_parked_reliable_send_promptly_as_send_failed() {
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<Result<(), Error>>();
+  // Enqueue the send and the leave together: one command drain dispatches the
+  // send (request queued in out_transmit) then the leave (cancels + terminalizes
+  // it) BEFORE the same poll's transport-byte drain empties out_transmit.
+  shared.push_command(Command::SendReliable(SendReliableCmd {
+    to: "192.0.2.1:80".parse::<SocketAddr>().unwrap(),
+    payloads: vec![Bytes::from_static(b"reliable")],
+    reply: tx,
+  }));
+  let (leave_tx, _leave_rx) = oneshot::channel::<Result<(), Error>>();
+  shared.push_command(Command::Leave(LeaveCmd { reply: leave_tx }));
+
+  // NO shutdown: the driver stays alive (Pending). A couple of passes drain the
+  // queued terminal into account_event.
+  assert!(
+    poll_once(&mut driver).is_pending(),
+    "driver alive after send+leave"
+  );
+  let _ = poll_once(&mut driver);
+  let _ = poll_once(&mut driver);
+
+  let got = tokio::time::timeout(Duration::from_secs(5), rx).await;
+  assert!(
+    matches!(got, Ok(Ok(Err(Error::SendFailed)))),
+    "leave resolves the parked reliable send as SendFailed without shutdown, got {got:?}",
+  );
+}
+
+/// A parked wait-`join` resolves PROMPTLY at `leave()` with its partial
+/// contacted set — NOT only at shutdown. With the join and the leave in the same
+/// command drain, both seeds' push/pull exchanges are cancelled + terminalized
+/// `Failed` before the transport drain, so the contacted set is empty and
+/// `join_reply` yields `Err((empty, JoinFailed))`. Unreachable seeds keep the
+/// dials stalled so the leave terminal is the sole resolver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_resolves_parked_wait_join_with_partial_contacted_set() {
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver(16, Some(1 << 20)).await;
+  let (tx, rx) = oneshot::channel::<crate::command::JoinReply>();
+  shared.push_command(Command::Join(JoinCmd {
+    addrs: vec![
+      "192.0.2.1:80".parse::<SocketAddr>().unwrap(),
+      "192.0.2.2:80".parse::<SocketAddr>().unwrap(),
+    ],
+    wait: true,
+    reply: tx,
+  }));
+  let (leave_tx, _leave_rx) = oneshot::channel::<Result<(), Error>>();
+  shared.push_command(Command::Leave(LeaveCmd { reply: leave_tx }));
+
+  assert!(
+    poll_once(&mut driver).is_pending(),
+    "driver alive after join+leave"
+  );
+  let _ = poll_once(&mut driver);
+  let _ = poll_once(&mut driver);
+
+  let got = tokio::time::timeout(Duration::from_secs(5), rx).await;
+  assert!(
+    matches!(&got, Ok(Ok(Err((set, Error::JoinFailed(_))))) if set.is_empty()),
+    "leave resolves the parked wait-join with its (empty) partial set, got {got:?}",
+  );
+}
+
 /// The shutdown branch's `close_and_drain` loop fails EVERY queued command
 /// variant: a handle that pushed a command in the race window between the
 /// poll's top-of-poll command drain and the shutdown `close_and_drain` gets a

@@ -766,16 +766,48 @@ where
   /// (its `Connect` never drained) and by the post-leave inbound mint guard for
   /// an un-minted acceptor bridge — so a cancelled exchange leaves no live
   /// bridge (no stream deadline, no record-layer buffer) and emits no bytes.
-  fn cancel_exchange(&mut self, id: ExchangeId) {
+  ///
+  /// When `emit_terminal` is `true` and the exchange carries a start-originated
+  /// kind (an outbound `start_*` exchange whose `Connect` the driver already
+  /// drained, so it holds the `eid`), this emits the exchange's ONE machine
+  /// terminal: a `Failed` [`Event::ExchangeCompleted`] — a leave-cancel is
+  /// honestly `Failed`. Pass `false` when the caller already emitted this id's
+  /// terminal (a still-queued `Connect` retired with a
+  /// [`Event::DialAborted`]); its DialAborted is the one terminal, so a second
+  /// emission here would break the one-terminal-per-`StreamId` invariant.
+  /// Inbound exchanges carry `kind == None` and never emit either way.
+  fn cancel_exchange(&mut self, id: ExchangeId, emit_terminal: bool)
+  where
+    A: crate::CheapClone,
+  {
     // Ignoring the removed bridge: a never-opened exchange owes the peer no
     // clean-close bytes, and dropping it clears its record-layer state.
     let _ = self.conns.remove(id);
-    // No `ExchangeCompleted` here. This path runs on leave, where a driver
-    // resolves a parked waiter via its own leave/shutdown drain with the clearer
-    // `Shutdown` signal; emitting a generic `Failed` would double-resolve it and
-    // mask that. The genuinely-stranding case (a dial that retired without a
-    // drain covering it) emits from the `dial_succeeded(None)` reap instead.
-    self.exchanges.remove(&id);
+    let removed = self.exchanges.remove(&id);
+    // Emit the exchange's single terminal for a kind-bearing outbound exchange
+    // the driver already correlated (its `Connect` was drained, so it holds the
+    // `eid`): a leave-cancel is a `Failed` `ExchangeCompleted`, the same
+    // kind-gated payload discipline `reap_bridge` uses. This resolves a parked
+    // reliable-send / join waiter PROMPTLY at leave. The reactor has NO leave
+    // drain — only a shutdown drain — so without this terminal such a waiter
+    // hangs from leave until shutdown; QUIC is already total at leave via
+    // `retire_failed_dial`, and this brings the stream backend to parity. A
+    // double-resolve is impossible: driver `account_event` resolve-and-removes
+    // the `eid`-keyed entry once, so a later terminal for the same `eid` finds
+    // nothing to resolve.
+    if emit_terminal
+      && let Some(meta) = &removed
+      && let Some(kind) = meta.kind
+    {
+      self
+        .ep
+        .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
+          id,
+          crate::CheapClone::cheap_clone(&meta.peer),
+          ExchangeStatus::Failed,
+          kind,
+        )));
+    }
     self.purge_transmit_for(id);
     // Replace any teardown already queued for this id with an Abort, so the
     // driver tears down a transport connection it may have already opened (the
@@ -1518,19 +1550,89 @@ where
   /// [`leave`](Self::leave) with an explicit farewell payload reserved into
   /// every dead-self compound ahead of the ordinary queue drain (see
   /// [`Endpoint::leave_with`](crate::Endpoint::leave_with)).
+  ///
+  /// A graceful leave TERMINALIZES every cancelled outbound exchange so a parked
+  /// reliable-send / join waiter resolves promptly — an `ExchangeCompleted`
+  /// (`Failed`) for one whose `Connect` was already drained, a
+  /// [`Event::DialAborted`] (`Leaving`) for one whose `Connect` was still
+  /// queued. The driver's own hard-shutdown teardown instead uses
+  /// [`leave_silent`](Self::leave_silent), which cancels identically but emits
+  /// no application terminals (shutdown reaps every parked waiter with its own
+  /// `Shutdown` outcome, which a leave-cancel terminal would otherwise preempt).
   pub fn leave_with(&mut self, now: Instant, farewell: Option<Bytes>) -> Result<(), Error> {
+    self.leave_inner(now, farewell, true)
+  }
+
+  /// Non-terminalizing sibling of [`leave_with`](Self::leave_with) for the
+  /// driver's hard-shutdown teardown: cancels every unsent outbound exchange
+  /// identically (so no pre-leave request reaches the wire during the drain) but
+  /// emits NO per-exchange application terminal. Shutdown fails every parked
+  /// waiter with its own `Shutdown` outcome; a leave-cancel `ExchangeCompleted` /
+  /// [`Event::DialAborted`] here would resolve the waiter FIRST with the
+  /// less-specific `SendFailed` / `JoinFailed`, changing the observed
+  /// shutdown result.
+  pub fn leave_silent(&mut self, now: Instant) -> Result<(), Error> {
+    self.leave_inner(now, None, false)
+  }
+
+  /// Shared body of [`leave_with`](Self::leave_with) and
+  /// [`leave_silent`](Self::leave_silent). `terminalize` gates whether the
+  /// cancelled outbound exchanges emit their application terminal
+  /// (`ExchangeCompleted(Failed)` / [`Event::DialAborted`]); the cancellation
+  /// itself (bridge drop, transmit purge, `Abort` teardown) is identical either
+  /// way.
+  fn leave_inner(
+    &mut self,
+    now: Instant,
+    farewell: Option<Bytes>,
+    terminalize: bool,
+  ) -> Result<(), Error> {
     self.last_now = Some(now);
     self.dial_pending.clear();
     self.pending_outbound_kinds.clear();
-    self.pending_connects.clear();
+    // Drain the still-queued `Connect` directives BEFORE clearing them. Each
+    // names an outbound exchange whose `Connect` the driver never observed
+    // (queued == un-polled), so it never received a `Connect` to later complete
+    // as an `ExchangeCompleted`: under `terminalize`, its ONE terminal is a
+    // `DialAborted { Leaving }` keyed by the originating `StreamId`.
+    // `cancel_exchange(_, false)` then tears it down WITHOUT a second
+    // (ExchangeCompleted) terminal and removes it from `exchanges`, so the
+    // unsent-outbound sweep below no longer sees it. A machine-scheduled dial
+    // (kind `None`) emits nothing, per the totality contract. `Vec` keeps this
+    // no_std-clean (the queue is small).
+    let queued_connects: Vec<StreamAction> = self.pending_connects.drain(..).collect();
+    for action in queued_connects {
+      if let StreamAction::Connect(info) = action {
+        let id = info.id();
+        if terminalize {
+          let terminal = self.exchanges.get(&id).and_then(|meta| {
+            meta
+              .kind
+              .map(|kind| (crate::CheapClone::cheap_clone(&meta.peer), kind))
+          });
+          if let Some((peer, kind)) = terminal {
+            self.ep.emit_event(Event::DialAborted(DialAborted::new(
+              info.stream_id(),
+              peer,
+              kind,
+              DialAbortReason::Leaving,
+            )));
+          }
+        }
+        self.cancel_exchange(id, false);
+      }
+    }
     // Drop inbound gossip buffered before leave — handle_packet would drop it
     // anyway once not Running, so it must not linger or later decode.
     self.mem_ingress.clear();
     // Cancel every OUTBOUND exchange (kind is Some) whose request bytes are still
-    // queued in out_transmit: its `Connect` may already be drained, but the
-    // request is not yet on the wire, so writing it after leave would advertise
-    // our pre-leave Alive. Inbound exchanges and request-sent outbound exchanges
-    // are left to drain. A `Vec` keeps this no_std-clean (the set is small).
+    // queued in out_transmit: its `Connect` was already drained (the queued ones
+    // were retired above), but the request is not yet on the wire, so writing it
+    // after leave would advertise our pre-leave Alive. Under `terminalize` the
+    // driver holds this exchange's `eid`, so its terminal is the one
+    // `ExchangeCompleted(Failed)` `cancel_exchange(_, true)` emits. Inbound
+    // exchanges and request-sent outbound exchanges are left to drain. A `Vec`
+    // keeps this no_std-clean.
     let unsent_outbound: Vec<ExchangeId> = self
       .exchanges
       .iter()
@@ -1539,7 +1641,7 @@ where
       .collect();
     for eid in unsent_outbound {
       if self.exchange_has_pending_bytes(eid) {
-        self.cancel_exchange(eid);
+        self.cancel_exchange(eid, terminalize);
       }
     }
     self.ep.leave_with(now, farewell)
@@ -1938,7 +2040,9 @@ where
             // settles during the drain is fully cancelled, so its record layer
             // queues and emits no bytes and it holds no buffers to the deadline.
             // `accept_stream` owns the lifecycle decision; `None` is the signal.
-            self.cancel_exchange(id);
+            // Inbound exchanges carry `kind == None`, so `emit_terminal` here is
+            // a no-op — no start id ever correlated this stream.
+            self.cancel_exchange(id, true);
           }
         },
       }
