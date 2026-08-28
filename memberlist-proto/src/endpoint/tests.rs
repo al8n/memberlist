@@ -8274,6 +8274,66 @@ fn reset_nodes_keeps_live_members_and_reaps_only_expired_dead() {
 }
 
 #[test]
+fn reset_nodes_purges_reclaimed_members_broadcasts() {
+  // max_members = Some(2) bounds membership to the local node plus one peer at
+  // a time. The gossip queue is NEVER drained here (no scheduler, no
+  // take_broadcasts), so the only thing that can drop a reclaimed member's
+  // id-keyed broadcast is the reset_nodes purge. Repeatedly admit, kill, and
+  // reclaim DISTINCT ids: without the purge each round's Dead broadcast would
+  // linger under its own id and the queue would grow with the round count even
+  // though membership stays bounded.
+  let window = Duration::from_millis(10);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_max_members(Some(2))
+      .with_gossip_to_the_dead_time(window),
+  );
+  let baseline = e.broadcast_queue_len();
+  let mut now = Instant::now();
+  for i in 0..6u16 {
+    let id = format!("peer-{i}");
+    process_alive_auto(&mut e, alive(&id, 7001 + i, 1), false, now);
+    // `from != target` ⇒ Dead (reclaimable past `gossip_to_the_dead_time`).
+    e.process_dead(dead(&id, "reporter", 2), now);
+    now += window * 2;
+    e.reset_nodes(now);
+    assert!(e.num_members() <= 2, "membership stays within max_members");
+  }
+  assert_eq!(e.num_members(), 1, "only the local node remains");
+  assert_eq!(
+    e.broadcast_queue_len(),
+    baseline,
+    "reclaimed members' broadcasts must not accumulate in the queue"
+  );
+}
+
+#[test]
+fn reset_nodes_removes_the_reclaimed_ids_broadcast_entry() {
+  // A single reclaim: the reclaimed id's queued Dead broadcast must leave the
+  // queue when reset_nodes prunes the member — the queue length drops by
+  // exactly that one entry.
+  let window = Duration::from_millis(10);
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(window));
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("doomed", 7001, 1), false, now);
+  // The Dead broadcast invalidates the Alive broadcast (same id) and is queued.
+  e.process_dead(dead("doomed", "reporter", 2), now);
+  let before = e.broadcast_queue_len();
+  assert!(before >= 1, "doomed's Dead broadcast is queued");
+  e.reset_nodes(now + window * 2);
+  assert!(
+    e.member(&SmolStr::new("doomed")).is_none(),
+    "doomed reclaimed"
+  );
+  assert_eq!(
+    e.broadcast_queue_len(),
+    before - 1,
+    "exactly the reclaimed id's broadcast leaves the queue"
+  );
+}
+
+#[test]
 fn send_user_packets_empty_slice_is_ok_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);

@@ -4703,6 +4703,14 @@ where
       );
       self.suspicion_deadlines.set(&id, None);
       self.members.remove(&id);
+      // Queue ownership ends when the member is reclaimed. A reclaimed id's
+      // membership broadcast is keyed by that id, and once the record is gone
+      // nothing invalidates it by re-broadcasting under the same id; when
+      // gossip cannot drain (disabled, or no usable gossip target) the
+      // retransmit ceiling never fires either, so the orphaned entry would
+      // outlive the member and grow the queue past the `max_members` bound
+      // that is meant to cap every per-member structure. Purge it here.
+      self.broadcast.remove_by_id(&id);
     }
     // Decorrelate probe order across rounds: without a reshuffle the round-robin
     // cursor walks the members in a fixed insertion-derived order every pass, so

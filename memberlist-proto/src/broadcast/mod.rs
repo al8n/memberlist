@@ -460,6 +460,32 @@ where
     None
   }
 
+  /// Remove any queued broadcast owned by `id`, firing its
+  /// [`finished()`](Broadcast::finished) notification, and return how many
+  /// entries were removed (at most one — id-keyed broadcasts are deduplicated
+  /// by id, so a given id owns a single queued entry).
+  ///
+  /// Used when the owning member is reclaimed so queue ownership ends together
+  /// with membership: otherwise that member's last id-keyed broadcast would
+  /// linger in the queue after its `Endpoint` record is gone. Removal keeps
+  /// `q` and `m` consistent, mirroring the id-keyed replacement in
+  /// [`queue_broadcast`](Self::queue_broadcast).
+  pub fn remove_by_id(&mut self, id: &Id) -> usize {
+    match self.m.remove(id) {
+      Some(old) => {
+        old.broadcast.finished();
+        self.q.remove(&old);
+        if self.q.is_empty() {
+          // An emptied (idle) queue resets the id counter, matching the
+          // id-keyed replacement path in `queue_broadcast`.
+          self.id_gen = 0;
+        }
+        1
+      }
+      None => 0,
+    }
+  }
+
   /// Drain all queued broadcasts (calling `finished()` on each).
   pub fn reset(&mut self) {
     let q = core::mem::take(&mut self.q);
