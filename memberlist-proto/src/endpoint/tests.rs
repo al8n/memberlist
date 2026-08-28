@@ -8013,6 +8013,84 @@ fn alive_with_changed_meta_emits_node_updated() {
   assert!(updated, "a meta change must emit NodeUpdated");
 }
 
+#[test]
+fn alive_with_changed_protocol_version_emits_node_updated() {
+  // A higher-incarnation Alive for a still-Alive peer that changes ONLY the
+  // protocol version — same address, same meta, same delegate version — must
+  // still emit NodeUpdated so an event-only mirror does not keep stale
+  // capability info.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  let updated_alive = alive("bob", 7001, 2).with_protocol_version(ProtocolVersion::Unknown(2));
+  process_alive_auto(&mut e, updated_alive, false, now);
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
+  let updated = events
+    .iter()
+    .filter(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")))
+    .count();
+  assert_eq!(
+    updated, 1,
+    "a protocol-version-only change must emit exactly one NodeUpdated"
+  );
+  assert_eq!(
+    e.member(&SmolStr::new("bob"))
+      .expect("bob present")
+      .protocol_version(),
+    ProtocolVersion::Unknown(2),
+    "the stored member must reflect the new protocol version"
+  );
+}
+
+#[test]
+fn alive_with_changed_delegate_version_emits_node_updated() {
+  // A higher-incarnation Alive that changes ONLY the delegate version — same
+  // address, same meta, same protocol version — must still emit NodeUpdated.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  let updated_alive = alive("bob", 7001, 2).with_delegate_version(DelegateVersion::Unknown(2));
+  process_alive_auto(&mut e, updated_alive, false, now);
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
+  let updated = events
+    .iter()
+    .filter(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")))
+    .count();
+  assert_eq!(
+    updated, 1,
+    "a delegate-version-only change must emit exactly one NodeUpdated"
+  );
+  assert_eq!(
+    e.member(&SmolStr::new("bob"))
+      .expect("bob present")
+      .delegate_version(),
+    DelegateVersion::Unknown(2),
+    "the stored member must reflect the new delegate version"
+  );
+}
+
+#[test]
+fn alive_with_unchanged_meta_and_versions_emits_no_node_updated() {
+  // Negative control: a higher-incarnation Alive that leaves meta, protocol
+  // version, and delegate version all unchanged must NOT emit NodeUpdated — the
+  // no-change branch only bumps the snapshot version.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  // Same meta (empty), same V1 protocol + delegate versions, only the
+  // incarnation moves forward.
+  process_alive_auto(&mut e, alive("bob", 7001, 2), false, now);
+  let updated = core::iter::from_fn(|| e.poll_event())
+    .any(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")));
+  assert!(
+    !updated,
+    "an Alive with unchanged meta and versions must not emit NodeUpdated"
+  );
+}
+
 // ─── refute while leaving + skip-past ─────────────────────────────────────────
 
 #[test]

@@ -4045,15 +4045,24 @@ where
 
     if old_state.is_dead() || old_state.is_left() {
       self.emit_event(Event::NodeJoined(new_server));
-    } else if old_meta != new_meta {
+    } else if old_meta != new_meta
+      || local_protocol != alive_protocol
+      || local_delegate != alive_delegate
+    {
+      // A strictly-newer incarnation that changes any event-relevant facet of
+      // the server — metadata, the protocol version, or the delegate version —
+      // is an update. Comparing the whole tuple (not just the metadata) ensures
+      // an event-only consumer never keeps stale protocol/delegate capability
+      // info after a version-only Alive.
       self.emit_event(Event::NodeUpdated(new_server));
     } else {
       // The update applied a strictly-newer incarnation (the older/equal guards
       // returned above), changing the member's incarnation and possibly its
       // state (e.g. a Suspect -> Alive refutation), but NEITHER a resurrection
-      // NOR a meta change fired an event. The published snapshot reflects that
-      // new state/incarnation, so bump explicitly — otherwise a driver would
-      // serve a stale `Suspect` for a node that is now `Alive`.
+      // NOR a change to the metadata / protocol / delegate versions fired an
+      // event. The published snapshot reflects that new state/incarnation, so
+      // bump explicitly — otherwise a driver would serve a stale `Suspect` for a
+      // node that is now `Alive`.
       self.bump_snapshot_version();
     }
   }
