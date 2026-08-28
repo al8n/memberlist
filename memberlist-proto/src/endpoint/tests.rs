@@ -6265,6 +6265,204 @@ fn probe_scheduler_fires_when_deadline_elapses() {
   );
 }
 
+/// Count of outstanding failure-detection (Detection) probes.
+fn detection_probe_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.probes
+    .values()
+    .filter(|p| p.kind == ProbeKind::Detection)
+    .count()
+}
+
+/// Count of outstanding application (Ping) probes.
+fn app_ping_probe_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.probes
+    .values()
+    .filter(|p| p.kind == ProbeKind::Ping)
+    .count()
+}
+
+/// A degraded local node (health score > 0) must not stack concurrent
+/// Detection rounds. The Detection failure deadline is `sent + scale_timeout(
+/// probe_interval)` = `(score + 1) * probe_interval`, so a probe started at t0
+/// lives past several base intervals. The scheduler re-arms every base interval
+/// (missed-tick) but must NOT start a second Detection round while the first is
+/// still outstanding; it starts a fresh one only after the current one
+/// terminalizes. Application pings stay independent.
+#[test]
+fn degraded_node_single_flights_detection_probes() {
+  let p = Duration::from_millis(100);
+  // probe_timeout > probe_interval so the direct sub-window does not expire (and
+  // escalate/terminate the probe) before t0 + probe_interval — the probe stays
+  // genuinely outstanding across the skipped tick.
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
+    SmolStr::new("local"),
+    "127.0.0.1:7946".parse().unwrap(),
+  )
+  .with_probe_interval(p)
+  .with_probe_timeout(Duration::from_millis(200))
+  .with_gossip_interval(Duration::ZERO)
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+
+  let t_setup = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7947, 1), false, t_setup);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Degrade local health by 2 → failure deadline = (2 + 1) * probe_interval.
+  e.degrade_health(2);
+  assert_eq!(e.health_score(), 2);
+
+  let t0 = Instant::now();
+  e.next_probe = Some(t0);
+
+  // First tick: a Detection probe starts, failure deadline = t0 + 3 * 100ms.
+  e.fire_probe_scheduler(t0);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "first tick must start exactly one Detection probe"
+  );
+  let first_seq = *e
+    .probes
+    .iter()
+    .find(|(_, p)| p.kind == ProbeKind::Detection)
+    .map(|(seq, _)| seq)
+    .expect("Detection probe present");
+  assert_eq!(
+    e.next_probe,
+    Some(t0 + p),
+    "next_probe re-armed one base interval ahead"
+  );
+  assert_eq!(
+    e.probes_since_reset, 1,
+    "starting tick advances the counter"
+  );
+
+  // Second tick at t0 + probe_interval — BEFORE the first probe's failure
+  // deadline (t0 + 3 * 100ms). Single-flight: no second Detection round.
+  e.fire_probe_scheduler(t0 + p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "single-flight: no second Detection probe while the first is outstanding"
+  );
+  assert_eq!(
+    e.next_probe,
+    Some(t0 + 2 * p),
+    "missed-tick: deadline re-armed even though no probe started"
+  );
+  assert_eq!(
+    e.probes_since_reset, 1,
+    "a skipped tick must not advance the round-robin counter"
+  );
+
+  // An application ping issued WHILE the Detection probe is outstanding is NOT
+  // gated by the single-flight guard — it starts independently.
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7947);
+  e.ping(Node::new(SmolStr::new("peer"), peer_addr), t0 + p)
+    .expect("application ping issued while running");
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "application ping must not start a second Detection probe"
+  );
+  assert_eq!(
+    app_ping_probe_count(&e),
+    1,
+    "application ping starts even while a Detection probe is outstanding"
+  );
+  while e.poll_transmit().is_some() {}
+
+  // Terminate the outstanding Detection probe at its failure deadline.
+  e.advance_probe_fsm(t0 + 3 * p);
+  assert_eq!(
+    detection_probe_count(&e),
+    0,
+    "Detection probe terminates at its failure deadline"
+  );
+
+  // Next scheduler tick after terminalization starts a NEW Detection round.
+  e.fire_probe_scheduler(t0 + 3 * p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "a new Detection round starts once the previous one terminalized"
+  );
+  let second_seq = *e
+    .probes
+    .iter()
+    .find(|(_, p)| p.kind == ProbeKind::Detection)
+    .map(|(seq, _)| seq)
+    .expect("new Detection probe present");
+  assert_ne!(
+    first_seq, second_seq,
+    "the new Detection round is a distinct probe"
+  );
+}
+
+/// Single-flight must not slow HEALTHY probing. At score 0 the failure deadline
+/// is exactly one base interval and an acked probe terminates before the next
+/// tick, so a fresh Detection probe still starts every interval.
+#[test]
+fn healthy_probe_rate_unchanged_by_single_flight() {
+  let p = Duration::from_millis(100);
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
+    SmolStr::new("local"),
+    "127.0.0.1:7946".parse().unwrap(),
+  )
+  .with_probe_interval(p)
+  .with_probe_timeout(Duration::from_millis(50))
+  .with_gossip_interval(Duration::ZERO)
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+
+  let t_setup = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7947, 1), false, t_setup);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  assert_eq!(e.health_score(), 0);
+
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7947);
+  let t0 = Instant::now();
+  e.next_probe = Some(t0);
+
+  // First tick starts a Detection probe.
+  e.fire_probe_scheduler(t0);
+  let first_seq = match e.poll_transmit().expect("first probe Ping") {
+    Transmit::Packet(pkt) => {
+      let (_, message) = pkt.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping expected");
+      }
+    }
+    _ => panic!("Ping expected"),
+  };
+  assert_eq!(detection_probe_count(&e), 1);
+
+  // Ack the probe before the next tick — it terminates as success.
+  e.handle_ack(
+    peer_addr,
+    Ack::new(first_seq),
+    t0 + Duration::from_millis(10),
+  );
+  assert_eq!(
+    detection_probe_count(&e),
+    0,
+    "acked probe terminates before the next tick"
+  );
+
+  // Next tick starts a fresh Detection probe — healthy rate is unchanged.
+  e.fire_probe_scheduler(t0 + p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "single-flight does not slow healthy probing"
+  );
+}
+
 #[test]
 fn probe_scheduler_does_not_fire_after_leave() {
   let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
