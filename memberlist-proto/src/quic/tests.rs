@@ -573,6 +573,7 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
       c_addr,
       "localhost",
       None,
+      super::conn::Reliability::Reliable,
     )
     .expect("fresh dial after reap succeeds");
   assert_eq!(

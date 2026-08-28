@@ -1644,25 +1644,16 @@ impl<I, R> QuicEndpoint<I, R> {
     Some((from, bytes))
   }
 
-  /// Number of live (non-reaped) QUIC connections to `peer` — `0` or `1`,
-  /// since the connection table pools one connection per peer.
+  /// Number of usable QUIC connections to `peer` — `0` or `1`, since the
+  /// connection table selects one best-usable handle per peer.
   ///
-  /// Observation-only, for a driver/test to assert the drained-reap
-  /// lifecycle (a connection that idled past `max_idle_timeout` is reaped:
-  /// its slab + peers entry is removed, so this drops back to `0`). A
-  /// connection still in its closing/draining wind-down is reported live
-  /// until [`ConnTable::reap_if_drained`] removes it.
+  /// Observation-only, for a driver/test to assert the connection lifecycle.
+  /// Backed by the same derived best-usable selection the reliable/unreliable
+  /// send paths ride ([`ConnTable::handle_for`]): a peer with an established or
+  /// handshaking connection (either direction) reports `1`; a peer whose only
+  /// tracked connections are closed/draining or handshake-failed reports `0`.
   pub fn live_connections_to(&self, peer: SocketAddr) -> usize {
-    match self.conns.handle_for(&peer) {
-      Some(ch) => usize::from(
-        self
-          .conns
-          .get(ch)
-          .map(|e| !e.conn_ref().is_drained())
-          .unwrap_or(false),
-      ),
-      None => 0,
-    }
+    usize::from(self.conns.handle_for(&peer).is_some())
   }
 
   /// Number of active reliable-exchange bridges (one per in-flight push/pull
@@ -1713,8 +1704,9 @@ impl<I, R> QuicEndpoint<I, R> {
   /// `last_now` is also anchored so any wake the close requires
   /// surfaces immediately.
   ///
-  /// Returns `false` if no connection to `peer` exists, or if the
-  /// open is refused.
+  /// Targets the peer's derived best-usable connection (the same selection the
+  /// send paths ride, [`ConnTable::handle_for`]). Returns `false` if no usable
+  /// connection to `peer` exists, or if the open is refused.
   pub fn try_open_uni_stream_to(&mut self, peer: SocketAddr, now: Instant) -> bool {
     self.last_now = Some(now);
     let Some(ch) = self.conns.handle_for(&peer) else {
@@ -2992,6 +2984,7 @@ impl<I, R> QuicEndpoint<I, R> {
       peer,
       &sni_arc,
       self.cfg.max_quic_connections(),
+      conn::Reliability::Unreliable,
     ) {
       Ok(ch) => ch,
       // The datagram-fallback dial hit the global connection cap: this new
@@ -3748,6 +3741,7 @@ where
       addr,
       &sni_arc,
       self.cfg.max_quic_connections(),
+      conn::Reliability::Reliable,
     ) {
       Ok(ch) => {
         // Record every dialed connection as touched: `get_or_dial` may have
@@ -5866,6 +5860,15 @@ where
     let credit_restored_peer = credit_restored.then_some(peer);
     // `e` borrows `self.conns`; release it before touching `self.bridges`.
     let _ = e;
+    // Establishment-chokepoint promotion, run BEFORE the caller resolves this
+    // pass's wake: a newly-established inbound becomes its peer's tracked inbound
+    // route (newest-established-inbound wins), so the woken bucket's selection
+    // sees the freshly-live connection instead of a stale zombie. The one place
+    // truth changes — no promote/restore pair to desync. A no-op for a
+    // still-handshaking connection.
+    if established_transition {
+      self.conns.on_established_transition(ch);
+    }
     if lost || drained {
       // Mark every bridge on this connection fatal AND complete its D1
       // drain_then_reap synchronously, in this same tick.
