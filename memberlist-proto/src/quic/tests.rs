@@ -573,6 +573,7 @@ fn conn_entry_pending_events_drop_with_entry_on_reap() {
       c_addr,
       "localhost",
       None,
+      super::conn::Reliability::Reliable,
     )
     .expect("fresh dial after reap succeeds");
   assert_eq!(
@@ -6530,6 +6531,310 @@ fn outbound_dials_cannot_exceed_global_connection_cap() {
     rejected >= (surplus + 1) as u64,
     "each dial refused at the cap must be counted (>= {} expected, got {rejected})",
     surplus + 1
+  );
+}
+
+/// A reliable dial refused at the global connection cap FAILS FAST: it is
+/// retired (not queued), the `quic_connections_rejected` metric is bumped, and
+/// the reliable-send waiter is resolved by a Failed `ExchangeCompleted`. The cap
+/// is a hard operator ceiling and the coordinator sheds rather than queues at its
+/// bounds; a slot already freed by a drained connection is harvested before dial
+/// servicing (tick step 4.5), so this arm fires only when the table is genuinely
+/// full.
+///
+/// Mutation-verify: restore an at-cap repark (return `repark_blocked_dial`
+/// instead of `retire_failed_dial` in the `Err(AtGlobalCap)` arm) — the intent is
+/// parked instead of resolved, so no Failed `ExchangeCompleted` is emitted and
+/// the `found` assertion fails.
+#[test]
+fn at_cap_reliable_dial_retires_and_resolves_the_waiter() {
+  use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeStatus};
+
+  let a_addr: SocketAddr = "127.0.0.1:7720".parse().unwrap();
+  let now = Instant::now();
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(1)),
+    a_addr,
+    now,
+  );
+
+  // Fill the single-connection cap with a closed (not-yet-drained, so unreaped)
+  // connection, so the table is genuinely full when the reliable dial is made.
+  let filler: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+  let ch = a
+    .conns
+    .get_or_dial(
+      &mut a.quinn,
+      now,
+      a.cfg.client().clone(),
+      filler,
+      "localhost",
+      Some(1),
+      super::conn::Reliability::Reliable,
+    )
+    .unwrap();
+  a.conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  assert!(a.conns.get(ch).unwrap().conn_ref().is_closed());
+  assert!(!a.conns.get(ch).unwrap().conn_ref().is_drained());
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "the table is at the cap of 1"
+  );
+  let rejected_before = a.metrics().quic_connections_rejected;
+
+  // A reliable user-message dial to a fresh peer: its in-band R7 dial hits the
+  // cap and is retired, resolving the parked send waiter.
+  let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let id = a
+    .start_user_message(y, Bytes::from_static(b"hi"), now)
+    .expect("issued while running");
+  let expected_eid = ExchangeId::from(id);
+
+  assert!(
+    a.metrics().quic_connections_rejected > rejected_before,
+    "the at-cap refusal bumps quic_connections_rejected"
+  );
+  assert_eq!(
+    a.dial_parked.get(&y).map(|b| b.len()).unwrap_or(0),
+    0,
+    "a cap-refused reliable dial is retired (fail-fast), not queued"
+  );
+  assert_eq!(
+    a.live_connections_to(y),
+    0,
+    "no new connection was created at the cap"
+  );
+
+  // The reliable-send waiter is resolved by a Failed ExchangeCompleted.
+  let mut found = None;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(payload) = ev
+      && payload.eid() == expected_eid
+    {
+      found = Some(payload);
+      break;
+    }
+  }
+  let payload = found.expect(
+    "a reliable dial refused at the global cap MUST resolve its parked waiter \
+       via Event::ExchangeCompleted(Failed) — without it the send hangs forever",
+  );
+  assert_eq!(payload.kind(), ExchangeKind::UserMessage);
+  assert_eq!(payload.outcome(), ExchangeStatus::Failed);
+  assert_eq!(payload.peer(), &y);
+}
+
+/// FIX for the strict-poll cap-recovery gap: a reliable dial parked at the global
+/// cap must open the SAME tick the draining connection occupying its slot is
+/// reaped. The tick reaps drained connections BEFORE `service_dials`, so the
+/// freed slot is available to the parked dial's fresh R7 attempt that same tick.
+///
+/// Without that ordering the reap lands only in `finalize_tick` (AFTER
+/// `service_dials`), so the parked dial re-parks this tick and — under a
+/// strict-poll driver with schedulers off — does not retry until its own
+/// pre-deadline service wake, which can arrive only a service margin before the
+/// deadline: too late for a fresh handshake to complete, yielding a false Suspect
+/// of a live peer.
+///
+/// Mutation-verify: delete the step-(4.5) `reap_drained_connections()` call in
+/// `tick` (leaving only the `finalize_tick` reap) — the parked dial to Y is not
+/// attempted the tick X reaps (X still fills the cap during `service_dials`), so
+/// `live_connections_to(y)` stays 0 and the recovery assertion fails.
+#[test]
+fn drained_slot_freed_before_dials_opens_a_cap_blocked_reliable_dial_same_tick() {
+  let a_addr: SocketAddr = "127.0.0.1:7730".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers off: the tick advances membership time but arms no probe / gossip
+  // / push-pull scheduler, isolating the reap-then-dial ordering.
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(1)),
+    a_addr,
+    now,
+  );
+
+  // Fill the single-connection cap with X, then drive X fully drained
+  // (`is_drained()`) so its slot is reapable this tick.
+  let x_addr: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+  let x = a
+    .conns
+    .get_or_dial(
+      &mut a.quinn,
+      now,
+      a.cfg.client().clone(),
+      x_addr,
+      "localhost",
+      Some(1),
+      super::conn::Reliability::Reliable,
+    )
+    .unwrap();
+  a.conns
+    .get_mut(x)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  for _ in 0..5000 {
+    if a.conns.get(x).unwrap().conn_ref().is_drained() {
+      break;
+    }
+    match a.conns.get_mut(x).unwrap().conn_mut().poll_timeout() {
+      Some(d) => a.conns.get_mut(x).unwrap().conn_mut().handle_timeout(d),
+      None => break,
+    }
+  }
+  assert!(
+    a.conns.get(x).unwrap().conn_ref().is_drained(),
+    "X must be fully drained (reapable)"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "the drained X still occupies the cap of 1"
+  );
+
+  // A reliable ping to a live peer Y parked at the cap (deadline far). A
+  // reapable connection (X) exists, so at the cap it re-parks rather than
+  // retiring — the intent survives to the reap tick.
+  let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .entry(y)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(300_000),
+      peer: y,
+      deadline,
+      wake: deadline,
+      attempted: true,
+      kind: super::ExchangeKind::ReliablePing,
+    });
+  assert_eq!(a.live_connections_to(y), 0, "Y is not yet dialed");
+
+  // One global tick: it reaps the drained X BEFORE dial servicing, so the parked
+  // ping's R7 dial opens a fresh connection to Y in the SAME tick — recovery,
+  // not a wait for the pre-deadline service wake.
+  a.run_tick(now);
+
+  assert_eq!(
+    a.live_connections_to(x_addr),
+    0,
+    "the drained X was reaped this tick"
+  );
+  assert!(
+    a.live_connections_to(y) >= 1,
+    "the cap-blocked reliable dial opened a connection to Y the same tick X was reaped"
+  );
+}
+
+/// The FLUSH path (`flush_outbound` / `flush_outbound_transmits`) must harvest a
+/// drained connection's freed cap slot BEFORE its own dial servicing, mirroring
+/// the global tick's step-4.5 reap. `flush_outbound` runs `service_quinn` (which
+/// can drain a connection) and then services dials via the ready-peers loop and
+/// the ready-dial ledger drain, all BEFORE the only-other reap in
+/// `finalize_tick`. Without a reap-before-dials in the flush, a reliable dial to
+/// a peer whose slot is held by a now-drained connection hits `AtGlobalCap` and
+/// is retired (fail-fast) on a slot already fully freed.
+///
+/// Mutation-verify: delete the `reap_drained_connections()` call added to
+/// `flush_outbound` (between `service_quinn` and the dial loops) — the drained X
+/// still fills the cap when Y's ledger bucket is serviced, so Y's dial is retired
+/// at the cap and `live_connections_to(y)` stays 0, failing the assertion.
+#[test]
+fn flush_path_reaps_drained_slot_before_dials_so_a_cap_blocked_reliable_dial_opens() {
+  let a_addr: SocketAddr = "127.0.0.1:7731".parse().unwrap();
+  let now = Instant::now();
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(1)),
+    a_addr,
+    now,
+  );
+
+  // Fill the single-connection cap with X, then drive X fully drained
+  // (`is_drained()`) so its slot is reapable during the flush.
+  let x_addr: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+  let x = a
+    .conns
+    .get_or_dial(
+      &mut a.quinn,
+      now,
+      a.cfg.client().clone(),
+      x_addr,
+      "localhost",
+      Some(1),
+      super::conn::Reliability::Reliable,
+    )
+    .unwrap();
+  a.conns
+    .get_mut(x)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  for _ in 0..5000 {
+    if a.conns.get(x).unwrap().conn_ref().is_drained() {
+      break;
+    }
+    match a.conns.get_mut(x).unwrap().conn_mut().poll_timeout() {
+      Some(d) => a.conns.get_mut(x).unwrap().conn_mut().handle_timeout(d),
+      None => break,
+    }
+  }
+  assert!(
+    a.conns.get(x).unwrap().conn_ref().is_drained(),
+    "X must be fully drained (reapable)"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "the drained X still occupies the cap of 1"
+  );
+
+  // A ready reliable ping to peer Y deposited into the ready-dial ledger so the
+  // FLUSH path's ledger drain services its parked bucket (the flush owns no
+  // `service_dials`).
+  let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .entry(y)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(310_000),
+      peer: y,
+      deadline,
+      wake: deadline,
+      attempted: true,
+      kind: super::ExchangeKind::ReliablePing,
+    });
+  a.ready_dial_peers.insert(y);
+  assert_eq!(a.live_connections_to(y), 0, "Y is not yet dialed");
+
+  // The flush reaps the drained X BEFORE its dial buckets, so Y's ledger bucket
+  // opens a fresh connection to Y rather than being retired at the cap.
+  a.flush_outbound_transmits(now);
+
+  assert_eq!(
+    a.live_connections_to(x_addr),
+    0,
+    "the drained X was reaped during the flush"
+  );
+  assert!(
+    a.live_connections_to(y) >= 1,
+    "the cap-blocked reliable dial opened a connection to Y in the same flush X was reaped"
   );
 }
 

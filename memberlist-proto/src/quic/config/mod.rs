@@ -232,7 +232,21 @@ impl QuicConfigOptions {
     let endpoint = EndpointConfig::default();
 
     let mut transport = TransportConfig::default();
+    // Connection migration stays enabled (quinn's default). The membership
+    // identity a connection is keyed on is its logical/advertised address and is
+    // immutable for the connection's life, independent of any post-migration
+    // transport 4-tuple — so migration is transparent to the connection table.
     if let Some(t) = self.max_idle_timeout {
+      // A zero idle-timeout transport parameter DISABLES the idle timeout (RFC
+      // 9000 §18.2), removing the bound on stale-connection self-healing — the
+      // opposite of the field's intent. quinn's `IdleTimeout::try_from` encodes
+      // `as_millis()`, so any sub-millisecond duration (1ns .. 999_999ns) also
+      // encodes to a disabling zero; reject on the encoded millisecond value, not
+      // just an exactly-zero `Duration`. An unset timeout takes quinn's finite
+      // default.
+      if t.as_millis() == 0 {
+        return Err(QuicConfigError::IdleTimeoutZero);
+      }
       let idle = IdleTimeout::try_from(t).map_err(|_| QuicConfigError::IdleTimeoutTooLarge(t))?;
       transport.max_idle_timeout(Some(idle));
     }
@@ -405,6 +419,17 @@ pub enum QuicConfigError {
   /// The configured `max_idle_timeout` exceeds the QUIC varint encoding range.
   #[error("max_idle_timeout {0:?} is too large for the QUIC idle-timeout encoding")]
   IdleTimeoutTooLarge(Duration),
+  /// The configured `max_idle_timeout` encodes to a disabling zero — it is zero,
+  /// or a sub-millisecond duration that quinn's millisecond encoding rounds to
+  /// zero. Per RFC 9000 §18.2 a zero idle-timeout transport parameter means the
+  /// idle timeout is DISABLED — the opposite of what the field name suggests —
+  /// which would remove the bound on stale-connection self-healing. Leave it
+  /// unset for quinn's finite default, or configure at least one millisecond.
+  #[error(
+    "max_idle_timeout encodes to a disabling zero (RFC 9000 §18.2); leave it \
+     unset for the default finite timeout, or configure at least 1ms"
+  )]
+  IdleTimeoutZero,
 }
 
 #[cfg(test)]

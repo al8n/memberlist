@@ -1,6 +1,35 @@
 //! Per-peer QUIC connection table. One long-lived `quinn_proto::Connection`
 //! per peer (idle-evicted by quinn-proto's own `max_idle_timeout`); reaped
 //! only when `Connection::is_drained()` (the same protocol quinn uses).
+//!
+//! ## Residual: the transport layer does not order instance epochs
+//!
+//! Establishment does not prove the remote instance is *currently* alive: the
+//! server completes a handshake by replying to a client's `Finished`, and a
+//! delayed pre-crash client `Finished` still arriving under network delay drives
+//! that same completion. Nor does any transport-local signal reliably order two
+//! connections by which peer instance-epoch opened them — under unbounded
+//! network delay a delayed packet can interleave to fool creation-order,
+//! establishment-order, and close-the-older tracking alike. This table therefore
+//! makes NO attempt to rank connection instance-epochs; it selects the best
+//! *usable* connection and lets the most recently established inbound win.
+//!
+//! The bounded consequence: a zombie (an established connection to a peer's dead
+//! prior instance) can capture selection, but only until the negotiated idle
+//! timeout reaps it. That finite bound is guaranteed by the file-based
+//! `QuicConfigOptions::build` path, which rejects a `max_idle_timeout` that
+//! encodes to a disabling zero (zero, or a sub-millisecond value quinn rounds to
+//! zero) — so a config-built endpoint always negotiates a finite idle timeout
+//! (the minimum of the two peers'). The raw `QuicOptions::new` /
+//! `new_with_sni_provider` constructors are an advanced escape hatch that takes a
+//! caller-supplied `TransportConfig` verbatim, so a caller CAN disable the idle
+//! timeout there (`max_idle_timeout(None)` or an encoded-zero value) and thereby
+//! forgo the bound — an opt-out those constructors caution against. Even so this
+//! is safety-preserving: every established connection is serviced by the
+//! coordinator's unconditional accept loops, so the peer's traffic and its SWIM
+//! refutations still flow over whichever connection each side prefers. The signal
+//! that actually resolves an instance-epoch conflict is the membership
+//! incarnation at the SWIM layer, one layer up — not the transport.
 
 use crate::Instant;
 use core::net::SocketAddr;
@@ -210,9 +239,73 @@ impl ConnEntry {
   }
 }
 
+/// Whether a selection is servicing the RELIABLE plane (push/pull, reliable-ping,
+/// user message — an intent that may create a fresh outbound connection and is
+/// retired through `dial_failed` on terminal failure) or the UNRELIABLE plane
+/// (a best-effort gossip/probe datagram that never surfaces a dial error as a
+/// membership signal and never creates a companion connection beside a live
+/// handshaking inbound). The discriminant the two selection tables branch on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reliability {
+  /// Reliable-plane intent — the reliable selection table (may dial fresh; a
+  /// terminal outbound is authoritative and routes to `dial_failed`).
+  Reliable,
+  /// Unreliable-plane datagram — the unreliable selection table (every dial
+  /// failure degrades to a best-effort UDP fallback; no companion dial beside a
+  /// live handshaking inbound).
+  Unreliable,
+}
+
+/// The at-most-two tracked handles for one logical peer. `outbound` is our most
+/// recent self-initiated dial; `inbound` is the peer's most recent accepted
+/// connection. Direction is the discriminant the terminality rule is asymmetric
+/// on — a closed-never-established outbound is our own failed dial (authoritative
+/// unreachability on our egress), while a closed-never-established inbound is the
+/// peer's failed dial toward us (says nothing about our egress) — so it is kept
+/// structural, one field per direction. A `PeerRoute` with both fields `None` is
+/// dropped from the map; the connection slab may still hold further entries for
+/// the same peer (draining residue, a superseded same-direction accept) — all
+/// serviced by the coordinator, none selectable here.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PeerRoute {
+  outbound: Option<ConnectionHandle>,
+  inbound: Option<ConnectionHandle>,
+}
+
+/// Per-handle classification computed inline from the slab state — NOT a stored
+/// field, so it is always current. `closed` is `Connection::is_closed()`
+/// (`Closed | Draining | Drained`). The direction split of the two
+/// closed-never-established classes is the asymmetric-reachability fix: our own
+/// failed dial ([`HandleClass::TerminalOutbound`]) proves the peer is
+/// unreachable on our egress and is authoritative (anti-storm); the peer's
+/// failed dial toward us ([`HandleClass::DeadInbound`]) proves nothing about our
+/// egress and is never returned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HandleClass {
+  /// `!closed && !is_handshaking` — usable, ready to mint.
+  Established,
+  /// `!closed && is_handshaking` — usable, repark.
+  Handshaking,
+  /// `closed && established_at_least_once` — drain window, redial.
+  DrainClosed,
+  /// `closed && !established && direction == Outbound` — authoritative failure.
+  TerminalOutbound,
+  /// `closed && !established && direction == Inbound` — non-authoritative, prune.
+  DeadInbound,
+  /// The slab slot is gone (race-defensive).
+  Gone,
+}
+
 pub(crate) struct ConnTable {
   conns: Slab<ConnEntry>,
-  peers: HashMap<SocketAddr, ConnectionHandle>,
+  /// The at-most-two tracked handles per logical peer — the self-initiated
+  /// `outbound` and the peer-accepted `inbound` — that [`Self::get_or_dial`]
+  /// selects among. Replaces a single direction-blind canonical pointer: a
+  /// peer-initiated inbound still handshaking can no longer occupy the slot a
+  /// reliable outbound intent selects, so an inbound that stalls or fails does
+  /// not suppress our own independent outbound dial to a peer reachable on our
+  /// egress. An entry whose both fields fall to `None` is removed.
+  peer_routes: HashMap<SocketAddr, PeerRoute>,
   /// Per-source count of INBOUND connections that have not yet established — the
   /// half-open population the coordinator's per-source pending cap bounds. Kept
   /// as an index so admission is an O(1) lookup ([`Self::pending_inbound_from`])
@@ -227,7 +320,7 @@ impl ConnTable {
   pub(crate) fn new() -> Self {
     Self {
       conns: Slab::new(),
-      peers: HashMap::new(),
+      peer_routes: HashMap::new(),
       pending_inbound: HashMap::new(),
     }
   }
@@ -242,53 +335,137 @@ impl ConnTable {
     self.conns.get(ch.0)
   }
 
-  pub(crate) fn handle_for(&self, peer: &SocketAddr) -> Option<ConnectionHandle> {
-    self.peers.get(peer).copied()
+  /// Classify one tracked handle from its current slab state. See
+  /// [`HandleClass`]; direction resolves the two closed-never-established
+  /// classes.
+  fn classify(&self, ch: ConnectionHandle) -> HandleClass {
+    match self.conns.get(ch.0) {
+      None => HandleClass::Gone,
+      Some(e) => {
+        if !e.conn.is_closed() {
+          if e.conn.is_handshaking() {
+            HandleClass::Handshaking
+          } else {
+            HandleClass::Established
+          }
+        } else if e.established_at_least_once {
+          HandleClass::DrainClosed
+        } else if e.direction == ConnDirection::Outbound {
+          HandleClass::TerminalOutbound
+        } else {
+          HandleClass::DeadInbound
+        }
+      }
+    }
   }
 
-  /// Return the existing connection handle for `peer`, or dial a new one.
+  /// The best usable handle for `peer` — the derived selection an observer
+  /// (`live_connections_to`, `try_open_uni_stream_to`, datagram sizing) rides,
+  /// with NO dial side effect. Prefers an established connection, then a
+  /// handshaking one; outbound before inbound within each class. A closed/terminal
+  /// handle is never usable, so this returns `None` for a peer whose only
+  /// tracked connections are draining or handshake-failed. At most one handle
+  /// (0 or 1 per peer).
+  pub(crate) fn handle_for(&self, peer: &SocketAddr) -> Option<ConnectionHandle> {
+    let route = self.peer_routes.get(peer)?;
+    let candidates = [route.outbound, route.inbound];
+    for want in [HandleClass::Established, HandleClass::Handshaking] {
+      for ch in candidates.into_iter().flatten() {
+        if self.classify(ch) == want {
+          return Some(ch);
+        }
+      }
+    }
+    None
+  }
+
+  /// Debug tripwire for the logical-immutable identity contract: a connection's
+  /// `peer` is the key its route is filed under, so no `peer_routes` key OTHER
+  /// than `ch`'s own peer may reference `ch`. A future change that let `peer`
+  /// follow QUIC path migration would file the route under a stale key while
+  /// `peer()` returns the migrated address, stranding peer-keyed parked dials;
+  /// this catches that divergence. Debug-only (the scan compiles out in release).
+  pub(crate) fn debug_assert_peer_is_route_key(&self, ch: ConnectionHandle) {
+    debug_assert!(
+      {
+        match self.conns.get(ch.0) {
+          None => true,
+          Some(e) => !self
+            .peer_routes
+            .iter()
+            .any(|(k, r)| *k != e.peer && (r.outbound == Some(ch) || r.inbound == Some(ch))),
+        }
+      },
+      "connection {ch:?} is referenced by a peer_routes key other than its own peer"
+    );
+  }
+
+  /// Pre-pass over `peer`'s route, applied before either selection table.
   ///
-  /// quinn-proto assigns `ConnectionHandle(slab.vacant_key())` inside
-  /// `Endpoint::connect`, so the slab index and the handle's inner value are
-  /// always in sync (asserted at insert time).
+  /// **P1 — prune a closed inbound.** A `DeadInbound` (closed, never
+  /// established — the peer's failed dial toward us) or `DrainClosed`
+  /// (established-then-closed) inbound, or one whose slab slot is gone, is
+  /// cleared from `route.inbound`; the slab entry is kept for its
+  /// handle-equality reap. Past P1, `route.inbound` only ever carries a live
+  /// (Established/Handshaking) inbound.
   ///
-  /// **Closed-before-drained pool window: redial, don't reuse.** A pooled
-  /// `Connection` may sit in `Closed`/`Draining` for the 3×PTO drain window
-  /// before it reaches `Drained`. During that window, quinn-proto's
-  /// `Streams::open(Dir::Bi)` already returns `None` (it checks
-  /// `self.conn_state.is_closed()`, and `Connection::is_closed()` covers
-  /// `Closed | Draining | Drained`), but `Connection::is_handshaking`
-  /// is *also* `false`, so the coordinator's `service_dials` handshaking-
-  /// requeue path would not catch it; the intent would fall into
-  /// `dial_failed` and the push/pull / reliable-ping-fallback / user message
-  /// would be silently lost. We therefore probe the cached connection with
-  /// `is_closed()` (the same predicate `Streams::open` uses to refuse) AND
-  /// `established_at_least_once` (sticky — set the first time the conn was
-  /// observed `!is_handshaking() && !is_closed()`): a closed conn that
-  /// was previously Established is in the drain window and we redial (drop
-  /// only the `peers` mapping; keep the slab entry so `reap_if_drained`
-  /// completes the drained-reap on the original handle later; dial a fresh
-  /// connection). A closed conn that never reached Established is a
-  /// handshake failure for an unreachable peer — returning the cached
-  /// handle lets `service_dials::open(Dir::Bi)=None && !is_handshaking()`
-  /// fall through to `dial_failed`, so a genuinely-unreachable peer does
-  /// not generate fresh handshake attempts inside one push/pull deadline. The slab momentarily holds two entries
-  /// for the same peer (the old one awaiting drained-reap; the new one
-  /// live); this is by design — `peers[peer]` always points at the live
-  /// one for new outbound exchanges, and `reap_if_drained` clears the old
-  /// slab slot when its `Drained` state is reached.
+  /// **P2 — clear the outbound drain window.** A `DrainClosed`
+  /// (established-then-closed) outbound, or one whose slab slot is gone, is
+  /// cleared from `route.outbound` so a fresh redial can proceed. A
+  /// `TerminalOutbound` (closed, never established — our own failed dial) is
+  /// LEFT in place: it is authoritative unreachability on our egress and
+  /// suppresses a fresh-handshake storm. Past P2,
+  /// `route.outbound ∈ {None, Handshaking, Established, TerminalOutbound}`.
   ///
-  /// **Global connection cap covers outbound dials too.** `max_connections`
-  /// (the coordinator's `max_quic_connections`) is enforced right before a NEW
-  /// outbound `quinn.connect` commits a fresh slab slot — the no-reusable-entry
-  /// branch only. Without it, `max_quic_connections` would bound inbound
-  /// Initials while a large or attacker-influenced membership address set could
-  /// still grow the slab past the cap through reliable dials and datagram
-  /// fallbacks (both reach here). Every early-return reuse path above (a usable
-  /// pooled connection, or a cached closed-never-Established handle) returns
-  /// BEFORE the check, so reusing a slot is never blocked — only a genuinely
-  /// new connection is refused, with [`DialError::AtGlobalCap`].
-  pub(crate) fn get_or_dial(
+  /// A route left with both fields `None` is removed (no permanent empty
+  /// entries).
+  fn prepass(&mut self, peer: &SocketAddr) {
+    let Some(route) = self.peer_routes.get(peer) else {
+      return;
+    };
+    let clear_inbound = match route.inbound {
+      None => false,
+      // Any closed (or slab-gone) inbound is pruned; only a live inbound may
+      // survive P1. `is_closed()` covers `DeadInbound` and `DrainClosed`.
+      Some(ch) => self.conns.get(ch.0).is_none_or(|e| e.conn.is_closed()),
+    };
+    let clear_outbound = match route.outbound {
+      None => false,
+      // Only a `DrainClosed` (or slab-gone) outbound is cleared; a
+      // `TerminalOutbound` stays authoritative.
+      Some(ch) => self
+        .conns
+        .get(ch.0)
+        .is_none_or(|e| e.conn.is_closed() && e.established_at_least_once),
+    };
+    if clear_inbound || clear_outbound {
+      let route = self
+        .peer_routes
+        .get_mut(peer)
+        .expect("route present for the peer just inspected");
+      if clear_inbound {
+        route.inbound = None;
+      }
+      if clear_outbound {
+        route.outbound = None;
+      }
+    }
+    if self
+      .peer_routes
+      .get(peer)
+      .is_some_and(|r| r.outbound.is_none() && r.inbound.is_none())
+    {
+      self.peer_routes.remove(peer);
+    }
+  }
+
+  /// Commit a fresh self-initiated outbound `quinn.connect` and record it as
+  /// `route.outbound`. Enforces the global connection cap right before the new
+  /// slab slot commits (the only site a NEW connection is created), so a large
+  /// or attacker-influenced membership set cannot grow the slab past the cap
+  /// through reliable dials and datagram fallbacks. Reached only when
+  /// `route.outbound` is `None` after the pre-pass.
+  fn dial_fresh(
     &mut self,
     quinn: &mut QuinnEndpoint,
     now: Instant,
@@ -297,42 +474,16 @@ impl ConnTable {
     server_name: &str,
     max_connections: Option<usize>,
   ) -> Result<ConnectionHandle, DialError> {
-    if let Some(ch) = self.peers.get(&peer).copied() {
-      let (reusable, was_established) = match self.conns.get(ch.0) {
-        Some(e) => (!e.conn.is_closed(), e.established_at_least_once),
-        None => (false, false),
-      };
-      if reusable {
-        return Ok(ch);
-      }
-      // Cached conn is closed (or its slab slot is gone — race-defensive).
-      // If it was previously Established, we are in the closed-before-
-      // drained pool window: drop ONLY the `peers` mapping (keep the
-      // slab so its in-flight drained-reap can complete on the original
-      // handle) and fall through to dial a fresh connection. If it was
-      // NEVER Established, treat the cached entry as authoritative —
-      // returning it lets the existing `service_dials` path fire
-      // `dial_failed` via `open(Bi)=None && !is_handshaking()`.
-      if !was_established {
-        return Ok(ch);
-      }
-      self.peers.remove(&peer);
-    }
-    // Global connection cap — enforced ONLY here, on the no-reusable-entry
-    // branch that is about to create a fresh slab slot. A reused connection
-    // returned above without reaching this check. `len()` counts every tracked
-    // slab entry (handshaking, established, draining), so this caps the total
-    // outbound + inbound connection population at `max_connections`.
+    // `len()` counts every tracked slab entry (handshaking, established,
+    // draining), so this caps the total outbound + inbound population.
     if max_connections.is_some_and(|max| self.conns.len() >= max) {
       return Err(DialError::AtGlobalCap);
     }
-    // `server_name` is the rustls verification identity for the peer's
-    // cert — supplied by the driver's SNI provider so the verification
-    // name is keyed on the membership address (not a hardcoded constant).
-    // quinn-proto forwards it verbatim to
-    // `config.crypto.start_session(version, server_name, ...)`; the
-    // rustls-backed `start_session` parses it via `ServerName::try_from`
-    // and feeds the result to the configured `ServerCertVerifier`.
+    // `server_name` is the rustls verification identity for the peer's cert,
+    // supplied by the driver's SNI provider so the name is keyed on the
+    // membership address. quinn-proto forwards it verbatim to
+    // `config.crypto.start_session`; the rustls-backed `start_session` parses
+    // it via `ServerName::try_from` and feeds the configured verifier.
     let (ch, conn) = quinn
       .connect(now.into_std(), client, peer, server_name)
       .map_err(DialError::Connect)?;
@@ -348,44 +499,192 @@ impl ConnTable {
       outbound_bridge_count: 0,
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
-    self.peers.insert(peer, ch);
+    self.peer_routes.entry(peer).or_default().outbound = Some(ch);
     Ok(ch)
+  }
+
+  /// Select the connection handle for an intent to `peer`, dialing a fresh
+  /// outbound when the selection tables call for one.
+  ///
+  /// quinn-proto assigns `ConnectionHandle(slab.vacant_key())` inside
+  /// `Endpoint::connect`, so the slab index and the handle's inner value are
+  /// always in sync (asserted at insert time).
+  ///
+  /// The selection runs the [`Self::prepass`], classifies the surviving
+  /// `route.outbound` (`O`) and `route.inbound` (`I`), then applies the table
+  /// for `reliability`:
+  ///
+  /// **Reliable** (first matching row): R1 `O` Established → `O`; R2 `I`
+  /// Established → `I`; R3 `O` Handshaking → `O`; R4 `O` TerminalOutbound + `I`
+  /// Handshaking → `I`; R5 `O` TerminalOutbound + no `I` → `O` (downstream
+  /// `dial_failed`, anti-storm); R6 no `O` + `I` Handshaking → dial fresh under
+  /// cap, else degrade to `I` (a synchronous connect error degrades identically
+  /// — return the live inbound and repark, never propagate); R7 no `O`, no `I`
+  /// → dial fresh under cap, else propagate the dial error.
+  ///
+  /// **Unreliable** (first matching row): U1 `O` Established → `O`; U2 `I`
+  /// Established → `I`; U3 `O` Handshaking → `O`; U4 `I` Handshaking → `I` (no
+  /// companion dial); U5 `O` TerminalOutbound + no `I` → `O`; U6 no `O`, no `I`
+  /// → cold-dial under cap, else the dial error (the datagram caller maps every
+  /// dial error to a best-effort UDP fallback).
+  ///
+  /// **Fresh-dial condition** (the asymmetric-reachability core): a
+  /// `quinn.connect` is issued iff `route.outbound` is `None` after the pre-pass
+  /// (R6/R7/U6) — never for a Handshaking/Established/TerminalOutbound outbound,
+  /// and never keyed on `route.inbound`. So a peer's stalled or failed inbound
+  /// never suppresses our own independent outbound dial to a peer reachable on
+  /// our egress.
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn get_or_dial(
+    &mut self,
+    quinn: &mut QuinnEndpoint,
+    now: Instant,
+    client: quinn_proto::ClientConfig,
+    peer: SocketAddr,
+    server_name: &str,
+    max_connections: Option<usize>,
+    reliability: Reliability,
+  ) -> Result<ConnectionHandle, DialError> {
+    use HandleClass::{Established, Handshaking, TerminalOutbound};
+    self.prepass(&peer);
+    let (outbound, inbound) = match self.peer_routes.get(&peer) {
+      Some(r) => (r.outbound, r.inbound),
+      None => (None, None),
+    };
+    let oc = outbound.map(|ch| self.classify(ch));
+    let ic = inbound.map(|ch| self.classify(ch));
+    match reliability {
+      Reliability::Reliable => {
+        if oc == Some(Established) {
+          return Ok(outbound.expect("Established outbound handle present")); // R1
+        }
+        if ic == Some(Established) {
+          return Ok(inbound.expect("Established inbound handle present")); // R2
+        }
+        if oc == Some(Handshaking) {
+          return Ok(outbound.expect("Handshaking outbound handle present")); // R3
+        }
+        if oc == Some(TerminalOutbound) {
+          if ic == Some(Handshaking) {
+            // R4: our dial failed but the peer's inbound may still establish.
+            return Ok(inbound.expect("Handshaking inbound handle present"));
+          }
+          debug_assert!(
+            ic.is_none(),
+            "reliable R5 reached with a live inbound the pre-pass should have surfaced earlier"
+          );
+          // R5: authoritative terminal — downstream `dial_failed` (anti-storm).
+          return Ok(outbound.expect("TerminalOutbound handle present"));
+        }
+        debug_assert!(
+          oc.is_none(),
+          "reliable selection reached the fresh-dial rows with a non-None outbound class"
+        );
+        if ic == Some(Handshaking) {
+          // R6: dial our own outbound under cap; at cap OR on a synchronous
+          // connect error, degrade to the live inbound and repark (never
+          // propagate the dial error — a live candidate exists).
+          return match self.dial_fresh(quinn, now, client, peer, server_name, max_connections) {
+            Ok(ch) => Ok(ch),
+            Err(_) => Ok(inbound.expect("Handshaking inbound handle present")),
+          };
+        }
+        // R7: no candidate of either direction — propagate the dial error.
+        debug_assert!(ic.is_none(), "reliable R7 reached with a live inbound");
+        self.dial_fresh(quinn, now, client, peer, server_name, max_connections)
+      }
+      Reliability::Unreliable => {
+        if oc == Some(Established) {
+          return Ok(outbound.expect("Established outbound handle present")); // U1
+        }
+        if ic == Some(Established) {
+          return Ok(inbound.expect("Established inbound handle present")); // U2
+        }
+        if oc == Some(Handshaking) {
+          return Ok(outbound.expect("Handshaking outbound handle present")); // U3
+        }
+        if ic == Some(Handshaking) {
+          // U4: ride the live handshaking inbound (→ NotReady → UDP); NEVER
+          // create a companion outbound beside a live inbound.
+          return Ok(inbound.expect("Handshaking inbound handle present"));
+        }
+        if oc == Some(TerminalOutbound) {
+          debug_assert!(ic.is_none(), "unreliable U5 reached with a live inbound");
+          // U5: (→ NotReady → UDP).
+          return Ok(outbound.expect("TerminalOutbound handle present"));
+        }
+        // U6: no candidate — cold-dial under cap; the datagram caller maps a
+        // dial error (at cap / connect error) to a best-effort UDP fallback.
+        debug_assert!(
+          oc.is_none() && ic.is_none(),
+          "unreliable U6 reached with a live handle"
+        );
+        self.dial_fresh(quinn, now, client, peer, server_name, max_connections)
+      }
+    }
+  }
+
+  /// Establishment-chokepoint promotion. Called the pass a connection's sticky
+  /// `established_at_least_once` flips `false → true`. A newly-established
+  /// INBOUND becomes `route.inbound` unconditionally: completing the handshake is
+  /// the strongest liveness signal available at the transport layer, so the most
+  /// recently established inbound is the one selection should ride. Touches only
+  /// `.inbound` (never displaces a self-initiated outbound). A newly-established
+  /// OUTBOUND must already be its peer's tracked `route.outbound` (an
+  /// establishing outbound is `!closed`, so the pre-pass never cleared it) —
+  /// asserted, not written.
+  ///
+  /// The transport layer does NOT attempt to order connection instance-epochs
+  /// (see the module-level residual note): establishment proves an Initial +
+  /// Finished were exchanged, not that the remote instance is currently alive, so
+  /// a zombie can capture selection until the idle timeout reaps it. This is
+  /// bounded and safety-preserving; the resolving signal is the membership
+  /// incarnation at the SWIM layer.
+  pub(crate) fn on_established_transition(&mut self, ch: ConnectionHandle) {
+    let (peer, direction) = match self.conns.get(ch.0) {
+      Some(e) => (e.peer, e.direction),
+      None => return,
+    };
+    match direction {
+      ConnDirection::Inbound => {
+        self.peer_routes.entry(peer).or_default().inbound = Some(ch);
+      }
+      ConnDirection::Outbound => {
+        debug_assert!(
+          self.peer_routes.get(&peer).and_then(|r| r.outbound) == Some(ch),
+          "an establishing outbound must already be its peer's tracked outbound route"
+        );
+      }
+    }
   }
 
   /// Record an inbound connection accepted by the server endpoint.
   ///
   /// The accepted connection is always inserted into the slab (so quinn can
-  /// drive it and its inbound bidi streams are serviced). The `peers`
-  /// address→handle map — which `get_or_dial` consults to route NEW
-  /// OUTBOUND streams — is (re)pointed at this connection only if the
-  /// existing canonical (if any) is no longer usable, using the **same
-  /// `!Connection::is_closed()` predicate** `get_or_dial` uses for
-  /// outbound reuse.
+  /// drive it and its inbound bidi streams are serviced). It is written into
+  /// `route.inbound` only when the current inbound slot is empty or holds a
+  /// closed/gone connection — an accept never displaces a live (handshaking or
+  /// established) tracked inbound.
   ///
-  /// Symmetry with `get_or_dial`. Outbound dial considers a cached
-  /// connection re-usable iff `!is_closed()` (quinn-proto's
-  /// `Connection::is_closed` covers `Closed|Draining|Drained`); a closed
-  /// cached handle is treated as unreachable (`Streams::open(Bi)=None`).
-  /// Inbound accept must use the *same* predicate: when the existing
-  /// canonical is closed/draining/drained, the new accepted connection
-  /// becomes canonical (`peers[peer] = new_ch`); the old slab entry
-  /// persists until its drained-reap completes (its `peers` mapping is
-  /// already gone, so the equality-guarded `reap_if_drained` cannot
-  /// clobber the new canonical). Without this symmetry an accepted live
-  /// connection from a peer can be hidden behind a closed-never-
-  /// Established cached handle — subsequent outbound dials hit the
-  /// closed cached handle and silently `dial_failed`, leaving the live
-  /// accepted connection unused.
+  /// The rule: an accept proves only that an Initial datagram arrived, which a
+  /// delayed pre-crash Initial can also produce; it does NOT prove the remote
+  /// instance is currently alive. Route displacement between competing inbounds
+  /// is therefore gated on the establishment chokepoint
+  /// ([`Self::on_established_transition`]), which promotes the most recently
+  /// established inbound — not at accept time, where a delayed pre-crash Initial
+  /// (structurally incapable of completing its handshake) would otherwise
+  /// displace a live route. Accept-time writes fill only an empty or closed slot.
   ///
-  /// Simultaneous bidirectional dial. When both peers `connect` to each
-  /// other before either accepts, each side ends up with one
-  /// self-initiated and one accepted connection to the same address. If
-  /// the self-initiated one is healthy (`!is_closed()`) it stays
-  /// canonical for this node's outbound exchanges — unconditionally
-  /// clobbering `peers` would route outbound onto the peer-initiated
-  /// connection while the peer's accept side is bound to the other one,
-  /// wedging the exchange (the peer is then wrongly never confirmed →
-  /// false Suspect). The `!is_closed()` gate preserves this property.
+  /// NEVER written into `route.outbound`: an accept can therefore never displace
+  /// a self-initiated outbound, else the peer-initiated connection would become
+  /// the slot our outbound exchanges select while the peer binds its accept side
+  /// to the other connection, wedging the exchange (the peer wrongly never
+  /// confirmed → false Suspect). Keeping the two directions in separate fields
+  /// makes that wedge-avoidance structural.
+  ///
+  /// The displaced (previous) inbound, if any, stays in the slab until its
+  /// drained-reap; its handle is no longer in `route.inbound`, so the
+  /// equality-guarded [`Self::reap_if_drained`] cannot clobber this one.
   pub(crate) fn insert_accepted(
     &mut self,
     ch: ConnectionHandle,
@@ -413,18 +712,21 @@ impl ConnTable {
       "accepted connection slab slot must equal ConnectionHandle"
     );
     *self.pending_inbound.entry(peer).or_insert(0) += 1;
-    let existing_usable = self
-      .peers
-      .get(&peer)
-      .and_then(|existing| self.conns.get(existing.0))
-      .is_some_and(|e| !e.conn.is_closed());
-    if !existing_usable {
-      self.peers.insert(peer, ch);
+    // Fill only an empty or closed inbound slot; never displace a live inbound
+    // at accept (that decision belongs to the establishment chokepoint). Never
+    // touch `route.outbound`.
+    let replace = match self.peer_routes.get(&peer).and_then(|r| r.inbound) {
+      None => true,
+      Some(cur) => self.conns.get(cur.0).is_none_or(|e| e.conn.is_closed()),
+    };
+    if replace {
+      self.peer_routes.entry(peer).or_default().inbound = Some(ch);
     }
   }
 
   /// Drained-reap: if `Connection::is_drained()`, relay `EndpointEvent::drained()`
-  /// to quinn (cleans its CID index) then drop the slab + peers entry.
+  /// to quinn (cleans its CID index) then drop the slab entry and clear it from
+  /// its peer's route.
   ///
   /// Returns `true` if the connection was reaped.
   ///
@@ -432,14 +734,13 @@ impl ConnTable {
   /// `Connection::is_drained()` the runtime sends `EndpointEvent::drained()`
   /// (via `Endpoint::handle_event`) and then frees the connection.
   ///
-  /// **Handle-equality-guarded `peers` removal.** When a redial happened
-  /// during the original connection's drain window (`get_or_dial` saw the
-  /// cached `Connection` in `Closed`/`Draining`/`Drained` and dialed a
-  /// fresh `ConnectionHandle`), `peers[e.peer]` now points at the NEW
-  /// handle while the slab still holds the OLD entry awaiting this reap.
-  /// Removing `peers[e.peer]` unconditionally would clobber the redial's
-  /// mapping. We therefore drop the `peers` entry only when it still points
-  /// at the handle being reaped — the canonical post-redial invariant.
+  /// **Handle-equality-guarded route removal.** A superseding write may have
+  /// already repointed `route.outbound`/`route.inbound` at a fresh handle (a
+  /// drain-window redial, a newest-established-inbound promotion) while the slab
+  /// still holds the OLD entry awaiting this reap. Clearing a field
+  /// unconditionally would clobber the newer handle, so each field is cleared
+  /// only when it still equals the handle being reaped. A `PeerRoute` left with
+  /// both fields `None` is dropped.
   ///
   /// Contract: once this returns `true` the slab slot is gone — the caller must not forward any further `poll_endpoint_events()` for `ch` into the endpoint (that would double-drain a removed handle).
   pub(crate) fn reap_if_drained(
@@ -468,8 +769,20 @@ impl ConnTable {
       if e.pending_indexed {
         Self::release_pending_inbound(&mut self.pending_inbound, e.peer);
       }
-      if self.peers.get(&e.peer).copied() == Some(ch) {
-        self.peers.remove(&e.peer);
+      if let Some(route) = self.peer_routes.get_mut(&e.peer) {
+        if route.outbound == Some(ch) {
+          route.outbound = None;
+        }
+        if route.inbound == Some(ch) {
+          route.inbound = None;
+        }
+      }
+      if self
+        .peer_routes
+        .get(&e.peer)
+        .is_some_and(|r| r.outbound.is_none() && r.inbound.is_none())
+      {
+        self.peer_routes.remove(&e.peer);
       }
     }
     true

@@ -1644,25 +1644,16 @@ impl<I, R> QuicEndpoint<I, R> {
     Some((from, bytes))
   }
 
-  /// Number of live (non-reaped) QUIC connections to `peer` — `0` or `1`,
-  /// since the connection table pools one connection per peer.
+  /// Number of usable QUIC connections to `peer` — `0` or `1`, since the
+  /// connection table selects one best-usable handle per peer.
   ///
-  /// Observation-only, for a driver/test to assert the drained-reap
-  /// lifecycle (a connection that idled past `max_idle_timeout` is reaped:
-  /// its slab + peers entry is removed, so this drops back to `0`). A
-  /// connection still in its closing/draining wind-down is reported live
-  /// until [`ConnTable::reap_if_drained`] removes it.
+  /// Observation-only, for a driver/test to assert the connection lifecycle.
+  /// Backed by the same derived best-usable selection the reliable/unreliable
+  /// send paths ride ([`ConnTable::handle_for`]): a peer with an established or
+  /// handshaking connection (either direction) reports `1`; a peer whose only
+  /// tracked connections are closed/draining or handshake-failed reports `0`.
   pub fn live_connections_to(&self, peer: SocketAddr) -> usize {
-    match self.conns.handle_for(&peer) {
-      Some(ch) => usize::from(
-        self
-          .conns
-          .get(ch)
-          .map(|e| !e.conn_ref().is_drained())
-          .unwrap_or(false),
-      ),
-      None => 0,
-    }
+    usize::from(self.conns.handle_for(&peer).is_some())
   }
 
   /// Number of active reliable-exchange bridges (one per in-flight push/pull
@@ -1713,8 +1704,9 @@ impl<I, R> QuicEndpoint<I, R> {
   /// `last_now` is also anchored so any wake the close requires
   /// surfaces immediately.
   ///
-  /// Returns `false` if no connection to `peer` exists, or if the
-  /// open is refused.
+  /// Targets the peer's derived best-usable connection (the same selection the
+  /// send paths ride, [`ConnTable::handle_for`]). Returns `false` if no usable
+  /// connection to `peer` exists, or if the open is refused.
   pub fn try_open_uni_stream_to(&mut self, peer: SocketAddr, now: Instant) -> bool {
     self.last_now = Some(now);
     let Some(ch) = self.conns.handle_for(&peer) else {
@@ -2228,6 +2220,10 @@ impl<I, R> QuicEndpoint<I, R> {
       }
       None => return,
     };
+    // The slot-free wake is keyed by the connection's membership address, which
+    // must be the key its route is filed under; a `peer` that followed QUIC path
+    // migration would strand this wake against the original key.
+    self.conns.debug_assert_peer_is_route_key(ch);
     self.slot_freed_peers.insert(peer);
   }
 
@@ -2685,26 +2681,36 @@ impl<I, R> QuicEndpoint<I, R> {
     }
   }
 
-  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
-  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
+  /// Walk every live `ConnectionHandle` and reap the ones quinn reports
+  /// `is_drained()` (fully dead — no further transport work is owed), dropping
+  /// each reaped connection's deadline key and pending-events membership so
+  /// neither lingers as a stale index term. Per-connection deferred
+  /// `ConnectionEvent`s live in each [`super::conn::ConnEntry`]'s own
+  /// `pending_events` deque (see [`super::conn::ConnEntry::queue_pending_event`]),
+  /// so a reap that drops the slab entry also drops its deferred queue by
+  /// construction — no global FIFO can survive past the reap to be re-keyed onto
+  /// a fresh connection occupying the freed slab slot.
   ///
-  /// The reap simply walks every live `ConnectionHandle` and calls
-  /// [`ConnTable::reap_if_drained`]; per-connection deferred
-  /// `ConnectionEvent`s queued by `service_quinn` live in each
-  /// [`super::conn::ConnEntry`]'s own `pending_events` deque (see
-  /// [`super::conn::ConnEntry::queue_pending_event`]) so a reap that drops
-  /// the slab entry also drops its deferred queue by construction — no
-  /// global FIFO can survive past the reap to be re-keyed onto a fresh
-  /// connection occupying the freed slab slot.
-  fn finalize_tick(&mut self, now: Instant) {
+  /// Idempotent: a handle already reaped this tick returns `false` and is skipped.
+  /// The tick runs this BEFORE `service_dials` (so a global-cap slot a reap frees
+  /// is available to the same tick's fresh dial — a reliable intent parked at the
+  /// cap opens the instant the draining connection occupying its slot dies,
+  /// rather than waiting a whole tick for a wake a strict-poll driver would not
+  /// schedule) and AGAIN in [`Self::finalize_tick`] (to catch a connection that
+  /// only reached `is_drained()` during this tick's later servicing).
+  fn reap_drained_connections(&mut self) {
     for ch in self.conns.iter_handles() {
       if self.conns.reap_if_drained(&mut self.quinn, ch) {
-        // The connection left the table: drop its deadline key and any
-        // pending-events membership so neither lingers as a stale index term.
         self.deadline_index.set(TimerKey::Conn(ch), None);
         self.conns_with_pending_events.remove(&ch);
       }
     }
+  }
+
+  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
+  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
+  fn finalize_tick(&mut self, now: Instant) {
+    self.reap_drained_connections();
     self.collect_transmits(now);
     // The global tick services every bridge directly via `pump_bridges` (which
     // clears every `queued` flag at pump entry), so any ready-queue entries a
@@ -2992,6 +2998,7 @@ impl<I, R> QuicEndpoint<I, R> {
       peer,
       &sni_arc,
       self.cfg.max_quic_connections(),
+      conn::Reliability::Unreliable,
     ) {
       Ok(ch) => ch,
       // The datagram-fallback dial hit the global connection cap: this new
@@ -3748,6 +3755,7 @@ where
       addr,
       &sni_arc,
       self.cfg.max_quic_connections(),
+      conn::Reliability::Reliable,
     ) {
       Ok(ch) => {
         // Record every dialed connection as touched: `get_or_dial` may have
@@ -3980,11 +3988,22 @@ where
         }
       }
       Err(conn::DialError::AtGlobalCap) => {
-        // The global connection cap is reached: this new outbound peer gets
-        // no connection. Count it against the same connection-cap metric the
-        // inbound Initial path uses, and retire the intent through the
-        // standard pre-bridge failure path (a Failed ExchangeCompleted for a
-        // UserMessage / PushPull dial resolves the parked waiter).
+        // The global connection cap is reached: this reliable dial fails fast.
+        // The cap is an operator ceiling, and the coordinator sheds rather than
+        // queues at its bounds. A slot already freed by a drained connection was
+        // harvested before dial servicing (the tick's step 4.5 reap), so this arm
+        // fires only when the table is genuinely full. The cost is at worst a
+        // transient false Suspect of a not-yet-connected peer at cap saturation,
+        // which the failure detector's next interval, indirect probes, and
+        // incarnation refutation heal (refutation does not depend on this node's
+        // connection-table capacity). Retaining intents against future capacity
+        // would need a deduplicated capacity-wait ledger with reap-triggered
+        // wakes — deliberately not built for this corner.
+        //
+        // Count the refusal against the same connection-cap metric the inbound
+        // Initial path uses, then retire the intent through the standard
+        // pre-bridge failure path (a Failed `ExchangeCompleted` for a UserMessage
+        // / PushPull dial resolves the parked waiter).
         self.ep.metrics_mut().quic_connections_rejected += 1;
         self.retire_failed_dial(
           id,
@@ -5305,6 +5324,12 @@ where
     // parked bucket unconditionally, so a bucket a readiness event unblocked is
     // serviced there regardless.
     let _ready_peers = self.service_quinn(now);
+    // (4.5) Reap connections that reached `is_drained()` this tick BEFORE dial
+    // servicing, so a global-cap slot a reap frees is available to the SAME
+    // tick's fresh dials. A reliable dial is therefore never refused at the cap
+    // for a slot that has already freed; the at-cap fail-fast in
+    // `process_dial_entry` fires only when the table is genuinely full.
+    self.reap_drained_connections();
     // (5) Dial requests emitted by (3) or by accept-events, plus every parked
     // bucket (the liveness backstop for expiry and handshake-failure retirement).
     self.service_dials(now);
@@ -5393,6 +5418,15 @@ where
     let pre_first_pump_ids: HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     let ready_peers = self.service_quinn(now);
+    // Reap fully-drained (`is_drained()`) connections BEFORE dial servicing,
+    // mirroring the global tick's step-4.5 reap: a `service_quinn` pass above can
+    // transition a connection to drained, and a global-cap slot that reap frees
+    // must be available to this flush's dial buckets (the ready-peers loop AND the
+    // ready-dial ledger drain below). Without it a reliable dial to a peer whose
+    // slot is held by a now-drained connection would hit `AtGlobalCap` and be
+    // retired on a slot that has already freed. `finalize_tick`'s reap at the end
+    // stays (idempotent) to catch connections drained later in this pass.
+    self.reap_drained_connections();
     // One unbounded dial budget SHARED across the ready-peers loop, the ready-dial
     // ledger drain, and the slot-free consume: this is an O(N) flush-all path, so it
     // must never budget-exit a bucket (which would deposit into the ledger it is
@@ -5443,6 +5477,10 @@ where
     let mut ready_peers: SmallVec<SocketAddr> = SmallVec::new();
     for ch in self.conns.iter_handles() {
       let marks = self.service_one_conn(ch, now);
+      // The parked bucket is serviced by this connection's membership address,
+      // which must be the key its route is filed under (else the wake strands
+      // against the original key).
+      self.conns.debug_assert_peer_is_route_key(ch);
       // Establishment unblocks the dials parked on THIS connection's peer;
       // resolve it while `ch` is still in hand (it may have been reaped during
       // the pass, in which case there is no bucket to service — the tick is the
@@ -5481,6 +5519,13 @@ where
   /// dials; they cannot be acted on in place because the parked-dial servicing
   /// re-borrows `self.conns` through `get_or_dial`.
   fn service_one_conn(&mut self, ch: ConnectionHandle, now: Instant) -> ServiceMarks {
+    // Both the inbound-accept and the inbound-datagram drains below attribute
+    // work to this connection's membership address (`e.peer()`), which must be
+    // the key its route is filed under. Asserted once here — the whole pass
+    // holds `e`'s exclusive borrow of the table, so the check cannot sit inline
+    // at those two sites — defending against a future `peer` that follows QUIC
+    // path migration and strands peer-keyed parked dials.
+    self.conns.debug_assert_peer_is_route_key(ch);
     let Some(e) = self.conns.get_mut(ch) else {
       return ServiceMarks::default();
     };
@@ -5866,6 +5911,15 @@ where
     let credit_restored_peer = credit_restored.then_some(peer);
     // `e` borrows `self.conns`; release it before touching `self.bridges`.
     let _ = e;
+    // Establishment-chokepoint promotion, run BEFORE the caller resolves this
+    // pass's wake: a newly-established inbound becomes its peer's tracked inbound
+    // route (newest-established-inbound wins), so the woken bucket's selection
+    // sees the freshly-live connection instead of a stale zombie. The one place
+    // truth changes — no promote/restore pair to desync. A no-op for a
+    // still-handshaking connection.
+    if established_transition {
+      self.conns.on_established_transition(ch);
+    }
     if lost || drained {
       // Mark every bridge on this connection fatal AND complete its D1
       // drain_then_reap synchronously, in this same tick.

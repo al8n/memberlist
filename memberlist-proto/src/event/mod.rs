@@ -391,6 +391,12 @@ impl<I, A> NodeConflict<I, A> {
 /// Payload for [`Event::UserPacket`]: an application-level user-data packet.
 #[derive(Debug)]
 pub struct UserPacket<A> {
+  /// The logical peer identity the packet arrived from — the membership
+  /// address, a best-effort transport-origin hint. It is explicitly NOT the raw
+  /// post-migration transport 4-tuple: a QUIC connection may migrate its egress
+  /// path, but the identity here stays the membership address the connection was
+  /// keyed on. Identity-critical routing uses the advertised SWIM-payload
+  /// address rather than this hint.
   from: A,
   data: Bytes,
   reliability: Reliability,
