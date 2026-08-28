@@ -58,6 +58,19 @@ fn default_server_name() -> String {
   DEFAULT_SERVER_NAME.to_string()
 }
 
+/// Force QUIC 0-RTT (early data) OFF on the managed path's rustls pair. The
+/// coordinator's effect-finality boundary defers every application effect to a
+/// connection's establishment, so early data buys nothing here, and the shared
+/// TLS assembly must never re-enable it. rustls already defaults these off
+/// (client `enable_early_data = false`, server `max_early_data_size = 0`), but
+/// forcing them keeps that guarantee independent of any future default or
+/// shared-builder change — the config-path analogue of the `IdleTimeoutZero`
+/// guard in [`QuicConfigOptions::build`].
+fn force_early_data_off(client: &mut rustls::ClientConfig, server: &mut rustls::ServerConfig) {
+  client.enable_early_data = false;
+  server.max_early_data_size = 0;
+}
+
 /// Construct a [`QuicOptions`] from cert / key / CA files on disk plus a single
 /// [`ClientAuthMode`](crate::tls::ClientAuthMode) choice and a few transport
 /// tunables.
@@ -222,15 +235,7 @@ impl QuicConfigOptions {
     let mut rustls_server = build_server_config(&provider, &roots, &certs, &key, self.client_auth)?;
     let mut rustls_client = build_client_config(provider, roots, certs, key, self.client_auth)?;
 
-    // Force QUIC 0-RTT (early data) off on the managed path. The coordinator's
-    // effect-finality boundary defers every application effect to a connection's
-    // establishment, so early data buys nothing here, and the shared TLS assembly
-    // must never re-enable it. rustls already defaults these off (client
-    // `enable_early_data = false`, server `max_early_data_size = 0`), but forcing
-    // them keeps that guarantee independent of any future default or shared-builder
-    // change — the config-path analogue of the `IdleTimeoutZero` guard below.
-    rustls_client.enable_early_data = false;
-    rustls_server.max_early_data_size = 0;
+    force_early_data_off(&mut rustls_client, &mut rustls_server);
 
     Ok((rustls_server, rustls_client))
   }
