@@ -327,12 +327,20 @@ impl QuicOptions {
   /// direction would be a footgun). The caller controls every other
   /// tunable (`max_idle_timeout`, `stream_receive_window`, MTU
   /// discovery, congestion controller, …) by populating that
-  /// `TransportConfig` before handing it in. Leaving `max_idle_timeout`
-  /// finite is recommended: disabling it (a zero transport parameter per
-  /// RFC 9000 §18.2) removes the idle-timeout bound that self-heals a stale
-  /// connection, so a zombie could persist indefinitely; the
-  /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build)
-  /// path rejects a zero `max_idle_timeout` for that reason. The constructor
+  /// `TransportConfig` before handing it in. This raw constructor performs NO
+  /// idle-timeout enforcement — it is the advanced escape hatch, and silently
+  /// overriding a caller's explicit `TransportConfig` would defeat it. Leaving
+  /// `max_idle_timeout` finite is strongly recommended: supplying a
+  /// `TransportConfig` whose idle timeout is disabled — either `max_idle_timeout(None)`
+  /// or a value that encodes to zero (`Some(Duration::ZERO)`, or any
+  /// sub-millisecond duration, since quinn encodes the timeout in milliseconds;
+  /// a disabling zero per RFC 9000 §18.2) — removes the finite idle-timeout bound
+  /// that self-heals a stale connection, so a zombie to a dead peer instance
+  /// could hold selection indefinitely (see the residual note in the connection
+  /// table module). The higher-level
+  /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build) path
+  /// rejects a zero/sub-millisecond `max_idle_timeout` and so guarantees the
+  /// finite bound; this raw path does not. The constructor
   /// unconditionally forces `max_concurrent_uni_streams = 0` on the
   /// supplied value (mutating it before moving it into a shared `Arc`,
   /// so a caller's surviving `Arc` view cannot accidentally re-enable

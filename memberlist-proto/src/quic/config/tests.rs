@@ -95,29 +95,40 @@ fn build_installs_configured_server_name() {
 }
 
 #[test]
-fn build_rejects_zero_max_idle_timeout() {
+fn build_rejects_max_idle_timeout_that_encodes_to_zero() {
   install_provider();
-  let dir = unique_dir();
-  let (cert, key, ca) = write_self_signed(&dir);
 
-  // A zero idle-timeout transport parameter DISABLES the QUIC idle timeout
-  // (RFC 9000 §18.2), removing the stale-connection self-healing bound — rejected.
-  // (`QuicOptions` is not `Debug`, so match the `Result` rather than `expect_err`.)
-  let result = QuicConfigOptions::new(cert, key, ca)
-    .with_max_idle_timeout(Some(Duration::ZERO))
-    .build();
-  assert!(
-    matches!(result, Err(QuicConfigError::IdleTimeoutZero)),
-    "a zero max_idle_timeout must be rejected with IdleTimeoutZero"
-  );
+  // A zero idle-timeout transport parameter DISABLES the QUIC idle timeout (RFC
+  // 9000 §18.2), removing the stale-connection self-healing bound. quinn encodes
+  // the timeout in milliseconds, so any sub-millisecond duration also rounds to a
+  // disabling zero — all must be rejected. (`QuicOptions` is not `Debug`, so match
+  // the `Result` rather than `expect_err`.)
+  for t in [
+    Duration::ZERO,
+    Duration::from_nanos(1),
+    Duration::from_micros(500),
+    Duration::from_nanos(999_999),
+  ] {
+    let dir = unique_dir();
+    let (cert, key, ca) = write_self_signed(&dir);
+    let result = QuicConfigOptions::new(cert, key, ca)
+      .with_max_idle_timeout(Some(t))
+      .build();
+    assert!(
+      matches!(result, Err(QuicConfigError::IdleTimeoutZero)),
+      "max_idle_timeout {t:?} encodes to a disabling zero and must be rejected"
+    );
+  }
 
-  // A finite idle-timeout still builds.
-  let dir = unique_dir();
-  let (cert, key, ca) = write_self_signed(&dir);
-  QuicConfigOptions::new(cert, key, ca)
-    .with_max_idle_timeout(Some(Duration::from_secs(20)))
-    .build()
-    .expect("a finite max_idle_timeout builds");
+  // A finite >= 1ms idle-timeout still builds.
+  for t in [Duration::from_millis(1), Duration::from_secs(20)] {
+    let dir = unique_dir();
+    let (cert, key, ca) = write_self_signed(&dir);
+    QuicConfigOptions::new(cert, key, ca)
+      .with_max_idle_timeout(Some(t))
+      .build()
+      .expect("a finite (>= 1ms) max_idle_timeout builds");
+  }
 }
 
 #[cfg(feature = "serde")]

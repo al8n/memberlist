@@ -2681,26 +2681,36 @@ impl<I, R> QuicEndpoint<I, R> {
     }
   }
 
-  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
-  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
+  /// Walk every live `ConnectionHandle` and reap the ones quinn reports
+  /// `is_drained()` (fully dead — no further transport work is owed), dropping
+  /// each reaped connection's deadline key and pending-events membership so
+  /// neither lingers as a stale index term. Per-connection deferred
+  /// `ConnectionEvent`s live in each [`super::conn::ConnEntry`]'s own
+  /// `pending_events` deque (see [`super::conn::ConnEntry::queue_pending_event`]),
+  /// so a reap that drops the slab entry also drops its deferred queue by
+  /// construction — no global FIFO can survive past the reap to be re-keyed onto
+  /// a fresh connection occupying the freed slab slot.
   ///
-  /// The reap simply walks every live `ConnectionHandle` and calls
-  /// [`ConnTable::reap_if_drained`]; per-connection deferred
-  /// `ConnectionEvent`s queued by `service_quinn` live in each
-  /// [`super::conn::ConnEntry`]'s own `pending_events` deque (see
-  /// [`super::conn::ConnEntry::queue_pending_event`]) so a reap that drops
-  /// the slab entry also drops its deferred queue by construction — no
-  /// global FIFO can survive past the reap to be re-keyed onto a fresh
-  /// connection occupying the freed slab slot.
-  fn finalize_tick(&mut self, now: Instant) {
+  /// Idempotent: a handle already reaped this tick returns `false` and is skipped.
+  /// The tick runs this BEFORE `service_dials` (so a global-cap slot a reap frees
+  /// is available to the same tick's fresh dial — a reliable intent parked at the
+  /// cap opens the instant the draining connection occupying its slot dies,
+  /// rather than waiting a whole tick for a wake a strict-poll driver would not
+  /// schedule) and AGAIN in [`Self::finalize_tick`] (to catch a connection that
+  /// only reached `is_drained()` during this tick's later servicing).
+  fn reap_drained_connections(&mut self) {
     for ch in self.conns.iter_handles() {
       if self.conns.reap_if_drained(&mut self.quinn, ch) {
-        // The connection left the table: drop its deadline key and any
-        // pending-events membership so neither lingers as a stale index term.
         self.deadline_index.set(TimerKey::Conn(ch), None);
         self.conns_with_pending_events.remove(&ch);
       }
     }
+  }
+
+  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
+  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
+  fn finalize_tick(&mut self, now: Instant) {
+    self.reap_drained_connections();
     self.collect_transmits(now);
     // The global tick services every bridge directly via `pump_bridges` (which
     // clears every `queued` flag at pump entry), so any ready-queue entries a
@@ -5316,6 +5326,14 @@ where
     // parked bucket unconditionally, so a bucket a readiness event unblocked is
     // serviced there regardless.
     let _ready_peers = self.service_quinn(now);
+    // (4.5) Reap connections that reached `is_drained()` this tick BEFORE dial
+    // servicing, so a global-cap slot a reap frees is available to the same
+    // tick's fresh dial. Otherwise a reliable intent parked at the cap (its slot
+    // held by a now-draining connection) would re-park this tick and wait for its
+    // own pre-deadline service wake before retrying — under a strict-poll driver
+    // that wake can land only a service margin before the deadline, too late for
+    // a fresh handshake to complete, yielding a false Suspect of a live peer.
+    self.reap_drained_connections();
     // (5) Dial requests emitted by (3) or by accept-events, plus every parked
     // bucket (the liveness backstop for expiry and handshake-failure retirement).
     self.service_dials(now);

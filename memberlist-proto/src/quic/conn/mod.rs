@@ -16,14 +16,20 @@
 //!
 //! The bounded consequence: a zombie (an established connection to a peer's dead
 //! prior instance) can capture selection, but only until the negotiated idle
-//! timeout reaps it — the idle timeout is always finite (see the `build`-time
-//! rejection of a zero `max_idle_timeout`), and the negotiated value is the
-//! minimum of the two peers'. This is safety-preserving: every established
-//! connection is serviced by the coordinator's unconditional accept loops, so
-//! the peer's traffic and its SWIM refutations still flow over whichever
-//! connection each side prefers. The signal that actually resolves an
-//! instance-epoch conflict is the membership incarnation at the SWIM layer, one
-//! layer up — not the transport.
+//! timeout reaps it. That finite bound is guaranteed by the file-based
+//! `QuicConfigOptions::build` path, which rejects a `max_idle_timeout` that
+//! encodes to a disabling zero (zero, or a sub-millisecond value quinn rounds to
+//! zero) — so a config-built endpoint always negotiates a finite idle timeout
+//! (the minimum of the two peers'). The raw `QuicOptions::new` /
+//! `new_with_sni_provider` constructors are an advanced escape hatch that takes a
+//! caller-supplied `TransportConfig` verbatim, so a caller CAN disable the idle
+//! timeout there (`max_idle_timeout(None)` or an encoded-zero value) and thereby
+//! forgo the bound — an opt-out those constructors caution against. Even so this
+//! is safety-preserving: every established connection is serviced by the
+//! coordinator's unconditional accept loops, so the peer's traffic and its SWIM
+//! refutations still flow over whichever connection each side prefers. The signal
+//! that actually resolves an instance-epoch conflict is the membership
+//! incarnation at the SWIM layer, one layer up — not the transport.
 
 use crate::Instant;
 use core::net::SocketAddr;

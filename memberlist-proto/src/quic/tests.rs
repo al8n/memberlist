@@ -6618,6 +6618,112 @@ fn at_cap_reliable_dial_reparks_while_a_slot_is_about_to_free() {
   );
 }
 
+/// FIX for the strict-poll cap-recovery gap: a reliable dial parked at the global
+/// cap must open the SAME tick the draining connection occupying its slot is
+/// reaped. The tick reaps drained connections BEFORE `service_dials`, so the
+/// freed slot is available to the parked dial's fresh R7 attempt that same tick.
+///
+/// Without that ordering the reap lands only in `finalize_tick` (AFTER
+/// `service_dials`), so the parked dial re-parks this tick and — under a
+/// strict-poll driver with schedulers off — does not retry until its own
+/// pre-deadline service wake, which can arrive only a service margin before the
+/// deadline: too late for a fresh handshake to complete, yielding a false Suspect
+/// of a live peer.
+///
+/// Mutation-verify: delete the step-(4.5) `reap_drained_connections()` call in
+/// `tick` (leaving only the `finalize_tick` reap) — the parked dial to Y is not
+/// attempted the tick X reaps (X still fills the cap during `service_dials`), so
+/// `live_connections_to(y)` stays 0 and the recovery assertion fails.
+#[test]
+fn drained_slot_freed_before_dials_opens_a_cap_blocked_reliable_dial_same_tick() {
+  let a_addr: SocketAddr = "127.0.0.1:7730".parse().unwrap();
+  let now = Instant::now();
+  // Schedulers off: the tick advances membership time but arms no probe / gossip
+  // / push-pull scheduler, isolating the reap-then-dial ordering.
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    cfg,
+    test_config().with_max_quic_connections(Some(1)),
+    a_addr,
+    now,
+  );
+
+  // Fill the single-connection cap with X, then drive X fully drained
+  // (`is_drained()`) so its slot is reapable this tick.
+  let x_addr: SocketAddr = "127.0.0.3:4000".parse().unwrap();
+  let x = a
+    .conns
+    .get_or_dial(
+      &mut a.quinn,
+      now,
+      a.cfg.client().clone(),
+      x_addr,
+      "localhost",
+      Some(1),
+      super::conn::Reliability::Reliable,
+    )
+    .unwrap();
+  a.conns
+    .get_mut(x)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  for _ in 0..5000 {
+    if a.conns.get(x).unwrap().conn_ref().is_drained() {
+      break;
+    }
+    match a.conns.get_mut(x).unwrap().conn_mut().poll_timeout() {
+      Some(d) => a.conns.get_mut(x).unwrap().conn_mut().handle_timeout(d),
+      None => break,
+    }
+  }
+  assert!(
+    a.conns.get(x).unwrap().conn_ref().is_drained(),
+    "X must be fully drained (reapable)"
+  );
+  assert_eq!(
+    a.conns.iter_handles().len(),
+    1,
+    "the drained X still occupies the cap of 1"
+  );
+
+  // A reliable ping to a live peer Y parked at the cap (deadline far). A
+  // reapable connection (X) exists, so at the cap it re-parks rather than
+  // retiring — the intent survives to the reap tick.
+  let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
+  let deadline = now + Duration::from_secs(30);
+  a.dial_parked
+    .entry(y)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(300_000),
+      peer: y,
+      deadline,
+      wake: deadline,
+      attempted: true,
+      kind: super::ExchangeKind::ReliablePing,
+    });
+  assert_eq!(a.live_connections_to(y), 0, "Y is not yet dialed");
+
+  // One global tick: it reaps the drained X BEFORE dial servicing, so the parked
+  // ping's R7 dial opens a fresh connection to Y in the SAME tick — recovery,
+  // not a wait for the pre-deadline service wake.
+  a.run_tick(now);
+
+  assert_eq!(
+    a.live_connections_to(x_addr),
+    0,
+    "the drained X was reaped this tick"
+  );
+  assert!(
+    a.live_connections_to(y) >= 1,
+    "the cap-blocked reliable dial opened a connection to Y the same tick X was reaped"
+  );
+}
+
 /// A cold dial (to a peer with NO established connection) that `service_dials`
 /// attempts must flush its Initial AND register its deadline key in the same call
 /// — even though it mints no bridge (its `open(Bi)` returns `None`, still
