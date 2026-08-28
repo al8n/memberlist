@@ -727,21 +727,30 @@ impl ConnTable {
   ///
   /// The accepted connection is always inserted into the slab (so quinn can
   /// drive it and its inbound bidi streams are serviced). It is written into
-  /// `route.inbound` when the current inbound is `None`, classifies closed, or
-  /// is older by generation — so an accept tracks the freshest inbound (this
-  /// connection is newest-created, so a newer accept always wins over a live
-  /// older one). NEVER written into `route.outbound`: an accept can therefore
-  /// never displace a self-initiated outbound, else the peer-initiated
-  /// connection would become the slot our outbound exchanges select while the
-  /// peer binds its accept side to the other connection, wedging the exchange
-  /// (the peer wrongly never confirmed → false Suspect). Keeping the two
-  /// directions in separate fields makes that wedge-avoidance structural.
+  /// `route.inbound` only when the current inbound slot is empty or holds a
+  /// closed/gone connection — an accept never displaces a live (handshaking or
+  /// established) tracked inbound.
+  ///
+  /// The rule: an accept proves only that an Initial datagram arrived, which a
+  /// delayed pre-crash Initial can also produce; it does NOT prove the remote
+  /// instance is currently alive. A completed handshake does prove liveness.
+  /// Route displacement between competing inbounds is therefore gated on the
+  /// establishment chokepoint ([`Self::on_established_transition`]), where the
+  /// freshest proven-live inbound wins by generation — not at accept time, where
+  /// a delayed pre-crash Initial (structurally incapable of completing its
+  /// handshake) would otherwise displace a proven-live route. Accept-time writes
+  /// fill only an empty or closed slot.
+  ///
+  /// NEVER written into `route.outbound`: an accept can therefore never displace
+  /// a self-initiated outbound, else the peer-initiated connection would become
+  /// the slot our outbound exchanges select while the peer binds its accept side
+  /// to the other connection, wedging the exchange (the peer wrongly never
+  /// confirmed → false Suspect). Keeping the two directions in separate fields
+  /// makes that wedge-avoidance structural.
   ///
   /// The displaced (previous) inbound, if any, stays in the slab until its
   /// drained-reap; its handle is no longer in `route.inbound`, so the
-  /// equality-guarded [`Self::reap_if_drained`] cannot clobber this one. A
-  /// newest-established-inbound promotion for the same peer runs later at the
-  /// establishment chokepoint ([`Self::on_established_transition`]).
+  /// equality-guarded [`Self::reap_if_drained`] cannot clobber this one.
   pub(crate) fn insert_accepted(
     &mut self,
     ch: ConnectionHandle,
@@ -771,16 +780,12 @@ impl ConnTable {
       "accepted connection slab slot must equal ConnectionHandle"
     );
     *self.pending_inbound.entry(peer).or_insert(0) += 1;
-    // Track the freshest inbound: set `route.inbound` when the current inbound
-    // is None/closed, or when this newly-created (hence newest-generation)
-    // connection is fresher than the one currently tracked. Never touch
-    // `route.outbound`.
+    // Fill only an empty or closed inbound slot; never displace a live inbound
+    // at accept (that decision belongs to the establishment chokepoint). Never
+    // touch `route.outbound`.
     let replace = match self.peer_routes.get(&peer).and_then(|r| r.inbound) {
       None => true,
-      Some(cur) => self
-        .conns
-        .get(cur.0)
-        .is_none_or(|e| e.conn.is_closed() || generation > e.generation),
+      Some(cur) => self.conns.get(cur.0).is_none_or(|e| e.conn.is_closed()),
     };
     if replace {
       self.peer_routes.entry(peer).or_default().inbound = Some(ch);

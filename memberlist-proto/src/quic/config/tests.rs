@@ -94,6 +94,32 @@ fn build_installs_configured_server_name() {
   assert_eq!(&*cfg.sni_for(&peer), "localhost");
 }
 
+#[test]
+fn build_rejects_zero_max_idle_timeout() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  // A zero idle-timeout transport parameter DISABLES the QUIC idle timeout
+  // (RFC 9000 §18.2), removing the stale-connection self-healing bound — rejected.
+  // (`QuicOptions` is not `Debug`, so match the `Result` rather than `expect_err`.)
+  let result = QuicConfigOptions::new(cert, key, ca)
+    .with_max_idle_timeout(Some(Duration::ZERO))
+    .build();
+  assert!(
+    matches!(result, Err(QuicConfigError::IdleTimeoutZero)),
+    "a zero max_idle_timeout must be rejected with IdleTimeoutZero"
+  );
+
+  // A finite idle-timeout still builds.
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+  QuicConfigOptions::new(cert, key, ca)
+    .with_max_idle_timeout(Some(Duration::from_secs(20)))
+    .build()
+    .expect("a finite max_idle_timeout builds");
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn quic_config_options_serde_round_trip() {

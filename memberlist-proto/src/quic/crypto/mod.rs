@@ -327,7 +327,12 @@ impl QuicOptions {
   /// direction would be a footgun). The caller controls every other
   /// tunable (`max_idle_timeout`, `stream_receive_window`, MTU
   /// discovery, congestion controller, …) by populating that
-  /// `TransportConfig` before handing it in. The constructor
+  /// `TransportConfig` before handing it in. Leaving `max_idle_timeout`
+  /// finite is recommended: disabling it (a zero transport parameter per
+  /// RFC 9000 §18.2) removes the idle-timeout bound that self-heals a stale
+  /// connection, so a zombie could persist indefinitely; the
+  /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build)
+  /// path rejects a zero `max_idle_timeout` for that reason. The constructor
   /// unconditionally forces `max_concurrent_uni_streams = 0` on the
   /// supplied value (mutating it before moving it into a shared `Arc`,
   /// so a caller's surviving `Arc` view cannot accidentally re-enable

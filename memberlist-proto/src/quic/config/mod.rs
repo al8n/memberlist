@@ -237,6 +237,13 @@ impl QuicConfigOptions {
     // immutable for the connection's life, independent of any post-migration
     // transport 4-tuple — so migration is transparent to the connection table.
     if let Some(t) = self.max_idle_timeout {
+      // A zero idle-timeout transport parameter DISABLES the idle timeout (RFC
+      // 9000 §18.2), removing the bound on stale-connection self-healing — the
+      // opposite of the field's intent. Reject it; an unset timeout takes quinn's
+      // finite default.
+      if t.is_zero() {
+        return Err(QuicConfigError::IdleTimeoutZero);
+      }
       let idle = IdleTimeout::try_from(t).map_err(|_| QuicConfigError::IdleTimeoutTooLarge(t))?;
       transport.max_idle_timeout(Some(idle));
     }
@@ -409,6 +416,16 @@ pub enum QuicConfigError {
   /// The configured `max_idle_timeout` exceeds the QUIC varint encoding range.
   #[error("max_idle_timeout {0:?} is too large for the QUIC idle-timeout encoding")]
   IdleTimeoutTooLarge(Duration),
+  /// The configured `max_idle_timeout` is exactly zero. Per RFC 9000 §18.2 a
+  /// zero idle-timeout transport parameter means the idle timeout is DISABLED —
+  /// the opposite of what the field name suggests — which would remove the bound
+  /// on stale-connection self-healing. Leave it unset for quinn's finite default
+  /// instead.
+  #[error(
+    "max_idle_timeout of zero disables the QUIC idle timeout (RFC 9000 §18.2); \
+     leave it unset for the default finite timeout"
+  )]
+  IdleTimeoutZero,
 }
 
 #[cfg(test)]
