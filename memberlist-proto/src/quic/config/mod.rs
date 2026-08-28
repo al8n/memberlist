@@ -232,6 +232,10 @@ impl QuicConfigOptions {
     let endpoint = EndpointConfig::default();
 
     let mut transport = TransportConfig::default();
+    // Connection migration stays enabled (quinn's default). The membership
+    // identity a connection is keyed on is its logical/advertised address and is
+    // immutable for the connection's life, independent of any post-migration
+    // transport 4-tuple — so migration is transparent to the connection table.
     if let Some(t) = self.max_idle_timeout {
       let idle = IdleTimeout::try_from(t).map_err(|_| QuicConfigError::IdleTimeoutTooLarge(t))?;
       transport.max_idle_timeout(Some(idle));

@@ -350,6 +350,27 @@ impl ConnTable {
     None
   }
 
+  /// Debug tripwire for the logical-immutable identity contract: a connection's
+  /// `peer` is the key its route is filed under, so no `peer_routes` key OTHER
+  /// than `ch`'s own peer may reference `ch`. A future change that let `peer`
+  /// follow QUIC path migration would file the route under a stale key while
+  /// `peer()` returns the migrated address, stranding peer-keyed parked dials;
+  /// this catches that divergence. Debug-only (the scan compiles out in release).
+  pub(crate) fn debug_assert_peer_is_route_key(&self, ch: ConnectionHandle) {
+    debug_assert!(
+      {
+        match self.conns.get(ch.0) {
+          None => true,
+          Some(e) => !self
+            .peer_routes
+            .iter()
+            .any(|(k, r)| *k != e.peer && (r.outbound == Some(ch) || r.inbound == Some(ch))),
+        }
+      },
+      "connection {ch:?} is referenced by a peer_routes key other than its own peer"
+    );
+  }
+
   /// Pre-pass over `peer`'s route, applied before either selection table.
   ///
   /// **P1 — prune a closed inbound.** A `DeadInbound` (closed, never

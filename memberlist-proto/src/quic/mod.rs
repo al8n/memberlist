@@ -2220,6 +2220,10 @@ impl<I, R> QuicEndpoint<I, R> {
       }
       None => return,
     };
+    // The slot-free wake is keyed by the connection's membership address, which
+    // must be the key its route is filed under; a `peer` that followed QUIC path
+    // migration would strand this wake against the original key.
+    self.conns.debug_assert_peer_is_route_key(ch);
     self.slot_freed_peers.insert(peer);
   }
 
@@ -5437,6 +5441,10 @@ where
     let mut ready_peers: SmallVec<SocketAddr> = SmallVec::new();
     for ch in self.conns.iter_handles() {
       let marks = self.service_one_conn(ch, now);
+      // The parked bucket is serviced by this connection's membership address,
+      // which must be the key its route is filed under (else the wake strands
+      // against the original key).
+      self.conns.debug_assert_peer_is_route_key(ch);
       // Establishment unblocks the dials parked on THIS connection's peer;
       // resolve it while `ch` is still in hand (it may have been reaped during
       // the pass, in which case there is no bucket to service — the tick is the
@@ -5475,6 +5483,13 @@ where
   /// dials; they cannot be acted on in place because the parked-dial servicing
   /// re-borrows `self.conns` through `get_or_dial`.
   fn service_one_conn(&mut self, ch: ConnectionHandle, now: Instant) -> ServiceMarks {
+    // Both the inbound-accept and the inbound-datagram drains below attribute
+    // work to this connection's membership address (`e.peer()`), which must be
+    // the key its route is filed under. Asserted once here — the whole pass
+    // holds `e`'s exclusive borrow of the table, so the check cannot sit inline
+    // at those two sites — defending against a future `peer` that follows QUIC
+    // path migration and strands peer-keyed parked dials.
+    self.conns.debug_assert_peer_is_route_key(ch);
     let Some(e) = self.conns.get_mut(ch) else {
       return ServiceMarks::default();
     };
