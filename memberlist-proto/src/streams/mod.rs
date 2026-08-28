@@ -1625,22 +1625,37 @@ where
     // Drop inbound gossip buffered before leave — handle_packet would drop it
     // anyway once not Running, so it must not linger or later decode.
     self.mem_ingress.clear();
-    // Cancel every OUTBOUND exchange (kind is Some) whose request bytes are still
-    // queued in out_transmit: its `Connect` was already drained (the queued ones
-    // were retired above), but the request is not yet on the wire, so writing it
-    // after leave would advertise our pre-leave Alive. Under `terminalize` the
-    // driver holds this exchange's `eid`, so its terminal is the one
-    // `ExchangeCompleted(Failed)` `cancel_exchange(_, true)` emits. Inbound
-    // exchanges and request-sent outbound exchanges are left to drain. A `Vec`
-    // keeps this no_std-clean.
-    let unsent_outbound: Vec<ExchangeId> = self
+    // Cancel every OUTBOUND exchange whose APPLICATION request has not reached
+    // the wire — its `Connect` was already drained (the queued ones were retired
+    // above), so writing its request after leave would advertise our pre-leave
+    // Alive. Two states qualify:
+    //   (a) request bytes still queued in `out_transmit`; or
+    //   (b) the bridge is still an unminted `PendingMint::Outbound` — a
+    //       handshaking dialer whose record-layer prefix (e.g. a TLS ClientHello)
+    //       has already flushed (`out_transmit` empty) while the application
+    //       request is still held in the inner endpoint's pending intent, unsent.
+    //       `leave` clears that intent, so without cancelling here the
+    //       handshaking bridge would linger with no terminal until its stream
+    //       deadline, leaving a parked reliable-send / join unresolved.
+    // A MINTED bridge with an empty `out_transmit` has handed its request to the
+    // transport and is genuinely in-flight; it (and inbound exchanges) is left to
+    // drain — its terminal arrives from `reap_bridge`, never here, so it is not
+    // double-terminalized. Under `terminalize` the driver holds a drained-Connect
+    // exchange's `eid`, so its one terminal is the `ExchangeCompleted(Failed)`
+    // `cancel_exchange(_, true)` emits; `cancel_exchange` also tears the
+    // handshaking bridge down. A `Vec` keeps this no_std-clean.
+    let outbound: Vec<ExchangeId> = self
       .exchanges
       .iter()
       .filter(|(_, meta)| meta.outbound)
       .map(|(eid, _)| *eid)
       .collect();
-    for eid in unsent_outbound {
-      if self.exchange_has_pending_bytes(eid) {
+    for eid in outbound {
+      let unminted_outbound = matches!(
+        self.exchanges.get(&eid).map(|meta| &meta.mint),
+        Some(Some(PendingMint::Outbound(_)))
+      );
+      if self.exchange_has_pending_bytes(eid) || unminted_outbound {
         self.cancel_exchange(eid, terminalize);
       }
     }

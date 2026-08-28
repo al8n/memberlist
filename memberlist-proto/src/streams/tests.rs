@@ -1233,6 +1233,139 @@ mod tls {
     );
   }
 
+  /// Completeness of the leave-cancellation sweep: a drained-`Connect` outbound
+  /// TLS exchange whose ClientHello has ALREADY flushed (`out_transmit` empty)
+  /// while the bridge is still an unminted `PendingMint::Outbound` — the peer
+  /// crash-stopped after the ClientHello, sending no handshake response and no
+  /// FIN — is terminalized PROMPTLY by `leave()`, with NO dependence on the
+  /// stream deadline. The sweep's second predicate (unminted `PendingMint::
+  /// Outbound`, not just non-empty `out_transmit`) catches it: exactly one
+  /// `ExchangeCompleted(Failed)`, the handshaking bridge torn down, an `Abort`
+  /// queued, and no duplicate terminal.
+  #[test]
+  fn leave_terminalizes_flushed_unminted_tls_handshake_exchange() {
+    let now = Instant::now();
+    let mut coord = tls_coord(7330);
+    let _sid = coord.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let exchange = match coord.poll_action().expect("the dial surfaces a Connect") {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {other:?}"),
+    };
+    while coord.poll_action().is_some() {}
+
+    // Drain the flushed ClientHello so `out_transmit` is empty; feed NO server
+    // response, so the bridge stays Handshaking (unminted `PendingMint::Outbound`).
+    let mut hello_bytes = 0usize;
+    while let Some((_id, _peer, bytes)) = coord.poll_transport_transmit() {
+      hello_bytes += bytes.len();
+    }
+    assert!(hello_bytes > 0, "the TLS dialer flushed a ClientHello");
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "the handshaking bridge is live (unminted) before leave",
+    );
+
+    // Leave WITHOUT advancing time or firing a timeout.
+    coord.leave(now).expect("leave from a running node");
+
+    let mut completed = Vec::new();
+    let mut aborts = 0;
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::ExchangeCompleted(c) => completed.push((c.eid(), c.outcome(), c.kind())),
+        Event::DialAborted(_) => aborts += 1,
+        _ => {}
+      }
+    }
+    assert_eq!(
+      aborts, 0,
+      "a drained-Connect exchange completes, never DialAborted"
+    );
+    assert_eq!(
+      completed.as_slice(),
+      &[(exchange, ExchangeStatus::Failed, ExchangeKind::PushPull)],
+      "one immediate Failed completion for the flushed-but-unminted TLS exchange",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the handshaking bridge is torn down by the leave cancel",
+    );
+
+    // The teardown surfaces an Abort (the half-open TLS connection is not left
+    // live); no `Connect` and no duplicate terminal.
+    let mut aborted = false;
+    while let Some(a) = coord.poll_action() {
+      match a {
+        StreamAction::Abort(r) if r.id() == exchange => aborted = true,
+        StreamAction::Connect(_) => panic!("a left node surfaces no Connect"),
+        _ => {}
+      }
+    }
+    assert!(
+      aborted,
+      "leave queues an Abort to tear the half-open TLS connection down"
+    );
+    let mut duplicate_terminals = 0;
+    while let Some(ev) = coord.poll_event() {
+      if matches!(ev, Event::ExchangeCompleted(_) | Event::DialAborted(_)) {
+        duplicate_terminals += 1;
+      }
+    }
+    assert_eq!(
+      duplicate_terminals, 0,
+      "no duplicate terminal after the leave"
+    );
+  }
+
+  /// The `leave_silent` twin (the driver's hard-shutdown teardown path): the same
+  /// flushed-but-unminted TLS exchange is cancelled and its handshaking bridge
+  /// torn down (the connection is not left live), but NO application terminal is
+  /// emitted — the shutdown drain reaps the parked waiter with its own `Shutdown`
+  /// outcome, which a leave-cancel terminal would preempt.
+  #[test]
+  fn leave_silent_cancels_flushed_unminted_tls_handshake_without_terminal() {
+    let now = Instant::now();
+    let mut coord = tls_coord(7331);
+    let _sid = coord.start_push_pull(addr(7000), PushPullKind::Join, now);
+    let exchange = match coord.poll_action().expect("the dial surfaces a Connect") {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {other:?}"),
+    };
+    while coord.poll_action().is_some() {}
+    while coord.poll_transport_transmit().is_some() {}
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "the handshaking bridge is live before leave_silent",
+    );
+
+    coord.leave_silent(now).expect("silent leave");
+
+    let mut terminals = 0;
+    while let Some(ev) = coord.poll_event() {
+      if matches!(ev, Event::ExchangeCompleted(_) | Event::DialAborted(_)) {
+        terminals += 1;
+      }
+    }
+    assert_eq!(terminals, 0, "leave_silent emits no application terminal");
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "leave_silent still tears the handshaking bridge down",
+    );
+    let mut aborted = false;
+    while let Some(a) = coord.poll_action() {
+      if let StreamAction::Abort(r) = a
+        && r.id() == exchange
+      {
+        aborted = true;
+      }
+    }
+    assert!(aborted, "leave_silent still queues the Abort teardown");
+  }
+
   /// A TLS dial whose SNI provider returns `None` is rejected at
   /// `TlsRecords::dial_context` inside `service_dials`, retiring the intent via
   /// the pre-`ExchangeMeta` `dial_failed` path and draining the
