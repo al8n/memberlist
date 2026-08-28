@@ -1,6 +1,29 @@
 //! Per-peer QUIC connection table. One long-lived `quinn_proto::Connection`
 //! per peer (idle-evicted by quinn-proto's own `max_idle_timeout`); reaped
 //! only when `Connection::is_drained()` (the same protocol quinn uses).
+//!
+//! ## Residual: the transport layer does not order instance epochs
+//!
+//! Establishment does not prove the remote instance is *currently* alive: the
+//! server completes a handshake by replying to a client's `Finished`, and a
+//! delayed pre-crash client `Finished` still arriving under network delay drives
+//! that same completion. Nor does any transport-local signal reliably order two
+//! connections by which peer instance-epoch opened them — under unbounded
+//! network delay a delayed packet can interleave to fool creation-order,
+//! establishment-order, and close-the-older tracking alike. This table therefore
+//! makes NO attempt to rank connection instance-epochs; it selects the best
+//! *usable* connection and lets the most recently established inbound win.
+//!
+//! The bounded consequence: a zombie (an established connection to a peer's dead
+//! prior instance) can capture selection, but only until the negotiated idle
+//! timeout reaps it — the idle timeout is always finite (see the `build`-time
+//! rejection of a zero `max_idle_timeout`), and the negotiated value is the
+//! minimum of the two peers'. This is safety-preserving: every established
+//! connection is serviced by the coordinator's unconditional accept loops, so
+//! the peer's traffic and its SWIM refutations still flow over whichever
+//! connection each side prefers. The signal that actually resolves an
+//! instance-epoch conflict is the membership incarnation at the SWIM layer, one
+//! layer up — not the transport.
 
 use crate::Instant;
 use core::net::SocketAddr;
@@ -90,15 +113,6 @@ pub(crate) struct ConnEntry {
   /// Independent of the coordinator's separate `inbound_bridge_count` (which
   /// counts accepted bridges); a bridge contributes to exactly one of the two.
   outbound_bridge_count: usize,
-  /// Monotonic creation stamp, drawn from [`ConnTable::next_gen`] the moment
-  /// this entry is created (in `dial_fresh` and `insert_accepted`) and never
-  /// mutated. Orders connections by recency of CREATION — a later-created
-  /// connection always has a strictly greater generation. This is the correct
-  /// freshness signal for choosing among same-class connections to one peer:
-  /// unlike establishment time (which a delayed handshake distorts), creation
-  /// order cannot be reordered by a slow handshake, so a fresh post-restart
-  /// connection always outranks a stale pre-restart one.
-  generation: u64,
 }
 
 impl ConnEntry {
@@ -294,11 +308,6 @@ pub(crate) struct ConnTable {
   /// an O(total connections) scan per rejected datagram. A source with zero
   /// pending inbound connections has no entry (the map never stores a zero).
   pending_inbound: HashMap<SocketAddr, usize>,
-  /// The next connection generation to hand out. Increments on every connection
-  /// creation ([`Self::next_gen`]), so each connection's stamp is strictly
-  /// greater than every connection created before it. A `u64` never wraps in
-  /// practice (one increment per connection created for the process's life).
-  next_generation: u64,
 }
 
 impl ConnTable {
@@ -307,31 +316,7 @@ impl ConnTable {
       conns: Slab::new(),
       peer_routes: HashMap::new(),
       pending_inbound: HashMap::new(),
-      next_generation: 0,
     }
-  }
-
-  /// Return the next connection generation and advance the counter. Each call
-  /// yields a strictly greater value than the previous, so a later-created
-  /// connection always outranks an earlier one by generation.
-  fn next_gen(&mut self) -> u64 {
-    let g = self.next_generation;
-    debug_assert!(
-      self.next_generation != u64::MAX,
-      "connection generation counter must not wrap"
-    );
-    self.next_generation = self.next_generation.wrapping_add(1);
-    g
-  }
-
-  /// The fresher (higher-generation) of two tracked handles — the tiebreak used
-  /// when both candidates in the same selection class are usable, so a fresh
-  /// post-restart connection outranks a same-class zombie. A slab-gone handle
-  /// has generation `0` and loses to any live one.
-  fn fresher(&self, a: ConnectionHandle, b: ConnectionHandle) -> ConnectionHandle {
-    let ga = self.conns.get(a.0).map_or(0, |e| e.generation);
-    let gb = self.conns.get(b.0).map_or(0, |e| e.generation);
-    if ga >= gb { a } else { b }
   }
 
   /// `true` iff the table currently holds at least one closed connection whose
@@ -380,9 +365,7 @@ impl ConnTable {
   /// The best usable handle for `peer` — the derived selection an observer
   /// (`live_connections_to`, `try_open_uni_stream_to`, datagram sizing) rides,
   /// with NO dial side effect. Prefers an established connection, then a
-  /// handshaking one; within the first satisfied class, when BOTH the outbound
-  /// and inbound match, returns the fresher (higher-generation) one so a fresh
-  /// post-restart connection outranks a same-class zombie. A closed/terminal
+  /// handshaking one; outbound before inbound within each class. A closed/terminal
   /// handle is never usable, so this returns `None` for a peer whose only
   /// tracked connections are draining or handshake-failed. At most one handle
   /// (0 or 1 per peer).
@@ -390,17 +373,10 @@ impl ConnTable {
     let route = self.peer_routes.get(peer)?;
     let candidates = [route.outbound, route.inbound];
     for want in [HandleClass::Established, HandleClass::Handshaking] {
-      let mut best: Option<ConnectionHandle> = None;
       for ch in candidates.into_iter().flatten() {
         if self.classify(ch) == want {
-          best = Some(match best {
-            None => ch,
-            Some(b) => self.fresher(b, ch),
-          });
+          return Some(ch);
         }
-      }
-      if best.is_some() {
-        return best;
       }
     }
     None
@@ -514,7 +490,6 @@ impl ConnTable {
     let (ch, conn) = quinn
       .connect(now.into_std(), client, peer, server_name)
       .map_err(DialError::Connect)?;
-    let generation = self.next_gen();
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
@@ -525,7 +500,6 @@ impl ConnTable {
       pending_indexed: false,
       pending_events: VecDeque::new(),
       outbound_bridge_count: 0,
-      generation,
     });
     debug_assert_eq!(slot, ch.0, "quinn ConnectionHandle is the slab vacant_key");
     self.peer_routes.entry(peer).or_default().outbound = Some(ch);
@@ -543,8 +517,7 @@ impl ConnTable {
   /// `route.outbound` (`O`) and `route.inbound` (`I`), then applies the table
   /// for `reliability`:
   ///
-  /// **Reliable** (first matching row): both Established → the fresher by
-  /// generation; R1 `O` Established → `O`; R2 `I`
+  /// **Reliable** (first matching row): R1 `O` Established → `O`; R2 `I`
   /// Established → `I`; R3 `O` Handshaking → `O`; R4 `O` TerminalOutbound + `I`
   /// Handshaking → `I`; R5 `O` TerminalOutbound + no `I` → `O` (downstream
   /// `dial_failed`, anti-storm); R6 no `O` + `I` Handshaking → dial fresh under
@@ -552,8 +525,7 @@ impl ConnTable {
   /// — return the live inbound and repark, never propagate); R7 no `O`, no `I`
   /// → dial fresh under cap, else propagate the dial error.
   ///
-  /// **Unreliable** (first matching row): both Established → the fresher by
-  /// generation; U1 `O` Established → `O`; U2 `I`
+  /// **Unreliable** (first matching row): U1 `O` Established → `O`; U2 `I`
   /// Established → `I`; U3 `O` Handshaking → `O`; U4 `I` Handshaking → `I` (no
   /// companion dial); U5 `O` TerminalOutbound + no `I` → `O`; U6 no `O`, no `I`
   /// → cold-dial under cap, else the dial error (the datagram caller maps every
@@ -586,16 +558,6 @@ impl ConnTable {
     let ic = inbound.map(|ch| self.classify(ch));
     match reliability {
       Reliability::Reliable => {
-        if oc == Some(Established) && ic == Some(Established) {
-          // Both established: return the fresher by generation so a fresh
-          // post-restart connection outranks a same-class zombie (e.g. an
-          // established inbound from a restarted peer beats a locally-still-
-          // Established outbound to its dead prior instance).
-          return Ok(self.fresher(
-            outbound.expect("Established outbound handle present"),
-            inbound.expect("Established inbound handle present"),
-          ));
-        }
         if oc == Some(Established) {
           return Ok(outbound.expect("Established outbound handle present")); // R1
         }
@@ -635,14 +597,6 @@ impl ConnTable {
         self.dial_fresh(quinn, now, client, peer, server_name, max_connections)
       }
       Reliability::Unreliable => {
-        if oc == Some(Established) && ic == Some(Established) {
-          // Both established: the fresher by generation (same tiebreak as the
-          // reliable plane) — a fresh post-restart connection outranks a zombie.
-          return Ok(self.fresher(
-            outbound.expect("Established outbound handle present"),
-            inbound.expect("Established inbound handle present"),
-          ));
-        }
         if oc == Some(Established) {
           return Ok(outbound.expect("Established outbound handle present")); // U1
         }
@@ -675,44 +629,28 @@ impl ConnTable {
 
   /// Establishment-chokepoint promotion. Called the pass a connection's sticky
   /// `established_at_least_once` flips `false → true`. A newly-established
-  /// INBOUND becomes `route.inbound` only when the current inbound is `None` or
-  /// this connection is at least as fresh by generation
-  /// (`ch.generation >= current.generation`). Freshness is CREATION order, not
-  /// establishment order: a delayed pre-crash inbound whose handshake finishes
-  /// *after* a fresher post-restart inbound is already tracked has an older
-  /// generation, so it is REJECTED here and never overwrites the fresher one.
-  /// Touches only `.inbound` (never displaces a self-initiated outbound). A
-  /// newly-established OUTBOUND must already be its peer's tracked
-  /// `route.outbound` (an establishing outbound is `!closed`, so the pre-pass
-  /// never cleared it) — asserted, not written.
+  /// INBOUND becomes `route.inbound` unconditionally: completing the handshake is
+  /// the strongest liveness signal available at the transport layer, so the most
+  /// recently established inbound is the one selection should ride. Touches only
+  /// `.inbound` (never displaces a self-initiated outbound). A newly-established
+  /// OUTBOUND must already be its peer's tracked `route.outbound` (an
+  /// establishing outbound is `!closed`, so the pre-pass never cleared it) —
+  /// asserted, not written.
   ///
-  /// Bounded self-healing residual (a per-peer generation high-watermark
-  /// surviving route removal would close it but adds unbounded per-peer state —
-  /// the bounded window is the deliberate tradeoff): if the freshest inbound
-  /// reaps and empties the route, and only THEN a much-older pre-crash inbound
-  /// finally establishes, that stale inbound is promoted into the now-empty
-  /// route and selected until it idle-kills (~`max_idle_timeout`), after which
-  /// the route empties and a fresh dial proceeds. This is a narrow multi-event
-  /// window that self-heals.
+  /// The transport layer does NOT attempt to order connection instance-epochs
+  /// (see the module-level residual note): establishment proves an Initial +
+  /// Finished were exchanged, not that the remote instance is currently alive, so
+  /// a zombie can capture selection until the idle timeout reaps it. This is
+  /// bounded and safety-preserving; the resolving signal is the membership
+  /// incarnation at the SWIM layer.
   pub(crate) fn on_established_transition(&mut self, ch: ConnectionHandle) {
-    let (peer, direction, generation) = match self.conns.get(ch.0) {
-      Some(e) => (e.peer, e.direction, e.generation),
+    let (peer, direction) = match self.conns.get(ch.0) {
+      Some(e) => (e.peer, e.direction),
       None => return,
     };
     match direction {
       ConnDirection::Inbound => {
-        // Promote only when this connection is at least as fresh as the current
-        // tracked inbound; a stale delayed establishment is rejected.
-        let promote = match self.peer_routes.get(&peer).and_then(|r| r.inbound) {
-          None => true,
-          Some(cur) => self
-            .conns
-            .get(cur.0)
-            .is_none_or(|e| generation >= e.generation),
-        };
-        if promote {
-          self.peer_routes.entry(peer).or_default().inbound = Some(ch);
-        }
+        self.peer_routes.entry(peer).or_default().inbound = Some(ch);
       }
       ConnDirection::Outbound => {
         debug_assert!(
@@ -733,13 +671,12 @@ impl ConnTable {
   ///
   /// The rule: an accept proves only that an Initial datagram arrived, which a
   /// delayed pre-crash Initial can also produce; it does NOT prove the remote
-  /// instance is currently alive. A completed handshake does prove liveness.
-  /// Route displacement between competing inbounds is therefore gated on the
-  /// establishment chokepoint ([`Self::on_established_transition`]), where the
-  /// freshest proven-live inbound wins by generation — not at accept time, where
-  /// a delayed pre-crash Initial (structurally incapable of completing its
-  /// handshake) would otherwise displace a proven-live route. Accept-time writes
-  /// fill only an empty or closed slot.
+  /// instance is currently alive. Route displacement between competing inbounds
+  /// is therefore gated on the establishment chokepoint
+  /// ([`Self::on_established_transition`]), which promotes the most recently
+  /// established inbound — not at accept time, where a delayed pre-crash Initial
+  /// (structurally incapable of completing its handshake) would otherwise
+  /// displace a live route. Accept-time writes fill only an empty or closed slot.
   ///
   /// NEVER written into `route.outbound`: an accept can therefore never displace
   /// a self-initiated outbound, else the peer-initiated connection would become
@@ -757,7 +694,6 @@ impl ConnTable {
     conn: Connection,
     peer: SocketAddr,
   ) {
-    let generation = self.next_gen();
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
@@ -773,7 +709,6 @@ impl ConnTable {
       // handle a later local dial rides (simultaneous bidirectional dial), so a
       // dialer bridge may be opened on it — start the outbound count at zero.
       outbound_bridge_count: 0,
-      generation,
     });
     assert_eq!(
       slot, ch.0,

@@ -1115,27 +1115,6 @@ fn establish_outbound(
   ch
 }
 
-/// Establish a real connection in `t` that is LABELLED inbound (via
-/// `insert_accepted`) but dialed on `client_ep` to `remote`, so it can coexist
-/// with a client-dialed outbound in the SAME `t` under one slab lockstep. Used
-/// to build a peer whose route holds BOTH an established outbound and an
-/// established inbound.
-fn establish_client_dialed_as_inbound(
-  t: &mut ConnTable,
-  client_ep: &mut QuinnEndpoint,
-  cfg: &QuicOptions,
-  peer: SocketAddr,
-  remote: SocketAddr,
-) -> ConnectionHandle {
-  let now = Instant::now().into_std();
-  let (ch, conn) = client_ep
-    .connect(now, cfg.client().clone(), remote, "localhost")
-    .expect("client dial for the inbound-labelled connection");
-  t.insert_accepted(ch, conn, peer);
-  ferry_client_conn_to_established(t, client_ep, cfg, ch, remote);
-  ch
-}
-
 /// Asymmetric-reachability fix: a closed never-established INBOUND (the peer's
 /// failed dial toward us) is non-authoritative — it says nothing about our
 /// egress. A reliable intent must dial our OWN independent outbound, and the
@@ -1197,16 +1176,16 @@ fn closed_inbound_is_non_authoritative_and_triggers_a_fresh_outbound_dial() {
   );
 }
 
-/// An accept never displaces a LIVE tracked inbound: a newer inbound Y accepted
-/// while an older X is live (handshaking) does NOT overwrite `route.inbound` —
-/// an accept proves only that an Initial arrived, not that the remote instance
-/// is alive. Y becomes the tracked inbound only once it establishes (the
-/// establishment chokepoint promotes the fresher connection), after which
+/// An accept never displaces a LIVE tracked inbound: a second inbound Y accepted
+/// while X is live (handshaking) does NOT overwrite `route.inbound` — an accept
+/// proves only that an Initial arrived, not that the remote instance is alive. Y
+/// becomes the tracked inbound only once it establishes (the establishment
+/// chokepoint promotes the most recently established inbound), after which
 /// selection surfaces Y and Y stays discoverable when X is reaped.
 ///
-/// Negative control: restore the accept-time displacement in `insert_accepted`
-/// (`|| generation > e.generation`) — Y then displaces the live X at accept and
-/// the `route.inbound == Some(x)` assertion fails.
+/// Negative control: make `insert_accepted` overwrite unconditionally — Y then
+/// displaces the live X at accept and the `route.inbound == Some(x)` assertion
+/// fails.
 #[test]
 fn accept_does_not_displace_a_live_inbound() {
   let (mut client, _server, cfg) = quinn_pair();
@@ -1225,8 +1204,8 @@ fn accept_does_not_displace_a_live_inbound() {
   assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(x));
   assert_eq!(t.handle_for(&peer), Some(x));
 
-  // A NEWER inbound Y accepted while X is live (not closed) → X is NOT displaced;
-  // the tracked inbound stays X even though Y has a greater generation.
+  // A second inbound Y accepted while X is live (not closed) → X is NOT displaced;
+  // the tracked inbound stays X.
   let y = accept_inbound(
     &mut t,
     &mut client,
@@ -1235,22 +1214,18 @@ fn accept_does_not_displace_a_live_inbound() {
     peer,
     "127.0.0.1:4501".parse().unwrap(),
   );
-  assert!(
-    t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation,
-    "the later accept has a strictly greater generation"
-  );
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(x),
     "an accept does not displace a live tracked inbound"
   );
 
-  // Y establishes → the chokepoint promotes the fresher connection to tracked.
+  // Y establishes → the chokepoint promotes the most recently established inbound.
   t.on_established_transition(y);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(y),
-    "establishment promotes the fresher inbound"
+    "establishment promotes the newly-established inbound"
   );
   assert_eq!(
     t.handle_for(&peer),
@@ -1269,61 +1244,6 @@ fn accept_does_not_displace_a_live_inbound() {
     t.handle_for(&peer),
     Some(y),
     "the promoted inbound remains discoverable after the older one is reaped"
-  );
-}
-
-/// F1 delayed-pre-crash: a delayed pre-crash inbound X (older generation) that
-/// finishes its handshake AFTER a fresher post-restart inbound Y is already
-/// tracked must NOT overwrite Y. Freshness is CREATION order, not establishment
-/// order — `on_established_transition` rejects the stale late establishment.
-///
-/// Negative control: drop the `>=` generation guard in the inbound arm of
-/// `on_established_transition` (unconditional set) — the late X overwrites Y and
-/// both the `route.inbound == Y` and `handle_for == Y` assertions fail.
-#[test]
-fn on_established_transition_rejects_a_delayed_older_inbound() {
-  let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
-  let now = Instant::now();
-  let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-  // X accepted first (older generation) — the pre-crash inbound.
-  let x = accept_inbound(
-    &mut t,
-    &mut client,
-    &cfg,
-    now,
-    peer,
-    "127.0.0.1:4500".parse().unwrap(),
-  );
-  // Y accepted second (newer generation) — the post-restart inbound. The live X
-  // is not displaced at accept, so the tracked inbound is still X.
-  let y = accept_inbound(
-    &mut t,
-    &mut client,
-    &cfg,
-    now,
-    peer,
-    "127.0.0.1:4501".parse().unwrap(),
-  );
-  assert!(t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation);
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(x));
-
-  // Y establishes → the chokepoint promotes the fresher connection to tracked.
-  t.on_established_transition(y);
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(y));
-
-  // X's handshake finishes LATE (older generation) → rejected, does NOT
-  // overwrite the fresher Y.
-  t.on_established_transition(x);
-  assert_eq!(
-    t.peer_routes.get(&peer).and_then(|r| r.inbound),
-    Some(y),
-    "a delayed older inbound must not overwrite the fresher tracked inbound"
-  );
-  assert_eq!(
-    t.handle_for(&peer),
-    Some(y),
-    "selection stays on the fresher inbound"
   );
 }
 
@@ -1403,140 +1323,74 @@ fn established_outbound_precedes_a_live_inbound() {
   );
 }
 
-/// F2 both-established hard-restart: a peer whose route holds an established
-/// OUTBOUND with an OLDER generation (a zombie to the peer's dead prior instance)
-/// and an established INBOUND with a NEWER generation (from the restarted peer).
-/// The freshest-usable tiebreak must return the fresher inbound on the reliable
-/// plane, the unreliable plane, and `handle_for` — not the stale outbound that
-/// R1 would rank first.
-///
-/// Negative control: remove the both-established generation tiebreak (R1/U1
-/// unconditional; `handle_for` fixed outbound-before-inbound) — every selection
-/// returns the stale outbound and the `== i` assertions fail.
+/// The self-healing residual the transport layer deliberately accepts: a delayed
+/// inbound that establishes into an EMPTY route is promoted (unconditionally, the
+/// most recently established inbound wins), and even if it is a zombie to a dead
+/// prior instance it is bounded — once it idle-reaps the route empties and a
+/// subsequent fresh reliable dial proceeds. No permanent wedge; the route
+/// recovers.
 #[test]
-fn freshest_established_wins_over_a_same_class_zombie() {
+fn established_inbound_into_empty_route_promotes_then_self_heals_on_reap() {
   let (mut client, _server, cfg) = quinn_pair();
   let mut t = ConnTable::new();
   let now = Instant::now();
-  let peer: SocketAddr = FERRY_SERVER_ADDR.parse().unwrap();
-  // Older established outbound O (created first → lower generation).
-  let o = establish_outbound(&mut t, &mut client, &cfg, peer);
-  // Newer established inbound I for the SAME peer (created second → higher
-  // generation), dialed to a distinct transport address but labelled inbound.
-  let remote_i: SocketAddr = "127.0.0.1:5002".parse().unwrap();
-  let i = establish_client_dialed_as_inbound(&mut t, &mut client, &cfg, peer, remote_i);
-  assert!(
-    t.conns.get(i.0).unwrap().generation > t.conns.get(o.0).unwrap().generation,
-    "the inbound was created later, so it is fresher"
-  );
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.outbound), Some(o));
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(i));
+  let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
 
-  assert_eq!(
-    dial_reliable(&mut t, &mut client, &cfg, now, peer).unwrap(),
-    i,
-    "reliable selection returns the fresher established inbound, not the zombie outbound"
-  );
-  assert_eq!(
-    t.get_or_dial(
-      &mut client,
-      now,
-      cfg.client().clone(),
-      peer,
-      "localhost",
-      None,
-      Reliability::Unreliable,
-    )
-    .unwrap(),
-    i,
-    "unreliable selection returns the fresher established inbound"
-  );
-  assert_eq!(
-    t.handle_for(&peer),
-    Some(i),
-    "handle_for returns the fresher established inbound"
-  );
-}
-
-/// A proven-live route (an older established outbound O plus a fresher
-/// established inbound Y, tracked) must not be knocked off by a LATE accepted
-/// handshaking X (a delayed pre-crash Initial, newest generation). The accept
-/// does not displace the live Y, so every plane keeps selecting the fresher
-/// established Y — even though X outranks Y by generation, X has not proven
-/// liveness. When X later closes and reaps, Y stays tracked.
-///
-/// Negative control: restore the accept-time displacement in `insert_accepted`
-/// (`|| generation > e.generation`) — X (newest generation) displaces the live Y
-/// at accept, so `route.inbound` becomes the handshaking X, selection falls back
-/// to the established outbound O, and the `== y` assertions fail.
-#[test]
-fn a_late_accept_does_not_knock_a_proven_live_route_off_the_fresh_inbound() {
-  let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
-  let now = Instant::now();
-  let peer: SocketAddr = FERRY_SERVER_ADDR.parse().unwrap();
-  // Older established outbound O (created first → lower generation).
-  let o = establish_outbound(&mut t, &mut client, &cfg, peer);
-  // Fresher established inbound Y for the same peer (tracked at accept because the
-  // inbound slot was empty).
-  let remote_y: SocketAddr = "127.0.0.1:5002".parse().unwrap();
-  let y = establish_client_dialed_as_inbound(&mut t, &mut client, &cfg, peer, remote_y);
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.outbound), Some(o));
-  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(y));
-
-  // A LATE accepted handshaking X (newest generation) — a delayed pre-crash
-  // Initial. It does NOT displace the live Y at accept.
+  // A delayed inbound X arrives into an EMPTY route (accept fills the empty slot).
   let x = accept_inbound(
     &mut t,
     &mut client,
     &cfg,
     now,
     peer,
-    "127.0.0.1:4700".parse().unwrap(),
+    "127.0.0.1:4500".parse().unwrap(),
   );
-  assert!(t.conns.get(x.0).unwrap().generation > t.conns.get(y.0).unwrap().generation);
-  assert!(t.conns.get(x.0).unwrap().conn_ref().is_handshaking());
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(x));
+
+  // It establishes → the chokepoint promotes it unconditionally; selection rides
+  // it (this is the zombie-can-capture-selection residual).
+  t.on_established_transition(x);
+  assert_eq!(t.peer_routes.get(&peer).and_then(|r| r.inbound), Some(x));
   assert_eq!(
-    t.peer_routes.get(&peer).and_then(|r| r.inbound),
-    Some(y),
-    "the late accept does not displace the proven-live inbound"
+    t.handle_for(&peer),
+    Some(x),
+    "the promoted inbound is selected"
   );
 
-  // Every plane keeps selecting the fresher established inbound Y.
-  assert_eq!(
-    dial_reliable(&mut t, &mut client, &cfg, now, peer).unwrap(),
-    y,
-    "reliable selection stays on the fresher established inbound"
-  );
-  assert_eq!(
-    t.get_or_dial(
-      &mut client,
-      now,
-      cfg.client().clone(),
-      peer,
-      "localhost",
-      None,
-      Reliability::Unreliable,
-    )
-    .unwrap(),
-    y,
-    "unreliable selection stays on the fresher established inbound"
-  );
-  assert_eq!(t.handle_for(&peer), Some(y), "handle_for stays on Y");
-
-  // X closes and reaps → Y (in neither field changed) stays tracked.
+  // The idle timeout closes it; its drained-reap empties the route (the bounded
+  // self-heal — no per-peer state survives).
   t.get_mut(x)
     .unwrap()
     .conn_mut()
     .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
   drive_to_drained(&mut t, x);
   assert!(t.reap_if_drained(&mut client, x));
-  assert_eq!(
-    t.peer_routes.get(&peer).and_then(|r| r.inbound),
-    Some(y),
-    "reaping the late X leaves Y tracked"
+  assert_eq!(t.handle_for(&peer), None, "the reaped route is empty");
+  assert!(
+    !t.peer_routes.contains_key(&peer),
+    "no residual route entry"
   );
-  assert_eq!(t.handle_for(&peer), Some(y));
+
+  // A subsequent fresh reliable dial proceeds — the route recovers, no wedge.
+  // (The reaped slab slot is reused, so the new handle value may equal the old
+  // one; recovery is proven by a fresh Outbound connection being dialed, not by
+  // the handle differing.)
+  let fresh = dial_reliable(&mut t, &mut client, &cfg, now, peer)
+    .expect("a fresh reliable dial proceeds after the zombie reaps");
+  assert_eq!(
+    t.conns.len(),
+    1,
+    "exactly the fresh outbound is tracked after recovery"
+  );
+  assert_eq!(
+    t.conns.get(fresh.0).unwrap().direction,
+    ConnDirection::Outbound,
+    "the recovery dial is a self-initiated outbound"
+  );
+  assert_eq!(
+    t.peer_routes.get(&peer).and_then(|r| r.outbound),
+    Some(fresh)
+  );
 }
 
 /// A real established INBOUND is selected on both planes (R2 / U2), and a newer
@@ -1578,29 +1432,28 @@ fn established_inbound_selected_and_promotion_supersedes_the_prior_one() {
     "U2 selects the established inbound"
   );
 
-  // A NEWER inbound Y is accepted+established while X is live → NOT displaced at
+  // A second inbound Y is accepted+established while X is live → NOT displaced at
   // accept (X stays tracked); the promotion at the establishment chokepoint is
-  // what moves selection to the fresher Y.
+  // what moves selection to the newly-established Y.
   let y = establish_inbound(&mut t, &mut server, &mut client, &cfg);
   assert_ne!(x, y);
-  assert!(t.conns.get(y.0).unwrap().generation > t.conns.get(x.0).unwrap().generation);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(x),
     "a new inbound is not tracked at accept while the prior one is live"
   );
 
-  // The establishment chokepoint promotes the fresher established inbound.
+  // The establishment chokepoint promotes the newly-established inbound.
   t.on_established_transition(y);
   assert_eq!(
     t.peer_routes.get(&peer).and_then(|r| r.inbound),
     Some(y),
-    "establishment promotes the fresher inbound over the prior one"
+    "establishment promotes the newly-established inbound over the prior one"
   );
   let sel2 = dial_reliable(&mut t, &mut client, &cfg, now, peer).unwrap();
   assert_eq!(
     sel2, y,
-    "selection follows to the freshest established inbound (R2), not the older X"
+    "selection follows to the newly-established inbound (R2), not the prior X"
   );
 }
 
