@@ -4045,15 +4045,24 @@ where
 
     if old_state.is_dead() || old_state.is_left() {
       self.emit_event(Event::NodeJoined(new_server));
-    } else if old_meta != new_meta {
+    } else if old_meta != new_meta
+      || local_protocol != alive_protocol
+      || local_delegate != alive_delegate
+    {
+      // A strictly-newer incarnation that changes any event-relevant facet of
+      // the server — metadata, the protocol version, or the delegate version —
+      // is an update. Comparing the whole tuple (not just the metadata) ensures
+      // an event-only consumer never keeps stale protocol/delegate capability
+      // info after a version-only Alive.
       self.emit_event(Event::NodeUpdated(new_server));
     } else {
       // The update applied a strictly-newer incarnation (the older/equal guards
       // returned above), changing the member's incarnation and possibly its
       // state (e.g. a Suspect -> Alive refutation), but NEITHER a resurrection
-      // NOR a meta change fired an event. The published snapshot reflects that
-      // new state/incarnation, so bump explicitly — otherwise a driver would
-      // serve a stale `Suspect` for a node that is now `Alive`.
+      // NOR a change to the metadata / protocol / delegate versions fired an
+      // event. The published snapshot reflects that new state/incarnation, so
+      // bump explicitly — otherwise a driver would serve a stale `Suspect` for a
+      // node that is now `Alive`.
       self.bump_snapshot_version();
     }
   }
@@ -4363,8 +4372,31 @@ where
     }
   }
 
+  /// Whether a periodic failure-detection (`Detection`) probe is currently
+  /// outstanding. Derived from `self.probes` — the single source of truth —
+  /// rather than a separate flag that could desync from the map. O(probes) and
+  /// off the hot path: evaluated once per probe interval, and under the
+  /// single-flight scheduler `self.probes` holds at most one Detection probe
+  /// plus a few application pings.
+  fn detection_probe_in_flight(&self) -> bool {
+    self.probes.values().any(|p| p.kind == ProbeKind::Detection)
+  }
+
   /// Fire the probe scheduler if its deadline has elapsed.
-  /// Calls `start_probe(now)` and reschedules `next_probe = now + probe_interval`.
+  ///
+  /// A Detection probe's failure deadline is `sent + awareness.scale_timeout(
+  /// probe_interval)` = `(score + 1) * probe_interval`, so a degraded local node
+  /// (health score > 0) keeps a probe outstanding for several base intervals.
+  /// Without a single-flight guard the scheduler would start a fresh Detection
+  /// round every base interval, stacking up to `score + 1` concurrent rounds
+  /// precisely when the node is degraded — the opposite of Lifeguard's intent to
+  /// shed load and avoid false suspicions. Instead the deadline is re-armed every
+  /// base interval (missed-tick: re-check each period whether or not a probe
+  /// starts) and the next Detection round waits for the current one's
+  /// terminalization — an ack, or its failure deadline. This mirrors the
+  /// reference implementation's synchronous probe driven by a fixed-interval,
+  /// missed-tick ticker. Application pings (`ProbeKind::Ping`) are independent
+  /// and never gated by this guard.
   fn fire_probe_scheduler(&mut self, now: Instant) {
     let Some(deadline) = self.next_probe else {
       return;
@@ -4372,6 +4404,19 @@ where
     if now < deadline {
       return;
     }
+    // Missed-tick re-arm: advance the deadline every base interval regardless of
+    // whether a probe starts this tick, so the driver re-checks each period. This
+    // is a single re-arm to `now + probe_interval`, not interval catch-up.
+    self.next_probe = Some(now + self.cfg.probe_interval());
+
+    // Single-flight: while a Detection probe is outstanding, skip this tick
+    // without starting a new round and without touching the round-robin / reset
+    // accounting — a skipped tick did no probe work, so the probe count must not
+    // advance (the reference advances it only inside the probe itself).
+    if self.detection_probe_in_flight() {
+      return;
+    }
+
     // Once per full round-robin pass, prune long-dead members. Without
     // this, with the default `dead_node_reclaim_time == 0`, Dead/Left
     // entries are never collected and a returning id at a new address
@@ -4383,7 +4428,6 @@ where
       self.probes_since_reset = 0;
     }
     self.start_probe(now);
-    self.next_probe = Some(now + self.cfg.probe_interval());
   }
 
   /// Fire the gossip scheduler if its deadline has elapsed.
@@ -4694,6 +4738,14 @@ where
       );
       self.suspicion_deadlines.set(&id, None);
       self.members.remove(&id);
+      // Queue ownership ends when the member is reclaimed. A reclaimed id's
+      // membership broadcast is keyed by that id, and once the record is gone
+      // nothing invalidates it by re-broadcasting under the same id; when
+      // gossip cannot drain (disabled, or no usable gossip target) the
+      // retransmit ceiling never fires either, so the orphaned entry would
+      // outlive the member and grow the queue past the `max_members` bound
+      // that is meant to cap every per-member structure. Purge it here.
+      self.broadcast.remove_by_id(&id);
     }
     // Decorrelate probe order across rounds: without a reshuffle the round-robin
     // cursor walks the members in a fixed insertion-derived order every pass, so

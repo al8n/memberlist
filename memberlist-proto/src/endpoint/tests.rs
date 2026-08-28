@@ -6265,6 +6265,204 @@ fn probe_scheduler_fires_when_deadline_elapses() {
   );
 }
 
+/// Count of outstanding failure-detection (Detection) probes.
+fn detection_probe_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.probes
+    .values()
+    .filter(|p| p.kind == ProbeKind::Detection)
+    .count()
+}
+
+/// Count of outstanding application (Ping) probes.
+fn app_ping_probe_count(e: &Endpoint<SmolStr, SocketAddr>) -> usize {
+  e.probes
+    .values()
+    .filter(|p| p.kind == ProbeKind::Ping)
+    .count()
+}
+
+/// A degraded local node (health score > 0) must not stack concurrent
+/// Detection rounds. The Detection failure deadline is `sent + scale_timeout(
+/// probe_interval)` = `(score + 1) * probe_interval`, so a probe started at t0
+/// lives past several base intervals. The scheduler re-arms every base interval
+/// (missed-tick) but must NOT start a second Detection round while the first is
+/// still outstanding; it starts a fresh one only after the current one
+/// terminalizes. Application pings stay independent.
+#[test]
+fn degraded_node_single_flights_detection_probes() {
+  let p = Duration::from_millis(100);
+  // probe_timeout > probe_interval so the direct sub-window does not expire (and
+  // escalate/terminate the probe) before t0 + probe_interval — the probe stays
+  // genuinely outstanding across the skipped tick.
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
+    SmolStr::new("local"),
+    "127.0.0.1:7946".parse().unwrap(),
+  )
+  .with_probe_interval(p)
+  .with_probe_timeout(Duration::from_millis(200))
+  .with_gossip_interval(Duration::ZERO)
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+
+  let t_setup = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7947, 1), false, t_setup);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  // Degrade local health by 2 → failure deadline = (2 + 1) * probe_interval.
+  e.degrade_health(2);
+  assert_eq!(e.health_score(), 2);
+
+  let t0 = Instant::now();
+  e.next_probe = Some(t0);
+
+  // First tick: a Detection probe starts, failure deadline = t0 + 3 * 100ms.
+  e.fire_probe_scheduler(t0);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "first tick must start exactly one Detection probe"
+  );
+  let first_seq = *e
+    .probes
+    .iter()
+    .find(|(_, p)| p.kind == ProbeKind::Detection)
+    .map(|(seq, _)| seq)
+    .expect("Detection probe present");
+  assert_eq!(
+    e.next_probe,
+    Some(t0 + p),
+    "next_probe re-armed one base interval ahead"
+  );
+  assert_eq!(
+    e.probes_since_reset, 1,
+    "starting tick advances the counter"
+  );
+
+  // Second tick at t0 + probe_interval — BEFORE the first probe's failure
+  // deadline (t0 + 3 * 100ms). Single-flight: no second Detection round.
+  e.fire_probe_scheduler(t0 + p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "single-flight: no second Detection probe while the first is outstanding"
+  );
+  assert_eq!(
+    e.next_probe,
+    Some(t0 + 2 * p),
+    "missed-tick: deadline re-armed even though no probe started"
+  );
+  assert_eq!(
+    e.probes_since_reset, 1,
+    "a skipped tick must not advance the round-robin counter"
+  );
+
+  // An application ping issued WHILE the Detection probe is outstanding is NOT
+  // gated by the single-flight guard — it starts independently.
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7947);
+  e.ping(Node::new(SmolStr::new("peer"), peer_addr), t0 + p)
+    .expect("application ping issued while running");
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "application ping must not start a second Detection probe"
+  );
+  assert_eq!(
+    app_ping_probe_count(&e),
+    1,
+    "application ping starts even while a Detection probe is outstanding"
+  );
+  while e.poll_transmit().is_some() {}
+
+  // Terminate the outstanding Detection probe at its failure deadline.
+  e.advance_probe_fsm(t0 + 3 * p);
+  assert_eq!(
+    detection_probe_count(&e),
+    0,
+    "Detection probe terminates at its failure deadline"
+  );
+
+  // Next scheduler tick after terminalization starts a NEW Detection round.
+  e.fire_probe_scheduler(t0 + 3 * p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "a new Detection round starts once the previous one terminalized"
+  );
+  let second_seq = *e
+    .probes
+    .iter()
+    .find(|(_, p)| p.kind == ProbeKind::Detection)
+    .map(|(seq, _)| seq)
+    .expect("new Detection probe present");
+  assert_ne!(
+    first_seq, second_seq,
+    "the new Detection round is a distinct probe"
+  );
+}
+
+/// Single-flight must not slow HEALTHY probing. At score 0 the failure deadline
+/// is exactly one base interval and an acked probe terminates before the next
+/// tick, so a fresh Detection probe still starts every interval.
+#[test]
+fn healthy_probe_rate_unchanged_by_single_flight() {
+  let p = Duration::from_millis(100);
+  let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
+    SmolStr::new("local"),
+    "127.0.0.1:7946".parse().unwrap(),
+  )
+  .with_probe_interval(p)
+  .with_probe_timeout(Duration::from_millis(50))
+  .with_gossip_interval(Duration::ZERO)
+  .with_push_pull_interval(Duration::ZERO);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+
+  let t_setup = Instant::now();
+  process_alive_auto(&mut e, alive("peer", 7947, 1), false, t_setup);
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+  assert_eq!(e.health_score(), 0);
+
+  let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7947);
+  let t0 = Instant::now();
+  e.next_probe = Some(t0);
+
+  // First tick starts a Detection probe.
+  e.fire_probe_scheduler(t0);
+  let first_seq = match e.poll_transmit().expect("first probe Ping") {
+    Transmit::Packet(pkt) => {
+      let (_, message) = pkt.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping expected");
+      }
+    }
+    _ => panic!("Ping expected"),
+  };
+  assert_eq!(detection_probe_count(&e), 1);
+
+  // Ack the probe before the next tick — it terminates as success.
+  e.handle_ack(
+    peer_addr,
+    Ack::new(first_seq),
+    t0 + Duration::from_millis(10),
+  );
+  assert_eq!(
+    detection_probe_count(&e),
+    0,
+    "acked probe terminates before the next tick"
+  );
+
+  // Next tick starts a fresh Detection probe — healthy rate is unchanged.
+  e.fire_probe_scheduler(t0 + p);
+  assert_eq!(
+    detection_probe_count(&e),
+    1,
+    "single-flight does not slow healthy probing"
+  );
+}
+
 #[test]
 fn probe_scheduler_does_not_fire_after_leave() {
   let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
@@ -8013,6 +8211,84 @@ fn alive_with_changed_meta_emits_node_updated() {
   assert!(updated, "a meta change must emit NodeUpdated");
 }
 
+#[test]
+fn alive_with_changed_protocol_version_emits_node_updated() {
+  // A higher-incarnation Alive for a still-Alive peer that changes ONLY the
+  // protocol version — same address, same meta, same delegate version — must
+  // still emit NodeUpdated so an event-only mirror does not keep stale
+  // capability info.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  let updated_alive = alive("bob", 7001, 2).with_protocol_version(ProtocolVersion::Unknown(2));
+  process_alive_auto(&mut e, updated_alive, false, now);
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
+  let updated = events
+    .iter()
+    .filter(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")))
+    .count();
+  assert_eq!(
+    updated, 1,
+    "a protocol-version-only change must emit exactly one NodeUpdated"
+  );
+  assert_eq!(
+    e.member(&SmolStr::new("bob"))
+      .expect("bob present")
+      .protocol_version(),
+    ProtocolVersion::Unknown(2),
+    "the stored member must reflect the new protocol version"
+  );
+}
+
+#[test]
+fn alive_with_changed_delegate_version_emits_node_updated() {
+  // A higher-incarnation Alive that changes ONLY the delegate version — same
+  // address, same meta, same protocol version — must still emit NodeUpdated.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  let updated_alive = alive("bob", 7001, 2).with_delegate_version(DelegateVersion::Unknown(2));
+  process_alive_auto(&mut e, updated_alive, false, now);
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
+  let updated = events
+    .iter()
+    .filter(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")))
+    .count();
+  assert_eq!(
+    updated, 1,
+    "a delegate-version-only change must emit exactly one NodeUpdated"
+  );
+  assert_eq!(
+    e.member(&SmolStr::new("bob"))
+      .expect("bob present")
+      .delegate_version(),
+    DelegateVersion::Unknown(2),
+    "the stored member must reflect the new delegate version"
+  );
+}
+
+#[test]
+fn alive_with_unchanged_meta_and_versions_emits_no_node_updated() {
+  // Negative control: a higher-incarnation Alive that leaves meta, protocol
+  // version, and delegate version all unchanged must NOT emit NodeUpdated — the
+  // no-change branch only bumps the snapshot version.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, now);
+  while e.poll_event().is_some() {}
+  // Same meta (empty), same V1 protocol + delegate versions, only the
+  // incarnation moves forward.
+  process_alive_auto(&mut e, alive("bob", 7001, 2), false, now);
+  let updated = core::iter::from_fn(|| e.poll_event())
+    .any(|ev| matches!(ev, Event::NodeUpdated(n) if n.id_ref() == &SmolStr::new("bob")));
+  assert!(
+    !updated,
+    "an Alive with unchanged meta and versions must not emit NodeUpdated"
+  );
+}
+
 // ─── refute while leaving + skip-past ─────────────────────────────────────────
 
 #[test]
@@ -8192,6 +8468,66 @@ fn reset_nodes_keeps_live_members_and_reaps_only_expired_dead() {
   assert!(
     e.member(&SmolStr::new("gone")).is_none(),
     "expired dead reaped"
+  );
+}
+
+#[test]
+fn reset_nodes_purges_reclaimed_members_broadcasts() {
+  // max_members = Some(2) bounds membership to the local node plus one peer at
+  // a time. The gossip queue is NEVER drained here (no scheduler, no
+  // take_broadcasts), so the only thing that can drop a reclaimed member's
+  // id-keyed broadcast is the reset_nodes purge. Repeatedly admit, kill, and
+  // reclaim DISTINCT ids: without the purge each round's Dead broadcast would
+  // linger under its own id and the queue would grow with the round count even
+  // though membership stays bounded.
+  let window = Duration::from_millis(10);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_max_members(Some(2))
+      .with_gossip_to_the_dead_time(window),
+  );
+  let baseline = e.broadcast_queue_len();
+  let mut now = Instant::now();
+  for i in 0..6u16 {
+    let id = format!("peer-{i}");
+    process_alive_auto(&mut e, alive(&id, 7001 + i, 1), false, now);
+    // `from != target` ⇒ Dead (reclaimable past `gossip_to_the_dead_time`).
+    e.process_dead(dead(&id, "reporter", 2), now);
+    now += window * 2;
+    e.reset_nodes(now);
+    assert!(e.num_members() <= 2, "membership stays within max_members");
+  }
+  assert_eq!(e.num_members(), 1, "only the local node remains");
+  assert_eq!(
+    e.broadcast_queue_len(),
+    baseline,
+    "reclaimed members' broadcasts must not accumulate in the queue"
+  );
+}
+
+#[test]
+fn reset_nodes_removes_the_reclaimed_ids_broadcast_entry() {
+  // A single reclaim: the reclaimed id's queued Dead broadcast must leave the
+  // queue when reset_nodes prunes the member — the queue length drops by
+  // exactly that one entry.
+  let window = Duration::from_millis(10);
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(window));
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("doomed", 7001, 1), false, now);
+  // The Dead broadcast invalidates the Alive broadcast (same id) and is queued.
+  e.process_dead(dead("doomed", "reporter", 2), now);
+  let before = e.broadcast_queue_len();
+  assert!(before >= 1, "doomed's Dead broadcast is queued");
+  e.reset_nodes(now + window * 2);
+  assert!(
+    e.member(&SmolStr::new("doomed")).is_none(),
+    "doomed reclaimed"
+  );
+  assert_eq!(
+    e.broadcast_queue_len(),
+    before - 1,
+    "exactly the reclaimed id's broadcast leaves the queue"
   );
 }
 

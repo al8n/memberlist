@@ -977,3 +977,47 @@ fn user_broadcasts_empty_and_num_queued() {
   assert!(msgs.is_empty());
   assert_eq!(used, 0);
 }
+
+#[test]
+fn remove_by_id_removes_only_the_named_broadcast() {
+  let mut q = BroadcastQueue::new(3);
+  let fa = Arc::new(AtomicUsize::new(0));
+  let fb = Arc::new(AtomicUsize::new(0));
+  q.queue_broadcast(bcast("alice", "hello-a", fa.clone()));
+  q.queue_broadcast(bcast("bob", "hello-b", fb.clone()));
+  assert_eq!(q.num_queued(), 2);
+
+  let removed = q.remove_by_id(&"alice");
+  assert_eq!(removed, 1, "exactly alice's one broadcast is removed");
+  assert_eq!(q.num_queued(), 1);
+  assert_eq!(
+    fa.load(Ordering::SeqCst),
+    1,
+    "the removed broadcast is finished()"
+  );
+  assert_eq!(fb.load(Ordering::SeqCst), 0);
+
+  // The `m` index stays consistent with `q`: re-queuing alice inserts anew
+  // (no stale index entry masks it), and bob is still the only survivor to
+  // drain if alice is not re-queued.
+  let got = q.take_broadcasts(10, 0, 1024);
+  assert_eq!(got, vec!["hello-b".to_string()]);
+
+  // Removing a non-present id is a no-op returning 0.
+  assert_eq!(q.remove_by_id(&"carol"), 0);
+}
+
+#[test]
+fn remove_by_id_of_last_entry_resets_id_generator() {
+  let mut q = BroadcastQueue::new(3);
+  let f = Arc::new(AtomicUsize::new(0));
+  q.queue_broadcast(bcast("alice", "hello", f.clone()));
+  assert_eq!(q.remove_by_id(&"alice"), 1);
+  assert!(q.is_empty());
+  // After emptying, a freshly queued broadcast is drainable — the queue and
+  // its index are fully consistent (no orphaned `m` entry).
+  let f2 = Arc::new(AtomicUsize::new(0));
+  q.queue_broadcast(bcast("bob", "world", f2));
+  assert_eq!(q.num_queued(), 1);
+  assert_eq!(q.take_broadcasts(10, 0, 1024), vec!["world".to_string()]);
+}
