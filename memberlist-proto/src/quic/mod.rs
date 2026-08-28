@@ -5418,6 +5418,15 @@ where
     let pre_first_pump_ids: HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     let ready_peers = self.service_quinn(now);
+    // Reap fully-drained (`is_drained()`) connections BEFORE dial servicing,
+    // mirroring the global tick's step-4.5 reap: a `service_quinn` pass above can
+    // transition a connection to drained, and a global-cap slot that reap frees
+    // must be available to this flush's dial buckets (the ready-peers loop AND the
+    // ready-dial ledger drain below). Without it a reliable dial to a peer whose
+    // slot is held by a now-drained connection would hit `AtGlobalCap` and be
+    // retired on a slot that has already freed. `finalize_tick`'s reap at the end
+    // stays (idempotent) to catch connections drained later in this pass.
+    self.reap_drained_connections();
     // One unbounded dial budget SHARED across the ready-peers loop, the ready-dial
     // ledger drain, and the slot-free consume: this is an O(N) flush-all path, so it
     // must never budget-exit a bucket (which would deposit into the ledger it is
