@@ -340,7 +340,34 @@ impl QuicOptions {
   /// table module). The higher-level
   /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build) path
   /// rejects a zero/sub-millisecond `max_idle_timeout` and so guarantees the
-  /// finite bound; this raw path does not. The constructor
+  /// finite bound; this raw path does not.
+  ///
+  /// # 0-RTT / early data (DEFERRAL, not a delegated obligation)
+  ///
+  /// A caller MAY enable rustls early data on the configs it hands in (client
+  /// `rustls::ClientConfig::enable_early_data = true`, server
+  /// `rustls::ServerConfig::max_early_data_size > 0`); this constructor neither
+  /// inspects nor overrides those fields. Enabling it transfers NO replay or
+  /// transactional obligation to `MergeDelegate`s or event consumers. The
+  /// coordinator DEFERS every application-effect commitment to the connection's
+  /// establishment boundary (its own `quinn_proto::Event::Connected`) regardless
+  /// of the early-data policy:
+  ///
+  /// - An accepted 0-RTT bidi STREAM is held un-accepted inside quinn until the
+  ///   handshake completes, then processed normally — still a full round-trip
+  ///   earlier than a non-early resumed exchange, but never before establishment,
+  ///   so a handshake that fails mid-flight (the crash-stop trigger) commits no
+  ///   membership, push/pull, user, or probe effect.
+  /// - An accepted 0-RTT application DATAGRAM is DROPPED and counted (the
+  ///   unreliable plane is loss-tolerant — ordinary gossip redundancy re-delivers
+  ///   within a round).
+  ///
+  /// The higher-level
+  /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build) path
+  /// forces early data OFF on both sides, so a managed deployment is never exposed
+  /// to the trigger at all.
+  ///
+  /// The constructor
   /// unconditionally forces `max_concurrent_uni_streams = 0` on the
   /// supplied value (mutating it before moving it into a shared `Arc`,
   /// so a caller's surviving `Arc` view cannot accidentally re-enable
@@ -419,6 +446,10 @@ impl QuicOptions {
   /// `unreliable_transport` governs the datagram extension exactly as for
   /// [`Self::new`]: enabled in [`UnreliableTransport::Datagram`] mode, left at
   /// quinn defaults (disabled, unadvertised) in [`UnreliableTransport::Udp`].
+  ///
+  /// The 0-RTT / early-data deferral semantics documented on [`Self::new`] apply
+  /// verbatim to this constructor: caller-enabled early data commits no
+  /// application effect before a connection's establishment boundary.
   pub fn new_with_sni_provider(
     mut endpoint: quinn_proto::EndpointConfig,
     mut server: quinn_proto::ServerConfig,

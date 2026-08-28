@@ -351,6 +351,78 @@ fn build_with_timeout_tuning_is_usable() {
 }
 
 #[test]
+fn build_forces_early_data_off_on_both_sides() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  // The managed builder must force QUIC 0-RTT (early data) OFF on both rustls
+  // configs it assembles, regardless of rustls's own defaults. Introspect the
+  // pair BEFORE quinn's `try_from` wrapping hides those fields.
+  let (server, client) = QuicConfigOptions::new(cert, key, ca)
+    .assemble_rustls_configs()
+    .expect("assembling the rustls pair should succeed");
+  assert!(
+    !client.enable_early_data,
+    "the managed build path must force client `enable_early_data = false`"
+  );
+  assert_eq!(
+    server.max_early_data_size, 0,
+    "the managed build path must force server `max_early_data_size = 0`"
+  );
+}
+
+/// Load-bearing mutation anchor for the force-off. rustls already DEFAULTS early
+/// data off, so the introspection test above stays green even if a force-off
+/// write is deleted. Here we DELIBERATELY PRE-ENABLE early data on both configs
+/// (mirroring the caller escape hatch that opts in) and run them THROUGH
+/// [`force_early_data_off`] — so deleting either assignment leaves the pre-enabled
+/// value in place and fails an assertion below.
+#[test]
+fn force_early_data_off_disables_pre_enabled_early_data() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  let provider = rustls::crypto::CryptoProvider::get_default()
+    .cloned()
+    .expect("a default CryptoProvider is installed by install_provider()");
+  let certs = load_certs(&cert).unwrap();
+  let priv_key = load_private_key(&key).unwrap();
+  let roots = load_roots(&ca).unwrap();
+
+  let mode = ClientAuthMode::TrustedNetwork;
+  // `build_server_config` borrows; `build_client_config` consumes — so build the
+  // server first, then move the material into the client.
+  let mut server = build_server_config(&provider, &roots, &certs, &priv_key, mode).unwrap();
+  let mut client = build_client_config(provider, roots, certs, priv_key, mode).unwrap();
+
+  // Deliberately pre-ENABLE 0-RTT on both, the state a caller opting into early
+  // data would produce.
+  client.enable_early_data = true;
+  server.max_early_data_size = u32::MAX;
+  assert!(
+    client.enable_early_data,
+    "precondition: the client config must start with early data ENABLED"
+  );
+  assert_ne!(
+    server.max_early_data_size, 0,
+    "precondition: the server config must start with early data ENABLED"
+  );
+
+  // The force-off helper must disable BOTH regardless of the incoming state.
+  force_early_data_off(&mut client, &mut server);
+  assert!(
+    !client.enable_early_data,
+    "force_early_data_off must set client `enable_early_data = false`"
+  );
+  assert_eq!(
+    server.max_early_data_size, 0,
+    "force_early_data_off must set server `max_early_data_size = 0`"
+  );
+}
+
+#[test]
 fn build_missing_cert_file_errors() {
   install_provider();
   let dir = unique_dir();

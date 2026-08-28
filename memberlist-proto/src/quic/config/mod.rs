@@ -58,6 +58,19 @@ fn default_server_name() -> String {
   DEFAULT_SERVER_NAME.to_string()
 }
 
+/// Force QUIC 0-RTT (early data) OFF on the managed path's rustls pair. The
+/// coordinator's effect-finality boundary defers every application effect to a
+/// connection's establishment, so early data buys nothing here, and the shared
+/// TLS assembly must never re-enable it. rustls already defaults these off
+/// (client `enable_early_data = false`, server `max_early_data_size = 0`), but
+/// forcing them keeps that guarantee independent of any future default or
+/// shared-builder change — the config-path analogue of the `IdleTimeoutZero`
+/// guard in [`QuicConfigOptions::build`].
+fn force_early_data_off(client: &mut rustls::ClientConfig, server: &mut rustls::ServerConfig) {
+  client.enable_early_data = false;
+  server.max_early_data_size = 0;
+}
+
 /// Construct a [`QuicOptions`] from cert / key / CA files on disk plus a single
 /// [`ClientAuthMode`](crate::tls::ClientAuthMode) choice and a few transport
 /// tunables.
@@ -201,15 +214,16 @@ impl QuicConfigOptions {
     self.unreliable_transport
   }
 
-  /// Load the PEM files and assemble a [`QuicOptions`] under the configured
-  /// [`ClientAuthMode`](crate::tls::ClientAuthMode) and transport tunables.
+  /// Load the PEM material and assemble the rustls server/client pair under the
+  /// configured [`ClientAuthMode`](crate::tls::ClientAuthMode), with
+  /// memberlist's QUIC 0-RTT (early-data) policy FORCED off on both sides.
   ///
-  /// Reuses the rustls server/client assembly from
-  /// [`crate::tls::TlsConfigOptions`], wraps the result into quinn's QUIC crypto
-  /// configs, builds an `EndpointConfig` with a random stateless-reset key, and
-  /// installs a cluster-uniform SNI. Requires the process default
-  /// `CryptoProvider` to be installed (see the module docs).
-  pub fn build(&self) -> Result<QuicOptions, QuicConfigError> {
+  /// Factored out of [`Self::build`] so a unit test can introspect the rustls
+  /// configs BEFORE quinn's `QuicServerConfig`/`QuicClientConfig` `try_from`
+  /// wrapping hides those fields.
+  fn assemble_rustls_configs(
+    &self,
+  ) -> Result<(rustls::ServerConfig, rustls::ClientConfig), QuicConfigError> {
     let provider = rustls::crypto::CryptoProvider::get_default()
       .cloned()
       .ok_or(TlsConfigError::NoCryptoProvider)?;
@@ -218,8 +232,25 @@ impl QuicConfigOptions {
     let key = load_private_key(&self.key_file)?;
     let roots = load_roots(&self.ca_file)?;
 
-    let rustls_server = build_server_config(&provider, &roots, &certs, &key, self.client_auth)?;
-    let rustls_client = build_client_config(provider, roots, certs, key, self.client_auth)?;
+    let mut rustls_server = build_server_config(&provider, &roots, &certs, &key, self.client_auth)?;
+    let mut rustls_client = build_client_config(provider, roots, certs, key, self.client_auth)?;
+
+    force_early_data_off(&mut rustls_client, &mut rustls_server);
+
+    Ok((rustls_server, rustls_client))
+  }
+
+  /// Load the PEM files and assemble a [`QuicOptions`] under the configured
+  /// [`ClientAuthMode`](crate::tls::ClientAuthMode) and transport tunables.
+  ///
+  /// Reuses the rustls server/client assembly from
+  /// [`crate::tls::TlsConfigOptions`], wraps the result into quinn's QUIC crypto
+  /// configs, builds an `EndpointConfig` with a random stateless-reset key, and
+  /// installs a cluster-uniform SNI. Requires the process default
+  /// `CryptoProvider` to be installed (see the module docs). Forces QUIC 0-RTT
+  /// (early data) off on both sides — see [`Self::assemble_rustls_configs`].
+  pub fn build(&self) -> Result<QuicOptions, QuicConfigError> {
+    let (rustls_server, rustls_client) = self.assemble_rustls_configs()?;
 
     let qsc = QuicServerConfig::try_from(Arc::new(rustls_server))?;
     let server = QuinnServerConfig::with_crypto(Arc::new(qsc));

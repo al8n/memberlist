@@ -12587,3 +12587,448 @@ fn quic_options_ping_exempt_cap_default_and_validation() {
     .validate()
     .expect("the default config validates");
 }
+
+// ===================================================================
+// QUIC 0-RTT readiness gate (#173)
+// ===================================================================
+
+/// Build an early-data-capable coordinator: server ACCEPTS 0-RTT
+/// (`max_early_data_size = u32::MAX`), client is built from the SHARED
+/// `client_arc` (0-RTT enabled + a resumption store shared across every endpoint
+/// built from the same Arc). Datagram unreliable mode + a finite idle timeout,
+/// matching [`test_config`].
+fn make_endpoint_early(
+  id: &str,
+  addr: SocketAddr,
+  now: Instant,
+  client_arc: std::sync::Arc<quinn_proto::crypto::rustls::QuicClientConfig>,
+) -> QuicEndpoint<SmolStr> {
+  make_endpoint_early_capped(id, addr, now, client_arc, None)
+}
+
+/// [`make_endpoint_early`] with an explicit `max_inbound` override: `Some(n)`
+/// sets [`QuicOptions::with_max_inbound_streams`] `Some(n)`; `None` leaves the
+/// default (`DEFAULT_MAX_QUIC_INBOUND_STREAMS`).
+fn make_endpoint_early_capped(
+  id: &str,
+  addr: SocketAddr,
+  now: Instant,
+  client_arc: std::sync::Arc<quinn_proto::crypto::rustls::QuicClientConfig>,
+  max_inbound: Option<usize>,
+) -> QuicEndpoint<SmolStr> {
+  let cfg = EndpointOptions::new(SmolStr::new(id), addr);
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+  ep.start_scheduling(now);
+  let mut transport = quinn_proto::TransportConfig::default();
+  transport.max_idle_timeout(Some(
+    quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
+  ));
+  let mut qc = QuicOptions::new(
+    crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]),
+    crate::quic::crypto::tests::test_server_early(),
+    quinn_proto::ClientConfig::new(client_arc),
+    transport,
+    "localhost",
+    UnreliableTransport::Datagram,
+  );
+  if let Some(n) = max_inbound {
+    qc = qc.with_max_inbound_streams(Some(n));
+  }
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+  QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
+}
+
+/// Drive a full push/pull JOIN `a` -> `b` at a fixed instant to membership
+/// completion, ferrying both directions and draining both event queues (so `b`
+/// issues + `a` stores a session ticket in the shared resumption store).
+fn ferry_join_to_completion(
+  a: &mut QuicEndpoint<SmolStr>,
+  b: &mut QuicEndpoint<SmolStr>,
+  a_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..512 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    while a.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if !moved {
+      break;
+    }
+  }
+}
+
+/// Establish a first connection `a1 <-> b` so `a1`'s SHARED resumption store
+/// captures a session ticket `b` issued, then return a FRESH `a2` (sharing the
+/// same store) ready to resume `b` with 0-RTT, plus `b`, their addrs, and the
+/// fixed instant. `max_inbound` overrides `b`'s (and `a2`'s) inbound-stream cap.
+/// `a1` is kept alive by the returned tuple's store references (its own binding
+/// is dropped — the ticket lives in the store, not the connection).
+fn setup_for_zero_rtt_resume(
+  base_port: u16,
+  max_inbound: Option<usize>,
+) -> (
+  QuicEndpoint<SmolStr>,
+  QuicEndpoint<SmolStr>,
+  SocketAddr,
+  SocketAddr,
+  Instant,
+) {
+  let a1_addr: SocketAddr = format!("127.0.0.1:{base_port}").parse().unwrap();
+  let a2_addr: SocketAddr = format!("127.0.0.1:{}", base_port + 1).parse().unwrap();
+  let b_addr: SocketAddr = format!("127.0.0.1:{}", base_port + 2).parse().unwrap();
+  let now = Instant::now();
+  let client_arc = crate::quic::crypto::tests::early_data_client_arc();
+  let mut a1 = make_endpoint_early("a1", a1_addr, now, client_arc.clone());
+  let a2 = make_endpoint_early_capped("a2", a2_addr, now, client_arc.clone(), max_inbound);
+  let mut b = make_endpoint_early_capped("b", b_addr, now, client_arc, max_inbound);
+
+  ferry_join_to_completion(&mut a1, &mut b, a1_addr, b_addr, now);
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    2,
+    "precondition: the first (non-resumed) a1<->b JOIN must fully merge"
+  );
+  assert!(
+    b.bridges.is_empty(),
+    "precondition: a1's push/pull bridge on b must be reaped after the merge"
+  );
+  assert_eq!(
+    b.inbound_bridge_count(),
+    0,
+    "precondition: no inbound bridge remains live on b after the first merge"
+  );
+  (a2, b, a2_addr, b_addr, now)
+}
+
+/// Flush `a2` and deliver every `a2 -> b` transmit to `b` WITHOUT ferrying `b`'s
+/// reply back, so `b` processes the (0-RTT) first flight but cannot complete its
+/// handshake. Returns the number of datagrams delivered.
+fn deliver_a2_first_flight_to_b(
+  a2: &mut QuicEndpoint<SmolStr>,
+  b: &mut QuicEndpoint<SmolStr>,
+  a2_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) -> usize {
+  a2.flush_outbound_transmits(now);
+  let mut delivered = 0usize;
+  while let Some((to, bytes)) = a2.poll_transmit() {
+    if to == b_addr {
+      b.handle_udp(a2_addr, &bytes, now);
+      delivered += 1;
+    }
+  }
+  // Service b a few times so any (ungated) accepted stream would mint AND pump.
+  for _ in 0..4 {
+    b.handle_timeout(now);
+    while b.poll_event().is_some() {}
+  }
+  delivered
+}
+
+/// Complete a2<->b's handshake by ferrying both directions to quiescence.
+fn complete_a2_b_handshake(
+  a2: &mut QuicEndpoint<SmolStr>,
+  b: &mut QuicEndpoint<SmolStr>,
+  a2_addr: SocketAddr,
+  b_addr: SocketAddr,
+  now: Instant,
+) {
+  for _ in 0..512 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a2.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a2_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a2_addr {
+        a2.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a2.handle_timeout(now);
+    b.handle_timeout(now);
+    while a2.poll_event().is_some() {}
+    while b.poll_event().is_some() {}
+    if !moved {
+      break;
+    }
+  }
+}
+
+/// Test 1 — 0-RTT deferral, end-to-end over the public `QuicOptions` path with
+/// early data enabled both sides and a real resumption ticket. `a2` resumes `b`
+/// and, IN 0-RTT (before `b`'s handshake completes), opens a push/pull JOIN
+/// stream (with FIN) AND queues an application datagram. While `b` is still
+/// handshaking the coordinator commits NO effect — no membership merge, no
+/// inbound bridge, and the early datagram is dropped and counted. Only once `b`
+/// establishes does the quarantined stream's push/pull merge (exactly once); the
+/// dropped datagram is not recovered (the unreliable plane is loss-tolerant).
+///
+/// Mutation-anchor (stream gate): revert the accept-drain gate in
+/// `service_one_conn` to accept while handshaking and `a2`'s JOIN merges into `b`
+/// BEFORE establishment — the `member_liveness("a2") == None` while-handshaking
+/// assertion fails. Mutation-anchor (datagram gate): revert the datagram gate to
+/// push while handshaking and `pre_established_datagrams_dropped` stays 0 while
+/// the payload reaches `mem_ingress`.
+#[test]
+fn zero_rtt_stream_and_datagram_defer_until_establishment() {
+  let (mut a2, mut b, a2_addr, b_addr, now) = setup_for_zero_rtt_resume(9320, None);
+  let a2_id = SmolStr::new("a2");
+
+  // a2 resumes b: a 0-RTT push/pull JOIN stream AND a 0-RTT application datagram.
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  let dstatus = a2.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01probe0rtt"), now);
+  assert_eq!(
+    dstatus,
+    crate::quic::DatagramSendStatus::Queued,
+    "the 0-RTT resume must make datagram credit available (cached peer params), \
+       so the application datagram is queued in early data"
+  );
+
+  let delivered = deliver_a2_first_flight_to_b(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert!(delivered >= 1, "a2's 0-RTT first flight must reach b");
+
+  // b's connection to a2 exists and is still handshaking.
+  let ch = b
+    .conns
+    .handle_for(&a2_addr)
+    .expect("b must hold a (handshaking) connection from a2's 0-RTT flight");
+  let e = b.conns.get(ch).expect("b's a2 connection is present");
+  assert!(
+    e.conn_ref().is_handshaking(),
+    "b's a2 connection must still be handshaking (b's reply was withheld)"
+  );
+  assert!(
+    !e.established_at_least_once(),
+    "b's a2 connection must NOT have reached its establishment boundary yet"
+  );
+
+  // NO effect committed while handshaking: no merge, no inbound bridge.
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    2,
+    "no membership merge may commit before b's establishment (still {} known)",
+    b.endpoint_mut().num_members()
+  );
+  assert_eq!(
+    b.endpoint_mut().member_liveness(&a2_id),
+    None,
+    "a2 must NOT be a known member before b establishes its connection"
+  );
+  assert!(
+    b.bridges.is_empty(),
+    "no inbound bridge may be minted for a 0-RTT stream while b is handshaking \
+       (quinn quarantines it)"
+  );
+  assert_eq!(
+    b.inbound_bridge_count(),
+    0,
+    "the quarantined 0-RTT stream must count against no inbound-bridge budget"
+  );
+  // The 0-RTT datagram was dropped and counted, NOT delivered to ingress.
+  assert!(
+    b.pre_established_datagrams_dropped() >= 1,
+    "the 0-RTT application datagram must be dropped and counted while handshaking"
+  );
+  assert!(
+    b.poll_memberlist_ingress().is_none(),
+    "no pre-establishment datagram may reach mem_ingress"
+  );
+
+  // Complete b's handshake: the quarantined push/pull is re-driven and merges.
+  complete_a2_b_handshake(&mut a2, &mut b, a2_addr, b_addr, now);
+  let ch = b
+    .conns
+    .handle_for(&a2_addr)
+    .expect("b still holds the a2 connection post-handshake");
+  assert!(
+    b.conns.get(ch).unwrap().established_at_least_once(),
+    "b's a2 connection must have reached establishment"
+  );
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    3,
+    "after establishment the deferred 0-RTT push/pull JOIN must merge a2 exactly once"
+  );
+  assert_eq!(
+    b.endpoint_mut().member_liveness(&a2_id),
+    Some(State::Alive),
+    "a2 must be a known Alive member only after b's establishment"
+  );
+  // The dropped datagram is not recovered by the stream path; the count stands.
+  assert!(
+    b.pre_established_datagrams_dropped() >= 1,
+    "the early datagram remains dropped (loss-tolerant); it is not replayed"
+  );
+}
+
+/// Test 2 — crash-stop before finality. `a2` sends an accepted 0-RTT flight (a
+/// push/pull JOIN stream WITH FIN, plus an application datagram), then `b`'s
+/// connection fails BEFORE it reaches establishment (a transport-level close, the
+/// crash-stop analogue). No membership/user effect is EVER committed, the
+/// connection and its quinn-held streams are reaped, `inbound_bridge_count` is
+/// unchanged, and no bridge is ever minted.
+#[test]
+fn zero_rtt_flight_then_crash_stop_commits_nothing() {
+  let (mut a2, mut b, a2_addr, b_addr, now) = setup_for_zero_rtt_resume(9330, None);
+  let a2_id = SmolStr::new("a2");
+
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  let _ = a2.queue_unreliable_datagram(b_addr, Bytes::from_static(b"\x01probe0rtt"), now);
+  let delivered = deliver_a2_first_flight_to_b(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert!(delivered >= 1, "a2's 0-RTT first flight must reach b");
+
+  // Precondition: handshaking, nothing committed.
+  let ch = b
+    .conns
+    .handle_for(&a2_addr)
+    .expect("b holds the handshaking a2 connection");
+  assert!(b.conns.get(ch).unwrap().conn_ref().is_handshaking());
+  assert_eq!(b.endpoint_mut().num_members(), 2);
+  assert!(b.bridges.is_empty());
+  assert_eq!(b.inbound_bridge_count(), 0);
+  let dropped_before = b.pre_established_datagrams_dropped();
+  assert!(
+    dropped_before >= 1,
+    "the early datagram was dropped and counted"
+  );
+
+  // Crash-stop: fail b's connection to a2 BEFORE it ever establishes.
+  b.conns
+    .get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), Bytes::new());
+  for _ in 0..8 {
+    b.handle_timeout(now);
+    while b.poll_event().is_some() {}
+  }
+
+  // No effect EVER; connection reaped; no bridge ever minted.
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    2,
+    "a crash-stop before finality must commit no membership effect"
+  );
+  assert_eq!(
+    b.endpoint_mut().member_liveness(&a2_id),
+    None,
+    "a2 must never become a known member from an abandoned 0-RTT handshake"
+  );
+  assert!(
+    b.bridges.is_empty(),
+    "no inbound bridge may survive an abandoned 0-RTT handshake"
+  );
+  assert_eq!(
+    b.inbound_bridge_count(),
+    0,
+    "inbound_bridge_count must be unchanged after a crash-stop"
+  );
+  assert_eq!(
+    b.pre_established_datagrams_dropped(),
+    dropped_before,
+    "the dropped early datagram is never revived by the connection teardown"
+  );
+}
+
+/// Test 3 — one-shot `Opened` re-drive. A 0-RTT stream whose ONLY
+/// `StreamEvent::Opened` fires while `b` is handshaking must still be accepted,
+/// minted, and pumped at the establishment transition — the coalesced signal
+/// never re-fires, so the transition drain (`|| established_transition`) is the
+/// only thing that can re-drive it. Proven by the JOIN completing with NO further
+/// peer application traffic after the first flight (only the handshake-completing
+/// packets are exchanged).
+///
+/// Mutation-anchor: drop `|| established_transition` from the accept-drain gate
+/// and the quarantined stream is never accepted — `num_members` stays 2 forever.
+#[test]
+fn zero_rtt_one_shot_opened_is_redriven_at_establishment() {
+  let (mut a2, mut b, a2_addr, b_addr, now) = setup_for_zero_rtt_resume(9340, None);
+  let a2_id = SmolStr::new("a2");
+
+  // Only a 0-RTT stream (no datagram): its single Opened fires while handshaking.
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  let delivered = deliver_a2_first_flight_to_b(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert!(delivered >= 1);
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    2,
+    "the one-shot Opened fired while handshaking must NOT be accepted yet"
+  );
+  assert!(b.bridges.is_empty());
+
+  // Complete only the handshake (no re-sent stream frames): the re-drive accepts
+  // and pumps the quarantined stream at the establishment transition.
+  complete_a2_b_handshake(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    3,
+    "the coalesced pre-establishment Opened must be re-driven at establishment so \
+       the quarantined stream is accepted and merged"
+  );
+  assert_eq!(b.endpoint_mut().member_liveness(&a2_id), Some(State::Alive),);
+}
+
+/// Test 6 — inbound-cap interaction. A 0-RTT stream quarantined in quinn while
+/// `b` handshakes counts against NOTHING (`inbound_bridge_count == 0`), so the
+/// `max_inbound_streams` headroom is preserved; the cap is applied at the
+/// establishment (transition) drain exactly as it would be at an inline drain —
+/// here the accept succeeds within a cap of 2 and the stream is counted only once
+/// accepted.
+#[test]
+fn zero_rtt_stream_counts_against_inbound_cap_only_once_accepted() {
+  let (mut a2, mut b, a2_addr, b_addr, now) = setup_for_zero_rtt_resume(9350, Some(2));
+
+  let _ = a2.start_push_pull(b_addr, PushPullKind::Join, now);
+  let delivered = deliver_a2_first_flight_to_b(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert!(delivered >= 1);
+
+  // Quarantined while handshaking: counts against no budget.
+  assert_eq!(
+    b.inbound_bridge_count(),
+    0,
+    "a quarantined 0-RTT stream must not consume max_inbound_streams headroom"
+  );
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    0,
+    "no inbound stream may be rejected while it is merely quarantined"
+  );
+
+  // At establishment the cap gate runs in the transition drain and accepts (1 <= 2).
+  complete_a2_b_handshake(&mut a2, &mut b, a2_addr, b_addr, now);
+  assert_eq!(
+    b.endpoint_mut().num_members(),
+    3,
+    "within the inbound cap the re-driven stream is accepted and merged"
+  );
+  assert_eq!(
+    b.metrics().inbound_streams_rejected,
+    0,
+    "the accept at the transition drain stayed within the cap — no rejection"
+  );
+  assert!(
+    b.counters.max_inbound_bridges_live >= 1,
+    "the stream was counted as a live inbound bridge only once accepted at establishment"
+  );
+}
