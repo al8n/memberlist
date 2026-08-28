@@ -3445,6 +3445,12 @@ where
   /// The driver accepted an inbound stream from `from`. Endpoint mints a
   /// fresh `StreamId` and returns an inbound-phase `Stream<I, A>`. The
   /// driver feeds bytes via `stream.handle_data(bytes, now)`.
+  ///
+  /// `from` is the accepted connection's remote transport socket, echoed
+  /// verbatim as the best-effort transport-origin hint on this stream's inbound
+  /// events (`UserPacket::from` / `RemoteStateReceived::peer`) — NOT the peer's
+  /// advertised membership address. Identity-critical consumers read the
+  /// advertised address from the push/pull payload instead.
   pub fn accept_stream(&mut self, from: A, now: Instant) -> Option<Stream<I, A>> {
     // Reliable-inbound lifecycle chokepoint, the stream-plane twin of
     // `handle_packet` refusing gossip-plane inbound once not Running. A

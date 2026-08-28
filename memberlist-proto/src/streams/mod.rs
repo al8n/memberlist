@@ -101,7 +101,8 @@ use crate::{
   endpoint::Endpoint,
   error::{Error, StreamError},
   event::{
-    Event, ExchangeCompleted, ExchangeKind, ExchangeStatus, PushPullKind, StreamId, Transmit,
+    DialAbortReason, DialAborted, Event, ExchangeCompleted, ExchangeKind, ExchangeStatus,
+    PushPullKind, StreamId, Transmit,
   },
 };
 use bridge::StreamBridge;
@@ -155,10 +156,11 @@ struct ExchangeMeta<A> {
   /// tagged with so the driver writes the bytes on the right transport
   /// connection.
   peer_socket: SocketAddr,
-  /// The membership address (`A`) of the peer. Carried alongside
-  /// `peer_socket` so the bridge-reap path can emit the generic
-  /// [`Event::ExchangeCompleted`] payload without a back-conversion from
-  /// `SocketAddr` to `A`.
+  /// The address this exchange is keyed on: the dialed advertised address
+  /// (outbound) or the accept-time transport source (inbound); echoed on this
+  /// exchange's events. Carried alongside `peer_socket` so the bridge-reap path
+  /// can emit the generic [`Event::ExchangeCompleted`] payload without a
+  /// back-conversion from `SocketAddr` to `A`.
   peer: A,
   /// `Some` until the label / handshake step settles and the coordinator mints
   /// + promotes the `Stream`; `None` afterwards (an `Established` bridge needs
@@ -1972,6 +1974,14 @@ where
   /// with. The `Stream` is minted later (at label / handshake settled, via
   /// `Endpoint::accept_stream`).
   ///
+  /// `from` is the accepted connection's remote transport socket (typically the
+  /// peer's ephemeral source), echoed verbatim as the best-effort
+  /// transport-origin hint on this stream's inbound events
+  /// ([`UserPacket::from_ref`](crate::event::UserPacket::from_ref),
+  /// [`RemoteStateReceived::peer_ref`](crate::event::RemoteStateReceived::peer_ref)) —
+  /// NOT the peer's advertised membership address. Identity-critical consumers
+  /// read the advertised address from the push/pull payload instead.
+  ///
   /// Returns `None` when the connection is NOT admitted: the node is
   /// leaving/left, the optional `max_inbound_streams` ceiling is reached, or the
   /// record-layer acceptor is misconfigured. No bridge is built, so the driver
@@ -2075,22 +2085,36 @@ where
       // emitted outside this coordinator's start path — kept defensive
       // (reap then does not emit a kind-specific event for this exchange).
       let exchange_kind = self.pending_outbound_kinds.remove(&id);
+      // Clone the membership address up front: every pre-`ExchangeMeta` failure
+      // path below emits a `DialAborted` (which consumes it) after
+      // `dial_failed`, and the success path stamps it onto the `ExchangeMeta`.
+      // Each failure branch `continue`s, so the clone survives to the success
+      // path.
+      let peer_a = crate::CheapClone::cheap_clone(&peer);
       // Retire the intent without opening a connection if its own deadline
       // has already elapsed (mirrors the sibling coordinators'
-      // expired-intent gate).
+      // expired-intent gate). Emit `DialAborted` when the kind is
+      // start-originated so the returned `StreamId` reaches a terminal.
       if now >= deadline {
         self.ep.dial_failed(
           id,
           StreamError::DialFailed("stream dial deadline elapsed".into()),
           now,
         );
+        if let Some(kind) = exchange_kind {
+          self.ep.emit_event(Event::DialAborted(DialAborted::new(
+            id,
+            peer_a,
+            kind,
+            DialAbortReason::DeadlineElapsed,
+          )));
+        }
         continue;
       }
       // SocketAddr conversion needed: `peer_socket` tags entries on
       // `out_transmit` and the `StreamAction::Connect(ConnectInfo)` payload
       // (both driver-facing SocketAddr-typed surfaces).
       let peer_socket = (self.peer_to_socket)(&peer);
-      let peer_a = crate::CheapClone::cheap_clone(&peer);
       // Resolve the per-dial record-layer context (e.g. the TLS verification
       // identity). An `Err` is the soft-fail-via-dial_failed path —
       // retire the intent for this one peer and move on.
@@ -2101,6 +2125,14 @@ where
           self
             .ep
             .dial_failed(id, StreamError::DialFailed(msg.into()), now);
+          if let Some(kind) = exchange_kind {
+            self.ep.emit_event(Event::DialAborted(DialAborted::new(
+              id,
+              peer_a,
+              kind,
+              DialAbortReason::DialContext,
+            )));
+          }
           continue;
         }
       };
@@ -2115,6 +2147,14 @@ where
             StreamError::DialFailed(format!("record-layer construction failed: {e}").into()),
             now,
           );
+          if let Some(kind) = exchange_kind {
+            self.ep.emit_event(Event::DialAborted(DialAborted::new(
+              id,
+              peer_a,
+              kind,
+              DialAbortReason::RecordLayer,
+            )));
+          }
           continue;
         }
       };
@@ -2406,10 +2446,25 @@ where
   /// `handle_timeout` pre-pump.
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     self.last_now = Some(now);
+    // The inner endpoint returns an inert id (no `DialRequested` enqueued) when
+    // leaving/left. Clone the address up front so the not-running branch can
+    // terminate that id with a `DialAborted` without staging it — staging would
+    // leave a `pending_outbound_kinds` entry that `service_dials` never drains
+    // while not running.
+    let peer_a = crate::CheapClone::cheap_clone(&peer);
     let id = self.ep.start_push_pull(peer, kind, now);
+    if !self.ep.is_running() {
+      self.ep.emit_event(Event::DialAborted(DialAborted::new(
+        id,
+        peer_a,
+        ExchangeKind::PushPull,
+        DialAbortReason::NotRunning,
+      )));
+      return id;
+    }
     self
       .pending_outbound_kinds
-      .insert(id, crate::event::ExchangeKind::PushPull);
+      .insert(id, ExchangeKind::PushPull);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -2433,12 +2488,24 @@ where
     now: Instant,
   ) -> StreamId {
     self.last_now = Some(now);
+    // See `start_push_pull`: a not-running endpoint hands back an inert id.
+    // Terminate it with a `DialAborted` and do not stage its kind.
+    let peer_a = crate::CheapClone::cheap_clone(&peer_addr);
     let id = self
       .ep
       .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
+    if !self.ep.is_running() {
+      self.ep.emit_event(Event::DialAborted(DialAborted::new(
+        id,
+        peer_a,
+        ExchangeKind::ReliablePing,
+        DialAbortReason::NotRunning,
+      )));
+      return id;
+    }
     self
       .pending_outbound_kinds
-      .insert(id, crate::event::ExchangeKind::ReliablePing);
+      .insert(id, ExchangeKind::ReliablePing);
     self.service_dials(now);
     self.flush_outbound(now);
     id

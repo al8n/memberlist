@@ -19,7 +19,7 @@ mod tcp {
 
   use crate::{
     RawRecords,
-    event::{Event, PushPullKind, StreamId},
+    event::{DialAbortReason, Event, ExchangeKind, PushPullKind, StreamId},
     streams::{
       LabelOptions, StreamAction, StreamEndpoint,
       bridge::StreamBridge,
@@ -625,6 +625,197 @@ mod tcp {
       "a compression-policy change never fails or reaps a live bridge",
     );
   }
+
+  /// STR-A001: a `start_reliable_ping` whose probe deadline has already elapsed
+  /// is retired inside `service_dials`' expired-intent gate — no connection is
+  /// opened — and, because the kind is start-originated (`ReliablePing`),
+  /// surfaces exactly one `Event::DialAborted{ReliablePing, DeadlineElapsed}`
+  /// keyed by the returned `StreamId`. The probe FSM's own fallback retirement
+  /// is preserved (`dial_failed` still routes for `ReliablePing`).
+  #[test]
+  fn reliable_ping_elapsed_deadline_emits_dialaborted_deadline_elapsed() {
+    let now = Instant::now();
+    let mut coord = coord(7108);
+    // `deadline == now` is already elapsed at the `now >= deadline` gate.
+    let sid = coord.start_reliable_ping(SmolStr::new("p"), addr(7000), 7, now, now);
+
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(
+      aborts.as_slice(),
+      &[(
+        sid,
+        ExchangeKind::ReliablePing,
+        DialAbortReason::DeadlineElapsed
+      )],
+      "exactly one DialAborted, keyed by the returned StreamId",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no bridge is built for an already-elapsed reliable-ping dial",
+    );
+    assert!(
+      coord.poll_action().is_none(),
+      "no Connect surfaces for an expired reliable-ping dial",
+    );
+  }
+
+  /// STR-A001 kind-gating non-vacuity: a `DialRequested` fed straight into the
+  /// inner endpoint (bypassing the `start_*` wrappers, so no
+  /// `pending_outbound_kinds` entry — kind `None`) whose dial fails pre-`Connect`
+  /// emits NO `DialAborted`. The abort is reported only for start-originated
+  /// ids; machine-scheduled dials self-heal on their schedulers.
+  #[test]
+  fn kind_none_dial_failing_pre_connect_emits_no_dialaborted() {
+    let now = Instant::now();
+    let mut coord = coord(7109);
+    // A real inner intent + `DialRequested`, allocated OUTSIDE the wrappers, so
+    // `pending_outbound_kinds` never gains an entry for its id.
+    coord
+      .endpoint_mut()
+      .start_push_pull(addr(7000), PushPullKind::Join, now);
+    // Sieve the `DialRequested` into the private dial deque.
+    while coord.poll_event().is_some() {}
+
+    // Service the dial well past its deadline so it retires pre-`Connect`.
+    let later = now + Duration::from_secs(86_400);
+    coord.service_dials(later);
+
+    let mut saw_abort = false;
+    while let Some(ev) = coord.poll_event() {
+      if matches!(ev, Event::DialAborted(_)) {
+        saw_abort = true;
+      }
+    }
+    assert!(
+      !saw_abort,
+      "a kind-None (machine-scheduled) dial failure emits no DialAborted",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the expired kind-None dial built no bridge",
+    );
+    assert!(
+      coord.poll_action().is_none(),
+      "no Connect surfaces for the expired kind-None dial",
+    );
+  }
+}
+
+/// STR-A001 test 3: a record layer whose `dialer` constructor fails drives the
+/// `R::dialer` `Err` arm of `service_dials`, surfacing a
+/// `DialAborted{.., RecordLayer}`. Uses a minimal record layer whose only
+/// reachable methods are `dial_context` (Ok) and `dialer` (Err); the dial fails
+/// before any bridge is built, so the transport I/O methods are never called.
+#[cfg(any(feature = "tcp", feature = "tls"))]
+mod fallible {
+  use crate::Instant;
+
+  use bytes::Bytes;
+  use core::net::SocketAddr;
+  use smol_str::SmolStr;
+
+  use crate::{
+    event::{DialAbortReason, Event, ExchangeKind},
+    streams::{
+      StreamEndpoint,
+      test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      transport::{Intake, StreamTransport},
+    },
+  };
+
+  /// A record layer whose dialer construction always fails. Only `dial_context`
+  /// and `dialer` are reachable in the record-layer-construction-failure path;
+  /// every transport method is unreachable because no bridge is ever built.
+  struct FallibleDialer;
+
+  impl StreamTransport for FallibleDialer {
+    type Options = ();
+    type DialContext = ();
+    type ConstructError = &'static str;
+
+    fn dial_context<A>(_addr: &A, _server_name: Option<&str>) -> Result<(), &'static str> {
+      Ok(())
+    }
+
+    fn dialer(_opts: &(), _ctx: ()) -> Result<Self, &'static str> {
+      Err("test: dialer construction always fails")
+    }
+
+    fn acceptor(_opts: &()) -> Result<Self, &'static str> {
+      Err("test: acceptor construction always fails")
+    }
+
+    fn handle_transport_data(&mut self, _input: &[u8], _now: Instant) -> Intake {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn poll_transport_transmit(&mut self, _out: &mut std::vec::Vec<u8>) -> usize {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn is_handshaking(&self) -> bool {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn read_plaintext(&mut self, _out: &mut std::vec::Vec<u8>) -> usize {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn write_plaintext(&mut self, _plaintext: &[u8]) -> bool {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn send_close_notify(&mut self) {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn peer_has_closed(&self) -> bool {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn clear_outbound(&mut self) {
+      unreachable!("no bridge is built when the dialer fails")
+    }
+    fn is_secure() -> bool {
+      false
+    }
+  }
+
+  #[test]
+  fn dialer_construction_failure_emits_dialaborted_record_layer() {
+    let now = Instant::now();
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, FallibleDialer> = StreamEndpoint::new(
+      endpoint(7120),
+      (),
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    let sid = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"x"), now)
+      .expect("issued while running");
+
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(
+      aborts.as_slice(),
+      &[(sid, ExchangeKind::UserMessage, DialAbortReason::RecordLayer)],
+      "a dialer-construction failure surfaces one DialAborted with RecordLayer",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no bridge is built when the dialer constructor fails",
+    );
+    assert!(
+      coord.poll_action().is_none(),
+      "no Connect surfaces for a failed dialer construction",
+    );
+  }
 }
 
 #[cfg(feature = "tls")]
@@ -642,11 +833,13 @@ mod tls {
     version::TLS13,
   };
 
+  use bytes::Bytes;
+
   use crate::{
     TlsOptions, TlsRecords,
-    event::{Event, ExchangeKind, ExchangeStatus, PushPullKind},
+    event::{DialAbortReason, Event, ExchangeKind, ExchangeStatus, PushPullKind},
     streams::{
-      LabelOptions, Labeled, StreamEndpoint,
+      LabelOptions, Labeled, StreamAction, StreamEndpoint,
       test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
     },
   };
@@ -908,6 +1101,144 @@ mod tls {
       acceptor.bridge_is_established_pre_fin(missing),
       None,
       "an unknown exchange id has no bridge to inspect",
+    );
+  }
+
+  /// STR-A001 test 1: a `start_user_message` whose per-peer SNI provider returns
+  /// `None` returns `Ok(sid)` (the id is allocated before the fallible dial
+  /// setup), then the dial is rejected at `TlsRecords::dial_context` inside
+  /// `service_dials`. Exactly one `DialAborted{UserMessage, DialContext}` keyed
+  /// by `sid` surfaces; no `Connect`, no transmit, no retained exchange
+  /// metadata, and no leaked `pending_outbound_kinds` entry.
+  #[test]
+  fn sni_none_user_message_emits_dialaborted_dialcontext() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    let sni: Box<dyn Fn(&SocketAddr) -> Option<String> + Send + Sync> = Box::new(|_| None);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(endpoint(7320), cfg, sni, test_peer_to_socket());
+
+    let sid = coord
+      .start_user_message(addr(7000), Bytes::from_static(b"x"), now)
+      .expect("start_user_message returns Ok while running");
+
+    assert!(
+      coord.poll_action().is_none(),
+      "no Connect surfaces for an SNI-rejected user-message dial",
+    );
+    assert!(
+      coord.poll_transport_transmit().is_none(),
+      "no bytes transmit for an SNI-rejected dial",
+    );
+
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(
+      aborts.as_slice(),
+      &[(sid, ExchangeKind::UserMessage, DialAbortReason::DialContext)],
+      "exactly one DialAborted (UserMessage, DialContext) keyed by the returned id",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no exchange metadata / bridge is retained after the rejected dial",
+    );
+    assert_eq!(
+      coord.pending_outbound_kinds_len(),
+      0,
+      "the pending_outbound_kinds entry drained on the dial_context-failure exit",
+    );
+  }
+
+  /// STR-A001 test 4: a mixed batch of two `start_user_message`s — the first
+  /// peer's SNI resolves (`Some`), the second's does not (`None`) — surfaces
+  /// exactly one `Connect` (the first id) and exactly one `DialAborted` (the
+  /// second id), with disjoint ids. Proves the abort is per-id and only for the
+  /// dial that actually failed pre-`Connect`.
+  #[test]
+  fn mixed_sni_batch_emits_one_connect_and_one_dialaborted() {
+    let now = Instant::now();
+    let cfg = LabelOptions::new_in(None, TlsOptions::new(test_server(), test_client()));
+    // Resolve SNI for port 7001 only; port 7002 gets `None`.
+    let sni: Box<dyn Fn(&SocketAddr) -> Option<String> + Send + Sync> =
+      Box::new(|a: &SocketAddr| (a.port() == 7001).then(|| "localhost".to_string()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
+      StreamEndpoint::new(endpoint(7321), cfg, sni, test_peer_to_socket());
+
+    let ok_sid = coord
+      .start_user_message(addr(7001), Bytes::from_static(b"a"), now)
+      .expect("issued while running");
+    let bad_sid = coord
+      .start_user_message(addr(7002), Bytes::from_static(b"b"), now)
+      .expect("issued while running");
+    assert_ne!(ok_sid, bad_sid, "the two starts allocate disjoint ids");
+
+    let mut connects = Vec::new();
+    while let Some(action) = coord.poll_action() {
+      if let StreamAction::Connect(info) = action {
+        connects.push(info.stream_id());
+      }
+    }
+    assert_eq!(
+      connects.as_slice(),
+      &[ok_sid],
+      "exactly one Connect, for the SNI-resolved (first) id",
+    );
+
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(
+      aborts.as_slice(),
+      &[(
+        bad_sid,
+        ExchangeKind::UserMessage,
+        DialAbortReason::DialContext
+      )],
+      "exactly one DialAborted, for the SNI-rejected (second) id",
+    );
+  }
+
+  /// STR-A001 test 5: `leave()` then `start_push_pull` — the inner endpoint
+  /// hands back an inert id (no dial initiated while not running) — surfaces one
+  /// `DialAborted{PushPull, NotRunning}` and leaves `pending_outbound_kinds`
+  /// empty (the wrapper does NOT stage a not-running dial, closing the latent
+  /// lingering-entry wart).
+  #[test]
+  fn not_running_push_pull_emits_dialaborted_not_running() {
+    let now = Instant::now();
+    let mut coord = tls_coord(7322);
+    coord.leave(now).expect("leave from a running node");
+
+    let sid = coord.start_push_pull(addr(7000), PushPullKind::Join, now);
+
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(
+      aborts.as_slice(),
+      &[(sid, ExchangeKind::PushPull, DialAbortReason::NotRunning)],
+      "one DialAborted (PushPull, NotRunning) keyed by the inert id",
+    );
+    assert_eq!(
+      coord.pending_outbound_kinds_len(),
+      0,
+      "a not-running dial stages no pending_outbound_kinds entry",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no bridge is built while not running",
     );
   }
 }

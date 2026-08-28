@@ -423,7 +423,7 @@ fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
 
   use super::{TlsOptions, TlsRecords};
   use crate::{
-    event::PushPullKind,
+    event::{DialAbortReason, Event, ExchangeKind, PushPullKind},
     streams::{
       LabelOptions, Labeled, StreamEndpoint,
       test_support::{addr, endpoint, test_peer_to_socket},
@@ -441,7 +441,7 @@ fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
   let mut coord: StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>> =
     StreamEndpoint::new(ep, cfg, sni, test_peer_to_socket());
 
-  let _sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
+  let sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
 
   assert_eq!(
     coord.pending_outbound_kinds_len(),
@@ -452,6 +452,19 @@ fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
     coord.live_bridge_count(),
     0,
     "no bridge is allocated when dial_context rejects the per-peer SNI",
+  );
+  // STR-A001: the retired dial surfaces exactly one terminal `DialAborted`
+  // keyed by the returned id, carrying the originating kind + reason.
+  let mut aborts = Vec::new();
+  while let Some(ev) = coord.poll_event() {
+    if let Event::DialAborted(a) = ev {
+      aborts.push((a.stream_id(), a.kind(), a.reason()));
+    }
+  }
+  assert_eq!(
+    aborts.as_slice(),
+    &[(sid, ExchangeKind::PushPull, DialAbortReason::DialContext)],
+    "the dial_context rejection surfaces one DialAborted (PushPull, DialContext)",
   );
 }
 
@@ -801,6 +814,210 @@ fn tls_two_same_label_nodes_complete_a_reliable_exchange() {
        (num_members={})",
     acceptor.endpoint_ref().num_members(),
   );
+}
+
+/// STR-001 TLS twin: on an INBOUND TLS connection the acceptor's reliable
+/// events attribute the accept-time transport source (the client's ephemeral
+/// socket), NOT the peer's advertised membership address — while the membership
+/// merge still lands the peer under its advertised address. Mirrors the
+/// plain-TCP `inbound_reliable_events_report_transport_source_not_advertised_addr`.
+#[test]
+fn tls_inbound_reliable_events_report_transport_source_not_advertised_addr() {
+  use crate::Instant;
+  use core::{net::SocketAddr, time::Duration};
+
+  use bytes::Bytes;
+  use smol_str::SmolStr;
+
+  use super::{TlsOptions, TlsRecords};
+  use crate::{
+    event::{Event, PushPullKind},
+    streams::{
+      ExchangeId, LabelOptions, Labeled, StreamAction, StreamEndpoint,
+      test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+    },
+    tls::options::tests::{test_client, test_server},
+  };
+
+  fn build() -> (
+    StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>,
+    StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>,
+    SocketAddr,
+    SocketAddr,
+  ) {
+    let dialer_addr = addr(8120);
+    let acceptor_addr = addr(8121);
+    let label = || Some(b"cluster-x".to_vec());
+    let dialer = StreamEndpoint::new(
+      endpoint(dialer_addr.port()),
+      LabelOptions::new_in(label(), TlsOptions::new(test_server(), test_client())),
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    let acceptor = StreamEndpoint::new(
+      endpoint(acceptor_addr.port()),
+      LabelOptions::new_in(label(), TlsOptions::new(test_server(), test_client())),
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    (dialer, acceptor, dialer_addr, acceptor_addr)
+  }
+
+  // Drive the pair to quiescence, feeding `accept_from` as the acceptor's
+  // inbound connection source, and return every event the acceptor surfaced.
+  fn drive(
+    dialer: &mut StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>,
+    acceptor: &mut StreamEndpoint<SmolStr, SocketAddr, Labeled<TlsRecords>>,
+    accept_from: SocketAddr,
+    start: Instant,
+  ) -> Vec<Event<SmolStr, SocketAddr>> {
+    let mut now = start;
+    let mut dialer_ex: Option<ExchangeId> = None;
+    let mut acceptor_ex: Option<ExchangeId> = None;
+    let mut acc_events = Vec::new();
+    for _ in 0..256 {
+      dialer.handle_timeout(now);
+      acceptor.handle_timeout(now);
+
+      while let Some(action) = dialer.poll_action() {
+        match action {
+          StreamAction::Connect(info) => {
+            dialer_ex = Some(info.id());
+            if acceptor_ex.is_none() {
+              acceptor_ex = Some(
+                acceptor
+                  .accept_connection(accept_from, now)
+                  .expect("test: connection admitted"),
+              );
+            }
+          }
+          StreamAction::Shutdown(r) | StreamAction::Close(r) => {
+            if Some(r.id()) == dialer_ex
+              && let Some(ax) = acceptor_ex
+            {
+              acceptor.handle_transport_data(ax, &[], true, now);
+            }
+          }
+          StreamAction::Abort(_) => panic!("the labeled dialer must not abort a same-label peer"),
+        }
+      }
+      while let Some(action) = acceptor.poll_action() {
+        match action {
+          StreamAction::Connect(_) => panic!("the acceptor never dials"),
+          StreamAction::Shutdown(r) | StreamAction::Close(r) => {
+            if Some(r.id()) == acceptor_ex
+              && let Some(dx) = dialer_ex
+            {
+              dialer.handle_transport_data(dx, &[], true, now);
+            }
+          }
+          StreamAction::Abort(_) => panic!("the labeled acceptor must not abort a same-label peer"),
+        }
+      }
+
+      if let Some(ax) = acceptor_ex {
+        let mut to_acceptor = Vec::new();
+        while let Some((id, _peer, bytes)) = dialer.poll_transport_transmit() {
+          if Some(id) == dialer_ex {
+            to_acceptor.extend_from_slice(&bytes);
+          }
+        }
+        if !to_acceptor.is_empty() {
+          acceptor.handle_transport_data(ax, &to_acceptor, false, now);
+        }
+      }
+      if let Some(dx) = dialer_ex {
+        let mut to_dialer = Vec::new();
+        while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+          if Some(id) == acceptor_ex {
+            to_dialer.extend_from_slice(&bytes);
+          }
+        }
+        if !to_dialer.is_empty() {
+          dialer.handle_transport_data(dx, &to_dialer, false, now);
+        }
+      }
+
+      while dialer.poll_event().is_some() {}
+      while let Some(ev) = acceptor.poll_event() {
+        acc_events.push(ev);
+      }
+
+      now += Duration::from_millis(5);
+    }
+    acc_events
+  }
+
+  let assert_source = |ephemeral: SocketAddr| {
+    let now = Instant::now();
+    let (mut dialer, mut acceptor, dialer_addr, acceptor_addr) = build();
+    assert_ne!(
+      ephemeral, dialer_addr,
+      "ephemeral source differs from advertised"
+    );
+
+    dialer
+      .set_local_state_snapshot(Bytes::from_static(b"dialer-state"))
+      .expect("set_local_state_snapshot forwards");
+
+    // (push/pull) — RemoteStateReceived.peer is the fed transport source.
+    let _sid = dialer.start_push_pull(acceptor_addr, PushPullKind::Join, now);
+    let events = drive(&mut dialer, &mut acceptor, ephemeral, now);
+    let rsr_peer = events.iter().find_map(|ev| match ev {
+      Event::RemoteStateReceived(rs) => Some(*rs.peer_ref()),
+      _ => None,
+    });
+    assert_eq!(
+      rsr_peer,
+      Some(ephemeral),
+      "RemoteStateReceived.peer is the accept-time TLS transport source",
+    );
+
+    // (c) merge unpoisoned: the dialer is at its advertised address, and no
+    // member sits at the ephemeral source.
+    let merged = acceptor
+      .endpoint_ref()
+      .member(&SmolStr::new("n-8120"))
+      .expect("the acceptor merged the dialer's advertised membership entry");
+    assert_eq!(
+      *merged.address_ref(),
+      dialer_addr,
+      "the dialer is merged at its advertised address, not the ephemeral source",
+    );
+    assert!(
+      acceptor
+        .endpoint_ref()
+        .members()
+        .all(|m| *m.address_ref() != ephemeral),
+      "no membership entry is poisoned with the ephemeral transport source",
+    );
+
+    // (reliable user data) — UserPacket.from is the fed transport source.
+    let payload = Bytes::from_static(b"reliable-hello");
+    dialer
+      .start_user_message(acceptor_addr, payload.clone(), now)
+      .expect("issued while running");
+    let events = drive(&mut dialer, &mut acceptor, ephemeral, now);
+    let up_from = events.iter().find_map(|ev| match ev {
+      Event::UserPacket(p) => {
+        assert_eq!(
+          p.data_ref().as_ref(),
+          payload.as_ref(),
+          "payload round-trips"
+        );
+        Some(*p.from_ref())
+      }
+      _ => None,
+    });
+    assert_eq!(
+      up_from,
+      Some(ephemeral),
+      "UserPacket(Reliable).from is the accept-time TLS transport source",
+    );
+  };
+
+  assert_source(addr(49152));
+  assert_source(addr(49153));
 }
 
 /// A labeled acceptor rejects a peer that completes the TLS handshake and

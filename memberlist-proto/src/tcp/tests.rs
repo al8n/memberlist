@@ -3509,12 +3509,16 @@ fn coordinator_pair(
 /// (an empty `read == 0`) to the peer. Runs to mutual quiescence (both sides
 /// reaped their bridge) or the iteration cap.
 ///
-/// `acceptor_addr` is the socket the dialer dials; the acceptor accepts the
-/// connection as coming `from` the dialer's advertised address.
+/// `accept_from` is the transport source the acceptor sees the inbound
+/// connection arriving `from` — fed straight into `accept_connection`. A real
+/// listener reports the peer's kernel-selected ephemeral socket here, which is
+/// generally DISTINCT from the peer's advertised membership address; callers
+/// that want the historical "acceptor sees the advertised address" behavior
+/// pass the dialer's advertised address.
 fn drive_exchange(
   dialer: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
   acceptor: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
-  dialer_addr: SocketAddr,
+  accept_from: SocketAddr,
   now: Instant,
 ) {
   // Per-side connection handle, established when the dialer's Connect fires.
@@ -3536,7 +3540,7 @@ fn drive_exchange(
           dial_eid = Some(c.id());
           acc_eid = Some(
             acceptor
-              .accept_connection(dialer_addr, now)
+              .accept_connection(accept_from, now)
               .expect("test: connection admitted"),
           );
         }
@@ -3695,6 +3699,99 @@ fn end_to_end_reliable_user_message_delivers_on_acceptor() {
     Some(payload.as_ref()),
     "the reliable user message surfaced on the acceptor as UserPacket",
   );
+}
+
+/// STR-001 regression: on an INBOUND connection the acceptor's reliable events
+/// attribute the accept-time transport source (the peer's ephemeral socket),
+/// NOT the peer's advertised membership address — while the membership merge
+/// still lands the peer under its advertised address (merge unpoisoned). The
+/// event `.peer` / `.from` is a best-effort transport-origin hint; the two
+/// address domains are deliberately distinct on the inbound path. The
+/// in-memory harness previously masked this by feeding the advertised address
+/// as the accept source.
+#[test]
+fn inbound_reliable_events_report_transport_source_not_advertised_addr() {
+  // One push/pull (RemoteStateReceived) + one reliable user-message
+  // (UserPacket) exchange with the acceptor fed `ephemeral` as the connection
+  // source, distinct from the dialer's advertised `n-7820` @ `dialer_addr`.
+  fn drive_and_assert(ephemeral: SocketAddr) {
+    let now = Instant::now();
+    let dialer_addr = addr(7820);
+    let acceptor_addr = addr(7821);
+    assert_ne!(
+      ephemeral, dialer_addr,
+      "the ephemeral source must differ from the advertised address",
+    );
+    let (mut dialer, mut acceptor) = coordinator_pair(dialer_addr.port(), acceptor_addr.port());
+
+    // Non-empty local state so the merge emits `RemoteStateReceived`.
+    dialer
+      .set_local_state_snapshot(Bytes::from_static(b"dialer-state"))
+      .expect("set_local_state_snapshot forwards");
+
+    // (push/pull)
+    let _sid = dialer.start_push_pull(acceptor_addr, PushPullKind::Join, now);
+    drive_exchange(&mut dialer, &mut acceptor, ephemeral, now);
+
+    let mut rsr_peer = None;
+    while let Some(ev) = acceptor.poll_event() {
+      if let Event::RemoteStateReceived(rs) = ev {
+        rsr_peer = Some(*rs.peer_ref());
+      }
+    }
+    // (a) the merge event attributes the fed transport source.
+    assert_eq!(
+      rsr_peer,
+      Some(ephemeral),
+      "RemoteStateReceived.peer is the accept-time transport source",
+    );
+
+    // (c) the acceptor merged the dialer under its ADVERTISED address, and no
+    // member sits at the ephemeral source (the merge is unpoisoned).
+    let merged = acceptor
+      .endpoint_ref()
+      .member(&SmolStr::new("n-7820"))
+      .expect("the acceptor merged the dialer's advertised membership entry");
+    assert_eq!(
+      *merged.address_ref(),
+      dialer_addr,
+      "the dialer is merged at its advertised address, not the ephemeral source",
+    );
+    assert!(
+      acceptor
+        .endpoint_ref()
+        .members()
+        .all(|m| *m.address_ref() != ephemeral),
+      "no membership entry is poisoned with the ephemeral transport source",
+    );
+
+    // (reliable user data)
+    let payload = Bytes::from_static(b"reliable-hello");
+    dialer
+      .start_user_message(acceptor_addr, payload.clone(), now)
+      .expect("issued while running");
+    drive_exchange(&mut dialer, &mut acceptor, ephemeral, now);
+
+    let mut up_from = None;
+    while let Some(ev) = acceptor.poll_event() {
+      if let Event::UserPacket(p) = ev {
+        let (from, data, _) = p.into_parts();
+        assert_eq!(data.as_ref(), payload.as_ref(), "payload round-trips");
+        up_from = Some(from);
+      }
+    }
+    // (b) the reliable user packet attributes the fed transport source.
+    assert_eq!(
+      up_from,
+      Some(ephemeral),
+      "UserPacket(Reliable).from is the accept-time transport source",
+    );
+  }
+
+  // Repeat from a second, distinct ephemeral source: the logical attribution
+  // tracks whatever transport source the acceptor was fed.
+  drive_and_assert(addr(49152));
+  drive_and_assert(addr(49153));
 }
 
 /// `poll_timeout` folds in a pending-dial intent's own deadline AND returns an

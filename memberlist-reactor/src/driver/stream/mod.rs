@@ -1137,6 +1137,21 @@ where
           }
         }
       }
+      // Pre-connect dial abort: the coordinator retired a `start_*` id before
+      // any `Connect`. No synchronous waiter is keyed on a `StreamId` — the
+      // join / send waiter tables are `ExchangeId`-keyed and capture their ids
+      // from the surfaced `Connect` — so a `DialAborted` never resolves one and
+      // double-reporting is structurally impossible. Trace it for visibility.
+      Event::DialAborted(_p) => {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+          stream_id = _p.stream_id().as_u64(),
+          peer = %_p.peer_ref(),
+          kind = ?_p.kind(),
+          reason = ?_p.reason(),
+          "stream dial aborted before Connect",
+        );
+      }
       _ => {}
     }
   }
