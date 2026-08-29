@@ -120,6 +120,15 @@ fn user_packet(len: usize) -> Event<SmolStr, SocketAddr> {
   ))
 }
 
+/// The payload length of a `user_packet` event, for asserting WHICH event
+/// occupies a channel slot or overflow position. Panics on any other variant.
+fn user_packet_len(ev: &Event<SmolStr, SocketAddr>) -> usize {
+  match ev {
+    Event::UserPacket(up) => up.data_ref().len(),
+    other => panic!("expected a UserPacket event, got {other:?}"),
+  }
+}
+
 /// A control event carrying no app-data (`observation_payload_bytes` is `None`)
 /// and, with no parked leave/join/ping, a no-op for `account_event`. Used to
 /// drive the obs-channel `Full`-and-recoverable drop arm.
@@ -385,7 +394,8 @@ async fn obs_disconnected_rolls_back_reservation() {
 /// With older events still queued in the overflow, `send_observation` must route
 /// a new event BEHIND them, never `try_send` it into a slot freed since the last
 /// `flush_obs_overflow` — doing so would deliver it ahead of the queued events,
-/// out of machine-event order.
+/// out of machine-event order. A slot freed in that window is consumed by the
+/// OLDEST queued event, and the new one waits behind whatever backlog remains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn obs_new_event_waits_behind_nonempty_overflow() {
   // Capacity-1 channel, ample byte budget.
@@ -399,17 +409,106 @@ async fn obs_new_event_waits_behind_nonempty_overflow() {
   // naive `try_send` would jump the queue.
   obs_rx.try_recv().expect("drain the queued first event");
 
-  driver.send_observation(user_packet(3)); // overflow non-empty → must wait behind
+  driver.send_observation(user_packet(3)); // overflow non-empty → drains behind
 
+  // The freed slot is consumed by the OLDER queued event (len 2), and the new
+  // event takes its place in the overflow — order preserved, nothing dropped.
   assert_eq!(
     driver.obs_overflow.len(),
-    2,
-    "a new event with a non-empty overflow is appended behind the backlog, \
-       preserving FIFO order"
+    1,
+    "the older queued event moved into the freed slot; the new event waits behind it"
   );
+  assert_eq!(
+    user_packet_len(
+      &obs_rx
+        .try_recv()
+        .expect("the freed slot now holds the older event")
+    ),
+    2,
+    "the OLDER queued event took the freed slot, not the new one — FIFO order",
+  );
+  assert_eq!(
+    user_packet_len(
+      driver
+        .obs_overflow
+        .back()
+        .expect("the new event is retained in the overflow")
+    ),
+    3,
+    "the new event is behind the backlog, never ahead of an older queued one",
+  );
+}
+
+/// With the overflow FULL at `OBS_OVERFLOW_MAX` but a channel slot freed since the
+/// last flush, a new app-data event must NOT be dropped: the freed slot is first
+/// consumed by the OLDEST queued event, and the new event is appended behind the
+/// remaining backlog. Dropping here would lose reconstructible app-data while a
+/// channel slot sat unused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn obs_full_overflow_reuses_freed_slot_before_dropping() {
+  // Capacity-1 channel, ample byte budget so nothing is dropped for bytes.
+  let (mut driver, obs_rx, shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+
+  // Fill the capacity-1 channel.
+  driver.send_observation(user_packet(1));
   assert!(
-    obs_rx.try_recv().is_err(),
-    "the new event must NOT jump ahead into the freed slot"
+    driver.obs_overflow.is_empty(),
+    "first event went to the channel"
+  );
+
+  // Fill the overflow to exactly OBS_OVERFLOW_MAX. Stage the items directly (the
+  // reservation path is exercised by the byte-accounting tests); the OLDEST is
+  // tagged with a distinct payload length so we can confirm it — not the new
+  // event — consumes the freed slot.
+  const OLDEST_LEN: usize = 200;
+  const NEW_LEN: usize = 99;
+  driver.obs_overflow.push_back(user_packet(OLDEST_LEN));
+  for _ in 1..OBS_OVERFLOW_MAX {
+    driver.obs_overflow.push_back(user_packet(50));
+  }
+  assert_eq!(
+    driver.obs_overflow.len(),
+    OBS_OVERFLOW_MAX,
+    "the overflow is staged at its cap"
+  );
+
+  // Free a channel slot WITHOUT flushing: the exact window where the old gate
+  // would drop the new event even though the channel has room.
+  obs_rx.try_recv().expect("drain the queued first event");
+
+  driver.send_observation(user_packet(NEW_LEN));
+
+  // No drop: the freed slot absorbed the oldest queued event, and the new event
+  // is retained behind the remaining backlog (overflow back at cap, not over).
+  assert_eq!(
+    shared.observation_dropped(),
+    0,
+    "a free channel slot must be reused before dropping — nothing is dropped"
+  );
+  assert_eq!(
+    driver.obs_overflow.len(),
+    OBS_OVERFLOW_MAX,
+    "the oldest event moved to the channel; the new event took its place at the back"
+  );
+
+  // FIFO: the freed slot holds the OLDEST queued event, never the newest.
+  let front = obs_rx
+    .try_recv()
+    .expect("the freed slot now holds an event");
+  assert_eq!(
+    user_packet_len(&front),
+    OLDEST_LEN,
+    "the oldest queued event consumed the freed slot, preserving FIFO order"
+  );
+  // The new event is at the back of the overflow, behind the remaining backlog.
+  let back = driver
+    .obs_overflow
+    .back()
+    .expect("the overflow still holds the appended new event");
+  assert_eq!(
+    user_packet_len(back),
+    NEW_LEN,
+    "the new event is appended at the back, never ahead of an older queued one"
   );
 }
 

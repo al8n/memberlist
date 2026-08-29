@@ -1424,6 +1424,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     &mut pending,
     stream_opts,
     &cidr_policy,
+    &snapshot,
+    &mut last_snapshot_version,
   )
   .await;
 
@@ -2891,6 +2893,8 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
   pending: &mut PendingCommands,
   stream_opts: StreamTransportOptions,
   cidr_policy: &CidrFilter,
+  snapshot: &SnapshotCell<I, A>,
+  last_snapshot_version: &mut u64,
 ) where
   I: memberlist_proto::Id,
   A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
@@ -2929,6 +2933,11 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
       drain_actions::<I, A, R, G>(endpoint, bridges, bridge_ready_tx, stream_opts, cidr_policy);
     let did_transports = drain_transport_transmits::<I, A, R, G>(endpoint, bridges);
     let did_transmits = drain_transmits::<I, A, R, G>(endpoint, gossip_socket, label.clone()).await;
+    // Publish the post-transition snapshot BEFORE `drain_events` resolves
+    // parked waiters / hands events to the obs task, so a caller woken by a
+    // completion that landed during the shutdown drain observes the new
+    // membership, never the pre-transition snapshot.
+    refresh_snapshot_if_changed::<I, A, R, G>(endpoint, snapshot, last_snapshot_version);
     let did_events = drain_events(
       endpoint,
       obs_tx,

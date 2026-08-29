@@ -1417,14 +1417,22 @@ where
       self.obs_payload_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
     // FIFO gate: if older events are still queued in the overflow, this one must
-    // not jump ahead of them. `flush_obs_overflow` retries the backlog before each
-    // event drain but stops at the first `Full`, so a slot freed since then would
-    // let `try_send` accept this newer event ahead of the queued ones — delivering
-    // it out of machine-event order. Route it behind the backlog exactly as a Full
-    // channel would, preserving order.
+    // not jump ahead of them. A channel slot may have been freed since the last
+    // `flush_obs_overflow`, so drain the backlog into any freed slot(s) first —
+    // this both preserves machine-event order and lets a newly-freed slot be
+    // consumed by the oldest queued event rather than by this newer one.
     if !self.obs_overflow.is_empty() {
-      self.retain_or_drop_observation(ev, payload);
-      return;
+      self.flush_obs_overflow();
+      // Backlog still non-empty ⇒ the channel is full (flush stops at the first
+      // `Full`); queue this event behind it (or drop it only if the overflow is
+      // genuinely at cap). Order is preserved: the new event never precedes an
+      // older queued one.
+      if !self.obs_overflow.is_empty() {
+        self.retain_or_drop_observation(ev, payload);
+        return;
+      }
+      // The backlog fully drained into freed slots; fall through to try the new
+      // event against the now-emptied overflow / possibly-free channel.
     }
     match self.obs_tx.try_send(ev) {
       // Reserved above; the obs task releases it on receive.

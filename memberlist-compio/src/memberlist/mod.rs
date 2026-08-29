@@ -738,18 +738,25 @@ impl<I, A> Memberlist<I, A> {
 
   /// Leave the cluster gracefully.
   ///
-  /// Returns `Ok(())` once the leave broadcast has been flushed to
-  /// peers — i.e. once the direct `Dead`-self notices queued for every
-  /// live peer have been handed to the wire (the membership machine's
-  /// `Event::LeftCluster` completion signal). Until then the call is
-  /// in flight; subscribers observe `Event::NodeLeft(self)` on peers as
-  /// the notices land.
+  /// Returns `Ok(())` once the local leave has completed: the membership
+  /// machine has transitioned out of the cluster and its direct
+  /// `Dead`-self notices for every live peer have been handed to the
+  /// gossip socket (the machine's `Event::LeftCluster` completion
+  /// signal). This is a best-effort socket hand-off, NOT a wire- or
+  /// peer-delivery guarantee — the notices travel over the unreliable
+  /// gossip plane, a send error is ignored once its transmit is dequeued,
+  /// and even a successful send does not confirm any peer received it (a
+  /// peer that never sees a notice still reaps the departed node via
+  /// failure detection). Subscribers observe `Event::NodeLeft(self)` on
+  /// peers only as, and if, the notices land.
   ///
   /// The wait races the driver's `leave_timeout` (see
   /// [`RuntimeOptions::with_leave_timeout`](crate::RuntimeOptions::with_leave_timeout)):
-  /// if the flush does not complete within that budget the call returns
-  /// [`MemberlistError::LeaveTimeout`] — the local node has still left,
-  /// but the driver could not confirm peers were notified.
+  /// if the local leave does not complete within that budget the call
+  /// returns [`MemberlistError::LeaveTimeout`] — the node's own departure
+  /// may still finish, but the driver did not observe local completion in
+  /// time. The timeout reflects local completion only; it never confirmed
+  /// peer notification.
   #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn leave(&self) -> Result<()> {
     if self.shutdown_flag.get() {

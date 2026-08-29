@@ -1520,13 +1520,33 @@ async fn run_shutdown_drain(
   bridge_inbound_rx: &mut mpsc::Receiver<super::BridgeInbound>,
   bridge_ready_tx: &flume::Sender<BridgeReady>,
   pending: &mut PendingCommands,
-) {
+) -> SnapshotCell<SmolStr> {
   let gossip_socket = compio::net::UdpSocket::bind("127.0.0.1:0")
     .await
     .expect("bind loopback udp");
   let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
   let observation_dropped = Cell::new(0u64);
   let obs_payload_bytes = Cell::new(0u64);
+
+  // Bootstrap the snapshot cell from the pre-drain membership. If the drain folds
+  // a completion that changes membership, the freeze helper republishes the cell
+  // before it resolves the woken waiter.
+  let snapshot: SnapshotCell<SmolStr> = {
+    let ep_ref = endpoint.endpoint_ref();
+    let local = ep_ref
+      .member(ep_ref.local_id_ref())
+      .expect("the local node is always a member");
+    let boot = MemberlistSnapshot::new(
+      vec![local.clone()],
+      local,
+      1,
+      ep_ref.num_members(),
+      ep_ref.health_score(),
+    );
+    Rc::new(RefCell::new(Rc::new(boot)))
+  };
+  let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
+
   freeze_and_drain_bridges_to_disconnected::<SmolStr, SocketAddr, RawRecords, _>(
     endpoint,
     bridges,
@@ -1542,8 +1562,11 @@ async fn run_shutdown_drain(
     pending,
     StreamTransportOptions::default(),
     &Default::default(),
+    &snapshot,
+    &mut last_snapshot_version,
   )
   .await;
+  snapshot
 }
 
 /// Regression: a successful push/pull completion buffered PAST the per-iteration
@@ -1745,6 +1768,96 @@ async fn shutdown_drain_folds_completion_that_lost_the_select() {
     ),
     other => panic!("expected Ok(reached) for a fully-completed join; got {other:?}"),
   }
+}
+
+/// Regression: a completion that changes membership AND resolves its waiter during
+/// the shutdown drain publishes the post-transition snapshot BEFORE the waiter is
+/// woken — the woken caller observes the new membership, never the pre-transition
+/// snapshot the drain started from. The bootstrap cell holds only the local node;
+/// folding the push/pull completion merges the peer, so the republished cell must
+/// carry it. Without the pre-`drain_events` republish, the cell keeps the
+/// bootstrap membership and the peer is absent.
+#[compio::test]
+async fn shutdown_drain_publishes_snapshot_before_waking_waiter() {
+  let now = Instant::now();
+  let mut endpoint = unlabeled_endpoint("dialer", "127.0.0.1:0".parse().unwrap());
+  endpoint.start_scheduling(now);
+
+  let addr_a = addr(7830);
+  // The peer entry is named "seed" (see `drive_push_to_queued_response`); folding
+  // its pull response merges it into the dialer's membership.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut endpoint, addr_a, now);
+
+  // A 1-seed WaitForCompletion join: when eid_a completes the join resolves and
+  // its waiter is woken inside the drain.
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
+  let mut pending = empty_pending();
+  pending.joins.push(PendingJoin {
+    pending: HashSet::from([eid_a]),
+    addr_by_eid: HashMap::from([(eid_a, addr_a)]),
+    contacted: smallvec::SmallVec::new(),
+    requested: 1,
+    deadline: now + Duration::from_secs(30),
+    reply: tx,
+  });
+
+  let (bridge_inbound_tx, mut bridge_inbound_rx) = mpsc::unbounded::<super::BridgeInbound>();
+  let (bridge_ready_tx, _bridge_ready_rx) = flume::unbounded::<BridgeReady>();
+  for chunk in response_a {
+    queue_inbound(
+      &bridge_inbound_tx,
+      super::BridgeInbound::Bytes(super::BridgeBytes {
+        eid: eid_a,
+        bytes: chunk,
+        received_at: now,
+      }),
+    );
+  }
+  queue_inbound(
+    &bridge_inbound_tx,
+    super::BridgeInbound::Eof(super::BridgeEof {
+      eid: eid_a,
+      received_at: now,
+    }),
+  );
+
+  // The bootstrap snapshot (built inside `run_shutdown_drain` from the pre-drain
+  // membership) does NOT yet carry the peer.
+  let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
+  let snapshot = run_shutdown_drain(
+    &mut endpoint,
+    &mut bridges,
+    bridge_inbound_tx,
+    &mut bridge_inbound_rx,
+    &bridge_ready_tx,
+    &mut pending,
+  )
+  .await;
+
+  // The waiter was resolved inside the drain.
+  assert!(
+    pending.joins.is_empty(),
+    "the fully-resolved join was replied + removed inline by the drain",
+  );
+  match rx.await {
+    Ok(Ok(reached)) => assert!(
+      reached.contains(&addr_a),
+      "the completion resolved the join Ok: {reached:?}",
+    ),
+    other => panic!("expected Ok(reached) for a fully-completed join; got {other:?}"),
+  }
+
+  // The republished snapshot the woken waiter would read carries the merged peer.
+  let published = snapshot.borrow().clone();
+  assert!(
+    published.by_id(&SmolStr::new("seed")).is_some(),
+    "the post-transition snapshot published before the waiter woke carries the merged peer; members: {:?}",
+    published
+      .members()
+      .iter()
+      .map(|ns| ns.id_ref().as_str())
+      .collect::<Vec<_>>(),
+  );
 }
 
 /// Regression: the shutdown drain TERMINATES against a backlog far deeper than
