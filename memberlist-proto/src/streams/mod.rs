@@ -1065,8 +1065,10 @@ where
   /// drive a scenario the public `start_*` wrappers cannot reach — e.g.
   /// invoking `Endpoint::start_reliable_ping` WITHOUT the in-band
   /// `service_dials` + `flush_outbound` the coordinator wrapper runs, or
-  /// retiring a dial intent directly with `Endpoint::dial_failed`.
-  #[cfg(all(test, feature = "tcp"))]
+  /// retiring a dial intent directly with `Endpoint::dial_failed`. Used by both
+  /// the plain-TCP and TLS stream tests, so it is gated on either transport
+  /// feature (a TLS-only build has no `tcp` but still runs the TLS dial tests).
+  #[cfg(all(test, any(feature = "tcp", feature = "tls")))]
   pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A, G> {
     &mut self.ep
   }

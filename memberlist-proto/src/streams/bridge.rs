@@ -957,8 +957,11 @@ where
   }
 
   /// Test-only: expose the pre-promote out-of-band FIN latch (asserted by the
-  /// plain-TCP bridge tests, whose FIN is the only close anchor).
-  #[cfg(all(test, feature = "tcp"))]
+  /// plain-TCP bridge tests, whose FIN is the only close anchor, and by the TLS
+  /// bridge tests exercising the retained-ciphertext deferral of the
+  /// authenticated-close classification). Gated on either transport feature so a
+  /// TLS-only build (no `tcp`) still resolves it.
+  #[cfg(all(test, any(feature = "tcp", feature = "tls")))]
   #[allow(dead_code)]
   pub(crate) fn pending_eof(&self) -> bool {
     self.pending_eof
