@@ -80,6 +80,38 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = memberlist_proto::CHECKSUMED_WRAPPER_
 #[cfg(not(checksum))]
 const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 
+/// Compute the per-recv UDP buffer size for the QUIC driver's socket, which
+/// carries BOTH raw QUIC packets and memberlist gossip datagrams. The buffer
+/// must hold the larger of the two, or the kernel silently truncates whichever
+/// is bigger:
+///
+/// - A gossip datagram is at most
+///   `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`
+///   bytes when checksum and encryption are enabled, so a `with_gossip_mtu`
+///   above the historical default is not truncated.
+/// - A QUIC packet is at most the endpoint's advertised
+///   [`QuicEndpoint::max_recv_udp_payload_size`]. A small `gossip_mtu` (validated
+///   floor 512) must NOT shrink the buffer below it: an inbound QUIC packet —
+///   including the >= 1200-byte handshake Initial — would be truncated and the
+///   handshake would never complete, silently breaking the transport.
+///
+/// The `GOSSIP_RECV_BUF_MAX` cap applies ONLY to the gossip-derived size —
+/// applying it after taking the max with the QUIC size would wrongly truncate
+/// a custom `EndpointConfig` whose `max_udp_payload_size` sits above
+/// `GOSSIP_RECV_BUF_MAX` (quinn allows up to 65527, e.g. for IPv6 jumbograms,
+/// while `GOSSIP_RECV_BUF_MAX` is the IPv4 UDP payload ceiling of 65507). The
+/// QUIC size is already bounded to `1200..=65527` by quinn and is applied as a
+/// floor AFTER the gossip cap, so it is never clamped down and the result stays
+/// `<= 65527`.
+fn recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize {
+  endpoint
+    .gossip_mtu()
+    .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
+    .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
+    .min(GOSSIP_RECV_BUF_MAX)
+    .max(endpoint.max_recv_udp_payload_size())
+}
+
 /// Cap on the count of application-data events retained after a full observation
 /// channel (the payload byte budget bounds their bytes; this bounds their count).
 const OBS_OVERFLOW_MAX: usize = 1024;
@@ -210,11 +242,7 @@ where
     label: Option<Bytes>,
     cidr_policy: CidrFilter,
   ) -> Self {
-    let buf_len = endpoint
-      .gossip_mtu()
-      .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
-      .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
-      .min(GOSSIP_RECV_BUF_MAX);
+    let buf_len = recv_buf_len(&endpoint);
     let last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
     Self {
       endpoint,

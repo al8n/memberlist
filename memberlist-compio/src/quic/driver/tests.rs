@@ -67,7 +67,21 @@ fn build_endpoint_with_quic(
 fn test_quic_options() -> memberlist_proto::QuicOptions {
   use std::sync::Arc;
 
-  use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
+  use quinn_proto::EndpointConfig;
+
+  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x5au8; 32]);
+  test_quic_options_with_endpoint_cfg(EndpointConfig::new(Arc::new(hmac)))
+}
+
+/// Like [`test_quic_options`] but with a caller-supplied `EndpointConfig`, so a
+/// test can raise `max_udp_payload_size` above quinn's 1472 default (up to its
+/// 65527 ceiling) to exercise `recv_buf_len`'s QUIC-size floor.
+fn test_quic_options_with_endpoint_cfg(
+  endpoint_cfg: quinn_proto::EndpointConfig,
+) -> memberlist_proto::QuicOptions {
+  use std::sync::Arc;
+
+  use quinn_proto::{ClientConfig, ServerConfig, TransportConfig};
   use rustls::RootCertStore;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -103,9 +117,6 @@ fn test_quic_options() -> memberlist_proto::QuicOptions {
     .expect("QuicClientConfig");
   let client_cfg = ClientConfig::new(Arc::new(qcc));
 
-  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x5au8; 32]);
-  let endpoint_cfg = EndpointConfig::new(Arc::new(hmac));
-
   let transport = TransportConfig::default();
 
   memberlist_proto::QuicOptions::new(
@@ -120,6 +131,96 @@ fn test_quic_options() -> memberlist_proto::QuicOptions {
 
 fn addr(port: u16) -> SocketAddr {
   ([127, 0, 0, 1], port).into()
+}
+
+/// Build a coordinator with an explicit gossip MTU, so the recv-buffer sizing
+/// can be exercised at the validated `gossip_mtu` floor and well above it.
+fn build_endpoint_with_gossip_mtu(
+  id: &str,
+  addr: SocketAddr,
+  now: Instant,
+  gossip_mtu: usize,
+) -> QuicEndpoint<smol_str::SmolStr> {
+  use memberlist_proto::{EndpointOptions, endpoint::Endpoint};
+  use rand::SeedableRng;
+
+  let cfg = EndpointOptions::new(smol_str::SmolStr::new(id), addr).with_gossip_mtu(gossip_mtu);
+  let rng = rand::rngs::StdRng::seed_from_u64(addr.port() as u64);
+  let mut ep: Endpoint<smol_str::SmolStr, SocketAddr, rand::rngs::StdRng> = Endpoint::new(cfg, rng);
+  ep.start_scheduling(now);
+
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+  QuicEndpoint::<smol_str::SmolStr>::with_quinn_rng_seed(ep, test_quic_options(), Some(seed))
+}
+
+/// At the validated `gossip_mtu` floor (512) the gossip datagram ceiling is far
+/// below quinn's max recv UDP payload, so the recv buffer MUST floor at the QUIC
+/// max — otherwise inbound QUIC packets (the >= 1200-byte Initial included) are
+/// truncated and the handshake never completes. Reverting the `.max(...)` in
+/// `recv_buf_len` drops this below the QUIC max and fails the test.
+#[test]
+fn recv_buf_len_floors_at_quic_max_for_small_gossip_mtu() {
+  let ep = build_endpoint_with_gossip_mtu("n", addr(7710), Instant::now(), 512);
+  let quic_max = ep.max_recv_udp_payload_size();
+  assert!(quic_max >= 1200);
+  assert!(
+    super::recv_buf_len::<smol_str::SmolStr, rand::rngs::StdRng>(&ep) >= quic_max,
+    "recv buffer must accommodate the largest QUIC packet even at the gossip_mtu floor"
+  );
+}
+
+/// A large `gossip_mtu` keeps the gossip datagram ceiling as the binding size —
+/// the QUIC-max floor must not shrink it.
+#[test]
+fn recv_buf_len_gossip_wins_for_large_gossip_mtu() {
+  let ep = build_endpoint_with_gossip_mtu("n", addr(7711), Instant::now(), 60_000);
+  let got = super::recv_buf_len::<smol_str::SmolStr, rand::rngs::StdRng>(&ep);
+  assert!(got > ep.max_recv_udp_payload_size());
+  assert_eq!(
+    got,
+    60_000 + super::ENCRYPTED_WRAPPER_OVERHEAD + super::CHECKSUMED_WRAPPER_OVERHEAD
+  );
+}
+
+/// A custom `EndpointConfig` can raise `max_udp_payload_size` up to quinn's
+/// 65527 ceiling (e.g. for IPv6 jumbograms), which sits ABOVE
+/// `GOSSIP_RECV_BUF_MAX` (65507, the IPv4 UDP payload limit). At the default
+/// gossip MTU the QUIC size is the binding term, and `recv_buf_len` must floor
+/// at it WITHOUT the `GOSSIP_RECV_BUF_MAX` cap clamping it back down — the cap
+/// applies only to the gossip-derived size. Applying `.min(GOSSIP_RECV_BUF_MAX)`
+/// after the `.max(quic)` (the old clamp order) would wrongly truncate this to
+/// 65507 and fail the assertion.
+#[test]
+fn recv_buf_len_floors_at_quic_max_above_gossip_cap() {
+  use std::sync::Arc;
+
+  use memberlist_proto::{EndpointOptions, endpoint::Endpoint};
+  use quinn_proto::EndpointConfig;
+  use rand::SeedableRng;
+
+  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x5au8; 32]);
+  let mut endpoint_cfg = EndpointConfig::new(Arc::new(hmac));
+  endpoint_cfg
+    .max_udp_payload_size(65_527)
+    .expect("65527 is quinn's max_udp_payload_size ceiling");
+  let qc = test_quic_options_with_endpoint_cfg(endpoint_cfg);
+
+  let a = addr(7712);
+  let cfg = EndpointOptions::new(smol_str::SmolStr::new("n"), a);
+  let rng = rand::rngs::StdRng::seed_from_u64(a.port() as u64);
+  let mut ep: Endpoint<smol_str::SmolStr, SocketAddr, rand::rngs::StdRng> = Endpoint::new(cfg, rng);
+  ep.start_scheduling(Instant::now());
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&a.port().to_le_bytes());
+  let ep = QuicEndpoint::<smol_str::SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed));
+
+  assert_eq!(ep.max_recv_udp_payload_size(), 65_527);
+  let got = super::recv_buf_len::<smol_str::SmolStr, rand::rngs::StdRng>(&ep);
+  assert!(
+    got >= 65_527,
+    "recv buffer must floor at the QUIC receive size even above GOSSIP_RECV_BUF_MAX, got {got}"
+  );
 }
 
 /// Build an empty (allow-all default) CIDR filter — admits every address.

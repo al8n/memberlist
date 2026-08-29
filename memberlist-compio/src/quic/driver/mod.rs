@@ -285,16 +285,33 @@ struct QuicDriverState<I, G = rand::rngs::StdRng> {
   pending_user_sends: Vec<PendingUserSend>,
 }
 
-/// Compute the per-recv UDP buffer size from the coordinator's
-/// configured `gossip_mtu`. A datagram on the wire is at most
-/// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`
-/// bytes when checksum and encryption are enabled (the encryption wrapper
-/// carries the algorithm tag + nonce + AEAD auth tag, and the checksum
-/// wrapper its tag + digest); the driver sizes the recv buffer to that value so a
-/// configured `with_gossip_mtu` above the historical 16 KiB default is
-/// not silently truncated by the kernel. Mirrors the stream driver's
-/// `gossip_recv_buf_len`.
-fn gossip_recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize
+/// Compute the per-recv UDP buffer size for the QUIC driver's socket, which
+/// carries BOTH raw QUIC packets and memberlist gossip datagrams. The buffer
+/// must hold the larger of the two, or the kernel silently truncates whichever
+/// is bigger:
+///
+/// - A gossip datagram is at most
+///   `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD`
+///   bytes when checksum and encryption are enabled (the encryption wrapper
+///   carries the algorithm tag + nonce + AEAD auth tag, and the checksum wrapper
+///   its tag + digest), so a `with_gossip_mtu` above the historical 16 KiB
+///   default is not truncated.
+/// - A QUIC packet is at most the endpoint's advertised
+///   [`QuicEndpoint::max_recv_udp_payload_size`]. A small `gossip_mtu` (validated
+///   floor 512) must NOT shrink the buffer below it: an inbound QUIC packet —
+///   including the >= 1200-byte handshake Initial — would be truncated and the
+///   handshake would never complete, silently breaking the transport.
+///
+/// The `GOSSIP_RECV_BUF_MAX` cap applies ONLY to the gossip-derived size —
+/// applying it after taking the max with the QUIC size would wrongly truncate
+/// a custom `EndpointConfig` whose `max_udp_payload_size` sits above
+/// `GOSSIP_RECV_BUF_MAX` (quinn allows up to 65527, e.g. for IPv6 jumbograms,
+/// while `GOSSIP_RECV_BUF_MAX` is the IPv4 UDP payload ceiling of 65507). The
+/// QUIC size is already bounded to `1200..=65527` by quinn and is applied as a
+/// floor AFTER the gossip cap, so it is never clamped down and the result stays
+/// `<= 65527`. Mirrors the stream driver's `gossip_recv_buf_len` (which shares
+/// no socket with QUIC and so needs no QUIC floor).
+fn recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize
 where
   I: memberlist_proto::Id,
 {
@@ -303,6 +320,7 @@ where
     .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
     .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
+    .max(endpoint.max_recv_udp_payload_size())
 }
 
 /// Single-owner QUIC driver task.
@@ -406,12 +424,12 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     pending_user_sends: Vec::new(),
   };
 
-  // Per-driver UDP recv buffer size derived once from the coordinator's
-  // configured `gossip_mtu` + encrypted-wrapper overhead, capped at the
-  // IP-layer UDP maximum. The coordinator's `gossip_mtu` is set at
-  // construction time and never reconfigured at runtime, so a single
-  // value computed up-front is correct.
-  let recv_buf_len = gossip_recv_buf_len::<I, G>(&state.endpoint);
+  // Per-driver UDP recv buffer size derived once: the larger of the gossip
+  // datagram ceiling (`gossip_mtu` + wrapper overheads) and the QUIC endpoint's
+  // advertised max recv UDP payload, capped at the IP-layer UDP maximum. Both
+  // the `gossip_mtu` and the QUIC config are set at construction time and never
+  // reconfigured at runtime, so a single value computed up-front is correct.
+  let recv_buf_len = recv_buf_len::<I, G>(&state.endpoint);
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay

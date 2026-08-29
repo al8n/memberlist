@@ -1722,6 +1722,28 @@ impl<I, R> QuicEndpoint<I, R> {
     self.ep.gossip_mtu()
   }
 
+  /// The largest UDP datagram this QUIC endpoint can receive: quinn's advertised
+  /// `max_udp_payload_size` transport parameter, read from the bundled
+  /// [`quinn_proto::EndpointConfig`] via its `get_max_udp_payload_size`.
+  ///
+  /// A peer never sends this endpoint a QUIC packet larger than this value — it
+  /// is exactly the size quinn tells peers it accepts — so a driver that shares
+  /// one UDP socket for QUIC packets and gossip datagrams must size its receive
+  /// buffer to at least this many bytes. A smaller buffer silently truncates
+  /// inbound QUIC packets (including the >= 1200-byte handshake Initial), so the
+  /// handshake never completes and the QUIC transport is unusable.
+  ///
+  /// Defaults to quinn's 1472 (a 1500-byte Ethernet MTU minus IPv4/UDP
+  /// headers). A caller who raises `EndpointConfig::max_udp_payload_size` on the
+  /// raw [`QuicOptions::new`](crate::quic::QuicOptions::new) path — e.g. for a
+  /// jumbo-frame or loopback link — sees that larger value here, so the driver's
+  /// recv buffer tracks the configured value without any further wiring.
+  pub fn max_recv_udp_payload_size(&self) -> usize {
+    // Bounded to `1200..=65527` by quinn's setter, so the `u64 -> usize` cast is
+    // lossless on every supported target.
+    self.cfg.endpoint_ref().get_max_udp_payload_size() as usize
+  }
+
   /// Probe the protocol-layer credit for opening a remote-initiated
   /// unidirectional stream to `peer`. Returns `true` iff the open
   /// would have succeeded; on the (rare) success branch the probe
