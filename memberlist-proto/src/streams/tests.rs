@@ -1029,7 +1029,7 @@ mod fallible {
 #[cfg(feature = "tls")]
 mod tls {
   use crate::Instant;
-  use core::net::SocketAddr;
+  use core::{net::SocketAddr, time::Duration};
 
   use smol_str::SmolStr;
   use std::sync::Arc;
@@ -1580,6 +1580,60 @@ mod tls {
       coord.live_bridge_count(),
       0,
       "no bridge is built while not running",
+    );
+  }
+
+  /// A reaped exchange's still-queued `Connect` must never surface:
+  /// `poll_action` orders every queued `Connect` before any teardown, so a
+  /// `Connect` left in `pending_connects` across a deadline reap would open a
+  /// transport socket for an exchange the coordinator has already removed,
+  /// before the `Abort` that tells the driver to tear the connection back
+  /// down.
+  ///
+  /// The TLS dialer stays `Handshaking` after `start_push_pull` (no server
+  /// response is fed), so the bridge is still unminted when its dial deadline
+  /// elapses. The `Connect` is deliberately left undrained — the driver has
+  /// not yet called `poll_action` when `handle_timeout` fires at the elapsed
+  /// deadline, which pumps the bridge, fails it on the handshake-deadline
+  /// guard, and reaps it through the GENERIC `reap_bridge` path (not the
+  /// dial-retired `dial_succeeded(None)` branch other tests cover).
+  #[test]
+  fn deadline_reaped_dial_surfaces_only_abort_no_stale_connect() {
+    let now = Instant::now();
+    let mut coord = tls_coord(7332);
+    let _sid = coord.start_push_pull(addr(7000), PushPullKind::Join, now);
+
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "the dial built one handshaking bridge",
+    );
+
+    // Advance past the bridge's dial deadline (the default `stream_timeout`)
+    // WITHOUT ever draining the queued Connect via `poll_action`, then run
+    // the timer tick that reaps it.
+    let later = now + Duration::from_secs(30);
+    coord.handle_timeout(later);
+
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the deadline-elapsed bridge is reaped",
+    );
+
+    let mut saw_abort = false;
+    while let Some(action) = coord.poll_action() {
+      match action {
+        StreamAction::Connect(_) => {
+          panic!("a reaped exchange's stale Connect must never surface")
+        }
+        StreamAction::Abort(_) => saw_abort = true,
+        _ => {}
+      }
+    }
+    assert!(
+      saw_abort,
+      "the deadline-elapsed reap emits an Abort teardown",
     );
   }
 }
