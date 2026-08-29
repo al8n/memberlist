@@ -50,7 +50,7 @@ use crate::{
     Command, JoinCmd, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
     SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
-  driver::join_reply,
+  driver::{TIMEOUT_STALENESS_GRACE, join_reply},
   error::{Error, JoinFailed, UserDialBacklogFull},
   observation::observation_payload_bytes,
   shared::Shared,
@@ -216,6 +216,11 @@ where
   transmit_batch: usize,
   timer: Option<Pin<Box<R::Sleep>>>,
   timer_deadline: Option<Instant>,
+  /// Anchored the first poll a DUE deadline is held back by a capped inbound
+  /// path; `handle_timeout` force-fires once
+  /// [`TIMEOUT_STALENESS_GRACE`] has elapsed since this anchor, so a
+  /// sustained inbound flood cannot suppress failure detection.
+  timeout_stall_since: Option<Instant>,
   idle_wake: Duration,
   /// CIDR transport-source filter: a UDP packet (QUIC handshake or gossip
   /// datagram) from a blocked source IP is dropped before the machine sees it, so
@@ -268,6 +273,7 @@ where
       transmit_batch,
       timer: None,
       timer_deadline: None,
+      timeout_stall_since: None,
       idle_wake: Duration::from_secs(1),
       cidr_policy,
     }
@@ -1160,40 +1166,86 @@ where
       progress = true;
     }
     // A saturated batch (recv_n == recv_batch) means more datagrams may still be
-    // queued in the socket; self-wake so the next poll drains the rest.
-    if recv_n == this.recv_batch {
-      more = true;
-    }
+    // queued in the socket; self-wake so the next poll drains the rest. Kept in
+    // scope for the timeout gate below.
+    let recv_capped = recv_n == this.recv_batch;
+    more |= recv_capped;
 
     // Drain machine surfaces (bounded per surface).
     let (drained, drain_more) = this.drain_surfaces(cx);
     progress |= drained;
     more |= drain_more;
 
-    // Timer: advance membership time on schedule. A past-due deadline fires
-    // `handle_timeout` now; otherwise (re)arm and poll the sleep. This runs every
-    // poll regardless of the receive batch: `drain_surfaces` above decoded the
-    // inbound ingress to empty (a datagram-carried probe Ack is already applied),
-    // and the probe FSM anchors success on an absolute `failure_deadline`, so an
-    // Ack decoded slightly later still rescues the probe regardless of
-    // handle_ack-vs-handle_timeout ordering — no recv-saturation gate is needed.
+    // Timer, gated on INBOUND quiescence. Two deadline classes reach
+    // `handle_timeout`, and only one needs the gate:
+    //
+    // The PROBE class is ordering-independent. `complete_probe_success` rejects
+    // a late-decoded Ack against the probe FSM's absolute `failure_deadline`
+    // exactly as `handle_timeout` would, so no driver ordering (a gate, or
+    // draining the socket before the timer) can rescue a probe Ack whose decode
+    // crosses that cutoff — the QUIC / UDP gossip path carries no per-datagram
+    // arrival timestamp to reinstate. A sustained flood that pushes a probe Ack's
+    // decode past the deadline is therefore a bounded decode-lag capacity limit,
+    // absorbed by Lifeguard / awareness refutation, NOT a gate-fixable ordering
+    // bug — so unbounded drain-before-timer stays forbidden for probes.
+    //
+    // The gate exists for the ORDERING-DEPENDENT classes — suspicion expiry,
+    // indirect-probe forwards, and stream intents — whose refuting or completing
+    // inputs (e.g. an `Alive(inc+1)` clearing a suspicion) carry NO wall-clock
+    // cutoff. Such an input can sit kernel-buffered behind a saturated recv
+    // batch, and firing `handle_timeout` past it would broadcast a false `Dead`
+    // cluster-wide. The super-machine's `handle_timeout` contract presumes a
+    // driver that defers on inbound quiescence; a DUE deadline therefore DEFERS
+    // while the recv batch is capped (the `more` self-wake re-polls and each
+    // capped batch drains FIFO), bounded by a wall-clock staleness grace so a
+    // sustained flood cannot suppress failure detection past it.
+    //
+    // `recv_capped` is the ONLY inbound backlog term with a QUIC analog: unlike
+    // the stream driver, `handle_udp` never backpressures (an over-cap datagram
+    // is dropped, not deferred), `drain_surfaces` empties the memberlist ingress
+    // every poll, and reliable-plane residue is self-scheduled by the machine's
+    // own `poll_timeout` anchors — so none of the stream terms
+    // (recv_gated / ingress_capped / inbound_capped) has a counterpart here.
+    let inbound_backlog = recv_capped;
+    // Sample the clock FRESH for the timeout decision: the recv loop and
+    // `drain_surfaces` above take real time, and a deadline that was in the
+    // future at poll entry may have been crossed during them — evaluating
+    // against the stale entry `now` would route that crossed deadline to the
+    // armed-sleep arm below, which must never fire.
+    let decision_now = Instant::now();
     let target = match this.endpoint.poll_timeout() {
-      Some(d) => d.min(now + this.idle_wake),
-      None => now + this.idle_wake,
+      Some(d) => d.min(decision_now + this.idle_wake),
+      None => decision_now + this.idle_wake,
     };
-    if target <= now {
-      this.endpoint.handle_timeout(now);
-      progress = true;
+    if target <= decision_now {
+      if inbound_backlog {
+        this.timeout_stall_since.get_or_insert(decision_now);
+      }
+      let grace_elapsed = this
+        .timeout_stall_since
+        .is_some_and(|t| decision_now.saturating_duration_since(t) >= TIMEOUT_STALENESS_GRACE);
+      if !inbound_backlog || grace_elapsed {
+        this.endpoint.handle_timeout(decision_now);
+        this.timeout_stall_since = None;
+        progress = true;
+      }
+      // Due (fired or deferred): self-wake either way — a fired deadline may
+      // have queued transmits/events this pass did not drain, and a deferred
+      // one needs the re-poll to drain the backlog toward quiescence.
       more = true;
     } else {
-      this.arm_timer(target, now);
+      this.timeout_stall_since = None;
+      this.arm_timer(target, decision_now);
       if let Some(timer) = this.timer.as_mut()
         && timer.as_mut().poll(cx).is_ready()
       {
-        this.endpoint.handle_timeout(Instant::now());
+        // The sleep elapsed at/just after arming (the deadline crossed between
+        // the fresh sample above and this poll). Do NOT fire here — every
+        // `handle_timeout` goes through the gated due branch, which the next
+        // poll's fresh sample reaches — just clear the consumed sleep and
+        // self-wake.
         this.timer = None;
         this.timer_deadline = None;
-        progress = true;
         more = true;
       }
     }

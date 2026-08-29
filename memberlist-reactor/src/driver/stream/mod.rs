@@ -74,7 +74,7 @@ use crate::{
     Command, JoinCmd, JoinReply, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
     SendUserCmd, SetAckPayloadCmd, SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd,
   },
-  driver::join_reply,
+  driver::{TIMEOUT_STALENESS_GRACE, join_reply},
   error::{Error, JoinFailed},
   observation::observation_payload_bytes,
   shared::Shared,
@@ -85,14 +85,6 @@ use smallvec::SmallVec;
 
 /// IP-layer UDP payload maximum; caps the per-recv gossip buffer.
 const GOSSIP_RECV_BUF_MAX: usize = 65507;
-
-/// Wall-clock bound on deferring a DUE `handle_timeout` behind capped inbound
-/// paths. Inbound drains roughly FIFO, so the pre-deadline backlog clears
-/// within a bounded number of capped polls (microseconds at gossip datagram
-/// sizes) — the grace exists so a sustained external flood that keeps every
-/// poll capped cannot suppress failure detection, while a burst that merely
-/// truncated one batch never prematurely times out the input it buffered.
-const TIMEOUT_STALENESS_GRACE: core::time::Duration = core::time::Duration::from_millis(5);
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
