@@ -63,6 +63,14 @@ async fn tcp_two_node_join_via_new() {
 /// `join()` waiter, so the seed is already counted the moment `join().await`
 /// returns — a caller woken by its own join completion never reads the
 /// pre-transition snapshot.
+///
+/// This end-to-end read is taken AFTER `join().await` returns, on the single-
+/// thread compio executor where the woken caller only runs once the driver poll
+/// has completed — so it observes post-poll state and cannot distinguish
+/// publish-before-notify from a publish-AFTER-notify reorder. It anchors that the
+/// publish is not REMOVED; the deterministic reorder guard is the white-box
+/// `shutdown_drain_publishes_snapshot_before_resolving_waiter_inline`, which
+/// captures the snapshot at the exact resolution instant.
 #[compio::test]
 async fn join_completion_observes_post_transition_snapshot() {
   let n1 = spawn_node("seed").await;

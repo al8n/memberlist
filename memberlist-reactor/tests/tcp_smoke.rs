@@ -84,6 +84,14 @@ async fn two_nodes_join_converge() {
 /// its own join completion never reads the pre-transition snapshot. (The
 /// converge test above polls because it also waits on the SEED to learn the
 /// joiner, a separate gossip round; here the joiner's own view is immediate.)
+///
+/// This end-to-end read is taken AFTER `join().await` returns, so — like its
+/// compio sibling — it anchors that the publish is not REMOVED but cannot catch a
+/// publish-AFTER-notify reorder: the driver poll (including its end-of-poll
+/// republish) has finished by the time the woken caller reads. The deterministic
+/// reorder guard is the white-box unit test
+/// `drive_pass_publishes_snapshot_before_resolving_join_waiter`, which captures
+/// the snapshot at the exact instant the pass resolves the waiter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn join_completion_observes_post_transition_snapshot() {
   let a = make("seed").await;

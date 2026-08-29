@@ -893,6 +893,133 @@ async fn shutdown_drains_queued_inbound_completion_into_reached_before_reaping()
   }
 }
 
+/// Ordering guard for the publish-BEFORE-notify contract in
+/// `drain_surfaces_pass`: the pass must republish the post-transition snapshot
+/// BEFORE its event drain resolves a parked waiter, so a caller woken by its own
+/// completion never reads the pre-transition snapshot.
+///
+/// A black-box read taken AFTER the pass cannot distinguish publish-before-notify
+/// from publish-after-notify — both have happened by then. This test instead
+/// captures the snapshot AT THE INSTANT the waiter resolves, via an instrumented
+/// waker: `oneshot::Sender::send` synchronously wakes the receiver's registered
+/// waker, so the driver's own `pj.reply.send(..)` (inside `account_event`) runs
+/// the probe INLINE, mid-pass, before the pass returns. The probe reads the
+/// published snapshot then and there. Under the correct order the merged seed is
+/// already published; a reorder that moves the publish AFTER the event drain
+/// leaves it stale at that instant, which the probe catches.
+///
+/// Setup: seed A's push/pull response + EOF are folded directly into the endpoint
+/// so the fold both MERGES "seed" (advancing the snapshot version) and enqueues
+/// its terminal `ExchangeCompleted(Succeeded)` — WITHOUT publishing (only the
+/// driver's pass publishes), so the published snapshot is stale going into the
+/// pass. `drain_surfaces_pass` then publishes, then resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drive_pass_publishes_snapshot_before_resolving_join_waiter() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |ep| {
+    ep.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7801".parse().unwrap();
+  // Drive seed A's push/pull, then fold its pull response + EOF straight into the
+  // endpoint: this merges "seed" and terminalizes the exchange (queuing its
+  // `ExchangeCompleted`) in one step, but publishes nothing.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+  for chunk in &response_a {
+    driver
+      .endpoint
+      .handle_transport_data(eid_a, chunk, false, now);
+  }
+  driver.endpoint.handle_transport_data(eid_a, &[], true, now);
+
+  // Precondition: the merge advanced the machine's membership, but the PUBLISHED
+  // snapshot the waiter would read is still the stale pre-merge one.
+  assert!(
+    shared
+      .load_snapshot()
+      .by_id(&SmolStr::new("seed"))
+      .is_none(),
+    "precondition: the merge is applied to the machine but not yet published",
+  );
+
+  // Install the 1-seed pending join awaiting eid_a.
+  let (tx, mut rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 1,
+      reply: tx,
+    },
+  );
+
+  // The instrumented waker: fired synchronously by the driver's `reply.send`, it
+  // records — AT the resolution instant — whether the merged seed is already in
+  // the published snapshot.
+  struct AtResolution {
+    shared: Arc<Shared<SmolStr>>,
+    fired: AtomicBool,
+    seed_published_at_resolution: AtomicBool,
+  }
+  impl Wake for AtResolution {
+    fn wake(self: Arc<Self>) {
+      self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+      self.fired.store(true, Ordering::SeqCst);
+      let present = self
+        .shared
+        .load_snapshot()
+        .by_id(&SmolStr::new("seed"))
+        .is_some();
+      self
+        .seed_published_at_resolution
+        .store(present, Ordering::SeqCst);
+    }
+  }
+  let probe = Arc::new(AtResolution {
+    shared: shared.clone(),
+    fired: AtomicBool::new(false),
+    seed_published_at_resolution: AtomicBool::new(false),
+  });
+  let probe_waker = Waker::from(probe.clone());
+  // Register the probe waker on the reply receiver (Pending stores the waker),
+  // so the driver's later `reply.send` wakes it.
+  let mut rx_cx = Context::from_waker(&probe_waker);
+  assert!(
+    Pin::new(&mut rx).poll(&mut rx_cx).is_pending(),
+    "the reply is not yet resolved; polling registers the probe waker",
+  );
+
+  // Run the exact production pass containing the publish + event-drain sequence.
+  let pass_waker = flag_waker();
+  let mut cx = Context::from_waker(&pass_waker);
+  let _ = driver.drain_surfaces_pass(&mut cx);
+
+  assert!(
+    probe.fired.load(Ordering::SeqCst),
+    "the pass must have resolved the join waiter (else this test proves nothing)",
+  );
+  assert!(
+    probe.seed_published_at_resolution.load(Ordering::SeqCst),
+    "publish-before-notify: at the instant the pass resolved the join waiter the \
+     merged seed was ALREADY in the published snapshot — a reorder that publishes \
+     AFTER the notify would leave it stale here",
+  );
+  // The reply itself carries the successful contacted set.
+  match rx.await {
+    Ok(Ok(reached)) => assert!(
+      reached.contains(&addr_a),
+      "the completed join resolved Ok with the contacted seed: {reached:?}",
+    ),
+    other => panic!("expected Ok(reached) for a completed join; got {other:?}"),
+  }
+}
+
 /// The real gate: a target join's terminal peer-FIN EOF PARKED on a bridge's
 /// SATURATED `inbound_tx.send` — sitting OUTSIDE the bounded channel buffer — is
 /// still folded into the reaped reached set. The earlier snapshot-bound drain
