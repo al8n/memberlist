@@ -1669,8 +1669,10 @@ where
   /// Apply an incoming Suspect to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
-  /// 3. Existing suspicion timer: forward to `confirm`. Re-broadcast on new info.
-  /// 4. Non-Alive node: ignore.
+  /// 3. Existing suspicion timer: forward to `confirm`. Re-broadcast on new info,
+  ///    and record a newer incarnation for the resurrection gate.
+  /// 4. Non-Alive node: record a newer incarnation for the resurrection gate,
+  ///    then ignore.
   /// 5. Self → refute, return.
   /// 6. Otherwise: install a fresh Suspicion, transition to Suspect,
   ///    enqueue broadcast.
@@ -1729,13 +1731,37 @@ where
       if confirmed.is_accepted() {
         self.broadcast_message(
           target.cheap_clone(),
-          Message::Suspect(Suspect::new(inc, target, from)),
+          Message::Suspect(Suspect::new(inc, target.cheap_clone(), from)),
         );
+      }
+      // Record higher-incarnation evidence carried by a confirming Suspect,
+      // independent of the confirmation dedup above: the stored incarnation
+      // feeds the Alive resurrection gate, and a suspicion that later expires
+      // synthesizes its Dead at this incarnation. Monotone (strict `>` so a
+      // gossip duplicate does not churn the snapshot); no state change, event,
+      // or broadcast beyond the confirm's own.
+      if inc > local_inc {
+        if let Some(m) = self.members.get_mut(&target) {
+          m.state_mut().set_incarnation(inc);
+          self.bump_snapshot_version();
+        }
       }
       return;
     }
 
     if current_state != State::Alive {
+      // The member is Dead or Left. Record higher-incarnation failure evidence
+      // without changing state: `merge_state` funnels remote Dead and Suspect
+      // push/pull entries through here, so this is the anti-entropy path that
+      // advances a dead member's stored incarnation, and the Alive resurrection
+      // gate then rejects a stale lower-incarnation Alive. Monotone (strict `>`);
+      // no state change, event, or broadcast.
+      if inc > local_inc {
+        if let Some(m) = self.members.get_mut(&target) {
+          m.state_mut().set_incarnation(inc);
+          self.bump_snapshot_version();
+        }
+      }
       return;
     }
 
@@ -1775,7 +1801,8 @@ where
   /// Apply an incoming Dead to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
-  /// 3. Already Dead/Left: ignore.
+  /// 3. Already Dead/Left: record a newer incarnation for the resurrection gate,
+  ///    then ignore.
   /// 4. Self + not leaving: refute, return.
   /// 5. Self + leaving: mark Left.
   /// 6. Otherwise: mark Dead.
@@ -1805,6 +1832,20 @@ where
       return;
     }
     if matches!(current_state, State::Dead | State::Left) {
+      // Record higher-incarnation failure evidence for an already-dead member
+      // without changing state: the Alive resurrection gate compares against the
+      // stored incarnation, so advancing it here stops a later stale, lower-
+      // incarnation Alive from resurrecting a node that higher evidence killed.
+      // Monotone (strict `>` so a gossip duplicate does not churn the snapshot);
+      // no state change, event, or broadcast. Guarded on Running so a
+      // leaving/left node makes no remote membership change during its drain.
+      // (HashiCorp's `deadNode` drops this evidence; the port closes the hole.)
+      if inc > local_inc && self.lifecycle.is_running() {
+        if let Some(m) = self.members.get_mut(&target) {
+          m.state_mut().set_incarnation(inc);
+          self.bump_snapshot_version();
+        }
+      }
       return;
     }
 
@@ -3995,6 +4036,16 @@ where
     let local_protocol = member.state_ref().server_ref().protocol_version();
     let local_delegate = member.state_ref().server_ref().delegate_version();
 
+    // The stored incarnation is monotone: it records the highest incarnation
+    // carried by any admitted evidence (Alive/Suspect/Dead, from gossip, probe
+    // escalation, suspicion expiry, or push/pull merge) for the member's current
+    // instance, EVEN when that evidence caused no state transition (see the
+    // incarnation-advance in `process_dead` / `process_suspect`). Because this
+    // gate compares against that maximum, a stale lower-incarnation Alive cannot
+    // resurrect a member that higher failure evidence has killed; a genuine
+    // rejoin still passes by learning the recorded maximum via anti-entropy and
+    // refuting past it. (Address-change reclaim below is a separate path — a new
+    // instance with a fresh generation — and is deliberately exempt.)
     if !is_new && !updates_address && !is_local && alive_incarnation <= local_incarnation {
       return;
     }

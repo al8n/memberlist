@@ -525,9 +525,9 @@ fn dead_node() {
   );
 }
 
-/// A second `Dead` for an already-`Dead` peer is a no-op: even at a higher
-/// incarnation it leaves the state, incarnation, and stamp untouched, emits no
-/// event, and enqueues no broadcast.
+/// A second `Dead` for an already-`Dead` peer at a strictly higher incarnation
+/// records the higher incarnation (so the resurrection gate compares against it)
+/// but leaves the state, state-change stamp, events, and broadcasts untouched.
 #[test]
 fn dead_node_double() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
@@ -538,14 +538,14 @@ fn dead_node_double() {
   e.age_member(test.id_ref(), Duration::from_secs(3600));
   e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 1), t0);
   while e.poll_event().is_some() {}
-  let inc_before = e.node_incarnation(test.id_ref());
   let change_before = e.node_state_change(test.id_ref());
 
   // Drain so the queue-length delta isolates the second Dead's effect.
   e.drain_broadcasts();
   let queued_before = e.broadcast_queue_len();
 
-  // A second Dead at a strictly higher incarnation must do nothing.
+  // A second Dead at a strictly higher incarnation records that incarnation but
+  // is otherwise silent.
   e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 2), Instant::now());
 
   assert_eq!(
@@ -555,8 +555,8 @@ fn dead_node_double() {
   );
   assert_eq!(
     e.node_incarnation(test.id_ref()),
-    inc_before,
-    "a double Dead must not advance the incarnation"
+    Some(2),
+    "higher-incarnation failure evidence advances the stored incarnation"
   );
   assert_eq!(
     e.node_state_change(test.id_ref()),
@@ -568,6 +568,397 @@ fn dead_node_double() {
     e.broadcast_queue_len(),
     queued_before,
     "a double Dead must not enqueue a broadcast"
+  );
+}
+
+/// Higher-incarnation failure evidence on an already-Dead peer advances the
+/// stored incarnation without any state change, so the Alive resurrection gate
+/// later rejects a stale lower-incarnation Alive and admits only a genuinely
+/// newer one. Without the advance, `Alive@1 → Dead@1 → Dead@10 → Alive@2` would
+/// resurrect a node higher evidence had killed.
+#[test]
+fn dead_on_dead_records_incarnation_and_blocks_stale_resurrection() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let test = node("test", 8000);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&test, 1), false, t0);
+  e.age_member(test.id_ref(), Duration::from_secs(3600));
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 1), t0);
+  while e.poll_event().is_some() {}
+  let change_after_dead = e.node_state_change(test.id_ref());
+  e.drain_broadcasts();
+  let queued_before = e.broadcast_queue_len();
+
+  // Dead@10 on the already-Dead peer: record the incarnation, nothing else.
+  let version_before = e.snapshot_version();
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 10), Instant::now());
+  assert_eq!(
+    e.node_incarnation(test.id_ref()),
+    Some(10),
+    "the higher Dead advances the stored incarnation"
+  );
+  assert!(
+    e.snapshot_version() > version_before,
+    "recording a strictly higher incarnation must bump snapshot_version so the \
+     push/pull cache rebuilds"
+  );
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Dead),
+    "the node stays Dead"
+  );
+  assert_eq!(
+    e.node_state_change(test.id_ref()),
+    change_after_dead,
+    "recording an incarnation must not restamp the state-change"
+  );
+  assert!(
+    e.poll_event().is_none(),
+    "recording an incarnation emits no event"
+  );
+  assert_eq!(
+    e.broadcast_queue_len(),
+    queued_before,
+    "recording an incarnation enqueues no broadcast"
+  );
+
+  // A stale Alive@2 (< 10) can no longer resurrect the killed node.
+  e.process_alive(alive_of(&test, 2), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Dead),
+    "a stale lower-incarnation Alive must not resurrect a killed node"
+  );
+  assert!(
+    e.poll_event().is_none(),
+    "the rejected Alive emits no NodeJoined"
+  );
+
+  // A genuinely newer Alive@11 (> 10) resurrects the node the standard way.
+  e.process_alive(alive_of(&test, 11), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Alive),
+    "an Alive past the recorded maximum resurrects the node"
+  );
+  let ev = e.poll_event().expect("expected NodeJoined");
+  match ev {
+    Event::NodeJoined(n) => assert_eq!(n.id_ref(), test.id_ref()),
+    other => panic!("expected NodeJoined, got {other:?}"),
+  }
+}
+
+/// A confirming `Suspect` at a higher incarnation records that incarnation on an
+/// already-suspected peer (independent of the confirmation dedup), so a stale
+/// lower-incarnation Alive can no longer refute the suspicion, while the
+/// suspicion timer keeps running and, on expiry, synthesizes its `Dead` at the
+/// recorded incarnation.
+#[test]
+fn suspect_confirm_records_incarnation_and_blocks_stale_refutation() {
+  let scfg = || {
+    cfg()
+      .with_probe_interval(Duration::ZERO)
+      .with_push_pull_interval(Duration::ZERO)
+      .with_gossip_interval(Duration::ZERO)
+      .with_suspicion_mult(1)
+      .with_suspicion_max_timeout_mult(1)
+  };
+  let src_b = SmolStr::new("srcB");
+
+  // Main flow: confirm up to 10, then verify the resurrection/refute gate.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(scfg());
+  let test = node("test", 8000);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&test, 1), false, t0);
+  e.age_member(test.id_ref(), Duration::from_secs(3600));
+  while e.poll_event().is_some() {}
+
+  e.process_suspect(suspect_of(test.id_ref(), e.local_id_ref(), 1), t0);
+  assert_eq!(e.member_liveness(test.id_ref()), Some(State::Suspect));
+
+  // A distinct-source Suspect at a higher incarnation confirms and records 10.
+  let version_before = e.snapshot_version();
+  e.process_suspect(suspect_of(test.id_ref(), &src_b, 10), t0);
+  assert_eq!(
+    e.node_incarnation(test.id_ref()),
+    Some(10),
+    "a confirming higher-incarnation Suspect advances the stored incarnation"
+  );
+  assert!(
+    e.snapshot_version() > version_before,
+    "recording a strictly higher incarnation on the confirm branch must bump \
+     snapshot_version so the push/pull cache rebuilds"
+  );
+
+  // The suspicion timer is armed; capture its deadline.
+  let armed_deadline = e
+    .poll_timeout()
+    .expect("an armed suspicion exposes a deadline");
+
+  // Alive@2 (< 10) cannot refute: the node stays Suspect and the timer is intact.
+  e.process_alive(alive_of(&test, 2), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Suspect),
+    "a stale lower-incarnation Alive must not clear the suspicion"
+  );
+  assert_eq!(
+    e.poll_timeout(),
+    Some(armed_deadline),
+    "a rejected Alive must leave the suspicion timer unchanged"
+  );
+
+  // Alive@11 (> 10) refutes past the recorded maximum and clears the suspicion.
+  e.process_alive(alive_of(&test, 11), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Alive),
+    "an Alive past the recorded maximum clears the suspicion"
+  );
+
+  // Expiry variant: the recorded incarnation flows into the synthesized Dead.
+  let mut e2: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(scfg());
+  let t1 = Instant::now();
+  e2.process_alive(alive_of(&test, 1), false, t1);
+  e2.age_member(test.id_ref(), Duration::from_secs(3600));
+  while e2.poll_event().is_some() {}
+  e2.process_suspect(suspect_of(test.id_ref(), e2.local_id_ref(), 1), t1);
+  e2.process_suspect(suspect_of(test.id_ref(), &src_b, 10), t1);
+  e2.drain_broadcasts();
+
+  let deadline = e2.poll_timeout().expect("suspicion deadline expected");
+  e2.handle_timeout(deadline + Duration::from_millis(1));
+  assert_eq!(
+    e2.member_liveness(test.id_ref()),
+    Some(State::Dead),
+    "the expired suspicion marks the node Dead"
+  );
+  assert_eq!(
+    drained_dead_incarnations(&mut e2, test.id_ref()),
+    vec![10],
+    "the synthesized Dead carries the recorded incarnation"
+  );
+}
+
+/// A remote `Dead` folded through `merge_state` (which routes it through
+/// `process_suspect`) advances the stored incarnation of an already-Dead member,
+/// so the anti-entropy path also blocks a stale-Alive resurrection.
+#[test]
+fn suspect_on_dead_records_incarnation() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let test = node("test", 8000);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&test, 1), false, t0);
+  e.age_member(test.id_ref(), Duration::from_secs(3600));
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 1), t0);
+  assert_eq!(e.member_liveness(test.id_ref()), Some(State::Dead));
+  while e.poll_event().is_some() {}
+
+  // A remote push/pull batch reports the node Dead at incarnation 10.
+  let version_before = e.snapshot_version();
+  let remote = [pns_of(&test, 10, State::Dead)];
+  e.merge_state(&remote, t0);
+  assert_eq!(
+    e.node_incarnation(test.id_ref()),
+    Some(10),
+    "a remote Dead advances the stored incarnation through anti-entropy"
+  );
+  assert!(
+    e.snapshot_version() > version_before,
+    "recording a strictly higher incarnation on the non-Alive branch must bump \
+     snapshot_version so the push/pull cache rebuilds"
+  );
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Dead),
+    "a remote Dead keeps the member Dead"
+  );
+
+  // A stale Alive@2 is rejected; a newer Alive@11 resurrects.
+  e.process_alive(alive_of(&test, 2), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Dead),
+    "a stale lower-incarnation Alive must not resurrect"
+  );
+  e.process_alive(alive_of(&test, 11), false, Instant::now());
+  assert_eq!(
+    e.member_liveness(test.id_ref()),
+    Some(State::Alive),
+    "an Alive past the recorded maximum resurrects"
+  );
+}
+
+/// Equal-incarnation duplicates (redelivered by design) leave the stored
+/// incarnation — already at the maximum — untouched and must NOT bump the
+/// snapshot version, so a gossip duplicate never churns the push/pull cache.
+#[test]
+fn equal_incarnation_duplicates_do_not_bump_snapshot_version() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let dead_peer = node("deadpeer", 8000);
+  let susp_peer = node("susppeer", 8001);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&dead_peer, 1), false, t0);
+  e.process_alive(alive_of(&susp_peer, 1), false, t0);
+  e.age_member(dead_peer.id_ref(), Duration::from_secs(3600));
+  e.age_member(susp_peer.id_ref(), Duration::from_secs(3600));
+
+  // Kill one peer and drive its stored incarnation to 10; suspect the other and
+  // confirm it up to 10. Both advances have already bumped the snapshot.
+  e.process_dead(dead_of(dead_peer.id_ref(), e.local_id_ref(), 1), t0);
+  e.process_dead(dead_of(dead_peer.id_ref(), e.local_id_ref(), 10), t0);
+  e.process_suspect(suspect_of(susp_peer.id_ref(), e.local_id_ref(), 1), t0);
+  e.process_suspect(
+    suspect_of(susp_peer.id_ref(), &SmolStr::new("srcB"), 10),
+    t0,
+  );
+  assert_eq!(e.node_incarnation(dead_peer.id_ref()), Some(10));
+  assert_eq!(e.node_incarnation(susp_peer.id_ref()), Some(10));
+
+  let version_before = e.snapshot_version();
+
+  // Equal-incarnation duplicates: the stored value is already the maximum, so
+  // the strict-`>` guard is a no-op and the snapshot version must not move.
+  e.process_dead(dead_of(dead_peer.id_ref(), e.local_id_ref(), 10), t0);
+  e.process_suspect(
+    suspect_of(susp_peer.id_ref(), &SmolStr::new("srcC"), 10),
+    t0,
+  );
+
+  assert_eq!(
+    e.snapshot_version(),
+    version_before,
+    "an equal-incarnation duplicate must not bump the snapshot version"
+  );
+}
+
+/// Decode a `SendPushPullResponse` command's frame and return the incarnation
+/// it advertises for `id`, if the response carries an entry for it.
+fn pushpull_reply_incarnation(
+  cmd: StreamCommand<SmolStr, SocketAddr>,
+  id: &SmolStr,
+) -> Option<u32> {
+  match cmd {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let bytes = resp.into_encoded();
+      let (_, msg) = crate::wire::decode_message::<SmolStr, SocketAddr>(&bytes)
+        .expect("cached push/pull response must decode");
+      match msg {
+        Message::PushPull(pp) => pp
+          .states_slice()
+          .iter()
+          .find(|s| s.id_ref() == id)
+          .map(|s| s.incarnation()),
+        other => panic!("expected a PushPull response frame, got {other:?}"),
+      }
+    }
+    StreamCommand::Close => panic!("an admitted push/pull request must not close the stream"),
+  }
+}
+
+/// Feed an empty-state `PushPullRequestReceived` (a bare refresh probe) at
+/// `now` and return the response command, so the cached push/pull response can
+/// be inspected without perturbing membership.
+fn probe_pushpull_response(
+  e: &mut Endpoint<SmolStr, SocketAddr>,
+  requester: SocketAddr,
+  stream_id: u64,
+  now: Instant,
+) -> StreamCommand<SmolStr, SocketAddr> {
+  let req = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new_with_stream_id(
+    requester,
+    Vec::new(),
+    Bytes::new(),
+    PushPullKind::Refresh,
+    StreamId::from_raw(stream_id),
+  ));
+  e.handle_stream_event(req, now)
+    .expect("an admitted push/pull request must yield a response command")
+}
+
+/// The `process_dead` already-Dead branch's `snapshot_version` bump is load-
+/// bearing for propagation: the push/pull response cache rebuilds only when
+/// `snapshot_version` moves (see `refresh_pushpull_response_cache`), so a
+/// corrected higher incarnation must actually reach the wire, not just the
+/// in-memory member table.
+#[test]
+fn dead_on_dead_incarnation_advance_propagates_through_pushpull_cache() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let test = node("test", 8000);
+  let requester = node("requester", 9000);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&test, 1), false, t0);
+  e.age_member(test.id_ref(), Duration::from_secs(3600));
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 1), t0);
+  while e.poll_event().is_some() {}
+
+  // Publish the Dead@1 view into the response cache via the schedule-fired
+  // tick, then confirm a fresh requester is served incarnation 1.
+  e.handle_timeout(t0);
+  let cmd_before = probe_pushpull_response(&mut e, *requester.addr_ref(), 1, t0);
+  assert_eq!(
+    pushpull_reply_incarnation(cmd_before, test.id_ref()),
+    Some(1),
+    "the cache must reflect Dead@1 before the higher evidence arrives"
+  );
+
+  // Higher failure evidence on the already-Dead peer.
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 10), Instant::now());
+  assert_eq!(e.node_incarnation(test.id_ref()), Some(10));
+
+  // The next tick rebuilds the cache; a fresh requester now sees incarnation
+  // 10, not the stale 1.
+  e.handle_timeout(Instant::now());
+  let cmd_after = probe_pushpull_response(&mut e, *requester.addr_ref(), 2, Instant::now());
+  assert_eq!(
+    pushpull_reply_incarnation(cmd_after, test.id_ref()),
+    Some(10),
+    "the rebuilt push/pull response must advertise the corrected incarnation"
+  );
+}
+
+/// Same propagation contract as
+/// `dead_on_dead_incarnation_advance_propagates_through_pushpull_cache`, but
+/// for the anti-entropy path: a remote `Dead@10` folded through `merge_state`
+/// (which funnels into `process_suspect`'s non-Alive branch) must also reach
+/// the rebuilt push/pull cache.
+#[test]
+fn merge_state_incarnation_advance_propagates_through_pushpull_cache() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let test = node("test", 8000);
+  let requester = node("requester", 9000);
+
+  let t0 = Instant::now();
+  e.process_alive(alive_of(&test, 1), false, t0);
+  e.age_member(test.id_ref(), Duration::from_secs(3600));
+  e.process_dead(dead_of(test.id_ref(), e.local_id_ref(), 1), t0);
+  while e.poll_event().is_some() {}
+
+  e.handle_timeout(t0);
+  let cmd_before = probe_pushpull_response(&mut e, *requester.addr_ref(), 1, t0);
+  assert_eq!(
+    pushpull_reply_incarnation(cmd_before, test.id_ref()),
+    Some(1),
+    "the cache must reflect Dead@1 before the anti-entropy evidence arrives"
+  );
+
+  // A remote push/pull batch reports the node Dead at incarnation 10.
+  let remote = [pns_of(&test, 10, State::Dead)];
+  e.merge_state(&remote, Instant::now());
+  assert_eq!(e.node_incarnation(test.id_ref()), Some(10));
+
+  e.handle_timeout(Instant::now());
+  let cmd_after = probe_pushpull_response(&mut e, *requester.addr_ref(), 2, Instant::now());
+  assert_eq!(
+    pushpull_reply_incarnation(cmd_after, test.id_ref()),
+    Some(10),
+    "the rebuilt push/pull response must advertise the anti-entropy-corrected \
+     incarnation"
   );
 }
 
