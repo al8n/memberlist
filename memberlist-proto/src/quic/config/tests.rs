@@ -437,3 +437,181 @@ fn build_missing_cert_file_errors() {
     "expected Tls(ReadFile), got {err:?}"
   );
 }
+
+/// The DoS-prevention regression: a config file that omits ALL the new
+/// admission fields must deserialize to the SAME defaults `QuicOptions::new`
+/// installs — `32` / `64` / `Some(1024)` / `Some(16)` — NOT the bare-`serde`
+/// defaults (`0` / `0` / `None` / `None`). A `0` prefix is a legitimate
+/// whole-family bucket `validate` accepts, so a bare `#[serde(default)]` would
+/// silently collapse the entire IPv4 internet into one 16-slot bucket.
+#[cfg(feature = "serde")]
+#[test]
+fn quic_config_options_serde_omitted_admission_fields_keep_safe_defaults() {
+  let j = r#"{"cert_file":"/c.pem","key_file":"/k.pem","ca_file":"/ca.pem"}"#;
+  let opts: QuicConfigOptions = serde_json::from_str(j).unwrap();
+  assert_eq!(
+    opts.pending_source_prefix_v4(),
+    32,
+    "omitted v4 prefix must default to /32, NOT 0 (the whole-IPv4 bucket)"
+  );
+  assert_eq!(
+    opts.pending_source_prefix_v6(),
+    64,
+    "omitted v6 prefix must default to /64, NOT 0"
+  );
+  assert_eq!(
+    opts.max_pending_inbound_total(),
+    Some(DEFAULT_MAX_PENDING_INBOUND_TOTAL),
+    "omitted budget must default to Some(1024), NOT None"
+  );
+  assert_eq!(
+    opts.max_pending_connections_per_source(),
+    Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
+    "omitted per-source cap must default to Some(16), NOT None"
+  );
+  // The matching non-zero defaults; a bucket keyed on `0.0.0.0` would be the
+  // whole-internet DoS this test guards against.
+  assert_eq!(DEFAULT_PENDING_SOURCE_PREFIX_V4, 32);
+  assert_eq!(DEFAULT_PENDING_SOURCE_PREFIX_V6, 64);
+}
+
+/// Explicit admission fields round-trip through serde.
+#[cfg(feature = "serde")]
+#[test]
+fn quic_config_options_serde_admission_fields_round_trip() {
+  let opts = QuicConfigOptions::new(
+    PathBuf::from("/c.pem"),
+    PathBuf::from("/k.pem"),
+    PathBuf::from("/ca.pem"),
+  )
+  .with_pending_source_prefix_v4(24)
+  .with_pending_source_prefix_v6(48)
+  .with_max_pending_inbound_total(Some(256))
+  .with_max_pending_connections_per_source(None);
+  let j = serde_json::to_string(&opts).unwrap();
+  let back: QuicConfigOptions = serde_json::from_str(&j).unwrap();
+  assert_eq!(opts, back);
+  assert_eq!(back.pending_source_prefix_v4(), 24);
+  assert_eq!(back.pending_source_prefix_v6(), 48);
+  assert_eq!(back.max_pending_inbound_total(), Some(256));
+  assert_eq!(back.max_pending_connections_per_source(), None);
+}
+
+/// `QuicConfigOptions::build` propagates the per-source cap, both prefixes, and
+/// the budget into the built `QuicOptions` — the NAT escape hatch must be
+/// reachable without a raw `QuicOptions`.
+#[test]
+fn build_propagates_admission_knobs() {
+  install_provider();
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+
+  let built = QuicConfigOptions::new(cert, key, ca)
+    .with_pending_source_prefix_v4(24)
+    .with_pending_source_prefix_v6(48)
+    .with_max_pending_connections_per_source(Some(7))
+    .with_max_pending_inbound_total(Some(300))
+    .build()
+    .expect("build should succeed");
+
+  assert_eq!(built.pending_source_prefix_v4(), 24);
+  assert_eq!(built.pending_source_prefix_v6(), 48);
+  assert_eq!(built.max_pending_connections_per_source(), Some(7));
+  assert_eq!(built.max_pending_inbound_total(), Some(300));
+  // And the composed prefix the connection table consumes reflects both.
+  assert_eq!(built.source_prefix().v4(), 24);
+  assert_eq!(built.source_prefix().v6(), 48);
+  // The plumbed values still pass validation.
+  built.validate().expect("propagated knobs validate");
+
+  // The default build carries the documented defaults.
+  let dir = unique_dir();
+  let (cert, key, ca) = write_self_signed(&dir);
+  let built = QuicConfigOptions::new(cert, key, ca)
+    .build()
+    .expect("default build succeeds");
+  assert_eq!(built.pending_source_prefix_v4(), 32);
+  assert_eq!(built.pending_source_prefix_v6(), 64);
+  assert_eq!(
+    built.max_pending_inbound_total(),
+    Some(DEFAULT_MAX_PENDING_INBOUND_TOTAL)
+  );
+  assert_eq!(
+    built.max_pending_connections_per_source(),
+    Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE)
+  );
+}
+
+/// The clap mirror carries the new admission args (fresh parse yields the
+/// defaults; a supplied override is applied) with distinct env ids.
+#[cfg(feature = "clap")]
+#[test]
+fn quic_config_options_clap_admission_args() {
+  use clap::{CommandFactory, Parser};
+
+  #[derive(Parser)]
+  struct Cli {
+    #[command(flatten)]
+    quic: QuicConfigOptions,
+  }
+
+  // Fresh parse with only the required paths yields the admission defaults.
+  let cli = Cli::try_parse_from([
+    "prog",
+    "--quic-cert",
+    "/c",
+    "--quic-key",
+    "/k",
+    "--quic-ca",
+    "/ca",
+  ])
+  .unwrap();
+  assert_eq!(cli.quic.pending_source_prefix_v4(), 32);
+  assert_eq!(cli.quic.pending_source_prefix_v6(), 64);
+  assert_eq!(
+    cli.quic.max_pending_inbound_total(),
+    Some(DEFAULT_MAX_PENDING_INBOUND_TOTAL)
+  );
+  assert_eq!(
+    cli.quic.max_pending_connections_per_source(),
+    Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE)
+  );
+
+  // Supplied overrides are applied.
+  let cli = Cli::try_parse_from([
+    "prog",
+    "--quic-cert",
+    "/c",
+    "--quic-key",
+    "/k",
+    "--quic-ca",
+    "/ca",
+    "--quic-pending-source-prefix-v4",
+    "24",
+    "--quic-pending-source-prefix-v6",
+    "48",
+    "--quic-max-pending-per-source",
+    "9",
+    "--quic-max-pending-inbound-total",
+    "512",
+  ])
+  .unwrap();
+  assert_eq!(cli.quic.pending_source_prefix_v4(), 24);
+  assert_eq!(cli.quic.pending_source_prefix_v6(), 48);
+  assert_eq!(cli.quic.max_pending_connections_per_source(), Some(9));
+  assert_eq!(cli.quic.max_pending_inbound_total(), Some(512));
+
+  let cmd = Cli::command();
+  let env_vars: Vec<_> = cmd
+    .get_arguments()
+    .filter_map(|a| a.get_env().and_then(|e| e.to_str()))
+    .collect();
+  for v in [
+    "MEMBERLIST_QUIC_MAX_PENDING_PER_SOURCE",
+    "MEMBERLIST_QUIC_PENDING_SOURCE_PREFIX_V4",
+    "MEMBERLIST_QUIC_PENDING_SOURCE_PREFIX_V6",
+    "MEMBERLIST_QUIC_MAX_PENDING_INBOUND_TOTAL",
+  ] {
+    assert!(env_vars.contains(&v), "missing env var {v}");
+  }
+}

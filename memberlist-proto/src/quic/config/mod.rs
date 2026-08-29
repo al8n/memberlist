@@ -47,7 +47,11 @@ use crate::tls::{
   config::{build_client_config, build_server_config, load_certs, load_private_key, load_roots},
 };
 
-use super::{QuicOptions, UnreliableTransport};
+use super::{
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_INBOUND_TOTAL,
+  DEFAULT_PENDING_SOURCE_PREFIX_V4, DEFAULT_PENDING_SOURCE_PREFIX_V6, QuicOptions,
+  UnreliableTransport,
+};
 
 /// The cluster-uniform server name installed on [`QuicOptions::new`] when none
 /// is configured. Every outbound dial presents this identity to the operator's
@@ -56,6 +60,30 @@ const DEFAULT_SERVER_NAME: &str = "localhost";
 
 fn default_server_name() -> String {
   DEFAULT_SERVER_NAME.to_string()
+}
+
+// Named serde defaults for the source-normalization knobs. A bare
+// `#[serde(default)]` would deserialize an omitted field to the type default
+// (`0` for the prefixes, `None` for the budget) — and `0` is a legitimate
+// whole-family bucket that `QuicOptions::validate` ACCEPTS, so a config file
+// upgraded across this change but not updated would silently collapse every
+// IPv4 source into ONE 16-slot bucket = a trivial total-inbound DoS. These
+// functions pin the omitted-field defaults to the same values `QuicOptions::new`
+// installs.
+fn default_pending_source_prefix_v4() -> u8 {
+  DEFAULT_PENDING_SOURCE_PREFIX_V4
+}
+
+fn default_pending_source_prefix_v6() -> u8 {
+  DEFAULT_PENDING_SOURCE_PREFIX_V6
+}
+
+fn default_max_pending_inbound_total() -> Option<usize> {
+  Some(DEFAULT_MAX_PENDING_INBOUND_TOTAL)
+}
+
+fn default_max_pending_connections_per_source() -> Option<usize> {
+  Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE)
 }
 
 /// Force QUIC 0-RTT (early data) OFF on the managed path's rustls pair. The
@@ -113,6 +141,36 @@ pub struct QuicConfigOptions {
   /// [`UnreliableTransport::Datagram`].
   #[cfg_attr(feature = "serde", serde(default))]
   unreliable_transport: UnreliableTransport,
+  /// Per-normalized-source ceiling on concurrent pending (half-open) inbound
+  /// handshakes, or `None` for no bound. The NAT / CGNAT tuning knob: honest
+  /// peers sharing one public IP (or one v6 subnet) share this allowance.
+  /// Defaults to [`Some`]`(`[`DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE`](super::DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE)`)`.
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_max_pending_connections_per_source")
+  )]
+  max_pending_connections_per_source: Option<usize>,
+  /// IPv4 prefix length used to normalize an inbound source into its admission
+  /// bucket. `/32` keys each host by its full address so UDP source-port rotation
+  /// cannot bypass the per-source cap; a shorter prefix collapses a subnet into
+  /// one bucket. Must be `<= 32`. Defaults to [`DEFAULT_PENDING_SOURCE_PREFIX_V4`](super::DEFAULT_PENDING_SOURCE_PREFIX_V4) (`/32`).
+  #[cfg_attr(feature = "serde", serde(default = "default_pending_source_prefix_v4"))]
+  pending_source_prefix_v4: u8,
+  /// IPv6 prefix length used to normalize an inbound source into its admission
+  /// bucket. `/64` (the SLAAC subnet a host owns) is the default — `/128` would
+  /// reopen the bypass as IPv6 source-address rotation. Must be `<= 128`.
+  /// Defaults to [`DEFAULT_PENDING_SOURCE_PREFIX_V6`](super::DEFAULT_PENDING_SOURCE_PREFIX_V6) (`/64`).
+  #[cfg_attr(feature = "serde", serde(default = "default_pending_source_prefix_v6"))]
+  pending_source_prefix_v6: u8,
+  /// Coordinator-wide ceiling on the aggregate half-open inbound population, or
+  /// `None` for no bound. Stops a subnet flood spread thin across many source
+  /// keys from pinning the whole global connection budget in half-open
+  /// handshakes. Defaults to [`Some`]`(`[`DEFAULT_MAX_PENDING_INBOUND_TOTAL`](super::DEFAULT_MAX_PENDING_INBOUND_TOTAL)`)`.
+  #[cfg_attr(
+    feature = "serde",
+    serde(default = "default_max_pending_inbound_total")
+  )]
+  max_pending_inbound_total: Option<usize>,
 }
 
 impl QuicConfigOptions {
@@ -128,6 +186,10 @@ impl QuicConfigOptions {
       max_idle_timeout: None,
       keep_alive_interval: None,
       unreliable_transport: UnreliableTransport::Datagram,
+      max_pending_connections_per_source: default_max_pending_connections_per_source(),
+      pending_source_prefix_v4: default_pending_source_prefix_v4(),
+      pending_source_prefix_v6: default_pending_source_prefix_v6(),
+      max_pending_inbound_total: default_max_pending_inbound_total(),
     }
   }
 
@@ -172,6 +234,40 @@ impl QuicConfigOptions {
     self
   }
 
+  /// Builder: set the per-normalized-source pending-handshake ceiling (`None`
+  /// removes the bound). The NAT tuning knob.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_pending_connections_per_source(mut self, max: Option<usize>) -> Self {
+    self.max_pending_connections_per_source = max;
+    self
+  }
+
+  /// Builder: set the IPv4 source-normalization prefix (`<= 32`).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_pending_source_prefix_v4(mut self, prefix: u8) -> Self {
+    self.pending_source_prefix_v4 = prefix;
+    self
+  }
+
+  /// Builder: set the IPv6 source-normalization prefix (`<= 128`).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_pending_source_prefix_v6(mut self, prefix: u8) -> Self {
+    self.pending_source_prefix_v6 = prefix;
+    self
+  }
+
+  /// Builder: set the coordinator-wide half-open inbound budget (`None` removes
+  /// the bound).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_pending_inbound_total(mut self, max: Option<usize>) -> Self {
+    self.max_pending_inbound_total = max;
+    self
+  }
+
   /// The configured certificate-chain file path.
   #[inline(always)]
   pub fn cert_file(&self) -> &PathBuf {
@@ -212,6 +308,30 @@ impl QuicConfigOptions {
   #[inline(always)]
   pub const fn unreliable_transport(&self) -> UnreliableTransport {
     self.unreliable_transport
+  }
+
+  /// The configured per-normalized-source pending-handshake ceiling, if any.
+  #[inline(always)]
+  pub const fn max_pending_connections_per_source(&self) -> Option<usize> {
+    self.max_pending_connections_per_source
+  }
+
+  /// The configured IPv4 source-normalization prefix.
+  #[inline(always)]
+  pub const fn pending_source_prefix_v4(&self) -> u8 {
+    self.pending_source_prefix_v4
+  }
+
+  /// The configured IPv6 source-normalization prefix.
+  #[inline(always)]
+  pub const fn pending_source_prefix_v6(&self) -> u8 {
+    self.pending_source_prefix_v6
+  }
+
+  /// The configured coordinator-wide half-open inbound budget, if any.
+  #[inline(always)]
+  pub const fn max_pending_inbound_total(&self) -> Option<usize> {
+    self.max_pending_inbound_total
   }
 
   /// Load the PEM material and assemble the rustls server/client pair under the
@@ -285,24 +405,39 @@ impl QuicConfigOptions {
       transport.keep_alive_interval(Some(k));
     }
 
-    Ok(QuicOptions::new(
-      endpoint,
-      server,
-      client,
-      transport,
-      self.server_name.as_str(),
-      self.unreliable_transport,
-    ))
+    Ok(
+      QuicOptions::new(
+        endpoint,
+        server,
+        client,
+        transport,
+        self.server_name.as_str(),
+        self.unreliable_transport,
+      )
+      // Plumb the admission knobs — the per-source cap is the primary NAT
+      // escape hatch and both prefixes plus the budget govern the source-key
+      // normalization, so they must be reachable without a raw `QuicOptions`.
+      .with_max_pending_connections_per_source(self.max_pending_connections_per_source)
+      .with_pending_source_prefix_v4(self.pending_source_prefix_v4)
+      .with_pending_source_prefix_v6(self.pending_source_prefix_v6)
+      .with_max_pending_inbound_total(self.max_pending_inbound_total),
+    )
   }
 }
 
 // `clap::Args` is delegated to a private mirror rather than derived on the
-// public struct: `client_auth`, `server_name`, and `unreliable_transport` each
-// carry a default, and a derived `update_from_arg_matches` treats every
-// defaulted arg as present, so a `try_update_from` carrying one unrelated flag
-// would reset all three back to their defaults. The manual
-// `update_from_arg_matches` applies a field only when its value came from the
-// command line or an env var, so an unset defaulted field is a no-op on update.
+// public struct: every field except the three required paths carries a default,
+// and a derived `update_from_arg_matches` treats every defaulted arg as present,
+// so a `try_update_from` carrying one unrelated flag would reset all of them
+// back to their defaults. The manual `update_from_arg_matches` applies a field
+// only when its value came from the command line or an env var, so an unset
+// defaulted field is a no-op on update.
+//
+// The `Option<usize>` admission caps are mirrored as plain `usize` args (with a
+// default value): the CLI can therefore set a finite bound — including `0`
+// (fail-closed) — but cannot express `None` (unbounded), which stays reachable
+// via serde (`null`) or the programmatic builder. `From` wraps the parsed value
+// in `Some`.
 #[cfg(feature = "clap")]
 #[cfg_attr(docsrs, doc(cfg(feature = "clap")))]
 const _: () = {
@@ -353,6 +488,34 @@ const _: () = {
       default_value_t = UnreliableTransport::default()
     )]
     unreliable_transport: UnreliableTransport,
+    #[arg(
+      id = "quic-max-pending-per-source",
+      long = "quic-max-pending-per-source",
+      env = "MEMBERLIST_QUIC_MAX_PENDING_PER_SOURCE",
+      default_value_t = DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE
+    )]
+    max_pending_connections_per_source: usize,
+    #[arg(
+      id = "quic-pending-source-prefix-v4",
+      long = "quic-pending-source-prefix-v4",
+      env = "MEMBERLIST_QUIC_PENDING_SOURCE_PREFIX_V4",
+      default_value_t = DEFAULT_PENDING_SOURCE_PREFIX_V4
+    )]
+    pending_source_prefix_v4: u8,
+    #[arg(
+      id = "quic-pending-source-prefix-v6",
+      long = "quic-pending-source-prefix-v6",
+      env = "MEMBERLIST_QUIC_PENDING_SOURCE_PREFIX_V6",
+      default_value_t = DEFAULT_PENDING_SOURCE_PREFIX_V6
+    )]
+    pending_source_prefix_v6: u8,
+    #[arg(
+      id = "quic-max-pending-inbound-total",
+      long = "quic-max-pending-inbound-total",
+      env = "MEMBERLIST_QUIC_MAX_PENDING_INBOUND_TOTAL",
+      default_value_t = DEFAULT_MAX_PENDING_INBOUND_TOTAL
+    )]
+    max_pending_inbound_total: usize,
   }
 
   impl From<QuicConfigOptionsCli> for QuicConfigOptions {
@@ -366,6 +529,10 @@ const _: () = {
         max_idle_timeout: c.max_idle_timeout,
         keep_alive_interval: c.keep_alive_interval,
         unreliable_transport: c.unreliable_transport,
+        max_pending_connections_per_source: Some(c.max_pending_connections_per_source),
+        pending_source_prefix_v4: c.pending_source_prefix_v4,
+        pending_source_prefix_v6: c.pending_source_prefix_v6,
+        max_pending_inbound_total: Some(c.max_pending_inbound_total),
       }
     }
   }
@@ -429,6 +596,25 @@ const _: () = {
         if let Some(v) = m.get_one::<UnreliableTransport>("quic-unreliable-transport") {
           self.unreliable_transport = *v;
         }
+      }
+      if supplied("quic-max-pending-per-source") {
+        self.max_pending_connections_per_source =
+          m.get_one::<usize>("quic-max-pending-per-source").copied();
+      }
+      if supplied("quic-pending-source-prefix-v4") {
+        if let Some(v) = m.get_one::<u8>("quic-pending-source-prefix-v4") {
+          self.pending_source_prefix_v4 = *v;
+        }
+      }
+      if supplied("quic-pending-source-prefix-v6") {
+        if let Some(v) = m.get_one::<u8>("quic-pending-source-prefix-v6") {
+          self.pending_source_prefix_v6 = *v;
+        }
+      }
+      if supplied("quic-max-pending-inbound-total") {
+        self.max_pending_inbound_total = m
+          .get_one::<usize>("quic-max-pending-inbound-total")
+          .copied();
       }
       Ok(())
     }

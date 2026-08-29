@@ -32,7 +32,7 @@
 //! incarnation at the SWIM layer, one layer up — not the transport.
 
 use crate::Instant;
-use core::net::SocketAddr;
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::collections::{HashMap, VecDeque};
 
 use quinn_proto::{Connection, ConnectionEvent, ConnectionHandle, Endpoint as QuinnEndpoint};
@@ -51,6 +51,119 @@ pub(crate) enum ConnDirection {
   /// Peer-initiated, accepted by the server endpoint via
   /// [`ConnTable::insert_accepted`].
   Inbound,
+}
+
+/// Prefix lengths that normalize an inbound source address into the bucket the
+/// per-source half-open admission cap and the coordinator-wide half-open budget
+/// count against.
+///
+/// Keying admission on a normalized source IP (rather than the full
+/// `SocketAddr`) is what stops a single host from bypassing its per-source
+/// allowance by rotating its UDP source port: every port from one address (or,
+/// at a shorter prefix, one subnet) folds to the same [`SourceKey`].
+///
+/// Defaults are `/32` (v4) and `/64` (v6). The v6 default is `/64`, NOT `/128`:
+/// a host owns its entire SLAAC `/64`, so keying on the full `/128` would
+/// reopen exactly the bypass this normalization closes — a host rotating IPv6
+/// source addresses inside its own `/64`. `/64` is therefore required for the
+/// property to hold, not a tuning nicety. An operator whose peers share a `/64`
+/// (a mainstream cloud topology — e.g. an AWS `/64`-per-subnet — puts many
+/// honest peers behind one key) can widen the grain to `/128` at the cost of
+/// reopening the rotation surface, relying on the per-source cap instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SourcePrefix {
+  v4: u8,
+  v6: u8,
+}
+
+impl SourcePrefix {
+  /// Default IPv4 prefix length: `/32` (the full address). Every UDP source
+  /// port from one IPv4 host folds to one key.
+  pub const DEFAULT_V4: u8 = 32;
+  /// Default IPv6 prefix length: `/64` (the SLAAC subnet a host owns). See the
+  /// type docs for why this is `/64` and not `/128`.
+  pub const DEFAULT_V6: u8 = 64;
+
+  /// Compose a prefix pair. `v4 <= 32` and `v6 <= 128` are operator invariants
+  /// enforced by
+  /// [`QuicOptions::validate`](crate::quic::QuicOptions::validate); a `0`
+  /// selects the whole-family bucket.
+  #[must_use]
+  #[inline(always)]
+  pub const fn new(v4: u8, v6: u8) -> Self {
+    Self { v4, v6 }
+  }
+
+  /// The IPv4 prefix length.
+  #[inline(always)]
+  pub const fn v4(&self) -> u8 {
+    self.v4
+  }
+
+  /// The IPv6 prefix length.
+  #[inline(always)]
+  pub const fn v6(&self) -> u8 {
+    self.v6
+  }
+}
+
+impl Default for SourcePrefix {
+  #[inline(always)]
+  fn default() -> Self {
+    Self::new(Self::DEFAULT_V4, Self::DEFAULT_V6)
+  }
+}
+
+/// A normalized inbound-source bucket: the source IP masked to the configured
+/// [`SourcePrefix`], with v4-mapped IPv6 canonicalized to IPv4 first. The grain
+/// the pending-inbound index and the half-open budget account against.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct SourceKey(IpAddr);
+
+/// Normalize `peer` into its [`SourceKey`] under `prefix`.
+///
+/// The peer IP is first canonicalized with `to_canonical` (stable since Rust
+/// 1.75, below the crate MSRV): a v4-mapped IPv6 address (`::ffff:a.b.c.d`,
+/// which a dual-stack listening socket reports for an IPv4 peer) collapses to
+/// its IPv4 form, so one host cannot split into two buckets by reaching a
+/// dual-stack endpoint over both families. The canonical address is then masked
+/// to the family's prefix.
+pub(crate) fn source_key(prefix: SourcePrefix, peer: &SocketAddr) -> SourceKey {
+  match peer.ip().to_canonical() {
+    IpAddr::V4(v4) => SourceKey(IpAddr::V4(mask_v4(v4, prefix.v4))),
+    IpAddr::V6(v6) => SourceKey(IpAddr::V6(mask_v6(v6, prefix.v6))),
+  }
+}
+
+/// Mask an IPv4 address to its high `prefix` bits (`prefix` in `0..=32`).
+fn mask_v4(addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+  // A prefix of `0` selects the whole-family bucket. Branch on it explicitly:
+  // `u32::MAX << 32` is, in release, a release-mode masked shift count (Rust
+  // masks the shift amount by the operand width, so a shift of 32 masks to 0
+  // and the shift is a no-op), which would silently yield the WRONG mask (`/0`
+  // behaving as `/32`) rather than the intended all-zero mask. Do NOT rely on
+  // the debug-only shift-overflow panic to catch this.
+  if prefix == 0 {
+    return Ipv4Addr::UNSPECIFIED;
+  }
+  // `prefix` is in `1..=32` here, so the shift amount `32 - prefix` is in
+  // `0..=31` — always a valid `u32` shift.
+  let mask = u32::MAX << (32 - prefix);
+  Ipv4Addr::from(u32::from(addr) & mask)
+}
+
+/// Mask an IPv6 address to its high `prefix` bits (`prefix` in `0..=128`).
+fn mask_v6(addr: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+  // See [`mask_v4`]: `u128::MAX << 128` is a release-mode masked shift count
+  // that would produce `/0` behaving as `/128`, so the whole-family bucket is
+  // branched explicitly rather than left to a debug-only panic.
+  if prefix == 0 {
+    return Ipv6Addr::UNSPECIFIED;
+  }
+  // `prefix` is in `1..=128` here, so the shift amount `128 - prefix` is in
+  // `0..=127` — always a valid `u128` shift.
+  let mask = u128::MAX << (128 - prefix);
+  Ipv6Addr::from(u128::from(addr) & mask)
 }
 
 /// Why [`ConnTable::get_or_dial`] could not return a connection handle.
@@ -306,22 +419,45 @@ pub(crate) struct ConnTable {
   /// not suppress our own independent outbound dial to a peer reachable on our
   /// egress. An entry whose both fields fall to `None` is removed.
   peer_routes: HashMap<SocketAddr, PeerRoute>,
-  /// Per-source count of INBOUND connections that have not yet established — the
-  /// half-open population the coordinator's per-source pending cap bounds. Kept
-  /// as an index so admission is an O(1) lookup ([`Self::pending_inbound_from`])
-  /// instead of a scan of the whole connection slab: at connection-table
-  /// saturation an attacker flooding fresh-DCID Initials would otherwise force
-  /// an O(total connections) scan per rejected datagram. A source with zero
-  /// pending inbound connections has no entry (the map never stores a zero).
-  pending_inbound: HashMap<SocketAddr, usize>,
+  /// Per-normalized-source count of INBOUND connections that have not yet
+  /// established — the half-open population the coordinator's per-source pending
+  /// cap bounds. Keyed on the [`SourceKey`] derived under [`Self::source_prefix`]
+  /// (a de-ported, prefix-masked source IP) rather than the full `SocketAddr`,
+  /// so a host cannot bypass its per-source allowance by rotating its UDP source
+  /// port — every port of one source folds to one key. Kept as an index so
+  /// admission is an O(1) lookup ([`Self::pending_inbound_from`]) instead of a
+  /// scan of the whole connection slab: at connection-table saturation an
+  /// attacker flooding fresh-DCID Initials would otherwise force an O(total
+  /// connections) scan per rejected datagram. A key with zero pending inbound
+  /// connections has no entry (the map never stores a zero).
+  pending_inbound: HashMap<SourceKey, usize>,
+  /// The prefix every `pending_inbound` key is normalized under.
+  ///
+  /// **Load-bearing immutable invariant.** Set once from validated config at
+  /// construction and NEVER mutated (there is deliberately no setter). A pending
+  /// unit is charged under `source_key(source_prefix, peer)` at accept and
+  /// released under the SAME derivation at establishment or reap; a runtime
+  /// change with entries outstanding would derive a different key on release
+  /// than on charge, leaking the old bucket and underflowing the new one.
+  source_prefix: SourcePrefix,
+  /// Running total of every `pending_inbound` count — the coordinator-wide
+  /// half-open inbound population the dedicated budget bounds. Maintained as a
+  /// scalar so that budget check is an O(1) compare ([`Self::pending_total`])
+  /// rather than a sum over the map. Moved in lockstep with `pending_inbound`
+  /// at the single increment site ([`Self::insert_accepted`]) and inside the
+  /// single decrement primitive ([`Self::release_pending_inbound`]), so it
+  /// always equals `Σ pending_inbound.values()`.
+  pending_total: usize,
 }
 
 impl ConnTable {
-  pub(crate) fn new() -> Self {
+  pub(crate) fn new(source_prefix: SourcePrefix) -> Self {
     Self {
       conns: Slab::new(),
       peer_routes: HashMap::new(),
       pending_inbound: HashMap::new(),
+      source_prefix,
+      pending_total: 0,
     }
   }
 
@@ -711,7 +847,11 @@ impl ConnTable {
       slot, ch.0,
       "accepted connection slab slot must equal ConnectionHandle"
     );
-    *self.pending_inbound.entry(peer).or_insert(0) += 1;
+    *self
+      .pending_inbound
+      .entry(source_key(self.source_prefix, &peer))
+      .or_insert(0) += 1;
+    self.pending_total += 1;
     // Fill only an empty or closed inbound slot; never displace a live inbound
     // at accept (that decision belongs to the establishment chokepoint). Never
     // touch `route.outbound`.
@@ -767,7 +907,10 @@ impl ConnTable {
       // `reconcile_pending_inbound`, so `pending_indexed` is false and this is
       // skipped — the decrement happens exactly once.
       if e.pending_indexed {
-        Self::release_pending_inbound(&mut self.pending_inbound, e.peer);
+        // Read the `Copy` prefix out before the `&mut self.pending_inbound`
+        // borrow; `SourceKey` is `Copy`, so there is no borrow friction.
+        let k = source_key(self.source_prefix, &e.peer);
+        Self::release_pending_inbound(&mut self.pending_inbound, &mut self.pending_total, k);
       }
       if let Some(route) = self.peer_routes.get_mut(&e.peer) {
         if route.outbound == Some(ch) {
@@ -788,22 +931,31 @@ impl ConnTable {
     true
   }
 
-  /// Release one unit of `peer`'s pending-inbound index. The single decrement
-  /// primitive: every caller has already confirmed the entry was indexed
-  /// (`pending_indexed`), so the source MUST have a positive count here. Removes
-  /// the map entry at zero so an idle source leaves no residue.
-  fn release_pending_inbound(pending_inbound: &mut HashMap<SocketAddr, usize>, peer: SocketAddr) {
-    match pending_inbound.get_mut(&peer) {
+  /// Release one unit of `key`'s pending-inbound index, moving `pending_total`
+  /// in lockstep. The single decrement primitive: every caller has already
+  /// confirmed the entry was indexed (`pending_indexed`), so the key MUST have a
+  /// positive count here. Removes the map entry at zero so an idle source leaves
+  /// no residue. The coordinator-wide `pending_total` is decremented only inside
+  /// the `Some` arm — i.e. only when a key unit is actually released — so it
+  /// stays equal to `Σ pending_inbound.values()`.
+  fn release_pending_inbound(
+    pending_inbound: &mut HashMap<SourceKey, usize>,
+    pending_total: &mut usize,
+    key: SourceKey,
+  ) {
+    match pending_inbound.get_mut(&key) {
       Some(count) => {
-        debug_assert!(*count > 0, "pending-inbound index underflow for {peer}");
+        debug_assert!(*count > 0, "pending-inbound index underflow for {key:?}");
         *count -= 1;
         if *count == 0 {
-          pending_inbound.remove(&peer);
+          pending_inbound.remove(&key);
         }
+        debug_assert!(*pending_total > 0, "pending-inbound total underflow");
+        *pending_total -= 1;
       }
       None => debug_assert!(
         false,
-        "pending-inbound index missing an indexed entry for {peer}"
+        "pending-inbound index missing an indexed entry for {key:?}"
       ),
     }
   }
@@ -842,7 +994,10 @@ impl ConnTable {
       entry.pending_indexed = false;
       entry.peer
     };
-    Self::release_pending_inbound(&mut self.pending_inbound, released_peer);
+    // Derive the key after the `entry` borrow ends; `self.source_prefix` is
+    // `Copy`, so reading it does not conflict with the `&mut` borrows below.
+    let k = source_key(self.source_prefix, &released_peer);
+    Self::release_pending_inbound(&mut self.pending_inbound, &mut self.pending_total, k);
   }
 
   /// Total number of connections currently tracked — every slab entry,
@@ -853,10 +1008,14 @@ impl ConnTable {
     self.conns.len()
   }
 
-  /// Number of inbound (server-accepted) connections from `source` that have
-  /// not yet established — still handshaking, OR handshake-failed and awaiting
-  /// their drained-reap. This is the half-open state the per-source pending cap
-  /// bounds before an unauthenticated inbound Initial commits new state.
+  /// Number of inbound (server-accepted) connections whose NORMALIZED source key
+  /// (see [`Self::source_prefix`]) matches `source`'s, that have not yet
+  /// established — still handshaking, OR handshake-failed and awaiting their
+  /// drained-reap. This is the half-open state the per-source pending cap bounds
+  /// before an unauthenticated inbound Initial commits new state. Because the
+  /// lookup is keyed on the normalized source (de-ported, prefix-masked), every
+  /// UDP source port from one host — and, at a shorter prefix, one subnet —
+  /// counts against a single allowance, so port rotation cannot bypass the cap.
   ///
   /// Two properties the cap depends on:
   ///
@@ -877,7 +1036,20 @@ impl ConnTable {
   /// the connection slab — so a rejected inbound Initial at connection-table
   /// saturation cannot be amplified into O(total connections) work.
   pub(crate) fn pending_inbound_from(&self, source: &SocketAddr) -> usize {
-    self.pending_inbound.get(source).copied().unwrap_or(0)
+    self
+      .pending_inbound
+      .get(&source_key(self.source_prefix, source))
+      .copied()
+      .unwrap_or(0)
+  }
+
+  /// The coordinator-wide count of inbound connections that have not yet
+  /// established — `Σ pending_inbound.values()`, maintained as a scalar so the
+  /// dedicated half-open budget is an O(1) admission compare. Summed across
+  /// every normalized source, this is the population a subnet flood would grow
+  /// to starve established/outbound work were it unbounded.
+  pub(crate) fn pending_total(&self) -> usize {
+    self.pending_total
   }
 
   /// Inbound (server-accepted) connections from `source` that have left the
@@ -892,7 +1064,7 @@ impl ConnTable {
       .conns
       .iter()
       .filter(|(_, e)| {
-        e.peer == *source
+        source_key(self.source_prefix, &e.peer) == source_key(self.source_prefix, source)
           && e.direction == ConnDirection::Inbound
           && !e.established_at_least_once
           && !e.conn.is_handshaking()
@@ -900,19 +1072,50 @@ impl ConnTable {
       .count()
   }
 
-  /// Independent recount of the connections currently indexed under `source`
-  /// (`pending_indexed`), read straight from the slab rather than the index.
-  /// The index invariant is `pending_inbound_from == this recount` for every
-  /// source at all times: a missed increment/decrement or a decrement that did
-  /// not clear the bit makes the two diverge, so the counter-maintenance test
-  /// asserts their equality after every accept / establish / reap to catch a
-  /// leak, underflow, or double-count.
+  /// Independent recount of the connections currently indexed under `source`'s
+  /// NORMALIZED key (`pending_indexed`), read straight from the slab rather than
+  /// the index — matching by [`source_key`] so every port that aggregates into
+  /// one bucket is recounted together. The index invariant is
+  /// `pending_inbound_from == this recount` for every source at all times: a
+  /// missed increment/decrement or a decrement that did not clear the bit makes
+  /// the two diverge, so the counter-maintenance test asserts their equality
+  /// after every accept / establish / reap to catch a leak, underflow, or
+  /// double-count. An un-normalized recount here would falsely break the
+  /// invariant the moment one key aggregates multiple source ports.
   #[cfg(test)]
   pub(crate) fn indexed_inbound_recount(&self, source: &SocketAddr) -> usize {
     self
       .conns
       .iter()
-      .filter(|(_, e)| e.peer == *source && e.pending_indexed)
+      .filter(|(_, e)| {
+        source_key(self.source_prefix, &e.peer) == source_key(self.source_prefix, source)
+          && e.pending_indexed
+      })
+      .count()
+  }
+
+  /// Independent recount of `pending_total` — the sum of every `pending_inbound`
+  /// value, read straight from the map rather than the maintained scalar. The
+  /// budget invariant is `pending_total() == this` at all times; the exact-once
+  /// test asserts equality after every step to catch a scalar that drifted from
+  /// the map (a missed lockstep move).
+  #[cfg(test)]
+  pub(crate) fn pending_total_recount(&self) -> usize {
+    self.pending_inbound.values().sum()
+  }
+
+  /// Count of INBOUND slab entries that have not established
+  /// (`!established_at_least_once`), read straight from the slab. Every such
+  /// entry is still charged (an un-established inbound stays `pending_indexed`
+  /// until reaped, and establishment is the only non-reap release), so this must
+  /// equal `pending_total()` at all times — the third face of the exact-once
+  /// invariant.
+  #[cfg(test)]
+  pub(crate) fn unestablished_inbound_count(&self) -> usize {
+    self
+      .conns
+      .iter()
+      .filter(|(_, e)| e.direction == ConnDirection::Inbound && !e.established_at_least_once)
       .count()
   }
 
