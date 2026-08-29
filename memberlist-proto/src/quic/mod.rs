@@ -132,6 +132,25 @@ const MAX_MEM_INGRESS_DATAGRAMS: usize = 8192;
 /// is popped from quinn (so its buffer cannot accumulate) and dropped.
 const MAX_INGRESS_DATAGRAMS_PER_PEER: usize = 1024;
 
+/// The largest the encrypted wrapper can inflate a gossip datagram, or `0`
+/// when no encryption backend is built in. The crate-root
+/// [`crate::ENCRYPTED_WRAPPER_OVERHEAD`] re-export is itself gated on the
+/// same `encryption` cfg, so it does not exist to reference when no backend
+/// is compiled in; this local alias mirrors the pattern the compio/reactor
+/// drivers use to size their gossip receive buffers.
+#[cfg(encryption)]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = crate::ENCRYPTED_WRAPPER_OVERHEAD;
+#[cfg(not(encryption))]
+const ENCRYPTED_WRAPPER_OVERHEAD: usize = 0;
+
+/// The largest the checksum wrapper can inflate a gossip datagram, or `0`
+/// when no checksum backend is built in. Same rationale as
+/// [`ENCRYPTED_WRAPPER_OVERHEAD`] above.
+#[cfg(checksum)]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = crate::CHECKSUMED_WRAPPER_OVERHEAD;
+#[cfg(not(checksum))]
+const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
+
 /// Maximum ready bridges the datagram service path pumps in ONE pass. Overflow
 /// stays queued in `ready_bridges` (its `Bridge::queued` flag set) and drains on
 /// the next pass — popped FRONT-first, so oldest-first round-robin — or on the
@@ -318,28 +337,52 @@ const _: () = assert!(
 );
 
 /// Push one inbound unreliable payload (a QUIC datagram or a plain-UDP gossip
-/// frame) into the shared coordinator ingress queue, enforcing the per-peer
-/// standing-share cap AND the node-global cap so neither source can exceed the
-/// bound. Drops and counts when either cap is reached; returns whether it was
+/// frame) into the shared coordinator ingress queue, enforcing a per-datagram
+/// wire-size cap, the per-peer standing-share cap, AND the node-global cap so
+/// neither an oversized frame nor a source-rotating flood can exceed the
+/// bound. Drops and counts when any cap is reached; returns whether it was
 /// queued. The per-peer counter is maintained here so a flood on EITHER
 /// transport cannot starve another peer's probe Ack and the global cap is a
 /// hard memory bound regardless of source.
 ///
-/// The payload is supplied as a thunk and built ONLY on admission: a rejected
-/// frame never materializes its `Bytes`, so a saturated queue cannot force an
-/// allocation/copy per dropped frame on the unauthenticated plain-UDP path
-/// (where the payload would otherwise be a fresh `Bytes::copy_from_slice`).
+/// `max_datagram_bytes` (the caller's [`QuicEndpoint::max_gossip_datagram_bytes`])
+/// bounds a SINGLE entry's size: a `Class::Memberlist` datagram larger than
+/// the endpoint's own configured gossip MTU (plus its wrapper overheads) is
+/// not legitimate gossip, so it is rejected before it can count against
+/// either the per-peer or the node-global cap. Combined with the node-global
+/// count cap, this bounds the shared queue's total bytes to
+/// `MAX_MEM_INGRESS_DATAGRAMS * max_gossip_datagram_bytes` regardless of how
+/// many distinct source addresses a flood rotates through — closing the count-
+/// only cap's gap, where a source-rotating flood of near-64KiB datagrams could
+/// fill the 8192-entry cap at hundreds of MiB.
 ///
-/// Borrows only the three disjoint ingress fields (never all of `self`) so the
+/// The payload is supplied as a thunk and built ONLY on admission: a rejected
+/// frame never materializes its `Bytes`, so a saturated queue OR an oversized
+/// frame cannot force an allocation/copy per dropped frame on the
+/// unauthenticated plain-UDP path (where the payload would otherwise be a
+/// fresh `Bytes::copy_from_slice`).
+///
+/// Borrows only the four disjoint ingress fields (never all of `self`) so the
 /// QUIC datagram drain in `service_quinn` can call it while the
 /// `self.conns.get_mut(..)` connection borrow is still live.
+#[allow(clippy::too_many_arguments)]
 fn push_mem_ingress_capped(
   mem_ingress: &mut VecDeque<(SocketAddr, Bytes)>,
   per_peer: &mut HashMap<SocketAddr, usize>,
   dropped: &mut u64,
+  oversized_dropped: &mut u64,
   from: SocketAddr,
+  max_datagram_bytes: usize,
+  datagram_len: usize,
   make_payload: impl FnOnce() -> Bytes,
 ) -> bool {
+  // Size gate FIRST, before either count check and before the payload thunk
+  // runs: an oversized datagram must count against neither cap (it is
+  // rejected outright, not merely load-shed) and must never be materialized.
+  if datagram_len > max_datagram_bytes {
+    *oversized_dropped = oversized_dropped.saturating_add(1);
+    return false;
+  }
   let queued = per_peer.get(&from).copied().unwrap_or(0);
   if queued >= MAX_INGRESS_DATAGRAMS_PER_PEER || mem_ingress.len() >= MAX_MEM_INGRESS_DATAGRAMS {
     // Reject WITHOUT constructing the payload: a saturated queue must not let a
@@ -832,6 +875,18 @@ pub struct QuicEndpoint<I, R = SmallRng> {
   /// bounded here by popping-and-dropping past either limit. Best-effort
   /// accounting only — never a membership signal.
   datagram_ingress_dropped: u64,
+  /// Count of inbound `Class::Memberlist` datagrams (plain-UDP or QUIC
+  /// datagram) rejected at admission because they exceeded
+  /// [`Self::max_gossip_datagram_bytes`] — the endpoint's own configured
+  /// gossip MTU plus its wrapper overheads. A datagram this large is not
+  /// legitimate gossip regardless of source, so it is rejected before it can
+  /// count against either the per-peer or the node-global ingress cap.
+  /// Distinct from [`Self::datagram_ingress_dropped`] (which counts drops
+  /// past the ingress COUNT cap): this counts a SIZE rejection, closing the
+  /// gap where a source-rotating flood of near-max-UDP-size datagrams could
+  /// otherwise fill the count cap at hundreds of MiB. Best-effort accounting
+  /// only — never a membership signal.
+  oversized_datagram_dropped: u64,
   /// Count of inbound application datagrams the `service_quinn` receive drain
   /// popped from quinn but DROPPED because the connection had not yet reached
   /// its application-readiness boundary (`established_at_least_once()` still
@@ -1222,6 +1277,7 @@ impl<I, R> QuicEndpoint<I, R> {
       last_now: None,
       datagram_dropped: 0,
       datagram_ingress_dropped: 0,
+      oversized_datagram_dropped: 0,
       pre_established_datagrams_dropped: 0,
       deadline_index: DeadlineIndex::new(),
       conns_with_pending_events: HashSet::new(),
@@ -1569,14 +1625,21 @@ impl<I, R> QuicEndpoint<I, R> {
   /// [`gossip_ingress_dropped`](crate::metrics::Metrics::gossip_ingress_dropped)
   /// — the inner `Endpoint`'s own gossip-ingress count is the STREAM plane's
   /// (zero on a QUIC endpoint) — so a driver reads one unified counter regardless
-  /// of transport.
+  /// of transport. Also surfaces the per-datagram size rejection
+  /// (`oversized_datagram_dropped`) on
+  /// [`gossip_ingress_oversized`](crate::metrics::Metrics::gossip_ingress_oversized)
+  /// so an oversized-datagram flood is visible in the PUBLIC snapshot, not
+  /// just the internal counter.
   pub fn metrics(&self) -> crate::metrics::Metrics {
     // `Endpoint::metrics` returns a borrow; `Metrics` is `Copy`, so take an
-    // owned copy to fold in this endpoint's datagram-plane shed count.
+    // owned copy to fold in this endpoint's datagram-plane shed counts.
     let mut m = *self.ep.metrics();
     m.gossip_ingress_dropped = m
       .gossip_ingress_dropped
       .saturating_add(self.datagram_ingress_dropped);
+    m.gossip_ingress_oversized = m
+      .gossip_ingress_oversized
+      .saturating_add(self.oversized_datagram_dropped);
     m
   }
 
@@ -1720,6 +1783,23 @@ impl<I, R> QuicEndpoint<I, R> {
   /// encryption is enabled.
   pub fn gossip_mtu(&self) -> usize {
     self.ep.gossip_mtu()
+  }
+
+  /// The largest legitimate on-wire `Class::Memberlist` datagram this
+  /// endpoint should ever emit or accept: [`Self::gossip_mtu`] plus the
+  /// encrypted and checksummed wrapper overheads (each `0` when its backend
+  /// is not built in) — the SAME formula the driver's `gossip_recv_buf_len`
+  /// uses to size its receive buffer. An inbound `Class::Memberlist`
+  /// datagram larger than this is not legitimate gossip, so
+  /// [`push_mem_ingress_capped`] rejects it at admission before it is
+  /// queued: bounding the shared ingress queue's total bytes to
+  /// `MAX_MEM_INGRESS_DATAGRAMS * max_gossip_datagram_bytes` regardless of
+  /// how many source addresses a flood rotates through.
+  pub(crate) fn max_gossip_datagram_bytes(&self) -> usize {
+    self
+      .gossip_mtu()
+      .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
+      .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
   }
 
   /// The largest UDP datagram this QUIC endpoint can receive: quinn's advertised
@@ -2670,11 +2750,15 @@ impl<I, R> QuicEndpoint<I, R> {
     // fallback flood cannot bypass the per-peer or node-global cap, drive
     // `mem_ingress_per_peer` past the bound the QUIC drain checks, or push the
     // global count over the hard memory limit.
+    let max_datagram_bytes = self.max_gossip_datagram_bytes();
     push_mem_ingress_capped(
       &mut self.mem_ingress,
       &mut self.mem_ingress_per_peer,
       &mut self.datagram_ingress_dropped,
+      &mut self.oversized_datagram_dropped,
       from,
+      max_datagram_bytes,
+      datagram.len(),
       || Bytes::copy_from_slice(datagram),
     );
   }
@@ -3050,6 +3134,14 @@ impl<I, R> QuicEndpoint<I, R> {
   #[cfg(test)]
   pub(crate) fn datagram_ingress_dropped(&self) -> u64 {
     self.datagram_ingress_dropped
+  }
+
+  /// Count of inbound `Class::Memberlist` datagrams rejected at admission
+  /// because they exceeded [`Self::max_gossip_datagram_bytes`] (best-effort
+  /// accounting; never a membership signal).
+  #[cfg(test)]
+  pub(crate) fn oversized_datagram_dropped(&self) -> u64 {
+    self.oversized_datagram_dropped
   }
 
   /// Count of inbound application datagrams dropped by the receive drain
@@ -5819,6 +5911,11 @@ where
   /// dials; they cannot be acted on in place because the parked-dial servicing
   /// re-borrows `self.conns` through `get_or_dial`.
   fn service_one_conn(&mut self, ch: ConnectionHandle, now: Instant) -> ServiceMarks {
+    // Sampled before `e` takes its exclusive borrow of `self.conns` below: the
+    // inbound-datagram drain further down needs the endpoint's per-datagram
+    // size cap, but `self.max_gossip_datagram_bytes()` reads `self.ep` via a
+    // `&self` method call, which cannot run while `e` holds `&mut self.conns`.
+    let max_gossip_datagram_bytes = self.max_gossip_datagram_bytes();
     // Both the inbound-accept and the inbound-datagram drains below attribute
     // work to this connection's membership address (`e.peer()`), which must be
     // the key its route is filed under. Asserted once here — the whole pass
@@ -6094,17 +6191,22 @@ where
       // each popped payload is gated.
       if established {
         // Pop quinn to empty so a zero-length-frame flood cannot accumulate
-        // inside quinn; admission (per-peer + global caps, dropped+counted past
-        // either bound so one flooding peer cannot fill the shared queue and
-        // starve another peer's probe Ack) is enforced by the shared helper —
-        // the SAME bound `handle_memberlist_udp` applies, so neither source can
-        // exceed it. The three `&mut self.<field>` args are disjoint from the
+        // inside quinn; admission (per-datagram size cap + per-peer + global
+        // count caps, dropped+counted past whichever bound so one flooding
+        // peer cannot fill the shared queue and starve another peer's probe
+        // Ack) is enforced by the shared helper — the SAME bound
+        // `handle_memberlist_udp` applies, so neither source can exceed it.
+        // The four `&mut self.<field>` args are disjoint from the
         // `self.conns` borrow `e` holds.
+        let payload_len = payload.len();
         push_mem_ingress_capped(
           &mut self.mem_ingress,
           &mut self.mem_ingress_per_peer,
           &mut self.datagram_ingress_dropped,
+          &mut self.oversized_datagram_dropped,
           peer,
+          max_gossip_datagram_bytes,
+          payload_len,
           move || payload,
         );
       } else {

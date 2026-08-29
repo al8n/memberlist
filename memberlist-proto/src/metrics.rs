@@ -17,6 +17,16 @@ pub struct Metrics {
   /// was already full (a memory-DoS backstop against a driver that does not gate
   /// its socket reads).
   pub gossip_ingress_dropped: u64,
+  /// Inbound gossip datagrams rejected at admission because they exceeded the
+  /// endpoint's own configured gossip MTU (plus its wrapper overheads) —
+  /// closing the gap where a source-rotating flood of near-max-datagram-size
+  /// frames could otherwise fill `gossip_ingress_dropped`'s count cap at
+  /// hundreds of MiB of attacker-controlled queued bytes. Distinct from
+  /// `gossip_ingress_dropped`: this is a SIZE rejection, counted before the
+  /// datagram can count against either the per-peer or the node-global
+  /// ingress cap, never a count-cap load-shed. Zero on a transport with no
+  /// per-datagram size cap.
+  pub gossip_ingress_oversized: u64,
   /// New nodes refused admission at the optional `max_members` ceiling. A
   /// refused node is never added to membership; existing members are unaffected.
   pub members_rejected: u64,

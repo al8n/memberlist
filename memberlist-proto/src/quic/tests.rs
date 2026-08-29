@@ -14024,3 +14024,416 @@ fn half_open_budget_bounds_aggregate_and_spares_outbound() {
     );
   }
 }
+
+/// A `Class::Memberlist` datagram larger than the endpoint's own configured
+/// [`super::QuicEndpoint::max_gossip_datagram_bytes`] is not legitimate
+/// gossip and must be rejected at admission — before it can grow the shared
+/// `mem_ingress` queue — rather than merely load-shed once the count cap is
+/// reached. A datagram at exactly the cap is still admitted (the cap rejects
+/// what is OVER it, not what is AT it).
+///
+/// Mutation-anchor: remove the `datagram_len > max_datagram_bytes` guard from
+/// `push_mem_ingress_capped` and this test fails — the oversized datagram is
+/// queued into `mem_ingress` instead of rejected.
+#[test]
+fn oversized_memberlist_datagram_rejected_at_ingress() {
+  let a_addr: SocketAddr = "127.0.0.1:7994".parse().unwrap();
+  let from: SocketAddr = "127.0.0.1:7995".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  let cap = a.max_gossip_datagram_bytes();
+  let dropped_before = a.oversized_datagram_dropped();
+  let queue_len_before = a.mem_ingress.len();
+
+  // Leading byte 0x01 classifies as Class::Memberlist (frame tag range
+  // 1..=15) via the plain-UDP path (`handle_udp`).
+  let oversized = vec![0x01u8; cap + 1];
+  a.handle_udp(from, &oversized, now);
+
+  assert_eq!(
+    a.mem_ingress.len(),
+    queue_len_before,
+    "an oversized Class::Memberlist datagram must not be queued into mem_ingress"
+  );
+  assert_eq!(
+    a.oversized_datagram_dropped(),
+    dropped_before + 1,
+    "the oversized datagram must be dropped and counted on the distinct oversized metric"
+  );
+  assert_eq!(
+    a.datagram_ingress_dropped(),
+    0,
+    "an oversized rejection is a size drop, not a count-cap drop"
+  );
+
+  // Control: a datagram AT exactly the cap is legitimate and must be admitted.
+  let at_cap = vec![0x01u8; cap];
+  a.handle_udp(from, &at_cap, now);
+  assert_eq!(
+    a.mem_ingress.len(),
+    queue_len_before + 1,
+    "a datagram exactly at the cap must be admitted"
+  );
+  assert_eq!(
+    a.oversized_datagram_dropped(),
+    dropped_before + 1,
+    "the at-cap datagram must not be counted as oversized"
+  );
+}
+
+/// Same rejection as [`oversized_memberlist_datagram_rejected_at_ingress`],
+/// but via the QUIC datagram drain (`service_one_conn`'s
+/// `datagrams().recv()` loop) rather than the plain-UDP path: an inbound QUIC
+/// application datagram larger than the RECEIVING endpoint's own
+/// `max_gossip_datagram_bytes` is rejected at admission, never reaching
+/// `mem_ingress`, regardless of which transport carried it.
+///
+/// A's `gossip_mtu` is configured small so its cap is small while the
+/// oversized payload stays comfortably under quinn's own per-connection
+/// datagram size ceiling — the sender B need not (and, via
+/// `queue_unreliable_datagram`'s own `TooLarge` guard, could not) exceed
+/// quinn's limit to prove this endpoint-level gate.
+#[test]
+fn oversized_quic_datagram_rejected_at_ingress() {
+  let a_addr: SocketAddr = "127.0.0.1:7996".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:7997".parse().unwrap();
+  let now = Instant::now();
+  let cfg_a = EndpointOptions::new(SmolStr::new("a"), a_addr).with_gossip_mtu(512);
+  let mut ep_a: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_a);
+  ep_a.start_scheduling(now);
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&a_addr.port().to_le_bytes());
+  let mut a = QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep_a, test_config(), Some(seed));
+  let mut b = make_endpoint("b", b_addr, now);
+
+  let cap = a.max_gossip_datagram_bytes();
+  let oversized_len = cap + 50;
+
+  // Drive the A<->B push/pull handshake until A holds an Established
+  // connection to B (the proven ferry pattern).
+  // Ignoring StreamId return: the test asserts on the drop counters, not the
+  // handle.
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_bridge_count() >= 1
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A must hold a live connection to B"
+  );
+
+  let dropped_before = a.oversized_datagram_dropped();
+  let ingress_dropped_before = a.datagram_ingress_dropped();
+  let queue_len_before = a.mem_ingress.len();
+
+  let payload = Bytes::from(vec![0x01u8; oversized_len]);
+  assert_eq!(
+    b.queue_unreliable_datagram(a_addr, payload, now),
+    super::DatagramSendStatus::Queued,
+    "test precondition: the payload must be well within quinn's own datagram \
+       size ceiling so this proves the endpoint-level cap, not quinn's"
+  );
+
+  for _ in 0..50 {
+    b.handle_timeout(now);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    if a.oversized_datagram_dropped() > dropped_before {
+      break;
+    }
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+  }
+
+  assert_eq!(
+    a.oversized_datagram_dropped(),
+    dropped_before + 1,
+    "the oversized QUIC datagram must be dropped and counted at the drain"
+  );
+  assert_eq!(
+    a.datagram_ingress_dropped(),
+    ingress_dropped_before,
+    "an oversized rejection is a size drop, not a count-cap drop"
+  );
+  assert_eq!(
+    a.mem_ingress.len(),
+    queue_len_before,
+    "the oversized QUIC datagram must never reach mem_ingress"
+  );
+}
+
+/// Control for [`oversized_memberlist_datagram_rejected_at_ingress`]: a
+/// `Class::Memberlist` datagram AT or under `max_gossip_datagram_bytes()` is
+/// ordinary legitimate gossip and must be queued normally — the cap must
+/// never reject anything a real gossip sender would produce.
+#[test]
+fn legit_gossip_datagram_within_cap_admitted() {
+  let a_addr: SocketAddr = "127.0.0.1:7998".parse().unwrap();
+  let from: SocketAddr = "127.0.0.1:7999".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+
+  let cap = a.max_gossip_datagram_bytes();
+
+  let at_cap = vec![0x01u8; cap];
+  a.handle_memberlist_udp(from, &at_cap);
+  assert_eq!(
+    a.mem_ingress.len(),
+    1,
+    "a datagram at exactly the cap must be queued normally"
+  );
+  assert_eq!(
+    a.oversized_datagram_dropped(),
+    0,
+    "a within-cap datagram must not be counted as oversized"
+  );
+
+  let under_len = if cap > 1 { cap - 1 } else { 1 };
+  let under = vec![0x01u8; under_len];
+  a.handle_memberlist_udp(from, &under);
+  assert_eq!(
+    a.mem_ingress.len(),
+    2,
+    "a datagram under the cap must also be queued normally"
+  );
+  assert_eq!(a.oversized_datagram_dropped(), 0);
+}
+
+/// The F5 scenario: a source-rotating flood of oversized `Class::Memberlist`
+/// datagrams cannot fill the shared `mem_ingress` queue with attacker-
+/// controlled bytes — each oversized datagram is rejected at admission
+/// regardless of source, so rotating the source address (to dodge the
+/// per-peer cap) buys the attacker nothing. Legitimate at-cap datagrams from
+/// many distinct sources are still admitted up to the node-global COUNT cap,
+/// bounding the queue's total bytes to
+/// `MAX_MEM_INGRESS_DATAGRAMS * max_gossip_datagram_bytes` — tied to the
+/// operator's own `gossip_mtu`, never an attacker-chosen datagram size.
+#[test]
+fn ingress_bytes_bounded_under_source_rotation() {
+  let a_addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
+  let now = Instant::now();
+  let mut a = make_endpoint("a", a_addr, now);
+  let cap = a.max_gossip_datagram_bytes();
+
+  // Phase 1: a source-rotating flood of OVERSIZED datagrams — one distinct
+  // source per datagram, well past the node-global count cap's own entry
+  // budget, so rotating the source (to dodge the per-peer cap) is the only
+  // thing left for the attacker to try.
+  let flood_count = super::MAX_MEM_INGRESS_DATAGRAMS + 500;
+  let oversized = vec![0x01u8; cap + 1];
+  for i in 0..flood_count {
+    let src: SocketAddr = format!(
+      "10.{}.{}.{}:9000",
+      (i >> 16) & 0xFF,
+      (i >> 8) & 0xFF,
+      i & 0xFF
+    )
+    .parse()
+    .unwrap();
+    a.handle_memberlist_udp(src, &oversized);
+  }
+  assert_eq!(
+    a.mem_ingress.len(),
+    0,
+    "an all-oversized source-rotating flood must queue NOTHING"
+  );
+  assert_eq!(
+    a.oversized_datagram_dropped() as usize,
+    flood_count,
+    "every oversized datagram must be dropped and counted regardless of source"
+  );
+
+  // Phase 2: legitimate AT-cap datagrams, still source-rotating (far more
+  // sources than MAX_MEM_INGRESS_DATAGRAMS, so the node-global count cap —
+  // not any single peer's per-peer share — is what bounds the queue).
+  let at_cap = vec![0x01u8; cap];
+  let legit_count = super::MAX_MEM_INGRESS_DATAGRAMS + 500;
+  for i in 0..legit_count {
+    let src: SocketAddr = format!(
+      "11.{}.{}.{}:9000",
+      (i >> 16) & 0xFF,
+      (i >> 8) & 0xFF,
+      i & 0xFF
+    )
+    .parse()
+    .unwrap();
+    a.handle_memberlist_udp(src, &at_cap);
+  }
+  assert!(
+    a.mem_ingress.len() <= super::MAX_MEM_INGRESS_DATAGRAMS,
+    "the node-global count cap must still bound the queue's entry count"
+  );
+  let total_bytes: usize = a.mem_ingress.iter().map(|(_, b)| b.len()).sum();
+  let byte_bound = super::MAX_MEM_INGRESS_DATAGRAMS * cap;
+  assert!(
+    total_bytes <= byte_bound,
+    "queued bytes must stay within MAX_MEM_INGRESS_DATAGRAMS * max_gossip_datagram_bytes \
+       ({total_bytes} > {byte_bound})"
+  );
+}
+
+/// The PUBLIC [`crate::metrics::Metrics::gossip_ingress_oversized`] snapshot,
+/// read via [`super::QuicEndpoint::metrics`], must reflect an oversized-
+/// datagram drop exactly like the internal `oversized_datagram_dropped`
+/// counter it folds — driven through BOTH ingress paths: the plain-UDP
+/// `handle_udp` path (as in
+/// [`oversized_memberlist_datagram_rejected_at_ingress`]) and the QUIC
+/// datagram drain (as in [`oversized_quic_datagram_rejected_at_ingress`]).
+/// Before this fix, `oversized_datagram_dropped` was only readable through a
+/// `#[cfg(test)]` accessor, so a production driver reading
+/// `QuicEndpoint::metrics()` during an external oversized-datagram flood saw
+/// no distinct signal for it.
+///
+/// Mutation-anchor: remove the `gossip_ingress_oversized` fold from
+/// `QuicEndpoint::metrics` and this test fails — the public snapshot stays
+/// at `0` while the internal counter advances.
+#[test]
+fn public_metrics_snapshot_reflects_oversized_ingress_drops() {
+  let a_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+  let plain_udp_from: SocketAddr = "127.0.0.1:8003".parse().unwrap();
+  let now = Instant::now();
+  let cfg_a = EndpointOptions::new(SmolStr::new("a"), a_addr).with_gossip_mtu(512);
+  let mut ep_a: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_a);
+  ep_a.start_scheduling(now);
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&a_addr.port().to_le_bytes());
+  let mut a = QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep_a, test_config(), Some(seed));
+  let mut b = make_endpoint("b", b_addr, now);
+
+  let cap = a.max_gossip_datagram_bytes();
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    0,
+    "no oversized drops yet"
+  );
+
+  // Path 1: the plain-UDP `handle_udp` path, from a source A holds no
+  // connection to.
+  let oversized = vec![0x01u8; cap + 1];
+  a.handle_udp(plain_udp_from, &oversized, now);
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    1,
+    "the plain-UDP oversized drop must surface on the public metric"
+  );
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    a.oversized_datagram_dropped(),
+    "the public metric must track the internal counter exactly"
+  );
+
+  // Path 2: the QUIC datagram drain, driven over a live A<->B connection —
+  // the proven ferry pattern from `oversized_quic_datagram_rejected_at_ingress`.
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_bridge_count() >= 1
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A must hold a live connection to B"
+  );
+
+  let before = a.metrics().gossip_ingress_oversized;
+  let oversized_len = cap + 50;
+  let payload = Bytes::from(vec![0x01u8; oversized_len]);
+  assert_eq!(
+    b.queue_unreliable_datagram(a_addr, payload, now),
+    super::DatagramSendStatus::Queued,
+    "test precondition: the payload must be well within quinn's own datagram \
+       size ceiling so this proves the endpoint-level cap, not quinn's"
+  );
+
+  for _ in 0..50 {
+    b.handle_timeout(now);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    if a.metrics().gossip_ingress_oversized > before {
+      break;
+    }
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+  }
+
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    before + 1,
+    "the QUIC-datagram-drain oversized drop must also surface on the public metric"
+  );
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    a.oversized_datagram_dropped(),
+    "the public metric must track the internal counter exactly, across both ingress paths"
+  );
+}
