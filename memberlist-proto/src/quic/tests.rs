@@ -172,6 +172,17 @@ fn quic_endpoint_type_is_constructible_signature() {
 }
 
 #[test]
+fn max_recv_udp_payload_size_is_quinn_default() {
+  // The bundled `EndpointConfig` leaves `max_udp_payload_size` at quinn's
+  // default (1472 = 1500-byte Ethernet MTU minus IPv4/UDP headers). The
+  // accessor surfaces exactly that so a driver can floor its recv buffer at it,
+  // and it must clear the 1200-byte QUIC Initial floor.
+  let ep = make_endpoint("n", "127.0.0.1:7590".parse().unwrap(), Instant::now());
+  assert_eq!(ep.max_recv_udp_payload_size(), 1472);
+  assert!(ep.max_recv_udp_payload_size() >= 1200);
+}
+
+#[test]
 fn with_label_empty_normalizes_to_none() {
   // An empty label collapses to the byte-identical no-label path, never a
   // `[12][0]` header.

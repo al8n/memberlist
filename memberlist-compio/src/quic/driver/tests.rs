@@ -122,6 +122,56 @@ fn addr(port: u16) -> SocketAddr {
   ([127, 0, 0, 1], port).into()
 }
 
+/// Build a coordinator with an explicit gossip MTU, so the recv-buffer sizing
+/// can be exercised at the validated `gossip_mtu` floor and well above it.
+fn build_endpoint_with_gossip_mtu(
+  id: &str,
+  addr: SocketAddr,
+  now: Instant,
+  gossip_mtu: usize,
+) -> QuicEndpoint<smol_str::SmolStr> {
+  use memberlist_proto::{EndpointOptions, endpoint::Endpoint};
+  use rand::SeedableRng;
+
+  let cfg = EndpointOptions::new(smol_str::SmolStr::new(id), addr).with_gossip_mtu(gossip_mtu);
+  let rng = rand::rngs::StdRng::seed_from_u64(addr.port() as u64);
+  let mut ep: Endpoint<smol_str::SmolStr, SocketAddr, rand::rngs::StdRng> = Endpoint::new(cfg, rng);
+  ep.start_scheduling(now);
+
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&addr.port().to_le_bytes());
+  QuicEndpoint::<smol_str::SmolStr>::with_quinn_rng_seed(ep, test_quic_options(), Some(seed))
+}
+
+/// At the validated `gossip_mtu` floor (512) the gossip datagram ceiling is far
+/// below quinn's max recv UDP payload, so the recv buffer MUST floor at the QUIC
+/// max — otherwise inbound QUIC packets (the >= 1200-byte Initial included) are
+/// truncated and the handshake never completes. Reverting the `.max(...)` in
+/// `recv_buf_len` drops this below the QUIC max and fails the test.
+#[test]
+fn recv_buf_len_floors_at_quic_max_for_small_gossip_mtu() {
+  let ep = build_endpoint_with_gossip_mtu("n", addr(7710), Instant::now(), 512);
+  let quic_max = ep.max_recv_udp_payload_size();
+  assert!(quic_max >= 1200);
+  assert!(
+    super::recv_buf_len::<smol_str::SmolStr, rand::rngs::StdRng>(&ep) >= quic_max,
+    "recv buffer must accommodate the largest QUIC packet even at the gossip_mtu floor"
+  );
+}
+
+/// A large `gossip_mtu` keeps the gossip datagram ceiling as the binding size —
+/// the QUIC-max floor must not shrink it.
+#[test]
+fn recv_buf_len_gossip_wins_for_large_gossip_mtu() {
+  let ep = build_endpoint_with_gossip_mtu("n", addr(7711), Instant::now(), 60_000);
+  let got = super::recv_buf_len::<smol_str::SmolStr, rand::rngs::StdRng>(&ep);
+  assert!(got > ep.max_recv_udp_payload_size());
+  assert_eq!(
+    got,
+    60_000 + super::ENCRYPTED_WRAPPER_OVERHEAD + super::CHECKSUMED_WRAPPER_OVERHEAD
+  );
+}
+
 /// Build an empty (allow-all default) CIDR filter — admits every address.
 fn allow_all() -> super::CidrFilter {
   #[cfg(feature = "cidr")]

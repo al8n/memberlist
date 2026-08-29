@@ -185,6 +185,50 @@ async fn build_driver_with_quic(
   (driver, obs_rx, shared, obs_payload_bytes)
 }
 
+/// Build a standalone coordinator with an explicit gossip MTU (no socket), so
+/// the recv-buffer sizing can be exercised at the validated `gossip_mtu` floor
+/// and well above it.
+fn endpoint_with_gossip_mtu(gossip_mtu: usize) -> QuicEndpoint<SmolStr, impl rand::Rng> {
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("qdrv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    )
+    .with_gossip_mtu(gossip_mtu),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
+  QuicEndpoint::new(ep, self_trusted_quic())
+}
+
+/// At the validated `gossip_mtu` floor (512) the gossip datagram ceiling is far
+/// below quinn's max recv UDP payload, so the recv buffer MUST floor at the QUIC
+/// max — otherwise inbound QUIC packets (the >= 1200-byte Initial included) are
+/// truncated and the handshake never completes. Reverting the `.max(...)` in
+/// `recv_buf_len` drops this below the QUIC max and fails the test.
+#[test]
+fn recv_buf_len_floors_at_quic_max_for_small_gossip_mtu() {
+  let ep = endpoint_with_gossip_mtu(512);
+  let quic_max = ep.max_recv_udp_payload_size();
+  assert!(quic_max >= 1200);
+  assert!(
+    recv_buf_len(&ep) >= quic_max,
+    "recv buffer must accommodate the largest QUIC packet even at the gossip_mtu floor"
+  );
+}
+
+/// A large `gossip_mtu` keeps the gossip datagram ceiling as the binding size —
+/// the QUIC-max floor must not shrink it.
+#[test]
+fn recv_buf_len_gossip_wins_for_large_gossip_mtu() {
+  let ep = endpoint_with_gossip_mtu(60_000);
+  let got = recv_buf_len(&ep);
+  assert!(got > ep.max_recv_udp_payload_size());
+  assert_eq!(
+    got,
+    60_000 + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD
+  );
+}
+
 /// Drives one `Future::poll` with a harmless waker.
 fn poll_once(driver: &mut QuicDriver<SmolStr, TokioRuntime>) -> Poll<()> {
   let waker = flag_waker();
