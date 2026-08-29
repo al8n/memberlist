@@ -265,7 +265,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   let eid = fresh_eid();
   let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let close_timeout = Duration::from_millis(300);
 
@@ -293,6 +293,18 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     .shutdown()
     .await
     .expect("half-close client write side");
+
+  // Wait until the bridge REPORTS the request EOF: only then is it actually
+  // in read-closed mode. The live-mode select prioritizes outbound data over
+  // reads, so enqueueing the response before this point can let the write
+  // start while `read_closed` is still false — the bridge would then apply
+  // the (here 60s) active `stream_timeout` instead of `close_timeout`.
+  loop {
+    match inbound_rx.recv().await.expect("bridge reports inbound") {
+      BridgeInbound::Eof(_) | BridgeInbound::Error(_) => break,
+      BridgeInbound::Bytes(_) => continue,
+    }
+  }
 
   // Queue the oversized response and drop the whole handle: the graceful-Close
   // shape (`out_tx` and `cancel_tx` both disconnect, the response queued). No
