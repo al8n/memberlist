@@ -4873,8 +4873,10 @@ fn rejected_initial_at_per_source_cap_is_one_indexed_probe_no_servicing() {
   );
 
   // Two more pending inbound from OTHER sources, so the table is populated with
-  // entries the admission decision for S must not scan.
-  for (port, src) in [(8101u16, "127.0.0.1:61101"), (8102, "127.0.0.1:61102")] {
+  // entries the admission decision for S must not scan. Distinct IPs so they
+  // occupy distinct normalized keys from S (same-IP different-port would now
+  // fold into S's bucket).
+  for (port, src) in [(8101u16, "127.0.0.2:61101"), (8102, "127.0.0.3:61102")] {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let src: SocketAddr = src.parse().unwrap();
     let mut c = make_endpoint(&format!("c{port}"), addr, now);
@@ -5433,7 +5435,10 @@ fn admitting_n_initials_is_o_n_not_o_n2() {
   const N: usize = 48;
   let mut clients: Vec<(SocketAddr, QuicEndpoint<SmolStr>)> = Vec::new();
   for i in 0..N {
-    let addr: SocketAddr = format!("127.0.0.1:{}", 7981 + i).parse().unwrap();
+    // Distinct source IPs so each occupies its own normalized key — under the
+    // default /32 per-source cap (16), 48 same-IP different-port sources would
+    // otherwise fold to one key and be capped.
+    let addr: SocketAddr = format!("127.0.0.{}:{}", 1 + i, 7981 + i).parse().unwrap();
     let mut c = make_endpoint(&format!("c{i}"), addr, now);
     let _ = c.start_push_pull(b_addr, PushPullKind::Join, now);
     clients.push((addr, c));
@@ -13251,6 +13256,89 @@ fn quic_options_ping_exempt_cap_default_and_validation() {
     .expect("the default config validates");
 }
 
+/// Config knobs: the source-normalization prefixes and the half-open budget.
+/// `pending_source_prefix_v4 > 32` and `pending_source_prefix_v6 > 128` are
+/// rejected; `0` is accepted (whole-family bucket); a budget above the global
+/// cap (both `Some`) is rejected; boundaries validate.
+#[test]
+fn quic_options_source_prefix_and_budget_validation() {
+  // Defaults are what `QuicOptions::new` installed and validate.
+  assert_eq!(test_config().pending_source_prefix_v4(), 32);
+  assert_eq!(test_config().pending_source_prefix_v6(), 64);
+  assert_eq!(test_config().max_pending_inbound_total(), Some(1024));
+  test_config().validate().expect("the defaults validate");
+
+  // v4 prefix > 32 is rejected; the boundary (32) and 0 are accepted.
+  let err = test_config()
+    .with_pending_source_prefix_v4(33)
+    .validate()
+    .expect_err("a v4 prefix above 32 is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::PendingSourcePrefixV4TooLong(33)
+    ),
+    "got {err:?}"
+  );
+  test_config()
+    .with_pending_source_prefix_v4(32)
+    .validate()
+    .expect("v4 prefix 32 (the boundary) validates");
+  test_config()
+    .with_pending_source_prefix_v4(0)
+    .validate()
+    .expect("v4 prefix 0 (whole-family bucket) validates");
+
+  // v6 prefix > 128 is rejected; the boundary (128) and 0 are accepted.
+  let err = test_config()
+    .with_pending_source_prefix_v6(129)
+    .validate()
+    .expect_err("a v6 prefix above 128 is rejected");
+  assert!(
+    matches!(
+      err,
+      super::QuicOptionsError::PendingSourcePrefixV6TooLong(129)
+    ),
+    "got {err:?}"
+  );
+  test_config()
+    .with_pending_source_prefix_v6(128)
+    .validate()
+    .expect("v6 prefix 128 (the boundary) validates");
+  test_config()
+    .with_pending_source_prefix_v6(0)
+    .validate()
+    .expect("v6 prefix 0 (whole-family bucket) validates");
+
+  // Budget above the global cap (both Some) is rejected.
+  let err = test_config()
+    .with_max_quic_connections(Some(100))
+    .with_max_pending_inbound_total(Some(101))
+    .validate()
+    .expect_err("a budget above the global cap is rejected");
+  assert!(
+    matches!(err, super::QuicOptionsError::PendingBudgetExceedsGlobalCap),
+    "got {err:?}"
+  );
+  // Equal to the global cap validates (the boundary).
+  test_config()
+    .with_max_quic_connections(Some(100))
+    .with_max_pending_inbound_total(Some(100))
+    .validate()
+    .expect("a budget equal to the global cap validates");
+  // A budget of 0 is accepted (fail-closed), and an unset global cap disables
+  // the cross-field check.
+  test_config()
+    .with_max_pending_inbound_total(Some(0))
+    .validate()
+    .expect("a zero budget (fail-closed) validates");
+  test_config()
+    .with_max_quic_connections(None)
+    .with_max_pending_inbound_total(Some(usize::MAX))
+    .validate()
+    .expect("with no global cap, any budget validates");
+}
+
 // ===================================================================
 // QUIC 0-RTT readiness gate (#173)
 // ===================================================================
@@ -13694,4 +13782,206 @@ fn zero_rtt_stream_counts_against_inbound_cap_only_once_accepted() {
     b.counters.max_inbound_bridges_live >= 1,
     "the stream was counted as a live inbound bridge only once accepted at establishment"
   );
+}
+
+/// #177: a host cannot bypass the per-source pending-handshake cap by rotating
+/// its UDP source port. Five valid Initials from five endpoints are delivered
+/// under ONE source IP across five DIFFERENT source ports; with a per-source cap
+/// of two, exactly the first two are accepted and the remaining three are
+/// refused BY THE PER-SOURCE GATE — the rotated ports all normalize to one key.
+///
+/// Negative control: revert the pending index to key on the full `SocketAddr` —
+/// each rotated port becomes its own bucket, all five are accepted, and
+/// `quic_pending_rejected_per_source` stays flat.
+#[test]
+fn source_port_rotation_cannot_bypass_per_source_pending_cap() {
+  let b_addr: SocketAddr = "127.0.0.1:7990".parse().unwrap();
+  let now = Instant::now();
+  // B: per-source pending cap 2, global cap and budget high enough not to fire.
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config()
+      .with_max_pending_connections_per_source(Some(2))
+      .with_max_quic_connections(Some(64))
+      .with_max_pending_inbound_total(Some(64)),
+    b_addr,
+    now,
+  );
+
+  // Mint five valid Initials (distinct DCIDs) from five endpoints.
+  let mut inits = Vec::new();
+  for i in 0..5u16 {
+    let a_addr: SocketAddr = format!("127.0.0.1:{}", 7991 + i).parse().unwrap();
+    let mut a = make_endpoint(&format!("a{i}"), a_addr, now);
+    // Ignoring StreamId: the test drives raw Initials, not exchange handles.
+    let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+    inits.push(drain_first_datagram_to(&mut a, b_addr));
+  }
+
+  // Deliver all five under ONE IP but five DIFFERENT source ports.
+  let src_ip = "198.51.100.1";
+  let per_source_before = b.counters.quic_pending_rejected_per_source;
+  let budget_before = b.counters.quic_pending_rejected_budget;
+  let rejected_before = b.metrics().quic_connections_rejected;
+  for (i, init) in inits.iter().enumerate() {
+    let src: SocketAddr = format!("{src_ip}:{}", 60001 + i).parse().unwrap();
+    b.handle_udp(src, init, now);
+  }
+
+  assert_eq!(
+    b.counters.quic_pending_rejected_per_source - per_source_before,
+    3,
+    "three of five rotated-port Initials must be refused by the per-source gate \
+       (all ports fold to one normalized key)"
+  );
+  assert_eq!(
+    b.counters.quic_pending_rejected_budget - budget_before,
+    0,
+    "the half-open budget (64) must not fire here"
+  );
+  assert_eq!(
+    b.metrics().quic_connections_rejected - rejected_before,
+    3,
+    "exactly three Initials were refused, so exactly two (the cap) were accepted"
+  );
+}
+
+/// The dedicated half-open inbound budget rejects an Initial once the AGGREGATE
+/// pending-inbound population reaches `max_pending_inbound_total`, even when the
+/// global cap is far off and every source is below the per-source cap — a subnet
+/// flood spread thin across many source keys cannot pin the whole connection
+/// budget in half-open handshakes. `Some(0)` fail-closes all inbound; `None`
+/// disables the budget; and outbound dials are unaffected by a full budget.
+#[test]
+fn half_open_budget_bounds_aggregate_and_spares_outbound() {
+  let now = Instant::now();
+
+  // (a) budget 2, high per-source and global caps: three distinct-IP Initials —
+  // the third is refused by the BUDGET gate (checked before the per-source gate,
+  // so the per-source lookup counter does not even advance for it).
+  {
+    let b_addr: SocketAddr = "127.0.0.1:7970".parse().unwrap();
+    let mut b = make_endpoint_full(
+      EndpointOptions::new(SmolStr::new("b"), b_addr),
+      test_config()
+        .with_max_pending_inbound_total(Some(2))
+        .with_max_pending_connections_per_source(Some(64))
+        .with_max_quic_connections(Some(64)),
+      b_addr,
+      now,
+    );
+    let mut inits = Vec::new();
+    for i in 0..3u16 {
+      let a_addr: SocketAddr = format!("127.0.0.1:{}", 7971 + i).parse().unwrap();
+      let mut a = make_endpoint(&format!("a{i}"), a_addr, now);
+      // Ignoring StreamId: raw Initials only.
+      let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+      inits.push(drain_first_datagram_to(&mut a, b_addr));
+    }
+    let budget_before = b.counters.quic_pending_rejected_budget;
+    let checks_before = b.counters.quic_pending_inbound_checks;
+    let per_source_before = b.counters.quic_pending_rejected_per_source;
+    // Three DISTINCT source IPs (each below the per-source cap).
+    for (i, init) in inits.iter().enumerate() {
+      let src: SocketAddr = format!("203.0.113.{}:5000", 1 + i).parse().unwrap();
+      b.handle_udp(src, init, now);
+    }
+    assert_eq!(
+      b.counters.quic_pending_rejected_budget - budget_before,
+      1,
+      "the third Initial must be refused by the half-open budget"
+    );
+    assert_eq!(
+      b.counters.quic_pending_rejected_per_source - per_source_before,
+      0,
+      "no per-source rejection: each source is below the per-source cap"
+    );
+    assert_eq!(
+      b.counters.quic_pending_inbound_checks - checks_before,
+      2,
+      "the budget-refused Initial returns before the per-source lookup, so only \
+         the two accepted ones reach it"
+    );
+  }
+
+  // (b) budget Some(0): the very first inbound Initial is fail-closed.
+  {
+    let b_addr: SocketAddr = "127.0.0.1:7975".parse().unwrap();
+    let mut b = make_endpoint_full(
+      EndpointOptions::new(SmolStr::new("b"), b_addr),
+      test_config()
+        .with_max_pending_inbound_total(Some(0))
+        .with_max_quic_connections(Some(64)),
+      b_addr,
+      now,
+    );
+    let a_addr: SocketAddr = "127.0.0.1:7976".parse().unwrap();
+    let mut a = make_endpoint("a", a_addr, now);
+    let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+    let init = drain_first_datagram_to(&mut a, b_addr);
+    let budget_before = b.counters.quic_pending_rejected_budget;
+    let src: SocketAddr = "203.0.113.50:5000".parse().unwrap();
+    b.handle_udp(src, &init, now);
+    assert_eq!(
+      b.counters.quic_pending_rejected_budget - budget_before,
+      1,
+      "a zero budget fail-closes every inbound handshake"
+    );
+    assert_eq!(
+      b.live_connections_to(src),
+      0,
+      "no connection-table entry is created for the fail-closed source"
+    );
+
+    // Outbound dials are unaffected by a full (here zero) budget: B can still
+    // dial OUT (an outbound connection never charges the inbound budget).
+    let peer: SocketAddr = "127.0.0.1:7977".parse().unwrap();
+    let _ = b.start_push_pull(peer, PushPullKind::Join, now);
+    let mut emitted_to_peer = false;
+    for _ in 0..8 {
+      while let Some((to, _bytes)) = b.poll_transmit() {
+        if to == peer {
+          emitted_to_peer = true;
+        }
+      }
+      if emitted_to_peer {
+        break;
+      }
+    }
+    assert!(
+      emitted_to_peer,
+      "an outbound dial must still emit its Initial with the inbound budget full"
+    );
+  }
+
+  // (c) budget None: no budget rejection however many distinct sources arrive.
+  {
+    let b_addr: SocketAddr = "127.0.0.1:7980".parse().unwrap();
+    let mut b = make_endpoint_full(
+      EndpointOptions::new(SmolStr::new("b"), b_addr),
+      test_config()
+        .with_max_pending_inbound_total(None)
+        .with_max_pending_connections_per_source(Some(64))
+        .with_max_quic_connections(Some(64)),
+      b_addr,
+      now,
+    );
+    let mut inits = Vec::new();
+    for i in 0..4u16 {
+      let a_addr: SocketAddr = format!("127.0.0.1:{}", 7981 + i).parse().unwrap();
+      let mut a = make_endpoint(&format!("a{i}"), a_addr, now);
+      let _ = a.start_push_pull(b_addr, PushPullKind::Join, now);
+      inits.push(drain_first_datagram_to(&mut a, b_addr));
+    }
+    let budget_before = b.counters.quic_pending_rejected_budget;
+    for (i, init) in inits.iter().enumerate() {
+      let src: SocketAddr = format!("203.0.113.{}:6000", 100 + i).parse().unwrap();
+      b.handle_udp(src, init, now);
+    }
+    assert_eq!(
+      b.counters.quic_pending_rejected_budget - budget_before,
+      0,
+      "a `None` budget disables the aggregate gate entirely"
+    );
+  }
 }

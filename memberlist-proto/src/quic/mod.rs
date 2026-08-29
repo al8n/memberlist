@@ -19,12 +19,14 @@ mod transport_mode;
 
 #[cfg(feature = "tls")]
 pub use config::{QuicConfigError, QuicConfigOptions};
+pub use conn::SourcePrefix;
 pub use crypto::{
   DEFAULT_CATCHUP_INTERVAL, DEFAULT_DIAL_SERVICE_MARGIN,
-  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
-  DEFAULT_MAX_QUIC_CONNECTIONS, DEFAULT_MAX_QUIC_INBOUND_STREAMS,
-  DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS, MAX_CATCHUP_INTERVAL, QuicOptions,
-  QuicOptionsError,
+  DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE, DEFAULT_MAX_PENDING_INBOUND_TOTAL,
+  DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER, DEFAULT_MAX_QUIC_CONNECTIONS,
+  DEFAULT_MAX_QUIC_INBOUND_STREAMS, DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS,
+  DEFAULT_PENDING_SOURCE_PREFIX_V4, DEFAULT_PENDING_SOURCE_PREFIX_V6, MAX_CATCHUP_INTERVAL,
+  QuicOptions, QuicOptionsError,
 };
 pub use transport_mode::{DatagramSendStatus, UnreliableTransport};
 
@@ -1046,6 +1048,18 @@ struct TestCounters {
   /// per-source lookup unconditionally) makes it advance and that test fails.
   /// Never compiled into production builds.
   quic_pending_inbound_checks: u64,
+  /// Test-only counter incremented once per inbound Initial refused by the
+  /// dedicated half-open inbound budget (`pending_total >= max_pending_inbound_total`).
+  /// The budget-gate regression test asserts it advances once the aggregate
+  /// half-open population reaches the budget even below the global cap and below
+  /// any per-source cap. Never compiled into production builds.
+  quic_pending_rejected_budget: u64,
+  /// Test-only counter incremented once per inbound Initial refused by the
+  /// per-source pending cap (`pending_inbound_from >= max_pending_connections_per_source`).
+  /// The source-port-rotation regression test asserts it advances once a single
+  /// normalized source key reaches the cap, no matter how many distinct UDP
+  /// source ports the flood used. Never compiled into production builds.
+  quic_pending_rejected_per_source: u64,
   /// Test-only count of `self.bridges` entries EXAMINED while routing a
   /// per-connection stream event (`StreamEvent::Finished`/`Stopped`) or reaping
   /// a lost connection's bridges inside [`QuicEndpoint::service_one_conn`].
@@ -1175,6 +1189,9 @@ impl<I, R> QuicEndpoint<I, R> {
     rng_seed: Option<[u8; 32]>,
   ) -> Self {
     let quinn = QuinnEndpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, rng_seed);
+    // Read the source-normalization prefix out of `cfg` before it is moved into
+    // the struct; the connection table stores it immutably for its life.
+    let source_prefix = cfg.source_prefix();
     Self {
       ep,
       quinn,
@@ -1187,7 +1204,7 @@ impl<I, R> QuicEndpoint<I, R> {
       checksum: crate::ChecksumOptions::new(),
       label: None,
       skip_inbound_label_check: false,
-      conns: ConnTable::new(),
+      conns: ConnTable::new(source_prefix),
       bridges: HashMap::new(),
       bridges_by_conn: HashMap::new(),
       ready_bridges: VecDeque::new(),
@@ -2491,12 +2508,14 @@ impl<I, R> QuicEndpoint<I, R> {
         // unauthenticated (the TLS handshake has not run), so a flood — from one
         // source with varied DCIDs, or many spoofed sources — would otherwise
         // grow the `ConnTable` slab without bound (memory exhaustion + O(N)
-        // per-tick scans). mutual-TLS and Retry time-bound this state; these two
+        // per-tick scans). mutual-TLS and Retry time-bound this state; these
         // caps are the additional hard bound. The global cap limits total
-        // tracked connections; the per-source cap limits one address's
-        // concurrent half-open handshakes so no single source can consume the
-        // global budget. Past either cap the Initial is dropped (see
-        // `reject_incoming`) and no `ConnTable` entry is created.
+        // tracked connections; the half-open budget limits the aggregate
+        // still-handshaking inbound population across all sources; the per-source
+        // cap limits one normalized source's concurrent half-open handshakes so
+        // no single source can consume the global budget. Past any cap the
+        // Initial is dropped (see `reject_incoming`) and no `ConnTable` entry is
+        // created.
         //
         // Global cap FIRST, short-circuiting the per-source check. At
         // connection-table saturation an attacker floods fresh-DCID Initials;
@@ -2513,9 +2532,29 @@ impl<I, R> QuicEndpoint<I, R> {
           // so this datagram addresses no connection.
           return None;
         }
-        // Per-source pending cap. Reached only under the global cap.
-        // `pending_inbound_from` is an O(1) index read (not a scan of the
-        // connection slab), so this too is attacker-flood-safe.
+        // Dedicated half-open inbound budget, enforced AFTER the global cap and
+        // BEFORE the per-source cap. The per-source cap bounds one normalized
+        // source key, but a flood spread thin across many keys — each below the
+        // per-source cap — could still pin the whole global connection budget in
+        // half-open handshakes, starving established and outbound work. This
+        // aggregate budget caps that. `pending_total` is an O(1) scalar read, so
+        // a saturated endpoint still rejects here without per-datagram work that
+        // scales with the table.
+        if let Some(total) = self.cfg.max_pending_inbound_total() {
+          if self.conns.pending_total() >= total {
+            #[cfg(test)]
+            {
+              self.counters.quic_pending_rejected_budget =
+                self.counters.quic_pending_rejected_budget.saturating_add(1);
+            }
+            self.reject_incoming(incoming);
+            return None;
+          }
+        }
+        // Per-source pending cap. Reached only under the global cap and the
+        // half-open budget. `pending_inbound_from` is an O(1) index read (not a
+        // scan of the connection slab) keyed on the normalized source, so it is
+        // attacker-flood-safe AND unbypassable by UDP source-port rotation.
         if let Some(max) = self.cfg.max_pending_connections_per_source() {
           #[cfg(test)]
           {
@@ -2523,6 +2562,13 @@ impl<I, R> QuicEndpoint<I, R> {
               self.counters.quic_pending_inbound_checks.saturating_add(1);
           }
           if self.conns.pending_inbound_from(&from) >= max {
+            #[cfg(test)]
+            {
+              self.counters.quic_pending_rejected_per_source = self
+                .counters
+                .quic_pending_rejected_per_source
+                .saturating_add(1);
+            }
             self.reject_incoming(incoming);
             return None;
           }

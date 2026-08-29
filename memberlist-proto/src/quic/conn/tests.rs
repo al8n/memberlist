@@ -23,7 +23,7 @@ fn quinn_pair() -> (QuinnEndpoint, QuinnEndpoint, QuicOptions) {
 #[test]
 fn dial_inserts_then_reuse_returns_same_handle() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
@@ -55,7 +55,7 @@ fn dial_inserts_then_reuse_returns_same_handle() {
 #[test]
 fn reap_if_drained_is_false_until_drained_then_removes() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
@@ -118,7 +118,7 @@ fn reap_if_drained_is_false_until_drained_then_removes() {
 #[test]
 fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
@@ -228,7 +228,7 @@ fn get_or_dial_redials_when_cached_conn_is_closed_not_drained() {
 #[test]
 fn closed_never_established_does_not_redial() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch1 = t
@@ -280,7 +280,7 @@ fn closed_never_established_does_not_redial() {
 #[test]
 fn established_flag_sticks_via_conn_mut_lazy_tracking() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
@@ -337,7 +337,7 @@ fn established_flag_sticks_via_conn_mut_lazy_tracking() {
 #[test]
 fn terminal_outbound_does_not_hide_live_accepted_inbound() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // (1) Outbound dial X → `route.outbound = ch1`.
@@ -444,7 +444,7 @@ fn terminal_outbound_does_not_hide_live_accepted_inbound() {
 #[test]
 fn reap_if_drained_handle_equality_guard_idempotent_when_peers_absent() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
@@ -504,7 +504,7 @@ fn reap_if_drained_handle_equality_guard_idempotent_when_peers_absent() {
 #[test]
 fn prepass_clears_slab_gone_outbound_then_dials_fresh() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // Plant a route whose outbound handle has no slab entry — the slab-gone input.
@@ -545,7 +545,7 @@ fn prepass_clears_slab_gone_outbound_then_dials_fresh() {
 #[test]
 fn reap_if_drained_on_absent_slab_slot_is_false_noop() {
   let (mut client, _server, _cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let phantom = ConnectionHandle(1234);
   assert!(
     !t.reap_if_drained(&mut client, phantom),
@@ -562,7 +562,7 @@ fn reap_if_drained_on_absent_slab_slot_is_false_noop() {
 #[test]
 fn conn_entry_observation_accessors_on_fresh_entry() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
@@ -604,7 +604,7 @@ fn conn_entry_observation_accessors_on_fresh_entry() {
 #[test]
 fn pending_inbound_from_excludes_local_outbound_dial() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let ch = t
@@ -650,7 +650,7 @@ fn pending_inbound_from_excludes_local_outbound_dial() {
 #[test]
 fn pending_inbound_from_charges_failed_never_established_inbound() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let src: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // Two distinct inbound (server-accepted) connections attributed to `src`,
@@ -731,10 +731,12 @@ fn drive_to_drained(t: &mut ConnTable, ch: ConnectionHandle) {
 #[test]
 fn pending_inbound_index_pairs_increment_with_exactly_one_decrement() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
+  // Distinct source IPs so they occupy distinct normalized keys under the
+  // default /32 (same-IP different-port sources would now fold to one key).
   let s1: SocketAddr = "127.0.0.1:5001".parse().unwrap();
-  let s2: SocketAddr = "127.0.0.1:5002".parse().unwrap();
+  let s2: SocketAddr = "127.0.0.2:5002".parse().unwrap();
 
   // Mint 3 inbound from s1 and 2 from s2. Minted on the SAME endpoint and
   // inserted in lockstep so the slab slots match the ConnectionHandles (the
@@ -989,7 +991,7 @@ fn ferry_client_conn_to_established(
     true,
     Some([0x5a; 32]),
   );
-  let mut server_conns = ConnTable::new();
+  let mut server_conns = ConnTable::new(SourcePrefix::default());
   let mut server_ch: Option<ConnectionHandle> = None;
   for _ in 0..200 {
     let mut buf = Vec::new();
@@ -1129,7 +1131,7 @@ fn establish_outbound(
 #[test]
 fn closed_inbound_is_non_authoritative_and_triggers_a_fresh_outbound_dial() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // An inbound that closes WITHOUT ever establishing (DeadInbound).
@@ -1189,7 +1191,7 @@ fn closed_inbound_is_non_authoritative_and_triggers_a_fresh_outbound_dial() {
 #[test]
 fn accept_does_not_displace_a_live_inbound() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // Inbound X accepted → route.inbound = X.
@@ -1258,7 +1260,7 @@ fn accept_does_not_displace_a_live_inbound() {
 #[test]
 fn reliable_r6_at_cap_returns_the_live_inbound_not_an_error() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   let inbound = accept_inbound(
@@ -1300,7 +1302,7 @@ fn reliable_r6_at_cap_returns_the_live_inbound_not_an_error() {
 #[test]
 fn established_outbound_precedes_a_live_inbound() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = FERRY_SERVER_ADDR.parse().unwrap();
   // A real established outbound O (drives a full handshake).
@@ -1332,7 +1334,7 @@ fn established_outbound_precedes_a_live_inbound() {
 #[test]
 fn established_inbound_into_empty_route_promotes_then_self_heals_on_reap() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
 
@@ -1404,7 +1406,7 @@ fn established_inbound_into_empty_route_promotes_then_self_heals_on_reap() {
 #[test]
 fn established_inbound_selected_and_promotion_supersedes_the_prior_one() {
   let (mut client, mut server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = FERRY_CLIENT_ADDR.parse().unwrap();
 
@@ -1465,7 +1467,7 @@ fn established_inbound_selected_and_promotion_supersedes_the_prior_one() {
 #[test]
 fn unreliable_selection_prefers_live_inbound_without_companion_dial() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
 
   // U4: a live handshaking inbound, no outbound → return the inbound, no dial.
@@ -1561,7 +1563,7 @@ fn unreliable_selection_prefers_live_inbound_without_companion_dial() {
 #[test]
 fn prepass_removes_a_route_left_fully_empty() {
   let (mut client, _server, cfg) = quinn_pair();
-  let mut t = ConnTable::new();
+  let mut t = ConnTable::new(SourcePrefix::default());
   let now = Instant::now();
   let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
   // Only a closed never-established inbound → route.inbound set, no outbound.
@@ -1597,5 +1599,346 @@ fn prepass_removes_a_route_left_fully_empty() {
   assert!(
     !t.peer_routes.contains_key(&peer),
     "a route the pre-pass emptied leaves no peer_routes entry"
+  );
+}
+
+/// Mint one inbound connection into `t` keyed on `peer`. The underlying quinn
+/// `Connection` is minted on `client` (its DCID is irrelevant to the source
+/// key); `dst_port` only varies the client's dial 4-tuple so successive mints
+/// get fresh connection objects. Minted and inserted in lockstep so the slab
+/// slot equals the handle (`insert_accepted`'s slot assertion). Returns the
+/// handle.
+fn mint_inbound_into(
+  t: &mut ConnTable,
+  client: &mut QuinnEndpoint,
+  cfg: &QuicOptions,
+  peer: SocketAddr,
+  dst_port: u16,
+) -> ConnectionHandle {
+  let now = Instant::now();
+  let dst: SocketAddr = format!("127.0.0.1:{dst_port}").parse().unwrap();
+  let (ch, c) = client
+    .connect(now.into_std(), cfg.client().clone(), dst, "localhost")
+    .unwrap();
+  t.insert_accepted(ch, c, peer);
+  ch
+}
+
+/// UDP source-port rotation from one IPv4 host folds to a single key: every port
+/// of `203.0.113.9` charges the same allowance, so `pending_inbound_from`
+/// reports the aggregate rather than one-per-port. This is the #177 fix at the
+/// index level — before it, each `(ip, port)` was its own bucket and the
+/// per-source cap saw only `1`.
+#[test]
+fn source_port_rotation_from_one_ipv4_folds_to_one_key() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+
+  // Five Initials from ONE IP across five different source ports.
+  for (i, port) in [40001u16, 40002, 40003, 40004, 40005]
+    .into_iter()
+    .enumerate()
+  {
+    let peer: SocketAddr = format!("203.0.113.9:{port}").parse().unwrap();
+    mint_inbound_into(&mut t, &mut client, &cfg, peer, 6100 + i as u16);
+  }
+
+  // Every port of the host resolves to the same aggregate allowance.
+  for port in [40001u16, 40002, 40003, 40004, 40005] {
+    let probe: SocketAddr = format!("203.0.113.9:{port}").parse().unwrap();
+    assert_eq!(
+      t.pending_inbound_from(&probe),
+      5,
+      "all rotated ports of one IPv4 host must share one bucket"
+    );
+  }
+  assert_eq!(t.pending_total(), 5);
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// IPv6 source-address rotation inside one `/64` folds to one key under the
+/// default `/64`; two distinct `/64`s stay independent.
+#[test]
+fn ipv6_rotation_within_a_64_folds_but_distinct_64s_are_independent() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+
+  // Three distinct addresses inside 2001:db8:1:1::/64.
+  for (i, host) in ["2001:db8:1:1::1", "2001:db8:1:1::2", "2001:db8:1:1::abcd"]
+    .into_iter()
+    .enumerate()
+  {
+    let peer: SocketAddr = format!("[{host}]:{}", 50001 + i).parse().unwrap();
+    mint_inbound_into(&mut t, &mut client, &cfg, peer, 6200 + i as u16);
+  }
+  // One address in a DIFFERENT /64 (2001:db8:1:2::/64).
+  let other: SocketAddr = "[2001:db8:1:2::1]:50100".parse().unwrap();
+  mint_inbound_into(&mut t, &mut client, &cfg, other, 6299);
+
+  let probe: SocketAddr = "[2001:db8:1:1::ffff]:9".parse().unwrap();
+  assert_eq!(
+    t.pending_inbound_from(&probe),
+    3,
+    "all addresses in one /64 share a bucket under the default /64 prefix"
+  );
+  assert_eq!(
+    t.pending_inbound_from(&other),
+    1,
+    "a distinct /64 keeps its own independent bucket"
+  );
+  assert_eq!(t.pending_total(), 4);
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// A v4-mapped IPv6 source (`::ffff:a.b.c.d`, as a dual-stack listener reports
+/// an IPv4 peer) canonicalizes to its IPv4 form, so it shares one bucket with
+/// the plain-IPv4 view of the same host — a host cannot split into two buckets
+/// by reaching a dual-stack endpoint over both families.
+#[test]
+fn v4_mapped_ipv6_shares_the_ipv4_bucket() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+
+  let v4: SocketAddr = "198.51.100.7:1111".parse().unwrap();
+  let mapped: SocketAddr = "[::ffff:198.51.100.7]:2222".parse().unwrap();
+  mint_inbound_into(&mut t, &mut client, &cfg, v4, 6300);
+  mint_inbound_into(&mut t, &mut client, &cfg, mapped, 6301);
+
+  assert_eq!(
+    t.pending_inbound_from(&v4),
+    2,
+    "the v4-mapped view must fold into the plain-IPv4 bucket"
+  );
+  assert_eq!(
+    t.pending_inbound_from(&mapped),
+    2,
+    "and the lookup is symmetric from the v4-mapped side"
+  );
+  assert_eq!(t.pending_total(), 2);
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// CGNAT-honest topology: distinct source IPs get independent buckets — the
+/// normalization must not falsely coalesce different hosts.
+#[test]
+fn distinct_source_ips_get_independent_buckets() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+
+  for (i, ip) in ["100.64.0.1", "100.64.0.2", "100.64.5.9"]
+    .into_iter()
+    .enumerate()
+  {
+    let peer: SocketAddr = format!("{ip}:{}", 3000 + i).parse().unwrap();
+    mint_inbound_into(&mut t, &mut client, &cfg, peer, 6400 + i as u16);
+  }
+  for ip in ["100.64.0.1", "100.64.0.2", "100.64.5.9"] {
+    let probe: SocketAddr = format!("{ip}:9").parse().unwrap();
+    assert_eq!(
+      t.pending_inbound_from(&probe),
+      1,
+      "each distinct /32 host keeps its own single-unit bucket"
+    );
+  }
+  assert_eq!(t.pending_total(), 3);
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// A shortened IPv4 prefix collapses a subnet into one bucket: with
+/// `pending_source_prefix_v4 = 24`, two hosts in one `/24` share a bucket while a
+/// host in another `/24` stays independent.
+#[test]
+fn shortened_v4_prefix_collapses_a_subnet() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::new(24, 64));
+
+  // Two hosts in 10.0.0.0/24.
+  let a: SocketAddr = "10.0.0.5:1000".parse().unwrap();
+  let b: SocketAddr = "10.0.0.9:1001".parse().unwrap();
+  // One host in 10.0.1.0/24.
+  let c: SocketAddr = "10.0.1.5:1002".parse().unwrap();
+  mint_inbound_into(&mut t, &mut client, &cfg, a, 6500);
+  mint_inbound_into(&mut t, &mut client, &cfg, b, 6501);
+  mint_inbound_into(&mut t, &mut client, &cfg, c, 6502);
+
+  assert_eq!(
+    t.pending_inbound_from(&a),
+    2,
+    "two hosts in one /24 share a bucket at prefix /24"
+  );
+  assert_eq!(t.pending_inbound_from(&b), 2);
+  assert_eq!(
+    t.pending_inbound_from(&c),
+    1,
+    "a host in a different /24 keeps its own bucket"
+  );
+  assert_eq!(t.pending_total(), 3);
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// Prefix `0` masks to the whole-family bucket (`0.0.0.0`), NOT `/32`: the
+/// release-mode masked-shift guard in `mask_v4` must branch on `prefix == 0`
+/// rather than let `u32::MAX << 32` silently behave as `/32`.
+#[test]
+fn source_key_prefix_zero_masks_to_whole_family() {
+  let p0 = SourcePrefix::new(0, 0);
+  let a: SocketAddr = "1.2.3.4:5".parse().unwrap();
+  let b: SocketAddr = "9.9.9.9:9".parse().unwrap();
+
+  let ka = source_key(p0, &a);
+  let kb = source_key(p0, &b);
+  assert_eq!(
+    ka, kb,
+    "prefix 0 collapses every IPv4 source into one bucket"
+  );
+  assert_eq!(
+    ka,
+    SourceKey(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+    "prefix 0 masks to 0.0.0.0, not the full /32 address"
+  );
+  // A distinct /32 default must NOT collapse them — proving the guard changed
+  // behavior rather than being a no-op.
+  assert_ne!(source_key(SourcePrefix::default(), &a), ka);
+
+  // IPv6 prefix 0 collapses to ::.
+  let v6a: SocketAddr = "[2001:db8::1]:1".parse().unwrap();
+  let v6b: SocketAddr = "[fe80::abcd]:2".parse().unwrap();
+  assert_eq!(source_key(p0, &v6a), source_key(p0, &v6b));
+  assert_eq!(
+    source_key(p0, &v6a),
+    SourceKey(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
+  );
+}
+
+/// A failed-but-undrained inbound stays charged against its key AND the
+/// coordinator-wide `pending_total` until it is reaped — the same charged-while-
+/// failed contract, now under source-key aggregation.
+#[test]
+fn failed_undrained_inbound_stays_charged_until_reaped() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+  let now = Instant::now();
+  let src: SocketAddr = "192.0.2.50:5000".parse().unwrap();
+
+  let ch = mint_inbound_into(&mut t, &mut client, &cfg, src, 6600);
+  assert_eq!(t.pending_inbound_from(&src), 1);
+  assert_eq!(t.pending_total(), 1);
+
+  // Close it: it leaves the handshaking phase without ever establishing, but its
+  // draining slab entry lingers, so it stays charged.
+  t.get_mut(ch)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  assert_eq!(
+    t.failed_never_established_inbound_from(&src),
+    1,
+    "the closed-never-established entry is observable as failed"
+  );
+  assert_eq!(
+    t.pending_inbound_from(&src),
+    1,
+    "a failed-undrained inbound stays charged against its key"
+  );
+  assert_eq!(t.pending_total(), 1, "and against the budget");
+
+  drive_to_drained(&mut t, ch);
+  assert!(t.reap_if_drained(&mut client, ch));
+  assert_eq!(
+    t.pending_inbound_from(&src),
+    0,
+    "reap releases the key unit"
+  );
+  assert_eq!(t.pending_total(), 0, "reap releases the budget unit");
+  assert_eq!(t.pending_total(), t.pending_total_recount());
+}
+
+/// Exact-once accounting under key aggregation: interleave accept / establish /
+/// reap across MULTIPLE source ports of ONE IP (all folding to one key) and,
+/// after every mutation, assert the three faces of the invariant hold together:
+/// `pending_inbound_from == indexed_inbound_recount` for the key,
+/// `pending_total == Σ pending_inbound.values()`, and
+/// `pending_total == count(un-established inbound entries)`.
+#[test]
+fn exact_once_accounting_under_key_aggregation() {
+  let (mut client, _server, cfg) = quinn_pair();
+  let mut t = ConnTable::new(SourcePrefix::default());
+  let now = Instant::now();
+  let ip = "203.0.113.77";
+  let probe: SocketAddr = format!("{ip}:1").parse().unwrap();
+
+  // Assert all three faces of the invariant after each step.
+  macro_rules! assert_invariant {
+    ($ctx:expr) => {{
+      assert_eq!(
+        t.pending_inbound_from(&probe),
+        t.indexed_inbound_recount(&probe),
+        "index == recount ({})",
+        $ctx
+      );
+      assert_eq!(
+        t.pending_total(),
+        t.pending_total_recount(),
+        "total == Σ map values ({})",
+        $ctx
+      );
+      assert_eq!(
+        t.pending_total(),
+        t.unestablished_inbound_count(),
+        "total == un-established inbound entries ({})",
+        $ctx
+      );
+    }};
+  }
+
+  // Accept four inbound from ONE IP across four rotated ports.
+  let mut handles = Vec::new();
+  for (i, port) in [7001u16, 7002, 7003, 7004].into_iter().enumerate() {
+    let peer: SocketAddr = format!("{ip}:{port}").parse().unwrap();
+    handles.push(mint_inbound_into(
+      &mut t,
+      &mut client,
+      &cfg,
+      peer,
+      6700 + i as u16,
+    ));
+    assert_invariant!("after accept");
+  }
+  assert_eq!(t.pending_inbound_from(&probe), 4);
+  assert_eq!(t.pending_total(), 4);
+
+  // Establish two of them (release at establishment).
+  for h in [handles[0], handles[1]] {
+    t.conns.get_mut(h.0).unwrap().established_at_least_once = true;
+    t.reconcile_pending_inbound(h);
+    assert_invariant!("after establish");
+  }
+  assert_eq!(t.pending_inbound_from(&probe), 2);
+
+  // Reap a never-established one (release at reap).
+  let never = handles[2];
+  t.get_mut(never)
+    .unwrap()
+    .conn_mut()
+    .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
+  drive_to_drained(&mut t, never);
+  assert!(t.reap_if_drained(&mut client, never));
+  assert_invariant!("after reap of never-established");
+  assert_eq!(t.pending_inbound_from(&probe), 1);
+
+  // Reap an already-established one (must NOT double-release).
+  let established = handles[0];
+  t.get_mut(established).unwrap().conn_mut().close(
+    now.into_std(),
+    0u32.into(),
+    bytes::Bytes::new(),
+  );
+  drive_to_drained(&mut t, established);
+  assert!(t.reap_if_drained(&mut client, established));
+  assert_invariant!("after reap of established");
+  assert_eq!(
+    t.pending_inbound_from(&probe),
+    1,
+    "reaping an already-released connection must not underflow"
   );
 }

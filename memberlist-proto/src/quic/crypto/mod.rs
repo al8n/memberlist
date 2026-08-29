@@ -68,7 +68,7 @@
 use core::{net::SocketAddr, time::Duration};
 use std::sync::Arc;
 
-use super::UnreliableTransport;
+use super::{UnreliableTransport, conn::SourcePrefix};
 
 /// Per-peer SNI lookup. The coordinator calls this once per outbound dial,
 /// passing the dialed `SocketAddr`; the returned string is forwarded to
@@ -117,7 +117,28 @@ pub struct QuicOptions {
   /// unauthenticated inbound Initial from a source already at this many
   /// in-flight handshakes is refused. See
   /// [`Self::max_pending_connections_per_source`] for the default and rationale.
+  /// The unit is one normalized source KEY (a de-ported, prefix-masked source
+  /// IP — see [`Self::source_prefix`]), not one `SocketAddr`: every UDP source
+  /// port from a host counts against the same allowance, so port rotation cannot
+  /// bypass this cap.
   max_pending_connections_per_source: Option<usize>,
+  /// IPv4 prefix length that normalizes an inbound source address into the
+  /// bucket [`Self::max_pending_connections_per_source`] and
+  /// [`Self::max_pending_inbound_total`] count against. Default `/32` (the full
+  /// address). See [`Self::source_prefix`].
+  pending_source_prefix_v4: u8,
+  /// IPv6 prefix length for source normalization. Default `/64` — a host owns
+  /// its entire SLAAC `/64`, so `/128` would reopen the port-rotation bypass as
+  /// IPv6 source-address rotation. See [`Self::source_prefix`].
+  pending_source_prefix_v6: u8,
+  /// Dedicated ceiling on the coordinator-wide half-open INBOUND population (all
+  /// normalized sources summed), or `None` for no bound. Enforced after the
+  /// global cap and before the per-source cap so a subnet flood spread thin
+  /// across many source keys — each below the per-source cap — cannot pin the
+  /// whole global connection budget in half-open handshakes and starve
+  /// established/outbound work. See [`Self::max_pending_inbound_total`] for the
+  /// default and rationale.
+  max_pending_inbound_total: Option<usize>,
   /// Coordinator-wide ceiling on concurrently accepted INBOUND reliable-stream
   /// exchanges (bridges) across all QUIC connections, or `None` for no bound. An
   /// inbound bidi stream accepted beyond this many live inbound bridges is
@@ -176,11 +197,68 @@ pub const DEFAULT_MAX_QUIC_CONNECTIONS: usize = 4096;
 /// duplicates arise only from the closed-before-drained redial window and
 /// simultaneous bidirectional dial (a small constant, and *pending* ones fewer
 /// still — typically one at a time). `16` is an order of magnitude above that
-/// legitimate maximum while capping the half-open handshake state one source
-/// address (including a spoofed one) can pin, so a single source cannot consume
-/// the global budget with half-open connections. Tunable via
+/// legitimate maximum while capping the half-open handshake state one normalized
+/// source KEY (a de-ported, prefix-masked source IP — see
+/// [`QuicOptions::source_prefix`]) can pin, so a single host cannot consume the
+/// global budget with half-open connections by rotating its UDP source port.
+///
+/// The unit is one normalized key, so a NAT or CGNAT egress whose honest peers
+/// share one public IPv4 — or a cloud `/64` subnet that folds to one IPv6 key —
+/// shares a single allowance: this cap is the primary lever for such shared-key
+/// topologies (raise it, or narrow the grain with
+/// [`QuicOptions::with_pending_source_prefix_v6`] toward `/128`). Tunable via
 /// [`QuicOptions::with_max_pending_connections_per_source`].
 pub const DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE: usize = 16;
+
+/// Default IPv4 source-normalization prefix installed by [`QuicOptions::new`].
+///
+/// `/32` keys every inbound source on its full IPv4 address: each UDP source
+/// port from one host folds to one bucket, so port rotation cannot bypass the
+/// per-source cap. Widen it (a shorter prefix) to collapse a spoofing range into
+/// one bucket. See [`QuicOptions::source_prefix`].
+pub const DEFAULT_PENDING_SOURCE_PREFIX_V4: u8 = SourcePrefix::DEFAULT_V4;
+
+/// Default IPv6 source-normalization prefix installed by [`QuicOptions::new`].
+///
+/// `/64` keys every inbound source on the SLAAC subnet a host owns. `/128` is
+/// deliberately NOT the default: a host owns its whole `/64`, so a `/128` key
+/// would reopen the port-rotation bypass as IPv6 source-address rotation within
+/// that `/64`. A shared-`/64` cloud subnet (e.g. an AWS `/64`-per-subnet — a
+/// mainstream honest topology) therefore shares one key, mitigated by the
+/// per-source cap or by narrowing this to `/128`. See
+/// [`QuicOptions::source_prefix`].
+pub const DEFAULT_PENDING_SOURCE_PREFIX_V6: u8 = SourcePrefix::DEFAULT_V6;
+
+/// Default coordinator-wide half-open inbound budget installed by
+/// [`QuicOptions::new`].
+///
+/// Bounds the total INBOUND connections that have not yet established, summed
+/// across every normalized source. The per-source cap alone bounds one key, but
+/// a flood spread thin across many source keys — each below the per-source cap —
+/// could still pin the entire global connection budget in half-open handshakes,
+/// starving established and outbound work. This dedicated budget, enforced after
+/// the global cap and before the per-source cap, caps that aggregate.
+///
+/// `1024` sits an order of magnitude above the legitimate concurrent-handshake
+/// fan-in of even a large LAN cluster (a healthy peer holds at most a transient
+/// handful of pending inbound handshakes) while keeping the half-open population
+/// hard-bounded well below [`DEFAULT_MAX_QUIC_CONNECTIONS`], so established and
+/// outbound connections always have global-budget headroom. `None` opts out;
+/// tune via [`QuicOptions::with_max_pending_inbound_total`]. The residual a
+/// short-prefix v6 allocation can still monopolize (e.g. a tunnel-broker `/48`
+/// spans 65536 distinct `/64` keys) is bounded by this budget and further
+/// narrowable via [`QuicOptions::with_pending_source_prefix_v6`] — the operator
+/// lever for that case.
+pub const DEFAULT_MAX_PENDING_INBOUND_TOTAL: usize = 1024;
+
+// A budget of 0 fail-closes ALL inbound handshakes (the admission gate refuses
+// when `pending_total >= budget`, and an empty population already satisfies
+// `>= 0`). That is a legitimate lockdown value `validate` accepts; the DEFAULT
+// must be a usable nonzero bound.
+const _: () = assert!(
+  DEFAULT_MAX_PENDING_INBOUND_TOTAL > 0,
+  "the default half-open inbound budget must be nonzero"
+);
 
 /// Default coordinator-wide inbound reliable-stream ceiling installed by
 /// [`QuicOptions::new`].
@@ -341,6 +419,16 @@ impl QuicOptions {
   /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build) path
   /// rejects a zero/sub-millisecond `max_idle_timeout` and so guarantees the
   /// finite bound; this raw path does not.
+  ///
+  /// The idle timeout also bounds the dedicated half-open inbound budget
+  /// ([`Self::max_pending_inbound_total`]): a stalling flood that opens
+  /// handshakes and then goes silent holds its share of that budget only until
+  /// the idle timeout retires each dead connection. With the idle timeout
+  /// DISABLED those half-open connections never self-heal, so such a flood pins
+  /// the budget PERMANENTLY rather than for one timeout window — a further reason
+  /// the raw path should leave `max_idle_timeout` finite. The
+  /// [`QuicConfigOptions::build`](super::config::QuicConfigOptions::build) path
+  /// guarantees a finite timeout and so bounds that hold time.
   ///
   /// # 0-RTT / early data (DEFERRAL, not a delegated obligation)
   ///
@@ -543,6 +631,9 @@ impl QuicOptions {
       unreliable_transport,
       max_quic_connections: Some(DEFAULT_MAX_QUIC_CONNECTIONS),
       max_pending_connections_per_source: Some(DEFAULT_MAX_PENDING_CONNECTIONS_PER_SOURCE),
+      pending_source_prefix_v4: DEFAULT_PENDING_SOURCE_PREFIX_V4,
+      pending_source_prefix_v6: DEFAULT_PENDING_SOURCE_PREFIX_V6,
+      max_pending_inbound_total: Some(DEFAULT_MAX_PENDING_INBOUND_TOTAL),
       max_inbound_streams: Some(DEFAULT_MAX_QUIC_INBOUND_STREAMS),
       max_pending_user_dials_per_peer: DEFAULT_MAX_PENDING_USER_DIALS_PER_PEER,
       catchup_interval: DEFAULT_CATCHUP_INTERVAL,
@@ -569,6 +660,40 @@ impl QuicOptions {
   #[inline(always)]
   pub fn with_max_pending_connections_per_source(mut self, max: Option<usize>) -> Self {
     self.max_pending_connections_per_source = max;
+    self
+  }
+
+  /// Override the IPv4 source-normalization prefix used to bucket inbound
+  /// half-open handshakes. Must be `<= 32`, enforced by [`Self::validate`]; `0`
+  /// selects the whole-IPv4 bucket. Defaults to
+  /// [`DEFAULT_PENDING_SOURCE_PREFIX_V4`] (`/32`). See [`Self::source_prefix`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_pending_source_prefix_v4(mut self, prefix: u8) -> Self {
+    self.pending_source_prefix_v4 = prefix;
+    self
+  }
+
+  /// Override the IPv6 source-normalization prefix used to bucket inbound
+  /// half-open handshakes. Must be `<= 128`, enforced by [`Self::validate`]; `0`
+  /// selects the whole-IPv6 bucket. Defaults to
+  /// [`DEFAULT_PENDING_SOURCE_PREFIX_V6`] (`/64`) — see that constant for why
+  /// `/128` is not the default. See [`Self::source_prefix`].
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_pending_source_prefix_v6(mut self, prefix: u8) -> Self {
+    self.pending_source_prefix_v6 = prefix;
+    self
+  }
+
+  /// Override the coordinator-wide half-open inbound budget. `None` removes the
+  /// bound. Enforced after the global cap and before the per-source cap; a `0`
+  /// budget fail-closes all inbound handshakes. Defaults to
+  /// [`Some`]`(`[`DEFAULT_MAX_PENDING_INBOUND_TOTAL`]`)`.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_pending_inbound_total(mut self, max: Option<usize>) -> Self {
+    self.max_pending_inbound_total = max;
     self
   }
 
@@ -699,6 +824,40 @@ impl QuicOptions {
     self.max_pending_connections_per_source
   }
 
+  /// The IPv4 source-normalization prefix. Defaults to
+  /// [`DEFAULT_PENDING_SOURCE_PREFIX_V4`]. See [`Self::source_prefix`].
+  #[inline(always)]
+  pub const fn pending_source_prefix_v4(&self) -> u8 {
+    self.pending_source_prefix_v4
+  }
+
+  /// The IPv6 source-normalization prefix. Defaults to
+  /// [`DEFAULT_PENDING_SOURCE_PREFIX_V6`]. See [`Self::source_prefix`].
+  #[inline(always)]
+  pub const fn pending_source_prefix_v6(&self) -> u8 {
+    self.pending_source_prefix_v6
+  }
+
+  /// The coordinator-wide half-open inbound budget, or `None` for no bound.
+  /// Defaults to [`Some`]`(`[`DEFAULT_MAX_PENDING_INBOUND_TOTAL`]`)`; see that
+  /// constant for the rationale.
+  #[inline(always)]
+  pub const fn max_pending_inbound_total(&self) -> Option<usize> {
+    self.max_pending_inbound_total
+  }
+
+  /// The composed [`SourcePrefix`] the coordinator normalizes inbound source
+  /// addresses under before charging them against the per-source pending cap and
+  /// the half-open budget. De-porting and prefix-masking the source is what
+  /// keeps a host from bypassing its per-source allowance by rotating its UDP
+  /// source port. The connection table stores this once at construction and
+  /// never mutates it (a runtime change with entries outstanding would release a
+  /// charge under a different key than it was made under).
+  #[inline(always)]
+  pub const fn source_prefix(&self) -> SourcePrefix {
+    SourcePrefix::new(self.pending_source_prefix_v4, self.pending_source_prefix_v6)
+  }
+
   /// The coordinator-wide inbound reliable-stream ceiling the QUIC accept loop
   /// enforces before minting a bridge, or `None` for no bound. Defaults to
   /// [`Some`]`(`[`DEFAULT_MAX_QUIC_INBOUND_STREAMS`]`)`; see that constant for
@@ -791,6 +950,12 @@ impl QuicOptions {
   /// * `max_reliable_ping_exempt_pops_per_pass` must be `>= 1` — a `0` cap defers
   ///   every over-budget reliable-ping fallback to its cumulative deadline, a false
   ///   Suspect of a live peer.
+  /// * `pending_source_prefix_v4` must be `<= 32` and `pending_source_prefix_v6`
+  ///   `<= 128` — a longer prefix cannot name a valid mask. `0` is ACCEPTED (the
+  ///   whole-family bucket, handled by the mask shift-guard).
+  /// * `max_pending_inbound_total`, when set alongside `max_quic_connections`,
+  ///   must be `<=` it — a budget above the global cap can never bind. `0` is
+  ///   ACCEPTED (fail-closed: refuse all inbound handshakes).
   ///
   /// Callers that assemble a [`QuicOptions`] from operator input run this before
   /// handing it to the coordinator.
@@ -820,6 +985,27 @@ impl QuicOptions {
     }
     if self.max_reliable_ping_exempt_pops_per_pass == 0 {
       return Err(QuicOptionsError::MaxReliablePingExemptPopsPerPassZero);
+    }
+    if self.pending_source_prefix_v4 > 32 {
+      return Err(QuicOptionsError::PendingSourcePrefixV4TooLong(
+        self.pending_source_prefix_v4,
+      ));
+    }
+    if self.pending_source_prefix_v6 > 128 {
+      return Err(QuicOptionsError::PendingSourcePrefixV6TooLong(
+        self.pending_source_prefix_v6,
+      ));
+    }
+    // The half-open budget must not exceed the global connection cap when both
+    // are set — a budget above the global cap can never bind (the global cap
+    // rejects first), so accepting it would silently mislead the operator.
+    // Matched on both `Option`s because `is_some_and` / `Option::zip` are not
+    // `const fn`, and this `validate` is `const`.
+    match (self.max_pending_inbound_total, self.max_quic_connections) {
+      (Some(total), Some(global)) if total > global => {
+        return Err(QuicOptionsError::PendingBudgetExceedsGlobalCap);
+      }
+      _ => {}
     }
     Ok(())
   }
@@ -863,6 +1049,21 @@ pub enum QuicOptionsError {
   /// Set it to `>= 1`.
   #[error("max_reliable_ping_exempt_pops_per_pass must be >= 1")]
   MaxReliablePingExemptPopsPerPassZero,
+  /// `pending_source_prefix_v4` exceeds `32` (the IPv4 address width), so it
+  /// cannot name a valid prefix mask. Set it to `<= 32` (`0` selects the whole
+  /// IPv4 bucket).
+  #[error("pending_source_prefix_v4 must be <= 32")]
+  PendingSourcePrefixV4TooLong(u8),
+  /// `pending_source_prefix_v6` exceeds `128` (the IPv6 address width), so it
+  /// cannot name a valid prefix mask. Set it to `<= 128` (`0` selects the whole
+  /// IPv6 bucket).
+  #[error("pending_source_prefix_v6 must be <= 128")]
+  PendingSourcePrefixV6TooLong(u8),
+  /// `max_pending_inbound_total` exceeds `max_quic_connections` (both set), so
+  /// the budget can never bind — the global cap always rejects first. Set it to
+  /// `<= max_quic_connections`.
+  #[error("max_pending_inbound_total must be <= max_quic_connections")]
+  PendingBudgetExceedsGlobalCap,
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use super::*;
+use super::{super::conn::SourcePrefix, *};
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::typed::Message;
@@ -62,7 +62,7 @@ fn drain_payload_only_defers_until_recv_fin_observed() {
 
   // Pre-drain: the Endpoint must have no observable side effects from
   // this stream.
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   assert!(
     !ep
       .poll_event()
@@ -160,7 +160,7 @@ fn pre_fin_transport_failure_discards_queued_payload_events() {
   // already empty — only the `StreamErrored` lifecycle notice is
   // delivered (visible via the FSM's `StreamEvent::Failed` after
   // `handle_stream_event(StreamErrored{...})`).
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   bridge.drain_then_reap(&mut ep, &mut conns, t0);
 
   // Public observable: NO `Event::UserPacket` may surface. The
@@ -762,7 +762,7 @@ fn fail_stopped_already_retired_sets_transport_failure_and_is_sticky() {
 /// panic, and a clean reap surfaces no `UserPacket` (no payload was queued).
 #[test]
 fn drain_then_reap_notice_selection_covers_every_failure_reason() {
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   let t0 = Instant::now();
   let reasons = [
     BridgeFailure::Timeout,
@@ -802,7 +802,7 @@ fn drain_then_reap_clean_bothclosed_emits_stream_closed() {
     SmolStr::new("self"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   ));
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   let t0 = Instant::now();
   let mut bridge = make_plain_bridge();
   bridge.observe_send_fin();
@@ -875,7 +875,7 @@ fn inbound_join_bridge_with_rejecting_endpoint() -> (
     .stream
     .handle_data(&bytes, t0)
     .expect("dispatch the join push/pull request");
-  (ep, ConnTable::new(), bridge, t0)
+  (ep, ConnTable::new(SourcePrefix::default()), bridge, t0)
 }
 
 /// `drain_payload_only`'s `StreamCommand::Close` arm: a rejected inbound join
@@ -947,7 +947,7 @@ fn push_recv_and_classify_returns_true_when_latch_already_set() {
 #[test]
 fn pump_in_out_are_ok_noops_when_connection_absent() {
   let mut bridge = make_plain_bridge();
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   let t0 = Instant::now();
   assert!(
     bridge.pump_in(&mut conns, t0).is_ok(),
@@ -1028,7 +1028,7 @@ impl RawQuicPair {
       .connect(now, cfg.client().clone(), SERVER_ADDR, "localhost")
       .expect("client dial");
 
-    let mut server_conns = ConnTable::new();
+    let mut server_conns = ConnTable::new(SourcePrefix::default());
     let mut client_conn = client_conn;
     let mut server_ch: Option<QpCh> = None;
 
@@ -2178,7 +2178,7 @@ fn pump_out_post_transmit_fsm_timeout_retires() {
 #[test]
 fn pump_out_leading_guard_fsm_failed_retires() {
   let mut bridge = make_plain_bridge();
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   // Fail the inner FSM via its own exchange deadline WITHOUT routing through
   // the bridge's `fail*` helpers, so `stream.is_failed()` is Some while
   // `bridge.phase` is still `Active`.
@@ -2295,7 +2295,7 @@ fn drain_then_reap_sends_push_pull_response_over_live_stream() {
 #[test]
 fn drain_then_reap_fsm_failed_notice_arm() {
   let mut ep = make_server_endpoint();
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   let mut bridge = make_plain_bridge();
   let t0 = Instant::now();
   // Fail the inner FSM via its own exchange deadline WITHOUT routing through
@@ -2915,7 +2915,7 @@ fn merge_rejection_flips_a_completed_bothclosed_bridge_to_failed() {
     "both FINs exchanged puts the bridge in BothClosed"
   );
 
-  let mut conns = ConnTable::new();
+  let mut conns = ConnTable::new(SourcePrefix::default());
   bridge.fail_with_retire(&mut conns, BridgeFailure::AdmissionClosed);
 
   assert!(
