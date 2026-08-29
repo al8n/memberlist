@@ -151,16 +151,25 @@ use crate::driver::{
 ///   fires the cancel arm nor drops a write mid-flight — the queued `Bytes`
 ///   then `Close` in `out_rx` flush first.
 /// - `inbound_tx`: bytes / eof / error events the driver consumes.
-/// - `close_timeout`: no-progress (idle) bound on a drain. A graceful Close has
-///   no remaining cancel path, so a peer that stopped reading would wedge the
-///   drain forever; if a single partial write makes NO progress for this long
-///   the drain is abandoned and the bridge tears down (RST). A peer that keeps
-///   reading — even slowly enough that the whole frame outlasts `close_timeout`
-///   — resets the deadline on every chunk and never trips it.
+/// - `stream_timeout`: no-progress (idle) bound governing an ACTIVE exchange's
+///   writes (the both-halves-live arm). This is the machine's per-exchange
+///   deadline: the coordinator arms the same `stream_timeout` and fires the
+///   `Abort` that preempts a stalled active write, so bounding the write by it
+///   keeps the driver-side idle guard from tripping ahead of that `Abort`. A
+///   `close_timeout` shorter than `stream_timeout` therefore cannot truncate an
+///   in-progress exchange.
+/// - `close_timeout`: no-progress (idle) bound on the POST-half-close drain (the
+///   read-closed arm). Once the peer has FIN'd, the reply is drained toward
+///   teardown with no remaining cancel path, so a peer that stopped reading would
+///   wedge the drain forever; if a single partial write makes NO progress for
+///   this long the drain is abandoned and the bridge tears down (RST). A peer
+///   that keeps reading — even slowly enough that the whole frame outlasts
+///   `close_timeout` — resets the deadline on every chunk and never trips it.
 ///
 /// All `Sender::send_async` failures are ignored with a justification: if
 /// the driver dropped the inbound receiver we are already shutting down
 /// and the event can be discarded.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn bridge_task<S>(
   stream: S,
   eid: ExchangeId,
@@ -168,6 +177,7 @@ pub(crate) async fn bridge_task<S>(
   cancel_rx: futures_channel::oneshot::Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   recv_buf_len: usize,
+  stream_timeout: Duration,
   close_timeout: Duration,
 ) where
   S: Splittable,
@@ -299,14 +309,15 @@ pub(crate) async fn bridge_task<S>(
             continue;
           }
           // Race each partial write against the cancel future AND a fresh
-          // `close_timeout`. An explicit abort preempts a write already in
-          // flight; the idle timeout bounds a post-Close drain whose peer
-          // stopped reading (no remaining cancel path, else it blocks forever,
-          // leaking the bridge and socket). `cancel_fut` resolves only on a
-          // real abort, so a graceful Close never drops a progressing write
-          // mid-flight; progress resets the deadline, so only a peer making NO
-          // progress for the full `close_timeout` times out.
-          match write_cancellable(&mut write_half, bytes, &mut cancel_fut, close_timeout).await {
+          // `stream_timeout`. This is an ACTIVE exchange: the machine arms the
+          // same `stream_timeout` and fires the `Abort` that resolves
+          // `cancel_fut`, so the idle bound must match it — a shorter
+          // `close_timeout` would truncate a live exchange whose peer merely
+          // reads slowly. `cancel_fut` resolves only on a real abort, so a
+          // graceful Close never drops a progressing write mid-flight; progress
+          // resets the deadline, so only a peer making NO progress for the full
+          // `stream_timeout` times out.
+          match write_cancellable(&mut write_half, bytes, &mut cancel_fut, stream_timeout).await {
             WriteStatus::Aborted | WriteStatus::TimedOut => break,
             WriteStatus::Wrote(res) => {
               if let Err(err) = res {

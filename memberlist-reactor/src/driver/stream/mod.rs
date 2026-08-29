@@ -626,6 +626,7 @@ where
         .expect("a bridge is only ever spawned while the driver is running, before the shutdown freeze drops the template inbound sender")
         .clone(),
       self.shared.clone(),
+      self.endpoint.stream_timeout(),
       self.close_timeout,
     ));
   }
@@ -755,8 +756,10 @@ where
           .map_err(|e| Error::Io(std::io::Error::other(e.to_string())));
         match res {
           // A running leave queues the Dead-self notices and WILL emit
-          // LeftCluster once they drain; park until then, so Ok means the leave
-          // reached the wire.
+          // LeftCluster once they drain; park until then, so Ok means the machine
+          // completed the leave locally and queued its Dead-self notices to the
+          // gossip socket — best-effort UDP, not a wire-delivery guarantee (a peer
+          // that never receives one still reaps the node via failure detection).
           Ok(()) if was_running => {
             self.pending_leave = Some(PendingLeave {
               repliers: vec![reply],
@@ -1330,6 +1333,14 @@ where
     worked |= sent > 0;
     more |= sent == budget;
 
+    // Publish the post-transition snapshot BEFORE the event drain resolves parked
+    // join/leave/ping/send waiters and hands events to the obs task: a caller
+    // woken by its completion (or an obs consumer) must observe the new
+    // membership this pass produced, never the pre-transition snapshot. The
+    // membership change was applied above by `handle_packet` / `handle_stream_action`;
+    // `poll_event` only drains the event queue, so the version is already final.
+    self.maybe_publish_snapshot();
+
     // Observation events: retry the overflow first, then drain to EMPTY (see
     // the pass doc for why this surface is uncapped).
     self.flush_obs_overflow();
@@ -1341,6 +1352,23 @@ where
     worked |= events;
 
     (worked, more, ingress_capped)
+  }
+
+  /// Republish the snapshot iff the endpoint's snapshot version advanced since the
+  /// last publish. The rebuild clones every `NodeState`, so the version gate skips
+  /// the work whenever membership/health did not actually change.
+  // `G: rand::Rng`: `snapshot_of` drives the endpoint's gossip RNG.
+  fn maybe_publish_snapshot(&mut self)
+  where
+    G: rand::Rng,
+  {
+    let v = self.endpoint.endpoint_ref().snapshot_version();
+    if v != self.last_snapshot_version {
+      self.last_snapshot_version = v;
+      self
+        .shared
+        .publish(snapshot_of(self.endpoint.endpoint_ref()));
+    }
   }
 
   /// Retries retained overflow events into the obs channel, stopping at the first
@@ -1388,29 +1416,49 @@ where
     if let Some(bytes) = payload {
       self.obs_payload_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
+    // FIFO gate: if older events are still queued in the overflow, this one must
+    // not jump ahead of them. `flush_obs_overflow` retries the backlog before each
+    // event drain but stops at the first `Full`, so a slot freed since then would
+    // let `try_send` accept this newer event ahead of the queued ones — delivering
+    // it out of machine-event order. Route it behind the backlog exactly as a Full
+    // channel would, preserving order.
+    if !self.obs_overflow.is_empty() {
+      self.retain_or_drop_observation(ev, payload);
+      return;
+    }
     match self.obs_tx.try_send(ev) {
       // Reserved above; the obs task releases it on receive.
       Ok(()) => {}
-      Err(flume::TrySendError::Full(ev)) => match payload {
-        // Application data the event stream cannot reconstruct: retain (still
-        // reserved) for a retry.
-        Some(_) if self.obs_overflow.len() < OBS_OVERFLOW_MAX => {
-          self.obs_overflow.push_back(ev);
-        }
-        // Recoverable membership/control, or the overflow is full: drop, count,
-        // and roll back any reservation.
-        _ => {
-          if let Some(bytes) = payload {
-            self.obs_payload_bytes.fetch_sub(bytes, Ordering::Relaxed);
-          }
-          self.shared.add_observation_dropped(1);
-        }
-      },
+      Err(flume::TrySendError::Full(ev)) => self.retain_or_drop_observation(ev, payload),
       // The obs task is gone: roll back the reservation.
       Err(flume::TrySendError::Disconnected(_)) => {
         if let Some(bytes) = payload {
           self.obs_payload_bytes.fetch_sub(bytes, Ordering::Relaxed);
         }
+      }
+    }
+  }
+
+  /// Route an event the obs channel cannot take immediately (or that must wait
+  /// behind an existing overflow backlog): retain reconstructible-only application
+  /// data in the overflow (FIFO, still byte-reserved) while there is room;
+  /// otherwise drop it, roll back any reservation, and count it. Recoverable
+  /// membership/control events carry no reservation and are always dropped — the
+  /// snapshot reconstructs them.
+  fn retain_or_drop_observation(&mut self, ev: Event<I, SocketAddr>, payload: Option<u64>) {
+    match payload {
+      // Application data the event stream cannot reconstruct: retain (still
+      // reserved) for a retry.
+      Some(_) if self.obs_overflow.len() < OBS_OVERFLOW_MAX => {
+        self.obs_overflow.push_back(ev);
+      }
+      // Recoverable membership/control, or the overflow is full: drop, count,
+      // and roll back any reservation.
+      _ => {
+        if let Some(bytes) = payload {
+          self.obs_payload_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        }
+        self.shared.add_observation_dropped(1);
       }
     }
   }
@@ -1904,13 +1952,11 @@ where
 
     // Republish the snapshot only when membership/health actually changed —
     // rebuilding clones every NodeState, so doing it on every productive poll is
-    // wasted under steady traffic.
-    let snap_v = this.endpoint.endpoint_ref().snapshot_version();
-    if progress && snap_v != this.last_snapshot_version {
-      this.last_snapshot_version = snap_v;
-      this
-        .shared
-        .publish(snapshot_of(this.endpoint.endpoint_ref()));
+    // wasted under steady traffic. `drain_surfaces` already published any change
+    // its passes produced (before those passes resolved waiters); this catches a
+    // change from the `handle_timeout` fired above, whose events drain next poll.
+    if progress {
+      this.maybe_publish_snapshot();
     }
     // Republish the load-shedding counters only when they change (a cheap u64
     // compare; the publish allocates only on a real change, which is rare).
@@ -2017,16 +2063,23 @@ async fn dial_task<I, R>(
 ///   no EOF; only a real `read == 0` does. An `inbound_tx` send already in flight
 ///   is awaited in an arm body, not the select, so it still completes first.
 ///
-/// A graceful Close has NO remaining cancel path (the handle is gone), so a peer
-/// that sent its request+FIN and then STOPPED reading would wedge the post-Close
-/// drain forever — leaking this detached task and its socket. The drain is
-/// therefore a chunked write loop, and EACH partial write is bounded by a fresh
-/// `close_timeout`. Because progress resets the deadline, this is a NO-PROGRESS
-/// (idle) timeout, not a cap on total drain duration: a peer that keeps reading
-/// — even slowly, so a large frame outlasts `close_timeout` overall — advances
-/// on every chunk and never trips it. It fires only when a single partial write
-/// makes NO progress for the full `close_timeout`; the bridge is then torn down,
-/// dropping the write half so the OS RSTs the stuck stream.
+/// A write's no-progress bound depends on the exchange phase. While BOTH halves
+/// are live the exchange is ACTIVE: the machine arms `stream_timeout` and fires
+/// the `Abort` (via `cancel_rx`) that preempts a stalled write, so that arm is
+/// bounded by `stream_timeout` — a shorter `close_timeout` must not truncate a
+/// live exchange whose peer merely reads slowly. Once the peer has half-closed
+/// (read-EOF), the reply is drained toward teardown: a graceful Close then has NO
+/// remaining cancel path (the handle is gone), so a peer that sent its request+FIN
+/// and then STOPPED reading would wedge the post-Close drain forever — leaking
+/// this detached task and its socket. That drain is therefore a chunked write
+/// loop bounded by a fresh `close_timeout`. Because progress resets either
+/// deadline, both are NO-PROGRESS (idle) timeouts, not caps on total drain
+/// duration: a peer that keeps reading — even slowly, so a large frame outlasts
+/// the bound overall — advances on every chunk and never trips it. A bound fires
+/// only when a single partial write makes NO progress for its full duration; the
+/// bridge is then torn down, dropping the write half so the OS RSTs the stuck
+/// stream.
+#[allow(clippy::too_many_arguments)]
 async fn bridge_task<I, R, S>(
   stream: S,
   eid: ExchangeId,
@@ -2034,6 +2087,7 @@ async fn bridge_task<I, R, S>(
   cancel_rx: oneshot::Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   shared: Arc<Shared<I>>,
+  stream_timeout: Duration,
   close_timeout: Duration,
 ) where
   I: NodeId,
@@ -2105,16 +2159,18 @@ async fn bridge_task<I, R, S>(
       () = &mut cancel_fut => break,
       out = out_rx.recv_async().fuse() => match out {
         Ok(BridgeOut::Data(bytes)) => {
-          // Tear down on an explicit abort OR a drain that makes NO progress for
-          // `close_timeout` on a non-reading peer (the graceful-Close backstop).
-          // A slow-but-reading peer resets the deadline each chunk and is not
-          // timed out.
+          // ACTIVE exchange (both halves live): bound by `stream_timeout`, the
+          // machine's per-exchange deadline. The coordinator arms the same
+          // deadline and fires the `Abort` that resolves `cancel_fut`, so the
+          // idle bound must match it — a shorter `close_timeout` would truncate a
+          // live exchange whose peer merely reads slowly. A slow-but-reading peer
+          // resets the deadline each chunk and is not timed out.
           if !write_closed
             && write_cancellable::<_, R, _>(
               &mut write_half,
               &bytes,
               &mut cancel_fut,
-              close_timeout,
+              stream_timeout,
             )
             .await
           {

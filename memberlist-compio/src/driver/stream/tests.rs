@@ -2059,6 +2059,7 @@ async fn shutdown_command_does_not_fabricate_response_without_fin() {
     &bridge_inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   );
 
   // A 1-seed join awaiting A.

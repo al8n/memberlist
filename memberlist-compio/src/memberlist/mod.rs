@@ -33,7 +33,6 @@ use std::{
 
 use crate::snapshot::SnapshotCell;
 use bytes::Bytes;
-use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
 #[cfg(checksum)]
 use memberlist_proto::ChecksumOptions;
@@ -70,13 +69,13 @@ use rand::rngs::StdRng;
 
 /// Cheaply clonable handle to a running memberlist driver.
 ///
-/// Every clone shares the same command channel, snapshot, events receiver,
-/// and driver-task handle. The driver task is spawned once at construction
-/// (see [`Memberlist::new`]) and lives until either [`Memberlist::shutdown`]
-/// resolves or every clone is dropped (the latter closes the command
-/// channel, which the driver observes as a shutdown request and exits its
-/// loop; the [`JoinHandle`] held inside the last `Arc` cancels the task on
-/// drop, which is a no-op if the loop already exited cleanly).
+/// Every clone shares the same command channel, snapshot, and events receiver.
+/// The driver task is spawned once at construction (see [`Memberlist::new`]) and
+/// lives until either [`Memberlist::shutdown`] resolves or every clone is dropped
+/// (the latter closes the command channel, which the driver observes as a
+/// shutdown request and exits its loop). The task is detached at spawn, so
+/// dropping the last handle does NOT cancel it mid-teardown — it runs its orderly
+/// shutdown to completion.
 ///
 /// `Memberlist<I, A>` carries the wire id type `I` and the transport's
 /// unresolved address type `A`. `I` flows into the snapshot and events channel,
@@ -100,11 +99,6 @@ pub struct Memberlist<I, A> {
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
   events_rx: Receiver<Event<I, SocketAddr>>,
-  /// Driver-task handle. Wrapped in `Arc` so clones share ownership;
-  /// dropping the last `Arc` drops the inner [`JoinHandle`], which
-  /// cancels the task. After [`Memberlist::shutdown`] the task has
-  /// already exited and the cancel is a no-op.
-  driver_handle: Rc<JoinHandle<()>>,
   /// Shutdown flag — set by the driver's post-loop cleanup
   /// BEFORE the cleanup drain runs. Every command-sending method on
   /// this handle (and its clones) reads the flag at entry and returns
@@ -151,7 +145,6 @@ impl<I, A> Clone for Memberlist<I, A> {
       snapshot: self.snapshot.clone(),
       metrics: self.metrics.clone(),
       events_rx: self.events_rx.clone(),
-      driver_handle: self.driver_handle.clone(),
       shutdown_flag: self.shutdown_flag.clone(),
       shutdown_done_rx: self.shutdown_done_rx.clone(),
       events_dropped: self.events_dropped.clone(),
@@ -423,17 +416,25 @@ where
     // when `run` returns (all sockets closed), unblocking any `shutdown` caller
     // that lost the flag race (see `shutdown`).
     let (shutdown_done_tx, shutdown_done_rx) = flume::bounded::<()>(1);
-    let driver_handle = compio::runtime::spawn(async move {
+    // Detach the driver task instead of holding its `JoinHandle`: a compio
+    // `JoinHandle` hard-cancels its task on drop, so keeping it in the handle
+    // would cancel the driver the instant the last `Memberlist` dropped — before
+    // the runtime could poll it to observe the closed command channel and run its
+    // orderly teardown (freeze, drain, waiter cleanup, shutdown publication).
+    // Detached, the driver instead survives the last handle drop and reaches that
+    // teardown on its own; an explicit `shutdown()` is still coordinated through
+    // `shutdown_done_rx`, which the task drops only after `run` returns.
+    compio::runtime::spawn(async move {
       transport.run(runtime, rng).await;
       drop(shutdown_done_tx);
-    });
+    })
+    .detach();
 
     Ok(Self {
       commands: commands_tx,
       snapshot,
       metrics,
       events_rx,
-      driver_handle: Rc::new(driver_handle),
       shutdown_flag,
       shutdown_done_rx,
       events_dropped,

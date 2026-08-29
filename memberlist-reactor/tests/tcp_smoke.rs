@@ -78,6 +78,37 @@ async fn two_nodes_join_converge() {
   let _ = b.shutdown().await;
 }
 
+/// The snapshot a join waiter observes on completion reflects the joined peer.
+/// The driver publishes the post-transition snapshot BEFORE resolving the
+/// `join()` waiter, so the count is correct with NO polling — a caller woken by
+/// its own join completion never reads the pre-transition snapshot. (The
+/// converge test above polls because it also waits on the SEED to learn the
+/// joiner, a separate gossip round; here the joiner's own view is immediate.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn join_completion_observes_post_transition_snapshot() {
+  let a = make("seed").await;
+  let b = make("joiner").await;
+  let a_addr = *a.local().addr_ref();
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+
+  // No poll: the waiter resolved only after the driver republished the snapshot.
+  assert_eq!(
+    b.num_members(),
+    2,
+    "the snapshot observed on join completion already counts the seed"
+  );
+  assert!(
+    b.snapshot().by_id(&SmolStr::new("seed")).is_some(),
+    "the joined seed appears in the post-join snapshot"
+  );
+
+  let _ = a.shutdown().await;
+  let _ = b.shutdown().await;
+}
+
 /// A delegate that counts `notify_join` invocations.
 struct RecordingDelegate {
   joins: Arc<AtomicUsize>,

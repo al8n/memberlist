@@ -382,6 +382,37 @@ async fn obs_disconnected_rolls_back_reservation() {
   );
 }
 
+/// With older events still queued in the overflow, `send_observation` must route
+/// a new event BEHIND them, never `try_send` it into a slot freed since the last
+/// `flush_obs_overflow` — doing so would deliver it ahead of the queued events,
+/// out of machine-event order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn obs_new_event_waits_behind_nonempty_overflow() {
+  // Capacity-1 channel, ample byte budget.
+  let (mut driver, obs_rx, _shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+
+  driver.send_observation(user_packet(1)); // fills the capacity-1 channel
+  driver.send_observation(user_packet(2)); // channel full → retained in overflow
+  assert_eq!(driver.obs_overflow.len(), 1, "second event retained");
+
+  // Free a channel slot WITHOUT flushing the overflow: exactly the window where a
+  // naive `try_send` would jump the queue.
+  obs_rx.try_recv().expect("drain the queued first event");
+
+  driver.send_observation(user_packet(3)); // overflow non-empty → must wait behind
+
+  assert_eq!(
+    driver.obs_overflow.len(),
+    2,
+    "a new event with a non-empty overflow is appended behind the backlog, \
+       preserving FIFO order"
+  );
+  assert!(
+    obs_rx.try_recv().is_err(),
+    "the new event must NOT jump ahead into the freed slot"
+  );
+}
+
 /// `flush_obs_overflow` stops at the first `Full`, pushing the un-sendable event
 /// back to the FRONT so retry order is preserved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1788,6 +1819,7 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
     inbound_tx,
     shared,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The peer sends its request, then half-closes its write side. The bridge
@@ -1874,6 +1906,7 @@ async fn explicit_abort_preempts_and_discards() {
     inbound_tx,
     shared,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The peer must see EOF with NO bytes — the abort dropped the write side
@@ -1938,6 +1971,7 @@ async fn shutdown_cancel_beats_readable_peer_fin_so_no_eof_is_folded() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -2014,6 +2048,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     close_timeout,
   ));
 
@@ -2097,6 +2132,7 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     close_timeout,
   ));
 
@@ -2168,6 +2204,68 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
   bridge.await.expect("bridge task exits cleanly");
 }
 
+/// A `close_timeout` shorter than `stream_timeout` must NOT abort an ACTIVE
+/// (both-halves-live) write. A live exchange is governed by the machine's
+/// `stream_timeout` (it arms that deadline and fires the `Abort` that preempts a
+/// stalled write), so the both-halves-live arm bounds its writes by
+/// `stream_timeout`; the shorter graceful-drain `close_timeout` is reserved for
+/// the post-half-close drain. Here the peer never reads and never half-closes, so
+/// the write stalls in the active arm — and must survive well past `close_timeout`.
+#[cfg_attr(
+  windows,
+  ignore = "Windows buffers the oversized reply in chunks; the zero-window stall never forms"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_write_governed_by_stream_timeout_not_close_timeout() {
+  // The client is held open, never reads, and never half-closes — so the bridge
+  // stays in both-halves-live mode with a stalled write.
+  let (server, _client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let shared = test_shared();
+
+  // A SHORT close_timeout and a LONG stream_timeout: the pre-fix code bounded the
+  // active write by `close_timeout` and would tear down at ~150ms.
+  let close_timeout = Duration::from_millis(150);
+  let stream_timeout = Duration::from_secs(4);
+
+  // A reply far larger than any socket buffer: with the peer never reading, the
+  // window collapses to zero and the write stalls once the buffers fill.
+  let response = vec![0x5Au8; 16 * 1024 * 1024];
+
+  let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    shared,
+    stream_timeout,
+    close_timeout,
+  ));
+
+  // Queue the oversized reply; keep `out_tx` and `cancel_tx` alive so the ONLY
+  // teardown that could fire is a write timeout (no Close disconnect, no abort).
+  out_tx
+    .send(BridgeOut::Data(Bytes::from(response)))
+    .expect("queue oversized reply");
+
+  // Wait well past `close_timeout`, comfortably short of `stream_timeout`: the
+  // bridge must still be alive — the active write was NOT aborted early.
+  tokio::time::sleep(close_timeout * 4).await;
+  assert!(
+    !bridge.is_finished(),
+    "an active both-halves-live write must be governed by stream_timeout, not \
+       aborted at the shorter close_timeout"
+  );
+
+  // Clean up deterministically: an explicit abort preempts the stalled write.
+  cancel_tx.send(()).expect("signal explicit abort");
+  bridge.await.expect("bridge exits on the abort");
+}
+
 /// `BridgeOut::ShutdownWrite` (the machine's `StreamAction::Shutdown`,
 /// half-closing the write side after the send half retires) closes the bridge's
 /// write half — the peer reads EOF on its read side — while the bridge stays
@@ -2188,6 +2286,7 @@ async fn bridge_shutdown_write_half_closes_write_side() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -2229,6 +2328,7 @@ async fn bridge_write_error_tears_down() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
