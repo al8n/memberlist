@@ -158,4 +158,17 @@ pub trait StreamTransport: Sized {
   ///
   /// Mirrors the legacy `memberlist-net::StreamLayer::is_secure`.
   fn is_secure() -> bool;
+
+  /// Whether a clean receive-close on this transport REQUIRES an authenticated
+  /// in-band close (so a bare transport FIN is truncation, not a clean close).
+  /// `true` for TLS (a `close_notify` alert); `false` for a plaintext transport
+  /// whose only close signal is the transport FIN itself.
+  ///
+  /// Type-level capability — no `&self`. The bridge uses this to distinguish a
+  /// transport whose out-of-band FIN is its legitimate clean close (plain TCP)
+  /// from one whose only authenticated clean close is in band (TLS): for the
+  /// latter, a bare FIN without [`Self::peer_has_closed`] is a truncation.
+  fn requires_authenticated_close() -> bool {
+    false
+  }
 }

@@ -552,6 +552,10 @@ where
   fn is_secure() -> bool {
     R::is_secure()
   }
+
+  fn requires_authenticated_close() -> bool {
+    R::requires_authenticated_close()
+  }
 }
 
 #[cfg(test)]

@@ -442,6 +442,20 @@ where
         }
       };
 
+      // The inner record stream authenticated-closed before the composed
+      // handshake / label could settle (e.g. TLS complete + `close_notify`
+      // before the peer's label): the record layer will read no further, so the
+      // handshake can never complete — fail now rather than holding a zombie
+      // bridge until the accept deadline. Automatically TCP-safe:
+      // `Passthrough::peer_has_closed()` is permanently `false`, so this never
+      // fires for plain TCP (whose pre-`Stream` EOF is the empty-slice
+      // `is_handshaking => fail` above). No retire here — during `Handshaking`
+      // there is no `Stream` and no queue to clear.
+      if self.records.is_handshaking() && self.records.peer_has_closed() {
+        self.fail(BridgeFailure::ConnectionLost);
+        return Err(());
+      }
+
       // The handshake / label step just settled inside this feed: any trailing
       // request is already surfaced as inbound plaintext inside the record
       // layer (drained by `replay_pending` post-promotion), unless the record
@@ -943,8 +957,11 @@ where
   }
 
   /// Test-only: expose the pre-promote out-of-band FIN latch (asserted by the
-  /// plain-TCP bridge tests, whose FIN is the only close anchor).
-  #[cfg(all(test, feature = "tcp"))]
+  /// plain-TCP bridge tests, whose FIN is the only close anchor, and by the TLS
+  /// bridge tests exercising the retained-ciphertext deferral of the
+  /// authenticated-close classification). Gated on either transport feature so a
+  /// TLS-only build (no `tcp`) still resolves it.
+  #[cfg(all(test, any(feature = "tcp", feature = "tls")))]
   #[allow(dead_code)]
   pub(crate) fn pending_eof(&self) -> bool {
     self.pending_eof
@@ -1062,13 +1079,23 @@ where
         // peer half-closed before establishing the exchange — that handshake can
         // never complete, so fail now (ConnectionLost) rather than holding a
         // zombie bridge (and its record-layer buffers) until the accept
-        // deadline. If it HAS settled (the mint is merely deferred to the tick),
-        // this is the benign coalesced-close case: latch the FIN for
-        // post-promotion replay.
+        // deadline.
         if self.records.is_handshaking() {
           self.fail(BridgeFailure::ConnectionLost);
           return Err(());
         }
+        // Settled pre-mint EOF (the mint is merely deferred to the tick): latch
+        // the FIN and defer ALL close classification to the post-promotion gate.
+        // That gate runs AFTER `replay_pending` drains the retained ciphertext
+        // tail and surfaces any buffered plaintext, so it sees the true post-
+        // decode state: a `close_notify` buffered behind a large reliable unit is
+        // honored (clean), a bare FIN at a complete-unit boundary becomes
+        // `ConnectionLost`, and a buffered partial reliable unit becomes
+        // `Decode`. Classifying here instead would have to proxy "nothing
+        // buffered" through `pending_inbound` (retained ciphertext only), which
+        // misses a decrypted partial unit the record layer holds as plaintext —
+        // misclassifying a mid-unit truncation. Deferring costs at most one
+        // `Stream` mint for a genuinely-truncated pre-mint exchange.
         self.pending_eof = true;
       }
       return self.intake_handshaking(data, now);
@@ -1195,7 +1222,8 @@ where
     // premature-vs-clean EOF decision. A premature EOF
     // (`StreamError::PeerClosed`) is the truncation path → decode failure; a
     // clean EOF (`Ok`) retires the recv half below via `observe_recv_fin`.
-    let fin_seen = eof || self.records.peer_has_closed();
+    let peer_closed = self.records.peer_has_closed();
+    let fin_seen = eof || peer_closed;
     if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
       // A trailing partial reliable unit at EOF is a truncated transmission —
       // the peer closed mid-unit. Treat it as a decode failure (the same
@@ -1222,6 +1250,22 @@ where
       // `Stream::is_failed()`; `drain_then_reap`'s `StreamErrored` notice uses
       // the `BridgeFailure::Decode` high-level reason.
       self.fail_with_retire(BridgeFailure::Decode);
+      return Err(());
+    }
+
+    // Authenticated-close gate. Reaching here with `fin_seen` means the FSM
+    // accepted the close anchor as a CLEAN completion (a premature EOF routed
+    // through the decode-fail path above). But a secure transport's clean
+    // receive-close is its authenticated in-band close — so a bare transport FIN
+    // (`eof && !peer_closed`) on such a transport is a truncation at a
+    // complete-unit boundary, not a clean completion, even though the FSM's
+    // exchange happens to be complete. Fail it `ConnectionLost` rather than
+    // committing the buffered payload as cleanly closed. Plain TCP's
+    // `peer_has_closed()` is permanently `false` AND `requires_authenticated_close()`
+    // is `false`, so this never fires there — a plain-TCP FIN at a unit boundary
+    // stays the legitimate clean close.
+    if fin_seen && !decode_failed && eof && !peer_closed && R::requires_authenticated_close() {
+      self.fail_with_retire(BridgeFailure::ConnectionLost);
       return Err(());
     }
 
