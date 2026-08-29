@@ -5287,6 +5287,78 @@ fn reliable_ping_ack_drives_probe_success() {
   );
 }
 
+/// The reliable-ping-ack success path is anchored by an ABSOLUTE cutoff, not by
+/// when in a coordinator tick the ack is applied: a `ReliablePingAcked` reaching
+/// `handle_stream_event` at `now >= failure_deadline` routes the probe to
+/// FAILURE (suspect the target), never rescues it. This is the invariant that
+/// makes the stream coordinator's per-tick order independent for the probe
+/// class — replaying a buffered ack earlier in the tick (before the membership
+/// timers) cannot resurrect a probe whose budget has already elapsed.
+#[test]
+fn reliable_ping_ack_after_failure_deadline_fails_probe() {
+  use EndpointEvent;
+
+  use crate::event::ReliablePingAcked;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let probe_seq = 55u32;
+  let bob = e.member(&SmolStr::new("bob")).unwrap().clone();
+  let bob_incarnation = e.node_incarnation(&SmolStr::new("bob")).unwrap();
+  let bob_generation = e.members.get(&SmolStr::new("bob")).unwrap().generation();
+  let now = Instant::now();
+  let deadline = now + Duration::from_secs(5);
+
+  let stream_id = StreamId::from_raw(999);
+  e.probes.insert(
+    probe_seq,
+    Probe {
+      target: bob,
+      target_incarnation: bob_incarnation,
+      target_generation: bob_generation,
+      sent_at: now,
+      kind: ProbeKind::Detection,
+      dispatched: true,
+      failure_deadline: deadline,
+      phase: ProbePhase::AwaitingIndirect(AwaitingIndirect {
+        expected_nacks: 2,
+        indirect_peers: SmallVec::new(),
+        nacked_by: SmallVec::new(),
+        reliable_stream_id: Some(stream_id),
+        deadline,
+      }),
+    },
+  );
+
+  let initial_score = e.health_score();
+  // The ack arrives AT/AFTER the failure deadline — too late to rescue.
+  e.handle_stream_event(
+    EndpointEvent::ReliablePingAcked(ReliablePingAcked::new(probe_seq, deadline)),
+    deadline,
+  );
+
+  assert!(
+    !e.probes.contains_key(&probe_seq),
+    "the probe is terminated by the past-deadline ack",
+  );
+  assert_eq!(
+    e.member_liveness(&SmolStr::new("bob")),
+    Some(State::Suspect),
+    "a past-deadline ack fails the probe: the target is suspected, not proven alive",
+  );
+  assert!(
+    e.health_score() >= initial_score,
+    "a probe failure does not tick awareness down (it records a failure)",
+  );
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted(..))),
+    "no PingCompleted is emitted for a past-deadline reliable-ping ack",
+  );
+}
+
 // ─────────────── Reliable user messages ──────────────────────────────────
 
 #[test]
