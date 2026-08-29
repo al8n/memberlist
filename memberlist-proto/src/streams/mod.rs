@@ -492,6 +492,15 @@ where
     self.ep.gossip_mtu()
   }
 
+  /// The configured per-exchange reliable-stream deadline
+  /// ([`crate::config::EndpointOptions::stream_timeout`]). A driver governs an
+  /// ACTIVE exchange's writes by this bound — the machine arms the same deadline
+  /// and fires the `Abort` that preempts a stalled write — reserving the shorter
+  /// graceful-drain `close_timeout` for the post-`Close` residual flush.
+  pub fn stream_timeout(&self) -> core::time::Duration {
+    self.ep.stream_timeout()
+  }
+
   /// The configured cross-transport compression options.
   #[cfg(compression)]
   #[cfg_attr(

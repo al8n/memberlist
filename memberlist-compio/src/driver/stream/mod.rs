@@ -123,9 +123,12 @@ struct PendingJoin {
 /// drained through `poll_transmit`. The driver parks this here and
 /// replies only once that `LeftCluster` arrives (success) or
 /// `deadline` elapses ([`MemberlistError::LeaveTimeout`]) — so a
-/// returned `Ok(())` means the leave actually reached the wire, never
-/// merely that it was queued. Mirrors the [`PendingJoin`] /
-/// `shutdown_reply` parking pattern.
+/// returned `Ok(())` means the machine completed the leave locally and
+/// its `Dead`-self notices were queued to the gossip socket. It is NOT a
+/// wire-delivery guarantee: those notices are best-effort UDP whose
+/// transient send errors are non-fatal (a peer that never receives one
+/// still reaps the departed node via failure detection). Mirrors the
+/// [`PendingJoin`] / `shutdown_reply` parking pattern.
 ///
 /// Leave is a SHARED operation: a second `Command::Leave` racing an
 /// in-flight one (cloned `Memberlist` handles can both call `leave()`)
@@ -668,8 +671,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
     let did_transmits =
       drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-    let did_events = drain_events(
+    let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
       &mut endpoint,
+      &snapshot,
+      &mut last_snapshot_version,
       &obs_tx,
       &observation_dropped,
       &obs_payload_bytes,
@@ -683,7 +688,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   }
   reap_pending_joins(&mut pending.joins, Instant::now()).await;
   reap_pending_leave(&mut pending.leave, Instant::now()).await;
-  refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
   refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
 
   // Hoist the listener-accept future ACROSS loop iterations. On a
@@ -848,14 +852,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     // arm fires. Run the drain phase + snapshot so the post-shutdown
     // state is flushed, then break.
     if exit {
-      // Exit-path snapshot gate (mirror-symmetric with the QUIC
-      // driver): publish a fresh snapshot iff the teardown drain
-      // itself produced observable progress, NOT on the iteration
-      // `dirty` flag. The drain-progress signal is the precise
-      // "did teardown change published state" question; gating on it
-      // (in both drivers) avoids a redundant publish when nothing
-      // drained and keeps the two exit paths identical in shape.
-      let mut drained_any = false;
+      // The drain loop publishes the refreshed snapshot before each
+      // `drain_events` pass, so the post-teardown state is flushed (and
+      // observed by any waiter it resolves) without a separate post-loop gate.
       loop {
         let did_actions = drain_actions::<I, A, R, G>(
           &mut endpoint,
@@ -867,8 +866,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -879,7 +880,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
-        drained_any = true;
       }
       // Do NOT deadline-reap the parked joins on the shutdown path: the
       // post-loop freeze->drain barrier is the sole owner of join reaping. It
@@ -889,9 +889,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       // `contacted` that drops a completed seed. Leave carries no
       // barrier-folded data, so its deadline reap is unaffected.
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
-      if drained_any {
-        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-      }
       // Publish the counters unconditionally before exit: a load-shed (e.g. a
       // rejected accept at the max_inbound_streams cap) can bump them on a path
       // that produced no drainable work, so gating on `drained_any` would drop
@@ -1008,8 +1005,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -1029,7 +1028,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       }
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
-        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
         refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
       }
       if exit {
@@ -1055,8 +1053,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -1075,7 +1075,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         reap_pending_joins(&mut pending.joins, Instant::now()).await;
       }
       reap_pending_leave(&mut pending.leave, Instant::now()).await;
-      refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
       refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
       dirty = false;
     }
@@ -1291,8 +1290,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
       let did_transmits =
         drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-      let did_events = drain_events(
+      let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
         &mut endpoint,
+        &snapshot,
+        &mut last_snapshot_version,
         &obs_tx,
         &observation_dropped,
         &obs_payload_bytes,
@@ -1313,7 +1314,6 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     reap_pending_leave(&mut pending.leave, Instant::now()).await;
 
     if dirty {
-      refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
       refresh_metrics_if_changed::<I, A, R, G>(&endpoint, &metrics, &mut last_metrics);
     }
 
@@ -1414,6 +1414,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     &mut pending,
     stream_opts,
     &cidr_policy,
+    &snapshot,
+    &mut last_snapshot_version,
   )
   .await;
 
@@ -1669,9 +1671,10 @@ async fn dispatch_command<I, A, R, G>(
           .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string())));
         match res {
           Ok(()) if was_running => {
-            // Initiated → park. A returned `Ok(())` then means the leave
-            // actually reached the wire (`LeftCluster`), never merely
-            // that it was queued.
+            // Initiated → park. A returned `Ok(())` then means the machine
+            // completed the leave locally and queued its `Dead`-self notices
+            // to the gossip socket (`LeftCluster`) — best-effort UDP, not a
+            // wire-delivery guarantee.
             pending.leave = Some(PendingLeave {
               repliers: vec![reply],
               deadline: now + leave_timeout,
@@ -2683,6 +2686,44 @@ where
   drained
 }
 
+/// Publish the refreshed membership snapshot, then drain the machine's events.
+///
+/// This ordering is load-bearing: [`refresh_snapshot_if_changed`] MUST run
+/// before [`drain_events`], because `drain_events` resolves parked `join`/`leave`
+/// waiters and hands events to the observation task. Publishing first guarantees
+/// a caller woken by a resolution observes the new membership, never the
+/// pre-transition snapshot. Every drain-loop site — the live loop and the
+/// shutdown freeze-drain barrier — funnels through this one helper so the
+/// ordering cannot drift or be reordered per-site. Returns whatever
+/// `drain_events` returns (`true` iff it made progress).
+#[allow(clippy::too_many_arguments)]
+async fn publish_snapshot_then_drain_events<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
+  snapshot: &SnapshotCell<I, A>,
+  last_snapshot_version: &mut u64,
+  obs_tx: &mpsc::Sender<Event<I, A>>,
+  observation_dropped: &Cell<u64>,
+  obs_payload_bytes: &Cell<u64>,
+  obs_payload_budget: Option<u64>,
+  pending: &mut PendingCommands,
+) -> bool
+where
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
+  R: StreamTransport,
+{
+  refresh_snapshot_if_changed::<I, A, R, G>(endpoint, snapshot, last_snapshot_version);
+  drain_events::<I, A, R, G>(
+    endpoint,
+    obs_tx,
+    observation_dropped,
+    obs_payload_bytes,
+    obs_payload_budget,
+    pending,
+  )
+  .await
+}
+
 /// Per-driver observation task: dispatch each event's [`Delegate`] hook, then
 /// fan membership / control events out to the `EventStream`, OFF the driver
 /// loop.
@@ -2880,6 +2921,8 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
   pending: &mut PendingCommands,
   stream_opts: StreamTransportOptions,
   cidr_policy: &CidrFilter,
+  snapshot: &SnapshotCell<I, A>,
+  last_snapshot_version: &mut u64,
 ) where
   I: memberlist_proto::Id,
   A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
@@ -2918,8 +2961,10 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
       drain_actions::<I, A, R, G>(endpoint, bridges, bridge_ready_tx, stream_opts, cidr_policy);
     let did_transports = drain_transport_transmits::<I, A, R, G>(endpoint, bridges);
     let did_transmits = drain_transmits::<I, A, R, G>(endpoint, gossip_socket, label.clone()).await;
-    let did_events = drain_events(
+    let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
       endpoint,
+      snapshot,
+      last_snapshot_version,
       obs_tx,
       observation_dropped,
       obs_payload_bytes,
@@ -3152,6 +3197,7 @@ fn handle_bridge_ready<I, A, R, G>(
         cancel_rx,
         bridge_inbound_tx,
         recv_buf_len,
+        endpoint.stream_timeout(),
         close_timeout,
       );
     }
@@ -3236,6 +3282,7 @@ where
         cancel_rx,
         bridge_inbound_tx,
         stream_opts.bridge_recv_buf_len(),
+        endpoint.stream_timeout(),
         stream_opts.close_timeout(),
       );
       true
@@ -3253,6 +3300,7 @@ where
 /// (out_tx) so any bytes queued before the bridge spawned reach the
 /// wire via the `out_rx` handed in here. The task is detached — see
 /// the [`BridgeHandle`] docstring for the rationale.
+#[allow(clippy::too_many_arguments)]
 fn spawn_bridge(
   stream: TcpStream,
   eid: ExchangeId,
@@ -3260,6 +3308,7 @@ fn spawn_bridge(
   cancel_rx: futures_channel::oneshot::Receiver<()>,
   bridge_inbound_tx: &mpsc::Sender<BridgeInbound>,
   recv_buf_len: usize,
+  stream_timeout: Duration,
   close_timeout: Duration,
 ) {
   let inbound_tx = bridge_inbound_tx.clone();
@@ -3270,6 +3319,7 @@ fn spawn_bridge(
     cancel_rx,
     inbound_tx,
     recv_buf_len,
+    stream_timeout,
     close_timeout,
   ))
   .detach();

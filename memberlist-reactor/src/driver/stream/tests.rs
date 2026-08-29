@@ -120,6 +120,15 @@ fn user_packet(len: usize) -> Event<SmolStr, SocketAddr> {
   ))
 }
 
+/// The payload length of a `user_packet` event, for asserting WHICH event
+/// occupies a channel slot or overflow position. Panics on any other variant.
+fn user_packet_len(ev: &Event<SmolStr, SocketAddr>) -> usize {
+  match ev {
+    Event::UserPacket(up) => up.data_ref().len(),
+    other => panic!("expected a UserPacket event, got {other:?}"),
+  }
+}
+
 /// A control event carrying no app-data (`observation_payload_bytes` is `None`)
 /// and, with no parked leave/join/ping, a no-op for `account_event`. Used to
 /// drive the obs-channel `Full`-and-recoverable drop arm.
@@ -379,6 +388,127 @@ async fn obs_disconnected_rolls_back_reservation() {
     shared.observation_dropped(),
     0,
     "a Disconnected (obs task gone) send is not a recoverable drop"
+  );
+}
+
+/// With older events still queued in the overflow, `send_observation` must route
+/// a new event BEHIND them, never `try_send` it into a slot freed since the last
+/// `flush_obs_overflow` — doing so would deliver it ahead of the queued events,
+/// out of machine-event order. A slot freed in that window is consumed by the
+/// OLDEST queued event, and the new one waits behind whatever backlog remains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn obs_new_event_waits_behind_nonempty_overflow() {
+  // Capacity-1 channel, ample byte budget.
+  let (mut driver, obs_rx, _shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+
+  driver.send_observation(user_packet(1)); // fills the capacity-1 channel
+  driver.send_observation(user_packet(2)); // channel full → retained in overflow
+  assert_eq!(driver.obs_overflow.len(), 1, "second event retained");
+
+  // Free a channel slot WITHOUT flushing the overflow: exactly the window where a
+  // naive `try_send` would jump the queue.
+  obs_rx.try_recv().expect("drain the queued first event");
+
+  driver.send_observation(user_packet(3)); // overflow non-empty → drains behind
+
+  // The freed slot is consumed by the OLDER queued event (len 2), and the new
+  // event takes its place in the overflow — order preserved, nothing dropped.
+  assert_eq!(
+    driver.obs_overflow.len(),
+    1,
+    "the older queued event moved into the freed slot; the new event waits behind it"
+  );
+  assert_eq!(
+    user_packet_len(
+      &obs_rx
+        .try_recv()
+        .expect("the freed slot now holds the older event")
+    ),
+    2,
+    "the OLDER queued event took the freed slot, not the new one — FIFO order",
+  );
+  assert_eq!(
+    user_packet_len(
+      driver
+        .obs_overflow
+        .back()
+        .expect("the new event is retained in the overflow")
+    ),
+    3,
+    "the new event is behind the backlog, never ahead of an older queued one",
+  );
+}
+
+/// With the overflow FULL at `OBS_OVERFLOW_MAX` but a channel slot freed since the
+/// last flush, a new app-data event must NOT be dropped: the freed slot is first
+/// consumed by the OLDEST queued event, and the new event is appended behind the
+/// remaining backlog. Dropping here would lose reconstructible app-data while a
+/// channel slot sat unused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn obs_full_overflow_reuses_freed_slot_before_dropping() {
+  // Capacity-1 channel, ample byte budget so nothing is dropped for bytes.
+  let (mut driver, obs_rx, shared, _bytes) = build_driver(1, Some(1 << 20)).await;
+
+  // Fill the capacity-1 channel.
+  driver.send_observation(user_packet(1));
+  assert!(
+    driver.obs_overflow.is_empty(),
+    "first event went to the channel"
+  );
+
+  // Fill the overflow to exactly OBS_OVERFLOW_MAX. Stage the items directly (the
+  // reservation path is exercised by the byte-accounting tests); the OLDEST is
+  // tagged with a distinct payload length so we can confirm it — not the new
+  // event — consumes the freed slot.
+  const OLDEST_LEN: usize = 200;
+  const NEW_LEN: usize = 99;
+  driver.obs_overflow.push_back(user_packet(OLDEST_LEN));
+  for _ in 1..OBS_OVERFLOW_MAX {
+    driver.obs_overflow.push_back(user_packet(50));
+  }
+  assert_eq!(
+    driver.obs_overflow.len(),
+    OBS_OVERFLOW_MAX,
+    "the overflow is staged at its cap"
+  );
+
+  // Free a channel slot WITHOUT flushing: the exact window where the old gate
+  // would drop the new event even though the channel has room.
+  obs_rx.try_recv().expect("drain the queued first event");
+
+  driver.send_observation(user_packet(NEW_LEN));
+
+  // No drop: the freed slot absorbed the oldest queued event, and the new event
+  // is retained behind the remaining backlog (overflow back at cap, not over).
+  assert_eq!(
+    shared.observation_dropped(),
+    0,
+    "a free channel slot must be reused before dropping — nothing is dropped"
+  );
+  assert_eq!(
+    driver.obs_overflow.len(),
+    OBS_OVERFLOW_MAX,
+    "the oldest event moved to the channel; the new event took its place at the back"
+  );
+
+  // FIFO: the freed slot holds the OLDEST queued event, never the newest.
+  let front = obs_rx
+    .try_recv()
+    .expect("the freed slot now holds an event");
+  assert_eq!(
+    user_packet_len(&front),
+    OLDEST_LEN,
+    "the oldest queued event consumed the freed slot, preserving FIFO order"
+  );
+  // The new event is at the back of the overflow, behind the remaining backlog.
+  let back = driver
+    .obs_overflow
+    .back()
+    .expect("the overflow still holds the appended new event");
+  assert_eq!(
+    user_packet_len(back),
+    NEW_LEN,
+    "the new event is appended at the back, never ahead of an older queued one"
   );
 }
 
@@ -760,6 +890,133 @@ async fn shutdown_drains_queued_inbound_completion_into_reached_before_reaping()
       "the already-queued inbound completion is preserved in the reached set: {reached:?}"
     ),
     other => panic!("expected Err((reached, Shutdown)); got {other:?}"),
+  }
+}
+
+/// Ordering guard for the publish-BEFORE-notify contract in
+/// `drain_surfaces_pass`: the pass must republish the post-transition snapshot
+/// BEFORE its event drain resolves a parked waiter, so a caller woken by its own
+/// completion never reads the pre-transition snapshot.
+///
+/// A black-box read taken AFTER the pass cannot distinguish publish-before-notify
+/// from publish-after-notify — both have happened by then. This test instead
+/// captures the snapshot AT THE INSTANT the waiter resolves, via an instrumented
+/// waker: `oneshot::Sender::send` synchronously wakes the receiver's registered
+/// waker, so the driver's own `pj.reply.send(..)` (inside `account_event`) runs
+/// the probe INLINE, mid-pass, before the pass returns. The probe reads the
+/// published snapshot then and there. Under the correct order the merged seed is
+/// already published; a reorder that moves the publish AFTER the event drain
+/// leaves it stale at that instant, which the probe catches.
+///
+/// Setup: seed A's push/pull response + EOF are folded directly into the endpoint
+/// so the fold both MERGES "seed" (advancing the snapshot version) and enqueues
+/// its terminal `ExchangeCompleted(Succeeded)` — WITHOUT publishing (only the
+/// driver's pass publishes), so the published snapshot is stale going into the
+/// pass. `drain_surfaces_pass` then publishes, then resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drive_pass_publishes_snapshot_before_resolving_join_waiter() {
+  let now = Instant::now();
+  let (mut driver, _obs_rx, shared, _bytes) = build_driver_with(64, None, 8, |ep| {
+    ep.start_scheduling(now);
+  })
+  .await;
+
+  let addr_a: SocketAddr = "127.0.0.1:7801".parse().unwrap();
+  // Drive seed A's push/pull, then fold its pull response + EOF straight into the
+  // endpoint: this merges "seed" and terminalizes the exchange (queuing its
+  // `ExchangeCompleted`) in one step, but publishes nothing.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut driver, addr_a, now);
+  for chunk in &response_a {
+    driver
+      .endpoint
+      .handle_transport_data(eid_a, chunk, false, now);
+  }
+  driver.endpoint.handle_transport_data(eid_a, &[], true, now);
+
+  // Precondition: the merge advanced the machine's membership, but the PUBLISHED
+  // snapshot the waiter would read is still the stale pre-merge one.
+  assert!(
+    shared
+      .load_snapshot()
+      .by_id(&SmolStr::new("seed"))
+      .is_none(),
+    "precondition: the merge is applied to the machine but not yet published",
+  );
+
+  // Install the 1-seed pending join awaiting eid_a.
+  let (tx, mut rx) = oneshot::channel::<crate::command::JoinReply>();
+  let mut pending_eids = HashSet::new();
+  pending_eids.insert(eid_a);
+  driver.pending_joins.insert(
+    0,
+    PendingJoin {
+      pending_eids,
+      contacted: SmallVec::new(),
+      requested: 1,
+      reply: tx,
+    },
+  );
+
+  // The instrumented waker: fired synchronously by the driver's `reply.send`, it
+  // records — AT the resolution instant — whether the merged seed is already in
+  // the published snapshot.
+  struct AtResolution {
+    shared: Arc<Shared<SmolStr>>,
+    fired: AtomicBool,
+    seed_published_at_resolution: AtomicBool,
+  }
+  impl Wake for AtResolution {
+    fn wake(self: Arc<Self>) {
+      self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+      self.fired.store(true, Ordering::SeqCst);
+      let present = self
+        .shared
+        .load_snapshot()
+        .by_id(&SmolStr::new("seed"))
+        .is_some();
+      self
+        .seed_published_at_resolution
+        .store(present, Ordering::SeqCst);
+    }
+  }
+  let probe = Arc::new(AtResolution {
+    shared: shared.clone(),
+    fired: AtomicBool::new(false),
+    seed_published_at_resolution: AtomicBool::new(false),
+  });
+  let probe_waker = Waker::from(probe.clone());
+  // Register the probe waker on the reply receiver (Pending stores the waker),
+  // so the driver's later `reply.send` wakes it.
+  let mut rx_cx = Context::from_waker(&probe_waker);
+  assert!(
+    Pin::new(&mut rx).poll(&mut rx_cx).is_pending(),
+    "the reply is not yet resolved; polling registers the probe waker",
+  );
+
+  // Run the exact production pass containing the publish + event-drain sequence.
+  let pass_waker = flag_waker();
+  let mut cx = Context::from_waker(&pass_waker);
+  let _ = driver.drain_surfaces_pass(&mut cx);
+
+  assert!(
+    probe.fired.load(Ordering::SeqCst),
+    "the pass must have resolved the join waiter (else this test proves nothing)",
+  );
+  assert!(
+    probe.seed_published_at_resolution.load(Ordering::SeqCst),
+    "publish-before-notify: at the instant the pass resolved the join waiter the \
+     merged seed was ALREADY in the published snapshot — a reorder that publishes \
+     AFTER the notify would leave it stale here",
+  );
+  // The reply itself carries the successful contacted set.
+  match rx.await {
+    Ok(Ok(reached)) => assert!(
+      reached.contains(&addr_a),
+      "the completed join resolved Ok with the contacted seed: {reached:?}",
+    ),
+    other => panic!("expected Ok(reached) for a completed join; got {other:?}"),
   }
 }
 
@@ -1788,6 +2045,7 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
     inbound_tx,
     shared,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The peer sends its request, then half-closes its write side. The bridge
@@ -1874,6 +2132,7 @@ async fn explicit_abort_preempts_and_discards() {
     inbound_tx,
     shared,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The peer must see EOF with NO bytes — the abort dropped the write side
@@ -1938,6 +2197,7 @@ async fn shutdown_cancel_beats_readable_peer_fin_so_no_eof_is_folded() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -2014,6 +2274,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     close_timeout,
   ));
 
@@ -2097,6 +2358,7 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     close_timeout,
   ));
 
@@ -2168,6 +2430,68 @@ async fn slow_but_progressing_reader_is_not_timed_out() {
   bridge.await.expect("bridge task exits cleanly");
 }
 
+/// A `close_timeout` shorter than `stream_timeout` must NOT abort an ACTIVE
+/// (both-halves-live) write. A live exchange is governed by the machine's
+/// `stream_timeout` (it arms that deadline and fires the `Abort` that preempts a
+/// stalled write), so the both-halves-live arm bounds its writes by
+/// `stream_timeout`; the shorter graceful-drain `close_timeout` is reserved for
+/// the post-half-close drain. Here the peer never reads and never half-closes, so
+/// the write stalls in the active arm — and must survive well past `close_timeout`.
+#[cfg_attr(
+  windows,
+  ignore = "Windows buffers the oversized reply in chunks; the zero-window stall never forms"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_write_governed_by_stream_timeout_not_close_timeout() {
+  // The client is held open, never reads, and never half-closes — so the bridge
+  // stays in both-halves-live mode with a stalled write.
+  let (server, _client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+  let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+  let shared = test_shared();
+
+  // A SHORT close_timeout and a LONG stream_timeout: the pre-fix code bounded the
+  // active write by `close_timeout` and would tear down at ~150ms.
+  let close_timeout = Duration::from_millis(150);
+  let stream_timeout = Duration::from_secs(4);
+
+  // A reply far larger than any socket buffer: with the peer never reading, the
+  // window collapses to zero and the write stalls once the buffers fill.
+  let response = vec![0x5Au8; 16 * 1024 * 1024];
+
+  let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    shared,
+    stream_timeout,
+    close_timeout,
+  ));
+
+  // Queue the oversized reply; keep `out_tx` and `cancel_tx` alive so the ONLY
+  // teardown that could fire is a write timeout (no Close disconnect, no abort).
+  out_tx
+    .send(BridgeOut::Data(Bytes::from(response)))
+    .expect("queue oversized reply");
+
+  // Wait well past `close_timeout`, comfortably short of `stream_timeout`: the
+  // bridge must still be alive — the active write was NOT aborted early.
+  tokio::time::sleep(close_timeout * 4).await;
+  assert!(
+    !bridge.is_finished(),
+    "an active both-halves-live write must be governed by stream_timeout, not \
+       aborted at the shorter close_timeout"
+  );
+
+  // Clean up deterministically: an explicit abort preempts the stalled write.
+  cancel_tx.send(()).expect("signal explicit abort");
+  bridge.await.expect("bridge exits on the abort");
+}
+
 /// `BridgeOut::ShutdownWrite` (the machine's `StreamAction::Shutdown`,
 /// half-closing the write side after the send half retires) closes the bridge's
 /// write half — the peer reads EOF on its read side — while the bridge stays
@@ -2188,6 +2512,7 @@ async fn bridge_shutdown_write_half_closes_write_side() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -2229,6 +2554,7 @@ async fn bridge_write_error_tears_down() {
     cancel_rx,
     inbound_tx,
     shared,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 

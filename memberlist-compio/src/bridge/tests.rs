@@ -93,6 +93,7 @@ async fn graceful_close_drains_queued_bytes_before_exit() {
     inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // Drop the handle: `cancel_tx` disconnects (the graceful-Close shape).
@@ -150,6 +151,7 @@ async fn explicit_abort_discards_queued_bytes() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -214,6 +216,7 @@ async fn explicit_abort_preempts_in_flight_write() {
     inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // Let the bridge dequeue the response and block inside the write with the
@@ -262,7 +265,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
   let eid = fresh_eid();
   let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
   let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
-  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+  let (inbound_tx, mut inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
 
   let close_timeout = Duration::from_millis(300);
 
@@ -278,6 +281,7 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     close_timeout,
   ));
 
@@ -289,6 +293,18 @@ async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
     .shutdown()
     .await
     .expect("half-close client write side");
+
+  // Wait until the bridge REPORTS the request EOF: only then is it actually
+  // in read-closed mode. The live-mode select prioritizes outbound data over
+  // reads, so enqueueing the response before this point can let the write
+  // start while `read_closed` is still false — the bridge would then apply
+  // the (here 60s) active `stream_timeout` instead of `close_timeout`.
+  loop {
+    match inbound_rx.recv().await.expect("bridge reports inbound") {
+      BridgeInbound::Eof(_) | BridgeInbound::Error(_) => break,
+      BridgeInbound::Bytes(_) => continue,
+    }
+  }
 
   // Queue the oversized response and drop the whole handle: the graceful-Close
   // shape (`out_tx` and `cancel_tx` both disconnect, the response queued). No
@@ -437,6 +453,7 @@ async fn recv_forwards_peer_bytes_to_driver() {
     inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The peer writes a request; the bridge's recv `Ok(n)` arm forwards it.
@@ -492,6 +509,7 @@ async fn read_closed_mode_writes_late_response_then_closes() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -553,6 +571,7 @@ async fn shutdown_write_half_closes_peer_read_side() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -619,6 +638,68 @@ async fn explicit_abort_preempts_stalled_write() {
   );
 }
 
+/// A `close_timeout` shorter than `stream_timeout` must NOT abort an ACTIVE
+/// (both-halves-live) write. A live exchange is governed by the machine's
+/// `stream_timeout` (it arms that deadline and fires the `Abort` that preempts a
+/// stalled write), so the both-halves-live arm bounds its writes by
+/// `stream_timeout`; the shorter graceful-drain `close_timeout` is reserved for
+/// the post-half-close drain. Here the peer never reads and never half-closes, so
+/// the write stalls in the active arm — and must survive well past
+/// `close_timeout`.
+#[cfg_attr(
+  windows,
+  ignore = "Windows buffers the oversized response in chunks; the zero-window stall never forms"
+)]
+#[compio::test]
+async fn active_write_governed_by_stream_timeout_not_close_timeout() {
+  // The client is held open, never reads, and never half-closes — so the bridge
+  // stays in both-halves-live mode with a stalled write.
+  let (server, _client) = loopback_pair().await;
+  let eid = fresh_eid();
+  let (out_tx, out_rx) = lochan::mpsc::unbounded::<BridgeOut>();
+  let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+  let (inbound_tx, _inbound_rx) = lochan::mpsc::unbounded::<BridgeInbound>();
+
+  // A SHORT close_timeout and a LONG stream_timeout: the pre-fix code bounded the
+  // active write by `close_timeout` and would tear down at ~150ms.
+  let close_timeout = Duration::from_millis(150);
+  let stream_timeout = Duration::from_secs(4);
+
+  // A response far larger than any socket buffer: with the peer never reading, the
+  // window collapses to zero and the write stalls once the buffers fill.
+  let response = vec![0x5Au8; 16 * 1024 * 1024];
+
+  let bridge = compio::runtime::spawn(bridge_task(
+    server,
+    eid,
+    out_rx,
+    cancel_rx,
+    inbound_tx,
+    64,
+    stream_timeout,
+    close_timeout,
+  ));
+
+  // Queue the oversized response; keep `out_tx` and `cancel_tx` alive so the ONLY
+  // teardown that could fire is a write timeout (no Close disconnect, no abort).
+  out_tx
+    .try_send(BridgeOut::Bytes(response))
+    .expect("queue oversized response");
+
+  // Wait well past `close_timeout`, comfortably short of `stream_timeout`: the
+  // bridge must still be alive — the active write was NOT aborted early.
+  compio::time::sleep(close_timeout * 4).await;
+  assert!(
+    !bridge.is_finished(),
+    "an active both-halves-live write must be governed by stream_timeout, not \
+       aborted at the shorter close_timeout"
+  );
+
+  // Clean up deterministically: an explicit abort preempts the stalled write.
+  cancel_tx.send(()).expect("signal explicit abort");
+  bridge.await.expect("bridge exits on the abort");
+}
+
 /// A stream whose write half always fails and whose read half blocks forever —
 /// drives the byte-mover's write-error arm without racing a peer FIN.
 struct FailingStream;
@@ -677,6 +758,7 @@ async fn write_failure_surfaces_bridge_error() {
     inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   out_tx
@@ -718,6 +800,7 @@ async fn out_sender_drop_without_close_sends_eof() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 
@@ -778,6 +861,7 @@ async fn read_closed_write_failure_surfaces_error() {
     inbound_tx,
     64,
     Duration::from_secs(60),
+    Duration::from_secs(60),
   ));
 
   // The immediate FIN surfaces an Eof and enters read-closed mode.
@@ -827,6 +911,7 @@ async fn bytes_after_shutdown_write_are_discarded() {
     cancel_rx,
     inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   ));
 

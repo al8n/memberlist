@@ -1520,6 +1520,53 @@ async fn run_shutdown_drain(
   bridge_inbound_rx: &mut mpsc::Receiver<super::BridgeInbound>,
   bridge_ready_tx: &flume::Sender<BridgeReady>,
   pending: &mut PendingCommands,
+) -> SnapshotCell<SmolStr> {
+  // Bootstrap the snapshot cell from the pre-drain membership. If the drain folds
+  // a completion that changes membership, the freeze helper republishes the cell
+  // before it resolves the woken waiter.
+  let snapshot = boot_snapshot_cell(endpoint);
+  run_shutdown_drain_publishing_to(
+    endpoint,
+    bridges,
+    bridge_inbound_tx,
+    bridge_inbound_rx,
+    bridge_ready_tx,
+    pending,
+    &snapshot,
+  )
+  .await;
+  snapshot
+}
+
+/// The pre-drain bootstrap snapshot cell, built from the local node only (it does
+/// not yet carry any peer a folded completion would merge).
+fn boot_snapshot_cell(
+  endpoint: &StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+) -> SnapshotCell<SmolStr> {
+  let ep_ref = endpoint.endpoint_ref();
+  let local = ep_ref
+    .member(ep_ref.local_id_ref())
+    .expect("the local node is always a member");
+  let boot = MemberlistSnapshot::new(
+    vec![local.clone()],
+    local,
+    1,
+    ep_ref.num_members(),
+    ep_ref.health_score(),
+  );
+  Rc::new(RefCell::new(Rc::new(boot)))
+}
+
+/// [`run_shutdown_drain`] publishing to a CALLER-OWNED snapshot cell, so a test
+/// can observe the republished snapshot the drain hands the woken waiter.
+async fn run_shutdown_drain_publishing_to(
+  endpoint: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+  bridges: &mut HashMap<ExchangeId, BridgeHandle>,
+  bridge_inbound_tx: mpsc::Sender<super::BridgeInbound>,
+  bridge_inbound_rx: &mut mpsc::Receiver<super::BridgeInbound>,
+  bridge_ready_tx: &flume::Sender<BridgeReady>,
+  pending: &mut PendingCommands,
+  snapshot: &SnapshotCell<SmolStr>,
 ) {
   let gossip_socket = compio::net::UdpSocket::bind("127.0.0.1:0")
     .await
@@ -1527,6 +1574,8 @@ async fn run_shutdown_drain(
   let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
   let observation_dropped = Cell::new(0u64);
   let obs_payload_bytes = Cell::new(0u64);
+  let mut last_snapshot_version = endpoint.endpoint_ref().snapshot_version();
+
   freeze_and_drain_bridges_to_disconnected::<SmolStr, SocketAddr, RawRecords, _>(
     endpoint,
     bridges,
@@ -1542,6 +1591,8 @@ async fn run_shutdown_drain(
     pending,
     StreamTransportOptions::default(),
     &Default::default(),
+    snapshot,
+    &mut last_snapshot_version,
   )
   .await;
 }
@@ -1742,6 +1793,267 @@ async fn shutdown_drain_folds_completion_that_lost_the_select() {
     Ok(Ok(reached)) => assert!(
       reached.contains(&addr_a),
       "the buffered completion that raced the select resolved the join Ok: {reached:?}",
+    ),
+    other => panic!("expected Ok(reached) for a fully-completed join; got {other:?}"),
+  }
+}
+
+/// Regression: a completion that changes membership AND resolves its waiter during
+/// the shutdown drain publishes the post-transition snapshot BEFORE the waiter is
+/// woken — the woken caller observes the new membership, never the pre-transition
+/// snapshot the drain started from. The bootstrap cell holds only the local node;
+/// folding the push/pull completion merges the peer, so the republished cell must
+/// carry it. Without the pre-`drain_events` republish, the cell keeps the
+/// bootstrap membership and the peer is absent.
+///
+/// This reads the cell AFTER the whole drain, so it anchors REMOVING the publish
+/// but not a publish-AFTER-notify reorder (both have happened by then);
+/// `helper_publishes_snapshot_before_resolving_waiter_inline` anchors the
+/// reorder by capturing the snapshot at the resolution instant.
+#[compio::test]
+async fn shutdown_drain_publishes_snapshot_before_waking_waiter() {
+  let now = Instant::now();
+  let mut endpoint = unlabeled_endpoint("dialer", "127.0.0.1:0".parse().unwrap());
+  endpoint.start_scheduling(now);
+
+  let addr_a = addr(7830);
+  // The peer entry is named "seed" (see `drive_push_to_queued_response`); folding
+  // its pull response merges it into the dialer's membership.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut endpoint, addr_a, now);
+
+  // A 1-seed WaitForCompletion join: when eid_a completes the join resolves and
+  // its waiter is woken inside the drain.
+  let (tx, rx) = futures_channel::oneshot::channel::<super::JoinReply>();
+  let mut pending = empty_pending();
+  pending.joins.push(PendingJoin {
+    pending: HashSet::from([eid_a]),
+    addr_by_eid: HashMap::from([(eid_a, addr_a)]),
+    contacted: smallvec::SmallVec::new(),
+    requested: 1,
+    deadline: now + Duration::from_secs(30),
+    reply: tx,
+  });
+
+  let (bridge_inbound_tx, mut bridge_inbound_rx) = mpsc::unbounded::<super::BridgeInbound>();
+  let (bridge_ready_tx, _bridge_ready_rx) = flume::unbounded::<BridgeReady>();
+  for chunk in response_a {
+    queue_inbound(
+      &bridge_inbound_tx,
+      super::BridgeInbound::Bytes(super::BridgeBytes {
+        eid: eid_a,
+        bytes: chunk,
+        received_at: now,
+      }),
+    );
+  }
+  queue_inbound(
+    &bridge_inbound_tx,
+    super::BridgeInbound::Eof(super::BridgeEof {
+      eid: eid_a,
+      received_at: now,
+    }),
+  );
+
+  // The bootstrap snapshot (built inside `run_shutdown_drain` from the pre-drain
+  // membership) does NOT yet carry the peer.
+  let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
+  let snapshot = run_shutdown_drain(
+    &mut endpoint,
+    &mut bridges,
+    bridge_inbound_tx,
+    &mut bridge_inbound_rx,
+    &bridge_ready_tx,
+    &mut pending,
+  )
+  .await;
+
+  // The waiter was resolved inside the drain.
+  assert!(
+    pending.joins.is_empty(),
+    "the fully-resolved join was replied + removed inline by the drain",
+  );
+  match rx.await {
+    Ok(Ok(reached)) => assert!(
+      reached.contains(&addr_a),
+      "the completion resolved the join Ok: {reached:?}",
+    ),
+    other => panic!("expected Ok(reached) for a fully-completed join; got {other:?}"),
+  }
+
+  // The republished snapshot the woken waiter would read carries the merged peer.
+  let published = snapshot.borrow().clone();
+  assert!(
+    published.by_id(&SmolStr::new("seed")).is_some(),
+    "the post-transition snapshot published before the waiter woke carries the merged peer; members: {:?}",
+    published
+      .members()
+      .iter()
+      .map(|ns| ns.id_ref().as_str())
+      .collect::<Vec<_>>(),
+  );
+}
+
+thread_local! {
+  /// The published snapshot cell the inline [`ResolutionProbe`] reads at the
+  /// wake instant, set on the driver thread for the duration of the ordering
+  /// test. It is a thread-local, not a field on the probe, precisely because a
+  /// [`Waker`](std::task::Waker) is `Send + Sync` by contract and so its backing
+  /// `Wake` value cannot hold the `!Send`, `Rc`-based `SnapshotCell`. The cell
+  /// stored here is a clone of the very `Rc` the helper publishes into, so the
+  /// probe observes the real publish; the probe only ever fires on this same
+  /// driver thread.
+  static RESOLUTION_PROBE_SNAPSHOT: RefCell<Option<SnapshotCell<SmolStr>>> =
+    const { RefCell::new(None) };
+}
+
+/// A genuinely `Send + Sync` probe (backed only by atomics) that records — at
+/// the instant a parked waiter is resolved — whether the merged `seed` is
+/// already in the published snapshot. Fired synchronously by the driver's own
+/// `reply.send`, so it observes the publish-vs-notify order the black-box
+/// post-drain read cannot. It reads the (`!Send`) published cell through the
+/// driver-thread [`RESOLUTION_PROBE_SNAPSHOT`] thread-local, honouring the
+/// `Waker` `Send + Sync` contract without any `unsafe` `RawWaker`. Mirrors the
+/// reactor's `AtResolution` probe, whose store is `Send + Sync` directly.
+struct ResolutionProbe {
+  fired: std::sync::atomic::AtomicBool,
+  seed_published_at_resolution: std::sync::atomic::AtomicBool,
+}
+
+impl std::task::Wake for ResolutionProbe {
+  fn wake(self: std::sync::Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &std::sync::Arc<Self>) {
+    use std::sync::atomic::Ordering;
+    self.fired.store(true, Ordering::SeqCst);
+    let present = RESOLUTION_PROBE_SNAPSHOT.with(|cell| {
+      cell
+        .borrow()
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.borrow().by_id(&SmolStr::new("seed")).is_some())
+    });
+    self
+      .seed_published_at_resolution
+      .store(present, Ordering::SeqCst);
+  }
+}
+
+/// Ordering guard for the publish-BEFORE-notify contract centralised in
+/// `publish_snapshot_then_drain_events` — the single helper every drain-loop site
+/// (live loop and shutdown freeze-drain barrier) funnels through. The helper must
+/// republish the post-transition snapshot BEFORE `drain_events` resolves a parked
+/// waiter, so a caller woken by its own completion never reads the pre-transition
+/// snapshot. Guarding the one helper covers all six former call sites at once.
+///
+/// The sibling `shutdown_drain_publishes_snapshot_before_waking_waiter` reads the
+/// snapshot AFTER the whole drain, so it anchors REMOVING the publish but cannot
+/// distinguish publish-before-notify from publish-AFTER-notify — both have
+/// happened by then, and on compio's single-thread executor a real woken waiter
+/// task only runs post-drain regardless. This test instead captures the snapshot
+/// AT the resolution instant via a sound `Arc<Wake>` probe: `oneshot::Sender::send`
+/// wakes the receiver's registered waker synchronously, so the driver's own
+/// `reply.send` (inside `drain_events`) runs the probe INLINE, mid-helper. Under
+/// the correct order the merged seed is already published; a reorder that moves
+/// the publish AFTER `drain_events` leaves it stale at that instant. (The reactor
+/// carries the same guard for the shared design in
+/// `drive_pass_publishes_snapshot_before_resolving_join_waiter`.)
+#[compio::test]
+async fn helper_publishes_snapshot_before_resolving_waiter_inline() {
+  let now = Instant::now();
+  let mut endpoint = unlabeled_endpoint("dialer", "127.0.0.1:0".parse().unwrap());
+  endpoint.start_scheduling(now);
+
+  let addr_a = addr(7831);
+  // The peer entry is named "seed". Drive the exchange, then fold its pull
+  // response + FIN straight into the endpoint: this merges "seed" (advancing the
+  // machine's snapshot version) AND queues the terminal `ExchangeCompleted` — but
+  // publishes nothing, so the published snapshot going into the helper is stale.
+  let (eid_a, response_a) = drive_push_to_queued_response(&mut endpoint, addr_a, now);
+  let stale_version = endpoint.endpoint_ref().snapshot_version();
+  for chunk in &response_a {
+    endpoint.handle_transport_data(eid_a, chunk, false, now);
+  }
+  endpoint.handle_transport_data(eid_a, &[], true, now);
+  assert_ne!(
+    endpoint.endpoint_ref().snapshot_version(),
+    stale_version,
+    "precondition: folding the response advanced the machine's snapshot version",
+  );
+
+  // A 1-seed WaitForCompletion join resolved inline when eid_a completes.
+  let (tx, mut rx) = futures_channel::oneshot::channel::<super::JoinReply>();
+  let mut pending = empty_pending();
+  pending.joins.push(PendingJoin {
+    pending: HashSet::from([eid_a]),
+    addr_by_eid: HashMap::from([(eid_a, addr_a)]),
+    contacted: smallvec::SmallVec::new(),
+    requested: 1,
+    deadline: now + Duration::from_secs(30),
+    reply: tx,
+  });
+
+  // The snapshot cell the helper publishes to, plus the stale last-published
+  // version so `refresh_snapshot_if_changed` actually republishes. Bootstrapped
+  // from the pre-fold membership — no peer.
+  let snapshot = boot_snapshot_cell(&endpoint);
+  let mut last_snapshot_version = stale_version;
+  assert!(
+    snapshot.borrow().by_id(&SmolStr::new("seed")).is_none(),
+    "precondition: the bootstrap snapshot does not yet carry the peer",
+  );
+
+  // The probe reads the published cell at the resolution instant through the
+  // driver-thread thread-local; the cell stored there is a clone of the very `Rc`
+  // the helper publishes into.
+  let probe = std::sync::Arc::new(ResolutionProbe {
+    fired: std::sync::atomic::AtomicBool::new(false),
+    seed_published_at_resolution: std::sync::atomic::AtomicBool::new(false),
+  });
+  RESOLUTION_PROBE_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(snapshot.clone()));
+
+  // Register the probe waker on the reply receiver, so the driver's `reply.send`
+  // inside the helper wakes it. The poll returns Pending (nothing resolved yet).
+  let waker = std::task::Waker::from(probe.clone());
+  let mut cx = core::task::Context::from_waker(&waker);
+  assert!(
+    core::future::Future::poll(core::pin::Pin::new(&mut rx), &mut cx).is_pending(),
+    "the reply is not yet resolved; this poll registers the probe waker",
+  );
+
+  let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
+  let observation_dropped = Cell::new(0u64);
+  let obs_payload_bytes = Cell::new(0u64);
+  let did_events = super::publish_snapshot_then_drain_events::<SmolStr, SocketAddr, RawRecords, _>(
+    &mut endpoint,
+    &snapshot,
+    &mut last_snapshot_version,
+    &obs_tx,
+    &observation_dropped,
+    &obs_payload_bytes,
+    None,
+    &mut pending,
+  )
+  .await;
+
+  RESOLUTION_PROBE_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
+
+  use std::sync::atomic::Ordering;
+  assert!(did_events, "the helper drained the completion event");
+  assert!(
+    probe.fired.load(Ordering::SeqCst),
+    "the helper must have resolved the join waiter (else this test proves nothing)",
+  );
+  assert!(
+    probe.seed_published_at_resolution.load(Ordering::SeqCst),
+    "publish-before-notify: at the instant the helper resolved the join waiter the \
+     merged seed was ALREADY in the published snapshot — a reorder publishing AFTER \
+     the notify would leave it stale here",
+  );
+  match rx.await {
+    Ok(Ok(reached)) => assert!(
+      reached.contains(&addr_a),
+      "the completion resolved the join Ok: {reached:?}",
     ),
     other => panic!("expected Ok(reached) for a fully-completed join; got {other:?}"),
   }
@@ -2058,6 +2370,7 @@ async fn shutdown_command_does_not_fabricate_response_without_fin() {
     cancel_rx,
     &bridge_inbound_tx,
     64,
+    Duration::from_secs(60),
     Duration::from_secs(60),
   );
 
