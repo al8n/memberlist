@@ -1312,6 +1312,157 @@ fn established_tls_complete_unit_with_close_notify_stays_clean() {
   );
 }
 
+/// F1 (retained-tail ordering, positive control): a coalesced
+/// `[handshake final][reliable unit > 16 KiB][close_notify]` delivered to a
+/// still-`Handshaking` server trips the record layer's received-plaintext
+/// backpressure, so the authenticated `close_notify` stays BEHIND the large
+/// unit in the retained ciphertext tail and `peer_has_closed()` is still false
+/// when a pre-promotion bare EOF arrives. The pre-promotion truncation gate
+/// must NOT eager-fail here (the close IS present, just unprocessed): it latches
+/// `pending_eof` and defers to the post-promotion gate, which — after
+/// `replay_pending` drains the tail and processes the `close_notify` — sees the
+/// authenticated close and keeps the exchange CLEAN.
+///
+/// Mutation anchor: dropping the `pending_inbound.is_empty()` guard on the
+/// pre-promotion gate makes this exchange eager-fail `ConnectionLost` before the
+/// retained close_notify is ever processed, so the "committed / not failed"
+/// assertions below fail.
+#[test]
+fn pre_promotion_large_unit_with_retained_close_notify_stays_clean() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+
+  // Drive the handshake until the CLIENT is done but the SERVER has NOT yet
+  // consumed the client's final flight (still Handshaking, no Stream).
+  for _ in 0..64 {
+    if !client.is_handshaking() {
+      break;
+    }
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    if !c_out.is_empty() {
+      server.handle_transport_data(&c_out, now).unwrap();
+    }
+    let mut s_out = Vec::new();
+    server.poll_transport_transmit(&mut s_out);
+    if !s_out.is_empty() {
+      client.handle_transport_data(&s_out, now).unwrap();
+    }
+    if c_out.is_empty() && s_out.is_empty() {
+      break;
+    }
+  }
+  assert!(!client.is_handshaking(), "client completed its handshake");
+  assert!(
+    server.is_handshaking(),
+    "server has not consumed the client's final flight"
+  );
+
+  // Client: a one-way LARGE (> 16 KiB) user message. `pump_out` writes the
+  // reliable unit AND (one-way half-close) queues a `close_notify`, so the
+  // coalesced transmit is `[Finished][> 16 KiB unit][close_notify]`.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7450)));
+  let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
+  let sid = ep_c
+    .start_user_message(addr(7000), payload.clone(), now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client
+    .pump_out(now)
+    .expect("client pumps its request + close_notify");
+  let mut coalesced = Vec::new();
+  for _ in 0..64 {
+    let before = coalesced.len();
+    client.poll_transport_transmit(&mut coalesced);
+    if coalesced.len() == before {
+      break;
+    }
+  }
+  assert!(
+    coalesced.len() > 16 * 1024,
+    "the coalesced [Finished][large unit][close_notify] exceeds the received-plaintext limit, got {}",
+    coalesced.len()
+  );
+
+  // Deliver the WHOLE coalesced buffer to the still-Handshaking server. The
+  // handshake settles; the > 16 KiB unit trips backpressure, so the record layer
+  // retains the tail (rest of the unit + the close_notify) in `pending_inbound`
+  // and `peer_has_closed()` is still false.
+  server
+    .handle_transport_data(&coalesced, now)
+    .expect("the coalesced final flight + large unit + close_notify is accepted");
+  assert!(
+    !server.is_handshaking(),
+    "the server handshake settled inside the coalesced feed"
+  );
+  assert!(
+    !server.pending_inbound_is_empty(),
+    "the > 16 KiB unit tripped backpressure — the close_notify is retained behind it"
+  );
+
+  // A bare EOF arrives pre-promotion. Because retained ciphertext (carrying the
+  // close_notify) is still to be processed, the truncation gate must DEFER —
+  // latch `pending_eof`, not eager-fail.
+  server
+    .handle_transport_data(&[], now)
+    .expect("a pre-promotion EOF with retained ciphertext defers, it does not fail");
+  assert!(
+    !server.is_terminal(),
+    "the bridge is NOT failed — the retained close_notify is a clean close, got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(
+    server.pending_eof(),
+    "the pre-promotion EOF was latched, not failed"
+  );
+
+  // Promote + replay: the retained tail (unit + close_notify) drains, the
+  // authenticated close is processed (peer_has_closed becomes true), and the
+  // latched EOF is applied AFTER — so the post-promotion gate stays clean.
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7450), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+  server
+    .replay_pending(now)
+    .expect("post-promote replay drains the large unit + close_notify cleanly");
+  assert!(
+    !matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(_))
+    ),
+    "a large unit with a retained close_notify closes clean, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  server.drain_payload_only(&mut ep_s, now);
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = Vec::new();
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed.push(data);
+    }
+  }
+  assert_eq!(
+    committed.len(),
+    1,
+    "the large payload commits exactly once (not zero, not duplicated)"
+  );
+  assert_eq!(
+    committed[0].as_ref(),
+    payload.as_ref(),
+    "the reassembled large payload is intact"
+  );
+}
+
 // ── F2: an in-band close before the composed handshake settles is terminal ──
 
 /// Build a `Labeled<TlsRecords>` acceptor bridge that requires `cluster` as its

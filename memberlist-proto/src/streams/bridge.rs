@@ -1083,14 +1083,30 @@ where
           self.fail(BridgeFailure::ConnectionLost);
           return Err(());
         }
-        if R::requires_authenticated_close() && !self.records.peer_has_closed() {
-          // Settled handshake, a complete unit already buffered, then a bare
-          // FIN with no authenticated in-band close (TLS `close_notify`): a
-          // truncation. Fail EARLY, before minting a `Stream`, rather than
-          // latching `pending_eof` and replaying into the post-promotion clean
-          // path (the post-promotion gate in `pump_in_established` would also
-          // catch it via `replay_pending`, but this avoids minting a doomed
-          // `Stream` for an exchange that is already truncated).
+        if R::requires_authenticated_close()
+          && !self.records.peer_has_closed()
+          && self.pending_inbound.is_empty()
+        {
+          // Settled handshake, every received byte already processed (no
+          // retained inbound ciphertext), then a bare FIN with no authenticated
+          // in-band close (TLS `close_notify`): a truncation. Fail EARLY, before
+          // minting a `Stream`, rather than latching `pending_eof` and replaying
+          // into the post-promotion clean path.
+          //
+          // The `pending_inbound.is_empty()` guard is load-bearing. A coalesced
+          // `[handshake final][reliable unit > 16 KiB][close_notify]` trips the
+          // record layer's received-plaintext backpressure, so the
+          // `close_notify`'s ciphertext stays in the retained tail
+          // (`pending_inbound`) BEHIND the large unit and `peer_has_closed()` is
+          // still `false` here — the authenticated close IS present, just not
+          // processed yet. Eager-failing then would drop a CLEAN exchange. When
+          // the tail is non-empty we instead fall through to latch `pending_eof`
+          // and defer the authenticated-close classification to the
+          // post-promotion gate, which runs AFTER `replay_pending` drains the
+          // tail (processing the `close_notify`, so `peer_has_closed()` is then
+          // `true` and the exchange stays clean). This is only an optimization —
+          // avoiding a minted `Stream` for a genuinely-truncated pre-mint
+          // exchange — so deferring when unsure costs at most one `Stream` mint.
           self.fail(BridgeFailure::ConnectionLost);
           return Err(());
         }
