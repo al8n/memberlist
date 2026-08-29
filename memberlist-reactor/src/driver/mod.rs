@@ -14,6 +14,17 @@ use smallvec::SmallVec;
 #[cfg(any(feature = "tcp", feature = "tls", feature = "quic"))]
 use std::net::SocketAddr;
 
+/// Wall-clock bound on deferring a DUE `handle_timeout` behind capped inbound
+/// paths. Inbound drains roughly FIFO, so the pre-deadline backlog clears
+/// within a bounded number of capped polls (microseconds at gossip datagram
+/// sizes) — the grace exists so a sustained external flood that keeps every
+/// poll capped cannot suppress failure detection, while a burst that merely
+/// truncated one batch never prematurely times out the input it buffered.
+/// Shared by every reliable-plane driver so both gates use the same bound.
+#[cfg(any(feature = "tcp", feature = "tls", feature = "quic"))]
+pub(crate) const TIMEOUT_STALENESS_GRACE: core::time::Duration =
+  core::time::Duration::from_millis(5);
+
 /// Build a fully-resolved join's reply from its reached set and requested count.
 /// A non-empty set resolves `Ok(set)`; an empty set is the all-failed case,
 /// surfacing `JoinFailed { requested, contacted: 0 }` with an empty

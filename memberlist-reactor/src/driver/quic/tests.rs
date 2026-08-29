@@ -4,7 +4,7 @@ use std::{
   thread,
 };
 
-use agnostic::{net::Net, tokio::TokioRuntime};
+use agnostic::{RuntimeLite, net::Net, tokio::TokioRuntime};
 #[cfg(checksum)]
 use memberlist_proto::ChecksumOptions;
 #[cfg(compression)]
@@ -13,10 +13,11 @@ use memberlist_proto::CompressionOptions;
 use memberlist_proto::EncryptionOptions;
 use memberlist_proto::{
   Node, QuicOptions, UnreliableTransport,
+  codec::{EncodeOptions, encode_outgoing},
   config::EndpointOptions,
   endpoint::Endpoint,
   event::{Reliability, UserPacket},
-  typed::{NodeState, State},
+  typed::{Alive, Message, NodeState, State, Suspect},
 };
 use quinn_proto::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
 use rustls::RootCertStore;
@@ -977,5 +978,347 @@ async fn reliable_over_cap_repeated_bounded_and_per_peer() {
   assert!(
     matches!(rx.try_recv(), Ok(None)),
     "a send to a peer with capacity is admitted and parks, not refused"
+  );
+}
+
+/// Build a `QuicDriver` with an explicit `recv_batch` and a preparation hook run
+/// on the endpoint before the driver is built. The periodic schedulers are left
+/// OFF (no `start_scheduling`) so a staged suspicion timer is the machine's ONLY
+/// deadline, and the suspicion timeout is shortened via `suspicion_mult = 1` and
+/// the caller's `probe_interval` (its milliseconds are the suspicion timeout at a
+/// two-node cluster's unit node-scale), so a test can sleep to the due instant
+/// quickly.
+async fn build_driver_with(
+  obs_cap: usize,
+  obs_budget: Option<u64>,
+  recv_batch: usize,
+  probe_interval: Duration,
+  prep: impl FnOnce(&mut QuicEndpoint<SmolStr, rand::rngs::StdRng>),
+) -> (
+  QuicDriver<SmolStr, TokioRuntime>,
+  flume::Receiver<Event<SmolStr, SocketAddr>>,
+  Arc<Shared<SmolStr>>,
+  Arc<AtomicU64>,
+) {
+  let socket = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind gossip socket");
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("qdrv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    )
+    .with_suspicion_mult(1)
+    .with_probe_interval(probe_interval),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
+  let mut endpoint = QuicEndpoint::new(ep, self_trusted_quic());
+  prep(&mut endpoint);
+  let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
+  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+  let (obs_tx, obs_rx) = flume::bounded(obs_cap);
+  let driver = QuicDriver::<SmolStr, TokioRuntime>::new(
+    endpoint,
+    socket,
+    shared.clone(),
+    recv_batch,
+    8,
+    obs_tx,
+    obs_payload_bytes.clone(),
+    obs_budget,
+    None,
+    #[cfg(feature = "cidr")]
+    None,
+    #[cfg(not(feature = "cidr"))]
+    (),
+  );
+  (driver, obs_rx, shared, obs_payload_bytes)
+}
+
+/// Stage a suspicion timer on a fresh peer: the machine's next deadline is its
+/// suspicion timeout (a fixed multiple of the probe interval, no random
+/// stagger), and its fire is OBSERVABLE as the peer turning `Dead` — so a test
+/// can distinguish a deferred timeout from a fired one by member state rather
+/// than by driver bookkeeping alone.
+fn stage_suspicion(
+  endpoint: &mut QuicEndpoint<SmolStr, rand::rngs::StdRng>,
+  id: &str,
+  peer_addr: SocketAddr,
+) {
+  let now = Instant::now();
+  endpoint.handle_alive(
+    peer_addr,
+    Alive::new(1, Node::new(SmolStr::new(id), peer_addr)),
+    now,
+  );
+  endpoint.handle_suspect(
+    peer_addr,
+    Suspect::new(1, SmolStr::new(id), SmolStr::new("qdrv")),
+    now,
+  );
+}
+
+/// The peer's gossip-tracked liveness, straight from the machine.
+fn peer_state(driver: &QuicDriver<SmolStr, TokioRuntime>, id: &str) -> Option<State> {
+  driver
+    .endpoint
+    .endpoint_ref()
+    .member_liveness(&SmolStr::new(id))
+}
+
+/// The plain gossip-frame bytes of an `Alive(inc)` for `id`@`peer_addr`, encoded
+/// through the PUBLIC codec exactly as the driver's outbound path emits gossip.
+/// With no gossip transforms configured on the default endpoint the inbound
+/// ingress path (`unwrap_transforms` / `decrypt_gossip`, then `decode_incoming`
+/// and `parse_messages`) round-trips it back to the same `Alive`, so a real UDP
+/// datagram carrying these bytes decodes and refutes the suspicion.
+fn refuting_alive_datagram(id: &str, peer_addr: SocketAddr, inc: u32) -> Vec<u8> {
+  let msg: Message<SmolStr, SocketAddr> =
+    Message::Alive(Alive::new(inc, Node::new(SmolStr::new(id), peer_addr)));
+  encode_outgoing(&msg, &EncodeOptions::new(None))
+    .expect("a well-formed Alive encodes")
+    .to_vec()
+}
+
+/// A DUE suspicion deadline must not fire while the gossip recv is capped: a
+/// refuting `Alive(inc+1)` that arrived before the deadline can still be
+/// buffered in the kernel socket behind a truncated batch, and firing past it
+/// would declare a live peer `Dead` cluster-wide. The pump anchors the deferral
+/// and self-wakes to drain instead; on the next poll the buffered `Alive`
+/// decodes and refutes the suspicion, so the peer ends `Alive`, never `Dead`.
+/// Deferral versus firing is read off the MACHINE (member state), so a
+/// `handle_timeout` call that is silently dropped or relocated past the gate
+/// fails this test rather than merely re-shuffling driver bookkeeping.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_defers_then_a_buffered_alive_refutes_the_suspicion() {
+  let peer_addr: SocketAddr = "127.0.0.1:39990".parse().unwrap();
+  // recv_batch == 1: every poll that reads a datagram is capped, so the two
+  // preloaded datagrams surface one per poll.
+  let (mut driver, _obs_rx, _shared, _bytes) =
+    build_driver_with(64, None, 1, Duration::from_millis(40), |endpoint| {
+      stage_suspicion(endpoint, "capped-peer", peer_addr);
+    })
+    .await;
+
+  // Let the suspicion deadline fall due while the pump is unpolled — the machine
+  // is passive, so the peer stays Suspect until a poll fires it.
+  let due_at = driver
+    .endpoint
+    .poll_timeout()
+    .expect("the staged suspicion arms a machine deadline");
+  TokioRuntime::sleep(due_at.saturating_duration_since(Instant::now()) + Duration::from_millis(20))
+    .await;
+
+  // Preload the kernel FIFO: one garbage datagram (dropped by classification, but
+  // still counts toward the batch) THEN the refuting Alive, from the same sender
+  // so loopback delivers them in order.
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+  tx.send_to(&[0x20u8; 24], gossip_addr)
+    .await
+    .expect("garbage send");
+  tx.send_to(
+    &refuting_alive_datagram("capped-peer", peer_addr, 2),
+    gossip_addr,
+  )
+  .await
+  .expect("alive send");
+  // Let the kernel surface both datagrams to the receiving socket.
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+
+  // Poll 1 reads only the garbage (batch capped at 1) — the due deadline DEFERS.
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "a due deadline behind a capped recv batch must defer, not fire"
+  );
+  assert_eq!(
+    peer_state(&driver, "capped-peer"),
+    Some(State::Suspect),
+    "the deferred fire must leave the machine untouched: the suspicion has not \
+     completed while the recv batch is capped"
+  );
+
+  // Poll 2 (well inside the 5ms grace) reads the Alive, which decodes and refutes
+  // the suspicion BEFORE the timeout region runs — the peer is now Alive, so the
+  // deadline can never declare it Dead.
+  let _ = poll_once(&mut driver);
+  assert_eq!(
+    peer_state(&driver, "capped-peer"),
+    Some(State::Alive),
+    "the buffered Alive refutes the suspicion the deferral kept open — the peer \
+     is Alive, never Dead"
+  );
+}
+
+/// The deferral is bounded: a sustained flood that keeps every poll capped
+/// cannot suppress `handle_timeout` past the staleness grace — the due deadline
+/// force-fires even with the backlog still standing, observable as the suspicion
+/// completing (the peer turns `Dead`) with the socket still saturated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_timeout_force_fires_past_the_staleness_grace() {
+  let peer_addr: SocketAddr = "127.0.0.1:39991".parse().unwrap();
+  let (mut driver, _obs_rx, _shared, _bytes) =
+    build_driver_with(64, None, 8, Duration::from_millis(40), |endpoint| {
+      stage_suspicion(endpoint, "flooded-peer", peer_addr);
+    })
+    .await;
+
+  let due_at = driver
+    .endpoint
+    .poll_timeout()
+    .expect("the staged suspicion arms a machine deadline");
+  TokioRuntime::sleep(due_at.saturating_duration_since(Instant::now()) + Duration::from_millis(20))
+    .await;
+
+  let gossip_addr = driver
+    .socket
+    .as_ref()
+    .expect("gossip socket held")
+    .local_addr()
+    .expect("gossip local addr");
+  let tx = <TokioNet as Net>::UdpSocket::bind("127.0.0.1:0")
+    .await
+    .expect("bind flood socket");
+
+  // Anchor the deferral with a first capped poll: the due suspicion is held.
+  for _ in 0..24 {
+    tx.send_to(&[0x20u8; 24], gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(Duration::from_millis(50)).await;
+  let _ = poll_once(&mut driver);
+  assert!(
+    driver.timeout_stall_since.is_some(),
+    "the flood must anchor a deferral first"
+  );
+  assert_eq!(
+    peer_state(&driver, "flooded-peer"),
+    Some(State::Suspect),
+    "the anchored deferral must hold the due suspicion open"
+  );
+
+  // Keep the socket saturated past the grace, then poll: the due deadline must
+  // force-fire despite the standing backlog.
+  for _ in 0..24 {
+    tx.send_to(&[0x20u8; 24], gossip_addr)
+      .await
+      .expect("flood send");
+  }
+  TokioRuntime::sleep(TIMEOUT_STALENESS_GRACE + Duration::from_millis(10)).await;
+  let _ = poll_once(&mut driver);
+  assert_eq!(
+    peer_state(&driver, "flooded-peer"),
+    Some(State::Dead),
+    "a sustained flood must not suppress the deadline past the staleness grace: \
+     the force-fire completes the suspicion"
+  );
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "the force-fire clears the deferral anchor"
+  );
+}
+
+/// The armed-sleep arm is machine-neutral: when the sleep polls Ready, the pump
+/// clears it and self-wakes — it never touches the endpoint. Entering that arm
+/// requires a STABLE future target (a machine deadline below the idle wake), else
+/// `arm_timer` replaces the staged sleep with a fresh one before it is ever
+/// polled; a staged suspicion supplies one, and swapping the armed sleep for an
+/// elapsed one while keeping `timer_deadline` drives the arm deterministically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_sleep_is_cleared_without_touching_the_machine() {
+  let peer_addr: SocketAddr = "127.0.0.1:39992".parse().unwrap();
+  // A 1s probe interval puts the suspicion deadline ~1s out — comfortably beyond
+  // this test's microsecond-scale polls and the 20ms swap wait, yet below the
+  // idle wake set next.
+  let (mut driver, _obs_rx, _shared, _bytes) =
+    build_driver_with(64, None, 8, Duration::from_secs(1), |endpoint| {
+      stage_suspicion(endpoint, "suspect-peer", peer_addr);
+    })
+    .await;
+  // Keep the idle wake above the suspicion deadline so the machine deadline is
+  // the arm target — a nearer idle target recomputes fresh every poll and would
+  // replace the staged sleep.
+  driver.idle_wake = Duration::from_secs(600);
+
+  // Quiescent poll arms the sleep toward the machine deadline.
+  let _ = poll_once(&mut driver);
+  let armed = driver.timer_deadline;
+  let machine_deadline = driver.endpoint.poll_timeout();
+  assert_eq!(
+    armed, machine_deadline,
+    "with a machine deadline below the idle wake, the timer arms toward it"
+  );
+  let target = armed.expect("the quiescent poll arms the sleep");
+
+  // Swap in an elapsed sleep, keeping the recorded deadline: the next poll
+  // recomputes the SAME stable target, so `arm_timer` keeps this sleep and polls
+  // it Ready — the exact shape of a deadline crossing between the fresh clock
+  // sample and the timer poll. The wait lets the zero-duration sleep pass the
+  // timer wheel's coarse elapse check while the suspicion deadline stays future.
+  driver.timer = Some(Box::pin(TokioRuntime::sleep(Duration::ZERO)));
+  TokioRuntime::sleep(Duration::from_millis(20)).await;
+  assert!(
+    Instant::now() < target,
+    "precondition: the machine deadline is still in the future"
+  );
+  let _ = poll_once(&mut driver);
+
+  assert!(
+    driver.timer.is_none() && driver.timer_deadline.is_none(),
+    "the ready sleep is consumed by the armed-sleep arm, not replaced"
+  );
+  assert_eq!(
+    driver.endpoint.poll_timeout(),
+    machine_deadline,
+    "the armed-sleep arm must not fire the machine timer: the deadline is \
+     untouched and fires later through the gated due branch"
+  );
+  assert!(
+    driver.timeout_stall_since.is_none(),
+    "clearing a ready sleep must not anchor a deferral"
+  );
+}
+
+/// The inbound-quiescence gate is sound only if the machine timer can fire
+/// nowhere else: every `handle_timeout` must route through the single gated
+/// decision (fresh clock sample, backlog deferral, staleness grace). Pin that
+/// structurally — the pump source carries exactly one call site AND it sits
+/// inside the gated block, so the call can neither gain a sibling nor be
+/// relocated to an arm (the ready-sleep arm in particular) that bypasses the
+/// gate.
+#[test]
+fn the_pump_fires_timeouts_only_inside_the_gated_branch() {
+  let src = include_str!("mod.rs");
+  assert_eq!(
+    src.matches(".handle_timeout(").count(),
+    1,
+    "a second handle_timeout call site can fire a due deadline past capped \
+     inbound backlog holding a deadline-refuting input"
+  );
+  let gate = src
+    .find("if !inbound_backlog || grace_elapsed")
+    .expect("the gated due decision exists in the pump");
+  // The gated block holds straight-line statements only, so its first `}` is its
+  // closing brace; the sole call must sit between the condition and it.
+  let gate_close = gate
+    + src[gate..]
+      .find('}')
+      .expect("the gated due decision block closes");
+  let call = src
+    .find(".handle_timeout(")
+    .expect("the single call site exists");
+  assert!(
+    gate < call && call < gate_close,
+    "the sole handle_timeout call must sit inside the gated due decision — \
+     anywhere else can fire past capped inbound backlog"
   );
 }
