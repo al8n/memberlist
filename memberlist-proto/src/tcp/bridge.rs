@@ -1560,3 +1560,77 @@ fn pump_out_on_fsm_failed_bridge_uses_fsm_reason() {
     phase_label(server.phase_ref())
   );
 }
+
+/// F1-4 (positive control, guards plain TCP): a promoted plain-TCP server
+/// receives one COMPLETE reliable unit and then a bare transport FIN. Unlike
+/// TLS, a plain-TCP FIN at a complete-unit boundary IS the legitimate clean
+/// close (`Passthrough::requires_authenticated_close() == false`), so the
+/// truncation gate must NOT fire: the exchange stays clean and commits its
+/// payload. Proves the F1 gate leaves `Passthrough` behavior unchanged.
+#[test]
+fn established_tcp_complete_unit_then_fin_stays_clean() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair("cluster-x", now + Duration::from_secs(10));
+  complete_label_exchange(&mut client, &mut server, now);
+
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7820)));
+  let payload = Bytes::from_static(b"plain-tcp-clean-unit");
+  let sid = ep_c
+    .start_user_message(addr(7000), payload.clone(), now)
+    .expect("issued while running");
+  let c_stream = ep_c.dial_succeeded(sid, now).expect("dial mints");
+  client.promote(c_stream);
+
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7820), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+
+  client
+    .pump_out(now)
+    .expect("client writes the reliable unit");
+  let mut c_out = Vec::new();
+  client.poll_transport_transmit(&mut c_out);
+  assert!(
+    !c_out.is_empty(),
+    "the plain-TCP unit is on the wire (no in-band close record exists)"
+  );
+  server
+    .handle_transport_data(&c_out, now)
+    .expect("the complete unit decodes");
+  server.drain_payload_only(&mut ep_s, now);
+
+  // The bare TCP FIN at a complete-unit boundary is a clean close for plain TCP.
+  let res = server.handle_transport_data(&[], now);
+  assert!(
+    res.is_ok(),
+    "a plain-TCP FIN at a unit boundary is a clean close, not a truncation"
+  );
+  assert!(
+    !matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(_))
+    ),
+    "the truncation gate must NOT fire for plain TCP, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  server.drain_payload_only(&mut ep_s, now);
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
+  assert_eq!(
+    committed.as_deref(),
+    Some(payload.as_ref()),
+    "the plain-TCP exchange commits its payload cleanly"
+  );
+}

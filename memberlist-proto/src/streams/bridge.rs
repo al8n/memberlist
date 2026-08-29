@@ -442,6 +442,20 @@ where
         }
       };
 
+      // The inner record stream authenticated-closed before the composed
+      // handshake / label could settle (e.g. TLS complete + `close_notify`
+      // before the peer's label): the record layer will read no further, so the
+      // handshake can never complete — fail now rather than holding a zombie
+      // bridge until the accept deadline. Automatically TCP-safe:
+      // `Passthrough::peer_has_closed()` is permanently `false`, so this never
+      // fires for plain TCP (whose pre-`Stream` EOF is the empty-slice
+      // `is_handshaking => fail` above). No retire here — during `Handshaking`
+      // there is no `Stream` and no queue to clear.
+      if self.records.is_handshaking() && self.records.peer_has_closed() {
+        self.fail(BridgeFailure::ConnectionLost);
+        return Err(());
+      }
+
       // The handshake / label step just settled inside this feed: any trailing
       // request is already surfaced as inbound plaintext inside the record
       // layer (drained by `replay_pending` post-promotion), unless the record
@@ -1069,6 +1083,17 @@ where
           self.fail(BridgeFailure::ConnectionLost);
           return Err(());
         }
+        if R::requires_authenticated_close() && !self.records.peer_has_closed() {
+          // Settled handshake, a complete unit already buffered, then a bare
+          // FIN with no authenticated in-band close (TLS `close_notify`): a
+          // truncation. Fail EARLY, before minting a `Stream`, rather than
+          // latching `pending_eof` and replaying into the post-promotion clean
+          // path (the post-promotion gate in `pump_in_established` would also
+          // catch it via `replay_pending`, but this avoids minting a doomed
+          // `Stream` for an exchange that is already truncated).
+          self.fail(BridgeFailure::ConnectionLost);
+          return Err(());
+        }
         self.pending_eof = true;
       }
       return self.intake_handshaking(data, now);
@@ -1195,7 +1220,8 @@ where
     // premature-vs-clean EOF decision. A premature EOF
     // (`StreamError::PeerClosed`) is the truncation path → decode failure; a
     // clean EOF (`Ok`) retires the recv half below via `observe_recv_fin`.
-    let fin_seen = eof || self.records.peer_has_closed();
+    let peer_closed = self.records.peer_has_closed();
+    let fin_seen = eof || peer_closed;
     if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
       // A trailing partial reliable unit at EOF is a truncated transmission —
       // the peer closed mid-unit. Treat it as a decode failure (the same
@@ -1222,6 +1248,22 @@ where
       // `Stream::is_failed()`; `drain_then_reap`'s `StreamErrored` notice uses
       // the `BridgeFailure::Decode` high-level reason.
       self.fail_with_retire(BridgeFailure::Decode);
+      return Err(());
+    }
+
+    // Authenticated-close gate. Reaching here with `fin_seen` means the FSM
+    // accepted the close anchor as a CLEAN completion (a premature EOF routed
+    // through the decode-fail path above). But a secure transport's clean
+    // receive-close is its authenticated in-band close — so a bare transport FIN
+    // (`eof && !peer_closed`) on such a transport is a truncation at a
+    // complete-unit boundary, not a clean completion, even though the FSM's
+    // exchange happens to be complete. Fail it `ConnectionLost` rather than
+    // committing the buffered payload as cleanly closed. Plain TCP's
+    // `peer_has_closed()` is permanently `false` AND `requires_authenticated_close()`
+    // is `false`, so this never fires there — a plain-TCP FIN at a unit boundary
+    // stays the legitimate clean close.
+    if fin_seen && !decode_failed && eof && !peer_closed && R::requires_authenticated_close() {
+      self.fail_with_retire(BridgeFailure::ConnectionLost);
       return Err(());
     }
 

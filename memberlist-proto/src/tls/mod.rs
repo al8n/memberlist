@@ -127,6 +127,12 @@ impl StreamTransport for TlsRecords {
   fn is_secure() -> bool {
     true
   }
+
+  fn requires_authenticated_close() -> bool {
+    // TLS's clean receive-close is its authenticated `close_notify` alert; a
+    // bare transport FIN — even at a complete-unit boundary — is a truncation.
+    true
+  }
 }
 
 #[cfg(test)]

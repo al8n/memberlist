@@ -21,11 +21,18 @@ use crate::{
   error::StreamError,
   event::Event,
   streams::{
+    LabelOptions, Labeled,
     bridge::StreamBridge,
     phase::BridgePhase,
-    test_support::{addr, handshaking_pair as shared_handshaking_pair, phase_label},
+    test_support::{
+      TEST_RELIABLE_MAX, addr, handshaking_pair as shared_handshaking_pair, phase_label,
+    },
+    transport::StreamTransport,
   },
-  tls::options::tests::{test_client, test_server},
+  tls::{
+    TlsOptions,
+    options::tests::{test_client, test_server},
+  },
 };
 
 /// Build a `Handshaking` client/server bridge pair sharing the accept-any
@@ -1002,5 +1009,595 @@ fn tls_bridge_reliable_skips_encryption_when_is_secure() {
   assert!(
     !bridge.encryption_for_test().is_enabled(),
     "a TLS bridge zeroes the EncryptionOptions regardless of caller intent"
+  );
+}
+
+// ── F1: a bare transport FIN is NOT a clean TLS close ───────────────────────
+
+/// Walk the outer TLS record framing of `ciphertext` and return
+/// `(all_but_last_record, last_record)`. Each TLS record is a 5-byte header
+/// (`[type][version_hi][version_lo][len_hi][len_lo]`) followed by `len`
+/// application bytes; the outer length is cleartext even in TLS 1.3 (only the
+/// content type is hidden by the record protection). The last record a
+/// post-handshake dialer transmits is its `close_notify` alert, so dropping it
+/// simulates an on-path truncation that delivers the complete application
+/// record(s) without the authenticated in-band close.
+fn split_trailing_tls_record(ciphertext: &[u8]) -> (&[u8], &[u8]) {
+  let mut last_start = 0usize;
+  let mut offset = 0usize;
+  while offset + 5 <= ciphertext.len() {
+    let len = u16::from_be_bytes([ciphertext[offset + 3], ciphertext[offset + 4]]) as usize;
+    let end = offset + 5 + len;
+    assert!(
+      end <= ciphertext.len(),
+      "a TLS record header must not declare a length past the buffer"
+    );
+    last_start = offset;
+    offset = end;
+  }
+  assert_eq!(
+    offset,
+    ciphertext.len(),
+    "the captured ciphertext is a whole number of TLS records"
+  );
+  ciphertext.split_at(last_start)
+}
+
+/// F1-1: a promoted TLS server bridge receives one COMPLETE reliable unit and
+/// then a bare transport FIN with NO `close_notify`. The bare FIN is a
+/// truncation, not a clean completion: the bridge must fail
+/// `Failed(ConnectionLost)` and commit NO payload event. Before the fix the
+/// bridge computed `fin_seen = eof || peer_has_closed()` and accepted the bare
+/// FIN as a clean close, committing the buffered `UserData`.
+///
+/// Mutation anchor: reverting the post-promotion gate in `pump_in_established`
+/// lets this exchange reach `RecvClosed` and commit `Event::UserPacket`, so the
+/// "NO payload committed" assertion below fails.
+#[test]
+fn established_tls_complete_unit_then_bare_fin_is_truncation() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  // Client: a one-way user message. `pump_out` writes the reliable unit AND
+  // (one-way half-close) queues a `close_notify`, so the transmit is
+  // `[app record][close_notify record]`.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7300)));
+  let payload = Bytes::from_static(b"truncated-tls-unit");
+  let sid = ep_c
+    .start_user_message(addr(7000), payload.clone(), now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client
+    .pump_out(now)
+    .expect("client pumps its request + close_notify");
+
+  // Server: accept + promote, then drain the pre-existing endpoint events so the
+  // post-truncation assertion observes only what the truncated exchange emits.
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7300), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+
+  // On-path truncation: deliver the application record(s) but DROP the trailing
+  // `close_notify` record.
+  let mut c_out = Vec::new();
+  client.poll_transport_transmit(&mut c_out);
+  let (app, close_notify) = split_trailing_tls_record(&c_out);
+  assert_eq!(
+    close_notify.len(),
+    24,
+    "the withheld trailing record is the 24-byte TLS 1.3 close_notify"
+  );
+  server
+    .handle_transport_data(app, now)
+    .expect("the complete reliable unit decodes");
+
+  // Nothing commits yet — the payload event stays queued pending close proof.
+  server.drain_payload_only(&mut ep_s, now);
+  assert!(
+    ep_s.poll_event().is_none(),
+    "no payload commits before the close anchor"
+  );
+
+  // The bare transport FIN, with no `close_notify` observed.
+  let res = server.handle_transport_data(&[], now);
+  assert!(
+    res.is_err(),
+    "a bare FIN on a TLS exchange with no close_notify is a truncation"
+  );
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::ConnectionLost))
+    ),
+    "the truncated TLS exchange fails ConnectionLost, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  // The reap routes a `StreamErrored` notice (no public Event); crucially, the
+  // buffered payload is NEVER committed.
+  server.drain_payload_only(&mut ep_s, now);
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
+  assert!(
+    committed.is_none(),
+    "a truncated TLS exchange commits NO payload event, got {committed:?}"
+  );
+  assert!(
+    server.is_terminal(),
+    "the bridge is terminal after the truncation reap"
+  );
+}
+
+/// F1-2: the same truncation with the complete unit buffered PRE-promotion. A
+/// bare FIN arriving before the `Stream` is minted must fail EARLY
+/// (`ConnectionLost`) through the settled-empty-slice gate — NOT latch
+/// `pending_eof` and mint a doomed `Stream` that later replays into the
+/// post-promotion clean path.
+///
+/// Mutation anchor: reverting the pre-promotion gate lets the empty-slice arm
+/// latch `pending_eof` and return `Ok`, leaving the bridge live (not
+/// terminal), so the `Failed(ConnectionLost)` assertion fails.
+#[test]
+fn pre_promotion_tls_complete_unit_then_bare_fin_fails_without_minting() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+
+  // Drive the handshake until the CLIENT is done but the SERVER has NOT yet
+  // consumed the client's final flight (still Handshaking, no Stream).
+  for _ in 0..64 {
+    if !client.is_handshaking() {
+      break;
+    }
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    if !c_out.is_empty() {
+      server.handle_transport_data(&c_out, now).unwrap();
+    }
+    let mut s_out = Vec::new();
+    server.poll_transport_transmit(&mut s_out);
+    if !s_out.is_empty() {
+      client.handle_transport_data(&s_out, now).unwrap();
+    }
+    if c_out.is_empty() && s_out.is_empty() {
+      break;
+    }
+  }
+  assert!(!client.is_handshaking(), "client completed its handshake");
+  assert!(
+    server.is_handshaking(),
+    "server has not consumed the client's final flight"
+  );
+
+  // Client: a one-way user message; coalesce `[Finished][app unit][close_notify]`.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7350)));
+  let payload = Bytes::from_static(b"pre-promote-truncation");
+  let sid = ep_c
+    .start_user_message(addr(7000), payload, now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client.pump_out(now).expect("client pumps its request");
+  let mut coalesced = Vec::new();
+  for _ in 0..64 {
+    let before = coalesced.len();
+    client.poll_transport_transmit(&mut coalesced);
+    if coalesced.len() == before {
+      break;
+    }
+  }
+
+  // Truncation: drop the trailing `close_notify` record. Feed the
+  // `[Finished][app unit]` prefix to the still-Handshaking server: the handshake
+  // completes and the unit buffers inside rustls, but `peer_has_closed()` stays
+  // false.
+  let (finished_and_app, close_notify) = split_trailing_tls_record(&coalesced);
+  assert_eq!(
+    close_notify.len(),
+    24,
+    "the withheld trailing record is the 24-byte TLS 1.3 close_notify"
+  );
+  server
+    .handle_transport_data(finished_and_app, now)
+    .expect("the handshake completes and the unit buffers");
+  assert!(
+    !server.is_handshaking(),
+    "the server handshake settled inside the feed"
+  );
+
+  // The bare FIN arrives pre-promotion (no Stream yet): the settled-empty-slice
+  // gate fails it early instead of latching `pending_eof`.
+  let res = server.handle_transport_data(&[], now);
+  assert!(
+    res.is_err(),
+    "a pre-promotion bare FIN on TLS is a truncation"
+  );
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::ConnectionLost))
+    ),
+    "the pre-promotion truncation fails ConnectionLost, got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(
+    server.stream_is_none(),
+    "NO Stream is minted for a truncated pre-promotion exchange"
+  );
+  assert!(server.is_terminal(), "the bridge is terminal");
+}
+
+/// F1-3 (positive control): a complete reliable unit followed by an authentic
+/// `close_notify` (and a later TCP EOF) stays CLEAN — the payload commits and
+/// the bridge is NOT failed. Proves the truncation gate only fires on a bare
+/// FIN, never on an authenticated in-band close.
+#[test]
+fn established_tls_complete_unit_with_close_notify_stays_clean() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+  complete_handshake(&mut client, &mut server, now);
+
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7400)));
+  let payload = Bytes::from_static(b"clean-tls-unit");
+  let sid = ep_c
+    .start_user_message(addr(7000), payload.clone(), now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client
+    .pump_out(now)
+    .expect("client pumps its request + close_notify");
+
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7400), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+
+  // Deliver the WHOLE transmit — application record(s) AND the `close_notify`.
+  let mut c_out = Vec::new();
+  client.poll_transport_transmit(&mut c_out);
+  server
+    .handle_transport_data(&c_out, now)
+    .expect("the unit + close_notify are accepted");
+  // The authenticated close drove `RecvClosed`; the payload commits.
+  server.drain_payload_only(&mut ep_s, now);
+  // A later bare TCP EOF is benign here (close_notify already latched).
+  server
+    .handle_transport_data(&[], now)
+    .expect("a redundant EOF after close_notify is benign");
+  assert!(
+    !matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(_))
+    ),
+    "an authenticated close_notify keeps the exchange clean, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
+  assert_eq!(
+    committed.as_deref(),
+    Some(payload.as_ref()),
+    "the cleanly-closed TLS exchange commits its payload"
+  );
+}
+
+// ── F2: an in-band close before the composed handshake settles is terminal ──
+
+/// Build a `Labeled<TlsRecords>` acceptor bridge that requires `cluster` as its
+/// inbound label. Compression + encryption start disabled; the bridge zeroes
+/// the reliable-plane encryption anyway because `TlsRecords::is_secure()`.
+fn labeled_acceptor_bridge(
+  cluster: &str,
+  deadline: Instant,
+) -> StreamBridge<SmolStr, SocketAddr, Labeled<TlsRecords>> {
+  let opts = LabelOptions::new_in(
+    Some(cluster.as_bytes().to_vec()),
+    TlsOptions::new(test_server(), test_client()),
+  );
+  let records =
+    Labeled::<TlsRecords>::acceptor(&opts).expect("acceptor construction is infallible");
+  StreamBridge::new(
+    records,
+    deadline,
+    crate::CompressionOptions::new(),
+    crate::EncryptionOptions::new(),
+    TEST_RELIABLE_MAX,
+  )
+}
+
+/// Complete the raw TLS handshake between a bare `TlsRecords` dialer (which
+/// emits NO cluster label) and a `Labeled<TlsRecords>` acceptor bridge. After
+/// this the dialer's TLS is established, but the acceptor's label gate is still
+/// validating, so the acceptor bridge remains `Handshaking`.
+fn handshake_raw_dialer_into_labeled_acceptor(
+  dialer: &mut TlsRecords,
+  acceptor: &mut StreamBridge<SmolStr, SocketAddr, Labeled<TlsRecords>>,
+  now: Instant,
+) {
+  for _ in 0..64 {
+    let mut d_out = Vec::new();
+    dialer.poll_transport_transmit(&mut d_out);
+    if !d_out.is_empty() {
+      acceptor
+        .handle_transport_data(&d_out, now)
+        .expect("handshake ciphertext is accepted");
+    }
+    let mut a_out = Vec::new();
+    acceptor.poll_transport_transmit(&mut a_out);
+    if !a_out.is_empty() {
+      // Ignoring Intake: the raw dialer only needs to advance its own
+      // handshake. (The inherent `TlsRecords::handle_transport_data` takes no
+      // `now`.)
+      let _ = dialer.handle_transport_data(&a_out);
+    }
+    if d_out.is_empty() && a_out.is_empty() {
+      break;
+    }
+  }
+}
+
+/// F2-1: a `Labeled<TlsRecords>` acceptor completes TLS, then the peer sends an
+/// authenticated `close_notify` before ever sending its cluster label (TCP held
+/// open). rustls will read no further, so the composed handshake can never
+/// settle. The bridge must fail immediately (`ConnectionLost`) with NO `Stream`
+/// minted and NO outbound label / ciphertext emitted — not linger as a zombie
+/// until the accept deadline.
+///
+/// Mutation anchor: reverting the `intake_handshaking` gate lets the empty-slice
+/// intake return `Ok` while the acceptor stays `Handshaking`, so it survives to
+/// its deadline and the `Failed(ConnectionLost)` / `is_terminal` assertions fail.
+#[test]
+fn labeled_tls_close_notify_before_label_is_terminal() {
+  let now = Instant::now();
+  let mut acceptor = labeled_acceptor_bridge("cluster-x", now + Duration::from_secs(10));
+  let mut dialer = TlsRecords::client(
+    Arc::new(test_client()),
+    ServerName::try_from("localhost").unwrap(),
+  )
+  .unwrap();
+
+  handshake_raw_dialer_into_labeled_acceptor(&mut dialer, &mut acceptor, now);
+  assert!(!dialer.is_handshaking(), "the dialer's TLS is established");
+  assert!(
+    acceptor.is_handshaking(),
+    "the acceptor still awaits the peer's cluster label"
+  );
+
+  // The peer authenticated-closes before sending any label.
+  dialer.send_close_notify();
+  let mut cn = Vec::new();
+  dialer.poll_transport_transmit(&mut cn);
+  assert!(!cn.is_empty(), "the dialer produced a close_notify record");
+
+  let res = acceptor.handle_transport_data(&cn, now);
+  assert!(
+    res.is_err(),
+    "a close_notify before the label settles is terminal"
+  );
+  assert!(
+    matches!(
+      acceptor.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::ConnectionLost))
+    ),
+    "the acceptor fails ConnectionLost, got {:?}",
+    phase_label(acceptor.phase_ref())
+  );
+  assert!(
+    acceptor.stream_is_none(),
+    "NO Stream is minted for a pre-label close"
+  );
+  assert!(acceptor.is_terminal(), "the bridge is terminal");
+
+  // No local label / ciphertext leaks on the failure path.
+  let mut leaked = Vec::new();
+  let n = acceptor.poll_transport_transmit(&mut leaked);
+  assert_eq!(n, 0, "a failed pre-label acceptor emits no outbound bytes");
+  assert!(leaked.is_empty(), "no local label or ciphertext leaked");
+}
+
+/// F2-2: the same close-before-label, but after the peer has sent a PARTIAL
+/// (fragmented) label. The label gate is mid-buffer when the `close_notify`
+/// lands; the bridge must still fail immediately rather than wait for the rest
+/// of a label that can never arrive.
+#[test]
+fn labeled_tls_close_notify_after_partial_label_is_terminal() {
+  let now = Instant::now();
+  let mut acceptor = labeled_acceptor_bridge("cluster-x", now + Duration::from_secs(10));
+  let mut dialer = TlsRecords::client(
+    Arc::new(test_client()),
+    ServerName::try_from("localhost").unwrap(),
+  )
+  .unwrap();
+
+  handshake_raw_dialer_into_labeled_acceptor(&mut dialer, &mut acceptor, now);
+  assert!(acceptor.is_handshaking(), "the acceptor awaits its label");
+
+  // A partial label frame: the `[LABELED_TAG=12][len=9]` header plus only two of
+  // the nine promised label bytes. The gate buffers it and stays validating.
+  dialer.write_plaintext(&[12u8, 9, b'c', b'l']);
+  let mut partial = Vec::new();
+  dialer.poll_transport_transmit(&mut partial);
+  acceptor
+    .handle_transport_data(&partial, now)
+    .expect("a partial label is buffered, not yet terminal");
+  assert!(
+    acceptor.is_handshaking(),
+    "a partial label leaves the acceptor validating"
+  );
+
+  // The peer authenticated-closes mid-label.
+  dialer.send_close_notify();
+  let mut cn = Vec::new();
+  dialer.poll_transport_transmit(&mut cn);
+  let res = acceptor.handle_transport_data(&cn, now);
+  assert!(res.is_err(), "a close_notify mid-label is terminal");
+  assert!(
+    matches!(
+      acceptor.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::ConnectionLost))
+    ),
+    "the acceptor fails ConnectionLost, got {:?}",
+    phase_label(acceptor.phase_ref())
+  );
+  assert!(acceptor.stream_is_none(), "NO Stream is minted");
+  assert!(acceptor.is_terminal(), "the bridge is terminal");
+}
+
+/// F2-3 (positive control): a matching label, a reliable unit, and a
+/// `close_notify` all coalesced into ONE feed to a still-`Handshaking`
+/// `Labeled<TlsRecords>` acceptor. The label settles the composed handshake in
+/// the SAME feed, so the F2 gate (which only fires while still handshaking) does
+/// NOT trip: the acceptor promotes, drains the unit, and closes cleanly.
+#[test]
+fn labeled_tls_coalesced_label_unit_close_notify_promotes_clean() {
+  let now = Instant::now();
+  let deadline = now + Duration::from_secs(10);
+  let (mut client, mut server) = shared_handshaking_pair(
+    deadline,
+    || {
+      let opts = LabelOptions::new_in(
+        Some(b"cluster-x".to_vec()),
+        TlsOptions::new(test_server(), test_client()),
+      );
+      let ctx = <Labeled<TlsRecords> as StreamTransport>::dial_context(&addr(0), Some("localhost"))
+        .expect("dial context");
+      Labeled::<TlsRecords>::dialer(&opts, ctx).expect("dialer construction")
+    },
+    || {
+      let opts = LabelOptions::new_in(
+        Some(b"cluster-x".to_vec()),
+        TlsOptions::new(test_server(), test_client()),
+      );
+      Labeled::<TlsRecords>::acceptor(&opts).expect("acceptor construction")
+    },
+  );
+
+  // Drive the handshake until the CLIENT is done but the SERVER has not yet
+  // consumed the final flight (still Handshaking, awaiting the label too).
+  for _ in 0..64 {
+    if !client.is_handshaking() {
+      break;
+    }
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    if !c_out.is_empty() {
+      server.handle_transport_data(&c_out, now).unwrap();
+    }
+    let mut s_out = Vec::new();
+    server.poll_transport_transmit(&mut s_out);
+    if !s_out.is_empty() {
+      client.handle_transport_data(&s_out, now).unwrap();
+    }
+    if c_out.is_empty() && s_out.is_empty() {
+      break;
+    }
+  }
+  assert!(!client.is_handshaking(), "client completed its handshake");
+  assert!(
+    server.is_handshaking(),
+    "server still awaits label + final flight"
+  );
+
+  // Client: a one-way user message; drain everything the client has to send —
+  // the coalesced `[Finished][label][unit][close_notify]`.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7500)));
+  let payload = Bytes::from_static(b"labeled-coalesced-unit");
+  let sid = ep_c
+    .start_user_message(addr(7000), payload.clone(), now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client.pump_out(now).expect("client pumps its request");
+  let mut coalesced = Vec::new();
+  for _ in 0..64 {
+    let before = coalesced.len();
+    client.poll_transport_transmit(&mut coalesced);
+    if coalesced.len() == before {
+      break;
+    }
+  }
+
+  // Deliver the WHOLE coalesced buffer in one feed. The label validates and the
+  // handshake settles in the SAME call — so `is_handshaking()` is already false
+  // when `peer_has_closed()` becomes true, and the F2 gate does not fire.
+  server
+    .handle_transport_data(&coalesced, now)
+    .expect("the coalesced label + unit + close_notify is accepted");
+  assert!(
+    !server.is_handshaking(),
+    "the label validated and the handshake settled in the coalesced feed"
+  );
+  assert!(
+    !server.is_terminal(),
+    "the F2 gate did not fire — the handshake settled before the close was seen"
+  );
+
+  // Promote + replay: the buffered unit drains and the close anchor fires clean.
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7500), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+  server
+    .replay_pending(now)
+    .expect("post-promote replay drains the unit and honors the close anchor");
+  server.drain_payload_only(&mut ep_s, now);
+  assert!(
+    !matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(_))
+    ),
+    "the coalesced clean exchange is not failed, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
+  assert_eq!(
+    committed.as_deref(),
+    Some(payload.as_ref()),
+    "the coalesced labeled exchange commits its payload cleanly"
   );
 }
