@@ -800,7 +800,7 @@ fn start_push_pull_direct_matches_event_emitting_surface() {
   // DIRECT method: same id / peer / deadline, and NO event.
   let mut e_new: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
   let (id_new, intent) = e_new.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
-  let intent = intent.expect("a running endpoint returns Some(DialIntent)");
+  let intent = intent.expect("a running endpoint returns Ok(DialIntent)");
   assert_eq!(
     id_new, id_old,
     "same id from the same fresh endpoint + args"
@@ -11707,5 +11707,325 @@ fn pushpull_response_cache_dirtied_by_set_local_state_snapshot() {
     after.as_ref(),
     b"app-state-v2",
     "the dirty flag makes the next tick rebuild the cache with the new snapshot"
+  );
+}
+
+// ── push/pull frame preflight against `max_stream_frame_size` ────────────────
+
+/// `meta_max_size` for the oversized-frame rigs: small enough that a single
+/// worst-case identity PushPull (the construction floor) fits under a modest
+/// `max_stream_frame_size`, while a SECOND member advertising a meta at this
+/// ceiling pushes the two-member frame over that cap.
+const OVERSIZED_META_MAX: usize = 256;
+
+/// A meta blob at exactly `OVERSIZED_META_MAX` — the largest a member may
+/// legally advertise under the rig config.
+fn near_max_meta() -> Meta {
+  Meta::try_from(Bytes::from(vec![0u8; OVERSIZED_META_MAX])).expect("meta at the ceiling is valid")
+}
+
+/// A second member carrying `near_max_meta`, admitted via a handled `Alive`.
+fn alive_near_max_meta(node_id: &str, port: u16, inc: u32) -> Alive<SmolStr, SocketAddr> {
+  Alive::new(inc, Node::new(SmolStr::new(node_id), sock(port)))
+    .with_meta(near_max_meta())
+    .with_protocol_version(ProtocolVersion::V1)
+    .with_delegate_version(DelegateVersion::V1)
+}
+
+/// The exact framed bytes of the two-member PushPull an endpoint holding
+/// `[local(empty meta), bob(near-max meta)]` with an empty local-state snapshot
+/// emits — the receiver-gated quantity. The local member reconstructs exactly
+/// (incarnation 1, empty initial meta, V1/V1 defaults) via `pns`; `bob` matches
+/// `alive_near_max_meta`. The `join` bool does not change the framed length.
+fn two_member_frame_bytes() -> Vec<u8> {
+  let local = pns("local", 7000, 1, State::Alive);
+  let bob = PushNodeState::new(1, SmolStr::new("bob"), sock(7001), State::Alive)
+    .with_meta(near_max_meta())
+    .with_protocol_version(ProtocolVersion::V1)
+    .with_delegate_version(DelegateVersion::V1);
+  Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&[local, bob], Bytes::new(), false)
+}
+
+fn two_member_frame_len() -> usize {
+  two_member_frame_bytes().len()
+}
+
+/// A `max_stream_frame_size` one byte below the two-member frame: the single
+/// worst-case identity floor still fits (so construction succeeds), but a
+/// two-member PushPull is exactly one byte over.
+fn oversized_rig_cap() -> usize {
+  two_member_frame_len() - 1
+}
+
+/// A running two-member endpoint (local plus `bob` at near-max meta) built with
+/// the given frame cap. The two-member frame is `two_member_frame_len()`.
+fn two_member_endpoint(cap: usize, now: Instant) -> Endpoint<SmolStr, SocketAddr> {
+  let mut e = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(
+    cfg()
+      .with_meta_max_size(OVERSIZED_META_MAX)
+      .with_max_stream_frame_size(cap),
+    now,
+  )
+  .expect("the single-identity floor fits under the cap, so construction succeeds");
+  while e.poll_event().is_some() {}
+  process_alive_auto(&mut e, alive_near_max_meta("bob", 7001, 1), false, now);
+  e
+}
+
+/// A running endpoint whose two-member PushPull frame overflows its
+/// `max_stream_frame_size` by one byte.
+fn oversized_two_member_endpoint(now: Instant) -> Endpoint<SmolStr, SocketAddr> {
+  two_member_endpoint(oversized_rig_cap(), now)
+}
+
+/// An oversized outbound push/pull request is aborted locally with the typed
+/// `FrameExceedsCap` reason: no intent is registered, no `DialRequested` is
+/// queued, the returned id is inert, and the request counter is bumped.
+#[test]
+fn start_push_pull_oversized_aborts_locally_with_typed_reason() {
+  let t0 = Instant::now();
+  let mut e = oversized_two_member_endpoint(t0);
+  let cap = oversized_rig_cap();
+  let peer = sock(7001);
+
+  let (id, res) = e.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  let se = match res {
+    Err(DialAbortReason::FrameExceedsCap(se)) => se,
+    other => panic!("expected Err(FrameExceedsCap), got {other:?}"),
+  };
+  assert_eq!(se.limit(), cap, "the reported limit is the frame cap");
+  assert_eq!(
+    se.size(),
+    cap + 1,
+    "the reported size is the framed request length (one byte over the cap)"
+  );
+  assert!(
+    se.size() > se.limit(),
+    "an aborted frame is strictly over the cap"
+  );
+
+  // Inert id: no intent was registered, so a driver's dial-succeeded callback
+  // finds nothing to promote to a stream.
+  assert!(
+    e.dial_succeeded(id, t0).is_none(),
+    "an aborted request registers no intent"
+  );
+  // No dial was queued.
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    "an aborted request queues no DialRequested"
+  );
+  assert_eq!(
+    e.metrics().push_pull_requests_oversized,
+    1,
+    "the oversized-request counter is bumped exactly once"
+  );
+}
+
+/// Control: a within-cap push/pull still dials. A single-member endpoint sized
+/// with the same cap frames a request well under it, so the direct variant
+/// returns `Ok(intent)` and the event variant queues a `DialRequested`; neither
+/// bumps the oversized counter.
+#[test]
+fn start_push_pull_within_cap_still_dials() {
+  let t0 = Instant::now();
+  let cap = oversized_rig_cap();
+  let peer = sock(7001);
+
+  // Direct variant: Ok(intent) with a matching id, counter untouched.
+  let mut e_direct = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(
+    cfg()
+      .with_meta_max_size(OVERSIZED_META_MAX)
+      .with_max_stream_frame_size(cap),
+    t0,
+  )
+  .expect("construction succeeds");
+  while e_direct.poll_event().is_some() {}
+  let (id, res) = e_direct.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  let intent = res.expect("a within-cap single-member frame dials");
+  assert_eq!(intent.id(), id, "the intent carries the returned id");
+  assert_eq!(
+    e_direct.metrics().push_pull_requests_oversized,
+    0,
+    "a within-cap request bumps no counter"
+  );
+
+  // Event variant: a DialRequested is queued for the same within-cap frame.
+  let mut e_event = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(
+    cfg()
+      .with_meta_max_size(OVERSIZED_META_MAX)
+      .with_max_stream_frame_size(cap),
+    t0,
+  )
+  .expect("construction succeeds");
+  while e_event.poll_event().is_some() {}
+  let ev_id = e_event.start_push_pull(peer, PushPullKind::Refresh, t0);
+  let dialed = core::iter::from_fn(|| e_event.poll_event()).any(|ev| match ev {
+    Event::DialRequested(d) => d.id() == ev_id,
+    _ => false,
+  });
+  assert!(dialed, "a within-cap request queues its DialRequested");
+  assert_eq!(
+    e_event.metrics().push_pull_requests_oversized,
+    0,
+    "a within-cap request bumps no counter"
+  );
+}
+
+/// The sender's preflight and the receiver's frame gate agree byte-for-byte and
+/// are both strict `>`: the very frame a sender aborts at `cap` is the frame a
+/// receiver rejects at `cap`, and the same frame at exactly its own length
+/// passes BOTH ends. Pins strict `>` on both sides against one identical frame.
+#[test]
+fn sender_preflight_matches_receiver_gate() {
+  use crate::error::StreamError;
+
+  let t0 = Instant::now();
+  let peer = sock(7001);
+
+  // The exact two-member frame both ends measure.
+  let frame = two_member_frame_bytes();
+  let l2 = frame.len();
+  let cap_below = l2 - 1; // frame is exactly one byte over
+  let cap_exact = l2; // frame is exactly at the cap
+
+  // ── Over the cap (`cap_below`) ──
+  // Sender: aborts locally with the exact framed size.
+  let mut e_send_over = two_member_endpoint(cap_below, t0);
+  let (_id, res) = e_send_over.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  match res {
+    Err(DialAbortReason::FrameExceedsCap(se)) => {
+      assert_eq!(se.size(), l2, "the sender measures the exact frame length");
+      assert_eq!(se.limit(), cap_below);
+    }
+    other => panic!("expected the sender to abort over the cap, got {other:?}"),
+  }
+  // Receiver: rejects the same frame at the same cap before decoding.
+  let mut s_over = stream_in_receiving(cap_below);
+  let err = s_over
+    .handle_data(&frame, t0)
+    .expect_err("the receiver rejects a frame over its cap");
+  assert!(
+    matches!(err, StreamError::Decode(_)),
+    "an over-cap frame is a decode rejection, got {err:?}"
+  );
+
+  // ── Exactly at the cap (`cap_exact`) ──
+  // Sender: the same frame at a cap equal to its length is sent (strict `>`).
+  let mut e_send_exact = two_member_endpoint(cap_exact, t0);
+  let (_id, res) = e_send_exact.start_push_pull_direct(peer, PushPullKind::Refresh, t0);
+  assert!(
+    res.is_ok(),
+    "a frame at exactly the cap is sent (strict `>` gate), got {res:?}"
+  );
+  assert_eq!(e_send_exact.metrics().push_pull_requests_oversized, 0);
+  // Receiver: the same frame at the same cap is accepted and decodes.
+  let mut s_exact = stream_in_receiving(cap_exact);
+  s_exact
+    .handle_data(&frame, t0)
+    .expect("a frame at exactly the cap is accepted");
+  assert!(
+    matches!(
+      s_exact.poll_endpoint_event(),
+      Some(EndpointEvent::PushPullRequestReceived(..))
+    ),
+    "the exact-cap frame decodes into a push/pull request"
+  );
+}
+
+/// A `Stream` in `InboundAwaitingFirstMessage` configured with `cap` as its
+/// frame bound, built directly from the crate-visible fields.
+fn stream_in_receiving(cap: usize) -> crate::stream::Stream<SmolStr, SocketAddr> {
+  use crate::stream::{Stream, StreamPhase};
+  use std::collections::VecDeque;
+  Stream {
+    id: StreamId::from_raw(1),
+    peer: sock(7002),
+    local_id: SmolStr::new("local"),
+    max_frame_size: cap,
+    phase: StreamPhase::InboundAwaitingFirstMessage,
+    input_buf: bytes::BytesMut::new(),
+    output_buf: VecDeque::new(),
+    deadline: Some(Instant::now() + Duration::from_secs(30)),
+    endpoint_events: VecDeque::new(),
+    stream_events: VecDeque::new(),
+  }
+}
+
+/// A periodic anti-entropy tick over an oversized membership counts the aborted
+/// request and still reschedules: no `DialRequested` surfaces, the counter is
+/// bumped, and the scheduler is not wedged (a future push/pull deadline stays).
+#[test]
+fn anti_entropy_tick_oversized_counts_and_reschedules() {
+  let t0 = Instant::now();
+  let mut e = oversized_two_member_endpoint(t0);
+  e.start_scheduling(t0);
+  while e.poll_event().is_some() {}
+
+  // Advance well past the push/pull interval so the scheduler fires.
+  let later = t0 + e.cfg.push_pull_interval() + Duration::from_secs(120);
+  e.handle_timeout(later);
+
+  assert!(
+    e.metrics().push_pull_requests_oversized >= 1,
+    "the anti-entropy tick counted the oversized abort"
+  );
+  assert!(
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    "the oversized anti-entropy tick queues no DialRequested"
+  );
+  assert!(
+    e.poll_timeout().is_some(),
+    "the scheduler reschedules rather than wedging on a doomed dial"
+  );
+}
+
+/// An oversized inbound push/pull response is served unchanged (refusing would
+/// diverge views) and counted per serve; a within-cap endpoint serves the same
+/// way with the counter flat.
+#[test]
+fn oversized_pushpull_response_served_and_counted() {
+  let t0 = Instant::now();
+  let mut e = oversized_two_member_endpoint(t0);
+  // Publish the two-member membership into the response cache (the tick is the
+  // only site that rebuilds it and re-evaluates the oversized flag).
+  e.handle_timeout(t0);
+  while e.poll_event().is_some() {}
+
+  let peer = sock(9500);
+  let cmd1 = e.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0);
+  let cmd2 = e.handle_stream_event(inbound_pushpull_request(peer, vec![], 2), t0);
+  let bytes1 = pushpull_response_bytes(cmd1);
+  let bytes2 = pushpull_response_bytes(cmd2);
+  // Served UNCHANGED: byte-identical to the cache, and both requests share the
+  // one cached allocation.
+  assert_eq!(
+    bytes1,
+    e.cached_pushpull_response(),
+    "the oversized response is served verbatim from the cache"
+  );
+  assert_eq!(
+    bytes1.as_ptr(),
+    bytes2.as_ptr(),
+    "both serves share the cache"
+  );
+  assert_eq!(
+    e.metrics().push_pull_responses_oversized,
+    2,
+    "each serve of an oversized response is counted"
+  );
+
+  // Control: a within-cap endpoint serves with the counter flat.
+  let mut e_ok: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at_seeded(cfg(), t0);
+  process_alive_auto(&mut e_ok, alive("known", 9001, 1), false, t0);
+  e_ok.handle_timeout(t0);
+  while e_ok.poll_event().is_some() {}
+  let _ = pushpull_response_bytes(
+    e_ok.handle_stream_event(inbound_pushpull_request(peer, vec![], 1), t0),
+  );
+  assert_eq!(
+    e_ok.metrics().push_pull_responses_oversized,
+    0,
+    "a within-cap response is not counted"
   );
 }

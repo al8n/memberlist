@@ -106,8 +106,8 @@ use crate::{
   endpoint::Endpoint,
   error::{Error, StreamError},
   event::{
-    DialAbortReason, DialAborted, Event, ExchangeCompleted, ExchangeKind, ExchangeStatus,
-    PushPullKind, StreamId, Transmit,
+    DialAbortReason, DialAborted, DialRequested, Event, ExchangeCompleted, ExchangeKind,
+    ExchangeStatus, PushPullKind, StreamId, Transmit,
   },
 };
 use bridge::StreamBridge;
@@ -2587,22 +2587,35 @@ where
   /// `handle_timeout` pre-pump.
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     self.last_now = Some(now);
-    // The inner endpoint returns an inert id (no `DialRequested` enqueued) when
-    // leaving/left. Clone the address up front so the not-running branch can
-    // terminate that id with a `DialAborted` without staging it — staging would
-    // leave a `pending_outbound_kinds` entry that `service_dials` never drains
-    // while not running.
+    // Use the direct variant so the abort reason is in-band. On `Err` the inner
+    // endpoint registered no intent and queued no `DialRequested`, so the id is
+    // inert: terminate it with a single `DialAborted` and do NOT stage its kind —
+    // staging without a dial would leave a `pending_outbound_kinds` entry that
+    // `service_dials` never drains. Both `NotRunning` (leaving/left) and
+    // `FrameExceedsCap` (the framed request exceeds `max_stream_frame_size`, so
+    // an identically-configured receiver would reject it before decoding) flow
+    // through this arm.
     let peer_a = crate::CheapClone::cheap_clone(&peer);
-    let id = self.ep.start_push_pull(peer, kind, now);
-    if !self.ep.is_running() {
-      self.ep.emit_event(Event::DialAborted(DialAborted::new(
-        id,
-        peer_a,
-        ExchangeKind::PushPull,
-        DialAbortReason::NotRunning,
-      )));
-      return id;
-    }
+    let (id, intent) = self.ep.start_push_pull_direct(peer, kind, now);
+    let intent = match intent {
+      Ok(intent) => intent,
+      Err(reason) => {
+        self.ep.emit_event(Event::DialAborted(DialAborted::new(
+          id,
+          peer_a,
+          ExchangeKind::PushPull,
+          reason,
+        )));
+        return id;
+      }
+    };
+    // Mirror what the event variant would have queued: surface the dial request
+    // so `service_dials` sieves and attempts it in-band (byte-identical to the
+    // event-emitting path for a within-cap frame).
+    let (rid, rpeer, deadline, _kind) = intent.into_parts();
+    self.ep.emit_event(Event::DialRequested(DialRequested::new(
+      rid, rpeer, deadline,
+    )));
     self
       .pending_outbound_kinds
       .insert(id, ExchangeKind::PushPull);

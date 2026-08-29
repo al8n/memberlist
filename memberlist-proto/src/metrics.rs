@@ -2,7 +2,8 @@
 //!
 //! [`Metrics`] is a snapshot of cumulative `u64` counters the single-owner
 //! machine bumps as it sheds load at its bounds — every count is a datagram,
-//! node, connection, or payload the machine deliberately dropped or withheld.
+//! node, connection, or payload the machine deliberately dropped, withheld, or
+//! served past a peer's frame gate.
 //! Because the machine is single-owner and synchronous, the counters are plain
 //! integers (no atomics); a driver reads a `Copy` snapshot via the endpoint and
 //! re-exports it on its handle, alongside the membership snapshot.
@@ -66,4 +67,10 @@ pub struct Metrics {
   /// keeps a plaintext forger from pinning a live id un-refutably. Locally
   /// synthesized failure detection is unaffected.
   pub unrefutable_failure_rejected: u64,
+  /// Outbound push/pull requests aborted locally because the encoded frame
+  /// exceeds `max_stream_frame_size` (join, seed drain, and periodic refresh alike).
+  pub push_pull_requests_oversized: u64,
+  /// Inbound push/pull responses served whose plain frame exceeds
+  /// `max_stream_frame_size` (the identically-configured peer will reject it; counted per serve).
+  pub push_pull_responses_oversized: u64,
 }

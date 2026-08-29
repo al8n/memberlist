@@ -122,7 +122,7 @@ pub enum Error {
 /// exceeded a limit in bytes. The variant names the specific size and limit
 /// (a per-endpoint cap, a gossip-packet budget, or a reliable-stream frame
 /// budget).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeExceeded(usize, usize);
 
 impl SizeExceeded {
