@@ -1966,12 +1966,34 @@ where
   }
 
   /// Driver feeds an incoming Suspect message.
+  ///
+  /// A `u32::MAX` incarnation is the single unrefutable accusation: a node
+  /// accused at MAX cannot advance its own incarnation past it (`refute` wraps
+  /// `MAX + 1` to `0`, which peers reject as `0 < MAX`), so it can never
+  /// self-heal. An honest node never reaches MAX — its incarnation advances only
+  /// through its own refutations — so failure evidence (`Dead`/`Suspect`) at MAX
+  /// about a live peer can only be forged, and a plaintext deployment lets an
+  /// external party forge it. Storing it would pin the target un-refutably and,
+  /// once the tombstone is reclaimed, let its id be redirected to a new address.
+  /// Refuse it here, at the external funnels only; locally-synthesized failure
+  /// detection (suspicion expiry, probe failure) still fires at any incarnation,
+  /// so a member forced to MAX by a forged `Alive` is never rendered un-failable.
   pub(crate) fn handle_suspect(&mut self, _from: A, suspect: Suspect<I>, at: Instant) {
+    if suspect.incarnation() == u32::MAX {
+      self.metrics.unrefutable_failure_rejected += 1;
+      return;
+    }
     self.process_suspect(suspect, at);
   }
 
-  /// Driver feeds an incoming Dead message.
+  /// Driver feeds an incoming Dead message. Failure evidence at the unrefutable
+  /// `u32::MAX` incarnation is refused at this external funnel; see
+  /// [`handle_suspect`](Self::handle_suspect) for the full rationale.
   pub(crate) fn handle_dead(&mut self, _from: A, dead: Dead<I>, at: Instant) {
+    if dead.incarnation() == u32::MAX {
+      self.metrics.unrefutable_failure_rejected += 1;
+      return;
+    }
     self.process_dead(dead, at);
   }
 
@@ -4179,6 +4201,12 @@ where
           self.process_alive(alive, false, now);
         }
         State::Left => {
+          // Unrefutable `u32::MAX` failure evidence is refused at this external
+          // funnel; see [`handle_suspect`](Self::handle_suspect).
+          if inc == u32::MAX {
+            self.metrics.unrefutable_failure_rejected += 1;
+            continue;
+          }
           // `from` MUST be the local id, NOT `id`. `process_dead` records
           // `State::Left` only when `node == from` (the genuine self-leave
           // sentinel), otherwise `State::Dead`. `State::Left` is
@@ -4190,6 +4218,12 @@ where
           self.process_dead(dead, now);
         }
         State::Dead | State::Suspect => {
+          // Unrefutable `u32::MAX` failure evidence is refused at this external
+          // funnel; see [`handle_suspect`](Self::handle_suspect).
+          if inc == u32::MAX {
+            self.metrics.unrefutable_failure_rejected += 1;
+            continue;
+          }
           let from = self.cfg.local_id_ref().cheap_clone();
           let s = Suspect::new(inc, id, from);
           self.process_suspect(s, now);

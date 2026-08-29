@@ -50,4 +50,10 @@ pub struct Metrics {
   /// tracked member's address (`ack_payload_to_members_only`), bounding the
   /// reflective byte-amplification a spoofed-source ping can elicit.
   pub ack_payloads_withheld: u64,
+  /// Inbound failure evidence (`Dead`/`Suspect`) refused at an external ingress
+  /// funnel because its incarnation was `u32::MAX` — the single unrefutable
+  /// accusation, which an honest node never emits about a live peer. Refusing it
+  /// keeps a plaintext forger from pinning a live id un-refutably. Locally
+  /// synthesized failure detection is unaffected.
+  pub unrefutable_failure_rejected: u64,
 }

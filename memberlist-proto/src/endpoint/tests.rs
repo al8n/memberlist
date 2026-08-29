@@ -475,6 +475,183 @@ fn remote_self_leave_reclaimable_after_window() {
   );
 }
 
+/// A remote `Dead` at the unrefutable `u32::MAX` incarnation is refused at the
+/// external funnel: a live peer accused at MAX could never advance its own
+/// incarnation past it, so such evidence can only be forged. X stays Alive.
+#[test]
+fn remote_dead_at_max_incarnation_rejected() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("x", 7001, 5), false, now);
+  while e.poll_event().is_some() {}
+  let relay: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+  e.handle_dead(relay, dead("x", "relay", u32::MAX), now);
+  let x = e.members.get(&SmolStr::new("x")).unwrap();
+  assert_eq!(x.state_ref().state(), State::Alive, "X must stay Alive");
+  assert_eq!(x.state_ref().incarnation(), 5, "incarnation untouched");
+  assert!(e.poll_event().is_none(), "no NodeLeft may be emitted");
+  assert_eq!(e.metrics().unrefutable_failure_rejected, 1);
+}
+
+/// Symmetric to `remote_dead_at_max_incarnation_rejected` on the `Suspect`
+/// funnel: no suspicion timer is armed and X stays Alive.
+#[test]
+fn remote_suspect_at_max_incarnation_rejected() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("x", 7001, 5), false, now);
+  while e.poll_event().is_some() {}
+  let relay: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+  e.handle_suspect(relay, suspect("x", "relay", u32::MAX), now);
+  let x = e.members.get(&SmolStr::new("x")).unwrap();
+  assert_eq!(x.state_ref().state(), State::Alive, "X must stay Alive");
+  assert_eq!(x.state_ref().incarnation(), 5, "incarnation untouched");
+  assert!(x.suspicion().is_none(), "no suspicion may be armed");
+  assert_eq!(e.metrics().unrefutable_failure_rejected, 1);
+}
+
+/// A forged self-`Dead` at `u32::MAX` must be dropped at the external funnel
+/// BEFORE it can reach `refute`, so the local incarnation never wraps to 0. The
+/// external guard, not the wrap, is what protects the local node here.
+#[test]
+fn self_dead_at_max_does_not_wrap_local_incarnation() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  while e.poll_event().is_some() {}
+  let starting_inc = e
+    .members
+    .get(&SmolStr::new("local"))
+    .unwrap()
+    .state_ref()
+    .incarnation();
+  let relay: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+  e.handle_dead(relay, dead("local", "relay", u32::MAX), Instant::now());
+  let local = e.members.get(&SmolStr::new("local")).unwrap();
+  assert_eq!(
+    local.state_ref().incarnation(),
+    starting_inc,
+    "local incarnation must be untouched (no refute, no wrap to 0)"
+  );
+  assert_eq!(local.state_ref().state(), State::Alive);
+  assert_eq!(e.metrics().unrefutable_failure_rejected, 1);
+}
+
+/// Anti-entropy push/pull `Dead` and `Left` entries at `u32::MAX` are refused in
+/// `merge_state`, so a forged pull payload cannot pin a live id un-refutably.
+#[test]
+fn merge_state_dead_at_max_rejected() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("x", 7001, 5), false, now);
+  while e.poll_event().is_some() {}
+  e.merge_state(&[pns("x", 7001, u32::MAX, State::Dead)], now);
+  e.merge_state(&[pns("x", 7001, u32::MAX, State::Left)], now);
+  let x = e.members.get(&SmolStr::new("x")).unwrap();
+  assert_eq!(
+    x.state_ref().state(),
+    State::Alive,
+    "X must survive as Alive"
+  );
+  assert_eq!(x.state_ref().incarnation(), 5, "incarnation untouched");
+  assert!(x.suspicion().is_none(), "no suspicion may be armed");
+  assert_eq!(e.metrics().unrefutable_failure_rejected, 2);
+}
+
+/// End-to-end takeover-blocked: a forged `Dead{X, u32::MAX}` must never open the
+/// delayed id-takeover window. Because the evidence is refused, X stays Alive and
+/// `reset_nodes` never reaps it — so no reclaim window opens and an `Alive{X}` at
+/// an attacker address conflicts instead of being adopted.
+#[test]
+fn max_forgery_cannot_take_over_id_after_reclaim() {
+  let real: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+  let attacker: SocketAddr = "127.0.0.1:6666".parse().unwrap();
+  let x = SmolStr::new("x");
+
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_gossip_to_the_dead_time(Duration::from_millis(5)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("x", 7001, 5), false, t0);
+  while e.poll_event().is_some() {}
+
+  // The forger relays a self-marked Dead for X at the unrefutable MAX. It is
+  // dropped at the external funnel: X stays Alive at its real address.
+  let relay: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+  e.handle_dead(relay, dead("x", "x", u32::MAX), t0);
+  assert_eq!(
+    e.member_liveness(&x),
+    Some(State::Alive),
+    "forged MAX Dead must not make X Dead"
+  );
+
+  // Past gossip_to_the_dead_time, reset_nodes reaps only Dead/Left tombstones.
+  // X is Alive, so it is never reaped — no reclaim window ever opens.
+  e.reset_nodes(t0 + Duration::from_millis(10));
+  assert!(
+    e.members.get(&x).is_some(),
+    "an Alive X must not be reaped by reset_nodes"
+  );
+  assert_eq!(e.member_liveness(&x), Some(State::Alive));
+
+  // A subsequent Alive{X} at the attacker's address cannot take over: X is still
+  // Alive at its real address, so this is an address conflict, not an admission.
+  e.process_alive(alive("x", 6666, 6), false, t0 + Duration::from_millis(11));
+  assert_eq!(
+    e.member(&x).unwrap().address_ref(),
+    &real,
+    "the attacker address must NOT be adopted"
+  );
+  assert_ne!(
+    e.member(&x).unwrap().address_ref(),
+    &attacker,
+    "no takeover: X keeps its real address"
+  );
+}
+
+/// Liveness-preserved counter-test to the external-only placement: a member
+/// forced to stored incarnation `u32::MAX` via a forged `Alive@MAX` (the
+/// non-failure path, still accepted) must remain LOCALLY failable. A real
+/// suspicion that expires still synthesizes its `Dead` and transitions X to
+/// `Dead` — the ingress guard did not render a MAX member un-failable.
+#[test]
+fn max_incarnation_member_still_locally_failable() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
+    cfg()
+      .with_probe_interval(Duration::from_millis(10))
+      .with_suspicion_mult(1)
+      .with_suspicion_max_timeout_mult(1),
+  );
+  let t0 = Instant::now();
+  // Forge X up to stored incarnation MAX via the Alive path (unchanged, still
+  // accepted — only failure evidence at MAX is refused).
+  process_alive_auto(&mut e, alive("x", 7001, u32::MAX), false, t0);
+  assert_eq!(
+    e.members
+      .get(&SmolStr::new("x"))
+      .unwrap()
+      .state_ref()
+      .incarnation(),
+    u32::MAX,
+    "X is forced to stored incarnation MAX"
+  );
+
+  // Arm a REAL suspicion (as a local synthesizer would) and expire it. This
+  // routes through process_suspect / fire_expired_suspicions, which the external
+  // guard does not touch.
+  e.process_suspect(suspect("x", "carol", u32::MAX), t0);
+  let deadline = e.poll_timeout().expect("suspicion deadline expected");
+  e.handle_timeout(deadline + Duration::from_millis(10));
+  assert_eq!(
+    e.members
+      .get(&SmolStr::new("x"))
+      .unwrap()
+      .state_ref()
+      .state(),
+    State::Dead,
+    "a MAX-incarnation member must still be locally failable"
+  );
+  // No failure evidence entered through an external funnel.
+  assert_eq!(e.metrics().unrefutable_failure_rejected, 0);
+}
+
 use PushNodeState;
 
 fn pns(node_id: &str, port: u16, inc: u32, st: State) -> PushNodeState<SmolStr, SocketAddr> {
