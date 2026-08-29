@@ -914,6 +914,261 @@ mod tcp {
       "exactly one machine terminal per kind-bearing StreamId",
     );
   }
+
+  /// Build a coordinator whose inner endpoint holds `m_id` in `State::Suspect`
+  /// at incarnation `inc`, armed with the suspicion's own deadline. The setup
+  /// events (the `NodeJoined(m_id)` from seeding it Alive, the `Suspect`
+  /// broadcast) are drained so the caller observes only what the tick under
+  /// test produces.
+  fn coord_with_suspect_member(
+    coord_port: u16,
+    m_id: &SmolStr,
+    m_addr: SocketAddr,
+    inc: u32,
+    now: Instant,
+  ) -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
+    use crate::typed::{Alive, Suspect};
+    let mut coord = coord(coord_port);
+    coord.handle_alive(
+      m_addr,
+      Alive::new(inc, crate::Node::new(m_id.clone(), m_addr)),
+      now,
+    );
+    coord.handle_suspect(
+      m_addr,
+      Suspect::new(inc, m_id.clone(), SmolStr::new("accuser")),
+      now,
+    );
+    while coord.poll_event().is_some() {}
+    let _ = coord.endpoint_mut().drain_broadcasts();
+    coord
+  }
+
+  /// A real dialer's coalesced `[label || push/pull request]` bytes, where the
+  /// push advertises `m_id` at `m_inc` as `State::Alive`. The dialer's
+  /// membership is seeded so its push/pull request carries that exact record —
+  /// the refutation (or, for a stale incarnation, non-refutation) the acceptor
+  /// merges when its handshake settles.
+  fn dialer_push_pull_advertising_alive(
+    dialer_port: u16,
+    m_id: &SmolStr,
+    m_addr: SocketAddr,
+    m_inc: u32,
+    coord_addr: SocketAddr,
+    now: Instant,
+  ) -> Vec<u8> {
+    use crate::typed::Alive;
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(dialer_port),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    dialer.handle_alive(
+      m_addr,
+      Alive::new(m_inc, crate::Node::new(m_id.clone(), m_addr)),
+      now,
+    );
+    let _ = dialer.start_push_pull(coord_addr, PushPullKind::Join, now);
+    let _ = dialer.poll_action();
+    let mut bytes = Vec::new();
+    while let Some((_id, _peer, chunk)) = dialer.poll_transport_transmit() {
+      bytes.extend_from_slice(&chunk);
+    }
+    bytes
+  }
+
+  /// A same-tick-settled handshake carrying a superseding `Alive` cancels a
+  /// suspicion whose deadline expires on that same tick as a silent
+  /// `Suspect -> Alive` — not a spurious `Dead -> Alive` flap. The buffered
+  /// refutation is applied (mint + replay) BEFORE `Endpoint::handle_timeout`
+  /// fires the suspicion, so no `NodeLeft`/`Dead` is ever synthesized.
+  #[test]
+  fn same_tick_refutation_cancels_suspicion_no_flap() {
+    use crate::{
+      event::Event,
+      typed::{Message, State},
+    };
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+    let coord_addr = addr(7300);
+
+    let mut coord = coord_with_suspect_member(7300, &m, m_addr, inc, now);
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Suspect),
+      "M starts Suspect",
+    );
+
+    // The suspicion is armed at `now`; its deadline is well within this margin
+    // (the small cluster gives `k == 0`, so the timer is fixed at the sub-minute
+    // `min`). The connection arrives fresh on the wake at `t >= deadline`: the
+    // peer's push/pull request coalesced with its handshake tail, delivered on a
+    // driver wake at or after the suspicion deadline — ordinary scheduling.
+    let t = now + Duration::from_secs(30);
+    let blob = dialer_push_pull_advertising_alive(7304, &m, m_addr, inc + 1, coord_addr, t);
+    let exchange = coord
+      .accept_connection(m_addr, t)
+      .expect("connection admitted while running");
+    coord.handle_transport_data(exchange, &blob, true, t);
+
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Alive),
+      "M ends Alive: the refutation cancelled the suspicion",
+    );
+    assert_eq!(
+      coord.endpoint_ref().node_incarnation(&m),
+      Some(inc + 1),
+      "M carries the refuting incarnation",
+    );
+
+    let mut node_left_m = false;
+    let mut node_joined_m = false;
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::NodeLeft(ns) if ns.id_ref() == &m => node_left_m = true,
+        Event::NodeJoined(ns) if ns.id_ref() == &m => node_joined_m = true,
+        _ => {}
+      }
+    }
+    assert!(
+      !node_left_m,
+      "no NodeLeft(M): the suspicion was cancelled, never fired",
+    );
+    assert!(
+      !node_joined_m,
+      "no NodeJoined(M): a Suspect -> Alive cancel is not a rejoin",
+    );
+
+    let broadcasts = coord.endpoint_mut().drain_broadcasts();
+    assert!(
+      broadcasts.iter().any(|msg| matches!(
+        msg,
+        Message::Alive(a) if a.node_ref().id_ref() == &m && a.incarnation() == inc + 1
+      )),
+      "the refutation Alive(M, inc+1) is broadcast",
+    );
+    assert!(
+      !broadcasts
+        .iter()
+        .any(|msg| matches!(msg, Message::Dead(d) if d.node_ref() == &m)),
+      "no Dead(M) is broadcast",
+    );
+  }
+
+  /// Liveness control: with no refutation on the wire, a suspicion still fires
+  /// `Dead` on the tick its deadline expires — the reorder does not suppress a
+  /// genuine failure. Same setup as the flap-cancel test, minus the inbound.
+  #[test]
+  fn suspicion_still_fires_without_refutation() {
+    use crate::{
+      event::Event,
+      typed::{Message, State},
+    };
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+
+    let mut coord = coord_with_suspect_member(7310, &m, m_addr, inc, now);
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Suspect),
+      "M starts Suspect",
+    );
+
+    // The same wake time the refutation tests use; here nothing refutes, so the
+    // suspicion deadline (well within this margin) fires on the tick.
+    let t = now + Duration::from_secs(30);
+    coord.handle_timeout(t);
+
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Dead),
+      "M transitions Dead once the suspicion deadline elapses",
+    );
+
+    let mut node_left_m = false;
+    while let Some(ev) = coord.poll_event() {
+      if let Event::NodeLeft(ns) = ev
+        && ns.id_ref() == &m
+      {
+        node_left_m = true;
+      }
+    }
+    assert!(
+      node_left_m,
+      "NodeLeft(M) is emitted on the suspicion expiry"
+    );
+
+    let broadcasts = coord.endpoint_mut().drain_broadcasts();
+    assert!(
+      broadcasts
+        .iter()
+        .any(|msg| matches!(msg, Message::Dead(d) if d.node_ref() == &m)),
+      "Dead(M) is broadcast on the suspicion expiry",
+    );
+  }
+
+  /// Control: a stale/equal-incarnation `Alive` carried in the same-tick
+  /// handshake does NOT refute the suspicion — the older/equal-incarnation
+  /// guard rejects it — so the suspicion survives the mint + replay and still
+  /// fires `Dead` when `handle_timeout` runs later in the same tick.
+  #[test]
+  fn stale_refutation_does_not_suppress_suspicion() {
+    use crate::{
+      event::Event,
+      typed::{Message, State},
+    };
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+    let coord_addr = addr(7320);
+
+    let mut coord = coord_with_suspect_member(7320, &m, m_addr, inc, now);
+
+    // The handshake carries Alive(M, inc) — equal to the suspicion incarnation,
+    // so the merge's `<= local_incarnation` guard drops it. The connection
+    // arrives fresh on the wake at `t >= deadline`.
+    let t = now + Duration::from_secs(30);
+    let blob = dialer_push_pull_advertising_alive(7321, &m, m_addr, inc, coord_addr, t);
+    let exchange = coord
+      .accept_connection(m_addr, t)
+      .expect("connection admitted while running");
+    coord.handle_transport_data(exchange, &blob, true, t);
+
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Dead),
+      "the stale Alive does not refute; the suspicion still fires Dead",
+    );
+
+    let mut node_left_m = false;
+    while let Some(ev) = coord.poll_event() {
+      if let Event::NodeLeft(ns) = ev
+        && ns.id_ref() == &m
+      {
+        node_left_m = true;
+      }
+    }
+    assert!(
+      node_left_m,
+      "NodeLeft(M) is emitted: the suspicion survived"
+    );
+
+    let broadcasts = coord.endpoint_mut().drain_broadcasts();
+    assert!(
+      broadcasts
+        .iter()
+        .any(|msg| matches!(msg, Message::Dead(d) if d.node_ref() == &m)),
+      "Dead(M) is broadcast: the stale Alive did not suppress the suspicion",
+    );
+  }
 }
 
 /// STR-A001 test 3: a record layer whose `dialer` constructor fails drives the

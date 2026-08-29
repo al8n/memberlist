@@ -19,9 +19,14 @@
 //! stream ([`StreamEndpoint::poll_memberlist_transmit`]).
 //!
 //! The fixed per-tick step order keeps the load-bearing invariant — the
-//! stream-endpoint-event drain STRICTLY precedes `Endpoint::handle_timeout`
-//! (else a reliable-fallback ping ack that lands the same tick the probe
-//! cumulative deadline expires is lost and the peer is wrongly Suspected).
+//! stream-endpoint-event drain AND the promotion + replay of any handshake that
+//! settled on this tick's already-fed input STRICTLY precede
+//! `Endpoint::handle_timeout`. Two same-tick races depend on it: (a) a
+//! reliable-fallback ping ack that lands the same tick the probe cumulative
+//! deadline expires must be drained first, else it is lost and the peer is
+//! wrongly Suspected; (b) a buffered push/pull `Alive` refutation carried in a
+//! same-tick-settled handshake must cancel a same-tick suspicion expiry as a
+//! `Suspect -> Alive` cancel, not fire a spurious `Dead -> Alive` flap.
 //!
 //! # Transport half-close anchors
 //!
@@ -1927,8 +1932,8 @@ where
     }
   }
 
-  /// Step (4): for every exchange still awaiting its `Stream`, mint it once
-  /// the label / handshake step has settled.
+  /// Steps (2.5) and (5.5): for every exchange still awaiting its `Stream`,
+  /// mint it once the label / handshake step has settled.
   ///
   /// `is_handshaking()` is `false` once the record layer reports the label /
   /// handshake step done (the mint window) AND once the bridge is `Established`
@@ -2172,9 +2177,9 @@ where
   /// Step (5): drain the private `dial_pending` deque, surfacing one
   /// [`StreamAction::Connect`] and building one `Handshaking` client bridge per
   /// intent. Does NOT call `dial_succeeded` — the `Stream` is minted at the
-  /// label / handshake-settled step (step 4) across a later tick (or this same
-  /// tick when invoked from a `start_*` flush, since a no-handshake dialer's
-  /// label step settles at construction).
+  /// label / handshake-settled step (step 5.5 this same tick, since a
+  /// no-handshake dialer's label step settles at construction; or a later tick
+  /// otherwise) or by a `start_*` flush's `service_handshake_completions`.
   pub(crate) fn service_dials(&mut self, now: Instant) {
     // A leaving/left node initiates no dial: skip sieving and draining so no
     // bridge is built or Connect surfaced after leave. Defensive — the start_*
@@ -2671,28 +2676,43 @@ where
   /// The fixed per-tick step order (load-bearing — see module docs).
   ///
   /// Step (2) (pump every bridge + drain each non-terminal stream's
-  /// endpoint-events into the `Endpoint`) MUST strictly precede step (3)
-  /// (`ep.handle_timeout`): a reliable-fallback ping ack delivered on the same
-  /// tick the probe cumulative deadline expires is carried by the stream's
-  /// last `poll_endpoint_event`; draining it after the probe timeout would
-  /// lose it and wrongly Suspect a live peer. Do not reorder.
+  /// endpoint-events into the `Endpoint`), step (2.5) (label / handshake-settled
+  /// mint), and step (2.6) (pump the just-minted bridges) MUST all strictly
+  /// precede step (3) (`ep.handle_timeout`). Two refutable-class deadlines
+  /// depend on this inbound-first ordering:
   ///
-  /// Step (4) (label / handshake-settled mint) mints the `Stream` for any
-  /// bridge whose label / handshake step settled since the last tick and
-  /// promotes it; a freshly-promoted OUTBOUND bridge carries its request bytes
-  /// in the minted `Stream`'s output buffer. Step (5) (`service_dials`) inserts
-  /// new `Handshaking` outbound bridges. A dialer record layer with no
-  /// handshake (its inbound label is validated in-line on the established
-  /// intake) is never handshaking, so step (5.5) — a second
-  /// `service_handshake_completions` — promotes those freshly-inserted dial
-  /// bridges in the SAME tick, before step (5.6)'s `pump_bridges` pumps their
-  /// request bytes out. Without the step (5.5) extra promote, a
+  /// - A reliable-fallback ping ack delivered on the same tick the probe
+  ///   cumulative deadline expires is carried by the stream's last
+  ///   `poll_endpoint_event`; draining it after the probe timeout would lose it
+  ///   and wrongly Suspect a live peer.
+  /// - A push/pull `Alive` refutation carried in a handshake that settles on
+  ///   this tick's already-fed input must cancel a same-tick suspicion expiry
+  ///   as a `Suspect -> Alive` — not fire a spurious `Dead -> Alive` flap. The
+  ///   handshake settles only on the byte feed the caller already performed, so
+  ///   step (2.5)'s mint and step (2.6)'s replay of the buffered plaintext apply
+  ///   the refutation before `handle_timeout` synthesizes a Dead.
+  ///
+  /// The probe class itself is ordering-INDEPENDENT: `complete_probe_success`
+  /// routes any ack at/after the probe's absolute `failure_deadline` to failure,
+  /// so replaying a past-deadline ack earlier (in step (2.6) rather than after
+  /// the timers) cannot resurrect a probe that has already lost its budget.
+  ///
+  /// Step (5) (`service_dials`) inserts new `Handshaking` outbound bridges
+  /// emitted by step (3). A dialer record layer with no handshake (its inbound
+  /// label is validated in-line on the established intake) is never handshaking,
+  /// so step (5.5) — a second `service_handshake_completions` — promotes those
+  /// freshly-inserted dial bridges in the SAME tick, before step (5.6)'s
+  /// `pump_bridges` pumps their request bytes out. A step-(5) dial's `Stream` is
+  /// minted by `dial_succeeded`, whose own `now >= deadline` check retires an
+  /// already-expired intent; that makes minting here order-equivalent to minting
+  /// after `fire_expired_stream_intents`, so moving the earlier mint (2.5) ahead
+  /// of the timers is safe. Without the step (5.5) extra promote, a
   /// reliable-fallback ping bridge created by step (3) would have its `Stream`
-  /// minted only on the NEXT coordinator wake — under a strict-poll driver
-  /// that wakes only at [`Self::poll_timeout`], that next wake is the bridge's
+  /// minted only on the NEXT coordinator wake — under a strict-poll driver that
+  /// wakes only at [`Self::poll_timeout`], that next wake is the bridge's
   /// exchange deadline itself, at which point
-  /// [`crate::stream::Stream::handle_data`] would reject the buffered request
-  /// as timed out. `pump_bridges` and `service_handshake_completions` are both
+  /// [`crate::stream::Stream::handle_data`] would reject the buffered request as
+  /// timed out. `pump_bridges` and `service_handshake_completions` are both
   /// idempotent on already-handled bridges, so the duplicated calls are no-ops
   /// on bridges already serviced upstream. There is NO connection drained-reap
   /// step (connection-per-exchange — a reaped bridge frees its own connection
@@ -2701,20 +2721,25 @@ where
     // (1) inbound feed already done by the caller (`handle_transport_data`).
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
     self.pump_bridges(now);
+    // (2.5) mint the Stream for any bridge whose label / handshake step settled
+    // on this tick's already-fed input, so its buffered refutation is applied
+    // BEFORE the membership timers below.
+    self.service_handshake_completions(now);
+    // (2.6) pump the just-minted bridges: replay their buffered plaintext and
+    // drain the decoded state into the Endpoint (a same-tick Alive refutation
+    // must cancel a suspicion expiry as a Suspect -> Alive, not fire
+    // Dead -> Alive).
+    self.pump_bridges(now);
     // (3) THEN membership timers (probe cumulative-deadline, suspicion).
     self.ep.handle_timeout(now);
-    // (4) mint the Stream for any bridge whose label / handshake step just
-    // settled.
-    self.service_handshake_completions(now);
     // (5) dial requests emitted by (3).
     self.service_dials(now);
     // (5.5) promote any dial bridge whose records are not handshaking from
     // the moment of construction (the dialer's role) so step (5.6)'s pump
     // can transmit the request bytes this same tick. Idempotent on bridges
-    // already promoted by step (4).
+    // already promoted by step (2.5).
     self.service_handshake_completions(now);
-    // (5.6) pump bridges promoted/inserted by (4), (5), and (5.5) this same
-    // tick.
+    // (5.6) pump bridges promoted/inserted by (5) and (5.5) this same tick.
     self.pump_bridges(now);
     self.finalize_tick(now);
     // Clear the policy-change reap latch: a bridge failed by
