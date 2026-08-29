@@ -1625,14 +1625,21 @@ impl<I, R> QuicEndpoint<I, R> {
   /// [`gossip_ingress_dropped`](crate::metrics::Metrics::gossip_ingress_dropped)
   /// — the inner `Endpoint`'s own gossip-ingress count is the STREAM plane's
   /// (zero on a QUIC endpoint) — so a driver reads one unified counter regardless
-  /// of transport.
+  /// of transport. Also surfaces the per-datagram size rejection
+  /// (`oversized_datagram_dropped`) on
+  /// [`gossip_ingress_oversized`](crate::metrics::Metrics::gossip_ingress_oversized)
+  /// so an oversized-datagram flood is visible in the PUBLIC snapshot, not
+  /// just the internal counter.
   pub fn metrics(&self) -> crate::metrics::Metrics {
     // `Endpoint::metrics` returns a borrow; `Metrics` is `Copy`, so take an
-    // owned copy to fold in this endpoint's datagram-plane shed count.
+    // owned copy to fold in this endpoint's datagram-plane shed counts.
     let mut m = *self.ep.metrics();
     m.gossip_ingress_dropped = m
       .gossip_ingress_dropped
       .saturating_add(self.datagram_ingress_dropped);
+    m.gossip_ingress_oversized = m
+      .gossip_ingress_oversized
+      .saturating_add(self.oversized_datagram_dropped);
     m
   }
 

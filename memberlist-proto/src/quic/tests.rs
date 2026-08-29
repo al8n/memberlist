@@ -14307,3 +14307,133 @@ fn ingress_bytes_bounded_under_source_rotation() {
        ({total_bytes} > {byte_bound})"
   );
 }
+
+/// The PUBLIC [`crate::metrics::Metrics::gossip_ingress_oversized`] snapshot,
+/// read via [`super::QuicEndpoint::metrics`], must reflect an oversized-
+/// datagram drop exactly like the internal `oversized_datagram_dropped`
+/// counter it folds — driven through BOTH ingress paths: the plain-UDP
+/// `handle_udp` path (as in
+/// [`oversized_memberlist_datagram_rejected_at_ingress`]) and the QUIC
+/// datagram drain (as in [`oversized_quic_datagram_rejected_at_ingress`]).
+/// Before this fix, `oversized_datagram_dropped` was only readable through a
+/// `#[cfg(test)]` accessor, so a production driver reading
+/// `QuicEndpoint::metrics()` during an external oversized-datagram flood saw
+/// no distinct signal for it.
+///
+/// Mutation-anchor: remove the `gossip_ingress_oversized` fold from
+/// `QuicEndpoint::metrics` and this test fails — the public snapshot stays
+/// at `0` while the internal counter advances.
+#[test]
+fn public_metrics_snapshot_reflects_oversized_ingress_drops() {
+  let a_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8002".parse().unwrap();
+  let plain_udp_from: SocketAddr = "127.0.0.1:8003".parse().unwrap();
+  let now = Instant::now();
+  let cfg_a = EndpointOptions::new(SmolStr::new("a"), a_addr).with_gossip_mtu(512);
+  let mut ep_a: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg_a);
+  ep_a.start_scheduling(now);
+  let mut seed = [0u8; 32];
+  seed[..2].copy_from_slice(&a_addr.port().to_le_bytes());
+  let mut a = QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep_a, test_config(), Some(seed));
+  let mut b = make_endpoint("b", b_addr, now);
+
+  let cap = a.max_gossip_datagram_bytes();
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    0,
+    "no oversized drops yet"
+  );
+
+  // Path 1: the plain-UDP `handle_udp` path, from a source A holds no
+  // connection to.
+  let oversized = vec![0x01u8; cap + 1];
+  a.handle_udp(plain_udp_from, &oversized, now);
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    1,
+    "the plain-UDP oversized drop must surface on the public metric"
+  );
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    a.oversized_datagram_dropped(),
+    "the public metric must track the internal counter exactly"
+  );
+
+  // Path 2: the QUIC datagram drain, driven over a live A<->B connection —
+  // the proven ferry pattern from `oversized_quic_datagram_rejected_at_ingress`.
+  let _ = a
+    .endpoint_mut()
+    .start_push_pull(b_addr, PushPullKind::Join, now);
+  for _ in 0..200 {
+    let mut moved = false;
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+        moved = true;
+      }
+    }
+    a.handle_timeout(now);
+    b.handle_timeout(now);
+    if a.live_bridge_count() >= 1
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+    if !moved
+      && a.counters.endpoint_events_processed > 0
+      && b.counters.endpoint_events_processed > 0
+    {
+      break;
+    }
+  }
+  assert!(
+    a.live_connections_to(b_addr) >= 1,
+    "test precondition: A must hold a live connection to B"
+  );
+
+  let before = a.metrics().gossip_ingress_oversized;
+  let oversized_len = cap + 50;
+  let payload = Bytes::from(vec![0x01u8; oversized_len]);
+  assert_eq!(
+    b.queue_unreliable_datagram(a_addr, payload, now),
+    super::DatagramSendStatus::Queued,
+    "test precondition: the payload must be well within quinn's own datagram \
+       size ceiling so this proves the endpoint-level cap, not quinn's"
+  );
+
+  for _ in 0..50 {
+    b.handle_timeout(now);
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == a_addr {
+        a.handle_udp(b_addr, &bytes, now);
+      }
+    }
+    a.handle_timeout(now);
+    if a.metrics().gossip_ingress_oversized > before {
+      break;
+    }
+    while let Some((to, bytes)) = a.poll_transmit() {
+      if to == b_addr {
+        b.handle_udp(a_addr, &bytes, now);
+      }
+    }
+  }
+
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    before + 1,
+    "the QUIC-datagram-drain oversized drop must also surface on the public metric"
+  );
+  assert_eq!(
+    a.metrics().gossip_ingress_oversized,
+    a.oversized_datagram_dropped(),
+    "the public metric must track the internal counter exactly, across both ingress paths"
+  );
+}
