@@ -69,7 +69,7 @@ async fn tcp_two_node_join_via_new() {
 /// has completed — so it observes post-poll state and cannot distinguish
 /// publish-before-notify from a publish-AFTER-notify reorder. It anchors that the
 /// publish is not REMOVED; the deterministic reorder guard is the white-box
-/// `shutdown_drain_publishes_snapshot_before_resolving_waiter_inline`, which
+/// `helper_publishes_snapshot_before_resolving_waiter_inline`, which
 /// captures the snapshot at the exact resolution instant.
 #[compio::test]
 async fn join_completion_observes_post_transition_snapshot() {

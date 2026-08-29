@@ -671,12 +671,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
     let did_transmits =
       drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-    // Publish the post-transition snapshot BEFORE `drain_events` resolves
-    // parked waiters / hands events to the obs task, so a woken caller
-    // observes the new membership, never the pre-transition snapshot.
-    refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-    let did_events = drain_events(
+    let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
       &mut endpoint,
+      &snapshot,
+      &mut last_snapshot_version,
       &obs_tx,
       &observation_dropped,
       &obs_payload_bytes,
@@ -868,12 +866,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        // Publish the post-transition snapshot BEFORE `drain_events` resolves
-        // parked waiters / hands events to the obs task, so a woken caller
-        // observes the new membership, never the pre-transition snapshot.
-        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -1009,12 +1005,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        // Publish the post-transition snapshot BEFORE `drain_events` resolves
-        // parked waiters / hands events to the obs task, so a woken caller
-        // observes the new membership, never the pre-transition snapshot.
-        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -1059,12 +1053,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
         let did_transmits =
           drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-        // Publish the post-transition snapshot BEFORE `drain_events` resolves
-        // parked waiters / hands events to the obs task, so a woken caller
-        // observes the new membership, never the pre-transition snapshot.
-        refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-        let did_events = drain_events(
+        let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
           &mut endpoint,
+          &snapshot,
+          &mut last_snapshot_version,
           &obs_tx,
           &observation_dropped,
           &obs_payload_bytes,
@@ -1298,12 +1290,10 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       let did_transports = drain_transport_transmits::<I, A, R, G>(&mut endpoint, &bridges);
       let did_transmits =
         drain_transmits::<I, A, R, G>(&mut endpoint, &gossip_socket, label.clone()).await;
-      // Publish the post-transition snapshot BEFORE `drain_events` resolves
-      // parked waiters / hands events to the obs task, so a woken caller
-      // observes the new membership, never the pre-transition snapshot.
-      refresh_snapshot_if_changed::<I, A, R, G>(&endpoint, &snapshot, &mut last_snapshot_version);
-      let did_events = drain_events(
+      let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
         &mut endpoint,
+        &snapshot,
+        &mut last_snapshot_version,
         &obs_tx,
         &observation_dropped,
         &obs_payload_bytes,
@@ -2696,6 +2686,44 @@ where
   drained
 }
 
+/// Publish the refreshed membership snapshot, then drain the machine's events.
+///
+/// This ordering is load-bearing: [`refresh_snapshot_if_changed`] MUST run
+/// before [`drain_events`], because `drain_events` resolves parked `join`/`leave`
+/// waiters and hands events to the observation task. Publishing first guarantees
+/// a caller woken by a resolution observes the new membership, never the
+/// pre-transition snapshot. Every drain-loop site — the live loop and the
+/// shutdown freeze-drain barrier — funnels through this one helper so the
+/// ordering cannot drift or be reordered per-site. Returns whatever
+/// `drain_events` returns (`true` iff it made progress).
+#[allow(clippy::too_many_arguments)]
+async fn publish_snapshot_then_drain_events<I, A, R, G>(
+  endpoint: &mut StreamEndpoint<I, A, R, G>,
+  snapshot: &SnapshotCell<I, A>,
+  last_snapshot_version: &mut u64,
+  obs_tx: &mpsc::Sender<Event<I, A>>,
+  observation_dropped: &Cell<u64>,
+  obs_payload_bytes: &Cell<u64>,
+  obs_payload_budget: Option<u64>,
+  pending: &mut PendingCommands,
+) -> bool
+where
+  I: memberlist_proto::Id,
+  A: memberlist_proto::Data + memberlist_proto::CheapClone + Eq + core::hash::Hash + 'static,
+  R: StreamTransport,
+{
+  refresh_snapshot_if_changed::<I, A, R, G>(endpoint, snapshot, last_snapshot_version);
+  drain_events::<I, A, R, G>(
+    endpoint,
+    obs_tx,
+    observation_dropped,
+    obs_payload_bytes,
+    obs_payload_budget,
+    pending,
+  )
+  .await
+}
+
 /// Per-driver observation task: dispatch each event's [`Delegate`] hook, then
 /// fan membership / control events out to the `EventStream`, OFF the driver
 /// loop.
@@ -2933,13 +2961,10 @@ async fn freeze_and_drain_bridges_to_disconnected<I, A, R, G>(
       drain_actions::<I, A, R, G>(endpoint, bridges, bridge_ready_tx, stream_opts, cidr_policy);
     let did_transports = drain_transport_transmits::<I, A, R, G>(endpoint, bridges);
     let did_transmits = drain_transmits::<I, A, R, G>(endpoint, gossip_socket, label.clone()).await;
-    // Publish the post-transition snapshot BEFORE `drain_events` resolves
-    // parked waiters / hands events to the obs task, so a caller woken by a
-    // completion that landed during the shutdown drain observes the new
-    // membership, never the pre-transition snapshot.
-    refresh_snapshot_if_changed::<I, A, R, G>(endpoint, snapshot, last_snapshot_version);
-    let did_events = drain_events(
+    let did_events = publish_snapshot_then_drain_events::<I, A, R, G>(
       endpoint,
+      snapshot,
+      last_snapshot_version,
       obs_tx,
       observation_dropped,
       obs_payload_bytes,

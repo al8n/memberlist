@@ -1808,7 +1808,7 @@ async fn shutdown_drain_folds_completion_that_lost_the_select() {
 ///
 /// This reads the cell AFTER the whole drain, so it anchors REMOVING the publish
 /// but not a publish-AFTER-notify reorder (both have happened by then);
-/// `shutdown_drain_publishes_snapshot_before_resolving_waiter_inline` anchors the
+/// `helper_publishes_snapshot_before_resolving_waiter_inline` anchors the
 /// reorder by capturing the snapshot at the resolution instant.
 #[compio::test]
 async fn shutdown_drain_publishes_snapshot_before_waking_waiter() {
@@ -1893,82 +1893,93 @@ async fn shutdown_drain_publishes_snapshot_before_waking_waiter() {
   );
 }
 
-/// Records — at the instant a parked waiter is resolved — whether the merged
-/// `seed` is already in the published snapshot. Fired synchronously by the
-/// driver's own `reply.send`, so it observes the publish-vs-notify order the
-/// black-box post-drain read cannot. `Cell`, not an atomic: the compio driver is
-/// single-threaded, and this probe only ever fires on that thread.
+thread_local! {
+  /// The published snapshot cell the inline [`ResolutionProbe`] reads at the
+  /// wake instant, set on the driver thread for the duration of the ordering
+  /// test. It is a thread-local, not a field on the probe, precisely because a
+  /// [`Waker`](std::task::Waker) is `Send + Sync` by contract and so its backing
+  /// `Wake` value cannot hold the `!Send`, `Rc`-based `SnapshotCell`. The cell
+  /// stored here is a clone of the very `Rc` the helper publishes into, so the
+  /// probe observes the real publish; the probe only ever fires on this same
+  /// driver thread.
+  static RESOLUTION_PROBE_SNAPSHOT: RefCell<Option<SnapshotCell<SmolStr>>> =
+    const { RefCell::new(None) };
+}
+
+/// A genuinely `Send + Sync` probe (backed only by atomics) that records — at
+/// the instant a parked waiter is resolved — whether the merged `seed` is
+/// already in the published snapshot. Fired synchronously by the driver's own
+/// `reply.send`, so it observes the publish-vs-notify order the black-box
+/// post-drain read cannot. It reads the (`!Send`) published cell through the
+/// driver-thread [`RESOLUTION_PROBE_SNAPSHOT`] thread-local, honouring the
+/// `Waker` `Send + Sync` contract without any `unsafe` `RawWaker`. Mirrors the
+/// reactor's `AtResolution` probe, whose store is `Send + Sync` directly.
 struct ResolutionProbe {
-  snapshot: SnapshotCell<SmolStr>,
-  fired: Cell<bool>,
-  seed_published_at_resolution: Cell<bool>,
+  fired: std::sync::atomic::AtomicBool,
+  seed_published_at_resolution: std::sync::atomic::AtomicBool,
 }
 
-impl ResolutionProbe {
-  fn record(&self) {
-    self.fired.set(true);
-    let present = self
-      .snapshot
-      .borrow()
-      .by_id(&SmolStr::new("seed"))
-      .is_some();
-    self.seed_published_at_resolution.set(present);
+impl std::task::Wake for ResolutionProbe {
+  fn wake(self: std::sync::Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &std::sync::Arc<Self>) {
+    use std::sync::atomic::Ordering;
+    self.fired.store(true, Ordering::SeqCst);
+    let present = RESOLUTION_PROBE_SNAPSHOT.with(|cell| {
+      cell
+        .borrow()
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.borrow().by_id(&SmolStr::new("seed")).is_some())
+    });
+    self
+      .seed_published_at_resolution
+      .store(present, Ordering::SeqCst);
   }
 }
 
-/// A [`Waker`](core::task::Waker) that runs [`ResolutionProbe::record`] on wake.
-/// Hand-rolled because the probe holds a `!Send` `Rc` snapshot cell, which a safe
-/// `Waker::from(Arc<W>)` (requiring `Send + Sync`) cannot carry.
-fn resolution_probe_waker(probe: &ResolutionProbe) -> core::task::Waker {
-  use core::task::{RawWaker, RawWakerVTable, Waker};
-
-  fn record(ptr: *const ()) {
-    // SAFETY: `ptr` is the `&ResolutionProbe` passed to `RawWaker::new` below. It
-    // outlives every wake — the probe is held on the test's stack across the
-    // whole drain — and the compio driver is single-threaded, so this fires on
-    // the same thread that owns the `Rc` cell. `record` takes `&self` and mutates
-    // only through `Cell`, so no aliasing `&mut` is ever formed.
-    let probe = unsafe { &*(ptr as *const ResolutionProbe) };
-    probe.record();
-  }
-  fn clone(ptr: *const ()) -> RawWaker {
-    RawWaker::new(ptr, &VTABLE)
-  }
-  fn noop(_: *const ()) {}
-  static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, record, record, noop);
-
-  let raw = RawWaker::new(probe as *const ResolutionProbe as *const (), &VTABLE);
-  // SAFETY: the vtable's `wake`/`wake_by_ref` re-borrow the same live probe
-  // pointer (see `record`); `clone` re-derives an identical raw waker; `drop` is a
-  // no-op because the waker does not own the probe.
-  unsafe { Waker::from_raw(raw) }
-}
-
-/// Ordering guard for the shutdown drain's publish-BEFORE-notify contract:
-/// `freeze_and_drain_bridges_to_disconnected` must republish the post-transition
-/// snapshot BEFORE `drain_events` resolves a parked waiter.
+/// Ordering guard for the publish-BEFORE-notify contract centralised in
+/// `publish_snapshot_then_drain_events` — the single helper every drain-loop site
+/// (live loop and shutdown freeze-drain barrier) funnels through. The helper must
+/// republish the post-transition snapshot BEFORE `drain_events` resolves a parked
+/// waiter, so a caller woken by its own completion never reads the pre-transition
+/// snapshot. Guarding the one helper covers all six former call sites at once.
 ///
 /// The sibling `shutdown_drain_publishes_snapshot_before_waking_waiter` reads the
 /// snapshot AFTER the whole drain, so it anchors REMOVING the publish but cannot
 /// distinguish publish-before-notify from publish-AFTER-notify — both have
 /// happened by then, and on compio's single-thread executor a real woken waiter
 /// task only runs post-drain regardless. This test instead captures the snapshot
-/// AT the resolution instant via an instrumented waker: `oneshot::Sender::send`
+/// AT the resolution instant via a sound `Arc<Wake>` probe: `oneshot::Sender::send`
 /// wakes the receiver's registered waker synchronously, so the driver's own
-/// `reply.send` (inside `drain_events`) runs the probe INLINE, mid-drain. Under
+/// `reply.send` (inside `drain_events`) runs the probe INLINE, mid-helper. Under
 /// the correct order the merged seed is already published; a reorder that moves
 /// the publish AFTER `drain_events` leaves it stale at that instant. (The reactor
 /// carries the same guard for the shared design in
 /// `drive_pass_publishes_snapshot_before_resolving_join_waiter`.)
 #[compio::test]
-async fn shutdown_drain_publishes_snapshot_before_resolving_waiter_inline() {
+async fn helper_publishes_snapshot_before_resolving_waiter_inline() {
   let now = Instant::now();
   let mut endpoint = unlabeled_endpoint("dialer", "127.0.0.1:0".parse().unwrap());
   endpoint.start_scheduling(now);
 
   let addr_a = addr(7831);
-  // The peer entry is named "seed"; folding its pull response merges it.
+  // The peer entry is named "seed". Drive the exchange, then fold its pull
+  // response + FIN straight into the endpoint: this merges "seed" (advancing the
+  // machine's snapshot version) AND queues the terminal `ExchangeCompleted` — but
+  // publishes nothing, so the published snapshot going into the helper is stale.
   let (eid_a, response_a) = drive_push_to_queued_response(&mut endpoint, addr_a, now);
+  let stale_version = endpoint.endpoint_ref().snapshot_version();
+  for chunk in &response_a {
+    endpoint.handle_transport_data(eid_a, chunk, false, now);
+  }
+  endpoint.handle_transport_data(eid_a, &[], true, now);
+  assert_ne!(
+    endpoint.endpoint_ref().snapshot_version(),
+    stale_version,
+    "precondition: folding the response advanced the machine's snapshot version",
+  );
 
   // A 1-seed WaitForCompletion join resolved inline when eid_a completes.
   let (tx, mut rx) = futures_channel::oneshot::channel::<super::JoinReply>();
@@ -1982,67 +1993,60 @@ async fn shutdown_drain_publishes_snapshot_before_resolving_waiter_inline() {
     reply: tx,
   });
 
-  let (bridge_inbound_tx, mut bridge_inbound_rx) = mpsc::unbounded::<super::BridgeInbound>();
-  let (bridge_ready_tx, _bridge_ready_rx) = flume::unbounded::<BridgeReady>();
-  for chunk in response_a {
-    queue_inbound(
-      &bridge_inbound_tx,
-      super::BridgeInbound::Bytes(super::BridgeBytes {
-        eid: eid_a,
-        bytes: chunk,
-        received_at: now,
-      }),
-    );
-  }
-  queue_inbound(
-    &bridge_inbound_tx,
-    super::BridgeInbound::Eof(super::BridgeEof {
-      eid: eid_a,
-      received_at: now,
-    }),
-  );
-
-  // The snapshot cell the drain publishes to, owned here so the probe can read it
-  // at the resolution instant. Bootstrapped from the pre-drain membership — no peer.
+  // The snapshot cell the helper publishes to, plus the stale last-published
+  // version so `refresh_snapshot_if_changed` actually republishes. Bootstrapped
+  // from the pre-fold membership — no peer.
   let snapshot = boot_snapshot_cell(&endpoint);
+  let mut last_snapshot_version = stale_version;
   assert!(
     snapshot.borrow().by_id(&SmolStr::new("seed")).is_none(),
     "precondition: the bootstrap snapshot does not yet carry the peer",
   );
 
-  let probe = ResolutionProbe {
-    snapshot: snapshot.clone(),
-    fired: Cell::new(false),
-    seed_published_at_resolution: Cell::new(false),
-  };
+  // The probe reads the published cell at the resolution instant through the
+  // driver-thread thread-local; the cell stored there is a clone of the very `Rc`
+  // the helper publishes into.
+  let probe = std::sync::Arc::new(ResolutionProbe {
+    fired: std::sync::atomic::AtomicBool::new(false),
+    seed_published_at_resolution: std::sync::atomic::AtomicBool::new(false),
+  });
+  RESOLUTION_PROBE_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(snapshot.clone()));
+
   // Register the probe waker on the reply receiver, so the driver's `reply.send`
-  // inside the drain wakes it. The poll returns Pending (nothing resolved yet).
-  let waker = resolution_probe_waker(&probe);
+  // inside the helper wakes it. The poll returns Pending (nothing resolved yet).
+  let waker = std::task::Waker::from(probe.clone());
   let mut cx = core::task::Context::from_waker(&waker);
   assert!(
     core::future::Future::poll(core::pin::Pin::new(&mut rx), &mut cx).is_pending(),
     "the reply is not yet resolved; this poll registers the probe waker",
   );
 
-  let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
-  run_shutdown_drain_publishing_to(
+  let (obs_tx, _obs_rx) = mpsc::unbounded::<memberlist_proto::event::Event<SmolStr, SocketAddr>>();
+  let observation_dropped = Cell::new(0u64);
+  let obs_payload_bytes = Cell::new(0u64);
+  let did_events = super::publish_snapshot_then_drain_events::<SmolStr, SocketAddr, RawRecords, _>(
     &mut endpoint,
-    &mut bridges,
-    bridge_inbound_tx,
-    &mut bridge_inbound_rx,
-    &bridge_ready_tx,
-    &mut pending,
     &snapshot,
+    &mut last_snapshot_version,
+    &obs_tx,
+    &observation_dropped,
+    &obs_payload_bytes,
+    None,
+    &mut pending,
   )
   .await;
 
+  RESOLUTION_PROBE_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
+
+  use std::sync::atomic::Ordering;
+  assert!(did_events, "the helper drained the completion event");
   assert!(
-    probe.fired.get(),
-    "the drain must have resolved the join waiter (else this test proves nothing)",
+    probe.fired.load(Ordering::SeqCst),
+    "the helper must have resolved the join waiter (else this test proves nothing)",
   );
   assert!(
-    probe.seed_published_at_resolution.get(),
-    "publish-before-notify: at the instant the drain resolved the join waiter the \
+    probe.seed_published_at_resolution.load(Ordering::SeqCst),
+    "publish-before-notify: at the instant the helper resolved the join waiter the \
      merged seed was ALREADY in the published snapshot — a reorder publishing AFTER \
      the notify would leave it stale here",
   );
