@@ -26,9 +26,9 @@ use crate::{
   delegate::{AliveDelegate, MergeDelegate},
   error::{EndpointInitError, Error, GossipMtuBound, MetaTooLarge, SizeExceeded},
   event::{
-    CompoundTransmit, DialIntent, DialRequested, Event, ExchangeKind, NodeConflict, PacketTransmit,
-    PingCompleted, PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse,
-    Transmit, UserPacket,
+    CompoundTransmit, DialAbortReason, DialIntent, DialRequested, Event, ExchangeKind,
+    NodeConflict, PacketTransmit, PingCompleted, PingFailed, PingId, Reliability,
+    RemoteStateReceived, SendPushPullResponse, Transmit, UserPacket,
   },
   members::{LocalNodeState, Member, Members},
   metrics::Metrics,
@@ -86,6 +86,14 @@ pub const META_MAX_SIZE: usize = 512;
 /// `PushNodeState` entries; an operator running BOTH a near-cap snapshot AND a
 /// cluster whose membership framing exceeds this reserve should raise
 /// `max_stream_frame_size` accordingly.
+///
+/// This reserve is a static construction/setter guard on the SNAPSHOT alone; it
+/// composes with — but does not replace — the dynamic gates that charge the FULL
+/// framed PushPull against the FULL `max_stream_frame_size` the receiver
+/// enforces. When membership framing pushes a request or response over that cap,
+/// the outbound request aborts as [`DialAbortReason::FrameExceedsCap`] (bumping
+/// `push_pull_requests_oversized`) and an over-cap served response bumps
+/// `push_pull_responses_oversized`.
 pub const LOCAL_STATE_FRAME_BUDGET: usize = 1024 * 1024;
 
 /// Validate a candidate local-state snapshot against the reliable-stream frame
@@ -280,6 +288,14 @@ pub struct Endpoint<I, A, R = SmallRng> {
   // encoding + compressing the frame per request. With compression disabled (or
   // no backend) this is the raw `encode_push_pull_response` frame verbatim.
   cached_pushpull_response: Bytes,
+  // Whether the plain (pre-compression) cached response frame exceeds
+  // `max_stream_frame_size` — the quantity an identically-configured peer's
+  // frame gate rejects before decoding. Recomputed on every cache rebuild in
+  // `build_pushpull_response_bytes`. The response is served anyway (refusing to
+  // answer diverges views); this flag drives the per-serve
+  // `push_pull_responses_oversized` counter so the doomed-but-served payload is
+  // observable.
+  cached_response_oversized: bool,
   // The `snapshot_version` the cached response was last built at. A tick rebuilds
   // the cache only when this differs from `snapshot_version` (which every
   // membership / incarnation / liveness / health change bumps), so a
@@ -1112,6 +1128,24 @@ where
       .collect();
     let framed =
       Self::encode_push_pull_response(&local_states, self.local_state_snapshot.clone(), false);
+    // Charge the PLAIN (pre-compression) frame against the cap the peer enforces
+    // before decoding — the receiver bounds the DECOMPRESSED plaintext by the
+    // same cap, so a well-compressing over-cap plain frame is still rejected;
+    // measuring `serve_ready` would undercount. The response is served anyway
+    // (refusing diverges views); the flag drives the per-serve counter.
+    let cap = self.cfg.max_stream_frame_size();
+    let oversized = framed.len() > cap;
+    #[cfg(feature = "tracing")]
+    if oversized && !self.cached_response_oversized {
+      // Edge-triggered: warn only on the false->true transition, not every
+      // rebuild, so a persistently over-cap cluster does not flood the log.
+      tracing::warn!(
+        framed_len = framed.len(),
+        cap,
+        "cached push/pull response frame exceeds max_stream_frame_size; peers with the same cap will reject it"
+      );
+    }
+    self.cached_response_oversized = oversized;
     // Fold the coordinator-uniform compression into the cache so it is paid once
     // per membership change, not once per inbound request. `compress_reliable_payload`
     // honors the don't-expand rule (a body that would not shrink is stored
@@ -1495,6 +1529,7 @@ where
       // Placeholder: the real self-only response is pre-built below (the forced
       // `cached_response_dirty` makes the first `refresh` build it).
       cached_pushpull_response: Bytes::new(),
+      cached_response_oversized: false,
       cached_response_version: 0,
       cached_response_dirty: true,
       #[cfg(compression)]
@@ -3229,10 +3264,18 @@ where
   /// `poll_event`. A driver that services its own dials in-band uses this to skip
   /// the drain-and-requeue of the whole application-event backlog per reliable send.
   ///
-  /// Returns `(id, None)` on the not-running inert-id path: a leaving/left node
-  /// registers no intent and emits no event, so there is no descriptor — the
-  /// returned id is inert, exactly as the event-emitting method leaves it.
-  /// Otherwise returns `(id, Some(intent))` with `intent.id() == id`.
+  /// Returns `(id, Ok(intent))` with `intent.id() == id` when the dial is
+  /// registered. Returns `(id, Err(reason))` with an inert id (no intent
+  /// registered, no event emitted) when the dial is retired before it starts:
+  ///
+  /// - [`DialAbortReason::NotRunning`] — a leaving/left node registers no intent
+  ///   and emits no event, so it advertises none of its pre-leave Alive state to
+  ///   a seed.
+  /// - [`DialAbortReason::FrameExceedsCap`] — the encoded PushPull frame exceeds
+  ///   `max_stream_frame_size`, so an identically-configured receiver's frame
+  ///   gate would reject it before decoding; dialing would burn a connection and
+  ///   handshake for a guaranteed remote decode error, so the send is aborted
+  ///   locally and `push_pull_requests_oversized` is bumped instead.
   ///
   /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
   /// for periodic anti-entropy.
@@ -3241,14 +3284,14 @@ where
     peer: A,
     kind: PushPullKind,
     now: Instant,
-  ) -> (StreamId, Option<DialIntent<A>>) {
+  ) -> (StreamId, Result<DialIntent<A>, DialAbortReason>) {
     let id = self.allocate_stream_id();
     // A leaving/left node initiates no push/pull: it queues no dial intent and
     // emits no DialRequested, so it advertises none of its pre-leave Alive state
     // to a seed. The returned id is inert; the gated callers (join command
     // handlers and seed drains) never reach this once not Running.
     if !self.is_running() {
-      return (id, None);
+      return (id, Err(DialAbortReason::NotRunning));
     }
     let deadline = now + self.cfg.stream_timeout();
 
@@ -3285,6 +3328,37 @@ where
     let encoded = crate::wire::encode_message::<I, A>(&msg)
       .expect("PushPull encode cannot fail for well-formed data");
 
+    // Preflight the framed request against the same cap the receiver enforces
+    // before decoding: `encode_message` yields `[TAG:1][VARINT body_len][BODY]`,
+    // whose length equals the receiver's gated `total = 1 + varint_bytes +
+    // body_len` (`Stream::probe_frame`), byte-for-byte, both fed from
+    // `EndpointOptions::max_stream_frame_size`. Compression/encryption are
+    // neutral: the receiver bounds the DECOMPRESSED plaintext by the same cap on
+    // unwrap, so a well-compressing over-cap plain frame is still rejected. The
+    // comparison is therefore on the plain frame and STRICT — an exactly-at-cap
+    // frame passes both gates and must be sent. Aborting here (no dial, inert id)
+    // spares a doomed connection + handshake + full re-serialization every
+    // anti-entropy interval and surfaces the size locally instead of only as a
+    // remote decode error.
+    let cap = self.cfg.max_stream_frame_size();
+    if encoded.len() > cap {
+      self.metrics.push_pull_requests_oversized += 1;
+      #[cfg(feature = "tracing")]
+      tracing::debug!(
+        encoded_len = encoded.len(),
+        cap,
+        kind = ?kind,
+        "push/pull request frame exceeds max_stream_frame_size; not dialing"
+      );
+      return (
+        id,
+        Err(DialAbortReason::FrameExceedsCap(SizeExceeded::new(
+          encoded.len(),
+          cap,
+        ))),
+      );
+    }
+
     self.insert_intent(
       id,
       PendingStreamIntent {
@@ -3298,7 +3372,7 @@ where
 
     (
       id,
-      Some(DialIntent::new(id, peer, deadline, ExchangeKind::PushPull)),
+      Ok(DialIntent::new(id, peer, deadline, ExchangeKind::PushPull)),
     )
   }
 
@@ -3314,7 +3388,12 @@ where
   /// for periodic anti-entropy.
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     let (id, intent) = self.start_push_pull_direct(peer, kind, now);
-    if let Some(intent) = intent {
+    // On `Err` (not running, or the frame exceeds `max_stream_frame_size`) no
+    // dial is queued — the metric and trace inside `start_push_pull_direct`
+    // carry the observability, and the returned id is inert, exactly as the
+    // not-running path has always behaved. The internal anti-entropy caller
+    // stays correct: an oversized tick dials nothing and still reschedules.
+    if let Ok(intent) = intent {
       let (id, peer, deadline, _kind) = intent.into_parts();
       self
         .pending_events
@@ -4973,6 +5052,15 @@ where
         // surface in the next tick's rebuild — at most one tick later.
         // `merge_state` above still applies the peer's push immediately; only
         // the reflected-back copy is tick-quantized.
+        //
+        // The response is served even when its plain frame exceeds
+        // `max_stream_frame_size`: refusing to answer would diverge the two
+        // nodes' views (a SWIM-semantic change), so the doomed-but-served
+        // payload is counted per serve instead. O(1) — the flag was computed on
+        // the last cache rebuild.
+        if self.cached_response_oversized {
+          self.metrics.push_pull_responses_oversized += 1;
+        }
         Some(StreamCommand::SendPushPullResponse(
           SendPushPullResponse::new(self.cached_pushpull_response.clone()),
         ))

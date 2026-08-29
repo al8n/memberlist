@@ -2129,6 +2129,88 @@ fn expired_push_pull_dial_emits_failed_exchange_completed() {
   );
 }
 
+/// A QUIC `start_push_pull` whose framed request exceeds `max_stream_frame_size`
+/// completes synchronously as a `Failed` `Event::ExchangeCompleted` keyed
+/// `ExchangeId::from(StreamId)` — the same terminal a QUIC join waiter parks on,
+/// so an oversized seed resolves immediately rather than hanging. No connection
+/// is dialed (no `dial_parked` entry) and no `pending_outbound_*` entry leaks.
+#[test]
+fn quic_start_push_pull_oversized_completes_failed() {
+  use crate::{
+    endpoint::Endpoint as CoreEndpoint,
+    event::{ExchangeId, ExchangeKind, ExchangeStatus},
+    node::Node,
+    typed::{Alive, DelegateVersion, Meta, ProtocolVersion, PushNodeState},
+  };
+
+  const META_MAX: usize = 256;
+  let big_meta = Meta::try_from(Bytes::from(vec![0u8; META_MAX])).expect("meta at the ceiling");
+
+  let a_addr: SocketAddr = "127.0.0.1:7983".parse().unwrap();
+  let bob_addr: SocketAddr = "127.0.0.1:7984".parse().unwrap();
+  let now = Instant::now();
+
+  // The exact two-member frame the endpoint (local "a" + bob near-max meta)
+  // would emit, and a cap one byte below it.
+  let local_pns = PushNodeState::new(1, SmolStr::new("a"), a_addr, State::Alive)
+    .with_meta(Meta::empty())
+    .with_protocol_version(ProtocolVersion::V1)
+    .with_delegate_version(DelegateVersion::V1);
+  let bob_pns = PushNodeState::new(1, SmolStr::new("bob"), bob_addr, State::Alive)
+    .with_meta(big_meta.clone())
+    .with_protocol_version(ProtocolVersion::V1)
+    .with_delegate_version(DelegateVersion::V1);
+  let l2 = CoreEndpoint::<SmolStr, SocketAddr>::encode_push_pull_response(
+    &[local_pns, bob_pns],
+    Bytes::new(),
+    false,
+  )
+  .len();
+
+  let cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_meta_max_size(META_MAX)
+    .with_max_stream_frame_size(l2 - 1);
+  let mut a = make_endpoint_full(cfg, test_config(), a_addr, now);
+  a.endpoint_mut().process_alive(
+    Alive::new(1, Node::new(SmolStr::new("bob"), bob_addr))
+      .with_meta(big_meta)
+      .with_protocol_version(ProtocolVersion::V1)
+      .with_delegate_version(DelegateVersion::V1),
+    false,
+    now,
+  );
+
+  let id = a.start_push_pull(bob_addr, PushPullKind::Refresh, now);
+  let expected_eid = ExchangeId::from(id);
+
+  let mut found = None;
+  while let Some(ev) = a.poll_event() {
+    if let Event::ExchangeCompleted(payload) = ev
+      && payload.eid() == expected_eid
+    {
+      found = Some(payload);
+      break;
+    }
+  }
+  let payload = found.expect(
+    "an oversized push/pull request completes synchronously as a Failed \
+       ExchangeCompleted keyed ExchangeId::from(StreamId)",
+  );
+  assert_eq!(payload.kind(), ExchangeKind::PushPull);
+  assert_eq!(payload.outcome(), ExchangeStatus::Failed);
+  assert_eq!(payload.peer(), &bob_addr);
+
+  // No connection was dialed and nothing leaked.
+  assert_eq!(
+    a.dial_parked.get(&bob_addr).map(|b| b.len()).unwrap_or(0),
+    0,
+    "an oversized request parks no dial",
+  );
+  assert!(!a.pending_outbound_kinds.contains_key(&id));
+  assert!(!a.pending_outbound_peers.contains_key(&id));
+  assert_eq!(a.live_bridge_count(), 0, "no bridge was built");
+}
+
 /// Strict-poll self-sufficiency: a bridge inserted into `self.bridges`
 /// by `service_quinn`'s `accept(Dir::Bi)` loop (step 4) or
 /// `service_dials`'s `streams().open(Dir::Bi)` (step 5) MUST be pumped

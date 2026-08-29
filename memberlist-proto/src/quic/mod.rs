@@ -5207,11 +5207,18 @@ where
   /// never scans the whole dial / bridge / connection tables and does zero
   /// event-queue work.
   ///
-  /// On the not-running inert-id path the descriptor is `None`: the endpoint
-  /// registered no intent and queued no event, so NO `pending_outbound_*` entry is
-  /// inserted (inserting one would leak — no bridge is ever created for this id to
-  /// reap it) and a synchronous `Failed` [`Event::ExchangeCompleted`] is emitted for
-  /// the returned id so a join waiter parked on it resolves immediately.
+  /// On an `Err` inert-id path the endpoint registered no intent and queued no
+  /// event, so NO `pending_outbound_*` entry is inserted (inserting one would
+  /// leak — no bridge is ever created for this id to reap it) and a synchronous
+  /// `Failed` [`Event::ExchangeCompleted`] is emitted for the returned id so a
+  /// join waiter parked on it resolves immediately. This covers both
+  /// [`DialAbortReason::NotRunning`](crate::event::DialAbortReason::NotRunning)
+  /// (the endpoint is leaving/left) and
+  /// [`DialAbortReason::FrameExceedsCap`](crate::event::DialAbortReason::FrameExceedsCap)
+  /// (the framed request exceeds `max_stream_frame_size`, so an
+  /// identically-configured receiver would reject it before decoding). The abort
+  /// reason is carried by `push_pull_requests_oversized` and the trace, not by
+  /// `ExchangeCompleted` (which has no reason field).
   pub fn start_push_pull(
     &mut self,
     peer: SocketAddr,
@@ -5221,7 +5228,7 @@ where
     self.last_now = Some(now);
     let (id, intent) = self.ep.start_push_pull_direct(peer, kind, now);
     match intent {
-      Some(intent) => {
+      Ok(intent) => {
         // `attempted = true`: this entry never entered `dial_pending`, so it was
         // never counted in `unattempted_dial_count`; constructing it attempted
         // keeps `process_dial_entry` from decrementing a count it never bumped, so
@@ -5241,7 +5248,7 @@ where
         self.pending_outbound_peers.insert(id, peer);
         self.service_started_exchange(entry, now);
       }
-      None => self.emit_inert_dial_failed(id, peer, ExchangeKind::PushPull),
+      Err(_reason) => self.emit_inert_dial_failed(id, peer, ExchangeKind::PushPull),
     }
     id
   }

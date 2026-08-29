@@ -1169,6 +1169,127 @@ mod tcp {
       "Dead(M) is broadcast: the stale Alive did not suppress the suspicion",
     );
   }
+
+  /// A meta blob at exactly `META_MAX` — the largest a member may advertise
+  /// under the oversized rig config.
+  const META_MAX: usize = 256;
+
+  fn near_max_meta() -> crate::typed::Meta {
+    crate::typed::Meta::try_from(Bytes::from(vec![0u8; META_MAX])).expect("meta at the ceiling")
+  }
+
+  /// The exact framed length of the two-member PushPull request an endpoint
+  /// holding `[local(empty meta), bob(near-max meta)]` emits (empty snapshot).
+  fn two_member_frame_len(local_id: &str, local: SocketAddr, bob: SocketAddr) -> usize {
+    use crate::{
+      endpoint::Endpoint,
+      typed::{DelegateVersion, ProtocolVersion, PushNodeState, State},
+    };
+    let local_pns = PushNodeState::new(1, SmolStr::new(local_id), local, State::Alive)
+      .with_meta(crate::typed::Meta::empty())
+      .with_protocol_version(ProtocolVersion::V1)
+      .with_delegate_version(DelegateVersion::V1);
+    let bob_pns = PushNodeState::new(1, SmolStr::new("bob"), bob, State::Alive)
+      .with_meta(near_max_meta())
+      .with_protocol_version(ProtocolVersion::V1)
+      .with_delegate_version(DelegateVersion::V1);
+    Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(
+      &[local_pns, bob_pns],
+      Bytes::new(),
+      false,
+    )
+    .len()
+  }
+
+  /// A running plain-TCP coordinator over a two-member endpoint (local + `bob`
+  /// at near-max meta) built with the given frame cap.
+  fn two_member_coord(
+    local_port: u16,
+    cap: usize,
+    now: Instant,
+  ) -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
+    use crate::{
+      config::EndpointOptions,
+      endpoint::Endpoint,
+      node::Node,
+      typed::{Alive, DelegateVersion, ProtocolVersion},
+    };
+    let local_id = format!("n-{local_port}");
+    let mut ep = Endpoint::<SmolStr, SocketAddr>::try_new_at_seeded(
+      EndpointOptions::new(SmolStr::new(local_id), addr(local_port))
+        .with_meta_max_size(META_MAX)
+        .with_max_stream_frame_size(cap),
+      now,
+    )
+    .expect("the single-identity floor fits under the cap");
+    ep.process_alive(
+      Alive::new(1, Node::new(SmolStr::new("bob"), addr(7002)))
+        .with_meta(near_max_meta())
+        .with_protocol_version(ProtocolVersion::V1)
+        .with_delegate_version(DelegateVersion::V1),
+      false,
+      now,
+    );
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+  }
+
+  /// A coordinator `start_push_pull` whose framed request exceeds
+  /// `max_stream_frame_size` surfaces exactly one `DialAborted{PushPull,
+  /// FrameExceedsCap}` keyed by the returned id, opens NO connection, and leaves
+  /// no staged `pending_outbound_kinds` entry to wedge later servicing. The
+  /// control (a raised cap) dials as usual.
+  #[test]
+  fn streams_start_push_pull_oversized_emits_dial_aborted() {
+    let now = Instant::now();
+    let local_port = 7150;
+    let l2 = two_member_frame_len(&format!("n-{local_port}"), addr(local_port), addr(7002));
+
+    // Oversized: cap one byte below the two-member frame.
+    let mut coord = two_member_coord(local_port, l2 - 1, now);
+    let sid = coord.start_push_pull(addr(7002), PushPullKind::Join, now);
+
+    assert!(
+      coord.poll_action().is_none(),
+      "no Connect surfaces for an oversized push/pull request",
+    );
+    assert!(
+      coord.poll_transport_transmit().is_none(),
+      "no bytes transmit for an aborted dial",
+    );
+    let mut aborts = Vec::new();
+    while let Some(ev) = coord.poll_event() {
+      if let Event::DialAborted(a) = ev {
+        aborts.push((a.stream_id(), a.kind(), a.reason()));
+      }
+    }
+    assert_eq!(aborts.len(), 1, "exactly one DialAborted surfaces");
+    let (aid, akind, areason) = aborts[0];
+    assert_eq!(aid, sid, "the abort is keyed by the returned StreamId");
+    assert_eq!(akind, ExchangeKind::PushPull);
+    assert!(
+      matches!(areason, DialAbortReason::FrameExceedsCap(_)),
+      "the reason is FrameExceedsCap, got {areason:?}",
+    );
+    assert_eq!(
+      coord.pending_outbound_kinds_len(),
+      0,
+      "an aborted dial stages no pending_outbound_kinds entry",
+    );
+    // No wedge: servicing again surfaces nothing further.
+    assert!(coord.poll_action().is_none());
+    assert_eq!(coord.live_bridge_count(), 0, "no bridge was built");
+
+    // Control: a raised cap dials through the coordinator as usual.
+    let mut ok = two_member_coord(local_port, l2 + 4096, now);
+    let ok_sid = ok.start_push_pull(addr(7002), PushPullKind::Join, now);
+    let connected = core::iter::from_fn(|| ok.poll_action())
+      .any(|a| matches!(a, StreamAction::Connect(c) if c.stream_id() == ok_sid));
+    assert!(connected, "a within-cap request surfaces a Connect");
+    let no_abort =
+      !core::iter::from_fn(|| ok.poll_event()).any(|ev| matches!(ev, Event::DialAborted(_)));
+    assert!(no_abort, "a within-cap request is not aborted");
+  }
 }
 
 /// STR-A001 test 3: a record layer whose `dialer` constructor fails drives the

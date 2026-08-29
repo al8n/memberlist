@@ -249,6 +249,10 @@ pub enum DialAbortReason {
   /// retires the id here. Distinct from [`Self::NotRunning`], which is a dial
   /// started while the endpoint was already leaving/left.
   Leaving,
+  /// The encoded push/pull request frame exceeds `max_stream_frame_size`, so an
+  /// identically-configured receiver's frame gate would reject it before
+  /// decoding. No dial was initiated. Carries the framed size and the cap.
+  FrameExceedsCap(crate::error::SizeExceeded),
 }
 
 /// Payload for [`Event::DialAborted`]: a [`StreamId`] returned by a `start_*`
