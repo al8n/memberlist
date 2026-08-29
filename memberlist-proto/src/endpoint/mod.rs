@@ -2119,6 +2119,22 @@ where
     let Some(probe) = self.probes.remove(&seq) else {
       return;
     };
+    // Symmetric with `probe_terminate_failure`: a probe rescued by a late Ack must
+    // also cancel its concurrently-armed reliable-ping fallback. The peer is proven
+    // alive, so the fallback has no remaining purpose; leaving its pending intent
+    // parked would let a rescued probe's fallback linger to its deadline and, across
+    // probe rounds under sustained UDP degradation, accumulate. If the fallback dial
+    // is already live the intent is gone and this is a no-op; a late reliable-ping
+    // event then lands on an absent probe and returns harmlessly.
+    if let ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      reliable_stream_id: Some(rid),
+      ..
+    }) = &probe.phase
+    {
+      // Copy the id out before the `&mut self` call to release the `&probe.phase` borrow.
+      let rid = *rid;
+      self.remove_intent(&rid);
+    }
     // Drop the original direct-ping AckRegistry entry registered at
     // `start_probe`. The direct/indirect-relayed paths reach here via
     // `handle_ack`, which already removed it; the reliable-fallback
@@ -2647,6 +2663,11 @@ where
   /// initiated, `false` if no eligible target exists (cluster has only the
   /// local node, all peers are dead/leaving, etc.). The periodic scheduler
   /// calls this every `probe_interval` (scaled by Awareness).
+  ///
+  /// Detection single-flight — at most one live Detection probe per peer, which is
+  /// what bounds a peer's concurrently-armed reliable-ping fallbacks to one — is
+  /// enforced by that periodic scheduler's target selection, NOT by this method. A
+  /// direct caller that starts a probe out of band bypasses that guard.
   pub fn start_probe(&mut self, now: Instant) -> bool {
     // A leaving/left node starts no failure-detection probe (no direct Ping I/O).
     if !self.is_running() {
