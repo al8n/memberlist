@@ -1821,8 +1821,6 @@ where
 
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let is_self = target == local_id;
-    // "self-marked-itself-dead" sentinel: target == from.
-    let self_marked = target == from;
 
     let (local_inc, current_state) = {
       let m = self.members.get(&target).unwrap();
@@ -1899,12 +1897,22 @@ where
     if let Some(m) = self.members.get_mut(&target) {
       let current_state = m.state_mut();
       current_state.set_incarnation(inc);
-      let new_state = if self_marked {
-        State::Left
-      } else {
-        State::Dead
-      };
-      current_state.set_state(new_state, now);
+      // Remote ingress records `State::Dead` unconditionally — never
+      // `State::Left`, even for the `node == from` self-marked-departure
+      // sentinel. `State::Left` is immediately address-reclaimable and exempt
+      // from the Alive incarnation-staleness guard; granting it off a payload
+      // whose only self-leave signal is two fields being equal would let an
+      // unauthenticated forger flip a live peer to `Left` and instantly
+      // redirect its id to an attacker-chosen address. A self-leave is
+      // unattributable in plaintext gossip — SWIM relays `Dead{X, X}` through
+      // arbitrary peers, so the transport source is never X — so it is
+      // downgraded to reclaim-protected `Dead`: peers still reap the target,
+      // and its address is reused only after `dead_node_reclaim_time` or the
+      // `reset_nodes` reap window, never instantly off an unattributed message.
+      // `State::Left` is reserved for the local node leaving itself (the
+      // `is_self` branch above) and mirrors the push/pull ingress
+      // (`merge_state` rewrites remote `Left` to `Dead`).
+      current_state.set_state(State::Dead, now);
     }
 
     self.broadcast_message(

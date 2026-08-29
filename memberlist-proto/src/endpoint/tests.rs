@@ -354,14 +354,125 @@ fn dead_self_when_not_leaving_refutes() {
 }
 
 #[test]
-fn dead_self_marked_message_treats_as_left() {
+fn remote_self_marked_dead_marks_dead_not_left() {
+  // A remote self-marked departure (node == from) records reclaim-protected
+  // State::Dead, NEVER State::Left. State::Left is immediately
+  // address-reclaimable and exempt from the incarnation-staleness guard, so
+  // granting it off an unattributable gossip payload would let a forger take
+  // over a live id. State::Left is reserved for the local self-leave.
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
   // node==from convention: bob is announcing his own departure.
   e.process_dead(dead("bob", "bob", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state_ref().state(), State::Left);
+  assert_eq!(bob.state_ref().state(), State::Dead);
+}
+
+/// A remote self-marked `Dead{X, from: X}` must not grant the privileged
+/// `State::Left` that would let an unauthenticated forger instantly redirect a
+/// live peer's id to an attacker-chosen address. The target
+/// becomes reclaim-protected `State::Dead`, so a lower- or higher-incarnation
+/// `Alive` at a fresh address is rejected/conflicted rather than adopted; only a
+/// genuine same-address refutation revives it.
+#[test]
+fn remote_self_leave_cannot_takeover_id() {
+  let real: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+  let attacker: SocketAddr = "127.0.0.1:6666".parse().unwrap();
+  let x = SmolStr::new("x");
+
+  // Default cfg: dead_node_reclaim_time == 0, so a Dead id is never instantly
+  // reclaimable — only State::Left would be.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  let now = Instant::now();
+  process_alive_auto(&mut e, alive("x", 7001, 5), false, now);
+  while e.poll_event().is_some() {}
+
+  // The forger relays a self-marked Dead for x (node == from). It must record
+  // reclaim-protected Dead, not Left.
+  e.process_dead(dead("x", "x", 5), now);
+  assert_eq!(
+    e.member_liveness(&x),
+    Some(State::Dead),
+    "a remote self-marked Dead must record Dead, never the reclaimable Left"
+  );
+
+  // A lower-incarnation Alive at the attacker's address must not resurrect x:
+  // the incarnation-staleness guard rejects it (Dead is not exempt).
+  e.process_alive(alive("x", 6666, 0), false, now);
+  assert_eq!(
+    e.member(&x).unwrap().address_ref(),
+    &real,
+    "a stale lower-incarnation Alive must not adopt the attacker address"
+  );
+  while e.poll_event().is_some() {}
+
+  // A higher-incarnation Alive at the attacker's address is a genuine
+  // address-conflict for a Dead (non-reclaimable) member: NodeConflict is
+  // emitted and the tracked address stays @real.
+  e.process_alive(alive("x", 6666, 6), false, now);
+  let ev = e.poll_event().expect("expected NodeConflict");
+  match ev {
+    Event::NodeConflict(p) => {
+      assert_eq!(p.existing_ref().address_ref(), &real);
+      assert_eq!(p.other_ref().address_ref(), &attacker);
+    }
+    other => panic!("expected NodeConflict, got {other:?}"),
+  }
+  assert_eq!(
+    e.member(&x).unwrap().address_ref(),
+    &real,
+    "a higher-incarnation Alive at a new address must conflict, not take over"
+  );
+
+  // A genuine refutation from x's real address at a higher incarnation revives
+  // it in place — the legitimate recovery path is preserved.
+  e.process_alive(alive("x", 7001, 6), false, now);
+  assert_eq!(
+    e.member_liveness(&x),
+    Some(State::Alive),
+    "genuine refute revives x"
+  );
+  assert_eq!(e.member(&x).unwrap().address_ref(), &real);
+}
+
+/// Control: the LOCAL node leaving itself still transitions to `State::Left`
+/// (the `is_self` self-leave branch, checked before the remote block). Only the
+/// remote-ingress mapping changed.
+#[test]
+fn local_self_leave_still_marks_left() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());
+  while e.poll_event().is_some() {}
+  e.leave(Instant::now()).expect("leave ok");
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+  assert_eq!(e.member_liveness(&SmolStr::new("local")), Some(State::Left));
+  assert!(e.is_left());
+}
+
+/// Liveness control: a genuine remote departure is still reclaimable once
+/// `dead_node_reclaim_time` elapses — the downgrade to Dead delays reclaim, it
+/// does not forbid it.
+#[test]
+fn remote_self_leave_reclaimable_after_window() {
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(cfg().with_dead_node_reclaim_time(Duration::from_millis(10)));
+  let t0 = Instant::now();
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t0);
+  while e.poll_event().is_some() {}
+
+  e.process_dead(dead("bob", "bob", 1), t0);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Dead));
+
+  // Past the reclaim window, a higher-incarnation Alive at a new address is
+  // adopted.
+  let later = t0 + Duration::from_millis(11);
+  e.process_alive_decided(alive("bob", 7777, 2), false, later);
+  assert_eq!(e.member_liveness(&SmolStr::new("bob")), Some(State::Alive));
+  assert_eq!(
+    e.member(&SmolStr::new("bob")).unwrap().address_ref().port(),
+    7777
+  );
 }
 
 use PushNodeState;
@@ -8833,10 +8944,11 @@ fn ping_untracked_node_synthesizes_target_state() {
 }
 
 #[test]
-fn gossip_scheduler_skips_left_members_as_candidates() {
-  // A Left member is not a gossip candidate (the `_ => false` filter arm). With
-  // only a Left peer present, gossip selects no target and emits nothing, yet
-  // does not panic and reschedules.
+fn gossip_scheduler_skips_out_of_window_dead_members_as_candidates() {
+  // A Dead member past the `gossip_to_the_dead_time` window is not a gossip
+  // candidate (the Dead-window / `_ => false` filter arms). With only such a
+  // peer present, gossip selects no target and emits nothing, yet does not
+  // panic and reschedules.
   let cfg = EndpointOptions::<SmolStr, SocketAddr>::new(
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
@@ -8844,24 +8956,28 @@ fn gossip_scheduler_skips_left_members_as_candidates() {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(2)
+  .with_gossip_to_the_dead_time(Duration::ZERO)
   .with_push_pull_interval(Duration::ZERO);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
   let t0 = Instant::now();
   process_alive_auto(&mut e, alive("gone", 7947, 1), false, t0);
-  // Mark "gone" as Left (self-marked dead sentinel: node == from).
+  // A remote self-marked departure (node == from) records reclaim-protected
+  // Dead.
   e.process_dead(dead("gone", "gone", 2), t0);
-  assert_eq!(e.member_liveness(&SmolStr::new("gone")), Some(State::Left));
+  assert_eq!(e.member_liveness(&SmolStr::new("gone")), Some(State::Dead));
   while e.poll_event().is_some() {}
   while e.poll_transmit().is_some() {}
 
   e.queue_user_broadcast(bytes::Bytes::from_static(b"x"))
     .unwrap();
-  e.next_gossip = Some(t0);
-  e.handle_timeout(t0);
-  // The only peer is Left ⇒ no gossip target ⇒ nothing transmitted.
+  // Gossip one tick past the zero-length dead window: the only peer is Dead and
+  // out of window ⇒ no gossip target ⇒ nothing transmitted.
+  let later = t0 + Duration::from_millis(1);
+  e.next_gossip = Some(later);
+  e.handle_timeout(later);
   assert!(
     e.poll_transmit().is_none(),
-    "a Left-only membership must yield no gossip target"
+    "a Dead-out-of-window-only membership must yield no gossip target"
   );
 }
 
@@ -9873,7 +9989,11 @@ fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(
     cfg()
       .with_probe_timeout(Duration::from_millis(50))
-      .with_probe_interval(Duration::from_millis(80)),
+      .with_probe_interval(Duration::from_millis(80))
+      // Short reclaim window so the departed bob's address is legitimately
+      // adoptable once it elapses (a remote self-marked Dead is
+      // reclaim-protected, not instantly reclaimable like the old Left).
+      .with_dead_node_reclaim_time(Duration::from_millis(5)),
   );
   let t0 = Instant::now();
   // bob@7001 admitted Alive at incarnation 10.
@@ -9909,11 +10029,11 @@ fn probe_expiry_does_not_suspect_a_readdressed_replacement() {
   probe.dispatched = true;
   e.probes.insert(seq, probe);
 
-  // bob gracefully leaves (self-marked Dead ⇒ State::Left, immediately
-  // address-reclaimable), then a NEW bob instance is admitted at a DIFFERENT
-  // address (7777) with a LOWER incarnation (2) than the probe snapshot (10).
-  // The address-adoption path bypasses the incarnation guard, so bob@7777 is
-  // admitted at incarnation 2.
+  // bob gracefully leaves (self-marked Dead ⇒ reclaim-protected State::Dead).
+  // Once the reclaim window elapses, a NEW bob instance is admitted at a
+  // DIFFERENT address (7777) with a LOWER incarnation (2) than the probe
+  // snapshot (10). The address-adoption path bypasses the incarnation guard, so
+  // bob@7777 is admitted at incarnation 2.
   e.process_dead(dead("bob", "bob", 10), t0 + Duration::from_millis(10));
   e.process_alive_decided(alive("bob", 7777, 2), false, t0 + Duration::from_millis(20));
   {
@@ -10015,16 +10135,17 @@ fn probe_expiry_does_not_suspect_a_same_address_lower_incarnation_replacement() 
   probe.dispatched = true;
   e.probes.insert(seq, probe);
 
-  // bob gracefully leaves (self-marked Dead ⇒ State::Left), is reclaimed by
-  // reset_nodes once past gossip_to_the_dead_time, then a NEW bob is admitted at
-  // the SAME address 7001 with a LOWER incarnation (2). Because the id was
-  // removed first, this hits the new-member branch, which sets incarnation to 2
-  // (a same-address Alive would otherwise be rejected as `inc <= local_inc`).
+  // bob gracefully leaves (self-marked Dead ⇒ reclaim-protected State::Dead),
+  // is reclaimed by reset_nodes once past gossip_to_the_dead_time, then a NEW
+  // bob is admitted at the SAME address 7001 with a LOWER incarnation (2).
+  // Because the id was removed first, this hits the new-member branch, which
+  // sets incarnation to 2 (a same-address Alive would otherwise be rejected as
+  // `inc <= local_inc`).
   e.process_dead(dead("bob", "bob", 10), t0 + Duration::from_millis(10));
   assert_eq!(
     e.member_liveness(&SmolStr::new("bob")),
-    Some(State::Left),
-    "bob self-marked Left"
+    Some(State::Dead),
+    "bob self-marked Dead"
   );
   e.reset_nodes(t0 + Duration::from_millis(20));
   assert!(
@@ -10123,16 +10244,16 @@ fn probe_expiry_does_not_suspect_an_equal_incarnation_reset_readmit_replacement(
     "the probe snapshots the original instance's generation"
   );
 
-  // bob gracefully leaves (State::Left), reset_nodes reclaims it, then a FRESH
-  // bob is admitted at the SAME address 7001 and the SAME incarnation 1. Because
-  // the id was removed first, this hits the new-member branch, which draws a NEW
-  // generation — so (id, address, incarnation) all match the probed instance yet
-  // the generation differs.
+  // bob gracefully leaves (reclaim-protected State::Dead), reset_nodes reclaims
+  // it, then a FRESH bob is admitted at the SAME address 7001 and the SAME
+  // incarnation 1. Because the id was removed first, this hits the new-member
+  // branch, which draws a NEW generation — so (id, address, incarnation) all
+  // match the probed instance yet the generation differs.
   e.process_dead(dead("bob", "bob", 1), t0 + Duration::from_millis(10));
   assert_eq!(
     e.member_liveness(&SmolStr::new("bob")),
-    Some(State::Left),
-    "bob self-marked Left"
+    Some(State::Dead),
+    "bob self-marked Dead"
   );
   e.reset_nodes(t0 + Duration::from_millis(20));
   assert!(

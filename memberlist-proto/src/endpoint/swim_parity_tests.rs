@@ -57,8 +57,9 @@ fn alive_of(n: &Node<SmolStr, SocketAddr>, inc: u32) -> Alive<SmolStr, SocketAdd
 }
 
 /// A `Dead` for `target` accused by `from` at incarnation `inc`. When
-/// `target == from` this is the self-marked-departure sentinel that resolves to
-/// `State::Left` rather than `State::Dead`.
+/// `target == from` this is the self-marked-departure sentinel; on remote
+/// ingress it resolves to reclaim-protected `State::Dead` (`State::Left` is
+/// local-only, reserved for the local node leaving itself).
 fn dead_of(target: &SmolStr, from: &SmolStr, inc: u32) -> Dead<SmolStr> {
   Dead::new(inc, target.cheap_clone(), from.cheap_clone())
 }
@@ -996,9 +997,10 @@ fn dead_node_old_dead() {
   );
 }
 
-/// The `node == from` self-marked-departure sentinel resolves to `State::Left`
-/// (not `State::Dead`), emits `NodeLeft`, and gossips a `Dead`. After the
-/// reclaim window a fresh `Alive` at a new address re-adopts the id.
+/// The `node == from` self-marked-departure sentinel resolves to
+/// reclaim-protected `State::Dead` (never the reclaimable `State::Left`), emits
+/// `NodeLeft`, and gossips a `Dead`. After `dead_node_reclaim_time` a fresh
+/// `Alive` at a new address re-adopts the id.
 #[test]
 fn dead_node_left() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
@@ -1014,8 +1016,8 @@ fn dead_node_left() {
   e.process_dead(dead_of(&id, &id, 1), t0);
   assert_eq!(
     e.member_liveness(&id),
-    Some(State::Left),
-    "a self-marked Dead resolves to Left, not Dead"
+    Some(State::Dead),
+    "a remote self-marked Dead resolves to reclaim-protected Dead, not Left"
   );
 
   let ev = e.poll_event().expect("expected NodeLeft");
@@ -1023,7 +1025,7 @@ fn dead_node_left() {
     Event::NodeLeft(n) => assert_eq!(n.id_ref(), &id),
     other => panic!("expected NodeLeft, got {other:?}"),
   }
-  // A Left transition still gossips the Dead.
+  // The Dead transition still gossips the Dead.
   assert_eq!(
     drained_dead_incarnations(&mut e, &id),
     vec![1],
