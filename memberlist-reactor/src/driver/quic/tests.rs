@@ -48,6 +48,14 @@ const ALPN: &[u8] = b"memberlist-quic-cov";
 /// driver tests never actually establish a connection, so a single self-trusted
 /// identity suffices.
 fn self_trusted_quic() -> QuicOptions {
+  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x5au8; 32]);
+  self_trusted_quic_with_endpoint_cfg(EndpointConfig::new(Arc::new(hmac)))
+}
+
+/// Like [`self_trusted_quic`] but with a caller-supplied `EndpointConfig`, so a
+/// test can raise `max_udp_payload_size` above quinn's 1472 default (up to its
+/// 65527 ceiling) to exercise `recv_buf_len`'s QUIC-size floor.
+fn self_trusted_quic_with_endpoint_cfg(endpoint_cfg: EndpointConfig) -> QuicOptions {
   let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen");
   let cert = CertificateDer::from(ck.cert.der().to_vec());
   let key = PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
@@ -76,8 +84,6 @@ fn self_trusted_quic() -> QuicOptions {
     .expect("QuicClientConfig");
   let client_cfg = ClientConfig::new(Arc::new(qcc));
 
-  let hmac = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[0x5au8; 32]);
-  let endpoint_cfg = EndpointConfig::new(Arc::new(hmac));
   let transport = TransportConfig::default();
   QuicOptions::new(
     endpoint_cfg,
@@ -226,6 +232,42 @@ fn recv_buf_len_gossip_wins_for_large_gossip_mtu() {
   assert_eq!(
     got,
     60_000 + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD
+  );
+}
+
+/// A custom `EndpointConfig` can raise `max_udp_payload_size` up to quinn's
+/// 65527 ceiling (e.g. for IPv6 jumbograms), which sits ABOVE
+/// `GOSSIP_RECV_BUF_MAX` (65507, the IPv4 UDP payload limit). At the default
+/// gossip MTU the QUIC size is the binding term, and `recv_buf_len` must floor
+/// at it WITHOUT the `GOSSIP_RECV_BUF_MAX` cap clamping it back down — the cap
+/// applies only to the gossip-derived size. Applying `.min(GOSSIP_RECV_BUF_MAX)`
+/// after the `.max(quic)` (the old clamp order) would wrongly truncate this to
+/// 65507 and fail the assertion.
+#[test]
+fn recv_buf_len_floors_at_quic_max_above_gossip_cap() {
+  let mut endpoint_cfg = EndpointConfig::new(Arc::new(ring::hmac::Key::new(
+    ring::hmac::HMAC_SHA256,
+    &[0x5au8; 32],
+  )));
+  endpoint_cfg
+    .max_udp_payload_size(65_527)
+    .expect("65527 is quinn's max_udp_payload_size ceiling");
+  let quic = self_trusted_quic_with_endpoint_cfg(endpoint_cfg);
+
+  let ep = Endpoint::new(
+    EndpointOptions::new(
+      SmolStr::new("qdrv"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ),
+    crate::gossip_rng().expect("test: OS entropy"),
+  );
+  let ep = QuicEndpoint::new(ep, quic);
+
+  assert_eq!(ep.max_recv_udp_payload_size(), 65_527);
+  let got = recv_buf_len(&ep);
+  assert!(
+    got >= 65_527,
+    "recv buffer must floor at the QUIC receive size even above GOSSIP_RECV_BUF_MAX, got {got}"
   );
 }
 

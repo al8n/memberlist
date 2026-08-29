@@ -183,6 +183,34 @@ fn max_recv_udp_payload_size_is_quinn_default() {
 }
 
 #[test]
+fn max_recv_udp_payload_size_reaches_quinn_ceiling() {
+  // A custom `EndpointConfig` can raise `max_udp_payload_size` up to quinn's
+  // 65527 ceiling (e.g. for IPv6 jumbograms), which sits ABOVE
+  // `GOSSIP_RECV_BUF_MAX` (65507, the IPv4 UDP payload limit) that the QUIC
+  // drivers use to cap their gossip-derived recv-buffer term. The accessor
+  // must surface the full 65527 uncapped, so a driver's `recv_buf_len` can
+  // floor at it without truncating valid large QUIC datagrams.
+  let mut endpoint_cfg = crate::quic::crypto::tests::test_endpoint_config(&[0x5au8; 32]);
+  endpoint_cfg
+    .max_udp_payload_size(65_527)
+    .expect("65527 is quinn's max_udp_payload_size ceiling");
+  let qc = QuicOptions::new(
+    endpoint_cfg,
+    crate::quic::crypto::tests::test_server(),
+    crate::quic::crypto::tests::test_client(),
+    quinn_proto::TransportConfig::default(),
+    "localhost",
+    UnreliableTransport::Datagram,
+  );
+  let cfg = EndpointOptions::new(SmolStr::new("n"), "127.0.0.1:7591".parse().unwrap());
+  let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg);
+  ep.start_scheduling(Instant::now());
+  let ep = QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some([0x11u8; 32]));
+
+  assert_eq!(ep.max_recv_udp_payload_size(), 65_527);
+}
+
+#[test]
 fn with_label_empty_normalizes_to_none() {
   // An empty label collapses to the byte-identical no-label path, never a
   // `[12][0]` header.

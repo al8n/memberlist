@@ -95,16 +95,21 @@ const CHECKSUMED_WRAPPER_OVERHEAD: usize = 0;
 ///   including the >= 1200-byte handshake Initial — would be truncated and the
 ///   handshake would never complete, silently breaking the transport.
 ///
-/// The result is capped at `GOSSIP_RECV_BUF_MAX`; the QUIC max (~1472) is far
-/// under that cap, so flooring at it never collides with the ceiling in
-/// practice.
+/// The `GOSSIP_RECV_BUF_MAX` cap applies ONLY to the gossip-derived size —
+/// applying it after taking the max with the QUIC size would wrongly truncate
+/// a custom `EndpointConfig` whose `max_udp_payload_size` sits above
+/// `GOSSIP_RECV_BUF_MAX` (quinn allows up to 65527, e.g. for IPv6 jumbograms,
+/// while `GOSSIP_RECV_BUF_MAX` is the IPv4 UDP payload ceiling of 65507). The
+/// QUIC size is already bounded to `1200..=65527` by quinn and is applied as a
+/// floor AFTER the gossip cap, so it is never clamped down and the result stays
+/// `<= 65527`.
 fn recv_buf_len<I, G>(endpoint: &QuicEndpoint<I, G>) -> usize {
   endpoint
     .gossip_mtu()
     .saturating_add(ENCRYPTED_WRAPPER_OVERHEAD)
     .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
-    .max(endpoint.max_recv_udp_payload_size())
     .min(GOSSIP_RECV_BUF_MAX)
+    .max(endpoint.max_recv_udp_payload_size())
 }
 
 /// Cap on the count of application-data events retained after a full observation
