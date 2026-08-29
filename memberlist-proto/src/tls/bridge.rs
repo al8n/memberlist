@@ -1043,6 +1043,31 @@ fn split_trailing_tls_record(ciphertext: &[u8]) -> (&[u8], &[u8]) {
   ciphertext.split_at(last_start)
 }
 
+/// Split `ciphertext` into its individual TLS records (each a 5-byte header plus
+/// its declared application bytes), returned in wire order. Lets a test deliver
+/// a handshake flight one record at a time and stop after the FIRST application
+/// record — surfacing only the leading chunk of a multi-record reliable unit.
+fn split_tls_records(ciphertext: &[u8]) -> Vec<&[u8]> {
+  let mut records = Vec::new();
+  let mut offset = 0usize;
+  while offset + 5 <= ciphertext.len() {
+    let len = u16::from_be_bytes([ciphertext[offset + 3], ciphertext[offset + 4]]) as usize;
+    let end = offset + 5 + len;
+    assert!(
+      end <= ciphertext.len(),
+      "a TLS record header must not declare a length past the buffer"
+    );
+    records.push(&ciphertext[offset..end]);
+    offset = end;
+  }
+  assert_eq!(
+    offset,
+    ciphertext.len(),
+    "the captured ciphertext is a whole number of TLS records"
+  );
+  records
+}
+
 /// F1-1: a promoted TLS server bridge receives one COMPLETE reliable unit and
 /// then a bare transport FIN with NO `close_notify`. The bare FIN is a
 /// truncation, not a clean completion: the bridge must fail
@@ -1144,16 +1169,16 @@ fn established_tls_complete_unit_then_bare_fin_is_truncation() {
 }
 
 /// F1-2: the same truncation with the complete unit buffered PRE-promotion. A
-/// bare FIN arriving before the `Stream` is minted must fail EARLY
-/// (`ConnectionLost`) through the settled-empty-slice gate — NOT latch
-/// `pending_eof` and mint a doomed `Stream` that later replays into the
-/// post-promotion clean path.
-///
-/// Mutation anchor: reverting the pre-promotion gate lets the empty-slice arm
-/// latch `pending_eof` and return `Ok`, leaving the bridge live (not
-/// terminal), so the `Failed(ConnectionLost)` assertion fails.
+/// bare FIN arriving before the `Stream` is minted latches `pending_eof` and
+/// defers classification to the post-promotion gate. After promote + replay the
+/// complete unit surfaces, the bare FIN at the complete-unit boundary is a
+/// truncation with no authenticated in-band close, so the exchange fails
+/// `ConnectionLost` and commits NO payload. The `Stream` is minted then
+/// immediately retired — the terminal outcome and the security property (a
+/// truncated TLS exchange never commits clean) are what matter, not whether a
+/// `Stream` is transiently minted.
 #[test]
-fn pre_promotion_tls_complete_unit_then_bare_fin_fails_without_minting() {
+fn pre_promotion_tls_complete_unit_then_bare_fin_is_connection_lost() {
   let now = Instant::now();
   let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
 
@@ -1223,11 +1248,34 @@ fn pre_promotion_tls_complete_unit_then_bare_fin_fails_without_minting() {
   );
 
   // The bare FIN arrives pre-promotion (no Stream yet): the settled-empty-slice
-  // gate fails it early instead of latching `pending_eof`.
-  let res = server.handle_transport_data(&[], now);
+  // gate latches `pending_eof` and defers, it does not eager-fail.
+  server
+    .handle_transport_data(&[], now)
+    .expect("a pre-promotion bare FIN latches, it does not fail");
+  assert!(
+    !server.is_terminal(),
+    "the pre-promotion EOF was latched, not classified early, got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(
+    server.pending_eof(),
+    "the pre-promotion EOF was latched for post-promotion replay"
+  );
+
+  // Promote + replay: the complete unit surfaces, then the latched bare FIN at
+  // the complete-unit boundary (no close_notify processed) is classified by the
+  // post-promotion gate as a truncation → ConnectionLost.
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7350), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+  let res = server.replay_pending(now);
   assert!(
     res.is_err(),
-    "a pre-promotion bare FIN on TLS is a truncation"
+    "the replayed complete unit + bare FIN is a truncation"
   );
   assert!(
     matches!(
@@ -1237,9 +1285,179 @@ fn pre_promotion_tls_complete_unit_then_bare_fin_fails_without_minting() {
     "the pre-promotion truncation fails ConnectionLost, got {:?}",
     phase_label(server.phase_ref())
   );
+
+  // The buffered payload is NEVER committed and the bridge ends terminal.
+  server.drain_payload_only(&mut ep_s, now);
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
   assert!(
-    server.stream_is_none(),
-    "NO Stream is minted for a truncated pre-promotion exchange"
+    committed.is_none(),
+    "a truncated TLS exchange commits NO payload event, got {committed:?}"
+  );
+  assert!(server.is_terminal(), "the bridge is terminal");
+}
+
+/// F1-2b: a PARTIAL reliable unit buffered PRE-promotion, then a bare FIN, is a
+/// mid-unit truncation and must fail `Decode` (NOT `ConnectionLost`). The peer
+/// coalesces `[Finished][first application record of a > 16 KiB reliable unit]`
+/// — one complete TLS record carrying only the leading ~16 KiB of a unit whose
+/// varint length declares far more — then bare-FINs with no `close_notify`.
+/// rustls consumes all of that ciphertext (no retained tail: `pending_inbound`
+/// is empty) while holding the leading chunk as decrypted plaintext, so the
+/// buffered reliable unit is genuinely partial. The pre-promotion EOF latches
+/// and defers; after promote + replay the partial unit surfaces into
+/// `recv_accum` and the FSM classifies the mid-unit close as a decode failure.
+///
+/// Mutation anchor: restoring the deleted pre-promotion eager-fail (which gated
+/// on `pending_inbound.is_empty()`) would classify this exact input
+/// `ConnectionLost` before promotion — the wrong class for a partial unit,
+/// because `pending_inbound` tests retained ciphertext only and cannot see the
+/// decrypted partial unit rustls holds as plaintext.
+#[test]
+fn pre_promotion_tls_partial_unit_then_bare_fin_is_decode() {
+  let now = Instant::now();
+  let (mut client, mut server) = handshaking_pair(now + Duration::from_secs(10));
+
+  // Drive the handshake until the CLIENT is done but the SERVER has NOT yet
+  // consumed the client's final flight (still Handshaking, no Stream).
+  for _ in 0..64 {
+    if !client.is_handshaking() {
+      break;
+    }
+    let mut c_out = Vec::new();
+    client.poll_transport_transmit(&mut c_out);
+    if !c_out.is_empty() {
+      server.handle_transport_data(&c_out, now).unwrap();
+    }
+    let mut s_out = Vec::new();
+    server.poll_transport_transmit(&mut s_out);
+    if !s_out.is_empty() {
+      client.handle_transport_data(&s_out, now).unwrap();
+    }
+    if c_out.is_empty() && s_out.is_empty() {
+      break;
+    }
+  }
+  assert!(!client.is_handshaking(), "client completed its handshake");
+  assert!(
+    server.is_handshaking(),
+    "server has not consumed the client's final flight"
+  );
+
+  // Client: a one-way LARGE (> 16 KiB) user message; coalesce
+  // `[Finished][> 16 KiB unit as multiple app records][close_notify]`.
+  let mut ep_c: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("cli"), addr(7375)));
+  let payload = Bytes::from((0..48 * 1024).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
+  let sid = ep_c
+    .start_user_message(addr(7000), payload, now)
+    .expect("issued while running");
+  let c_stream = ep_c
+    .dial_succeeded(sid, now)
+    .expect("dial_succeeded mints the outbound stream");
+  client.promote(c_stream);
+  client
+    .pump_out(now)
+    .expect("client pumps its request + close_notify");
+  let mut coalesced = Vec::new();
+  for _ in 0..64 {
+    let before = coalesced.len();
+    client.poll_transport_transmit(&mut coalesced);
+    if coalesced.len() == before {
+      break;
+    }
+  }
+  assert!(
+    coalesced.len() > 16 * 1024,
+    "the coalesced [Finished][large unit][close_notify] spans multiple records, got {}",
+    coalesced.len()
+  );
+
+  // Deliver records one at a time until the handshake settles (the Finished
+  // flight is a pure handshake record — it surfaces no application plaintext),
+  // then deliver exactly ONE more record: the first application record, carrying
+  // only the leading ~16 KiB of the 48 KiB unit. Everything after it (the rest
+  // of the unit and the close_notify) is dropped — an on-path truncation.
+  let records = split_tls_records(&coalesced);
+  let mut idx = 0;
+  while idx < records.len() && server.is_handshaking() {
+    server.handle_transport_data(records[idx], now).unwrap();
+    idx += 1;
+  }
+  assert!(
+    !server.is_handshaking(),
+    "the server handshake settled inside the record-by-record feed"
+  );
+  assert!(
+    idx < records.len(),
+    "an application record follows the settling handshake flight"
+  );
+  server
+    .handle_transport_data(records[idx], now)
+    .expect("the first application record decodes into buffered plaintext");
+  assert!(
+    server.pending_inbound_is_empty(),
+    "the single ~16 KiB application record is fully consumed — no retained ciphertext"
+  );
+
+  // The bare FIN arrives pre-promotion: latch `pending_eof` and defer, do not
+  // eager-fail. (The deleted eager-fail, gating on the empty `pending_inbound`,
+  // would misclassify this buffered PARTIAL unit as `ConnectionLost` here.)
+  server
+    .handle_transport_data(&[], now)
+    .expect("a pre-promotion bare FIN latches, it does not fail");
+  assert!(
+    !server.is_terminal(),
+    "the pre-promotion EOF was latched, not classified early, got {:?}",
+    phase_label(server.phase_ref())
+  );
+  assert!(
+    server.pending_eof(),
+    "the pre-promotion EOF was latched for post-promotion replay"
+  );
+
+  // Promote + replay: the partial unit surfaces into `recv_accum`, and the bare
+  // FIN mid-unit is classified `Decode` — a truncated transmission.
+  let mut ep_s: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new_seeded(EndpointOptions::new(SmolStr::new("srv"), addr(7000)));
+  let s_stream = ep_s
+    .accept_stream(addr(7375), now)
+    .expect("node is running");
+  server.promote(s_stream);
+  while ep_s.poll_event().is_some() {}
+  let res = server.replay_pending(now);
+  assert!(
+    res.is_err(),
+    "a partial reliable unit resident at FIN is a decode failure"
+  );
+  assert!(
+    matches!(
+      server.phase_ref(),
+      BridgePhase::Established(LinkState::Failed(BridgeFailure::Decode))
+    ),
+    "a mid-unit truncation fails Decode, not ConnectionLost, got {:?}",
+    phase_label(server.phase_ref())
+  );
+
+  // No payload commits, and the bridge ends terminal.
+  server.drain_payload_only(&mut ep_s, now);
+  server.drain_then_reap(&mut ep_s, now);
+  let mut committed = None;
+  while let Some(ev) = ep_s.poll_event() {
+    if let Event::UserPacket(p) = ev {
+      let (_, data, _) = p.into_parts();
+      committed = Some(data);
+    }
+  }
+  assert!(
+    committed.is_none(),
+    "a truncated partial unit commits NO payload event, got {committed:?}"
   );
   assert!(server.is_terminal(), "the bridge is terminal");
 }

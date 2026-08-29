@@ -1079,40 +1079,23 @@ where
         // peer half-closed before establishing the exchange — that handshake can
         // never complete, so fail now (ConnectionLost) rather than holding a
         // zombie bridge (and its record-layer buffers) until the accept
-        // deadline. If it HAS settled (the mint is merely deferred to the tick),
-        // this is the benign coalesced-close case: latch the FIN for
-        // post-promotion replay.
+        // deadline.
         if self.records.is_handshaking() {
           self.fail(BridgeFailure::ConnectionLost);
           return Err(());
         }
-        if R::requires_authenticated_close()
-          && !self.records.peer_has_closed()
-          && self.pending_inbound.is_empty()
-        {
-          // Settled handshake, every received byte already processed (no
-          // retained inbound ciphertext), then a bare FIN with no authenticated
-          // in-band close (TLS `close_notify`): a truncation. Fail EARLY, before
-          // minting a `Stream`, rather than latching `pending_eof` and replaying
-          // into the post-promotion clean path.
-          //
-          // The `pending_inbound.is_empty()` guard is load-bearing. A coalesced
-          // `[handshake final][reliable unit > 16 KiB][close_notify]` trips the
-          // record layer's received-plaintext backpressure, so the
-          // `close_notify`'s ciphertext stays in the retained tail
-          // (`pending_inbound`) BEHIND the large unit and `peer_has_closed()` is
-          // still `false` here — the authenticated close IS present, just not
-          // processed yet. Eager-failing then would drop a CLEAN exchange. When
-          // the tail is non-empty we instead fall through to latch `pending_eof`
-          // and defer the authenticated-close classification to the
-          // post-promotion gate, which runs AFTER `replay_pending` drains the
-          // tail (processing the `close_notify`, so `peer_has_closed()` is then
-          // `true` and the exchange stays clean). This is only an optimization —
-          // avoiding a minted `Stream` for a genuinely-truncated pre-mint
-          // exchange — so deferring when unsure costs at most one `Stream` mint.
-          self.fail(BridgeFailure::ConnectionLost);
-          return Err(());
-        }
+        // Settled pre-mint EOF (the mint is merely deferred to the tick): latch
+        // the FIN and defer ALL close classification to the post-promotion gate.
+        // That gate runs AFTER `replay_pending` drains the retained ciphertext
+        // tail and surfaces any buffered plaintext, so it sees the true post-
+        // decode state: a `close_notify` buffered behind a large reliable unit is
+        // honored (clean), a bare FIN at a complete-unit boundary becomes
+        // `ConnectionLost`, and a buffered partial reliable unit becomes
+        // `Decode`. Classifying here instead would have to proxy "nothing
+        // buffered" through `pending_inbound` (retained ciphertext only), which
+        // misses a decrypted partial unit the record layer holds as plaintext —
+        // misclassifying a mid-unit truncation. Deferring costs at most one
+        // `Stream` mint for a genuinely-truncated pre-mint exchange.
         self.pending_eof = true;
       }
       return self.intake_handshaking(data, now);
