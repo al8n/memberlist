@@ -2045,6 +2045,93 @@ fn detection_late_direct_ack_in_awaiting_indirect_emits_ping_completed() {
   assert_eq!(completed.payload_ref().as_ref(), b"pong");
 }
 
+/// A Detection probe that escalated (direct timeout → `AwaitingIndirect`) arms a
+/// concurrent reliable-ping fallback: an inserted pending stream intent plus its
+/// mirrored deadline-index key. If a LATE direct Ack then rescues the probe, that
+/// armed fallback must be cancelled — the peer is proven alive, so the fallback has
+/// no purpose, and a parked intent left behind would linger to its deadline and,
+/// across probe rounds under sustained UDP degradation, accumulate.
+///
+/// Mutation anchor: without `complete_probe_success`'s cancellation the intent (and
+/// its deadline key) survive the rescued probe, so both post-Ack `is_none` /
+/// `!contains` assertions fail.
+#[test]
+fn detection_late_direct_ack_cancels_armed_reliable_ping_fallback() {
+  let pt = Duration::from_millis(50);
+  // 4-node cluster so the direct-timeout escalation has real indirect peers to fan
+  // out to and the probe genuinely enters `AwaitingIndirect`. Reliable ping is
+  // enabled by default, so the escalation also arms the concurrent fallback.
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg().with_probe_timeout(pt));
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  process_alive_auto(&mut e, alive("carol", 7002, 1), false, Instant::now());
+  process_alive_auto(&mut e, alive("dave", 7003, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let t0 = Instant::now();
+  e.start_probe(t0);
+  let (seq, target_addr) = match e.poll_transmit().expect("direct Ping") {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (ping.sequence_number(), to)
+      } else {
+        panic!("Ping message expected")
+      }
+    }
+    _ => panic!("Ping expected"),
+  };
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // Direct sub-timeout (t0+50ms) elapses at t0+60ms → escalate to AwaitingIndirect,
+  // fan out IndirectPings, and arm the reliable-ping fallback.
+  e.handle_timeout(t0 + Duration::from_millis(60));
+
+  // Capture the armed fallback's stream id from the escalated phase.
+  let rid = match &e.probes.get(&seq).expect("probe still in flight").phase {
+    ProbePhase::AwaitingIndirect(AwaitingIndirect {
+      reliable_stream_id, ..
+    }) => reliable_stream_id.expect("escalation armed the reliable-ping fallback"),
+    other => panic!("expected AwaitingIndirect, got {other:?}"),
+  };
+  // The fallback is genuinely armed: its pending intent and mirrored deadline key
+  // both resident before the rescue.
+  assert!(
+    e.pending_stream_intents.contains_key(&rid),
+    "escalation must insert the fallback's pending stream intent",
+  );
+  assert!(
+    e.intent_deadlines.contains(&rid),
+    "the fallback intent must mirror into the intent deadline index",
+  );
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // The target answers LATE with a DIRECT Ack (its own source address) at t0+70ms,
+  // still inside the cumulative window → the probe is rescued.
+  e.handle_ack(
+    target_addr,
+    Ack::new(seq).with_payload(Bytes::from_static(b"pong")),
+    t0 + Duration::from_millis(70),
+  );
+
+  assert!(
+    !e.probes.contains_key(&seq),
+    "the late direct Ack completes the probe",
+  );
+  // The rescued probe cancelled its armed fallback: both the pending intent and its
+  // deadline-index key are gone.
+  assert!(
+    !e.pending_stream_intents.contains_key(&rid),
+    "a rescued probe must cancel its armed reliable-ping fallback intent",
+  );
+  assert!(
+    !e.intent_deadlines.contains(&rid),
+    "the cancelled fallback's intent deadline key must be cleared",
+  );
+}
+
 #[test]
 fn handle_ack_for_unknown_seq_is_noop() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_seeded(cfg());

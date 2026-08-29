@@ -153,8 +153,7 @@ pub struct QuicOptions {
   dial_service_margin: Duration,
   /// Maximum liveness-critical reliable-ping fallback dials the coordinator attempts
   /// PAST a per-pass dial-attempt budget, per peer bucket per pass. See
-  /// [`Self::max_reliable_ping_exempt_pops_per_pass`] for the default and the safety
-  /// floor.
+  /// [`Self::max_reliable_ping_exempt_pops_per_pass`] for the default and the floor.
   max_reliable_ping_exempt_pops_per_pass: usize,
 }
 
@@ -287,10 +286,11 @@ pub const DEFAULT_DIAL_SERVICE_MARGIN: Duration = super::DIAL_SERVICE_MARGIN;
 /// liveness-critical reliable-ping fallback at the front of a peer's parked bucket is
 /// attempted even when a pass's shared dial-attempt budget is spent, so it is never
 /// deferred to its cumulative probe deadline (a false-positive Dead) behind a
-/// user-message flood. `8` equals the membership `awareness_max_multiplier` default —
-/// the bound on how many same-peer reliable-ping fallbacks can stack at once — so an
-/// honest fallback is never deferred at the default configuration. See
-/// [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`] for the safety floor.
+/// user-message flood. A cap of `1` already suffices: every probe-terminal path
+/// cancels the armed fallback, and Detection single-flight plus "application pings
+/// never escalate" bound the live same-peer fallbacks to exactly one. `8` is a
+/// conservative default that keeps ample headroom for transient stale entries. See
+/// [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`] for the floor.
 pub const DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS: usize = 8;
 
 // A zero exempt-pop cap would defer EVERY reliable-ping fallback that arrives on a
@@ -624,10 +624,10 @@ impl QuicOptions {
   }
 
   /// Override the per-pass reliable-ping exempt-pop cap. A value of `0` disables the
-  /// exemption and is rejected by [`Self::validate`]. It MUST stay `>=` the
-  /// membership `awareness_max_multiplier` or honest reliable-ping fallbacks defer to
-  /// a false Suspect — see [`Self::max_reliable_ping_exempt_pops_per_pass`]. Defaults
-  /// to [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
+  /// exemption and is rejected by [`Self::validate`]; any value `>= 1` is accepted,
+  /// and `1` suffices because live same-peer fallbacks are bounded to one — see
+  /// [`Self::max_reliable_ping_exempt_pops_per_pass`]. Defaults to
+  /// [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
   #[must_use]
   #[inline(always)]
   pub const fn with_max_reliable_ping_exempt_pops_per_pass(mut self, max: usize) -> Self {
@@ -753,13 +753,14 @@ impl QuicOptions {
   /// an honest fallback from stranding behind a user-message flood. Defaults to
   /// [`DEFAULT_MAX_RELIABLE_PING_EXEMPT_POPS_PER_PASS`].
   ///
-  /// SAFETY FLOOR: keep this `>=` the membership `awareness_max_multiplier` (config
-  /// default 8), which bounds how many same-peer reliable-ping fallbacks can stack at
-  /// once. A smaller cap would defer honest fallbacks past the budget and risk a
-  /// false Suspect. The coordinator cannot cheaply read the membership awareness
-  /// bound at runtime (the composed endpoint exposes no accessor for it), so
-  /// [`Self::validate`] only rejects a zero cap; the default matches the awareness
-  /// default so the floor holds unless an operator lowers one without the other.
+  /// FLOOR: `1` is sufficient. Every probe-terminal path (success, failure, expiry,
+  /// dial-failure, leave) cancels the armed reliable-ping fallback, so a
+  /// `ReliablePing` pending intent exists only while its owning Detection probe is
+  /// live; Detection single-flight plus "application pings never escalate" then bound
+  /// the live same-peer fallbacks to exactly one. A stale entry left by a
+  /// since-succeeded probe retires at the coordinator without a dial and without
+  /// charging this budget, so it cannot crowd out the live ping. [`Self::validate`]
+  /// therefore only rejects a zero cap; the default keeps generous headroom.
   #[inline(always)]
   pub const fn max_reliable_ping_exempt_pops_per_pass(&self) -> usize {
     self.max_reliable_ping_exempt_pops_per_pass
@@ -859,7 +860,7 @@ pub enum QuicOptionsError {
   DialServiceMarginExceedsTwiceCatchupInterval,
   /// `max_reliable_ping_exempt_pops_per_pass` was set to `0`, which would defer every
   /// over-budget reliable-ping fallback to its cumulative deadline (a false Suspect).
-  /// Set it to `>= 1` (and `>=` the membership awareness max).
+  /// Set it to `>= 1`.
   #[error("max_reliable_ping_exempt_pops_per_pass must be >= 1")]
   MaxReliablePingExemptPopsPerPassZero,
 }

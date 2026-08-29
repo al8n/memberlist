@@ -168,6 +168,18 @@ const MAX_BRIDGE_PUMPS_PER_PASS: usize = 64;
 /// a handshake-blocked bucket still stops at the first re-park.
 const MAX_DIAL_ATTEMPTS_PER_PASS: usize = 64;
 
+/// Hard per-drain cap on machine-cancelled reliable-ping entries retired through the
+/// zero-budget exempt lane of [`QuicEndpoint::service_peer_bucket`]. Those retires open
+/// no stream and are deliberately NOT charged against the exempt-pop budget (a transient
+/// stale entry must never consume the single live-ping pop), so absent this cap a long
+/// prefix of stale entries would be walked in full in one pass. Honest operation leaves at
+/// most ~2 stale entries per peer (Detection single-flight plus the tick's unbudgeted dial
+/// drain), so this 4x-margin cap never fires under the scheduler; it bounds the lane
+/// unconditionally against an out-of-band [`Endpoint::start_probe`](crate::Endpoint) caller
+/// that stacks same-peer fallbacks, with the residue riding the ready-dial ledger to the
+/// next drain.
+const MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN: usize = 8;
+
 /// Maximum peers the budgeted catch-up ready-dial drain in
 /// [`QuicEndpoint::catchup_service`] POPS from [`QuicEndpoint::ready_dial_peers`] in
 /// ONE [`CATCHUP_INTERVAL`], independent of the ledger's size — the visit-count twin
@@ -403,6 +415,13 @@ enum DialAttempt {
   /// `dial_succeeded` invalidated it. No bidi credit was consumed, so a later
   /// entry may still open.
   Retired,
+  /// A `ReliablePing` entry was retired because its machine intent was already
+  /// cancelled (the owning Detection probe succeeded, which drops the armed
+  /// fallback). Like `Retired` it opened no stream and consumed no bidi credit,
+  /// but the scoped drain's exempt lane does NOT charge it against the exempt-pop
+  /// budget: it never attempted a dial, so a burst of these stale entries must not
+  /// exhaust the budget before the peer's live fallback ping is reached.
+  RetiredCancelled,
   /// The intent re-parked into [`QuicEndpoint::dial_parked`] because the pooled
   /// connection is still handshaking or its bidi credit is exhausted. Every later
   /// entry in the same bucket shares that connection and would re-park
@@ -3425,11 +3444,24 @@ where
     // attempted PAST an exhausted pass budget — the pass-budget twin of the
     // reliable-ping outbound-cap exemption — up to this cap, so an honest FSM ping is
     // never deferred to its cumulative probe deadline (a false Suspect) behind a
-    // user-message flood. The cap MUST be >= the membership awareness max (which
-    // bounds how many same-peer fallbacks stack); see
+    // user-message flood. An exempt cap of 1 suffices FOR THE LIVE POP, and stale
+    // entries reach the live ping the same pass, CONDITIONAL on scheduler single-flight:
+    // every probe-terminal path (success, failure, expiry, dial-failure, leave) cancels
+    // the armed fallback, and Detection single-flight plus "application pings never
+    // escalate" bound the live same-peer fallbacks to exactly one — a stale entry from a
+    // since-succeeded probe retires here without a dial and without charging this budget.
+    // Per-pass BOUNDEDNESS of this lane does NOT rely on that scheduler property: the
+    // uncharged stale retires are independently capped by
+    // [`MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN`], so even an out-of-band `start_probe`
+    // caller that stacks same-peer fallbacks cannot make one pass O(stale prefix). See
     // [`QuicOptions::max_reliable_ping_exempt_pops_per_pass`].
     let exempt_cap = self.cfg.max_reliable_ping_exempt_pops_per_pass();
     let mut exempt_pops = 0usize;
+    // Machine-cancelled reliable-ping entries retire here without opening a stream and
+    // WITHOUT charging `exempt_pops` (see the `RetiredCancelled` arm), so a separate
+    // counter caps that uncharged cleanup at
+    // [`MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN`] per drain.
+    let mut cancelled_retires = 0usize;
     loop {
       if *dial_budget == 0 {
         // Budget exhausted (or zero on arrival). Only a FRONT reliable-ping is popped
@@ -3457,11 +3489,29 @@ where
         let Some(entry) = popped else {
           break;
         };
-        exempt_pops += 1;
         match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
-          // Minted/Retired consumed the ping terminally; a later front entry may be
-          // another stacked exempt ping — keep popping up to the cap.
-          DialAttempt::Minted | DialAttempt::Retired => {}
+          // Minted/Retired consumed the ping terminally after attempting a dial; a
+          // later front entry may be another stacked exempt ping — charge the exempt
+          // budget and keep popping up to the cap.
+          DialAttempt::Minted | DialAttempt::Retired => exempt_pops += 1,
+          // The intent was already cancelled by its succeeding probe, so this retire
+          // never attempted a dial — do NOT charge the exempt budget, or a burst of
+          // transient stale entries under a small cap could exhaust it before the
+          // live fallback ping is reached. It is instead counted against a SEPARATE
+          // per-drain cap: honest operation leaves at most ~2 such stale entries per
+          // peer (Detection single-flight plus the tick's unbudgeted dial drain), so
+          // the cap never fires under the scheduler, but it bounds this uncharged loop
+          // UNCONDITIONALLY — including against an out-of-band `start_probe` caller that
+          // stacks same-peer fallbacks — instead of walking an arbitrarily long stale
+          // prefix in one pass. On the cap the loop breaks with the residue resident;
+          // the deposit below then rides it on the ready-dial ledger to the next drain.
+          // Below the cap, keep popping to reach the live ping behind them.
+          DialAttempt::RetiredCancelled => {
+            cancelled_retires += 1;
+            if cancelled_retires >= MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN {
+              break;
+            }
+          }
           // Re-parked to the FRONT (a ping always front-parks): stop before re-popping
           // it. Leaving `attempted_any` / `last_was_reparked` untouched preserves the
           // zero-budget deposit for the tail below.
@@ -3486,8 +3536,13 @@ where
       match self.process_dial_entry(entry, now, &mut minted, &mut touched) {
         // A `MAX_STREAMS` raise may grant more than one bidi credit, and a
         // retire consumes none, so a later entry in the bucket may still find
-        // an opening — keep draining (up to the budget).
-        DialAttempt::Minted | DialAttempt::Retired => last_was_reparked = false,
+        // an opening — keep draining (up to the budget). A cancelled-intent
+        // retire opened nothing either and is treated the same here, charging a
+        // dial unit like any pop; it only differs in the zero-budget lane above,
+        // where it is uncharged against `exempt_pops` but capped per drain.
+        DialAttempt::Minted | DialAttempt::Retired | DialAttempt::RetiredCancelled => {
+          last_was_reparked = false
+        }
         // The first re-park proves the shared pooled connection is still
         // handshaking or its restored bidi credit is already spent. Every later
         // entry in this bucket targets that SAME connection and would re-park
@@ -3762,6 +3817,24 @@ where
         now,
       );
       return DialAttempt::Retired;
+    }
+    // Retire a `ReliablePing` entry whose machine intent has already been
+    // cancelled, WITHOUT opening a stream. The Detection probe that armed this
+    // fallback succeeded (a late Ack rescued it), which drops the pending intent;
+    // the coordinator's parked entry is now stale. Opening `open(Dir::Bi)` for it
+    // would burn a peer bidi-stream credit only for `dial_succeeded` to invalidate
+    // the resulting stream (its intent is gone), so route it through the same
+    // pre-open retire the deadline pre-check uses. `intent_kind` reads the machine
+    // intent map: `None` means the intent was cancelled or consumed. Only a
+    // `ReliablePing` fallback can be cancelled out from under a still-parked entry
+    // this way; other kinds retire on their own deadline / dial outcome.
+    if matches!(kind, ExchangeKind::ReliablePing) && self.ep.intent_kind(id).is_none() {
+      self.retire_failed_dial(
+        id,
+        StreamError::DialFailed("quic reliable-ping fallback cancelled".into()),
+        now,
+      );
+      return DialAttempt::RetiredCancelled;
     }
     // The membership address `peer` IS the wire `SocketAddr` (the
     // coordinator pins `A = SocketAddr` internally); the TLS verification

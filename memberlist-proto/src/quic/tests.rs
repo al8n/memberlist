@@ -6705,20 +6705,11 @@ fn drained_slot_freed_before_dials_opens_a_cap_blocked_reliable_dial_same_tick()
 
   // A reliable ping to a live peer Y parked at the cap (deadline far). A
   // reapable connection (X) exists, so at the cap it re-parks rather than
-  // retiring — the intent survives to the reap tick.
+  // retiring — the intent survives to the reap tick. Arm a real machine
+  // fallback intent so the parked entry is a live (not machine-cancelled) dial.
   let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
   let deadline = now + Duration::from_secs(30);
-  a.dial_parked
-    .entry(y)
-    .or_default()
-    .push_back(super::PendingDial {
-      id: StreamId::from_raw(300_000),
-      peer: y,
-      deadline,
-      wake: deadline,
-      attempted: true,
-      kind: super::ExchangeKind::ReliablePing,
-    });
+  arm_parked_reliable_ping(&mut a, "y", y, 300, deadline, now);
   assert_eq!(a.live_connections_to(y), 0, "Y is not yet dialed");
 
   // One global tick: it reaps the drained X BEFORE dial servicing, so the parked
@@ -6806,20 +6797,11 @@ fn flush_path_reaps_drained_slot_before_dials_so_a_cap_blocked_reliable_dial_ope
 
   // A ready reliable ping to peer Y deposited into the ready-dial ledger so the
   // FLUSH path's ledger drain services its parked bucket (the flush owns no
-  // `service_dials`).
+  // `service_dials`). Arm a real machine fallback intent so the parked entry is a
+  // live (not machine-cancelled) dial.
   let y: SocketAddr = "127.0.0.9:5000".parse().unwrap();
   let deadline = now + Duration::from_secs(30);
-  a.dial_parked
-    .entry(y)
-    .or_default()
-    .push_back(super::PendingDial {
-      id: StreamId::from_raw(310_000),
-      peer: y,
-      deadline,
-      wake: deadline,
-      attempted: true,
-      kind: super::ExchangeKind::ReliablePing,
-    });
+  arm_parked_reliable_ping(&mut a, "y", y, 310, deadline, now);
   a.ready_dial_peers.insert(y);
   assert_eq!(a.live_connections_to(y), 0, "Y is not yet dialed");
 
@@ -12185,6 +12167,687 @@ fn reliable_ping_front_mints_past_zero_budget() {
     a.bridges.contains_key(&ping_id),
     "the front reliable-ping mints even at zero budget (mechanism (b)); removing the \
        exempt-pop parks it to a false Suspect"
+  );
+}
+
+/// Arm one machine-internal reliable-ping fallback to `target`/`peer` and park it at
+/// the BACK of the peer's bucket (front-to-back arrival order across calls), leaving
+/// its pending stream intent live. Returns the fallback's [`StreamId`].
+fn arm_parked_reliable_ping(
+  n: &mut QuicEndpoint<SmolStr>,
+  target: &str,
+  peer: SocketAddr,
+  seq: u32,
+  deadline: Instant,
+  now: Instant,
+) -> StreamId {
+  let id = n
+    .endpoint_mut()
+    .start_reliable_ping(SmolStr::new(target), peer, seq, deadline);
+  n.sieve_dial_events();
+  let mut pd = n
+    .dial_pending
+    .pop_front()
+    .expect("the reliable ping sieved into dial_pending");
+  n.unattempted_dial_count = 0;
+  assert!(
+    matches!(pd.kind, super::ExchangeKind::ReliablePing),
+    "the sieved intent is stamped ReliablePing"
+  );
+  pd.attempted = true;
+  pd.wake = n.dial_wake(pd.deadline, now);
+  let wake = pd.wake;
+  n.dial_parked.entry(peer).or_default().push_back(pd);
+  n.deadline_index.set(super::TimerKey::Dial(id), Some(wake));
+  while n.poll_event().is_some() {}
+  id
+}
+
+/// Count the `ReliablePing` entries currently parked for `peer`.
+fn parked_reliable_ping_count(n: &QuicEndpoint<SmolStr>, peer: SocketAddr) -> usize {
+  n.dial_parked
+    .get(&peer)
+    .map(|bk| {
+      bk.iter()
+        .filter(|e| matches!(e.kind, super::ExchangeKind::ReliablePing))
+        .count()
+    })
+    .unwrap_or(0)
+}
+
+/// Under sustained UDP degradation the probe FSM starts a fresh Detection fallback
+/// each interval while a late Ack rescues the previous round's probe (cancelling its
+/// armed fallback). With every probe-terminal path — success included — cancelling
+/// the fallback, the coordinator's parked bucket holds at most ONE live reliable-ping
+/// entry per peer: the stale entry from a since-succeeded probe retires without
+/// opening before the next one is armed, so fallbacks never accumulate to starve the
+/// exempt budget. Once credit is restored the surviving live fallback mints before
+/// its deadline.
+///
+/// Without the success-path cancellation (and the coordinator's stale-entry retire)
+/// the parked bucket would grow one entry per rescued round.
+#[test]
+fn reliable_ping_fallback_never_accumulates_across_rescued_probes() {
+  let n_addr: SocketAddr = "127.0.0.1:8460".parse().unwrap();
+  let b_addr: SocketAddr = "127.0.0.1:8461".parse().unwrap();
+  let now = Instant::now();
+  let mut n = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("n"), n_addr),
+    test_config_bidi_limit(1),
+    n_addr,
+    now,
+  );
+  let mut b = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("b"), b_addr),
+    test_config_bidi_limit(1),
+    b_addr,
+    now,
+  );
+  establish(&mut n, &mut b, n_addr, b_addr, now);
+  while n.poll_transmit().is_some() {}
+  while b.poll_transmit().is_some() {}
+
+  // Consume the single bidi credit with a held push/pull bridge, so every
+  // reliable-ping fallback re-parks (credit exhausted) rather than minting.
+  let _hold = n.start_push_pull(b_addr, PushPullKind::Join, now);
+  assert_eq!(
+    n.live_bridge_count(),
+    1,
+    "the held push/pull consumes the one bidi credit"
+  );
+
+  let deadline = now + Duration::from_secs(5);
+  let mut prev: Option<StreamId> = None;
+  for seq in 0..6u32 {
+    if let Some(prev_id) = prev.take() {
+      // The previous round's probe was rescued by a late Ack — cancel its armed
+      // fallback intent, exactly as `complete_probe_success` does in the machine.
+      n.endpoint_mut().dial_failed(
+        prev_id,
+        crate::error::StreamError::DialFailed("probe rescued by a late ack".into()),
+        now,
+      );
+    }
+    // Service first: the now-stale previous entry retires without opening.
+    let mut budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+    let _ = n.service_peer_bucket(b_addr, now, &mut budget);
+    // Arm this round's fresh fallback and let it re-park (credit exhausted).
+    let id = arm_parked_reliable_ping(&mut n, "b", b_addr, seq, deadline, now);
+    let mut budget = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+    let _ = n.service_peer_bucket(b_addr, now, &mut budget);
+    assert!(
+      parked_reliable_ping_count(&n, b_addr) <= 1,
+      "at most one live reliable-ping fallback may be parked per peer across rescued \
+         probe rounds; round {seq} left {}",
+      parked_reliable_ping_count(&n, b_addr)
+    );
+    prev = Some(id);
+  }
+
+  // The final round's fallback is live and parked, credit-blocked.
+  let live = prev.expect("a final live fallback remains parked");
+  assert!(
+    !n.bridges.contains_key(&live),
+    "the surviving fallback is credit-blocked, not yet open"
+  );
+
+  // Restore credit by ferrying the held push/pull to completion: B reaps its inbound
+  // bridge and raises MAX_STREAMS, whose Available arm services the parked fallback.
+  let mut minted = false;
+  let mut t = now;
+  'ferry: for _ in 0..400 {
+    t += Duration::from_millis(10);
+    let mut n_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = n.poll_transmit() {
+      if to == b_addr {
+        n_out.push(bytes.to_vec());
+      }
+    }
+    for dg in n_out {
+      b.handle_udp(n_addr, &dg, t);
+    }
+    let mut b_out: Vec<Vec<u8>> = Vec::new();
+    while let Some((to, bytes)) = b.poll_transmit() {
+      if to == n_addr {
+        b_out.push(bytes.to_vec());
+      }
+    }
+    for dg in b_out {
+      n.handle_udp(b_addr, &dg, t);
+      if n.bridges.contains_key(&live) {
+        minted = true;
+        break 'ferry;
+      }
+    }
+    b.handle_timeout(t);
+  }
+  assert!(
+    minted,
+    "once credit is restored the surviving live reliable-ping fallback mints before \
+       its deadline"
+  );
+}
+
+/// A prefix of stale `ReliablePing` entries (their machine intents cancelled by a
+/// since-succeeded probe) at the front of a peer's bucket must retire WITHOUT opening
+/// a stream — no bidi credit spent, no bridge minted — and WITHOUT charging the
+/// exempt-pop budget, so the live fallback behind them is still serviced. The cap is
+/// pinned to the stale count: if a stale retire consumed an exempt pop, the live ping
+/// would be starved and never mint.
+#[test]
+fn stale_reliable_ping_entries_retire_without_opening_or_consuming_exempt_pops() {
+  const STALE: usize = 3;
+  let a_addr: SocketAddr = "127.0.0.1:8464".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8465".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(STALE),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+  let bridges_before = a.live_bridge_count();
+
+  let deadline = now + Duration::from_secs(5);
+  // Arm STALE fallbacks, then cancel each machine intent (as a succeeding probe does).
+  let mut stale_ids = Vec::new();
+  for seq in 0..STALE as u32 {
+    let id = arm_parked_reliable_ping(&mut a, "y", y_addr, seq, deadline, now);
+    a.endpoint_mut().dial_failed(
+      id,
+      crate::error::StreamError::DialFailed("probe rescued".into()),
+      now,
+    );
+    stale_ids.push(id);
+  }
+  // One LIVE fallback behind the stale prefix (its intent remains).
+  let live = arm_parked_reliable_ping(&mut a, "y", y_addr, STALE as u32, deadline, now);
+
+  for id in &stale_ids {
+    assert!(
+      a.endpoint_mut().intent_kind(*id).is_none(),
+      "the stale fallback's machine intent is cancelled"
+    );
+  }
+  assert!(
+    a.endpoint_mut().intent_kind(live).is_some(),
+    "the live fallback's machine intent is resident"
+  );
+
+  // Zero budget → only the exempt lane runs.
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  while a.poll_transmit().is_some() {}
+
+  for id in &stale_ids {
+    assert!(
+      !a.bridges.contains_key(id),
+      "a stale fallback must retire without opening a stream"
+    );
+  }
+  assert!(
+    a.bridges.contains_key(&live),
+    "the live fallback behind the stale prefix is serviced (stale retires never charge \
+       the exempt budget)"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    bridges_before + 1,
+    "exactly one stream opened (the live ping); each stale retire opens none"
+  );
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    0,
+    "the stale prefix retired and the live ping minted, draining the bucket"
+  );
+}
+
+/// Zero-budget regression: a front live reliable-ping still mints past a spent budget,
+/// and a non-ping creditable tail is deposited to the ready-dial ledger for a
+/// pre-deadline catch-up wake (existing behavior preserved alongside the stale-entry
+/// retire).
+#[test]
+fn zero_budget_services_front_live_ping_and_deposits_nonping_tail() {
+  let a_addr: SocketAddr = "127.0.0.1:8468".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8469".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(a_cfg, test_config(), a_addr, now);
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_secs(5);
+  // A live reliable-ping at the FRONT, then a non-ping (user-message) tail behind it.
+  let live = arm_parked_reliable_ping(&mut a, "y", y_addr, 1, deadline, now);
+  a.dial_parked
+    .entry(y_addr)
+    .or_default()
+    .push_back(super::PendingDial {
+      id: StreamId::from_raw(160_000),
+      peer: y_addr,
+      deadline,
+      wake: deadline,
+      attempted: true,
+      kind: super::ExchangeKind::UserMessage,
+    });
+
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    a.bridges.contains_key(&live),
+    "the front live reliable-ping mints even at zero budget"
+  );
+  assert!(
+    a.ready_dial_peers.seen.contains(&y_addr),
+    "the creditable non-ping tail deposits the peer into the ready-dial ledger"
+  );
+  assert_eq!(
+    a.dial_parked.get(&y_addr).map(|bk| bk.len()).unwrap_or(0),
+    1,
+    "the user-message tail remains parked for the catch-up wake"
+  );
+}
+
+/// Cap = 1 crux: with the exempt budget pinned to one and a zero pass budget, a live
+/// reliable-ping behind a prefix of stale (intent-cancelled) entries is STILL attempted
+/// this pass, because a stale retire never charges the single exempt pop.
+///
+/// Mutation anchor: charge the intent-gone retire against `exempt_pops` (revert B2's
+/// uncounted retire) — the first stale entry then consumes the one pop, the loop breaks
+/// before the live ping, and it defers unopened.
+#[test]
+fn cap_one_live_ping_attempted_past_stale_prefix() {
+  const STALE: usize = 2;
+  let a_addr: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8473".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(1),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_secs(5);
+  for seq in 0..STALE as u32 {
+    let id = arm_parked_reliable_ping(&mut a, "y", y_addr, seq, deadline, now);
+    a.endpoint_mut().dial_failed(
+      id,
+      crate::error::StreamError::DialFailed("probe rescued".into()),
+      now,
+    );
+  }
+  let live = arm_parked_reliable_ping(&mut a, "y", y_addr, STALE as u32, deadline, now);
+
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    a.bridges.contains_key(&live),
+    "under cap = 1 the live reliable-ping still mints past a stale prefix; charging the \
+       intent-gone retire against the single exempt pop would defer it"
+  );
+}
+
+/// The zero-budget exempt lane retires machine-cancelled `ReliablePing` entries (their
+/// intents dropped by a since-succeeded probe) WITHOUT charging the exempt-pop budget, so
+/// a burst of stale entries cannot starve the single live-fallback pop. That uncharged
+/// retire is bounded per drain by `MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN`: a pass that
+/// hits the cap stops with the residue resident, deposits the peer into the ready-dial
+/// ledger, and rides the catch-up anchor — so the lane is bounded per pass even against an
+/// out-of-band `start_probe` caller that stacks same-peer fallbacks.
+///
+/// Mutation anchor: remove the cap `break` — the pass then walks the WHOLE stale prefix
+/// (and mints the live ping) in one call, so the serviced delta exceeds the cap and the
+/// bucket empties, failing every assertion below.
+#[test]
+fn exempt_lane_cancelled_retire_cleanup_is_capped_per_drain() {
+  const CAP: usize = super::MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN;
+  const STALE: usize = CAP + 4;
+  let a_addr: SocketAddr = "127.0.0.1:8476".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8477".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(1),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_secs(5);
+  // A prefix of machine-cancelled stale fallbacks, then one live fallback behind them.
+  for seq in 0..STALE as u32 {
+    let id = arm_parked_reliable_ping(&mut a, "y", y_addr, seq, deadline, now);
+    a.endpoint_mut().dial_failed(
+      id,
+      crate::error::StreamError::DialFailed("probe rescued".into()),
+      now,
+    );
+  }
+  let _live = arm_parked_reliable_ping(&mut a, "y", y_addr, STALE as u32, deadline, now);
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    STALE + 1,
+    "all stale fallbacks plus the live one are parked before the drain"
+  );
+
+  let before = a.counters.dial_entries_serviced;
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  let serviced = a.counters.dial_entries_serviced - before;
+  while a.poll_transmit().is_some() {}
+
+  assert_eq!(
+    serviced, CAP as u64,
+    "the exempt drain retires exactly MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN={CAP} stale \
+       entries then breaks; without the cap it would drain all {STALE} and mint the live \
+       ping ({serviced} serviced)"
+  );
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    STALE + 1 - CAP,
+    "the un-retired stale remainder and the live ping stay resident for the next drain"
+  );
+  assert!(
+    a.ready_dial_peers.seen.contains(&y_addr),
+    "the resident residue deposits the peer into the ready-dial ledger"
+  );
+  // The connection-event / catch-up pass that owns this drain arms the sticky anchor;
+  // mirror that reconcile and assert the deferred residue is anchored.
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the capped-drain residue leaves the catch-up anchor armed"
+  );
+}
+
+/// After the exempt lane caps its cancelled-retire cleanup and defers the residue, that
+/// residue drains over successive bounded zero-budget passes: each pass retires at most
+/// the cap (plus the single live mint on the final pass), the stale prefix shrinks
+/// monotonically, and once it is exhausted the live fallback mints — before its dial
+/// deadline, nothing stranded.
+#[test]
+fn capped_cancelled_retire_residue_drains_to_the_live_ping_over_bounded_passes() {
+  const CAP: usize = super::MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN;
+  const STALE: usize = CAP * 2 + 3;
+  let a_addr: SocketAddr = "127.0.0.1:8480".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8481".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(1),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_secs(5);
+  for seq in 0..STALE as u32 {
+    let id = arm_parked_reliable_ping(&mut a, "y", y_addr, seq, deadline, now);
+    a.endpoint_mut().dial_failed(
+      id,
+      crate::error::StreamError::DialFailed("probe rescued".into()),
+      now,
+    );
+  }
+  let live = arm_parked_reliable_ping(&mut a, "y", y_addr, STALE as u32, deadline, now);
+
+  let mut t = now;
+  let mut passes = 0usize;
+  loop {
+    let before_count = parked_reliable_ping_count(&a, y_addr);
+    let before_serviced = a.counters.dial_entries_serviced;
+    let mut budget = 0usize;
+    let _ = a.service_peer_bucket(y_addr, t, &mut budget);
+    while a.poll_transmit().is_some() {}
+    let serviced = a.counters.dial_entries_serviced - before_serviced;
+    let after_count = parked_reliable_ping_count(&a, y_addr);
+
+    assert!(
+      serviced <= CAP as u64 + 1,
+      "each bounded pass retires at most the cap plus the single live mint; pass \
+         serviced {serviced}"
+    );
+    assert!(
+      after_count < before_count,
+      "the stale prefix shrinks monotonically each pass ({before_count} -> {after_count})"
+    );
+    passes += 1;
+    if a.bridges.contains_key(&live) {
+      break;
+    }
+    assert!(
+      passes < 100,
+      "the residue must drain in a bounded number of passes"
+    );
+    t += Duration::from_millis(1);
+    assert!(
+      t < deadline,
+      "the live fallback still has budget before its dial deadline"
+    );
+  }
+  assert!(
+    a.bridges.contains_key(&live),
+    "once the capped stale prefix drains the live fallback mints before its deadline"
+  );
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    0,
+    "no residue strands: the whole bucket drained"
+  );
+}
+
+/// The gate's exact shape: a bucket holding MORE than a full dial budget's worth of
+/// machine-cancelled fallbacks plus one live entry, serviced by ONE pass that starts with
+/// the shared `MAX_DIAL_ATTEMPTS_PER_PASS` dial budget — as a handshake / `MAX_STREAMS`
+/// connection-event servicing pass hands to `service_peer_bucket`. The budgeted lane
+/// charges a dial unit per pop until the budget is spent, then the zero-budget exempt lane
+/// caps its cancelled cleanup, so the whole pass retires at most
+/// `MAX_DIAL_ATTEMPTS_PER_PASS + MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN` entries, with the
+/// remainder deposited into the ready-dial ledger and anchored.
+#[test]
+fn budgeted_then_exempt_cancelled_drain_is_bounded_by_dial_budget_plus_cap() {
+  const CAP: usize = super::MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN;
+  const BUDGET: usize = super::MAX_DIAL_ATTEMPTS_PER_PASS;
+  const STALE: usize = BUDGET + CAP * 2;
+  let a_addr: SocketAddr = "127.0.0.1:8484".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8485".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(1),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+
+  let deadline = now + Duration::from_secs(5);
+  for seq in 0..STALE as u32 {
+    let id = arm_parked_reliable_ping(&mut a, "y", y_addr, seq, deadline, now);
+    a.endpoint_mut().dial_failed(
+      id,
+      crate::error::StreamError::DialFailed("probe rescued".into()),
+      now,
+    );
+  }
+  let _live = arm_parked_reliable_ping(&mut a, "y", y_addr, STALE as u32, deadline, now);
+
+  let before = a.counters.dial_entries_serviced;
+  let mut budget = BUDGET;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  let serviced = a.counters.dial_entries_serviced - before;
+  while a.poll_transmit().is_some() {}
+
+  assert!(
+    serviced <= (BUDGET + CAP) as u64,
+    "one pass retires at most MAX_DIAL_ATTEMPTS_PER_PASS + \
+       MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN = {} entries; serviced {serviced}",
+    BUDGET + CAP
+  );
+  assert_eq!(
+    serviced,
+    (BUDGET + CAP) as u64,
+    "the budgeted lane spends the whole dial budget over the stale prefix, then the exempt \
+       lane retires exactly the cap before deferring the remainder"
+  );
+  assert_eq!(
+    budget, 0,
+    "the budgeted lane spent the whole shared dial budget"
+  );
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    STALE + 1 - (BUDGET + CAP),
+    "the un-serviced remainder and the live ping stay resident"
+  );
+  assert!(
+    a.ready_dial_peers.seen.contains(&y_addr),
+    "the residue deposits the peer into the ready-dial ledger"
+  );
+  a.reconcile_catchup_anchor(now);
+  assert!(
+    a.next_catchup_at.is_some(),
+    "the deferred residue leaves the catch-up anchor armed"
+  );
+}
+
+/// Honest population leaves the cap uninvoked: a single stale cancelled fallback ahead of
+/// one live ping retires uncounted and the live ping mints the SAME zero-budget pass, so
+/// the cap never fires under the scheduler-bounded stale prefix. Pins the `b93ab8a`
+/// exempt-lane behavior unchanged by the per-drain cap.
+#[test]
+fn honest_single_stale_cancelled_retire_leaves_the_cap_uninvoked() {
+  let a_addr: SocketAddr = "127.0.0.1:8488".parse().unwrap();
+  let y_addr: SocketAddr = "127.0.0.1:8489".parse().unwrap();
+  let now = Instant::now();
+  let a_cfg = EndpointOptions::new(SmolStr::new("a"), a_addr)
+    .with_probe_interval(Duration::ZERO)
+    .with_gossip_interval(Duration::ZERO)
+    .with_push_pull_interval(Duration::ZERO);
+  let mut a = make_endpoint_full(
+    a_cfg,
+    test_config().with_max_reliable_ping_exempt_pops_per_pass(1),
+    a_addr,
+    now,
+  );
+  let mut y = make_endpoint_full(
+    EndpointOptions::new(SmolStr::new("y"), y_addr),
+    test_config(),
+    y_addr,
+    now,
+  );
+  establish(&mut a, &mut y, a_addr, y_addr, now);
+  quiesce(&mut a, now);
+  let bridges_before = a.live_bridge_count();
+
+  let deadline = now + Duration::from_secs(5);
+  let stale = arm_parked_reliable_ping(&mut a, "y", y_addr, 0, deadline, now);
+  a.endpoint_mut().dial_failed(
+    stale,
+    crate::error::StreamError::DialFailed("probe rescued".into()),
+    now,
+  );
+  let live = arm_parked_reliable_ping(&mut a, "y", y_addr, 1, deadline, now);
+
+  let before = a.counters.dial_entries_serviced;
+  let mut budget = 0usize;
+  let _ = a.service_peer_bucket(y_addr, now, &mut budget);
+  let serviced = a.counters.dial_entries_serviced - before;
+  while a.poll_transmit().is_some() {}
+
+  assert_eq!(
+    serviced,
+    2,
+    "the honest pass retires the one stale entry and mints the live ping — the cap of {} \
+       is never reached",
+    super::MAX_CANCELLED_RETIRES_PER_EXEMPT_DRAIN
+  );
+  assert!(
+    !a.bridges.contains_key(&stale),
+    "the stale cancelled fallback retires without opening a stream"
+  );
+  assert!(
+    a.bridges.contains_key(&live),
+    "the live fallback mints the same pass — the uncounted stale retire never deferred it"
+  );
+  assert_eq!(
+    a.live_bridge_count(),
+    bridges_before + 1,
+    "exactly the live ping opened; the stale retire opened nothing"
+  );
+  assert_eq!(
+    parked_reliable_ping_count(&a, y_addr),
+    0,
+    "the stale prefix retired and the live ping minted, draining the bucket"
   );
 }
 
