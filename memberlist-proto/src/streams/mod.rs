@@ -1798,6 +1798,12 @@ where
   /// [`StreamAction::Abort`], so the driver RSTs without putting stale bytes
   /// (including a TLS `close_notify`) on the wire.
   fn reap_bridge(&mut self, id: ExchangeId, br: &mut StreamBridge<I, A, R>, now: Instant) {
+    // Retire any still-queued `Connect` for this exchange: `poll_action` surfaces
+    // Connects before teardowns, so a reaped exchange whose `Connect` the driver
+    // had not yet drained would otherwise open a socket for an already-removed
+    // exchange before its `Abort`/`Close` arrives. Unconditional — the exchange is
+    // removed below on every reap, so no initiation action for it may remain.
+    self.purge_pending_connect_for(id);
     // Discipline the bridge's outbound bytes by terminal outcome BEFORE emitting
     // the teardown action below.
     //
