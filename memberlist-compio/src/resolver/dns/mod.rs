@@ -11,6 +11,7 @@
 
 use crate::{
   Address,
+  driver::options::capped_timer,
   resolver::{OsResolver, Resolver},
 };
 use compio::{
@@ -147,7 +148,7 @@ impl DnsResolver {
   /// path (see [`Resolver::resolve`] below).
   async fn tcp_query(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, DnsError> {
     let query = self.tcp_query_inner(host, port).fuse();
-    let timeout = compio::time::sleep(self.timeout).fuse();
+    let timeout = compio::time::sleep(capped_timer(self.timeout)).fuse();
     pin_mut!(query, timeout);
     select_biased! {
       res = query => res,

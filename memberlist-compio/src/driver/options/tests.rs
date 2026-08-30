@@ -296,3 +296,28 @@ fn stream_transport_options_validate() {
       .is_ok()
   );
 }
+
+// `capped_timer` caps an extreme duration at `MAX_TIMER_DURATION` and passes
+// a small one through unchanged; the cap is representable by
+// `Instant::now() + d` while the uncapped `Duration::MAX` is not, which is
+// exactly why `compio::time::sleep` needs the cap.
+#[test]
+fn capped_timer_caps_extreme_and_passes_through_small() {
+  assert_eq!(capped_timer(Duration::MAX), MAX_TIMER_DURATION);
+  assert_eq!(capped_timer(Duration::from_secs(5)), Duration::from_secs(5));
+
+  // The cap is representable, so `sleep(capped)` cannot overflow-panic.
+  assert!(
+    std::time::Instant::now()
+      .checked_add(MAX_TIMER_DURATION)
+      .is_some()
+  );
+  // Mutation-anchor: without the cap, the raw extreme duration overflows the
+  // monotonic clock's `checked_add` — this is the panic `capped_timer` exists
+  // to prevent.
+  assert!(
+    std::time::Instant::now()
+      .checked_add(Duration::MAX)
+      .is_none()
+  );
+}

@@ -12,6 +12,23 @@
 use crate::error::{InvalidOption, MemberlistError};
 use core::time::Duration;
 
+/// The largest duration passed to `compio::time::sleep`. `compio::time::sleep(d)`
+/// computes `Instant::now() + d`, which panics if it overflows the platform
+/// monotonic clock; capping here degrades an extreme or misconfigured timeout
+/// to a far-future deadline instead of panicking the detached task. The cap is
+/// far larger than any real close/dial/peek timeout and far below the overflow
+/// point, so `Instant::now() + MAX_TIMER_DURATION` can never overflow.
+pub(crate) const MAX_TIMER_DURATION: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60); // ~10 years
+
+/// Cap `d` at [`MAX_TIMER_DURATION`] before handing it to `compio::time::sleep`,
+/// so an operator-configured `close_timeout` / `dial_timeout` / `peek_budget`
+/// large enough to overflow `Instant::now() + d` degrades to a bounded
+/// far-future sleep instead of panicking the sleeping task.
+#[inline]
+pub(crate) fn capped_timer(d: Duration) -> Duration {
+  d.min(MAX_TIMER_DURATION)
+}
+
 /// Default per-call deadline for [`Memberlist::join`](crate::Memberlist::join).
 pub const DEFAULT_JOIN_DEADLINE: Duration = Duration::from_secs(10);
 

@@ -12029,3 +12029,35 @@ fn oversized_pushpull_response_served_and_counted() {
     "a within-cap response is not counted"
   );
 }
+
+// `random_stagger` saturates its `u128 -> u64` nanosecond conversion instead
+// of truncating mod 2^64, so an interval whose total nanoseconds overflow
+// `u64` degrades to a huge non-empty stagger range instead of collapsing to
+// zero (which would fire every node's first tick simultaneously).
+#[test]
+fn random_stagger_saturates_on_overflow_interval() {
+  // Exactly 2^64 nanoseconds: `Duration::new(secs, nanos)` with
+  // `secs * 1_000_000_000 + nanos == 1u128 << 64`.
+  let interval = Duration::new(18_446_744_073, 709_551_616);
+  assert_eq!(interval.as_nanos(), 1u128 << 64);
+
+  let mut rng = test_seeded_rng();
+  let stagger = random_stagger(interval, &mut rng);
+  // Mutation-anchor: reverting to `as_nanos() as u64` truncates this
+  // interval's nanos to exactly 0, so `random_stagger` would return
+  // `Duration::ZERO` here — this assertion fails under that regression.
+  assert!(
+    stagger > Duration::ZERO,
+    "an overflow-large interval must not collapse the stagger to zero"
+  );
+  assert!(
+    stagger < interval,
+    "the stagger must stay a fraction of the (saturated) interval"
+  );
+
+  // Control: a normal interval still staggers within `[0, interval)`.
+  let normal = Duration::from_secs(1);
+  let mut rng2 = test_seeded_rng();
+  let normal_stagger = random_stagger(normal, &mut rng2);
+  assert!(normal_stagger < normal);
+}

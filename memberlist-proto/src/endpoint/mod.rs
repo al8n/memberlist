@@ -5172,7 +5172,11 @@ where
   R: Rng,
 {
   use rand::RngExt;
-  let nanos = interval.as_nanos() as u64;
+  // `as_nanos()` is `u128`; `try_from` (rather than `as u64`) avoids truncating
+  // mod 2^64 for an interval whose total nanoseconds overflow `u64` (~584
+  // years) — an `as` cast would wrap to a small (even zero) value here and
+  // collapse the jitter into a thundering herd instead of degrading it.
+  let nanos = u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX);
   if nanos == 0 {
     return Duration::ZERO;
   }
