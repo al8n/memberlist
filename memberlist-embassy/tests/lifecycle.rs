@@ -18,7 +18,7 @@ use embassy_net::{
   tcp::TcpSocket,
   udp::{PacketMetadata, UdpSocket},
 };
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
   AddressResolver, EndpointOptions, InitError, MaybeResolved, Memberlist, Options, Runner,
@@ -582,6 +582,148 @@ fn abort_preempts_a_stalled_established_send() {
     assert_eq!(
       free, free_a_at_start,
       "A's reliable pool did not recover after the stalled send was preempted"
+    );
+  });
+}
+
+/// An ESTABLISHED abort whose RST cannot egress must recover the slot within ONE
+/// teardown budget (`close_timeout / 2`), never two. The worker bounds the teardown
+/// RST-egress flush exactly ONCE, in `reset_socket`; the established `Command::Abort`
+/// arm therefore `abort()`s WITHOUT its own drain and relies on the caller's single
+/// `reset_socket` drain. Were the abort arm to drain too, a non-egressing RST would
+/// wait a full `close_timeout` (two `close_timeout / 2` bounds back to back) before the
+/// slot resets — which the engine's retiring deadline (`now + close_timeout`, evaluated
+/// on the pump BEFORE the workers) beats, ticking `teardown_overruns`.
+///
+/// A raw peer accepts A's reliable dial and never reads, so A's worker parks in an
+/// established send with the peer's window shut. Once established, A's FRAMING gate is
+/// closed (the device's `transmit` returns `None`), so the abort's RST — issued when
+/// the exchange elapses at `stream_timeout` and the engine posts `Abort` — cannot be
+/// framed and the teardown flush stalls, forcing the worker onto its dedicated teardown
+/// timer (the real-world analog is an established peer whose neighbor entry has expired
+/// and is now unreachable, so the RST cannot be framed). With the single drain the slot
+/// frees within `close_timeout / 2` and no teardown overruns; a second drain in the
+/// abort arm would double that to a full `close_timeout` and overrun the deadline.
+///
+/// This is the load-bearing regression for the single-drain invariant: it requires a
+/// NON-egressing established-abort RST, which the `tx_gate` (deliver-then-drop, so
+/// smoltcp counts the frame sent and the flush resolves) cannot produce — only the
+/// `frame_gate` (a `None` transmit, so the frame stays pending and the flush stalls)
+/// exposes the doubled budget.
+#[test]
+fn established_abort_with_non_egressing_rst_recovers() {
+  let (dev_a, dev_b) = pair();
+  // A cannot frame the abort's RST once this gate is closed (closed after the
+  // connection establishes, so only the teardown RST — not the handshake — is stalled).
+  let a_frame = dev_a.frame_gate();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  // A short close-timeout keeps the teardown bound (`close_timeout / 2`) well within
+  // the test budget while still strictly below the engine's retiring deadline.
+  let (ml_a, run_a) = node_with_opts(
+    stack_a,
+    &mut bufs_a,
+    "a",
+    1,
+    1,
+    Options::new().with_close_timeout(FAST_CLOSE_TIMEOUT),
+  );
+
+  // A deliberately-small receive buffer for the non-reading peer: it fills fast so A's
+  // established send stalls (window shut) well before the payload drains, keeping the
+  // exchange open until it elapses at `stream_timeout` and the engine aborts it.
+  let mut peer_rx = [0u8; 512];
+  let mut peer_tx = [0u8; 512];
+
+  let free_a_at_start = ml_a.pool_free_count();
+  block_on(async {
+    // The non-reading peer: accept A's dial, then hold the socket open forever without
+    // ever reading, so A's worker parks in the established send.
+    let peer = async {
+      let mut sock = TcpSocket::new(stack_b, &mut peer_rx, &mut peer_tx);
+      sock
+        .accept(7946)
+        .await
+        .expect("the raw peer accepts A's dial");
+      core::future::pending::<()>().await;
+    };
+
+    let op = async {
+      // Let the raw peer reach its `accept` before A dials it.
+      Timer::after(Duration::from_millis(50)).await;
+
+      // Close A's framing gate AFTER the (sub-millisecond, local) handshake has
+      // established the connection but BEFORE the exchange elapses at `stream_timeout`
+      // (300 ms) and the engine posts `Abort` — so the abort's RST cannot be framed and
+      // its teardown flush must fall back on the worker's dedicated teardown timer.
+      let gate = async {
+        Timer::after(Duration::from_millis(120)).await;
+        a_frame.set(false);
+        core::future::pending::<()>().await
+      };
+      // A large, incompressible payload guarantees the framed request exceeds the peer's
+      // shut window, so the worker is parked in the established send when the abort
+      // arrives — it hits the `Command::Abort` arm, the single-drain site under test.
+      let send = ml_a.send_reliable(addr(2, 7946), incompressible(16 * 1024));
+      let r = match select(send, gate).await {
+        Either::First(r) => r,
+        Either::Second(()) => unreachable!("the framing-gate future never resolves"),
+      };
+      assert!(
+        r.is_err(),
+        "a send to a non-draining peer must fail once the abort preempts it, not hang"
+      );
+
+      // The abort has been issued (the send resolved at the exchange deadline). Time the
+      // slot's recovery from here: a SINGLE teardown drain frees it within one budget
+      // (`close_timeout / 2`); a double drain would take a full `close_timeout`.
+      let aborted_at = Instant::now();
+      until(|| ml_a.pool_free_count() >= free_a_at_start && ml_a.retiring_count() == 0).await;
+      (
+        aborted_at.elapsed(),
+        ml_a.pool_free_count(),
+        ml_a.retiring_count(),
+        ml_a.teardown_overruns(),
+      )
+    };
+
+    // A bespoke drive: the peer is a raw socket, not a second memberlist node, so the
+    // shared `drive` helper does not fit.
+    let infra = select(select(net_a.run(), net_b.run()), select(run_a.run(), peer));
+    let (recovery, free, retiring, overruns) =
+      match select(op, select(infra, Timer::after(TEST_TIMEOUT))).await {
+        Either::First(v) => v,
+        Either::Second(_) => {
+          panic!("established_abort_with_non_egressing_rst_recovers timed out")
+        }
+      };
+    assert_eq!(
+      free, free_a_at_start,
+      "A's reliable pool did not recover after the established abort ({free} of \
+       {free_a_at_start})"
+    );
+    assert_eq!(
+      retiring, 0,
+      "a slot was left pinned in the retiring ledger after the established abort \
+       ({retiring})"
+    );
+    assert_eq!(
+      overruns, 0,
+      "the established abort's teardown overran the engine's retiring deadline \
+       ({overruns}) — a second drain in the abort arm doubles the teardown budget"
+    );
+    // One teardown budget is `close_timeout / 2` (250 ms); allow scheduling and the
+    // 10 ms recovery-poll granularity, but stay well below a full `close_timeout`
+    // (500 ms) so a double-drain regression (which needs the full close_timeout) also
+    // fails this bound, not only the overrun assertion above.
+    assert!(
+      recovery < Duration::from_millis(400),
+      "the slot took {recovery:?} to recover — beyond one teardown budget; a double \
+       drain of the non-egressing RST would take a full close_timeout"
     );
   });
 }

@@ -121,7 +121,7 @@ pub(crate) async fn run_slot(
             // The pump must observe the new accept so `check_listener` maps it.
             pump_wake.signal(());
             if peer.is_some() {
-              run_established(socket, mb, cmd_wake, pump_wake, teardown_timeout).await;
+              run_established(socket, mb, cmd_wake, pump_wake).await;
             }
             reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
@@ -133,11 +133,13 @@ pub(crate) async fn run_slot(
           }
           Either::Second(()) => {
             // A new command arrived mid-accept; abandon the listen and re-read it.
-            // `abort()` returns the socket to Closed so the next command's
-            // accept/connect starts cleanly. Bound the RST egress so a peer that
-            // never receives it cannot pin the worker here (see `drain_teardown`).
+            // `abort()` moves the socket to `Closed`. Do NOT drain here: this iteration
+            // does not reach `reset_socket`, so the socket's RST egress is bounded once
+            // at the eventual `reset_socket` (if the next command is `Close`/`Abort`) or
+            // simply discarded when the next `connect`/`accept` re-initializes the
+            // socket via smoltcp's `reset()` — draining here would double the teardown
+            // budget for a mid-accept-then-close.
             socket.abort();
-            drain_teardown(socket, teardown_timeout).await;
           }
         }
       }
@@ -181,7 +183,7 @@ pub(crate) async fn run_slot(
             }
             // The pump must observe the established slot to promote its exchange.
             pump_wake.signal(());
-            run_established(socket, mb, cmd_wake, pump_wake, teardown_timeout).await;
+            run_established(socket, mb, cmd_wake, pump_wake).await;
             reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
@@ -233,7 +235,6 @@ async fn run_established(
   mb: &RefCell<Mailbox>,
   cmd_wake: &SlotWake,
   pump_wake: &SlotWake,
-  teardown_timeout: Duration,
 ) {
   // Half-close state machine. A push/pull exchange is a full-duplex request/reply
   // over ONE connection that BOTH sides half-close: the requester writes its
@@ -284,10 +285,11 @@ async fn run_established(
       }
       Command::Abort => {
         socket.abort();
-        // Bound the RST egress: a peer that never receives it (e.g. an
-        // ARP-unresolvable on-link target) must not pin the worker here. The slot is
-        // reset next regardless (see `drain_teardown`).
-        drain_teardown(socket, teardown_timeout).await;
+        // `abort()` moves the socket to `Closed`; its RST egress is bounded ONCE at
+        // the caller's following `reset_socket` (the sole teardown drain). Do NOT drain
+        // here: a second bounded drain would double the teardown budget, so a
+        // non-egressing RST would wait ~the full `close_timeout` before the slot resets
+        // — which the engine's retiring deadline beats, ticking `teardown_overruns`.
         {
           let mut m = mb.borrow_mut();
           m.open = false;
@@ -518,6 +520,17 @@ async fn drain_teardown(socket: &mut TcpSocket<'_>, timeout: Duration) {
 /// wait for it beyond `teardown_timeout` — a dead on-link peer's RST never egresses,
 /// and an unbounded wait would pin this slot forever (see `drain_teardown`). The
 /// mailbox reset clears every per-connection field (preserving ring capacities).
+///
+/// This is the SOLE bounded teardown drain, so every teardown path drains AT MOST
+/// once. Every terminal path routes through here exactly once: accept success/err,
+/// dial success/err/preempt, a `Close`/`Abort` on an unestablished slot, and every
+/// `run_established` return (its `Close` completion, transport-error, and `Abort`
+/// arms). The `Abort` arm and the accept-preempt deliberately `abort()` WITHOUT their
+/// own drain and rely on this single one — a second bounded drain on the same teardown
+/// would double the budget, letting a non-egressing RST overrun the engine's retiring
+/// deadline. The accept-preempt is the one terminal `abort()` that does not reach here
+/// on its iteration; it needs no drain (the next `connect`/`accept` re-initializes the
+/// socket via smoltcp `reset()`, or a subsequent `Close`/`Abort` routes back here).
 async fn reset_socket(
   socket: &mut TcpSocket<'_>,
   mb: &RefCell<Mailbox>,
