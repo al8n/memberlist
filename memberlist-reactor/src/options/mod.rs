@@ -504,9 +504,12 @@ pub const DEFAULT_OBSERVATION_CHANNEL_CAPACITY: usize = 1024;
 /// [`Event`](memberlist_proto::Event)s to the observation task.
 ///
 /// As a config value or CLI flag the policy parses from a string
-/// ([`Channel::from_str`]): `"unbounded"` selects [`Channel::Unbounded`], and a
-/// bare unsigned integer selects [`Channel::Bounded`] of that capacity (`"1024"`
-/// → `Bounded(1024)`).
+/// ([`Channel::from_str`]): the canonical form is `"bounded:<n>"` (or
+/// `"bounded=<n>"`) for [`Channel::Bounded`], and `"unbounded"`
+/// (case-insensitive) for [`Channel::Unbounded`]; a bare unsigned integer
+/// (e.g. `"1024"`) is also accepted for back-compat and maps to `Bounded`.
+/// [`Display`](core::fmt::Display) always emits the canonical `bounded:<n>`
+/// form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -528,36 +531,46 @@ impl Default for Channel {
 impl core::fmt::Display for Channel {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
-      Self::Bounded(capacity) => write!(f, "{capacity}"),
+      Self::Bounded(capacity) => write!(f, "bounded:{capacity}"),
       Self::Unbounded => f.write_str("unbounded"),
     }
   }
 }
 
 /// Parse a [`Channel`] from a string — a config value or CLI flag.
-/// `"unbounded"` is [`Channel::Unbounded`]; a bare unsigned integer is
-/// [`Channel::Bounded`] of that capacity. Any other input is a
-/// [`ParseChannelError`].
+/// `"unbounded"` (case-insensitive) is [`Channel::Unbounded`]; `"bounded:<n>"`
+/// or `"bounded=<n>"` is [`Channel::Bounded`] of that capacity; a bare
+/// unsigned integer is also accepted as a back-compat alias for
+/// `"bounded:<n>"`. Any other input is a [`ParseChannelError`].
 impl core::str::FromStr for Channel {
   type Err = ParseChannelError;
 
   fn from_str(s: &str) -> Result<Self, Self::Err> {
-    if s == "unbounded" {
+    if s.eq_ignore_ascii_case("unbounded") {
       return Ok(Self::Unbounded);
     }
-    s.parse::<usize>()
-      .map(Self::Bounded)
-      .map_err(|_| ParseChannelError(()))
+    let cap = s
+      .strip_prefix("bounded:")
+      .or_else(|| s.strip_prefix("bounded="));
+    let n = match cap {
+      Some(cap) => cap.parse::<usize>().map_err(|_| ParseChannelError(()))?,
+      // Legacy fallback: a bare integer, as accepted before the CLI grammar
+      // was canonicalized on `bounded:<n>` to match the serde form.
+      None => s.parse::<usize>().map_err(|_| ParseChannelError(()))?,
+    };
+    Ok(Self::Bounded(n))
   }
 }
 
 /// The error from [`Channel::from_str`]: the input was neither `"unbounded"`
-/// nor a bare unsigned integer.
+/// nor a `"bounded:<n>"`/bare-integer capacity.
 ///
 /// Opaque — the private unit field seals construction to this module, so the
 /// error can gain detail later without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid observation channel (expected \"unbounded\" or an unsigned integer capacity)")]
+#[error(
+  "invalid observation channel (expected \"unbounded\", \"bounded:<n>\", or a bare integer capacity)"
+)]
 pub struct ParseChannelError(());
 
 /// The default membership `EventStream` capacity.

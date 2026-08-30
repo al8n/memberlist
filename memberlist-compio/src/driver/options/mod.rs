@@ -108,9 +108,12 @@ pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// the delegate would observe nothing.
 ///
 /// As a config value (serde / CLI) it is open-vocabulary: `Unbounded` is the
-/// bare string `"unbounded"`, `Bounded(n)` is `{"bounded": n}` under serde and
-/// `bounded:n` on the CLI (via [`FromStr`](core::str::FromStr) /
-/// [`Display`](core::fmt::Display)).
+/// bare string `"unbounded"` (case-insensitive), `Bounded(n)` is
+/// `{"bounded": n}` under serde and canonically `bounded:n` (or `bounded=n`)
+/// on the CLI (via [`FromStr`](core::str::FromStr) /
+/// [`Display`](core::fmt::Display)); a bare integer (`n`) is also accepted
+/// when parsing, as a back-compat alias for `bounded:n` — `Display` always
+/// emits the canonical `bounded:n` form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -133,9 +136,11 @@ impl core::fmt::Display for Channel {
   }
 }
 
-/// Parse a [`Channel`] from its string form — `"unbounded"` or `"bounded:<n>"`
-/// — for a config value or a CLI flag. The inverse of [`Channel`]'s `Display`;
-/// unconditional (not gated on `clap`) so any caller can use it.
+/// Parse a [`Channel`] from its string form — `"unbounded"`, `"bounded:<n>"`,
+/// or a bare integer `"<n>"` (a back-compat alias for `"bounded:<n>"`) — for a
+/// config value or a CLI flag. `Display` only ever emits the canonical
+/// `"bounded:<n>"`/`"unbounded"` forms; `FromStr` is the more permissive
+/// inverse. Unconditional (not gated on `clap`) so any caller can use it.
 impl core::str::FromStr for Channel {
   type Err = ParseChannelError;
 
@@ -145,20 +150,26 @@ impl core::str::FromStr for Channel {
     }
     let cap = s
       .strip_prefix("bounded:")
-      .or_else(|| s.strip_prefix("bounded="))
-      .ok_or(ParseChannelError(()))?;
-    let n = cap.parse::<usize>().map_err(|_| ParseChannelError(()))?;
+      .or_else(|| s.strip_prefix("bounded="));
+    let n = match cap {
+      Some(cap) => cap.parse::<usize>().map_err(|_| ParseChannelError(()))?,
+      // Legacy fallback: a bare integer, as accepted by other drivers' CLI
+      // grammar; `Display` never emits this form.
+      None => s.parse::<usize>().map_err(|_| ParseChannelError(()))?,
+    };
     Ok(Self::Bounded(n))
   }
 }
 
 /// The error from [`Channel::from_str`]: the input was neither `"unbounded"`
-/// nor a `"bounded:<n>"` with a valid capacity.
+/// nor a `"bounded:<n>"`/bare-integer capacity.
 ///
 /// Opaque — the private unit field seals construction to this module, so the
 /// error can gain detail later without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid observation channel (expected `unbounded` or `bounded:<n>`)")]
+#[error(
+  "invalid observation channel (expected `unbounded`, `bounded:<n>`, or a bare integer capacity)"
+)]
 pub struct ParseChannelError(());
 
 /// Default delegate observation channel: [`Channel::Bounded`] at 1024 events.
