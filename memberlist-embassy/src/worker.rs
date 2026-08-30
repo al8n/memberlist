@@ -19,6 +19,7 @@ use core::cell::RefCell;
 
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
+use embassy_time::{Duration, Timer};
 
 use crate::{
   mailbox::{Command, Mailbox},
@@ -61,7 +62,8 @@ pub(crate) async fn run_slot(
   mb: &RefCell<Mailbox>,
   cmd_wake: &SlotWake,
   pump_wake: &SlotWake,
-  socket_timeout: embassy_time::Duration,
+  socket_timeout: Duration,
+  teardown_timeout: Duration,
 ) -> ! {
   // Bound EVERY blocking socket await (connect / write / flush / read) so a peer
   // that stops responding cannot wedge this worker: embassy-net aborts the socket
@@ -119,24 +121,23 @@ pub(crate) async fn run_slot(
             // The pump must observe the new accept so `check_listener` maps it.
             pump_wake.signal(());
             if peer.is_some() {
-              run_established(socket, mb, cmd_wake, pump_wake).await;
+              run_established(socket, mb, cmd_wake, pump_wake, teardown_timeout).await;
             }
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
           Either::First(Err(_)) => {
             // Listen failed (e.g. the socket was not in a clean state). Reset and
             // retry on the next loop.
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
           }
           Either::Second(()) => {
             // A new command arrived mid-accept; abandon the listen and re-read it.
             // `abort()` returns the socket to Closed so the next command's
-            // accept/connect starts cleanly.
+            // accept/connect starts cleanly. Bound the RST egress so a peer that
+            // never receives it cannot pin the worker here (see `drain_teardown`).
             socket.abort();
-            // Ignoring Err: a best-effort RST flush on a socket with no peer is a
-            // no-op; the reset below re-clears the mailbox regardless.
-            let _ = socket.flush().await;
+            drain_teardown(socket, teardown_timeout).await;
           }
         }
       }
@@ -180,8 +181,8 @@ pub(crate) async fn run_slot(
             }
             // The pump must observe the established slot to promote its exchange.
             pump_wake.signal(());
-            run_established(socket, mb, cmd_wake, pump_wake).await;
-            reset_socket(socket, mb).await;
+            run_established(socket, mb, cmd_wake, pump_wake, teardown_timeout).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
           Either::First(Err(_)) => {
@@ -195,7 +196,7 @@ pub(crate) async fn run_slot(
             }
             // The pump must observe `open == false` to reap the failed dial.
             pump_wake.signal(());
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
           }
           Either::Second(()) => {
             // A command arrived mid-connect (the engine posted `Abort`, retiring this
@@ -203,7 +204,7 @@ pub(crate) async fn run_slot(
             // the next command starts cleanly, and wake the pump so it observes the
             // slot is reuse-ready (`reset_done`) and can dispatch any deferred dial —
             // without this the dial-churn would stall (freed slots never re-observed).
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
         }
@@ -211,7 +212,7 @@ pub(crate) async fn run_slot(
       // A Close/Abort posted to an un-established slot has nothing to tear down;
       // clear it and park again.
       Command::Close | Command::Abort => {
-        reset_socket(socket, mb).await;
+        reset_socket(socket, mb, teardown_timeout).await;
       }
       // Idle: park until the engine posts a command. Re-read after the wake.
       Command::Idle => {
@@ -232,6 +233,7 @@ async fn run_established(
   mb: &RefCell<Mailbox>,
   cmd_wake: &SlotWake,
   pump_wake: &SlotWake,
+  teardown_timeout: Duration,
 ) {
   // Half-close state machine. A push/pull exchange is a full-duplex request/reply
   // over ONE connection that BOTH sides half-close: the requester writes its
@@ -282,9 +284,10 @@ async fn run_established(
       }
       Command::Abort => {
         socket.abort();
-        // Ignoring Err: abort flush waits for the RST to be sent; failure means
-        // it is already gone. The slot is reset next regardless.
-        let _ = socket.flush().await;
+        // Bound the RST egress: a peer that never receives it (e.g. an
+        // ARP-unresolvable on-link target) must not pin the worker here. The slot is
+        // reset next regardless (see `drain_teardown`).
+        drain_teardown(socket, teardown_timeout).await;
         {
           let mut m = mb.borrow_mut();
           m.open = false;
@@ -479,17 +482,48 @@ async fn run_established(
   }
 }
 
+/// Best-effort bounded flush of a torn-down socket's RST, then proceed regardless.
+///
+/// A teardown site `abort()`s the socket (moving it to `Closed`) and then wants the
+/// RST to egress before the socket is reused. But embassy-net's `flush` stays PENDING
+/// while a `Closed` socket still holds its remote tuple, and that tuple clears only
+/// once the RST actually leaves the interface — which never happens for an
+/// ARP-unresolvable on-link peer (the SYN/RST cannot be framed without the peer's link
+/// address). An UNBOUNDED flush there would pin this worker — and thus its pool slot —
+/// forever, so a pre-trust peer that floods dials at dead on-link addresses could
+/// exhaust the reliable pool permanently. Racing the flush against a dedicated timer
+/// bounds every teardown to `timeout`: a reachable peer's RST still egresses (the flush
+/// resolves first), and a dead peer's simply does not — the slot frees either way.
+///
+/// The timer is DEDICATED (an [`embassy_time::Timer`]), NOT the multiplexed command
+/// wake the send flushes race, so a benign concurrent `send`/`recv` pulse cannot cut a
+/// teardown short — only real elapsed time does. `timeout` is derived at construction
+/// to be strictly less than the engine's retiring deadline, so the slot's teardown is
+/// acknowledged before the engine escalates (keeping `teardown_overruns` at 0). After
+/// an abandoned wait the socket stays `Closed` with its stale tuple/queued RST, which
+/// the next `connect`/`accept` discards when smoltcp re-initializes the control block —
+/// so reuse is safe.
+async fn drain_teardown(socket: &mut TcpSocket<'_>, timeout: Duration) {
+  // Ignoring Err/timeout: the RST is best-effort — a dead peer never receives it, and
+  // the socket is reset to a clean, reusable state regardless.
+  let _ = select(socket.flush(), Timer::after(timeout)).await;
+}
+
 /// Return the socket to a clean Closed state and reset the mailbox for the slot's
 /// next reuse.
 ///
 /// `abort()` is idempotent on an already-closed socket and guarantees the socket
-/// leaves any half-open/closing state so the next `accept`/`connect` starts
-/// fresh; the subsequent `flush` lets a pending RST go out. The mailbox reset
-/// clears every per-connection field (preserving ring capacities).
-async fn reset_socket(socket: &mut TcpSocket<'_>, mb: &RefCell<Mailbox>) {
+/// leaves any half-open/closing state so the next `accept`/`connect` starts fresh;
+/// the subsequent bounded flush lets a pending RST egress WHEN IT CAN, but does not
+/// wait for it beyond `teardown_timeout` — a dead on-link peer's RST never egresses,
+/// and an unbounded wait would pin this slot forever (see `drain_teardown`). The
+/// mailbox reset clears every per-connection field (preserving ring capacities).
+async fn reset_socket(
+  socket: &mut TcpSocket<'_>,
+  mb: &RefCell<Mailbox>,
+  teardown_timeout: Duration,
+) {
   socket.abort();
-  // Ignoring Err: flushing the RST on an already-dead socket is a no-op; the
-  // socket is returned to Closed either way.
-  let _ = socket.flush().await;
+  drain_teardown(socket, teardown_timeout).await;
   mb.borrow_mut().reset();
 }

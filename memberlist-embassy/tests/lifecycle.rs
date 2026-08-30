@@ -142,19 +142,28 @@ async fn drive<T>(
   }
 }
 
-/// Build one node with a short `stream_timeout` so dead dials reap quickly.
-fn node<'a>(
+/// A short engine close-timeout for the dead-on-link recovery tests. The worker
+/// bounds each teardown RST flush to `close_timeout / 2` (see the worker's
+/// `drain_teardown`), so a short close-timeout keeps a dead dial's slot recovering
+/// quickly — well within the test budget — while its teardown still completes before
+/// the engine's retiring deadline (`close_timeout`), keeping `teardown_overruns` at 0.
+const FAST_CLOSE_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(500);
+
+/// Build one node with a short `stream_timeout` (so dead dials reap quickly) and the
+/// given driver [`Options`].
+fn node_with_opts<'a>(
   stack: Stack<'a>,
   bufs: &'a mut NodeBufs,
   id: &str,
   last: u8,
   seed: u64,
+  opts: Options,
 ) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
   let (udp, tcp) = build_sockets(stack, bufs);
   // `SocketAddrResolver` resolves synchronously, so drive the now-async
   // constructor to completion inline — this helper stays sync.
   block_on(Memberlist::new_with_rng::<_, POOL>(
-    Options::new(),
+    opts,
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new(id), addr(last, 7946))
       // Short stream timeout: a dead dial fails (and its slot is reaped) quickly so
@@ -167,6 +176,17 @@ fn node<'a>(
     SmallRng::seed_from_u64(seed),
   ))
   .expect("build node")
+}
+
+/// Build one node with default driver options and a short `stream_timeout`.
+fn node<'a>(
+  stack: Stack<'a>,
+  bufs: &'a mut NodeBufs,
+  id: &str,
+  last: u8,
+  seed: u64,
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
+  node_with_opts(stack, bufs, id, last, seed, Options::new())
 }
 
 /// Wait until `cond()` holds, polling on a short timer; panics via the outer
@@ -262,23 +282,17 @@ fn abort_reuse_does_not_carry_stale_state() {
   });
 }
 
-/// Repeated dial/abort churn must not LEAK a reliable slot: every dead dial's
-/// slot must stay accounted for — either back in the free-list once its worker has
-/// reset the socket, or held in the engine's `retiring` ledger while its teardown
-/// is still pending — so `pool_free_count + retiring_count` recovers to the
-/// construction dial-slot count. A slot reused before its reset (the bug the
-/// generation-tagged teardown protocol closes) would zombie-leak, appearing in
-/// NEITHER, dropping the accounted total below construction.
-///
-/// A dead ON-LINK dial whose ARP never resolves pins its worker in the socket
-/// teardown (the embassy-net RST cannot egress, a pre-existing worker limitation):
-/// that slot's teardown never completes, so it stays VISIBLE in `retiring` (and its
-/// deadline eventually ticks `teardown_overruns`) rather than — as before this
-/// protocol — being returned to the pool and counted as free while its socket was
-/// still a zombie. The engine never reuses such a pinned slot in EITHER regime; the
-/// ledger merely makes the residual pin visible instead of masking it in the free
-/// count. The load-bearing property here is that NO slot is lost (the accounted
-/// total holds) and the listener self-heals.
+/// Repeated dial/abort churn must fully RECOVER the reliable pool, not merely avoid
+/// leaking it. A dead ON-LINK dial whose ARP never resolves stalls in SYN-sent; the
+/// exchange elapses at `stream_timeout` and the engine aborts + retires the slot. The
+/// teardown RST likewise cannot egress, so the worker bounds its teardown flush with a
+/// dedicated timer (`close_timeout / 2`) that frees the slot rather than pinning it.
+/// After the churn quiesces every dial slot must be back in the free-list (nothing
+/// left in the `retiring` ledger), the listener must self-heal, and no teardown may
+/// have overrun the engine's retiring deadline (`teardown_overruns == 0`). A slot
+/// reused before its worker reset would zombie-leak (absent from both free and
+/// retiring); an unbounded teardown flush would pin a dead dial's slot in `retiring`
+/// forever — both would fail the recovery assertions here.
 #[test]
 fn pool_does_not_wedge_under_dial_abort_churn() {
   let (dev_a, dev_b) = pair();
@@ -289,7 +303,14 @@ fn pool_does_not_wedge_under_dial_abort_churn() {
 
   let mut bufs_a = NodeBufs::new();
   let mut bufs_b = NodeBufs::new();
-  let (ml_a, run_a) = node(stack_a, &mut bufs_a, "a", 1, 1);
+  let (ml_a, run_a) = node_with_opts(
+    stack_a,
+    &mut bufs_a,
+    "a",
+    1,
+    1,
+    Options::new().with_close_timeout(FAST_CLOSE_TIMEOUT),
+  );
   let (_ml_b, run_b) = node(stack_b, &mut bufs_b, "b", 2, 2);
 
   let free_at_start = ml_a.pool_free_count();
@@ -300,38 +321,128 @@ fn pool_does_not_wedge_under_dial_abort_churn() {
 
   block_on(async {
     let op = async {
-      // Hammer the pool: many waves of dead dials, each exhausting and recycling the
-      // dial sockets. The listener must also self-heal across the churn.
-      for wave in 0..8u8 {
+      // Hammer the pool: many waves of dead on-link dials, each exhausting and
+      // recycling the dial sockets. The listener must also self-heal across the churn.
+      for wave in 0..6u8 {
         churn_join(&ml_a, &[dead(100 + wave), dead(120 + wave)]).await;
         // Let the dead bridges elapse and their slots reap before the next wave.
         Timer::after(Duration::from_millis(120)).await;
       }
-      // After the churn quiesces, every dial slot must be accounted for — free or
-      // visibly retiring, none leaked — and the listener must still be present
-      // (self-healed). A dial still mid-flight (in a Dialing connection) leaves the
-      // accounted total transiently below construction, so wait for it to settle.
+      // After the churn quiesces every dial slot must return to the free-list — none
+      // left pinned in `retiring` — and the listener must still be present
+      // (self-healed). A dial still mid-flight (a Dialing connection) or a teardown
+      // still draining leaves the pool transiently short, so wait for it to settle.
       until(|| {
-        ml_a.pool_free_count() + ml_a.retiring_count() >= free_at_start && ml_a.listener_present()
+        ml_a.pool_free_count() >= free_at_start
+          && ml_a.retiring_count() == 0
+          && ml_a.listener_present()
       })
       .await;
       (
         ml_a.pool_free_count(),
         ml_a.retiring_count(),
+        ml_a.teardown_overruns(),
         ml_a.listener_present(),
       )
     };
-    let (free, retiring, listener) = drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+    let (free, retiring, overruns, listener) =
+      drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
     assert_eq!(
-      free + retiring,
-      free_at_start,
-      "the reliable pool leaked under dial/abort churn: only {free} free + {retiring} \
-       retiring of {free_at_start} dial slots are accounted for (a slot reused before \
-       its worker reset would appear in neither)"
+      free, free_at_start,
+      "the reliable pool did not fully recover after the dial/abort churn: {free} free \
+       of {free_at_start} dial slots (a slot reused before its worker reset, or an \
+       unbounded teardown flush pinning a dead on-link dial, would strand it)"
+    );
+    assert_eq!(
+      retiring, 0,
+      "a slot was left pinned in the retiring ledger after the churn quiesced ({retiring})"
+    );
+    assert_eq!(
+      overruns, 0,
+      "a teardown overran the engine's retiring deadline during the churn ({overruns})"
     );
     assert!(
       listener,
       "the listener was not re-established after the churn"
+    );
+  });
+}
+
+/// A pre-trust peer that floods dials at DEAD on-link addresses (ARP never resolves,
+/// so neither the SYN nor the teardown RST can egress) must not be able to
+/// PERMANENTLY pin the reliable pool. Each such dial stalls in SYN-sent, the exchange
+/// elapses at `stream_timeout`, and the engine aborts + retires the slot — but the
+/// worker's teardown flush, which would otherwise wait for an RST that never egresses,
+/// is bounded by a dedicated timer (`close_timeout / 2`). So every touched slot LEAVES
+/// the retiring ledger within that bound, the free pool is restored, and — because the
+/// bound is strictly below the engine's retiring deadline — no teardown overruns it
+/// (`teardown_overruns == 0`). Without the bound each dead dial pins its slot forever
+/// and the pool is exhausted after `POOL` dials — an unbounded remote slot-exhaustion
+/// DoS — and this test hangs to the wall-clock cap.
+#[test]
+fn dead_on_link_dial_flood_recovers_every_slot() {
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  let mut bufs_b = NodeBufs::new();
+  let (ml_a, run_a) = node_with_opts(
+    stack_a,
+    &mut bufs_a,
+    "a",
+    1,
+    1,
+    Options::new().with_close_timeout(FAST_CLOSE_TIMEOUT),
+  );
+  let (_ml_b, run_b) = node(stack_b, &mut bufs_b, "b", 2, 2);
+
+  let free_at_start = ml_a.pool_free_count();
+  assert!(
+    free_at_start >= 1,
+    "expected a non-empty pool at construction"
+  );
+
+  block_on(async {
+    let op = async {
+      // Saturate EVERY dial slot with dead on-link targets, then require the whole pool
+      // to recover before the next wave — so each wave proves every dial slot both took
+      // a dead teardown AND left the retiring ledger within the teardown bound.
+      for wave in 0..4u8 {
+        churn_join(
+          &ml_a,
+          &[dead(140 + wave), dead(150 + wave), dead(160 + wave)],
+        )
+        .await;
+        until(|| ml_a.pool_free_count() >= free_at_start && ml_a.retiring_count() == 0).await;
+        assert_eq!(
+          ml_a.teardown_overruns(),
+          0,
+          "a teardown overran the engine's retiring deadline during wave {wave}"
+        );
+      }
+      (
+        ml_a.pool_free_count(),
+        ml_a.retiring_count(),
+        ml_a.teardown_overruns(),
+      )
+    };
+    let (free, retiring, overruns) = drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+    assert_eq!(
+      free, free_at_start,
+      "the reliable pool did not fully recover after the dead on-link dial flood: \
+       {free} free of {free_at_start} (an unbounded teardown flush pins each dead \
+       dial's slot forever)"
+    );
+    assert_eq!(
+      retiring, 0,
+      "a slot was left pinned in the retiring ledger after the flood ({retiring})"
+    );
+    assert_eq!(
+      overruns, 0,
+      "a teardown overran the engine's retiring deadline during the flood ({overruns})"
     );
   });
 }
