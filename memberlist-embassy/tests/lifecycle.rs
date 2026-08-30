@@ -641,6 +641,10 @@ fn established_abort_with_non_egressing_rst_recovers() {
 
   let free_a_at_start = ml_a.pool_free_count();
   block_on(async {
+    // Set once the raw peer's `accept` resolves — a wire-confirmed handshake (A's dial
+    // established) that the framing gate must not close before. A single-threaded `Cell`
+    // shared by the peer task (writer) and the gate (reader) under one `block_on`.
+    let peer_accepted = core::cell::Cell::new(false);
     // The non-reading peer: accept A's dial, then hold the socket open forever without
     // ever reading, so A's worker parks in the established send.
     let peer = async {
@@ -649,6 +653,10 @@ fn established_abort_with_non_egressing_rst_recovers() {
         .accept(7946)
         .await
         .expect("the raw peer accepts A's dial");
+      // Signal the wire-confirmed handshake: A sent the final ACK (the peer received it),
+      // so A's `connect` resolves with no further frames and its worker enters
+      // `run_established`. The gate may now close to strand only the later abort's RST.
+      peer_accepted.set(true);
       core::future::pending::<()>().await;
     };
 
@@ -656,12 +664,29 @@ fn established_abort_with_non_egressing_rst_recovers() {
       // Let the raw peer reach its `accept` before A dials it.
       Timer::after(Duration::from_millis(50)).await;
 
-      // Close A's framing gate AFTER the (sub-millisecond, local) handshake has
-      // established the connection but BEFORE the exchange elapses at `stream_timeout`
-      // (300 ms) and the engine posts `Abort` — so the abort's RST cannot be framed and
-      // its teardown flush must fall back on the worker's dedicated teardown timer.
+      // Close A's framing gate only once the connection is CONFIRMED established, so the
+      // stalled abort deterministically hits `run_established`'s established
+      // `Command::Abort` arm (the single-drain site under test) rather than the
+      // dial-preempt path — which is single-drain even on the pre-fix worker and would let
+      // the buggy code false-pass. The raw peer's `accept` resolving proves the handshake
+      // completed on the wire, so A's worker is (entering) `run_established`; closing the
+      // gate here therefore strands only the later teardown RST, not the handshake. Bound
+      // the wait and ASSERT establishment so a scheduling anomaly that never establishes
+      // fails LOUDLY instead of silently taking the dialing path and passing. The bound is
+      // well under `stream_timeout` (300 ms), so the gate always closes before the engine
+      // posts `Abort`.
       let gate = async {
-        Timer::after(Duration::from_millis(120)).await;
+        let established = select(
+          until(|| peer_accepted.get()),
+          Timer::after(Duration::from_millis(200)),
+        )
+        .await;
+        assert!(
+          matches!(established, Either::First(())),
+          "the raw peer never accepted A's dial within the establishment bound: the \
+           reliable connection did not establish, so the abort could not reach \
+           run_established's established Abort arm (the single-drain site under test)"
+        );
         a_frame.set(false);
         core::future::pending::<()>().await
       };
