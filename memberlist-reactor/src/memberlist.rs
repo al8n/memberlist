@@ -356,10 +356,14 @@ impl<I, A, R> Memberlist<I, A, R> {
     }
     let mut addrs = Vec::with_capacity(seeds.len());
     for seed in seeds {
+      // Canonicalize each seed the same way the local advertise address is
+      // canonicalized: an IPv4-mapped IPv6 seed spelling is dialed as its IPv4
+      // form, matching the peer's now-canonical identity and avoiding a
+      // family-mismatched gossip `send_to` from a V4-bound socket.
       match seed {
-        MaybeResolved::Resolved(s) => addrs.push(*s),
+        MaybeResolved::Resolved(s) => addrs.push(canonical_advertise(*s)),
         MaybeResolved::Unresolved(a) => match resolver.resolve(a).await {
-          Ok(resolved) => addrs.extend(resolved),
+          Ok(resolved) => addrs.extend(resolved.into_iter().map(canonical_advertise)),
           Err(e) => return Err((SmallVec::new(), Error::Resolve(Box::new(e)))),
         },
       }

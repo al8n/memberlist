@@ -46,7 +46,13 @@ impl AdvertiseAddrResolver for Ipv4PreferringResolver {
   type Error = AdvertiseResolutionError;
 
   fn pick(&self, candidates: Vec<SocketAddr>) -> Result<SocketAddr, Self::Error> {
-    let v4 = candidates.iter().find(|s| s.is_ipv4()).copied();
+    // Classify by the CANONICAL family so an IPv4-mapped IPv6 candidate
+    // (`::ffff:a.b.c.d`) counts as IPv4 — it names an IPv4 host and is
+    // canonicalized to its IPv4 form at the bind.
+    let v4 = candidates
+      .iter()
+      .find(|s| s.ip().to_canonical().is_ipv4())
+      .copied();
     if let Some(s) = v4 {
       return Ok(s);
     }
@@ -65,7 +71,13 @@ impl AdvertiseAddrResolver for Ipv6PreferringResolver {
   type Error = AdvertiseResolutionError;
 
   fn pick(&self, candidates: Vec<SocketAddr>) -> Result<SocketAddr, Self::Error> {
-    let v6 = candidates.iter().find(|s| s.is_ipv6()).copied();
+    // Classify by the CANONICAL family so an IPv4-mapped IPv6 candidate
+    // (`::ffff:a.b.c.d`) is treated as IPv4, NOT preferred here — it names an
+    // IPv4 host. Only a genuine IPv6 candidate is preferred.
+    let v6 = candidates
+      .iter()
+      .find(|s| s.ip().to_canonical().is_ipv6())
+      .copied();
     if let Some(s) = v6 {
       return Ok(s);
     }

@@ -1192,14 +1192,22 @@ where
 {
   let mut addrs: Vec<SocketAddr> = Vec::new();
   for seed in seeds {
+    // Canonicalize each seed the same way the local advertise address is
+    // canonicalized: an IPv4-mapped IPv6 seed spelling is dialed as its IPv4
+    // form, matching the peer's now-canonical identity and avoiding a
+    // family-mismatched gossip `send_to` from a V4-bound socket.
     match seed {
-      MaybeResolved::Resolved(s) => addrs.push(*s),
+      MaybeResolved::Resolved(s) => addrs.push(crate::options::canonical_advertise(*s)),
       MaybeResolved::Unresolved(a) => {
         let resolved = resolver
           .resolve(a)
           .await
           .map_err(|e| MemberlistError::Resolve(std::io::Error::other(e.to_string())))?;
-        addrs.extend(resolved);
+        addrs.extend(
+          resolved
+            .into_iter()
+            .map(crate::options::canonical_advertise),
+        );
       }
     }
   }
