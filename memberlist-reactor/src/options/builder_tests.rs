@@ -227,19 +227,59 @@ fn options_into_parts_without_delegates_is_none() {
   assert!(merge.is_none(), "no merge delegate by default");
 }
 
-/// `Channel` parses from a string: `"unbounded"` and a bare integer round-trip
-/// through `FromStr`/`Display`; anything else is a `ParseChannelError`.
+/// `"bounded:<n>"`, `"bounded=<n>"`, and a bare integer all parse to
+/// `Bounded(n)`; `"unbounded"` is case-insensitive; anything else is a
+/// `ParseChannelError`. The bare-integer form is the back-compat legacy
+/// fallback kept alongside the canonical `bounded:<n>` grammar.
 #[test]
-fn channel_from_str_and_display_round_trip() {
+fn channel_parses_bounded_prefixed_and_bare() {
+  assert_eq!(
+    "bounded:1024".parse::<Channel>().unwrap(),
+    Channel::Bounded(1024)
+  );
+  assert_eq!(
+    "bounded=1024".parse::<Channel>().unwrap(),
+    Channel::Bounded(1024)
+  );
+  assert_eq!("1024".parse::<Channel>().unwrap(), Channel::Bounded(1024));
   assert_eq!("unbounded".parse::<Channel>().unwrap(), Channel::Unbounded);
-  assert_eq!("2048".parse::<Channel>().unwrap(), Channel::Bounded(2048));
+  assert_eq!("UNBOUNDED".parse::<Channel>().unwrap(), Channel::Unbounded);
+  assert!("nope".parse::<Channel>().is_err());
+}
+
+/// `Display` always emits the canonical `bounded:<n>` / `unbounded` forms,
+/// matching the shared serde representation — never the legacy bare-integer
+/// form.
+#[test]
+fn channel_display_is_canonical() {
+  assert_eq!(Channel::Bounded(1024).to_string(), "bounded:1024");
   assert_eq!(Channel::Unbounded.to_string(), "unbounded");
-  assert_eq!(Channel::Bounded(2048).to_string(), "2048");
-  // The Display form re-parses to the same value.
-  for ch in [Channel::Unbounded, Channel::Bounded(7)] {
+}
+
+/// The canonical `Display` output always re-parses to the same value through
+/// `FromStr`.
+#[test]
+fn channel_display_roundtrips_through_fromstr() {
+  for ch in [Channel::Unbounded, Channel::Bounded(7), Channel::Bounded(0)] {
     assert_eq!(ch.to_string().parse::<Channel>().unwrap(), ch);
   }
-  assert!("nope".parse::<Channel>().is_err());
+}
+
+/// The string grammar is cross-driver: `memberlist-compio`'s `Channel` has no
+/// crate-level dependency relationship with this one, so parity is pinned by
+/// literal string, not by importing the other crate's type. Every string
+/// compio's `Display` can emit (`"bounded:<n>"`, `"unbounded"`) and reactor's
+/// own legacy bare-integer form all parse here to the expected variant —
+/// the same strings independently verified against compio's `FromStr` in its
+/// own test suite.
+#[test]
+fn channel_grammar_is_cross_driver() {
+  for s in ["bounded:1024", "bounded=1024", "1024"] {
+    assert_eq!(s.parse::<Channel>().unwrap(), Channel::Bounded(1024));
+  }
+  for s in ["unbounded", "UNBOUNDED"] {
+    assert_eq!(s.parse::<Channel>().unwrap(), Channel::Unbounded);
+  }
 }
 
 #[cfg(feature = "serde")]

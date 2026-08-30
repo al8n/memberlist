@@ -64,8 +64,47 @@ fn channel_variants_compare_and_default() {
   assert!(!format!("{:?}", Channel::Unbounded).is_empty());
 }
 
+/// `"bounded:<n>"`, `"bounded=<n>"`, and a bare integer all parse to
+/// `Bounded(n)`; `"unbounded"` is case-insensitive; anything else is a
+/// `ParseChannelError`. The bare-integer form is a back-compat alias kept
+/// alongside the canonical `bounded:<n>` grammar.
 #[test]
-fn channel_display_and_from_str_round_trip() {
+fn channel_parses_bounded_prefixed_and_bare() {
+  use core::str::FromStr;
+
+  assert_eq!(
+    Channel::from_str("bounded:1024"),
+    Ok(Channel::Bounded(1024))
+  );
+  assert_eq!(
+    Channel::from_str("bounded=1024"),
+    Ok(Channel::Bounded(1024))
+  );
+  assert_eq!(Channel::from_str("1024"), Ok(Channel::Bounded(1024)));
+  assert_eq!(Channel::from_str("unbounded"), Ok(Channel::Unbounded));
+  assert_eq!(Channel::from_str("UNBOUNDED"), Ok(Channel::Unbounded));
+  assert_eq!(Channel::from_str("bounded=8"), Ok(Channel::Bounded(8)));
+  // Garbage, a missing capacity, and a non-numeric capacity are rejected —
+  // the bare fallback only applies when neither `bounded:`/`bounded=` prefix
+  // is present.
+  assert!(Channel::from_str("nope").is_err());
+  assert!(Channel::from_str("bounded:").is_err());
+  assert!(Channel::from_str("bounded:x").is_err());
+}
+
+/// `Display` always emits the canonical `bounded:<n>` / `unbounded` forms,
+/// matching the shared serde representation — never the legacy bare-integer
+/// form.
+#[test]
+fn channel_display_is_canonical() {
+  assert_eq!(Channel::Unbounded.to_string(), "unbounded");
+  assert_eq!(Channel::Bounded(16).to_string(), "bounded:16");
+}
+
+/// The canonical `Display` output always re-parses to the same value through
+/// `FromStr`.
+#[test]
+fn channel_display_roundtrips_through_fromstr() {
   use core::str::FromStr;
 
   for c in [
@@ -75,15 +114,25 @@ fn channel_display_and_from_str_round_trip() {
   ] {
     assert_eq!(Channel::from_str(&c.to_string()), Ok(c));
   }
-  assert_eq!(Channel::Unbounded.to_string(), "unbounded");
-  assert_eq!(Channel::Bounded(16).to_string(), "bounded:16");
-  // Case-insensitive `unbounded` and the `bounded=` spelling both parse.
-  assert_eq!(Channel::from_str("UNBOUNDED"), Ok(Channel::Unbounded));
-  assert_eq!(Channel::from_str("bounded=8"), Ok(Channel::Bounded(8)));
-  // Garbage, a missing capacity, and a non-numeric capacity are rejected.
-  assert!(Channel::from_str("nope").is_err());
-  assert!(Channel::from_str("bounded:").is_err());
-  assert!(Channel::from_str("bounded:x").is_err());
+}
+
+/// The string grammar is cross-driver: `memberlist-reactor`'s `Channel` has no
+/// crate-level dependency relationship with this one, so parity is pinned by
+/// literal string, not by importing the other crate's type. Every string
+/// reactor's canonical `Display` can emit (`"bounded:<n>"`, `"unbounded"`) and
+/// reactor's own legacy bare-integer form all parse here to the expected
+/// variant — the same strings are independently verified against reactor's
+/// `FromStr` in its own test suite.
+#[test]
+fn channel_grammar_is_cross_driver() {
+  use core::str::FromStr;
+
+  for s in ["bounded:1024", "bounded=1024", "1024"] {
+    assert_eq!(Channel::from_str(s), Ok(Channel::Bounded(1024)));
+  }
+  for s in ["unbounded", "UNBOUNDED"] {
+    assert_eq!(Channel::from_str(s), Ok(Channel::Unbounded));
+  }
 }
 
 #[cfg(feature = "serde")]
