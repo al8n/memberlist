@@ -1,0 +1,82 @@
+name: fuzz
+
+# Builds and briefly smoke-runs the memberlist-proto fuzz targets — the
+# untrusted-input parsers a single inbound datagram reaches before any
+# authentication. The fuzz crate is its own workspace (it needs nightly + the
+# sanitizer runtime), so it is never reached by the other jobs' `--workspace`
+# builds; without this gate a target that fails to compile, or panics on a
+# discovered input, is caught by nobody. The push/PR gate is a fast build plus a
+# short bounded run per target; the nightly schedule fuzzes each target longer.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "memberlist-proto/**"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    paths:
+      - "memberlist-proto/**"
+      - ".github/workflows/fuzz.yml"
+  workflow_dispatch:
+  schedule: [cron: "0 3 * * *"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: build + smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            memberlist-proto/fuzz/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('memberlist-proto/fuzz/Cargo.toml', 'memberlist-proto/Cargo.toml') }}-fuzz
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Build all fuzz targets
+        # The core gate: every target must compile under nightly + the sanitizer
+        # runtime. This alone closes the "targets never compile-checked" gap.
+        run: cargo +nightly fuzz build --fuzz-dir memberlist-proto/fuzz
+
+      - name: Smoke run each target
+        # A short bounded run per target as a regression gate: fail loud if a
+        # target panics or aborts on a discovered input. The nightly schedule
+        # fuzzes each target far longer; the push/PR gate stays brief.
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            duration=300
+          else
+            duration=30
+          fi
+          for target in parse_messages decode_compound decode_incoming unwrap_transforms; do
+            echo "::group::fuzz ${target} (${duration}s)"
+            cargo +nightly fuzz run --fuzz-dir memberlist-proto/fuzz "${target}" -- \
+              -max_total_time="${duration}" -rss_limit_mb=4096
+            echo "::endgroup::"
+          done

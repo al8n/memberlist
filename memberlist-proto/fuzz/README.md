@@ -9,8 +9,8 @@ or unbounded allocation.
 |---|---|
 | `parse_messages` | the compound / single-message parser (count + part-length prefixes) |
 | `decode_compound` | the compound splitter (count-vs-remaining bound before allocation) |
-| `decode_incoming` | inbound cluster-label strip + frame decode (labeled and unlabeled) |
-| `unwrap_transforms` | the tag-driven checksum / decompress / decrypt unwrap loop (decompression bombs, non-canonical nesting) |
+| `decode_incoming` | the full inbound pipeline — cluster-label strip → transform unwrap → message parse — on the plaintext path (labeled and unlabeled) |
+| `unwrap_transforms` | the tag-driven checksum / decompress / decrypt unwrap loop, both unencrypted and through a keyed AES-256 AEAD decrypt (decompression and ciphertext bombs, non-canonical nesting) |
 
 ## Running
 
