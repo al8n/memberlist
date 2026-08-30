@@ -31,11 +31,11 @@ use hashbrown::HashMap;
 use smallvec_wrapper::MediumVec;
 
 use crate::{
-  GossipIo, InitError, Options, StreamIo, TransformOptions,
+  GossipIo, InitError, Options, SlotGen, StreamIo, TransformOptions,
   addr::socket_addr_is_routable,
   cidr::{CidrFilter, cidr_blocks},
   error::GossipMtuTooLarge,
-  reliable::{ConnState, Connection, ReliablePlane},
+  reliable::{ConnState, Connection, ReliablePlane, RetirePhase, Retiring},
 };
 use core::hash::Hash;
 use memberlist_proto::{codec::EncodeOptions, event::Event};
@@ -342,9 +342,20 @@ where
 
   /// Install the initial passive-open listener handle, set by the driver after it
   /// has `listen`ed on that connection slot at construction.
+  ///
+  /// The construction-time listen bypasses the engine's acquire path, so this
+  /// also records the slot's first occupancy generation ([`SlotGen::START`]) in
+  /// the ledger. A driver whose teardown gate is generation-tagged (embassy-net)
+  /// stamps the SAME `START` on that slot's bridge state at construction, so the
+  /// two agree from the first tick; a later re-arm of a reaped listener advances
+  /// to the next generation through the normal acquire path.
   #[inline]
-  pub fn set_listener(&mut self, c: C) {
+  pub fn set_listener(&mut self, c: C)
+  where
+    C: Copy + Eq + Hash,
+  {
     self.plane.listener = Some(c);
+    self.plane.slot_gen.insert(c, SlotGen::START);
   }
 
   /// The configured local port (gossip + reliable listener both bind it).
@@ -371,10 +382,29 @@ where
     self.plane.pool.free_len()
   }
 
-  /// Number of connection slots currently parked mid-close.
+  /// Number of connection slots currently parked mid-graceful-close (the
+  /// `Draining` retire phase). Slots aborted (or a graceful close escalated to
+  /// `Aborting` past its deadline) are excluded — an abort reclaims as soon as
+  /// its RST egress is acknowledged, so it does not "park" the way a graceful
+  /// close awaiting the peer does. This preserves the pre-ledger `closing`
+  /// diagnostic: only a graceful FIN-in-flight counts.
   #[inline]
   pub fn closing_count(&self) -> usize {
-    self.plane.closing.len()
+    self.plane.draining_count()
+  }
+
+  /// Number of connection slots currently retiring (any phase) — a graceful
+  /// close draining or an abort awaiting its teardown acknowledgement.
+  #[inline]
+  pub fn retiring_count(&self) -> usize {
+    self.plane.retiring.len()
+  }
+
+  /// Diagnostic count of retire deadlines that expired while still `Aborting` —
+  /// a residual socket pin the engine has made visible but could not free.
+  #[inline]
+  pub fn teardown_overruns(&self) -> u64 {
+    self.plane.teardown_overruns
   }
 
   /// Whether a passive-open listener slot is currently installed.
@@ -1213,57 +1243,126 @@ where
 }
 
 // Reliable-plane lifecycle helpers that move the connection handle `C` by value
-// (into the pool, the listener slot, and the `StreamIo` socket calls), so they
-// need `C: Copy`. The two that also key the `closing` map (`teardown`,
-// `flush_closing`) add `C: Eq + Hash` method-locally.
+// (into the pool, the listener slot, and the `StreamIo` socket calls) and key the
+// `retiring` / `slot_gen` ledgers by it, so they need `C: Copy + Eq + Hash`.
 impl<I, C, R> Engine<I, C, R>
 where
   I: memberlist_proto::Id,
-  C: Copy,
+  C: Copy + Eq + Hash,
 {
-  /// Reclaim gracefully-closing connections that have finished closing or whose
-  /// close has exceeded `cfg.close_timeout`.
+  /// Advance a slot's occupancy generation as it leaves the pool for a fresh
+  /// `listen` / `connect`, returning the new generation to stamp onto the socket
+  /// call. The first-ever occupancy of a slot uses [`SlotGen::START`]; each later
+  /// acquire is the successor of the slot's last generation.
   ///
-  /// A graceful `teardown` issues a FIN and parks the handle in `plane.closing`
-  /// with a deadline (see `teardown`). The socket then works through the TCP FIN
-  /// states (FinWait / Closing / LastAck / TimeWait) before becoming reusable.
-  /// This pass returns to the pool every parked handle that has reached a reusable
-  /// state and leaves the rest parked for a later tick.
+  /// The engine never advances past a generation before it has observed
+  /// [`StreamIo::teardown_done`] for it (the reap is the only path that frees a
+  /// slot back to the pool), so at most one generation of a slot is ever live.
+  fn advance_slot_gen(&mut self, c: C) -> SlotGen {
+    let g = self
+      .plane
+      .slot_gen
+      .get(&c)
+      .map_or(SlotGen::START, |prev| prev.next());
+    self.plane.slot_gen.insert(c, g);
+    g
+  }
+
+  /// The current occupancy generation of slot `c` (the one a retire tears down).
+  /// A slot always has a recorded generation by the time it is retired — it was
+  /// stamped when acquired (or by `set_listener` at construction) — but fall back
+  /// to [`SlotGen::START`] defensively so a missing entry never panics.
+  fn current_slot_gen(&self, c: C) -> SlotGen {
+    self
+      .plane
+      .slot_gen
+      .get(&c)
+      .copied()
+      .unwrap_or(SlotGen::START)
+  }
+
+  /// Park a retired occupancy in the ledger and immediately run one completion
+  /// check, so a slot whose teardown is ALREADY complete (a synchronous driver's
+  /// aborted-and-clean socket, the clean both-FIN close, or an embassy slot the
+  /// worker already reset) is freed THIS tick — preserving the pre-ledger
+  /// same-tick reclaim — while one still tearing down waits in `retiring`.
   ///
-  /// "Reusable" is `!is_open()` — false only in the `Closed` and `TimeWait`
-  /// states, exactly the states in which the socket's next consumer (`connect()`
-  /// dial or `listen()` replenish) is accepted; both reject an open socket and
-  /// both reset it on reuse, discarding any `TimeWait` 2MSL remainder. A socket
-  /// still flushing its FIN (FinWait1/2, Closing, LastAck) is still `is_open()` and
-  /// stays parked, so a socket is never reclaimed before its FIN completes.
-  ///
-  /// The deadline bounds that wait: the link layer applies no TCP timeout by
-  /// default, so a peer that vanishes mid-FIN leaves the socket `is_open()` forever
-  /// and the handle would leak. When `now >= deadline`, this pass `abort()`s the
-  /// socket (forcing it straight to `Closed`) before returning it, so a stuck
-  /// graceful close cannot permanently shrink the pool. A healthy close reaches
-  /// `Closed` long before the deadline and is reclaimed on the `!is_open()` path.
-  fn reap_closing<S>(&mut self, now: Instant, stream: &mut S)
+  /// The caller has already issued the `close(c, g)` / `abort(c, g)` (or the
+  /// socket was already terminal). NEVER `pool.give` directly on a retire path:
+  /// the slot returns to the pool only through [`reap_retiring`], gated on the
+  /// driver's teardown acknowledgement.
+  fn retire<S>(&mut self, c: C, g: SlotGen, phase: RetirePhase, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
   {
-    // Retain the still-closing handles; give the finished (or timed-out) ones back
-    // to the pool.
-    let pool = &mut self.plane.pool;
-    self.plane.closing.retain(|&c, &mut deadline| {
-      if !stream.is_open(c) {
-        // Clean close completed (Closed / TimeWait): reclaim.
+    self.plane.retiring.insert(
+      c,
+      Retiring {
+        generation: g,
+        deadline: now + self.cfg.close_timeout,
+        phase,
+      },
+    );
+    self.reap_retiring(now, stream);
+  }
+
+  /// Reclaim retired occupancies whose teardown the driver has acknowledged, and
+  /// escalate any whose teardown has stalled past `cfg.close_timeout`.
+  ///
+  /// A retire (`close` or `abort`) parks the handle in `plane.retiring` with a
+  /// deadline and phase (see [`retire`](Self::retire)). This pass:
+  ///
+  /// - returns to the pool every handle whose [`StreamIo::teardown_done`] now
+  ///   reports the socket is reset and reusable — the ONLY path a slot rejoins
+  ///   the pool, so a handle is never reused while a pending RST/FIN could be
+  ///   clobbered or suppressed;
+  /// - escalates a `Draining` entry past its deadline to `Aborting`, issuing the
+  ///   RST (a peer that vanished mid-FIN never drains on its own);
+  /// - on an `Aborting` entry past its deadline, re-issues the (idempotent) abort,
+  ///   re-arms the deadline, and counts a `teardown_overruns` — a residual pin the
+  ///   engine has surfaced but cannot free (an embassy socket owned by a worker
+  ///   future the engine cannot dispossess; freeing it into a new occupancy would
+  ///   be a lie). It NEVER blind-frees an unacknowledged teardown.
+  fn reap_retiring<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
+    // Split the disjoint plane fields so the `retiring.retain` closure can also
+    // `pool.give` and bump `teardown_overruns`; `close_timeout` is copied out of
+    // `cfg` up front so no borrow of it outlives the closure.
+    let close_timeout = self.cfg.close_timeout;
+    let ReliablePlane {
+      pool,
+      retiring,
+      teardown_overruns,
+      ..
+    } = &mut self.plane;
+    retiring.retain(|&c, r| {
+      if stream.teardown_done(c, r.generation) {
+        // The driver acknowledged the teardown: the socket is reset and reusable.
         pool.give(c);
         return false;
       }
-      if now >= deadline {
-        // Peer vanished mid-FIN: force the socket to Closed and reclaim so the pool
-        // (and the listener replenished from it) recover.
-        stream.abort(c);
-        pool.give(c);
-        return false;
+      if now >= r.deadline {
+        match r.phase {
+          RetirePhase::Draining => {
+            // A graceful close stalled (peer vanished mid-FIN): force the RST and
+            // switch to Aborting, re-arming the deadline for the abort's own egress.
+            stream.abort(c, r.generation);
+            r.phase = RetirePhase::Aborting;
+            r.deadline = now + close_timeout;
+          }
+          RetirePhase::Aborting => {
+            // The abort's teardown is STILL unacknowledged a full close_timeout on:
+            // re-issue the (idempotent) RST, re-arm, and surface the residual pin.
+            // Never blind-free — an async worker still owns this socket.
+            stream.abort(c, r.generation);
+            r.deadline = now + close_timeout;
+            *teardown_overruns += 1;
+          }
+        }
       }
-      // Still flushing its FIN within the deadline — keep parked.
+      // Keep parked: teardown not yet acknowledged.
       true
     });
   }
@@ -1299,14 +1398,17 @@ where
     };
 
     // Reject a reliable connection from a CIDR-blocked peer at the transport
-    // boundary: abort the connected listener socket and return it to the pool
+    // boundary: abort the connected listener socket and RETIRE its occupancy
     // WITHOUT registering the exchange, then re-arm a fresh listener — the same
-    // abort-and-reclaim shape the `dial` reject path uses. (The advertised-address
-    // filter is the composed routable-address alive delegate.)
+    // abort-and-retire shape the `dial` reject path uses. The accepted socket is
+    // established (a real peer tuple), so on smoltcp the reap holds the slot until
+    // the RST egresses. (The advertised-address filter is the composed
+    // routable-address alive delegate.)
     if cidr_blocks(&self.cidr_policy, peer.ip()) {
-      stream.abort(c);
-      self.plane.pool.give(c);
+      let g = self.current_slot_gen(c);
+      stream.abort(c, g);
       self.plane.listener = None;
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
       self.ensure_listener(stream);
       return;
     }
@@ -1325,12 +1427,13 @@ where
           .insert(eid, Connection::accepted(peer, c));
         self.plane.accepted_inbound += 1;
       }
-      // Abort the just-accepted socket AND return its handle to the pool — the
-      // same abort-and-reclaim shape the CIDR reject path above uses — so a
-      // rejection does not shrink the finite reliable pool one slot at a time.
+      // Abort the just-accepted socket AND retire its occupancy — the same
+      // abort-and-retire shape the CIDR reject path above uses — so a rejection
+      // does not shrink the finite reliable pool one slot at a time.
       None => {
-        stream.abort(c);
-        self.plane.pool.give(c);
+        let g = self.current_slot_gen(c);
+        stream.abort(c, g);
+        self.retire(c, g, RetirePhase::Aborting, now, stream);
       }
     }
 
@@ -1367,21 +1470,60 @@ where
     if self.plane.listener.is_some() {
       return;
     }
-    // Take only a slot the driver reports as fully reset and reuse-ready. An
-    // async-teardown driver (embassy-net) returns a just-aborted slot to the pool
-    // before its worker has reset the socket; re-`listen`ing it now would clobber
-    // the pending abort and leak the prior connection into the listener. A
-    // still-resetting slot is left in the pool and a later tick re-establishes the
-    // listener once the worker has finished. For a synchronous driver every slot is
-    // ready, so this is unchanged.
-    if let Some(c) = self.plane.pool.take_where(|&c| stream.reuse_ready(c)) {
+    // Every pooled slot is reusable by construction — a slot still tearing down
+    // lives in `retiring`, not the pool, and is returned only once its teardown is
+    // acknowledged — so a plain `take` always yields a slot safe to `listen`.
+    if let Some(c) = self.plane.pool.take() {
+      // Mint this slot's next occupancy generation and stamp it onto the listen.
+      let g = self.advance_slot_gen(c);
       // `listen()` only fails on port 0 or an already-open socket. Neither applies:
       // a pooled socket is Closed (freshly created, or reset on reuse out of
       // TimeWait/Closed) and `cfg.port` is the user-supplied non-zero port.
       // Ignoring Err: the two failure modes above are both unreachable here.
-      let _ = stream.listen(c, self.cfg.port);
+      let _ = stream.listen(c, self.cfg.port, g);
       self.plane.listener = Some(c);
     }
+  }
+
+  /// Re-arm a listener whose socket the link layer reaped to a terminal state,
+  /// routing it through the occupancy ledger rather than re-`listen`ing the dead
+  /// socket in place.
+  ///
+  /// A driver whose link layer can reap a stalled listener — the smoltcp
+  /// inactivity timeout aborting an unanswered half-open to `Closed` — calls this
+  /// after its stack tick. When the installed listener socket is no longer open
+  /// (`!is_open`), the listener is a self-abort: its occupancy is RETIRED
+  /// (`abort` → `Aborting` → the reap frees it once the RST egress is
+  /// acknowledged) and a fresh listener is re-acquired from the pool, minting the
+  /// NEXT generation. Expressing the reap as an occupancy retire+reacquire — not a
+  /// raw re-listen — is what closes #161 for the listener too: re-`listen`ing a
+  /// socket whose abort RST has not yet egressed would suppress that RST (the
+  /// link layer's `listen` resets the socket and clears the pending reset).
+  ///
+  /// A no-op when there is no listener or its socket is still open (a healthy
+  /// `Listen`, or an in-progress half-open the accept path handles).
+  pub fn rearm_reaped_listener<S>(&mut self, now: Instant, stream: &mut S)
+  where
+    S: StreamIo<Conn = C>,
+  {
+    let Some(c) = self.plane.listener else {
+      return;
+    };
+    // A healthy listener is `Listen` (open); a just-accepted one is swapped out by
+    // `check_listener`. Only a link-layer-reaped listener is terminal here.
+    if stream.is_open(c) {
+      return;
+    }
+    // Retire the reaped occupancy and re-acquire. The reaped socket already sent
+    // its RST during the stack tick (its tuple is cleared), so on smoltcp the reap
+    // acknowledges the teardown at once and re-arms the listener THIS call; a
+    // socket whose RST has not yet egressed instead waits for a later reap, never
+    // re-listened over a pending reset.
+    let g = self.current_slot_gen(c);
+    stream.abort(c, g);
+    self.plane.listener = None;
+    self.retire(c, g, RetirePhase::Aborting, now, stream);
+    self.ensure_listener(stream);
   }
 
   /// Abort the exchange for the machine's `StreamAction::Abort`, discarding any
@@ -1401,7 +1543,7 @@ where
   /// A `PendingDial` connection (pool was exhausted, no slot assigned) has nothing to
   /// reset or reclaim: removing it is the whole abort, so a failed exchange is never
   /// later dialed.
-  fn abort_exchange<S>(&mut self, eid: ExchangeId, stream: &mut S)
+  fn abort_exchange<S>(&mut self, eid: ExchangeId, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
   {
@@ -1410,10 +1552,12 @@ where
     };
     // Removing the `Connection` already dropped its parked `out` bytes, the deferred
     // FIN flag, and the EOF-delivered flag. Reclaim the socket (if any) with a hard
-    // reset so a half-delivered frame is not flushed.
+    // reset so a half-delivered frame is not flushed; retire the occupancy so the
+    // slot is freed only once the RST egress is acknowledged.
     if let Some(c) = conn.socket {
-      stream.abort(c);
-      self.plane.pool.give(c);
+      let g = self.current_slot_gen(c);
+      stream.abort(c, g);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
     }
   }
 
@@ -1473,8 +1617,6 @@ where
   fn teardown<S>(&mut self, eid: ExchangeId, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
-    // Keys the `closing` map when parking an in-flight FIN.
-    C: Eq + Hash,
   {
     // Inspect the connection WITHOUT removing it: a graceful close that still has
     // bytes to deliver must stay mapped (transition to `Closing`) so the egress pump
@@ -1505,20 +1647,22 @@ where
     let may_send = stream.may_send(c);
     let tx_unacked = stream.send_queue(c);
 
+    let g = self.current_slot_gen(c);
     if !is_open {
       // `!is_open()` is exactly `Closed | TimeWait`: both FINs already exchanged (or
-      // the socket was already aborted). Reclaim directly, no close handshake left to
-      // wait on.
+      // the socket was already aborted). Retire (Draining) and run the immediate
+      // completion check — a clean close is acknowledged at once and freed this
+      // tick, no close handshake left to wait on.
       self.plane.connections.remove(&eid);
-      self.plane.pool.give(c);
+      self.retire(c, g, RetirePhase::Draining, now, stream);
     } else if was_half_closed {
       // Our graceful FIN is in flight but the peer has not finished the close. Do NOT
       // close()/abort() now: the FIN was already sent and the tx half is closed, so
-      // any `out` remainder is undeliverable. Park the handle in `closing` with a
-      // `now + close_timeout` deadline so the reap pass reclaims it once it reaches
-      // Closed, or force-aborts it at the deadline if the peer vanished mid-FIN.
+      // any `out` remainder is undeliverable. Retire (Draining) with a
+      // `now + close_timeout` deadline so the reap reclaims it once its teardown is
+      // acknowledged, or force-aborts it at the deadline if the peer vanished mid-FIN.
       self.plane.connections.remove(&eid);
-      self.plane.closing.insert(c, now + self.cfg.close_timeout);
+      self.retire(c, g, RetirePhase::Draining, now, stream);
     } else if may_send && (out_pending || tx_unacked != 0) {
       // Send-capable (Established / CloseWait) with outbound bytes the peer has NOT yet
       // received — parked in `out` (partial-write backpressure) and/or still
@@ -1547,22 +1691,22 @@ where
       // Established one-shot teardown with an empty ring. Emit the graceful FIN
       // immediately — `close()` (CloseWait → LastAck, Established → FinWait1) sends our
       // FIN, giving the peer a clean EOF so its initiator commits the response — and
-      // park the handle in `closing` for the reap backstop.
+      // retire (Draining) for the reap backstop.
       self.plane.connections.remove(&eid);
-      stream.close(c);
-      self.plane.closing.insert(c, now + self.cfg.close_timeout);
+      stream.close(c, g);
+      self.retire(c, g, RetirePhase::Draining, now, stream);
     } else {
       // Abrupt teardown: a graceful `Close` whose socket is not send-capable and never
       // half-closed (e.g. a connection still in SynSent / never promoted). FAILED
       // exchanges no longer reach here — they arrive via `StreamAction::Abort` →
       // `abort_exchange` — but a graceful `Close` over a socket the peer never
-      // established is handled defensively the same way: RST and reclaim at once.
-      // `abort()` sets the state to Closed immediately, so reuse is safe without waiting
-      // for a close handshake, and any stale tx bytes are discarded rather than flushed
-      // — there is nothing to deliver over a connection the peer never established.
+      // established is handled defensively the same way: RST and retire. `abort()`
+      // moves the socket to Closed and the reap frees the slot once the RST egress is
+      // acknowledged; any stale tx bytes are discarded rather than flushed — there is
+      // nothing to deliver over a connection the peer never established.
       self.plane.connections.remove(&eid);
-      stream.abort(c);
-      self.plane.pool.give(c);
+      stream.abort(c, g);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
     }
   }
 
@@ -1598,15 +1742,13 @@ where
   fn flush_closing<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
-    // Keys the `closing` map when parking an in-flight FIN.
-    C: Eq + Hash,
   {
     // Classify each Closing connection without holding the `connections` borrow across
-    // the mutating socket / pool / closing-map calls below.
+    // the mutating socket / pool / retiring-ledger calls below.
     enum ClosingAction<C> {
-      /// Drained: emit the FIN and park the handle in `closing`.
+      /// Drained: emit the FIN and retire (Draining) the handle.
       Fin(C),
-      /// No drain progress for the full `close_timeout`: abort and reclaim.
+      /// No drain progress for the full `close_timeout`: abort and retire.
       Abort(C),
       /// The drain made progress this tick (the peer acked bytes): re-arm the idle
       /// deadline with the new undelivered mark.
@@ -1643,16 +1785,19 @@ where
       match outcome {
         ClosingAction::Fin(c) => {
           // Every byte was delivered: FIN the transmit half so the peer reads a clean
-          // EOF, then park for the reap backstop.
+          // EOF, then retire (Draining) for the reap backstop.
           self.plane.connections.remove(&eid);
-          stream.close(c);
-          self.plane.closing.insert(c, now + self.cfg.close_timeout);
+          let g = self.current_slot_gen(c);
+          stream.close(c, g);
+          self.retire(c, g, RetirePhase::Draining, now, stream);
         }
         ClosingAction::Abort(c) => {
-          // Idle deadline elapsed: RST and reclaim at once.
+          // Idle deadline elapsed: RST and retire (Aborting); the reap frees the slot
+          // once the RST egress is acknowledged.
           self.plane.connections.remove(&eid);
-          stream.abort(c);
-          self.plane.pool.give(c);
+          let g = self.current_slot_gen(c);
+          stream.abort(c, g);
+          self.retire(c, g, RetirePhase::Aborting, now, stream);
         }
         ClosingAction::Progress(mark) => {
           // Re-arm the idle deadline from `now`; keep the connection mapped so the egress
@@ -1874,8 +2019,9 @@ where
       // on the TRANSMIT half only. The connection stays in `connections` so the peer's
       // reply + FIN still pump inbound; the transition to HalfClosed (and clearing
       // `fin_pending`) records the FIN is sent so a later flush tick does not `close()`
-      // twice, and the eventual `StreamAction::Close` reclaims the socket.
-      stream.close(c);
+      // twice, and the eventual `StreamAction::Close` reclaims the socket. The FIN
+      // rides the slot's current occupancy generation.
+      stream.close(c, self.current_slot_gen(c));
       if let Some(conn) = self.plane.connections.get_mut(&eid) {
         conn.fin_pending = false;
         conn.state = ConnState::HalfClosed;
@@ -2005,11 +2151,11 @@ where
     G: GossipIo,
     S: StreamIo<Conn = C>,
   {
-    // 1a. Reap gracefully-closing connections. The driver's step-1 stack tick may
-    // have advanced FIN exchanges to completion; reclaim any that are now fully
-    // closed (or have exceeded `cfg.close_timeout`) so the freed handles back new
-    // dials/accepts this same tick.
-    self.reap_closing(now, stream);
+    // 1a. Reap retired occupancies. The driver's step-1 stack tick may have
+    // advanced FIN/RST exchanges to completion; return to the pool any whose
+    // teardown the driver now acknowledges (or escalate a stalled one) so the
+    // freed handles back new dials/accepts this same tick.
+    self.reap_retiring(now, stream);
 
     // The accept/replenish/dial phase is ordered LISTENER-FIRST: the inbound
     // listener gets first claim on a free slot and a deferred outbound dial takes
@@ -2039,7 +2185,7 @@ where
     // 1c. Self-heal a still-missing listener, then assign any remaining free slots
     // to deferred dials (listener-first). This runs the SAME rebalance as the late
     // call after the in-tick frees below (step 7), here over whatever
-    // `reap_closing` freed plus the spare pool. Running it BEFORE the machine tick
+    // `reap_retiring` freed plus the spare pool. Running it BEFORE the machine tick
     // (step 6) is required: a `PendingDial` deferred on a PRIOR tick must be
     // assigned a freed slot and dialed before step 6's `handle_timeout` could
     // elapse its bridge and tear it down — so the early site cannot move later.
@@ -2165,44 +2311,42 @@ where
 
     // 7d''. Re-run the listener/dial rebalance over every slot the machine tick and
     // teardown just freed back to the pool IN THIS TICK. The early 1c rebalance ran
-    // before step 6 and saw only what `reap_closing` had freed; the slot-freeing
-    // close paths run LATER (after the machine tick fires the `Close` actions), so a
-    // slot freed here would otherwise sit idle until the next pump — stranding a
-    // deferred `PendingDial` or a missing listener until some unrelated timer
-    // happened to wake the driver, possibly past the waiting exchange's own bridge
-    // deadline (which would then kill it before it ever got the slot). Servicing the
-    // frees in-tick lets a freed slot immediately back the oldest waiting dial — its
-    // SYN egress is then driven by the stack deadline, which the driver reports as
-    // ~now — or restore the listener, so the returned wakeup is naturally correct
-    // with no `pending_dial` deadline term needed.
+    // before step 6 and saw only what the 1a reap had freed; the slot-freeing
+    // teardown paths run LATER (after the machine tick fires the `Close`/`Abort`
+    // actions), so a slot freed here would otherwise sit idle until the next pump —
+    // stranding a deferred `PendingDial` or a missing listener until some unrelated
+    // timer happened to wake the driver, possibly past the waiting exchange's own
+    // bridge deadline (which would then kill it before it ever got the slot).
+    // Servicing the frees in-tick lets a freed slot immediately back the oldest
+    // waiting dial — its SYN egress is then driven by the stack deadline, which the
+    // driver reports as ~now — or restore the listener, so the returned wakeup is
+    // naturally correct with no `pending_dial` deadline term needed.
     //
-    // This MUST stay positioned after EVERY late `pool.give()` path so it dominates
-    // all of them. Today those are exactly three, all upstream here:
-    //   - 7a `drain_stream_actions` → `teardown`: the `Closed | TimeWait` branch
-    //     and the abrupt `abort()` branch both `pool.give(h)`.
-    //   - 7d' `flush_closing`: the deadline-`Abort` branch `pool.give(h)`.
-    // (`teardown`'s and `flush_closing`'s graceful-FIN branches `closing.insert`
-    // instead of `give`; those handles are reaped to the pool by a LATER tick's 1a
-    // `reap_closing`, whose freed slots the next tick's 1c rebalance claims — so they
-    // need no in-tick rebalance here.) If a new late free path is ever added, it must
-    // precede this call or the end-of-tick invariant below regresses.
+    // A slot returns to the pool ONLY through a reap (`retire` runs an immediate
+    // reap, and 1a runs the periodic one): a teardown whose completion the driver
+    // acknowledges this tick — a synchronous driver's clean/aborted socket — is
+    // freed by that immediate reap and serviced here; one still tearing down waits
+    // in `retiring` and is freed by a LATER tick's 1a reap, whose freed slots the
+    // next tick's 1c rebalance claims. Either way this late rebalance dominates
+    // every in-tick free; if a new late free path is ever added, it must precede
+    // this call or the end-of-tick invariant below regresses.
     self.rebalance_pool(now, stream);
 
-    // Invariant held at end-of-tick: if the reliable pool holds a REUSE-READY slot
-    // then a listener is present AND no connection remains in `PendingDial`. The late
+    // Invariant held at end-of-tick: if the reliable pool is non-empty then a
+    // listener is present AND no connection remains in `PendingDial`. The late
     // rebalance above is the last pool-touching reliable phase — the gossip egress
     // touches only the gossip socket, never the reliable pool — so the invariant
-    // cannot be disturbed before the deadline is computed below. The readiness
-    // qualifier matters for an async-teardown driver: a freed-but-still-resetting
-    // slot is intentionally NOT reused this tick (its worker has not reset the
-    // socket yet), so a pool holding only such slots is not a rebalance miss — the
-    // listener / deferred dial is serviced on the later tick the worker completes its
-    // reset. For a synchronous driver every freed slot is ready, so this is the same
-    // "non-empty pool ⇒ listener present and no PendingDial" guarantee as before.
+    // cannot be disturbed before the deadline is computed below. Every pooled slot
+    // is reusable by construction now (a slot still tearing down lives in
+    // `retiring`, never the pool), so there is no readiness qualifier: a non-empty
+    // pool is unconditionally a listener + deferred-dial the rebalance must have
+    // spent. A freed-but-still-resetting slot (async-teardown driver) is simply not
+    // in the pool this tick — it is serviced on the later tick its teardown is
+    // acknowledged and the reap returns it.
     debug_assert!(
-      !self.plane.pool.any_where(|&c| stream.reuse_ready(c))
+      self.plane.pool.is_empty()
         || (self.plane.listener.is_some() && self.plane.pending_dial_count() == 0),
-      "end-of-tick: a reuse-ready reliable slot left a listener missing or a PendingDial unserviced"
+      "end-of-tick: a reusable reliable slot left a listener missing or a PendingDial unserviced"
     );
 
     // 7e. Egress: drain outbound gossip transmits, encode, and send.
@@ -2216,40 +2360,45 @@ where
     //
     // - `machine` — the SWIM machine's next timer (probe / gossip / push-pull /
     //   bridge handshake-and-dial deadlines).
-    // - `closing` — the soonest force-abort deadline among connections parked
-    //   mid-close. Two engine-owned deadline sources feed this class, both enforced
-    //   only on a tick that actually runs: the `plane.closing` map (a detached
-    //   handle whose FIN is in flight, reaped by `reap_closing`) and the
-    //   `close_deadline` of any connection still draining in `Closing` before its
-    //   terminal FIN (the backstop in `flush_closing`). If either were omitted, a
-    //   peer that vanished mid-close would keep its socket `is_open()` forever (the
-    //   link layer sets no TCP timeout), and a deadline-driven caller could sleep
-    //   arbitrarily past `close_timeout`. Folding the soonest of BOTH in guarantees
-    //   the caller wakes by `close_timeout` to reap it, so pool / listener recovery
-    //   is bounded by `Options::close_timeout` as documented.
+    // - `closing` — the soonest teardown-escalation deadline. Two engine-owned
+    //   deadline sources feed this class, both enforced only on a tick that
+    //   actually runs: the `plane.retiring` ledger (a retired occupancy whose
+    //   teardown the driver has not acknowledged — a Draining entry's escalation to
+    //   Aborting, or an Aborting entry's overrun re-arm, both driven by 1a
+    //   `reap_retiring`) and the `close_deadline` of any connection still draining
+    //   in `Closing` before its terminal FIN (the backstop in `flush_closing`). If
+    //   either were omitted, a peer that vanished mid-close would keep its socket
+    //   `is_open()` forever (the link layer sets no TCP timeout), and a
+    //   deadline-driven caller could sleep arbitrarily past `close_timeout`.
+    //   Folding the soonest of BOTH in guarantees the caller wakes by
+    //   `close_timeout` to escalate it, so pool / listener recovery is bounded by
+    //   `Options::close_timeout` as documented.
     //
     // `pending_dial` deliberately contributes NO deadline of its own: a buffered
     // dial is serviced when a slot frees, never on a clock of its own, and every
     // free either is handled THIS tick or already feeds one of the terms above. A
-    // slot freed straight to the pool by a teardown / close this tick (7a / 7d') is
-    // spent on the oldest waiting dial by the late 7d'' rebalance immediately, so its
-    // SYN is queued before this deadline is computed and surfaces in the driver's
-    // stack term. A slot whose graceful FIN is still in flight is reaped to the pool
-    // only on a LATER tick by `reap_closing`, but that tick is itself guaranteed by
-    // the `closing` deadline folded in here; the next tick's early rebalance then
-    // dials the waiting connection. Either way the unblocking event is already
-    // covered, so a `pending_dial` term would be redundant.
+    // slot whose teardown is acknowledged this tick is spent on the oldest waiting
+    // dial by the late 7d'' rebalance immediately, so its SYN is queued before this
+    // deadline is computed and surfaces in the driver's stack term. A slot still
+    // tearing down is reaped to the pool only on a LATER tick by `reap_retiring`,
+    // and the driver's own link-layer deadline (the smoltcp socket's pending-RST
+    // dispatch, ~now) plus the folded `retiring` escalation deadline both guarantee
+    // that tick runs; the next tick's early rebalance then dials the waiting
+    // connection. Either way the unblocking event is already covered, so a
+    // `pending_dial` term would be redundant.
     //
     // The driver folds its own link-layer next-event deadline into the returned
     // instant before sleeping.
     let machine = self.endpoint.poll_timeout();
-    // Soonest force-abort deadline across BOTH close backstops: detached handles
-    // parked in `plane.closing`, and connections still draining in `Closing` before
-    // their terminal FIN (their `close_deadline`).
+    // Soonest teardown-escalation deadline across BOTH close backstops: retired
+    // occupancies parked in `plane.retiring` (a Draining entry's escalation to
+    // Aborting, or an Aborting entry's overrun re-arm), and connections still
+    // draining in `Closing` before their terminal FIN (their `close_deadline`).
     let closing = self
       .plane
-      .closing
+      .retiring
       .values()
+      .map(|r| &r.deadline)
       .chain(
         self
           .plane
@@ -2275,21 +2424,29 @@ where
   /// so the bridge is ultimately retired by its own dial/handshake deadline; the
   /// driver has no prompt dial-cancel path.) Shared by the live `Connect` drain and
   /// the deferred `drain_pending_dials` retry so both dial identically.
-  fn dial<S>(&mut self, eid: ExchangeId, peer: SocketAddr, c: C, now: Instant, stream: &mut S)
-  where
+  fn dial<S>(
+    &mut self,
+    eid: ExchangeId,
+    peer: SocketAddr,
+    c: C,
+    g: SlotGen,
+    now: Instant,
+    stream: &mut S,
+  ) where
     S: StreamIo<Conn = C>,
   {
     // Reject an outbound dial to a CIDR-blocked peer before `connect`: a blocked
     // peer forms no reliable connection in either direction (the accept guard
     // drops its passive opens; this drops our active dials, so a join toward a
-    // blocked seed fails rather than completing the push/pull). Reclaim the
+    // blocked seed fails rather than completing the push/pull). Abort + retire the
     // freshly-assigned socket and terminalize via `handle_dial_failed`: a
     // never-connected dial must FAIL the exchange, not feed a benign EOF that a
-    // one-way user-message send would read as success.
+    // one-way user-message send would read as success. The socket never connected
+    // (no peer tuple), so the retire is acknowledged and the slot freed this tick.
     if cidr_blocks(&self.cidr_policy, peer.ip()) {
-      stream.abort(c);
-      self.plane.pool.give(c);
+      stream.abort(c, g);
       self.plane.connections.remove(&eid);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
       self.endpoint.handle_dial_failed(eid, now);
       return;
     }
@@ -2298,14 +2455,14 @@ where
     // a useful TCP destination: the link layer's `connect` rejects the unspecified
     // address and port 0 with `Unaddressable`, and a multicast/broadcast remote
     // resolves only to a derived L2 multicast/broadcast MAC. Screen here on the same
-    // `is_unicast` predicate so no doomed connect is started, and reclaim cleanly
+    // `is_unicast` predicate so no doomed connect is started, and retire the socket
     // exactly as the connect-rejection path does: the freshly-assigned socket is
-    // still Closed, so `abort()` is a no-op that returns it reusable (never leaked),
-    // and terminalize the exchange as a dial failure.
+    // still Closed with no peer tuple, so its teardown is acknowledged at once and
+    // the slot freed this tick; terminalize the exchange as a dial failure.
     if !socket_addr_is_routable(&peer) {
-      stream.abort(c);
-      self.plane.pool.give(c);
+      stream.abort(c, g);
       self.plane.connections.remove(&eid);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
       self.endpoint.handle_dial_failed(eid, now);
       return;
     }
@@ -2315,13 +2472,13 @@ where
     // ExchangeId is a monotonically increasing u64 per endpoint, making this a cheap,
     // collision-resistant scheme without an explicit port allocator.
     let local_port = 49152u16 + (eid.get() as u16 % 16384);
-    if stream.connect(c, peer, local_port).is_err() {
-      // The connect was rejected before any SYN: abort, reclaim the socket, drop the
-      // Connection (with all its parked state), and terminalize the exchange as a
-      // dial failure.
-      stream.abort(c);
-      self.plane.pool.give(c);
+    if stream.connect(c, peer, local_port, g).is_err() {
+      // The connect was rejected before any SYN: abort + retire the socket (still
+      // Closed, no peer tuple, so freed this tick), drop the Connection (with all
+      // its parked state), and terminalize the exchange as a dial failure.
+      stream.abort(c, g);
       self.plane.connections.remove(&eid);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
       self.endpoint.handle_dial_failed(eid, now);
     }
   }
@@ -2333,7 +2490,7 @@ where
   /// which is the machine's monotonically increasing per-endpoint correlation
   /// token, so the oldest deferred dial is dialed first. Stops the moment the pool
   /// empties again so the rest stay parked for a later tick. Called each `pump` LAST
-  /// in the accept/replenish/dial phase — after `reap_closing`, `check_listener`,
+  /// in the accept/replenish/dial phase — after `reap_retiring`, `check_listener`,
   /// and the `ensure_listener` self-heal — so the inbound listener has already taken
   /// its slot and a deferred dial claims only what remains, yet a slot freed by a
   /// timed-out dead-seed bridge is still promptly spent on the oldest waiting viable
@@ -2362,13 +2519,16 @@ where
     waiting.sort_by_key(|(eid, _)| eid.get());
 
     for (eid, peer) in waiting {
-      // Only a reset, reuse-ready slot may back a fresh dial (see `ensure_listener`
-      // for the async-teardown rationale). When none is ready — the pool is empty,
-      // or every freed slot is still resetting — leave the rest parked for a later
-      // tick; the deferred dials are retried once a worker finishes its reset.
-      let Some(c) = self.plane.pool.take_where(|&c| stream.reuse_ready(c)) else {
+      // Every pooled slot is reusable by construction (a slot still tearing down
+      // lives in `retiring`, not the pool), so a plain `take` yields a slot safe to
+      // dial. When the pool is empty, leave the rest parked for a later tick; the
+      // deferred dials are retried once a retire is acknowledged and the reap frees a
+      // slot.
+      let Some(c) = self.plane.pool.take() else {
         break;
       };
+      // Mint this slot's next occupancy generation for the dial.
+      let g = self.advance_slot_gen(c);
       // Assign the freed slot and transition PendingDial → Dialing, then issue the
       // connect. `assign_socket` retains any parked `out` / `fin_pending`. The
       // connection is still present (a racing Close would have removed it, but
@@ -2377,7 +2537,7 @@ where
       if let Some(conn) = self.plane.connections.get_mut(&eid) {
         conn.assign_socket(c);
       }
-      self.dial(eid, peer, c, now, stream);
+      self.dial(eid, peer, c, g, now, stream);
     }
   }
 
@@ -2389,7 +2549,7 @@ where
   /// before `drain_pending_dials` touches the pool, so an inbound listener is never
   /// starved by deferred outbound intent — and a no-op when the pool is empty or
   /// there is no unmet demand. Run at two points each `pump`: early (1c), over the
-  /// slots `reap_closing` freed plus the spare pool, BEFORE the machine tick so a
+  /// slots `reap_retiring` freed plus the spare pool, BEFORE the machine tick so a
   /// prior-tick `PendingDial` is dialed before its bridge can time out; and late
   /// (7d''), over every slot the machine's teardown / close paths freed THIS tick, so
   /// an in-tick free immediately backs a waiting dial or restores the listener
@@ -2452,19 +2612,19 @@ where
           // dial defers to `PendingDial`): the exchange exists and will complete.
           self.outbound_stream_ids.insert(eid, info.stream_id());
 
-          // Only a reset, reuse-ready slot may back a fresh dial (see
-          // `ensure_listener`); a freed-but-still-resetting slot (async-teardown
-          // driver) is skipped and the dial defers to `PendingDial` until its worker
-          // finishes the reset.
-          match self.plane.pool.take_where(|&c| stream.reuse_ready(c)) {
+          // Every pooled slot is reusable by construction (a slot still tearing down
+          // lives in `retiring`, not the pool); when the pool is exhausted the dial
+          // defers to `PendingDial` until a retire is acknowledged and a slot frees.
+          match self.plane.pool.take() {
             Some(c) => {
-              // A slot is free: create the Dialing connection (slot assigned) and
-              // issue the connect this same tick.
+              // A slot is free: mint its occupancy generation, create the Dialing
+              // connection (slot assigned), and issue the connect this same tick.
+              let g = self.advance_slot_gen(c);
               self
                 .plane
                 .connections
                 .insert(eid, Connection::dialing(peer, c));
-              self.dial(eid, peer, c, now, stream);
+              self.dial(eid, peer, c, g, now, stream);
             }
             None => {
               // Pool exhausted (or every freed slot still resetting): no slot free to
@@ -2472,7 +2632,7 @@ where
               // poll_action and is never re-emitted, so dropping it would LOSE the
               // dial intent. Record a PendingDial connection (no slot yet) instead;
               // this same tick's request bytes and a same-tick Shutdown accumulate on
-              // it, and `drain_pending_dials` assigns a slot once `reap_closing` frees
+              // it, and `drain_pending_dials` assigns a slot once `reap_retiring` frees
               // one (e.g. when a dead seed's bridge times out). This is what lets a
               // multi-seed `join()` reach a viable later seed even when earlier dead
               // seeds momentarily hold every slot.
@@ -2516,9 +2676,10 @@ where
           // elapsed exchange deadline): its buffered `out` bytes are stale and MUST be
           // discarded, not drained. Hard-reset the socket (RST) and reclaim it
           // immediately — no `Closing` drain, no graceful FIN. Unlike `Close`,
-          // `abort_exchange` never parks the connection: a failed exchange owes nothing
-          // to the peer, so its socket returns straight to the pool.
-          self.abort_exchange(r.id(), stream);
+          // `abort_exchange` never drains: a failed exchange owes nothing to the
+          // peer, so its socket is retired and freed once its RST egress is
+          // acknowledged.
+          self.abort_exchange(r.id(), now, stream);
         }
       }
     }

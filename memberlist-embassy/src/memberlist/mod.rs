@@ -16,7 +16,8 @@ use embassy_time::Timer;
 #[cfg(compression)]
 use memberlist_embedded::transform::CompressionOptions;
 use memberlist_embedded::{
-  AliveDelegate, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig, TransformOptions,
+  AliveDelegate, Engine, MaybeResolved, MergeDelegate, Options as EngineConfig, SlotGen,
+  TransformOptions,
 };
 #[cfg(encryption)]
 use memberlist_embedded::{ControlError, transform::EncryptionOptions};
@@ -425,7 +426,16 @@ where
     // replenishes subsequent listeners via the `StreamIo` view; this is the
     // construction-time seed of the first one.)
     if let Some(listener) = engine.plane_mut().pool.take() {
-      mailboxes[listener.0].borrow_mut().command = Command::Listen(cfg.port);
+      {
+        let mut mb = mailboxes[listener.0].borrow_mut();
+        mb.command = Command::Listen(cfg.port);
+        // This direct seed bypasses the `StreamIo` view (whose `listen` would stamp
+        // the generation), so stamp the listener slot's FIRST occupancy generation
+        // to match the engine ledger's — `set_listener` below records `SlotGen::START`
+        // for this slot, so a later retire of the reaped listener is acknowledged
+        // against the same generation the engine queries.
+        mb.generation = SlotGen::START;
+      }
       // The worker is not yet running, so no wake is needed; it reads the command
       // on its first poll. Install the slot as the engine's listener.
       engine.set_listener(listener);
@@ -877,6 +887,18 @@ where
   #[inline]
   pub fn accepted_inbound_count(&self) -> u64 {
     self.shared.engine.borrow().accepted_inbound_count()
+  }
+
+  #[doc(hidden)]
+  #[inline]
+  pub fn retiring_count(&self) -> usize {
+    self.shared.engine.borrow().retiring_count()
+  }
+
+  #[doc(hidden)]
+  #[inline]
+  pub fn teardown_overruns(&self) -> u64 {
+    self.shared.engine.borrow().teardown_overruns()
   }
 
   /// Number of TCP slots currently parked mid-close (our FIN sent, the peer's not

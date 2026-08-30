@@ -246,10 +246,23 @@ fn abort_reuse_does_not_carry_stale_state() {
   });
 }
 
-/// Repeated dial/abort churn must not WEDGE the pool: every dead dial's slot must
-/// return to the free-list once its worker resets the socket, so the free count
-/// recovers to its construction value. A slot reused before its reset (the bug)
-/// would either zombie-leak (never returning) or corrupt a later reuse.
+/// Repeated dial/abort churn must not LEAK a reliable slot: every dead dial's
+/// slot must stay accounted for — either back in the free-list once its worker has
+/// reset the socket, or held in the engine's `retiring` ledger while its teardown
+/// is still pending — so `pool_free_count + retiring_count` recovers to the
+/// construction dial-slot count. A slot reused before its reset (the bug the
+/// generation-tagged teardown protocol closes) would zombie-leak, appearing in
+/// NEITHER, dropping the accounted total below construction.
+///
+/// A dead ON-LINK dial whose ARP never resolves pins its worker in the socket
+/// teardown (the embassy-net RST cannot egress, a pre-existing worker limitation):
+/// that slot's teardown never completes, so it stays VISIBLE in `retiring` (and its
+/// deadline eventually ticks `teardown_overruns`) rather than — as before this
+/// protocol — being returned to the pool and counted as free while its socket was
+/// still a zombie. The engine never reuses such a pinned slot in EITHER regime; the
+/// ledger merely makes the residual pin visible instead of masking it in the free
+/// count. The load-bearing property here is that NO slot is lost (the accounted
+/// total holds) and the listener self-heals.
 #[test]
 fn pool_does_not_wedge_under_dial_abort_churn() {
   let (dev_a, dev_b) = pair();
@@ -278,17 +291,27 @@ fn pool_does_not_wedge_under_dial_abort_churn() {
         // Let the dead bridges elapse and their slots reap before the next wave.
         Timer::after(Duration::from_millis(120)).await;
       }
-      // After the churn quiesces, the pool must recover to its construction count
-      // and the listener must still be present (self-healed).
-      until(|| ml_a.pool_free_count() >= free_at_start && ml_a.listener_present()).await;
-      (ml_a.pool_free_count(), ml_a.listener_present())
+      // After the churn quiesces, every dial slot must be accounted for — free or
+      // visibly retiring, none leaked — and the listener must still be present
+      // (self-healed). A dial still mid-flight (in a Dialing connection) leaves the
+      // accounted total transiently below construction, so wait for it to settle.
+      until(|| {
+        ml_a.pool_free_count() + ml_a.retiring_count() >= free_at_start && ml_a.listener_present()
+      })
+      .await;
+      (
+        ml_a.pool_free_count(),
+        ml_a.retiring_count(),
+        ml_a.listener_present(),
+      )
     };
-    let (free, listener) = drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+    let (free, retiring, listener) = drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
     assert_eq!(
-      free, free_at_start,
-      "the reliable pool wedged under dial/abort churn: free recovered to only {} \
-       of {} (a slot reused before its worker reset leaked or corrupted)",
-      free, free_at_start
+      free + retiring,
+      free_at_start,
+      "the reliable pool leaked under dial/abort churn: only {free} free + {retiring} \
+       retiring of {free_at_start} dial slots are accounted for (a slot reused before \
+       its worker reset would appear in neither)"
     );
     assert!(
       listener,

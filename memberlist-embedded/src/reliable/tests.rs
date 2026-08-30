@@ -11,41 +11,25 @@ fn peer(port: u16) -> SocketAddr {
 type Conn = u32;
 
 #[test]
-fn take_where_skips_not_ready_slots_without_reordering() {
-  // Model an async-teardown driver: only some pooled slots are reset (ready).
-  // `take_where` must return a ready slot and leave the not-ready ones in the
-  // pool, in order, so they become takeable the instant they reset.
+fn take_is_lifo_over_reusable_slots() {
+  // The free-list holds only reusable slots by construction (a slot mid-teardown
+  // lives in `retiring`, not here), so `take` is a plain LIFO pop and `is_empty`
+  // / `free_len` track the length.
   let mut pool = Pool::<Conn>::new();
-  pool.push(10); // ready
-  pool.push(11); // NOT ready (still resetting)
-  pool.push(12); // ready
-
-  // Newest-first scan: 12 is ready, take it.
-  let ready = |c: &Conn| *c != 11;
-  assert_eq!(pool.take_where(ready), Some(12));
-  // 10 is the next ready one (11 is skipped, not removed).
-  assert_eq!(pool.take_where(ready), Some(10));
-  // Only the not-ready slot remains; `take_where` now finds nothing ready even
-  // though the pool is non-empty.
-  assert_eq!(pool.free_len(), 1);
-  assert!(!pool.is_empty());
-  assert_eq!(pool.take_where(ready), None);
-  // Once it resets, it becomes takeable.
-  assert_eq!(pool.take_where(|_| true), Some(11));
   assert!(pool.is_empty());
-}
+  assert_eq!(pool.take(), None, "an empty pool yields None");
 
-#[test]
-fn any_where_reports_only_ready_slots() {
-  let mut pool = Pool::<Conn>::new();
-  assert!(!pool.any_where(|_| true), "empty pool has no ready slot");
-  pool.push(1);
-  pool.push(2);
-  // No slot is ready (all still resetting): the pool is non-empty but
-  // `any_where` is false — the end-of-tick invariant must not flag this.
-  assert!(!pool.any_where(|_| false));
-  // At least one ready slot flips it true.
-  assert!(pool.any_where(|c| *c == 2));
+  pool.push(10);
+  pool.push(11);
+  pool.push(12);
+  assert_eq!(pool.free_len(), 3);
+  assert!(!pool.is_empty());
+
+  // Newest-first (LIFO), matching a driver's socket reuse order.
+  assert_eq!(pool.take(), Some(12));
+  assert_eq!(pool.take(), Some(11));
+  assert_eq!(pool.take(), Some(10));
+  assert!(pool.is_empty());
 }
 
 #[test]

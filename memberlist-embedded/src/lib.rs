@@ -51,9 +51,9 @@ pub use memberlist_proto::{AliveDelegate, MaybeOwned, MaybeResolved, MergeDelega
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use memberlist_proto::{AddrParseError, CidrPolicy, IpNet};
-pub use reliable::{ConnState, Connection, Pool, ReliablePlane};
+pub use reliable::{ConnState, Connection, Pool, ReliablePlane, RetirePhase, Retiring};
 pub use resolver::{MAX_RESOLVED_ADDRS_PER_SEED, ResolvedAddrs};
-pub use stream_io::{StreamIo, StreamIoError};
+pub use stream_io::{SlotGen, StreamIo, StreamIoError};
 #[cfg(checksum)]
 #[cfg_attr(
   docsrs,

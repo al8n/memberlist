@@ -1,7 +1,7 @@
 use super::{Command, EmbassyStream, Mailbox, SlotId, SlotWake};
 use alloc::vec::Vec;
 use core::{cell::RefCell, net::SocketAddr};
-use memberlist_embedded::{StreamIo, StreamIoError};
+use memberlist_embedded::{SlotGen, StreamIo, StreamIoError};
 
 /// Build `n` fresh mailboxes (each `cap` bytes per ring) and `n` wakes for a
 /// view. Returns them so the test frame owns them for the view's lifetime.
@@ -45,19 +45,76 @@ fn free_list_take_give_and_count() {
   assert_eq!(view.free_count(), 0);
 }
 
-/// `reuse_ready` reads the slot's `reset_done`: true for a fresh slot, false
-/// once the worker has begun using it (cleared `reset_done`).
+/// `teardown_done` is `reset_done && generation == g`: a fresh slot (reset_done,
+/// generation START) is done for START; a mid-use slot (reset_done cleared) is
+/// not; and a reset that acknowledged a PRIOR generation never frees a later one.
 #[test]
-fn reuse_ready_tracks_reset_done() {
+fn teardown_done_tracks_reset_done_and_generation() {
   let (mb, wakes) = slots(1, 64);
   let mut free = Vec::new();
   let view = EmbassyStream::new(&mb, &wakes, &mut free);
 
-  assert!(view.reuse_ready(SlotId(0)), "a fresh slot is reuse-ready");
+  // Fresh slot: reset_done, generation START ⇒ done for START.
+  assert!(
+    view.teardown_done(SlotId(0), SlotGen::START),
+    "a fresh slot's teardown is done for its START occupancy"
+  );
+
+  // Worker begins using the slot (clears reset_done): not done.
   mb[0].borrow_mut().reset_done = false;
   assert!(
-    !view.reuse_ready(SlotId(0)),
-    "a slot whose worker is mid-use (reset_done cleared) is not reuse-ready"
+    !view.teardown_done(SlotId(0), SlotGen::START),
+    "a slot whose worker is mid-use (reset_done cleared) is not torn down"
+  );
+
+  // The slot has since moved to a LATER occupancy; a reset that acknowledges only
+  // the prior generation must not free the later one.
+  {
+    let mut m = mb[0].borrow_mut();
+    m.reset_done = true;
+    m.generation = SlotGen::START.next();
+  }
+  assert!(
+    !view.teardown_done(SlotId(0), SlotGen::START),
+    "a reset acknowledging a stale generation never frees a later occupancy"
+  );
+  assert!(
+    view.teardown_done(SlotId(0), SlotGen::START.next()),
+    "the matching generation is torn down"
+  );
+}
+
+/// `worker_reset_acks_the_occupancy`: a `Mailbox::reset` (what the worker runs via
+/// `reset_socket` after tearing a slot down) leaves the slot acknowledged for the
+/// generation the engine stamped — so `teardown_done` reports `true` for that
+/// occupancy and the engine's reap frees it. (No worker-behavior assertions here;
+/// those belong to a later stage.)
+#[test]
+fn worker_reset_acks_the_occupancy() {
+  let (mb, wakes) = slots(1, 64);
+  let mut free = Vec::new();
+  let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
+
+  // The engine stamps occupancy g and posts a dial; the worker picks it up and
+  // clears reset_done (modelled directly here — the worker is not driven in a unit
+  // test).
+  let g = SlotGen::START.next();
+  view
+    .connect(SlotId(0), sa(2), 1234, g)
+    .expect("connect posts");
+  assert_eq!(mb[0].borrow().generation, g, "connect stamps the occupancy");
+  mb[0].borrow_mut().reset_done = false;
+  assert!(
+    !view.teardown_done(SlotId(0), g),
+    "while the worker holds the slot its teardown is not done"
+  );
+
+  // The worker tears the slot down and resets it (Mailbox::reset), acknowledging
+  // the occupancy it served.
+  mb[0].borrow_mut().reset();
+  assert!(
+    view.teardown_done(SlotId(0), g),
+    "after the worker's reset the occupancy's teardown is acknowledged"
   );
 }
 
@@ -70,7 +127,7 @@ fn listen_posts_for_a_valid_port_and_rejects_port_zero() {
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
   assert!(matches!(
-    view.listen(SlotId(0), 0),
+    view.listen(SlotId(0), 0, SlotGen::START),
     Err(StreamIoError::Unaddressable)
   ));
   assert_eq!(
@@ -80,7 +137,7 @@ fn listen_posts_for_a_valid_port_and_rejects_port_zero() {
   );
 
   view
-    .listen(SlotId(0), 7946)
+    .listen(SlotId(0), 7946, SlotGen::START)
     .expect("a non-zero port is accepted");
   assert_eq!(mb[0].borrow().command, Command::Listen(7946));
   assert!(
@@ -97,7 +154,9 @@ fn connect_posts_a_dial() {
   let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
-  view.connect(SlotId(0), sa(2), 1234).expect("connect posts");
+  view
+    .connect(SlotId(0), sa(2), 1234, SlotGen::START)
+    .expect("connect posts");
   assert_eq!(mb[0].borrow().command, Command::Dial(sa(2)));
   assert!(wakes[0].signaled());
 }
@@ -224,12 +283,12 @@ fn close_and_abort_post_commands() {
   let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
-  view.close(SlotId(0));
+  view.close(SlotId(0), SlotGen::START);
   assert_eq!(mb[0].borrow().command, Command::Close);
   assert!(wakes[0].signaled());
 
   wakes[0].reset();
-  view.abort(SlotId(0));
+  view.abort(SlotId(0), SlotGen::START);
   assert_eq!(mb[0].borrow().command, Command::Abort);
   assert!(wakes[0].signaled());
 }

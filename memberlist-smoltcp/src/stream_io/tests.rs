@@ -118,12 +118,13 @@ fn established() -> (
   {
     let cell_b = RefCell::new(&mut set_b);
     let mut sb = SmoltcpStream::new(&mut if_b, &cell_b);
-    sb.listen(hb, 7946).expect("listen");
+    sb.listen(hb, 7946, SlotGen::START).expect("listen");
   }
   {
     let cell_a = RefCell::new(&mut set_a);
     let mut sa = SmoltcpStream::new(&mut if_a, &cell_a);
-    sa.connect(ha, remote_b, local_a.port()).expect("connect");
+    sa.connect(ha, remote_b, local_a.port(), SlotGen::START)
+      .expect("connect");
   }
 
   // Pump both stacks until A is send-capable (the handshake settled).
@@ -162,6 +163,98 @@ fn recv_finished(node: &mut (Interface, SocketSet<'static>, LoopDevice, SocketHa
   let cell = RefCell::new(&mut node.1);
   let view = SmoltcpStream::new(&mut node.0, &cell);
   view.recv_finished(node.3)
+}
+
+/// `teardown_done` of the `SmoltcpStream` view over `node`'s socket for gen `g`.
+fn teardown_done(
+  node: &mut (Interface, SocketSet<'static>, LoopDevice, SocketHandle),
+  g: SlotGen,
+) -> bool {
+  let cell = RefCell::new(&mut node.1);
+  let view = SmoltcpStream::new(&mut node.0, &cell);
+  view.teardown_done(node.3, g)
+}
+
+/// #161: after `abort`, the handle is NOT reusable (`teardown_done` reports
+/// `false`) until a stack poll has dispatched the RST — so a same-pump
+/// reallocation cannot suppress the pending reset by re-`listen`/`connect`ing the
+/// handle (which `reset()`s the socket and drops the queued RST). Once the RST has
+/// egressed (the remote tuple is cleared) the handle becomes reusable.
+///
+/// Mutation anchor: weaken the gate to `!is_open()` (dropping the RST-pending
+/// term) and the pre-poll assertion below flips — a same-pump reuse would then be
+/// allowed while the RST is still queued.
+#[test]
+fn abort_then_immediate_reallocation_waits_for_rst_egress() {
+  let (mut a, _b) = established();
+
+  // A aborts its established socket: smoltcp sets `Closed` but KEEPS the remote
+  // tuple until the next dispatch emits the single RST.
+  {
+    let cell = RefCell::new(&mut a.1);
+    let mut view = SmoltcpStream::new(&mut a.0, &cell);
+    view.abort(a.3, SlotGen::START);
+  }
+  assert_eq!(
+    a.1.get::<tcp::Socket>(a.3).state(),
+    tcp::State::Closed,
+    "abort moves the socket to Closed"
+  );
+  assert!(
+    a.1.get::<tcp::Socket>(a.3).remote_endpoint().is_some(),
+    "the aborted socket keeps its remote tuple until the RST egresses"
+  );
+  assert!(
+    !teardown_done(&mut a, SlotGen::START),
+    "an aborted handle is NOT reusable until its RST has egressed (#161)"
+  );
+
+  // Poll A's stack until the RST is dispatched and the tuple cleared.
+  for i in 0..20i64 {
+    a.0
+      .poll(SmolInstant::from_millis(100 + i), &mut a.2, &mut a.1);
+    if a.1.get::<tcp::Socket>(a.3).remote_endpoint().is_none() {
+      break;
+    }
+  }
+  assert!(
+    a.1.get::<tcp::Socket>(a.3).remote_endpoint().is_none(),
+    "the RST egress clears the remote tuple"
+  );
+  assert!(
+    teardown_done(&mut a, SlotGen::START),
+    "once the RST has egressed the handle is reusable"
+  );
+}
+
+/// Control: a cleanly-closed socket — both FINs exchanged, no RST pending — IS
+/// reusable at once. The reuse gate withholds only a socket whose abort RST has not
+/// yet egressed, never a graceful close that reached TimeWait / Closed.
+#[test]
+fn cleanly_closed_socket_is_reusable() {
+  let (mut a, mut b) = established();
+
+  // Both sides close their write halves gracefully, then settle the FIN handshake.
+  {
+    let cell = RefCell::new(&mut a.1);
+    let mut view = SmoltcpStream::new(&mut a.0, &cell);
+    view.close(a.3, SlotGen::START);
+  }
+  {
+    let cell = RefCell::new(&mut b.1);
+    let mut view = SmoltcpStream::new(&mut b.0, &cell);
+    view.close(b.3, SlotGen::START);
+  }
+  settle(&mut a, &mut b, 100);
+
+  assert!(
+    !a.1.get::<tcp::Socket>(a.3).is_open(),
+    "a cleanly-closed socket has left the open states"
+  );
+  assert!(
+    teardown_done(&mut a, SlotGen::START),
+    "a cleanly-closed socket (no RST pending) is reusable at once"
+  );
 }
 
 /// A graceful peer FIN is reported as a clean EOF: after B `close()`s its write

@@ -881,13 +881,19 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
     let _ = n.poll(clk.now(), &mut dn);
     let _ = p.poll(clk.now(), &mut dp);
 
-    // The contended poll: `p`'s inbound has just been accepted. The listener it
-    // consumed must be present again (re-established from `d1`'s freed socket)
-    // while `d2` is STILL deferred — the freed socket went to the listener, not
-    // the dial. Under the buggy order the dial would have taken it: the pending
-    // count would be zero here and the listener absent.
-    if n.accepted_inbound_count() >= 1 {
-      listener_reclaimed_freed_socket = n.listener_present() && n.pending_dial_count() >= 1;
+    // The contended reclaim: `p`'s inbound has been accepted (its accept consumed
+    // the listener), and the listener is re-established from `d1`'s freed socket
+    // while `d2` is STILL deferred — the freed socket went to the listener, not the
+    // dial. The `d1` socket's abort now retires through the ledger and is reclaimed
+    // only once its reset RST has egressed (#161), one poll after the bridge
+    // elapses, so the accept and the reclaim need not fall in the SAME poll; wait
+    // until BOTH the accept has happened AND the listener is present, then witness
+    // that `d2` never stole the one free socket (it is still `PendingDial`). Under
+    // the buggy listener-last order the dial drains before the listener replenishes,
+    // so the listener would be permanently absent here and this loop would spin out
+    // — caught by the assertion below and the second-accept corroboration.
+    if n.accepted_inbound_count() >= 1 && n.listener_present() {
+      listener_reclaimed_freed_socket = n.pending_dial_count() >= 1;
       first_accept_after_contention = n.accepted_inbound_count();
       break;
     }

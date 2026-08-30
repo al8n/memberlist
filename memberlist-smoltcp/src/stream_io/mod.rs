@@ -28,7 +28,7 @@
 
 use core::{cell::RefCell, net::SocketAddr};
 
-use memberlist_embedded::{StreamIo, StreamIoError};
+use memberlist_embedded::{SlotGen, StreamIo, StreamIoError};
 use smoltcp::{
   iface::{Interface, SocketHandle, SocketSet},
   socket::tcp,
@@ -73,7 +73,26 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     0
   }
 
-  fn listen(&mut self, c: Self::Conn, port: u16) -> Result<(), StreamIoError> {
+  fn teardown_done(&self, c: Self::Conn, _g: SlotGen) -> bool {
+    // The occupancy generation is ignored: this synchronous driver reads the
+    // socket's TCP state directly, and the engine only ever queries the slot it is
+    // retiring. Reusable iff the socket is not open AND not a `Closed` socket whose
+    // remote tuple is still set.
+    //
+    // smoltcp `abort()` sets the state to `Closed` but KEEPS the remote tuple; the
+    // next `dispatch` emits the single RST and only THEN clears the tuple
+    // (`socket/tcp.rs`: the Closed-state RST arm, then `if self.state == Closed {
+    // self.tuple = None }`). So `Closed && remote_endpoint().is_some()` is exactly
+    // "an abort whose RST has not yet egressed" — NOT reusable, or re-`listen` /
+    // re-`connect` would `reset()` the socket and suppress the pending RST (#161).
+    // A clean `TimeWait` (state != Closed) has no RST pending and IS reusable, as is
+    // a freshly-reset `Closed` socket with no tuple. Verified against smoltcp 0.13.1.
+    let set = self.sockets.borrow();
+    let sock = set.get::<tcp::Socket>(c);
+    !sock.is_open() && !(sock.state() == tcp::State::Closed && sock.remote_endpoint().is_some())
+  }
+
+  fn listen(&mut self, c: Self::Conn, port: u16, _g: SlotGen) -> Result<(), StreamIoError> {
     // `listen()` fails on port 0 (`Unaddressable`) or an already-open socket
     // (`InvalidState`). Map both to a non-fatal error rather than panicking; the
     // engine's listener paths only ever pass a non-zero port and a freshly-reset
@@ -114,6 +133,7 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     c: Self::Conn,
     remote: SocketAddr,
     local_port: u16,
+    _g: SlotGen,
   ) -> Result<(), StreamIoError> {
     // smoltcp's `connect` needs the interface context to resolve the local
     // endpoint. The interface is a separate field from the socket set, so the
@@ -222,11 +242,11 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     self.sockets.borrow().get::<tcp::Socket>(c).send_queue()
   }
 
-  fn close(&mut self, c: Self::Conn) {
+  fn close(&mut self, c: Self::Conn, _g: SlotGen) {
     self.sockets.borrow_mut().get_mut::<tcp::Socket>(c).close();
   }
 
-  fn abort(&mut self, c: Self::Conn) {
+  fn abort(&mut self, c: Self::Conn, _g: SlotGen) {
     self.sockets.borrow_mut().get_mut::<tcp::Socket>(c).abort();
   }
 }

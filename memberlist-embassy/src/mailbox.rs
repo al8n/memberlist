@@ -17,6 +17,8 @@
 use alloc::collections::VecDeque;
 use core::net::SocketAddr;
 
+use memberlist_embedded::SlotGen;
+
 /// A directive the engine (via [`EmbassyStream`](crate::stream_io::EmbassyStream))
 /// posts to a slot's worker, consumed on the next worker wake.
 ///
@@ -80,13 +82,23 @@ pub(crate) struct Mailbox {
   /// `true` for a fresh slot (a newly-created `TcpSocket` is Closed) and after the
   /// worker's `reset_socket` (`abort()` + flush, then [`Mailbox::reset`]); `false`
   /// from the instant the worker picks up a `Listen` / `Dial` (the socket is now in
-  /// use) until that reset completes. The engine reads it via
-  /// [`EmbassyStream::reuse_ready`](crate::stream_io::EmbassyStream) so it never
-  /// re-`listen`s / re-`connect`s a slot whose teardown the worker has not yet run —
-  /// which would clobber the pending `Abort`/`Close` and leak the prior connection's
-  /// `open` / `accepted_peer` / buffers into the reused slot. This is the
-  /// acknowledged reset→idle transition that makes the async teardown safe.
+  /// use) until that reset completes. The worker sets it (see [`crate::worker`]);
+  /// paired with [`gen`](Self::gen) it forms the engine's generation-tagged reuse
+  /// gate ([`EmbassyStream::teardown_done`](crate::stream_io::EmbassyStream)):
+  /// the teardown of occupancy `g` is done iff `reset_done && gen == g`, i.e. the
+  /// worker has reset the socket AND the reset it acknowledged is this occupancy's.
+  /// Until then the engine keeps the slot in its `retiring` ledger, never reusing a
+  /// slot whose teardown the worker has not yet run (which would clobber the pending
+  /// `Abort`/`Close` and leak the prior connection's state into the reused slot).
   pub reset_done: bool,
+  /// The occupancy generation the engine last stamped onto this slot (via
+  /// [`EmbassyStream`](crate::stream_io::EmbassyStream)'s `listen` / `connect` /
+  /// `close` / `abort`). Combined with [`reset_done`](Self::reset_done) it makes the
+  /// reuse gate generation-tagged: a `reset_done` that acknowledges a PRIOR
+  /// occupancy (a stale generation) never frees a later one, since `gen` no longer
+  /// matches the queried generation. Preserved across [`Mailbox::reset`] (a reset
+  /// acknowledges the CURRENT occupancy's teardown, it does not start a new one).
+  pub generation: SlotGen,
 }
 
 impl Mailbox {
@@ -110,6 +122,9 @@ impl Mailbox {
       // A freshly-created `TcpSocket` is Closed, so the slot is immediately
       // reuse-ready for its first `Listen` / `Dial`.
       reset_done: true,
+      // The first occupancy the engine mints for any slot is `START`; the view
+      // overwrites this on the first gen-carrying command.
+      generation: SlotGen::START,
     }
   }
 

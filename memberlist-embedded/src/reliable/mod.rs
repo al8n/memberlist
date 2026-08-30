@@ -35,6 +35,8 @@ use hashbrown::HashMap;
 use memberlist_proto::{Instant, streams::ExchangeId};
 use std::{collections::VecDeque, vec::Vec};
 
+use crate::stream_io::SlotGen;
+
 /// Free-list of pre-created reliable-stream connection handles.
 ///
 /// Handles are added at construction via [`Pool::push`]. The dial/accept paths
@@ -58,47 +60,29 @@ impl<C> Pool<C> {
 
   /// Remove and return a free connection handle, or `None` if all slots are in
   /// use (pool exhausted).
+  ///
+  /// The free-list holds ONLY reusable slots by construction: a slot mid-teardown
+  /// lives in [`ReliablePlane::retiring`], not here, and is returned to the pool
+  /// only once its teardown is acknowledged
+  /// ([`StreamIo::teardown_done`](crate::StreamIo::teardown_done)). So the plain
+  /// LIFO pop always yields a slot the engine may immediately `listen` / `connect`.
   pub fn take(&mut self) -> Option<C> {
     self.free.pop()
   }
 
-  /// Remove and return the most-recently-freed handle for which `ready` is
-  /// `true`, leaving every other handle (those still tearing down) in the pool.
-  ///
-  /// A driver whose teardown is asynchronous returns a freed slot to the pool
-  /// before its worker has reset the underlying socket; reusing such a slot for a
-  /// fresh `listen` / `connect` would clobber the pending reset and leak the prior
-  /// connection's state. This lets the engine pick a slot that is actually reset
-  /// (`StreamIo::reuse_ready`) and skip the rest until a later tick, without
-  /// reordering the survivors (so the still-tearing-down slots stay available the
-  /// instant they become ready). For a synchronous-teardown driver every slot is
-  /// ready, so this is exactly `take`.
-  pub fn take_where(&mut self, mut ready: impl FnMut(&C) -> bool) -> Option<C> {
-    // Scan newest-first (the end of the Vec) to match `take`'s LIFO reuse, and
-    // remove the first ready handle in place, preserving the order of the rest.
-    let pos = (0..self.free.len()).rev().find(|&i| ready(&self.free[i]))?;
-    Some(self.free.remove(pos))
-  }
-
-  /// Return a handle to the free-list once its exchange is complete. The caller
-  /// is responsible for resetting / aborting the socket first so it is ready for
-  /// reuse.
+  /// Return a handle to the free-list once its occupancy's teardown has been
+  /// acknowledged. The engine returns a slot here only after
+  /// [`StreamIo::teardown_done`](crate::StreamIo::teardown_done) reports the
+  /// socket is reset and reusable, so every pooled slot is reusable by
+  /// construction.
   pub fn give(&mut self, c: C) {
     self.free.push(c);
   }
 
-  /// Whether the free-list is empty (all slots assigned to active exchanges or
-  /// the listener).
+  /// Whether the free-list is empty (all slots assigned to active exchanges, the
+  /// listener, or a pending teardown in [`ReliablePlane::retiring`]).
   pub fn is_empty(&self) -> bool {
     self.free.is_empty()
-  }
-
-  /// Whether any free handle currently satisfies `ready` — i.e. at least one
-  /// pooled slot the engine could reuse THIS tick. Used by the end-of-tick
-  /// invariant so a pool holding only still-resetting (not reuse-ready) slots does
-  /// not count as "a free slot the rebalance should have spent".
-  pub fn any_where(&self, ready: impl FnMut(&C) -> bool) -> bool {
-    self.free.iter().any(ready)
   }
 
   /// Number of slots currently in the free-list. A diagnostic surfaced by the
@@ -278,6 +262,42 @@ impl<C> Connection<C> {
   }
 }
 
+/// The phase of a retired slot occupancy in [`ReliablePlane::retiring`].
+///
+/// A retire begins as `Draining` after a graceful `close` (our FIN is flushing;
+/// the socket works through the TCP FIN states before it is reusable) or as
+/// `Aborting` after an `abort` (the RST is egressing). The reap escalates a
+/// `Draining` entry past its deadline to `Aborting`; an `Aborting` entry never
+/// regresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetirePhase {
+  /// A graceful close is in flight (subsumes the pre-ledger "closing" state):
+  /// our FIN was emitted and the socket is draining toward a reusable state, or
+  /// the peer's FIN is still pending. Reclaimed once the driver acknowledges the
+  /// teardown; escalated to [`RetirePhase::Aborting`] if it stalls past its
+  /// deadline.
+  Draining,
+  /// An abort (RST) has been issued and the slot is awaiting the driver's
+  /// acknowledgement that the reset has egressed and the socket is reusable.
+  Aborting,
+}
+
+/// One retired slot occupancy awaiting its teardown acknowledgement in
+/// [`ReliablePlane::retiring`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retiring {
+  /// The generation of the occupancy being torn down. Matched against the
+  /// driver's [`StreamIo::teardown_done`](crate::StreamIo::teardown_done) so an
+  /// acknowledgement frees only the occupancy it actually completed.
+  pub generation: SlotGen,
+  /// The instant at which the reap escalates this teardown: a `Draining` entry
+  /// switches to `Aborting` (issuing the RST); an `Aborting` entry re-issues the
+  /// abort and counts a `teardown_overruns`.
+  pub deadline: Instant,
+  /// Whether this retire is a graceful drain or an abort.
+  pub phase: RetirePhase,
+}
+
 /// Maps in-flight exchanges to their [`Connection`], plus the pool and listener.
 ///
 /// `connections` is keyed by [`ExchangeId`] (the machine's correlation token);
@@ -297,33 +317,44 @@ pub struct ReliablePlane<C> {
   pub connections: HashMap<ExchangeId, Connection<C>>,
   /// The dedicated passive-open slot.
   pub listener: Option<C>,
-  /// Slots parked mid-close (our FIN sent, the peer's not yet completed), each
-  /// paired with the deadline by which the reap pass force-aborts it; reclaimed
-  /// to the free-list once they reach `Closed` (the peer's FIN completed the
-  /// close) OR the deadline elapses.
+  /// Slots whose occupancy has been retired (a graceful `close` or an `abort`
+  /// issued) but whose teardown the driver has not yet acknowledged
+  /// ([`StreamIo::teardown_done`](crate::StreamIo::teardown_done)). Keyed by the
+  /// connection handle, each entry records the retired occupancy's generation,
+  /// the deadline by which the reap pass escalates a stalled teardown, and its
+  /// [`RetirePhase`]. A slot is returned to [`Pool`] ONLY once its teardown is
+  /// acknowledged, so a handle is never reused while a pending RST/FIN could be
+  /// clobbered or suppressed.
   ///
-  /// Populated by the engine's `teardown` (or `flush_closing`) when a graceful
-  /// close emits the terminal FIN on a socket whose peer has not finished the
-  /// close: the exchange already half-closed (its graceful FIN went out earlier
-  /// while the `Connection` stayed mapped so the peer's reply still pumped); an
-  /// acceptor torn down in `CloseWait` whose reply was already fully delivered;
-  /// or a connection that finished draining its buffered reply in
-  /// [`ConnState::Closing`] and only then FIN-ed. In each case the `Connection`
-  /// is removed and the detached handle is parked here (with deadline
-  /// `now + close_timeout`) so it stays reachable. Without this map the handle
-  /// would be unreachable (absent from `connections`, `pool`, and `listener`)
-  /// and the slot would leak, permanently shrinking the pool after enough closes
-  /// whose peer lingered.
+  /// Populated by every engine teardown path — a graceful `close` whose peer has
+  /// not finished the close (parked `Draining`), an `abort` of a failed or
+  /// never-established exchange (`Aborting`), and the force-abort of a stalled
+  /// drain. Without this ledger a detached handle would be unreachable (absent
+  /// from `connections`, `pool`, and `listener`) and the slot would leak.
   ///
-  /// The deadline bounds the close: a link layer such as smoltcp sets no TCP
-  /// timeout by default, so a peer that vanishes mid-FIN (stuck in
-  /// FinWait/LastAck) would keep the socket `is_open()` forever and the handle
-  /// would never return to the pool. The reap pass force-`abort()`s any handle
-  /// parked past its deadline, guaranteeing the pool (and the listener
-  /// replenished from it) always recover. A `Close` whose socket is already
-  /// `!is_open()` (the clean both-FIN case) bypasses this map and returns
-  /// straight to the pool.
-  pub closing: HashMap<C, Instant>,
+  /// The deadline bounds the wait: a link layer such as smoltcp sets no TCP
+  /// timeout by default, so a peer that vanishes mid-FIN would keep the socket
+  /// `is_open()` forever. When a `Draining` entry passes its deadline the reap
+  /// escalates it to `Aborting` (issuing the RST); an `Aborting` entry past its
+  /// deadline re-issues the abort and counts a [`teardown_overruns`](Self::teardown_overruns).
+  /// The slot is freed only when the driver finally acknowledges the teardown —
+  /// never blindly, since a driver whose socket is owned by an async worker
+  /// cannot be dispossessed by the engine.
+  pub retiring: HashMap<C, Retiring>,
+  /// The current (or last) occupancy generation of each connection handle.
+  ///
+  /// The engine advances a slot's generation each time it takes the slot out of
+  /// the pool for a fresh `listen` / `connect`, and stamps that generation onto
+  /// the retire (`retiring`) so a teardown acknowledgement is matched to the
+  /// exact occupancy it completes. A slot with no entry has never been occupied;
+  /// its first occupancy uses [`SlotGen::START`]. Bounded by the pool size.
+  pub slot_gen: HashMap<C, SlotGen>,
+  /// Diagnostic count of `Aborting`-phase deadline expiries — a retired occupancy
+  /// whose teardown the driver has still not acknowledged a full `close_timeout`
+  /// after the abort was issued. A non-zero value witnesses a residual socket pin
+  /// (e.g. an embassy worker future the engine cannot dispossess); it never
+  /// causes the engine to free a slot whose teardown is unacknowledged.
+  pub teardown_overruns: u64,
   /// Monotonic count of inbound reliable connections accepted on the listener.
   ///
   /// Incremented once per passive open handed to the machine. It is a diagnostic
@@ -338,16 +369,31 @@ pub struct ReliablePlane<C> {
 
 impl<C> ReliablePlane<C> {
   /// Create an empty reliable plane: no pool entries, no connections, no
-  /// listener, no closing slots. Slots are added by the driver immediately
+  /// listener, no retiring slots. Slots are added by the driver immediately
   /// after.
   pub fn new() -> Self {
     Self {
       pool: Pool::new(),
       connections: HashMap::new(),
       listener: None,
-      closing: HashMap::new(),
+      retiring: HashMap::new(),
+      slot_gen: HashMap::new(),
+      teardown_overruns: 0,
       accepted_inbound: 0,
     }
+  }
+
+  /// Number of retired occupancies still in the graceful-close ([`RetirePhase::Draining`])
+  /// phase — the analog of the pre-ledger "closing" count. Slots aborted (or
+  /// escalated to [`RetirePhase::Aborting`]) are excluded: a graceful close parks
+  /// here awaiting the peer, whereas an abort reclaims as soon as its RST egress
+  /// is acknowledged.
+  pub fn draining_count(&self) -> usize {
+    self
+      .retiring
+      .values()
+      .filter(|r| r.phase == RetirePhase::Draining)
+      .count()
   }
 
   /// Number of reliable exchanges currently in [`ConnState::HalfClosed`]: their

@@ -1737,31 +1737,30 @@ where
       self.engine.pump(now, &mut gossip, &mut stream)
     };
 
-    // 2b. Re-arm a listener the inactivity timeout just reaped. When an
-    // unauthenticated half-open (a `SynReceived` whose final ACK is withheld) — or
-    // a stalled established exchange — sits idle past the socket timeout, step 1's
-    // stack tick drives that socket to `Closed`. The engine keeps its handle
-    // installed as the listener (it swaps the slot out only on a completed accept,
-    // and never re-arms a socket the link layer closed underneath it), so without
-    // this the single direct-smoltcp listener would stay `Closed` and the node
-    // would accept no further inbound reliable streams — turning the bounded reap
-    // back into a permanent black-hole. Re-`listen` in place restores it: the
-    // handle is unchanged, so the engine's listener bookkeeping still holds, and
-    // the timeout — preserved across `reset()` — reaps the next half-open too,
-    // keeping the DoS bounded to one timeout window. A socket mid-handshake
-    // (`SynReceived`, still `is_open()`) or a healthy `Listen` is left untouched;
-    // only a reaped (`!is_open()`, i.e. `Closed`) listener is re-armed. This is the
-    // smoltcp analog of the per-slot self-heal the embassy-net worker performs
-    // after its own `set_timeout` fires.
-    if let Some(listener) = self.engine.listener() {
-      let port = self.engine.port();
-      let sock = self.sockets.get_mut::<tcp::Socket>(listener);
-      if !sock.is_open() {
-        // Ignoring Err: `listen` fails only on port 0 (rejected at construction) or
-        // an already-open socket (excluded by the `!is_open()` guard); neither can
-        // occur here.
-        let _ = sock.listen(port);
-      }
+    // 2b. Re-arm a listener the inactivity timeout just reaped, routing it through
+    // the engine's occupancy ledger. When an unauthenticated half-open (a
+    // `SynReceived` whose final ACK is withheld) — or a stalled established exchange
+    // — sits idle past the socket timeout, step 1's stack tick drives that socket to
+    // `Closed`. The engine keeps its handle installed as the listener (it swaps the
+    // slot out only on a completed accept, and never re-arms a socket the link layer
+    // closed underneath it), so without this the single direct-smoltcp listener
+    // would stay `Closed` and the node would accept no further inbound reliable
+    // streams — turning the bounded reap back into a permanent black-hole.
+    //
+    // `rearm_reaped_listener` expresses the reap as an occupancy RETIRE + REACQUIRE
+    // (abort → `Aborting` → the reap frees it once the RST egress is acknowledged →
+    // re-`listen` a fresh occupancy), NOT a raw in-place re-listen. That is what
+    // closes #161 for the listener too: the reaping stack tick already emitted
+    // the abort RST (its tuple is cleared), so the retired occupancy is acknowledged
+    // and the listener re-armed THIS poll; re-`listen`ing in place a socket whose
+    // RST had NOT yet egressed would `reset()` it and suppress that RST. A socket
+    // mid-handshake (`SynReceived`, still `is_open()`) or a healthy `Listen` is left
+    // untouched. This is the smoltcp analog of the per-slot self-heal the embassy-net
+    // worker performs after its own `set_timeout` fires.
+    {
+      let sockets = RefCell::new(&mut self.sockets);
+      let mut stream = SmoltcpStream::new(&mut self.iface, &sockets);
+      self.engine.rearm_reaped_listener(now, &mut stream);
     }
 
     // 3. Fold the smoltcp stack's next scheduled event into the engine's returned
