@@ -1570,46 +1570,52 @@ where
   /// exchange deadline, a dial/label/encryption failure) is signalled separately by
   /// `StreamAction::Abort` → `abort_exchange`, which discards rather than drains. The
   /// connection is removed (dropping ALL of its per-exchange state at once — the
-  /// parked `out` bytes, the deferred `fin_pending` FIN, and the `eof_delivered`
-  /// flag) ONLY on a path that completes the teardown this tick; a graceful close
-  /// with bytes still to deliver is instead deferred (see the drain branch below).
-  /// The socket (if one was assigned) is handled by its TCP state:
+  /// parked `out` bytes, the deferred `fin_pending` FIN, and the `eof_delivered` /
+  /// `error_delivered` flags) ONLY on a path that completes the teardown this tick; a
+  /// graceful close with bytes still to deliver is instead deferred (see the drain
+  /// branch below). Every terminal path routes the socket through the occupancy ledger
+  /// ([`retire`](Self::retire)), never straight to the pool, so a slot rejoins `pool`
+  /// only once the driver acknowledges its teardown. The branch is chosen by the
+  /// socket's ESTABLISHMENT (`is_established`), NOT its writability (`may_send`): an
+  /// established connection under full outbound-ring backpressure reads `!may_send` yet
+  /// must still DRAIN gracefully, never RST. The cases:
   ///
   /// - `!is_open()` (Closed / TimeWait) — both FINs already exchanged (the clean
   ///   `BothClosed` case where our graceful FIN went out in `flush_pending_shutdowns`
-  ///   and the peer's FIN was pumped in): remove the connection and return the handle
-  ///   straight to the pool, no close handshake left to wait on.
+  ///   and the peer's FIN was pumped in), or the socket was already aborted: remove the
+  ///   connection and retire the handle (`Aborting` — the teardown is already terminal,
+  ///   so no graceful FIN drain remains to wait on). `retire`'s immediate completion
+  ///   check frees a synchronous driver's already-closed socket this tick.
   /// - `is_open()` after a graceful half-close (the connection was in
   ///   [`ConnState::HalfClosed`]): our FIN is already in flight, so `out` can no
-  ///   longer be flushed (the tx half is closed). Remove the connection and park the
-  ///   handle in `closing` with a `now + close_timeout` deadline; the reap pass
-  ///   reclaims it once it reaches Closed, or force-`abort()`s it at the deadline so a
-  ///   vanished peer cannot leak the socket.
-  /// - send-capable (`Established` / `CloseWait`) with outbound bytes still
-  ///   undelivered (`!out.is_empty()` OR `send_queue() != 0`) — a push/pull reply (or
-  ///   request) larger than the tx ring whose remainder is parked in `out` from
-  ///   partial-write backpressure, or still in the tx ring awaiting ACK. Issuing the
-  ///   FIN now would truncate it: `close()` only FINs after the bytes already IN the
-  ///   tx ring, never the remainder still in `out`, and an `abort()` would RST over a
-  ///   partial frame — collapsing the reliable push/pull to a gossip-only sync (or
-  ///   losing the reply entirely). Instead transition the connection to
-  ///   [`ConnState::Closing`] with a `now + close_timeout` deadline and KEEP it
-  ///   mapped, so `pump_outbound_reliable` keeps flushing `out` into the tx ring;
-  ///   `flush_closing` emits the terminal FIN and detaches the socket only once `out`
-  ///   is empty and the tx ring is fully acknowledged, or force-aborts at the deadline
-  ///   if the peer never drains it.
-  /// - send-capable with nothing left to deliver (`out` empty AND `send_queue() == 0`)
+  ///   longer be flushed (the tx half is closed). Remove the connection and retire the
+  ///   handle (`Draining`) with a `now + close_timeout` deadline; the reap pass
+  ///   reclaims it once its teardown is acknowledged, or force-`abort()`s it at the
+  ///   deadline so a peer that vanished mid-FIN cannot leak the socket.
+  /// - established with outbound bytes still undelivered (`!out.is_empty()` OR
+  ///   `send_queue() != 0`) — a push/pull reply (or request) larger than the tx ring
+  ///   whose remainder is parked in `out` from partial-write backpressure (or a full
+  ///   ring), or still in the tx ring awaiting ACK. Issuing the FIN now would truncate
+  ///   it: `close()` only FINs after the bytes already IN the tx ring, never the
+  ///   remainder still in `out`, and an `abort()` would RST over a partial frame —
+  ///   collapsing the reliable push/pull to a gossip-only sync (or losing the reply
+  ///   entirely). Instead transition the connection to [`ConnState::Closing`] with a
+  ///   `now + close_timeout` deadline (set ONCE — a HARD CAP, never re-armed) and KEEP
+  ///   it mapped, so `pump_outbound_reliable` keeps flushing `out` into the tx ring;
+  ///   `flush_closing` emits the terminal FIN and retires the socket only once `out` is
+  ///   empty and the tx ring is fully acknowledged, or force-aborts at the deadline if
+  ///   the peer never drains it.
+  /// - established with nothing left to deliver (`out` empty AND `send_queue() == 0`)
   ///   — an acceptor in `CloseWait` whose reply already reached the wire, or an
   ///   `Established` one-shot teardown with an empty tx ring. There is nothing to
   ///   drain: emit the graceful FIN immediately (`close()` → LastAck / FinWait1,
-  ///   giving the peer a clean EOF so its initiator commits the response) and park the
-  ///   handle in `closing` for the reap pass.
-  /// - any other `is_open()` state with no prior half-close (an abrupt `Close` — a
-  ///   failed dial, an admission-rejected exchange, a never-promoted bridge in
-  ///   SynSent): `abort()` (TCP RST) sets the state to Closed in one step, so the
-  ///   handle returns to the pool at once with no close handshake and the failed
-  ///   exchange's stale tx bytes are discarded rather than flushed — there is nothing
-  ///   to deliver over a connection the peer never established.
+  ///   giving the peer a clean EOF so its initiator commits the response) and retire
+  ///   the handle (`Draining`) for the reap pass.
+  /// - never established (an abrupt `Close` over a `Dialing` socket still in SynSent
+  ///   that the peer never established): `abort()` (TCP RST) sets the state to Closed
+  ///   in one step; retire the handle (`Aborting`), freed once the RST egress is
+  ///   acknowledged, and the stale tx bytes are discarded rather than flushed — there
+  ///   is nothing to deliver over a connection the peer never established.
   ///
   /// A connection still in `PendingDial` (its bridge timed out before a slot freed)
   /// has no socket: removing it is the whole teardown, so a retired exchange is never
@@ -1642,19 +1648,26 @@ where
     let was_half_closed = conn.state == ConnState::HalfClosed;
     let out_pending = !conn.out_is_empty();
 
-    // Read the socket's send/recv capability and tx-ring depth once.
+    // Branch on ESTABLISHMENT, not writability. `is_established` is "the handshake
+    // completed" regardless of tx-ring room; `may_send` is `established && writable`,
+    // so an established connection under FULL outbound-ring backpressure reads
+    // `!may_send` and would wrongly fall through to the abrupt-RST branch below. A
+    // graceful close of an established connection must DRAIN, never RST under ordinary
+    // backpressure — the egress pump keeps flushing `out` into the tx ring as it frees.
     let is_open = stream.is_open(c);
-    let may_send = stream.may_send(c);
+    let established = stream.is_established(c);
     let tx_unacked = stream.send_queue(c);
 
     let g = self.current_slot_gen(c);
     if !is_open {
-      // `!is_open()` is exactly `Closed | TimeWait`: both FINs already exchanged (or
-      // the socket was already aborted). Retire (Draining) and run the immediate
-      // completion check — a clean close is acknowledged at once and freed this
-      // tick, no close handshake left to wait on.
+      // `!is_open()` is exactly `Closed | TimeWait`: both FINs already exchanged, or
+      // the socket was already aborted. The teardown is already terminal — there is no
+      // graceful FIN drain still in flight to wait on (that is the `was_half_closed`
+      // case below) — so retire it as `Aborting`, excluded from the graceful-drain
+      // count, and run the immediate completion check; a synchronous driver
+      // acknowledges the already-closed socket at once and frees the slot this tick.
       self.plane.connections.remove(&eid);
-      self.retire(c, g, RetirePhase::Draining, now, stream);
+      self.retire(c, g, RetirePhase::Aborting, now, stream);
     } else if was_half_closed {
       // Our graceful FIN is in flight but the peer has not finished the close. Do NOT
       // close()/abort() now: the FIN was already sent and the tx half is closed, so
@@ -1663,30 +1676,29 @@ where
       // acknowledged, or force-aborts it at the deadline if the peer vanished mid-FIN.
       self.plane.connections.remove(&eid);
       self.retire(c, g, RetirePhase::Draining, now, stream);
-    } else if may_send && (out_pending || tx_unacked != 0) {
-      // Send-capable (Established / CloseWait) with outbound bytes the peer has NOT yet
-      // received — parked in `out` (partial-write backpressure) and/or still
-      // unacknowledged in the tx ring. FIN-ing now truncates the reply: `close()`
-      // flushes only what is already in the tx ring, never the `out` remainder, and
-      // `abort()` would RST over a partial frame. Defer the close: transition to
-      // `Closing` (KEEP the connection mapped) with a deadline so
-      // `pump_outbound_reliable` keeps draining `out` into the tx ring; the FIN + socket
-      // detach happen in `flush_closing` once everything is delivered, or the deadline
-      // force-aborts a permanently-backpressured / vanished peer.
+    } else if established && (out_pending || tx_unacked != 0) {
+      // Established (send half open, possibly CloseWait) with outbound bytes the peer
+      // has NOT yet received — parked in `out` (partial-write backpressure, INCLUDING a
+      // full outbound ring that reads `!may_send`) and/or still unacknowledged in the tx
+      // ring. FIN-ing now truncates the reply: `close()` flushes only what is already in
+      // the tx ring, never the `out` remainder, and `abort()` would RST over a partial
+      // frame. Defer the close: transition to `Closing` (KEEP the connection mapped) with
+      // a deadline so `pump_outbound_reliable` keeps draining `out` into the tx ring as it
+      // frees; the FIN + socket detach happen in `flush_closing` once everything is
+      // delivered, or the deadline force-aborts a permanently-backpressured / vanished
+      // peer.
       if let Some(conn) = self.plane.connections.get_mut(&eid) {
         conn.state = ConnState::Closing;
+        // Set the close deadline ONCE, here at `Closing` entry; `flush_closing` never
+        // re-arms it, so `close_timeout` is a HARD CAP on the pre-FIN drain — no peer
+        // behaviour, including a progressing ACK trickle, can extend the window.
         conn.close_deadline = Some(now + self.cfg.close_timeout);
-        // Seed the drain-progress mark with the current undelivered count (parked `out`
-        // + unacked tx ring). `flush_closing` re-arms `close_deadline` each tick the
-        // count shrinks, so `close_timeout` bounds a STALL, not the total drain — a
-        // slow-but-progressing peer is never truncated.
-        conn.close_drain_mark = conn.out_bytes() + tx_unacked;
         // A still-pending Shutdown FIN is subsumed by the Closing drain's own terminal
         // FIN; clear it so `flush_pending_shutdowns` does not also act.
         conn.fin_pending = false;
       }
-    } else if may_send {
-      // Send-capable with nothing left to deliver (`out` empty AND tx ring fully
+    } else if established {
+      // Established with nothing left to deliver (`out` empty AND tx ring fully
       // acknowledged): an acceptor whose reply already reached the wire, or an
       // Established one-shot teardown with an empty ring. Emit the graceful FIN
       // immediately — `close()` (CloseWait → LastAck, Established → FinWait1) sends our
@@ -1696,14 +1708,14 @@ where
       stream.close(c, g);
       self.retire(c, g, RetirePhase::Draining, now, stream);
     } else {
-      // Abrupt teardown: a graceful `Close` whose socket is not send-capable and never
-      // half-closed (e.g. a connection still in SynSent / never promoted). FAILED
-      // exchanges no longer reach here — they arrive via `StreamAction::Abort` →
-      // `abort_exchange` — but a graceful `Close` over a socket the peer never
-      // established is handled defensively the same way: RST and retire. `abort()`
-      // moves the socket to Closed and the reap frees the slot once the RST egress is
-      // acknowledged; any stale tx bytes are discarded rather than flushed — there is
-      // nothing to deliver over a connection the peer never established.
+      // Abrupt teardown: a graceful `Close` whose socket never established (still in
+      // SynSent / never promoted — a `Dialing` connection). FAILED exchanges no longer
+      // reach here — they arrive via `StreamAction::Abort` → `abort_exchange` — but a
+      // graceful `Close` over a socket the peer never established is handled defensively
+      // the same way: RST and retire. `abort()` moves the socket to Closed and the reap
+      // frees the slot once the RST egress is acknowledged; any stale tx bytes are
+      // discarded rather than flushed — there is nothing to deliver over a connection the
+      // peer never established.
       self.plane.connections.remove(&eid);
       stream.abort(c, g);
       self.retire(c, g, RetirePhase::Aborting, now, stream);
@@ -1725,34 +1737,37 @@ where
   ///   (`send_queue() == 0`): every byte reached the peer. Emit the terminal FIN
   ///   (`close()`, closing only the transmit half — CloseWait → LastAck or Established
   ///   → FinWait1) so the peer reads a clean EOF and commits the full response, remove
-  ///   the `Connection` (dropping its remaining per-exchange state), and park the
-  ///   detached handle in `closing` with a fresh `now + close_timeout` deadline for the
-  ///   reap pass to reclaim once the close completes.
+  ///   the `Connection` (dropping its remaining per-exchange state), and retire the
+  ///   detached handle (`Draining`) for the reap pass to reclaim once the close
+  ///   completes.
   /// - **Deadline elapsed** — `now >= close_deadline` while bytes are still
-  ///   undelivered (the peer stopped draining the tx ring: permanent backpressure or a
-  ///   vanished peer): force-`abort()` the socket (RST → Closed), remove the
-  ///   `Connection`, and return the handle straight to the pool. The drain is
-  ///   best-effort and bounded; it must never wedge a pooled socket.
+  ///   undelivered (the peer stopped fully draining the tx ring: permanent
+  ///   backpressure, a vanished peer, or an indefinite ACK trickle): force-`abort()`
+  ///   the socket (RST → Closed), remove the `Connection`, and retire the handle
+  ///   (`Aborting`). The drain is best-effort and hard-bounded; it must never wedge a
+  ///   pooled socket. `close_deadline` was set ONCE at `Closing` entry (in `teardown`)
+  ///   and is NEVER re-armed here, so `close_timeout` caps the WHOLE drain — a peer
+  ///   that keeps trickling bytes below the deadline cannot extend it.
   /// - Otherwise the connection is still draining within its deadline — leave it
   ///   mapped for a later tick.
   ///
   /// The `Closing` deadline is folded into `pump()`'s returned wakeup (alongside the
-  /// `closing`-map deadlines) so a deadline-driven caller wakes in time to run this
+  /// `retiring`-ledger deadlines) so a deadline-driven caller wakes in time to run this
   /// abort backstop by `close_timeout`.
   fn flush_closing<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
   {
     // Classify each Closing connection without holding the `connections` borrow across
-    // the mutating socket / pool / retiring-ledger calls below.
+    // the mutating socket / pool / retiring-ledger calls below. Exactly two terminal
+    // outcomes — the drain completed, or its hard-cap deadline elapsed; a connection
+    // still draining within its (fixed) deadline is left mapped for a later tick.
     enum ClosingAction<C> {
-      /// Drained: emit the FIN and retire (Draining) the handle.
+      /// Fully drained: emit the FIN and retire (Draining) the handle.
       Fin(C),
-      /// No drain progress for the full `close_timeout`: abort and retire.
+      /// The `close_timeout` hard cap elapsed with bytes still undelivered: abort and
+      /// retire.
       Abort(C),
-      /// The drain made progress this tick (the peer acked bytes): re-arm the idle
-      /// deadline with the new undelivered mark.
-      Progress(usize),
     }
 
     let mut actions: MediumVec<(ExchangeId, ClosingAction<C>)> = MediumVec::new();
@@ -1764,21 +1779,19 @@ where
       // CloseWait before the close); skip defensively if not.
       let Some(c) = conn.socket else { continue };
       // Undelivered = bytes still parked in `out` plus bytes in the tx ring the peer has
-      // not yet acked. It only ever shrinks during a close (no new bytes are queued once
-      // Closing), and shrinks ONLY when the peer acks — so a shrink is the peer-liveness
-      // signal. `close_timeout` therefore bounds the time since the peer last acked (a
-      // stall), not the total drain duration: a slow-but-progressing peer re-arms the
-      // deadline every tick it acks.
+      // not yet acked. `close_deadline` was set ONCE at `Closing` entry and is never
+      // re-armed here, so `close_timeout` is a HARD CAP on the whole pre-FIN drain: no
+      // peer behaviour — not even a progressing ACK trickle — can extend the window.
       let undelivered = conn.out_bytes() + stream.send_queue(c);
       if undelivered == 0 {
         actions.push((eid, ClosingAction::Fin(c)));
-      } else if undelivered < conn.close_drain_mark {
-        actions.push((eid, ClosingAction::Progress(undelivered)));
       } else if conn.close_deadline.is_some_and(|d| now >= d) {
-        // No progress for the full `close_timeout`: the peer stalled / vanished. Give up
-        // on the remainder and reclaim the socket so the pool cannot wedge.
+        // The drain did not complete within `close_timeout`: the peer stalled, vanished,
+        // or is trickling ACKs indefinitely. Give up on the remainder and reclaim the
+        // socket so the pool cannot wedge.
         actions.push((eid, ClosingAction::Abort(c)));
       }
+      // Otherwise still draining within the deadline: leave it mapped for a later tick.
     }
 
     for (eid, outcome) in actions {
@@ -1792,20 +1805,12 @@ where
           self.retire(c, g, RetirePhase::Draining, now, stream);
         }
         ClosingAction::Abort(c) => {
-          // Idle deadline elapsed: RST and retire (Aborting); the reap frees the slot
-          // once the RST egress is acknowledged.
+          // Hard-cap deadline elapsed: RST and retire (Aborting); the reap frees the
+          // slot once the RST egress is acknowledged.
           self.plane.connections.remove(&eid);
           let g = self.current_slot_gen(c);
           stream.abort(c, g);
           self.retire(c, g, RetirePhase::Aborting, now, stream);
-        }
-        ClosingAction::Progress(mark) => {
-          // Re-arm the idle deadline from `now`; keep the connection mapped so the egress
-          // pump keeps draining.
-          if let Some(conn) = self.plane.connections.get_mut(&eid) {
-            conn.close_drain_mark = mark;
-            conn.close_deadline = Some(now + self.cfg.close_timeout);
-          }
         }
       }
     }
@@ -1932,13 +1937,17 @@ where
   /// `Established`.
   ///
   /// A connection is created `Dialing` (slot assigned, SynSent) and stays so while the
-  /// three-way handshake is in flight. Once the socket can send (`may_send()` —
-  /// Established, and also CloseWait if the peer FIN'd before we did), the connection is
-  /// writable: its parked `out` flushes and a deferred FIN may fire. Recording that as
+  /// three-way handshake is in flight. Once the handshake completes (`is_established()`
+  /// — Established, and also CloseWait if the peer FIN'd before we did), its parked
+  /// `out` flushes and a deferred FIN may fire. Recording that as
   /// `ConnState::Established` makes the FIN gate in `flush_pending_shutdowns` a precise
   /// `state == Established` check rather than re-deriving readiness from the socket, and
-  /// keeps `ConnState` an honest reflection of the lifecycle. `PendingDial` connections
-  /// (no socket) and ones already `Established`/`HalfClosed` are left as-is.
+  /// keeps `ConnState` an honest reflection of the lifecycle. Promotion keys on
+  /// ESTABLISHMENT, not writability (`may_send`): a fresh dial's tx ring is empty at the
+  /// instant it establishes, so `is_established` and `may_send` coincide here — but
+  /// `is_established` records the lifecycle fact directly and cannot be masked by a
+  /// (here impossible) full ring. `PendingDial` connections (no socket) and ones already
+  /// `Established`/`HalfClosed` are left as-is.
   fn promote_established<S>(&mut self, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
@@ -1949,7 +1958,7 @@ where
       .iter()
       .filter(|(_, c)| c.state == ConnState::Dialing)
       .filter_map(|(&eid, c)| c.socket.map(|h| (eid, h)))
-      .filter(|&(_, h)| stream.may_send(h))
+      .filter(|&(_, h)| stream.is_established(h))
       .map(|(eid, _)| eid)
       .collect();
     for eid in promote {
@@ -2009,9 +2018,12 @@ where
         c.fin_pending && c.state == ConnState::Established && c.out_is_empty()
       })
       .filter_map(|(&eid, c)| c.socket.map(|h| (eid, h)))
-      // …and the socket's tx ring is fully drained and acknowledged, so every push/pull
-      // byte reached the peer before the FIN.
-      .filter(|&(_, h)| stream.may_send(h) && stream.send_queue(h) == 0)
+      // …and the socket is established with its tx ring fully drained and acknowledged,
+      // so every push/pull byte reached the peer before the FIN. The gate keys on
+      // `is_established`, not `may_send`: paired with `send_queue(h) == 0` (a fully-acked
+      // ring, so it has room) the two coincide, but `is_established` states the
+      // handshake-complete requirement directly rather than inferring it from writability.
+      .filter(|&(_, h)| stream.is_established(h) && stream.send_queue(h) == 0)
       .collect();
 
     for (eid, c) in ready {
@@ -2698,6 +2710,21 @@ where
   /// `Connection::eof_delivered` gates it so the bridge FSM receives a single
   /// half-close signal.
   ///
+  /// A socket that instead died WITHOUT a graceful peer FIN — a received RST, or an
+  /// async driver's worker resetting the slot — is a transport FAULT, distinct from the
+  /// clean EOF above. On a no-data read where `recv_finished` is false but
+  /// [`StreamIo::is_open`] has gone false, this surfaces the fault to the machine
+  /// exactly once (gated by `Connection::error_delivered`): a `Dialing` connection whose
+  /// dial never established routes to [`StreamEndpoint::handle_dial_failed`], and an
+  /// established exchange to [`StreamEndpoint::handle_transport_error`] — NEVER the
+  /// benign `handle_transport_data` EOF, which the FSM would map to a *successful*
+  /// one-way `UserMessage` completion. The one exception is the benign completed tail
+  /// (`eof_delivered` already set, `out` empty, tx ring fully acked): the `!is_open` of a
+  /// cleanly-finished exchange whose own `BothClosed → Close` is already due, which must
+  /// NOT be failed. Surfacing the fault here fails the owning bridge THIS pump, so the
+  /// same pump's `drain_stream_actions` reaps the resulting `StreamAction::Abort` rather
+  /// than the exchange lingering until its stream/bridge deadline.
+  ///
   /// A connection still in `PendingDial` has no slot, so it is skipped (there is
   /// nothing to receive on a dial that has not even been issued).
   ///
@@ -2728,6 +2755,16 @@ where
       .filter_map(|(&eid, c)| c.socket.map(|h| (eid, h)))
       .collect();
 
+    // How a socket that died WITHOUT a graceful peer FIN is surfaced to the machine —
+    // which entry point depends on whether the dial ever established. Classified under a
+    // short `connections` borrow, then dispatched once that borrow is released.
+    enum TransportFault {
+      /// A `Dialing` socket died before its handshake completed: an async dial failure.
+      DialFailed,
+      /// An established exchange's socket was reset mid-flight: connection lost.
+      Lost,
+    }
+
     for (eid, c) in pairs {
       // Drain the socket: read all buffered bytes, then observe a drained peer FIN.
       //
@@ -2747,14 +2784,60 @@ where
               .handle_transport_data(eid, &buf[..n], false, now);
           }
           _ => {
-            // No data this tick (`Some(0)` or `None`). Deliver the peer FIN exactly once
-            // when the receive half is gracefully closed and drained.
+            // No data this tick (`Some(0)` or `None`). Two non-data conditions matter:
+            // a graceful peer FIN (deliver the one-shot EOF), or a socket that died
+            // WITHOUT one — a RST or an async worker's reset — which is a transport FAULT
+            // to surface once so the owning bridge fails THIS pump instead of lingering
+            // until its ~stream-timeout deadline.
             if stream.recv_finished(c) {
+              // Peer graceful FIN with the rx buffer drained: deliver exactly one EOF.
               if let Some(conn) = self.plane.connections.get_mut(&eid) {
                 if !conn.eof_delivered {
                   conn.eof_delivered = true;
                   self.endpoint.handle_transport_data(eid, &[], true, now);
                 }
+              }
+            } else if !stream.is_open(c) {
+              // The socket is closed but the peer did NOT gracefully FIN (`recv_finished`
+              // is false): a received RST, or an async driver's worker resetting the slot.
+              // Surface it to the machine as a transport FAULT — NOT a benign
+              // `handle_transport_data` EOF, which the FSM maps to a *successful* one-way
+              // UserMessage completion — exactly once, gated by the `error_delivered`
+              // latch. The failed bridge's next tick queues `StreamAction::Abort`, which
+              // `drain_stream_actions` reaps in this SAME pump (removing the connection and
+              // retiring the slot via the occupancy ledger), so teardown stays
+              // machine-directed with no driver-side compensation. Classify under a short
+              // borrow, then dispatch once the `connections` borrow is released.
+              let fault = if let Some(conn) = self.plane.connections.get_mut(&eid) {
+                if conn.error_delivered {
+                  // Already surfaced for this connection: one-shot.
+                  None
+                } else {
+                  conn.error_delivered = true;
+                  if conn.state == ConnState::Dialing {
+                    // The dial never established: a genuine async dial failure. Feeding it
+                    // as a benign EOF would FALSELY complete a UserMessage send as success.
+                    Some(TransportFault::DialFailed)
+                  } else if conn.eof_delivered && conn.out_is_empty() && stream.send_queue(c) == 0 {
+                    // Benign completed tail: the peer's EOF was already delivered, `out` is
+                    // empty, and the tx ring is fully acked — the LastAck→Closed window of a
+                    // cleanly-finished exchange whose own `BothClosed → Close` is already
+                    // due. The socket going `!is_open` here is the normal end of a
+                    // SUCCESSFUL exchange, so do NOT fail it; the machine's own Close reaps
+                    // it.
+                    None
+                  } else {
+                    // An established exchange lost its transport mid-flight.
+                    Some(TransportFault::Lost)
+                  }
+                }
+              } else {
+                None
+              };
+              match fault {
+                Some(TransportFault::DialFailed) => self.endpoint.handle_dial_failed(eid, now),
+                Some(TransportFault::Lost) => self.endpoint.handle_transport_error(eid, now),
+                None => {}
               }
             }
             break;

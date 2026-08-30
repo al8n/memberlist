@@ -976,6 +976,11 @@ struct SockState {
   /// `send` of more than this many bytes leaves the remainder parked in the
   /// connection's `out` queue. `usize::MAX` accepts the whole buffer.
   send_cap: usize,
+  /// The outbound ring is full, so the socket is momentarily NOT writable even
+  /// though it is established: `may_send` (writability-gated) reads false while
+  /// `is_established` stays true. Models the F1 backpressure divergence. Off by
+  /// default, so existing tests keep `may_send == is_established`.
+  ring_full: bool,
 }
 
 impl SockState {
@@ -988,6 +993,7 @@ impl SockState {
       tx_unacked: 0,
       accepted: None,
       send_cap: usize::MAX,
+      ring_full: false,
     }
   }
 }
@@ -1099,7 +1105,10 @@ impl StreamIo for ProgRel {
 
   fn may_send(&self, c: u32) -> bool {
     let s = self.sock(c);
-    s.established && s.open
+    // Writability-gated: established AND the outbound ring has room. `ring_full`
+    // models an established connection whose tx ring is momentarily full, so
+    // `may_send` reads false while `is_established` stays true — the F1 divergence.
+    s.established && s.open && !s.ring_full
   }
 
   fn may_recv(&self, c: u32) -> bool {
@@ -2731,9 +2740,9 @@ fn send_many_to_cidr_blocked_destination_emits_no_datagram() {
 /// The drain-before-close path: B accepts a join push/pull but its reply tx is
 /// held unacknowledged when its bridge gracefully closes, so `teardown` parks the
 /// connection in `Closing` (KEEPING it mapped) instead of FIN-ing immediately;
-/// `flush_closing` then drains it — re-arming on partial progress and finally
-/// emitting the terminal FIN once the tx is fully acked, reclaiming the slot. A
-/// graceful close must never truncate an unacknowledged reply.
+/// `flush_closing` keeps it mapped while it drains and finally emits the terminal
+/// FIN once the tx is fully acked, reclaiming the slot. A graceful close must never
+/// truncate an unacknowledged reply.
 #[test]
 fn closing_drain_defers_fin_until_tx_acked_then_reclaims_slot() {
   let mut link = LinkPair::new(&[10, 11], &[20, 21]);
@@ -2768,8 +2777,9 @@ fn closing_drain_defers_fin_until_tx_acked_then_reclaims_slot() {
     "the draining connection still pins its slot before the tx is acked"
   );
 
-  // Partially ack: the undelivered count shrinks, so `flush_closing` takes the
-  // Progress branch (re-arm) and keeps the connection mapped.
+  // Partially ack: the undelivered count shrinks but is still non-zero and the
+  // (fixed, never re-armed) deadline has not elapsed, so `flush_closing` leaves the
+  // connection mapped and keeps draining.
   link.ack_b(1);
   link.step(now);
   while link.b.poll_event().is_some() {}
@@ -3365,5 +3375,455 @@ fn a_never_activated_occupancy_round_trips_through_the_ledger() {
     engine.pool_free_count(),
     1,
     "the reclaimed slot is back in the pool"
+  );
+}
+
+// --- #159 F1/F2/F6: engine teardown / close-deadline / inbound-fault policy ---
+
+/// Drive an outbound reliable user-message to `Established` on slot 0 (listener on
+/// slot 1), returning the engine, the mock, the clock, and the exchange's
+/// `ExchangeId`. The tx ring is held non-empty (`tx_unacked = 8`) so the machine's
+/// write-half Shutdown FIN stays withheld — keeping the connection `Established`
+/// (not `HalfClosed`) so a caller can drive the teardown / drain / inbound-fault
+/// paths from a known state.
+fn established_outbound(
+  payload: &'static [u8],
+) -> (
+  Engine<SmolStr, u32>,
+  ProgRel,
+  Instant,
+  memberlist_proto::streams::ExchangeId,
+) {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(0);
+  engine.set_listener(1);
+  let mut stream = ProgRel::new(&[0, 1]);
+
+  let to = node_addr(7100);
+  engine
+    .send_reliable(to, bytes::Bytes::from_static(payload), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  // Tick 1: Connect → dial slot 0 (SynSent).
+  engine.pump(now, &mut gossip, &mut stream);
+  // Complete the handshake but hold the tx ring non-empty, so the deferred-FIN gate
+  // (`send_queue == 0`) never fires and the connection stays Established.
+  stream.sock_mut(0).established = true;
+  stream.sock_mut(0).tx_unacked = 8;
+  // Tick 2: promote Dialing → Established; the request bytes flush.
+  engine.pump(now, &mut gossip, &mut stream);
+
+  let eid = *engine
+    .plane_mut()
+    .connections
+    .keys()
+    .next()
+    .expect("exactly one outbound connection");
+  assert_eq!(
+    engine.plane_mut().connections.get(&eid).map(|c| c.state),
+    Some(ConnState::Established),
+    "the exchange must reach Established with its FIN withheld (held tx)"
+  );
+  (engine, stream, now, eid)
+}
+
+/// F1: a graceful `Close` of an ESTABLISHED connection under FULL outbound-ring
+/// backpressure (`may_send` false, `is_established` true) must DRAIN — enter
+/// `Closing` and later emit its FIN once the ring frees — never RST. Before the
+/// fix the `!may_send` gate sent it down the abrupt-abort branch.
+#[test]
+fn backpressured_established_close_drains_not_aborts() {
+  let (mut engine, mut stream, now, eid) = established_outbound(b"reply-in-flight");
+
+  // Model a FULL outbound ring: the socket is established but not writable, with
+  // bytes still unacknowledged in the tx ring.
+  stream.sock_mut(0).ring_full = true;
+  assert!(
+    !StreamIo::may_send(&stream, 0) && StreamIo::is_established(&stream, 0),
+    "the socket must be established but NOT writable (the F1 divergence)"
+  );
+
+  // The graceful Close arrives now. With the fix it DRAINS (Closing), not RST.
+  engine.teardown(eid, now, &mut stream);
+
+  assert!(
+    !stream.aborted.contains(&0),
+    "a backpressured established close must NOT abort/RST"
+  );
+  {
+    let conn = engine
+      .plane_mut()
+      .connections
+      .get(&eid)
+      .expect("the connection stays mapped to drain");
+    assert_eq!(
+      conn.state,
+      ConnState::Closing,
+      "a backpressured established close must enter Closing to drain, not abort"
+    );
+    assert!(
+      conn.close_deadline.is_some(),
+      "the Closing drain arms its hard-cap deadline"
+    );
+  }
+
+  // The ring frees and the tx drains: `flush_closing` now emits the terminal FIN.
+  stream.sock_mut(0).ring_full = false;
+  stream.sock_mut(0).tx_unacked = 0;
+  engine.flush_closing(now, &mut stream);
+  assert!(
+    stream.closed.contains(&0),
+    "once drained, the graceful close emits a FIN (close), never an abort"
+  );
+  assert!(!stream.aborted.contains(&0), "the drained close never RSTs");
+  assert!(
+    engine.plane_mut().connections.get(&eid).is_none(),
+    "the drained connection is removed after its terminal FIN"
+  );
+}
+
+/// F1 control: a never-established (`Dialing`) connection whose graceful `Close`
+/// arrives still ABORTS (the peer never established a wire, so there is nothing to
+/// drain). This is the abrupt-abort branch the F1 divergence must NOT capture.
+#[test]
+fn unestablished_dialing_close_aborts_not_drains() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(0);
+  engine.set_listener(1);
+  let mut stream = ProgRel::new(&[0, 1]);
+
+  let to = node_addr(7101);
+  engine
+    .send_reliable(to, bytes::Bytes::from_static(b"never-established"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  // One pump: Connect dials slot 0 (the socket opens, SynSent) but the handshake
+  // never completes — the connection stays `Dialing`.
+  engine.pump(now, &mut gossip, &mut stream);
+  let eid = *engine
+    .plane_mut()
+    .connections
+    .keys()
+    .next()
+    .expect("one dialing connection");
+  assert_eq!(
+    engine.plane_mut().connections.get(&eid).map(|c| c.state),
+    Some(ConnState::Dialing),
+    "the connection must still be Dialing (handshake incomplete)"
+  );
+
+  engine.teardown(eid, now, &mut stream);
+  assert!(
+    stream.aborted.contains(&0),
+    "a never-established close aborts (RST), it does not drain"
+  );
+  assert!(
+    !stream.closed.contains(&0),
+    "a never-established close never emits a graceful FIN"
+  );
+  assert!(
+    engine.plane_mut().connections.get(&eid).is_none(),
+    "the aborted connection is removed"
+  );
+}
+
+/// F2: an ACK trickle (undelivered bytes shrinking by 1 each tick) must NOT extend
+/// the `Closing` drain deadline. The deadline is set ONCE at `Closing` entry and
+/// never re-armed, so a permanently-trickling peer is force-aborted at the ORIGINAL
+/// deadline rather than deferring the close forever.
+#[test]
+fn ack_trickle_cannot_extend_closing_past_one_window() {
+  let (mut engine, mut stream, now, eid) = established_outbound(b"held-reply");
+
+  // Park a known undelivered count and take the graceful close into `Closing`.
+  stream.sock_mut(0).tx_unacked = 5;
+  engine.teardown(eid, now, &mut stream);
+  let deadline = engine
+    .plane_mut()
+    .connections
+    .get(&eid)
+    .expect("the connection parks in Closing")
+    .close_deadline
+    .expect("the Closing drain arms a deadline");
+
+  // Trickle: the peer acks 1 byte per tick. Each `flush_closing` at an advancing
+  // clock (still before the deadline) makes progress but must NOT re-arm the
+  // deadline — the fix removed the progress re-arm entirely.
+  let mut t = now;
+  for acked in 1..=4u32 {
+    t += Duration::from_secs(1);
+    stream.sock_mut(0).tx_unacked = 5 - acked as usize; // 4, 3, 2, 1
+    engine.flush_closing(t, &mut stream);
+    let d = engine
+      .plane_mut()
+      .connections
+      .get(&eid)
+      .expect("still draining within the deadline")
+      .close_deadline
+      .expect("deadline still present");
+    assert_eq!(
+      d, deadline,
+      "an ACK trickle must NOT re-arm the close deadline (hard cap)"
+    );
+  }
+
+  // One undelivered byte remains. Advance PAST the original deadline: the drain is
+  // force-aborted at that (never-extended) instant, proving the trickle bought no
+  // extra time.
+  let past = deadline + Duration::from_secs(1);
+  engine.flush_closing(past, &mut stream);
+  assert!(
+    stream.aborted.contains(&0),
+    "the still-draining connection is force-aborted at its ORIGINAL deadline"
+  );
+  assert!(
+    engine.plane_mut().connections.get(&eid).is_none(),
+    "the force-aborted Closing connection is removed"
+  );
+}
+
+/// F2: `close_deadline` is set exactly once at `Closing` entry and is never moved
+/// by a later `flush_closing` pass, even when the drain makes progress.
+#[test]
+fn close_deadline_set_once() {
+  let (mut engine, mut stream, now, eid) = established_outbound(b"reply");
+
+  stream.sock_mut(0).tx_unacked = 3;
+  engine.teardown(eid, now, &mut stream);
+  let deadline = engine
+    .plane_mut()
+    .connections
+    .get(&eid)
+    .expect("Closing")
+    .close_deadline
+    .expect("deadline set once at Closing entry");
+  assert_eq!(
+    deadline,
+    now + crate::DEFAULT_CLOSE_TIMEOUT,
+    "the deadline is now + close_timeout"
+  );
+
+  // A progress tick (undelivered shrinks) at a later clock must leave the deadline
+  // untouched.
+  stream.sock_mut(0).tx_unacked = 1;
+  engine.flush_closing(now + Duration::from_secs(3), &mut stream);
+  assert_eq!(
+    engine
+      .plane_mut()
+      .connections
+      .get(&eid)
+      .expect("still Closing")
+      .close_deadline,
+    Some(deadline),
+    "progress must not re-arm the deadline"
+  );
+}
+
+/// F6: a socket that dies mid-exchange (`!is_open`, no graceful FIN) is surfaced to
+/// the machine as a transport error THIS pump — the bridge fails, its `Abort`
+/// action is drained, and `abort_exchange` removes+retires the slot within the same
+/// pump — instead of the exchange lingering until its ~stream-timeout deadline.
+#[test]
+fn mid_exchange_rst_terminalizes_within_one_pump() {
+  use memberlist_proto::event::{Event, ExchangeKind, ExchangeStatus};
+
+  let (mut engine, mut stream, now, eid) = established_outbound(b"mid-exchange");
+  // Drain any setup events.
+  while engine.poll_event().is_some() {}
+
+  // A mid-exchange RST: the socket closes WITHOUT a graceful peer FIN.
+  stream.sock_mut(0).open = false; // is_open → false
+  // peer_fin stays false, so recv_finished is false — this is a fault, not an EOF.
+
+  // A SINGLE pump at the (un-advanced) clock: the stream deadline (now + 30s) has
+  // NOT elapsed, so the ONLY way the exchange fails this pump is the F6 fault path.
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  let mut failed = false;
+  while let Some(ev) = engine.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      if ec.kind() == ExchangeKind::UserMessage && ec.outcome() == ExchangeStatus::Failed {
+        failed = true;
+      }
+    }
+  }
+  assert!(
+    failed,
+    "a mid-exchange RST must fail the exchange within one pump, not at the stream deadline"
+  );
+  assert!(
+    engine.plane_mut().connections.get(&eid).is_none(),
+    "the failed exchange's connection is removed the same pump (abort_exchange)"
+  );
+  assert!(
+    stream.aborted.contains(&0),
+    "abort_exchange RST-resets the slot"
+  );
+  assert_eq!(
+    engine.pool_free_count() + engine.listener_present() as usize,
+    2,
+    "the reset slot is reclaimed, never leaked"
+  );
+}
+
+/// F6: a `Dialing` connection whose socket dies before the handshake completes
+/// (`!is_open`, never established) routes through `handle_dial_failed` — failing the
+/// exchange within one pump rather than reading a benign EOF as a false success.
+#[test]
+fn async_dial_failure_calls_handle_dial_failed() {
+  use memberlist_proto::event::{Event, ExchangeKind, ExchangeStatus};
+
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(0);
+  engine.set_listener(1);
+  let mut stream = ProgRel::new(&[0, 1]);
+
+  let to = node_addr(7102);
+  engine
+    .send_reliable(to, bytes::Bytes::from_static(b"dial-fails"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  // One pump: Connect dials slot 0 (opens, SynSent); the connection is `Dialing`.
+  engine.pump(now, &mut gossip, &mut stream);
+  let eid = *engine
+    .plane_mut()
+    .connections
+    .keys()
+    .next()
+    .expect("one dialing connection");
+  assert_eq!(
+    engine.plane_mut().connections.get(&eid).map(|c| c.state),
+    Some(ConnState::Dialing),
+    "the connection must be Dialing (handshake not yet complete)"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The async dial fails: the socket dies while still Dialing (never established).
+  stream.sock_mut(0).open = false;
+
+  // One pump: the F6 fault path routes a Dialing `!is_open` through
+  // `handle_dial_failed`, failing the exchange this pump.
+  engine.pump(now, &mut gossip, &mut stream);
+  let mut failed = false;
+  while let Some(ev) = engine.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      if ec.kind() == ExchangeKind::UserMessage && ec.outcome() == ExchangeStatus::Failed {
+        failed = true;
+      }
+    }
+  }
+  assert!(
+    failed,
+    "an async dial failure must fail the exchange within one pump (handle_dial_failed)"
+  );
+  assert!(
+    engine.plane_mut().connections.get(&eid).is_none(),
+    "the dial-failed exchange's connection is removed the same pump"
+  );
+}
+
+/// F6: the benign completed tail — the peer's EOF was already delivered, `out` is
+/// empty, and the tx ring is fully acked — must NOT be surfaced as a transport
+/// error even though the socket has gone `!is_open`. That `!is_open` is the normal
+/// LastAck→Closed end of a SUCCESSFUL exchange whose own `Close` is already due;
+/// failing it would falsely turn a success into a failure.
+#[test]
+fn benign_completed_tail_does_not_false_fail() {
+  use memberlist_proto::event::{Event, ExchangeStatus};
+
+  let (mut engine, mut stream, now, eid) = established_outbound(b"benign-tail");
+
+  // Put the connection into the benign completed-tail window: EOF already delivered,
+  // our FIN sent (HalfClosed, so not Dialing), `out` empty, tx ring fully acked.
+  {
+    let conn = engine
+      .plane_mut()
+      .connections
+      .get_mut(&eid)
+      .expect("the exchange connection");
+    conn.eof_delivered = true;
+    conn.state = ConnState::HalfClosed;
+    assert!(
+      conn.out_is_empty(),
+      "the benign tail has no parked out bytes"
+    );
+  }
+  stream.sock_mut(0).tx_unacked = 0; // send_queue == 0
+  stream.sock_mut(0).open = false; // !is_open
+  stream.sock_mut(0).peer_fin = false; // recv_finished is false (past FIN-wait, Closed)
+  while engine.poll_event().is_some() {}
+
+  // The inbound pump observes `!is_open` on the still-mapped connection but must
+  // recognise the benign tail and NOT surface a transport error.
+  engine.pump_inbound_reliable(now, &mut stream);
+
+  let mut any_failed = false;
+  while let Some(ev) = engine.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      if ec.outcome() == ExchangeStatus::Failed {
+        any_failed = true;
+      }
+    }
+  }
+  assert!(
+    !any_failed,
+    "the benign completed tail must NOT be surfaced as a transport failure"
+  );
+  let conn = engine
+    .plane_mut()
+    .connections
+    .get(&eid)
+    .expect("the benign tail is not torn down by the inbound pump");
+  assert!(
+    conn.error_delivered,
+    "the !is_open observation still latches error_delivered (one-shot), even benign"
+  );
+}
+
+/// F6: `error_delivered` is a one-shot latch — the first `!is_open` observation
+/// surfaces the fault and sets the latch, so a second inbound pump over the (still
+/// mapped) connection does not re-surface it.
+#[test]
+fn error_delivered_is_one_shot() {
+  let (mut engine, mut stream, now, eid) = established_outbound(b"one-shot");
+  while engine.poll_event().is_some() {}
+
+  // Mid-exchange RST.
+  stream.sock_mut(0).open = false;
+
+  // Call the inbound pump directly (so `drain_stream_actions` does not remove the
+  // connection): the first observation surfaces the fault and latches.
+  engine.pump_inbound_reliable(now, &mut stream);
+  assert!(
+    engine
+      .plane_mut()
+      .connections
+      .get(&eid)
+      .expect("still mapped (no action drain)")
+      .error_delivered,
+    "the first !is_open observation latches error_delivered"
+  );
+  while engine.poll_event().is_some() {}
+
+  // A second inbound pump over the still-mapped, still-`!is_open` connection is a
+  // no-op for the fault path (latch set) — it neither clears the latch nor surfaces
+  // another completion.
+  engine.pump_inbound_reliable(now, &mut stream);
+  assert!(
+    engine
+      .plane_mut()
+      .connections
+      .get(&eid)
+      .expect("still mapped")
+      .error_delivered,
+    "the latch stays set across pumps (one-shot)"
+  );
+  assert!(
+    engine.poll_event().is_none(),
+    "a latched connection surfaces no further fault"
   );
 }

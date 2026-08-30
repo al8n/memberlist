@@ -35,16 +35,24 @@ pub struct Options {
   /// planes, since a datagram and a stream socket on the same port number are
   /// independent).
   pub port: u16,
-  /// Maximum time a gracefully-closing reliable connection may stay parked
-  /// before it is force-aborted and returned to the pool.
+  /// Maximum time EACH PHASE of a reliable connection's teardown may stay parked
+  /// before it is force-aborted and its slot returned to the pool.
+  ///
+  /// It is a HARD CAP applied per phase — the pre-FIN drain (`Closing`), the FIN
+  /// handshake (the `Draining` retire), and the RST egress (the `Aborting`
+  /// retire) — and is set once per phase, never re-armed by peer progress. So a
+  /// graceful teardown completes or is force-aborted within at most two windows
+  /// (plus one more for the RST egress), and NO peer behaviour — including an
+  /// indefinitely-slow but progressing ACK trickle — can extend any window.
   ///
   /// A link layer such as smoltcp applies no TCP timeout by default, so a peer
-  /// that vanishes during the FIN handshake (FinWait/LastAck) keeps the
-  /// connection open indefinitely and its slot never returns to the free-list —
-  /// permanently shrinking the pool and the listener replenished from it.
-  /// Bounding the close guarantees recovery. A healthy close completes well
-  /// before this and is reclaimed the moment it reaches `Closed`; the timeout
-  /// only governs the vanished-peer case.
+  /// that vanishes during the FIN handshake (FinWait/LastAck) — or one that keeps
+  /// trickling ACKs to defer the pre-FIN drain forever — would otherwise keep the
+  /// connection open indefinitely and its slot never returns to the free-list,
+  /// permanently shrinking the pool and the listener replenished from it. The hard
+  /// cap guarantees recovery. A healthy close completes well before this and is
+  /// reclaimed the moment its teardown is acknowledged; the timeout only governs
+  /// the vanished-, stalled-, or trickling-peer case.
   pub close_timeout: Duration,
   /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
   /// inbound reliable connections by peer address at the transport boundary, AND

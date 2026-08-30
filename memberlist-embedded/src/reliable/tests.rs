@@ -40,6 +40,7 @@ fn dialing_connection_has_socket_and_dialing_state() {
   assert!(c.out_is_empty());
   assert!(!c.fin_pending);
   assert!(!c.eof_delivered);
+  assert!(!c.error_delivered);
 }
 
 #[test]
@@ -110,6 +111,30 @@ fn eof_delivered_flag_models_deliver_once() {
   // Second observation: already latched, so suppress.
   let second = !c.eof_delivered;
   assert!(!second, "second EOF observation must be suppressed");
+}
+
+#[test]
+fn error_delivered_flag_models_deliver_once() {
+  // The inbound pump surfaces a mid-exchange transport fault (a socket that died
+  // without a graceful FIN — a RST) exactly once by flipping this latch on first
+  // observation; a second `!is_open` observation must find it already set. It is
+  // independent of `eof_delivered`: a reset is a failure, not a clean EOF.
+  let mut c = Connection::<Conn>::accepted(peer(7946), 6);
+  assert!(!c.error_delivered);
+  // First observation: not yet delivered, so surface the fault and latch.
+  let first = !c.error_delivered;
+  c.error_delivered = true;
+  assert!(first, "first transport-fault observation must surface");
+  // Second observation: already latched, so suppress.
+  let second = !c.error_delivered;
+  assert!(
+    !second,
+    "second transport-fault observation must be suppressed"
+  );
+  assert!(
+    !c.eof_delivered,
+    "the transport-fault latch is independent of the EOF latch"
+  );
 }
 
 #[test]

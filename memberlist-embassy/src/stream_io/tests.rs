@@ -147,18 +147,41 @@ fn listen_posts_for_a_valid_port_and_rejects_port_zero() {
 }
 
 /// `connect` posts a `Dial` to the slot regardless of the engine's requested
-/// local port (embassy-net owns ephemeral-port selection).
+/// local port (embassy-net owns ephemeral-port selection), and marks the slot
+/// `open` SYNCHRONOUSLY (the dial is committed) WITHOUT marking it `established`:
+/// so the engine's same-pump `is_open` fault check sees a healthy dial, while
+/// `is_established` / `may_send` stay false until the worker actually connects.
 #[test]
 fn connect_posts_a_dial() {
   let (mb, wakes) = slots(1, 64);
   let mut free = Vec::new();
   let mut view = EmbassyStream::new(&mb, &wakes, &mut free);
 
+  // A fresh slot is not yet open.
+  assert!(!view.is_open(SlotId(0)), "a fresh slot is not open");
+
   view
     .connect(SlotId(0), sa(2), 1234, SlotGen::START)
     .expect("connect posts");
   assert_eq!(mb[0].borrow().command, Command::Dial(sa(2)));
   assert!(wakes[0].signaled());
+  // Committing the dial reports the slot open immediately — the "not yet closed"
+  // signal the engine's dial-failure check reads in the SAME pump that issues the
+  // dial (the worker's async connect cannot flip it in time).
+  assert!(
+    view.is_open(SlotId(0)),
+    "committing a dial marks the slot open synchronously"
+  );
+  // But NOT established / send-capable: the handshake has not completed, so the
+  // engine must neither promote nor send on the not-yet-connected socket.
+  assert!(
+    !view.is_established(SlotId(0)),
+    "a committed-but-unconnected dial is not yet established"
+  );
+  assert!(
+    !view.may_send(SlotId(0)),
+    "a committed-but-unconnected dial is not yet send-capable"
+  );
 }
 
 /// The established-state predicates read straight from the mailbox: an

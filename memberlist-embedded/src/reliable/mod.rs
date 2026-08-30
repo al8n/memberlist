@@ -151,8 +151,9 @@ pub enum ConnState {
 /// This is the whole per-exchange state. Tearing the exchange down is removing
 /// the `Connection` from [`ReliablePlane::connections`], which drops the
 /// connection handle, the parked `out` bytes, the deferred-FIN flag, the close
-/// drain deadline, and the EOF-delivered flag together — no separate per-field
-/// purges to keep in sync. The only teardown that defers that removal is a
+/// drain deadline, and the EOF-/transport-error-delivered flags together — no
+/// separate per-field purges to keep in sync. The only teardown that defers that
+/// removal is a
 /// graceful close with bytes still to deliver: it parks in [`ConnState::Closing`]
 /// until the egress pump has flushed them, then removes the whole `Connection`.
 pub struct Connection<C> {
@@ -177,22 +178,25 @@ pub struct Connection<C> {
   /// The peer's FIN/EOF has been delivered to the machine. Gates the
   /// exactly-once empty-EOF `handle_transport_data` call.
   pub eof_delivered: bool,
+  /// A transport fault — the socket died WITHOUT a graceful peer FIN (a received
+  /// RST, or an async driver's worker resetting the slot) — has been surfaced to
+  /// the machine. Mirrors [`eof_delivered`](Self::eof_delivered): the inbound
+  /// pump sets it the first time it observes `!is_open` on a still-mapped
+  /// connection, so the machine's `handle_transport_error` / `handle_dial_failed`
+  /// fires at most once per connection rather than on every subsequent pump. A
+  /// reset is a transport FAILURE, not the clean EOF `eof_delivered` gates, so
+  /// the two latches are independent.
+  pub error_delivered: bool,
   /// Backstop deadline for the [`ConnState::Closing`] drain. `Some` only while
   /// the connection is `Closing`: it is the instant by which the buffered
-  /// outbound bytes must have been delivered and the terminal FIN emitted. If the
-  /// peer never drains the tx ring (permanent backpressure / vanished peer) the
-  /// drain check force-aborts the socket and reclaims it at this instant so the
-  /// pool cannot wedge. Folded into the engine's returned wakeup alongside the
-  /// `closing`-map deadlines so a deadline-driven caller honors it.
+  /// outbound bytes must have been delivered and the terminal FIN emitted. It is
+  /// set ONCE when the connection enters `Closing` and is NEVER re-armed, so it is
+  /// a hard cap on the pre-FIN drain: a peer that has not fully drained the tx
+  /// ring by this instant — permanent backpressure, a vanished peer, or an
+  /// indefinitely-slow ACK trickle — is force-aborted and its slot reclaimed, so
+  /// the pool cannot wedge. Folded into the engine's returned wakeup alongside the
+  /// `retiring`-ledger deadlines so a deadline-driven caller honors it.
   pub close_deadline: Option<Instant>,
-  /// The undelivered byte count (`out` bytes + the socket's tx `send_queue`) at
-  /// the last drain-progress observation, meaningful only while `Closing`. The
-  /// drain check re-arms `close_deadline` whenever the count shrinks, making
-  /// `close_timeout` a NO-PROGRESS (idle) bound rather than a total-duration cap:
-  /// a slow-but-progressing peer (reading the response over more than
-  /// `close_timeout`) is never force-aborted, while a stalled / vanished peer
-  /// (no progress for the full `close_timeout`) still is.
-  pub close_drain_mark: usize,
 }
 
 impl<C> Connection<C> {
@@ -205,8 +209,8 @@ impl<C> Connection<C> {
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
+      error_delivered: false,
       close_deadline: None,
-      close_drain_mark: 0,
     }
   }
 
@@ -221,8 +225,8 @@ impl<C> Connection<C> {
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
+      error_delivered: false,
       close_deadline: None,
-      close_drain_mark: 0,
     }
   }
 
@@ -236,8 +240,8 @@ impl<C> Connection<C> {
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
+      error_delivered: false,
       close_deadline: None,
-      close_drain_mark: 0,
     }
   }
 

@@ -139,7 +139,11 @@ pub(crate) async fn run_slot(
       Command::Dial(remote) => {
         // The slot is now in use; it is no longer reuse-ready until `reset_socket`
         // runs (see the `Listen` arm). Clear it before the connect await so the
-        // engine cannot reuse this slot mid-teardown.
+        // engine cannot reuse this slot mid-teardown. `open` is already `true` here:
+        // the engine's synchronous `EmbassyStream::connect` set it when it committed
+        // this dial (so the same-pump `is_open` fault check sees a dialing slot as
+        // open, not as a failed dial — see that method), and the worker leaves it set
+        // through the handshake, clearing it only on the failure/abort arms below.
         mb.borrow_mut().reset_done = false;
         // `connect(remote)` spans the handshake; on success the slot is established
         // and open. Race it against the command wake so a `Close`/`Abort` (the
@@ -158,6 +162,10 @@ pub(crate) async fn run_slot(
               let mut m = mb.borrow_mut();
               m.accepted_peer = peer;
               m.established = true;
+              // `open` was already set at the engine's dial commit and stays set; the
+              // completed handshake promotes `established`, the post-connect send
+              // signal the engine gates `may_send` / `is_established` on. Re-assert it
+              // (idempotent) so this success arm mirrors the accept arm above.
               m.open = true;
               m.command = Command::Idle;
               m.sock_send_queue = socket.send_queue();
