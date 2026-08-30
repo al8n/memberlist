@@ -91,7 +91,10 @@ fn safety_seed_sweep() {
     "a live peer must observe Suspect: {totals:?}"
   );
   assert!(totals.dead > 0, "a live peer must observe Dead: {totals:?}");
-  assert!(totals.left > 0, "a live peer must observe Left: {totals:?}");
+  assert_eq!(
+    totals.left, 0,
+    "post self-leave hardening, a live PEER never observes a remote node as Left — a self-marked departure is recorded as reclaim-protected Dead; Left is local-self-view-only and excluded from peer samples: {totals:?}"
+  );
   assert!(
     totals.calm_ticks > 0,
     "the calm/quiesce phase must run: {totals:?}"
@@ -130,8 +133,12 @@ fn full_campaign() {
   );
   assert!(totals.leaves > 0, "leaves must fire: {totals:?}");
   assert!(
-    totals.suspect > 0 && totals.dead > 0 && totals.left > 0,
-    "a live peer must observe Suspect, Dead, and Left: {totals:?}"
+    totals.suspect > 0 && totals.dead > 0,
+    "a live peer must observe Suspect and Dead: {totals:?}"
+  );
+  assert_eq!(
+    totals.left, 0,
+    "post self-leave hardening, a live PEER never observes a remote node as Left — a self-marked departure is recorded as reclaim-protected Dead; Left is local-self-view-only and excluded from peer samples: {totals:?}"
   );
   assert!(
     totals.seeds_with_calm_window > 0,

@@ -97,6 +97,17 @@ fn push_pull_convergence_over_tls() {
   assert!(c.sees_alive(b, &id("a")));
 }
 
+/// Reliable-fallback invariant: a single triggered failure-detection probe
+/// whose direct + indirect UDP path is blocked must complete via the TLS
+/// reliable-ping fallback on the warm connection, and the healthy peer must
+/// NOT be falsely Suspected.
+///
+/// Mirrors the QUIC harness's `reliable_fallback_rescues_udp_blocked_probe_no_false_suspect`
+/// (`quic_conformance.rs`): the warm-up MUST reach mutual Alive (a hard
+/// assert, not a soft loop-break), `trigger_probe` MUST report it actually
+/// armed a probe, and the test tracks the fallback bridge's full open→reap
+/// cycle so a run where the fallback path is never exercised (or stalls) is
+/// caught rather than silently passing on the absence of a false Suspect.
 #[test]
 fn reliable_fallback_rescues_udp_blocked_probe_no_false_suspect() {
   let a = "127.0.0.1:8021".parse().unwrap();
@@ -109,18 +120,66 @@ fn reliable_fallback_rescues_udp_blocked_probe_no_false_suspect() {
     }
     c.step();
   }
+  assert!(
+    c.sees_alive(a, &id("b")) && c.sees_alive(b, &id("a")),
+    "precondition: warm-up join must reach mutual Alive before blocking UDP probes"
+  );
+  assert_eq!(
+    c.live_bridge_count(a),
+    0,
+    "warm-up join must have fully settled (no leftover bridge)"
+  );
+
   c.drop_all_udp_probes_between(a, b);
-  c.trigger_probe(a);
+  assert!(
+    c.trigger_probe(a),
+    "trigger_probe must actually arm a probe on a"
+  );
+
+  // Drive the triggered probe's lifetime and watch the fallback bridge's
+  // full open→reap cycle: the direct ping times out, the probe escalates and
+  // opens the TLS reliable-ping fallback bridge, the fallback Ping↔Ack
+  // completes, and the bridge is reaped. A run where the fallback never
+  // opens (or opens but never reaps) is caught here instead of silently
+  // passing on `!ever_suspected` alone.
+  let mut fallback_bridge_opened = false;
+  let mut fallback_bridge_reaped = false;
   for _ in 0..20_000 {
-    if !c.step() {
+    let progressed = c.step();
+    let live = c.live_bridge_count(a);
+    if live > 0 {
+      fallback_bridge_opened = true;
+    } else if fallback_bridge_opened {
+      // The bridge opened and is now gone → the reliable-ping exchange
+      // finished and its bridge was reaped.
+      fallback_bridge_reaped = true;
+      break;
+    }
+    if !progressed {
       break;
     }
   }
+
+  assert!(
+    fallback_bridge_opened,
+    "the UDP-blocked probe must escalate and open a TLS reliable-ping \
+     fallback bridge (the fallback path was genuinely exercised)"
+  );
+  assert!(
+    fallback_bridge_reaped,
+    "the reliable-ping fallback bridge must complete its Ping↔Ack and be \
+     reaped (the fallback exchange actually finished — no stall, no leak)"
+  );
   assert!(
     !c.ever_suspected(a, &id("b")),
     "fallback ack absorbed in step (2) before probe handle_timeout — no false Suspect"
   );
   assert_eq!(c.live_bridge_count(a), 0, "fallback bridge reaped");
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "b must remain Alive: with the UDP probe path blocked, only the \
+     completed TLS reliable-ping fallback can keep b from being Suspected"
+  );
 }
 
 #[test]

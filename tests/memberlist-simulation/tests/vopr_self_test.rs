@@ -551,13 +551,19 @@ fn no_resurrection_checker_retains_baseline_through_unpruned_absence() {
 fn convergence_checker_bites_on_wrong_address_binding() {
   use memberlist_proto::typed::Dead;
   use memberlist_simulation::{Cluster, checker::ConvergenceChecker};
-  use std::collections::HashSet;
+  use std::{collections::HashSet, time::Duration};
   let a0 = addr(34400);
   let a1 = addr(34401);
   let a2 = addr(34402);
   let a_wrong = addr(34999); // not a registered node address
+  let reclaim = Duration::from_millis(10);
   let mut c = Cluster::new();
-  c.add_node("n0".into(), a0);
+  // a0 needs a non-zero reclaim window: post self-leave hardening, a self-marked
+  // Dead records reclaim-protected Dead, and only an elapsed reclaim window
+  // re-opens its address for adoption at a new binding.
+  c.add_node_with("n0".into(), a0, |cfg| {
+    cfg.with_dead_node_reclaim_time(reclaim)
+  });
   c.add_node("n1".into(), a1);
   c.add_node("n2".into(), a2);
   c.inject_alive(a0, "n1".into(), a1, 1);
@@ -570,20 +576,22 @@ fn convergence_checker_bites_on_wrong_address_binding() {
     c.step();
   }
 
-  // Drive a0's view of n1 to State::Left via a self-marked Dead (node == from),
-  // at the same incarnation the cluster holds (1). A Left entry is immediately
-  // address-reclaimable, so the next Alive at a wrong address is ADOPTED rather
-  // than rejected as a NodeConflict.
+  // Drive a0's view of n1 to State::Dead via a self-marked Dead (node == from),
+  // at the same incarnation the cluster holds (1). Post self-leave hardening a
+  // self-marked departure records reclaim-protected Dead (never the
+  // immediately-reclaimable Left), so age the entry past a0's reclaim window to
+  // re-open its address for adoption at a new binding.
   c.dead_node(a0, Dead::new(1, "n1".into(), "n1".into()));
   assert_eq!(
     c.member_liveness(a0, &"n1".into()),
-    Some(memberlist_proto::typed::State::Left),
-    "the self-marked Dead must drive n1 to Left at a0"
+    Some(memberlist_proto::typed::State::Dead),
+    "the self-marked Dead must drive n1 to reclaim-protected Dead at a0"
   );
-  // Inject Alive@1 for n1 at the WRONG address. Adopting the address skips the
-  // incarnation gate, so the applied incarnation stays 1 — every observer still
-  // agrees n1 is Alive@1, isolating the address-binding check from the
-  // incarnation-agreement check.
+  c.age_node(a0, &"n1".into(), reclaim + Duration::from_millis(1));
+  // Inject Alive@1 for n1 at the WRONG address. The post-window address-change
+  // reclaim adopts the new binding and is exempt from the incarnation gate, so
+  // the applied incarnation stays 1 — every observer still agrees n1 is Alive@1,
+  // isolating the address-binding check from the incarnation-agreement check.
   c.inject_alive(a0, "n1".into(), a_wrong, 1);
   assert_eq!(
     c.member_liveness(a0, &"n1".into()),
