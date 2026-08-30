@@ -55,7 +55,7 @@ pub(crate) fn gossip_rng() -> Result<StdRng, crate::Error> {
 }
 
 pub use error::{Error, GossipMtuTooSmall, InvalidGossipMtu, InvalidOption, JoinFailed};
-pub use memberlist_proto::{EndpointInitError, LabelError, MaybeResolved};
+pub use memberlist_proto::{EndpointInitError, EndpointTuning, LabelError, MaybeResolved};
 pub use options::{
   Channel, DEFAULT_CLOSE_TIMEOUT, DEFAULT_EVENT_STREAM_CAPACITY, DEFAULT_JOIN_DEADLINE,
   DEFAULT_OBSERVATION_CHANNEL_CAPACITY, DEFAULT_RECV_BATCH, DEFAULT_TRANSMIT_BATCH,

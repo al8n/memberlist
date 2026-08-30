@@ -12,6 +12,9 @@ use core::{num::NonZeroU8, time::Duration};
 use crate::typed::{DelegateVersion, Meta, ProtocolVersion};
 use bytes::Bytes;
 
+mod tuning;
+pub use tuning::EndpointTuning;
+
 /// Default value for [`EndpointOptions::gossip_mtu`]: 1400 bytes — just under
 /// a typical 1500-byte Ethernet MTU, matching the legacy memberlist default
 /// and keeping UDP gossip un-fragmented on IPv4/IPv6 + UDP-header headroom.

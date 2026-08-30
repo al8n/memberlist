@@ -243,6 +243,12 @@ where
     // receive reliable user data. Checked before `initial_local_state`, which
     // is validated against this same ceiling.
     crate::options::validate_max_stream_frame_size(&memberlist_opts)?;
+    // Fail fast on a SWIM tuning knob the machine would reject at construction
+    // (currently only an `awareness_max_multiplier` of zero, which leaves the
+    // awareness tracker unconstructable). compio builds the machine through the
+    // panicking `Endpoint::new` on a detached task, so this check surfaces the
+    // misconfiguration as a clean error here instead of a task abort.
+    crate::options::validate_endpoint_tuning(&memberlist_opts)?;
     // Fail fast on an `initial_meta` larger than the effective meta cap
     // (`min(meta_max_size, Meta::MAX_SIZE)`). The machine only debug-asserts this
     // invariant, so without a release check a node could start with a meta the
