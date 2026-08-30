@@ -48,6 +48,22 @@ fn dead(last: u8) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(169, 254, 1, last)), 7946)
 }
 
+/// A pseudo-random, incompressible payload of `n` bytes (xorshift64), so the
+/// framed reliable message is not shrunk below the peer's receive window by the
+/// compression transform — the worker's established send is forced to stall
+/// against a non-draining peer.
+fn incompressible(n: usize) -> bytes::Bytes {
+  let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+  let mut v = Vec::with_capacity(n);
+  for _ in 0..n {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    v.push(x as u8);
+  }
+  bytes::Bytes::from(v)
+}
+
 /// All the owned buffers one node's sockets borrow. Declared in the test frame so
 /// the sockets (and the `Memberlist`/`Runner` that hold them) can borrow them for
 /// the whole `block_on`.
@@ -382,6 +398,83 @@ fn silent_peer_does_not_wedge_the_pool() {
   });
 }
 
+/// An engine `Abort` must PREEMPT an in-flight ESTABLISHED send. A raw, non-reading
+/// peer accepts A's reliable dial and then never drains: its receive window closes
+/// while its stack keeps ACKing, so A's worker parks in an established `write`/`flush`
+/// with the socket still "active" (the inactivity timeout is refreshed indefinitely).
+/// When the exchange elapses at `stream_timeout` (300 ms) the engine posts `Abort`;
+/// the worker must PREEMPT the parked send on that wake, reset the socket, and free
+/// the slot — so the send resolves as an error and the pool recovers.
+///
+/// This is the load-bearing regression: before the fix the worker awaited the send
+/// DIRECTLY (unraced), so a posted `Abort` was not observed until the far longer
+/// per-socket inactivity timeout (15 s) — which exceeds this test's 5 s budget, so a
+/// regression HANGS to the timeout rather than freeing the slot. Racing each
+/// peer-dependent send against the command wake is what bounds it to one wake.
+#[test]
+fn abort_preempts_a_stalled_established_send() {
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  let (ml_a, run_a) = node(stack_a, &mut bufs_a, "a", 1, 1);
+
+  // A deliberately-small receive buffer for the non-reading peer: it fills fast (the
+  // peer never reads), shutting the window so A's established send stalls well before
+  // the payload drains.
+  let mut peer_rx = [0u8; 512];
+  let mut peer_tx = [0u8; 512];
+
+  let free_a_at_start = ml_a.pool_free_count();
+  block_on(async {
+    // The non-reading peer: accept A's dial, then hold the socket open forever without
+    // EVER reading. Its stack keeps ACKing (so A's socket stays active), but the
+    // receive window stays shut — A's worker parks in the established send.
+    let peer = async {
+      let mut sock = TcpSocket::new(stack_b, &mut peer_rx, &mut peer_tx);
+      sock
+        .accept(7946)
+        .await
+        .expect("the raw peer accepts A's dial");
+      core::future::pending::<()>().await;
+    };
+
+    let op = async {
+      // Let the raw peer reach its `accept` before A dials it.
+      Timer::after(Duration::from_millis(50)).await;
+      // A large, incompressible payload guarantees the framed request exceeds the
+      // peer's shut window, so the worker stalls in the WRITE/FLUSH (not merely the
+      // reply read). The send must resolve as an error once the abort preempts it.
+      let r = ml_a
+        .send_reliable(addr(2, 7946), incompressible(16 * 1024))
+        .await;
+      assert!(
+        r.is_err(),
+        "a send to a non-draining peer must fail once the abort preempts it, not hang"
+      );
+      // The preempted slot resets and returns to the pool.
+      until(|| ml_a.pool_free_count() >= free_a_at_start).await;
+      ml_a.pool_free_count()
+    };
+
+    // Drive A's memberlist, both stacks, and the raw peer, raced against the op and
+    // the wall-clock cap. (A bespoke drive: the peer is a raw socket, not a second
+    // memberlist node, so the shared `drive` helper does not fit.)
+    let infra = select(select(net_a.run(), net_b.run()), select(run_a.run(), peer));
+    let free = match select(op, select(infra, Timer::after(TEST_TIMEOUT))).await {
+      Either::First(v) => v,
+      Either::Second(_) => panic!("abort_preempts_a_stalled_established_send timed out"),
+    };
+    assert_eq!(
+      free, free_a_at_start,
+      "A's reliable pool did not recover after the stalled send was preempted"
+    );
+  });
+}
+
 /// A peer RESET mid reliable-send must NOT be reported as a successful completion.
 /// The worker maps a `read()` error (a RST) to `open = false` WITHOUT latching
 /// `peer_fin`, so `recv_finished` never reports a clean EOF for the reset — the
@@ -420,6 +513,92 @@ fn peer_reset_is_not_reported_as_send_success() {
       result.is_err(),
       "a reliable send whose connection never completed (reset / vanished peer) \
        must resolve as a FAILURE, not a false success: {result:?}"
+    );
+  });
+}
+
+/// Distinct reliable-plane terminal paths each return their slot to the pool exactly
+/// once. A graceful CLOSE (a completed exchange to a live peer) and a dial FAILURE (a
+/// routable peer with no listener RSTs the SYN, so the slot resets cleanly), driven
+/// repeatedly and interleaved, must each terminalize without leaking a slot (the free
+/// count would stay BELOW construction) and without double-freeing one (it would rise
+/// ABOVE construction). So the pool must recover to EXACTLY its construction count
+/// after every permutation, and the node stays healthy (its listener self-heals,
+/// membership holds) throughout.
+#[test]
+fn every_connect_close_abort_permutation_terminalizes() {
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  let mut bufs_b = NodeBufs::new();
+  let (ml_a, run_a) = node(stack_a, &mut bufs_a, "a", 1, 1);
+  let (ml_b, run_b) = node(stack_b, &mut bufs_b, "b", 2, 2);
+
+  let free_at_start = ml_a.pool_free_count();
+  block_on(async {
+    let op = async {
+      ml_b
+        .join(
+          &SocketAddrResolver,
+          &[MaybeResolved::Resolved(addr(1, 7946))],
+        )
+        .await
+        .expect("join from a running node");
+      until(|| ml_a.num_members() == 2 && ml_b.num_members() == 2).await;
+
+      for i in 0..3u8 {
+        // CONNECT → graceful CLOSE: a live exchange completes and its slot reaps.
+        ml_a
+          .send_reliable(addr(2, 7946), bytes::Bytes::from_static(b"alive"))
+          .await
+          .expect("a reliable send to a live peer completes");
+        until(|| ml_a.pool_free_count() >= free_at_start).await;
+        assert_eq!(
+          ml_a.pool_free_count(),
+          free_at_start,
+          "a graceful close neither leaked nor double-freed its slot (i={i})"
+        );
+
+        // CONNECT → dial FAILURE: a dial to a routable peer with no listener on the
+        // port is RST'd, so the dial fails fast and its slot resets CLEANLY (the RST
+        // egresses — B answers ARP — unlike an on-link black hole that pins teardown).
+        assert!(
+          ml_a
+            .send_reliable(
+              addr(2, 9000 + u16::from(i)),
+              bytes::Bytes::from_static(b"nobody")
+            )
+            .await
+            .is_err(),
+          "a reliable send to a routable peer with no listener must fail (i={i})"
+        );
+        until(|| ml_a.pool_free_count() >= free_at_start).await;
+        assert_eq!(
+          ml_a.pool_free_count(),
+          free_at_start,
+          "a dial abort neither leaked nor double-freed its slot (i={i})"
+        );
+      }
+
+      (
+        ml_a.pool_free_count(),
+        ml_a.num_members(),
+        ml_a.listener_present(),
+      )
+    };
+    let (free, members, listener) = drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+    assert_eq!(
+      free, free_at_start,
+      "the pool did not fully recover after the connect/close/abort permutations"
+    );
+    assert_eq!(members, 2, "membership must hold across the permutations");
+    assert!(
+      listener,
+      "the listener must stay present across the permutations"
     );
   });
 }

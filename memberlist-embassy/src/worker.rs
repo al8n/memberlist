@@ -109,7 +109,11 @@ pub(crate) async fn run_slot(
               m.accepted_peer = peer;
               m.established = peer.is_some();
               m.open = peer.is_some();
-              m.command = Command::Idle;
+              // Consume the `Listen` this arm acted on WITHOUT erasing a directive the
+              // engine posted while the handshake completed (see `consume_command`): a
+              // concurrent `Abort`/`Close` survives for the established loop to honor,
+              // rather than being erased into an orphaned, engine-unreachable socket.
+              m.consume_command(Command::Listen(port));
               m.sock_send_queue = socket.send_queue();
             }
             // The pump must observe the new accept so `check_listener` maps it.
@@ -167,7 +171,11 @@ pub(crate) async fn run_slot(
               // signal the engine gates `may_send` / `is_established` on. Re-assert it
               // (idempotent) so this success arm mirrors the accept arm above.
               m.open = true;
-              m.command = Command::Idle;
+              // Consume the `Dial` this arm acted on without erasing a directive posted
+              // while the connect completed (see `consume_command`): a concurrent
+              // `Abort`/`Close` survives for `run_established` to honor instead of
+              // orphaning the freshly-established slot.
+              m.consume_command(Command::Dial(remote));
               m.sock_send_queue = socket.send_queue();
             }
             // The pump must observe the established slot to promote its exchange.
@@ -262,7 +270,11 @@ async fn run_established(
           we_finned = true;
           {
             let mut m = mb.borrow_mut();
-            m.command = Command::Idle;
+            // Consume the `Close` without erasing a concurrent `Abort` escalation
+            // (Draining→Aborting; see `consume_command`): it survives for the next
+            // command match to abort + reset rather than half-closing a socket the
+            // engine wanted torn down.
+            m.consume_command(Command::Close);
             m.sock_send_queue = socket.send_queue();
           }
           pump_wake.signal(());
@@ -300,15 +312,22 @@ async fn run_established(
       };
       if drained {
         // Ignoring Err: a reset during the final flush just means the peer already
-        // tore down; our FIN is moot then and the slot is reset regardless.
-        let _ = socket.flush().await;
-        {
-          let mut m = mb.borrow_mut();
-          m.open = false;
-          m.sock_send_queue = 0;
+        // tore down; our FIN is moot then and the slot is reset regardless. Race the
+        // flush against the command wake so a peer that never ACKs our FIN cannot pin
+        // the worker here forever: an `Abort` then pre-empts it (`Either::Second` →
+        // re-check the mailbox), and `reset_socket`'s local RST completes the teardown.
+        match select(socket.flush(), cmd_wake.wait()).await {
+          Either::First(_) => {
+            {
+              let mut m = mb.borrow_mut();
+              m.open = false;
+              m.sock_send_queue = 0;
+            }
+            pump_wake.signal(());
+            return;
+          }
+          Either::Second(()) => continue,
         }
-        pump_wake.signal(());
-        return;
       }
     }
 
@@ -332,8 +351,17 @@ async fn run_established(
         let m = mb.borrow();
         m.outbound.iter().copied().collect()
       };
-      match socket.write(&chunk).await {
-        Ok(written) => {
+      // Race the write against the command wake so an engine `Abort` (or a benign
+      // send/recv pulse) pre-empts a peer-stalled write instead of parking the worker
+      // in `write` forever while a black-holed peer keeps the socket nominally active
+      // (refreshing the inactivity backstop). `Either::Second` means only "re-check the
+      // mailbox": embassy writes are single-commit poll futures, so dropping a
+      // still-pending one loses no bytes, and the top-of-loop command match then honors
+      // any real `Close`/`Abort` while a mere pulse re-drains. `select` polls the write
+      // first, so a write making progress still resolves as `Either::First` even with a
+      // pulse latched — only a genuinely-blocked write yields.
+      match select(socket.write(&chunk), cmd_wake.wait()).await {
+        Either::First(Ok(written)) => {
           {
             let mut m = mb.borrow_mut();
             for _ in 0..written {
@@ -343,15 +371,19 @@ async fn run_established(
           }
           // Ignoring Err: a reset mid-flush means the connection is gone; the read
           // below observes it and tears the slot down. Re-sync the send queue from
-          // the socket regardless.
-          let _ = socket.flush().await;
+          // the socket regardless. Race the flush too — a peer that never ACKs must
+          // not pin the worker here past an `Abort`; `Either::Second` re-checks the
+          // mailbox and the command match tears the slot down.
+          if let Either::Second(()) = select(socket.flush(), cmd_wake.wait()).await {
+            continue;
+          }
           {
             let mut m = mb.borrow_mut();
             m.sock_send_queue = socket.send_queue();
           }
           pump_wake.signal(());
         }
-        Err(_) => {
+        Either::First(Err(_)) => {
           {
             let mut m = mb.borrow_mut();
             m.open = false;
@@ -360,6 +392,7 @@ async fn run_established(
           pump_wake.signal(());
           return;
         }
+        Either::Second(()) => continue,
       }
       // Loop to re-read the command (the engine may now Close) and re-drain.
       continue;
