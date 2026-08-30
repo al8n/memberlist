@@ -6,7 +6,7 @@ use core::net::{IpAddr, Ipv4Addr};
 use smoltcp::{
   iface::{Config as IfConfig, Interface, SocketSet},
   phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken},
-  time::Instant as SmolInstant,
+  time::{Duration as SmolDuration, Instant as SmolInstant},
   wire::{HardwareAddress, IpAddress, IpCidr},
 };
 
@@ -249,5 +249,160 @@ fn mid_stream_reset_is_not_reported_as_eof() {
   assert!(
     !recv_finished(&mut a),
     "a mid-stream reset must not be reported as a graceful EOF"
+  );
+}
+
+/// Build a fresh 4 KiB `tcp::Socket` carrying the finite inactivity timeout the
+/// driver installs at socket creation (`Options::close_timeout` → smoltcp
+/// `Duration`), the mechanism that reaps a stalled reliable socket.
+fn timed_socket(timeout_ms: u64) -> tcp::Socket<'static> {
+  let mut sock = tcp::Socket::new(
+    tcp::SocketBuffer::new(vec![0u8; 4096]),
+    tcp::SocketBuffer::new(vec![0u8; 4096]),
+  );
+  sock.set_timeout(Some(SmolDuration::from_millis(timeout_ms)));
+  sock
+}
+
+/// ML-LIFE-01: a single unauthenticated half-open (a peer SYN with the final ACK
+/// withheld) must NOT pin the direct-smoltcp listener forever. With the socket
+/// inactivity timeout installed, the parked `SynReceived` is reaped to `Closed`,
+/// and re-`listen` (what `Memberlist::poll` does) frees the slot to accept again —
+/// bounding the DoS to one timeout window instead of a permanent black-hole.
+///
+/// Mutation anchor: delete the `set_timeout` inside `timed_socket` and the socket
+/// stays `SynReceived` forever, so the `Closed` assertion below fails.
+#[test]
+fn half_open_listener_is_reaped_by_inactivity_timeout() {
+  const TIMEOUT_MS: i64 = 200;
+  let (mut dev_a, mut dev_b) = link();
+  let mut if_a = iface(&mut dev_a, 1);
+  let mut if_b = iface(&mut dev_b, 2);
+  let mut set_a = SocketSet::new(Vec::new());
+  let mut set_b = SocketSet::new(Vec::new());
+
+  // B is the listener carrying the inactivity timeout.
+  let hb = set_b.add(timed_socket(TIMEOUT_MS as u64));
+  set_b
+    .get_mut::<tcp::Socket>(hb)
+    .listen(7946)
+    .expect("listen");
+
+  // A dials B, emitting a SYN. We deliver A's SYN to B (B: Listen → SynReceived,
+  // which sends a SYN-ACK) but then NEVER poll A again, so A never sees the
+  // SYN-ACK and never sends the final ACK — precisely the withheld-ACK attack.
+  let ha = set_a.add(timed_socket(TIMEOUT_MS as u64));
+  let remote_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946);
+  set_a
+    .get_mut::<tcp::Socket>(ha)
+    .connect(if_a.context(), to_endpoint(remote_b), 49_000u16)
+    .expect("connect");
+
+  if_a.poll(SmolInstant::from_millis(0), &mut dev_a, &mut set_a);
+  if_b.poll(SmolInstant::from_millis(0), &mut dev_b, &mut set_b);
+  assert_eq!(
+    set_b.get::<tcp::Socket>(hb).state(),
+    tcp::State::SynReceived,
+    "the withheld-ACK peer must park B half-open"
+  );
+
+  // Advance B's clock past the inactivity timeout, never delivering A's ACK (A is
+  // never polled again). B's dispatch observes the timeout and aborts to Closed.
+  let mut t = 1i64;
+  while t < TIMEOUT_MS + 500 {
+    if_b.poll(SmolInstant::from_millis(t), &mut dev_b, &mut set_b);
+    if set_b.get::<tcp::Socket>(hb).state() == tcp::State::Closed {
+      break;
+    }
+    t += 10;
+  }
+  assert_eq!(
+    set_b.get::<tcp::Socket>(hb).state(),
+    tcp::State::Closed,
+    "the inactivity timeout must reap the half-open listener to Closed"
+  );
+
+  // The reaped socket is free again: re-`listen` restores it IN PLACE (the same
+  // handle the engine keeps as its listener), and the timeout survives the reset
+  // so the next half-open is reaped too.
+  set_b
+    .get_mut::<tcp::Socket>(hb)
+    .listen(7946)
+    .expect("re-listen");
+  assert!(
+    set_b.get::<tcp::Socket>(hb).is_listening(),
+    "a reaped listener must re-listen so the node accepts inbound streams again"
+  );
+  assert_eq!(
+    set_b.get::<tcp::Socket>(hb).timeout(),
+    Some(SmolDuration::from_millis(TIMEOUT_MS as u64)),
+    "the inactivity timeout must survive the reap + re-listen (smoltcp reset() \
+     preserves it) so a re-armed listener stays protected"
+  );
+}
+
+/// Control: the socket timeout is an INACTIVITY timeout, not a hard cap on a live
+/// exchange. An established pair that keeps exchanging data across a span far
+/// longer than the timeout is never aborted, because each delivered packet resets
+/// the inactivity clock.
+#[test]
+fn active_exchange_within_window_not_reaped() {
+  const TIMEOUT_MS: i64 = 200;
+  let (mut dev_a, mut dev_b) = link();
+  let mut if_a = iface(&mut dev_a, 1);
+  let mut if_b = iface(&mut dev_b, 2);
+  let mut set_a = SocketSet::new(Vec::new());
+  let mut set_b = SocketSet::new(Vec::new());
+
+  let ha = set_a.add(timed_socket(TIMEOUT_MS as u64));
+  let hb = set_b.add(timed_socket(TIMEOUT_MS as u64));
+  set_b
+    .get_mut::<tcp::Socket>(hb)
+    .listen(7946)
+    .expect("listen");
+  let remote_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946);
+  set_a
+    .get_mut::<tcp::Socket>(ha)
+    .connect(if_a.context(), to_endpoint(remote_b), 49_000u16)
+    .expect("connect");
+
+  // Complete the handshake.
+  let mut t = 0i64;
+  for _ in 0..50 {
+    if_a.poll(SmolInstant::from_millis(t), &mut dev_a, &mut set_a);
+    if_b.poll(SmolInstant::from_millis(t), &mut dev_b, &mut set_b);
+    t += 1;
+    if set_a.get::<tcp::Socket>(ha).may_send() && set_b.get::<tcp::Socket>(hb).may_send() {
+      break;
+    }
+  }
+  assert!(set_a.get::<tcp::Socket>(ha).may_send(), "A must establish");
+  assert!(set_b.get::<tcp::Socket>(hb).may_send(), "B must establish");
+
+  // Exchange data across 3x the timeout window, sending on each side every half
+  // window so neither is ever idle for a full timeout. Both stay Established.
+  let end = t + TIMEOUT_MS * 3;
+  let mut last_send = t;
+  while t < end {
+    if t - last_send >= TIMEOUT_MS / 2 {
+      // Ignoring Err: both sockets stay Established throughout and the 4 KiB rings
+      // dwarf the few bytes sent, so send_slice always succeeds; the exchange
+      // exists only to keep the inactivity timer fed.
+      let _ = set_a.get_mut::<tcp::Socket>(ha).send_slice(b"ping");
+      let _ = set_b.get_mut::<tcp::Socket>(hb).send_slice(b"pong");
+      last_send = t;
+    }
+    if_a.poll(SmolInstant::from_millis(t), &mut dev_a, &mut set_a);
+    if_b.poll(SmolInstant::from_millis(t), &mut dev_b, &mut set_b);
+    t += 5;
+  }
+
+  assert!(
+    set_a.get::<tcp::Socket>(ha).may_send(),
+    "an actively-exchanging socket must not be reaped by the inactivity timeout"
+  );
+  assert!(
+    set_b.get::<tcp::Socket>(hb).may_send(),
+    "an actively-exchanging socket must not be reaped by the inactivity timeout"
   );
 }
