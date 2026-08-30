@@ -383,6 +383,24 @@ where
     self.plane.listener.is_some()
   }
 
+  /// The connection handle currently installed as the passive-open listener, or
+  /// `None` when the pool could not replenish one.
+  ///
+  /// The engine keeps this handle installed and swaps it out only on a completed
+  /// accept (`check_listener`); it never re-arms a listener socket the link layer
+  /// closed underneath it. A driver whose link layer reaps a stalled listener to a
+  /// terminal state — the smoltcp inactivity timeout aborting an unanswered
+  /// half-open to `Closed` — reads this to find the slot and re-`listen` it in
+  /// place, so a reaped listener does not stay dead and black-hole all further
+  /// inbound reliable streams.
+  #[inline]
+  pub fn listener(&self) -> Option<C>
+  where
+    C: Copy,
+  {
+    self.plane.listener
+  }
+
   // ── Membership queries ──────────────────────────────────────────────────────
   //
   // These are thin `&self` reads over the live `Endpoint` inside the

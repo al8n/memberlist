@@ -3,7 +3,10 @@
 
 use core::net::SocketAddr;
 use memberlist_proto::Instant;
-use smoltcp::{time::Instant as SmoltcpInstant, wire::IpEndpoint};
+use smoltcp::{
+  time::{Duration as SmoltcpDuration, Instant as SmoltcpInstant},
+  wire::IpEndpoint,
+};
 
 /// Convert a `SocketAddr` to a smoltcp `IpEndpoint`.
 ///
@@ -36,6 +39,18 @@ pub(crate) fn to_smoltcp_instant(now: Instant) -> SmoltcpInstant {
 pub(crate) fn from_smoltcp_instant(t: SmoltcpInstant) -> Instant {
   debug_assert!(t.total_millis() >= 0, "smoltcp instant before origin");
   Instant::from_origin(core::time::Duration::from_millis(t.total_millis() as u64))
+}
+
+/// Convert a `core::time::Duration` to a smoltcp `Duration` (microsecond granularity).
+///
+/// Used to install the reliable-plane socket inactivity timeout. Saturates at
+/// `u64::MAX` microseconds so an out-of-range configuration yields a finite (very
+/// large) timeout rather than overflowing smoltcp's own `From` conversion, which
+/// multiplies whole seconds by 1_000_000. The value this crate feeds it — the
+/// `close_timeout`, default 10 s — is far inside range.
+#[inline]
+pub(crate) fn to_smoltcp_duration(d: core::time::Duration) -> SmoltcpDuration {
+  SmoltcpDuration::from_micros(u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

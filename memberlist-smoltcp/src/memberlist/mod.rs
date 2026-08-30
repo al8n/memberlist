@@ -22,7 +22,7 @@ use smoltcp::{
 
 use crate::{
   InitError, InterfaceOptions, JoinError, Options, Resolver, TransformOptions,
-  addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_instant},
+  addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_duration, to_smoltcp_instant},
   error::{GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
   interface::{HardwareAddress, Medium},
@@ -678,13 +678,27 @@ where
     // gets independent rx/tx ring buffers sized by the config. One socket is
     // immediately moved into listen state and installed as the engine's listener;
     // the rest stay free for outbound dials and accepted inbound connections.
+    //
+    // Every socket carries a finite inactivity timeout derived from
+    // `close_timeout`. The single direct-smoltcp listener would otherwise pin
+    // forever on an unauthenticated half-open — a `SynReceived` whose final ACK is
+    // withheld: the accept gate `may_send()` never becomes true, nothing frees the
+    // slot, and ALL inbound reliable streams are black-holed until the node
+    // restarts. `set_timeout` drives such a half-open (and a stalled established
+    // exchange) to `Closed` after `close_timeout` of silence, so `poll` can re-arm
+    // the listener and the DoS is bounded to one timeout window instead of forever.
+    // Set at socket creation so it survives every listen/accept/reset cycle
+    // (smoltcp's `reset()` preserves the timeout); this mirrors the per-slot
+    // `set_timeout` the embassy-net driver installs in its worker. `close_timeout`
+    // is validated non-zero above, so this is never the zero value smoltcp would
+    // treat as an immediate abort.
+    let socket_timeout = to_smoltcp_duration(cfg.close_timeout);
     for _ in 0..cfg.tcp_pool_size {
       let rx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_rx_bytes]);
       let tx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_tx_bytes]);
-      engine
-        .plane_mut()
-        .pool
-        .push(sockets.add(tcp::Socket::new(rx, tx)));
+      let mut sock = tcp::Socket::new(rx, tx);
+      sock.set_timeout(Some(socket_timeout));
+      engine.plane_mut().pool.push(sockets.add(sock));
     }
     // Dedicate one pooled socket to listening for inbound reliable connections.
     if let Some(h) = engine.plane_mut().pool.take() {
@@ -1094,13 +1108,27 @@ where
     // gets independent rx/tx ring buffers sized by the config. One socket is
     // immediately moved into listen state and installed as the engine's listener;
     // the rest stay free for outbound dials and accepted inbound connections.
+    //
+    // Every socket carries a finite inactivity timeout derived from
+    // `close_timeout`. The single direct-smoltcp listener would otherwise pin
+    // forever on an unauthenticated half-open — a `SynReceived` whose final ACK is
+    // withheld: the accept gate `may_send()` never becomes true, nothing frees the
+    // slot, and ALL inbound reliable streams are black-holed until the node
+    // restarts. `set_timeout` drives such a half-open (and a stalled established
+    // exchange) to `Closed` after `close_timeout` of silence, so `poll` can re-arm
+    // the listener and the DoS is bounded to one timeout window instead of forever.
+    // Set at socket creation so it survives every listen/accept/reset cycle
+    // (smoltcp's `reset()` preserves the timeout); this mirrors the per-slot
+    // `set_timeout` the embassy-net driver installs in its worker. `close_timeout`
+    // is validated non-zero above, so this is never the zero value smoltcp would
+    // treat as an immediate abort.
+    let socket_timeout = to_smoltcp_duration(cfg.close_timeout);
     for _ in 0..cfg.tcp_pool_size {
       let rx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_rx_bytes]);
       let tx = tcp::SocketBuffer::new(vec![0u8; cfg.tcp_socket_tx_bytes]);
-      engine
-        .plane_mut()
-        .pool
-        .push(sockets.add(tcp::Socket::new(rx, tx)));
+      let mut sock = tcp::Socket::new(rx, tx);
+      sock.set_timeout(Some(socket_timeout));
+      engine.plane_mut().pool.push(sockets.add(sock));
     }
     // Dedicate one pooled socket to listening for inbound reliable connections.
     if let Some(h) = engine.plane_mut().pool.take() {
@@ -1197,6 +1225,25 @@ where
   #[inline]
   pub fn listener_present(&self) -> bool {
     self.engine.listener_present()
+  }
+
+  /// Whether the installed listener socket is actually in the `Listen` state
+  /// (ready to accept), as opposed to merely installed.
+  ///
+  /// A diagnostic for the listener-reap self-heal: an unanswered half-open reaped
+  /// by the socket inactivity timeout leaves the listener handle installed
+  /// ([`listener_present`](Self::listener_present) stays `true`) but its socket in
+  /// `Closed`, accepting nothing. `poll` re-`listen`s it in place; a test uses
+  /// this to witness that a reaped listener is `Closed` (not listening) before the
+  /// re-arm and back in `Listen` after it.
+  #[doc(hidden)]
+  #[inline]
+  pub fn listener_is_listening(&self) -> bool {
+    self
+      .engine
+      .listener()
+      .map(|h| self.sockets.get::<tcp::Socket>(h).is_listening())
+      .unwrap_or(false)
   }
 
   /// Number of reliable exchanges still in `PendingDial`: a dial was requested
@@ -1689,6 +1736,33 @@ where
       let mut stream = SmoltcpStream::new(&mut self.iface, &sockets);
       self.engine.pump(now, &mut gossip, &mut stream)
     };
+
+    // 2b. Re-arm a listener the inactivity timeout just reaped. When an
+    // unauthenticated half-open (a `SynReceived` whose final ACK is withheld) — or
+    // a stalled established exchange — sits idle past the socket timeout, step 1's
+    // stack tick drives that socket to `Closed`. The engine keeps its handle
+    // installed as the listener (it swaps the slot out only on a completed accept,
+    // and never re-arms a socket the link layer closed underneath it), so without
+    // this the single direct-smoltcp listener would stay `Closed` and the node
+    // would accept no further inbound reliable streams — turning the bounded reap
+    // back into a permanent black-hole. Re-`listen` in place restores it: the
+    // handle is unchanged, so the engine's listener bookkeeping still holds, and
+    // the timeout — preserved across `reset()` — reaps the next half-open too,
+    // keeping the DoS bounded to one timeout window. A socket mid-handshake
+    // (`SynReceived`, still `is_open()`) or a healthy `Listen` is left untouched;
+    // only a reaped (`!is_open()`, i.e. `Closed`) listener is re-armed. This is the
+    // smoltcp analog of the per-slot self-heal the embassy-net worker performs
+    // after its own `set_timeout` fires.
+    if let Some(listener) = self.engine.listener() {
+      let port = self.engine.port();
+      let sock = self.sockets.get_mut::<tcp::Socket>(listener);
+      if !sock.is_open() {
+        // Ignoring Err: `listen` fails only on port 0 (rejected at construction) or
+        // an already-open socket (excluded by the `!is_open()` guard); neither can
+        // occur here.
+        let _ = sock.listen(port);
+      }
+    }
 
     // 3. Fold the smoltcp stack's next scheduled event into the engine's returned
     // deadline. The engine returns only `min(machine, closing)` — the SWIM timers

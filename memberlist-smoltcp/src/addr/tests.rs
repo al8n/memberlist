@@ -21,3 +21,37 @@ fn machine_instant_round_trips_through_smoltcp_instant() {
   let s = to_smoltcp_instant(now);
   assert_eq!(from_smoltcp_instant(s), now);
 }
+
+#[test]
+fn duration_converts_to_smoltcp_micros() {
+  use smoltcp::time::Duration as SmoltcpDuration;
+  // The default close_timeout (10 s), the value the driver installs as the socket
+  // inactivity timeout, converts exactly.
+  assert_eq!(
+    to_smoltcp_duration(core::time::Duration::from_secs(10)),
+    SmoltcpDuration::from_secs(10)
+  );
+  // Sub-second precision is preserved at microsecond granularity.
+  assert_eq!(
+    to_smoltcp_duration(core::time::Duration::from_micros(1_500_250)),
+    SmoltcpDuration::from_micros(1_500_250)
+  );
+  // A non-zero timeout never converts to smoltcp's zero (which it treats as an
+  // immediate abort of every socket).
+  assert_ne!(
+    to_smoltcp_duration(core::time::Duration::from_millis(1)),
+    SmoltcpDuration::from_micros(0)
+  );
+}
+
+#[test]
+fn out_of_range_duration_saturates_without_panicking() {
+  use smoltcp::time::Duration as SmoltcpDuration;
+  // A duration whose microseconds exceed u64 saturates to a finite (very large)
+  // timeout instead of overflowing smoltcp's own `From`, which multiplies whole
+  // seconds by 1_000_000.
+  assert_eq!(
+    to_smoltcp_duration(core::time::Duration::MAX),
+    SmoltcpDuration::from_micros(u64::MAX)
+  );
+}
