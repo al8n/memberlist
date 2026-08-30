@@ -65,6 +65,58 @@ fn memberlist_options_default_leaves_every_override_unset() {
   let _checksum = opts.checksum();
   #[cfg(encryption)]
   let _encryption = opts.encryption();
+  // The nested tuning section defaults to all-unset.
+  assert_eq!(opts.tuning().probe_interval(), None);
+  assert_eq!(opts.tuning().max_members(), None);
+}
+
+#[test]
+fn memberlist_options_tuning_builder_round_trips() {
+  use memberlist_proto::EndpointTuning;
+
+  let opts = MemberlistOptions::new().with_tuning(
+    EndpointTuning::new()
+      .with_probe_interval(Duration::from_secs(5))
+      .with_max_members(32)
+      .with_suspicion_mult(7),
+  );
+  assert_eq!(opts.tuning().probe_interval(), Some(Duration::from_secs(5)));
+  assert_eq!(opts.tuning().max_members(), Some(32));
+  assert_eq!(opts.tuning().suspicion_mult(), Some(7));
+  // A field the builder did not touch stays unset.
+  assert_eq!(opts.tuning().gossip_nodes(), None);
+  // The default carries an all-unset tuning section.
+  assert_eq!(MemberlistOptions::new().tuning().probe_interval(), None);
+}
+
+// The driver-seam assertion: the returned `EndpointOptions` is verbatim what
+// `Endpoint::try_new` receives, so exercising the real
+// `apply_memberlist_options` proves the tuning overrides travel the driver path.
+#[test]
+fn apply_memberlist_options_installs_tuning_overrides() {
+  use crate::memberlist::apply_memberlist_options;
+  use memberlist_proto::{EndpointOptions, EndpointTuning};
+
+  let opts = MemberlistOptions::new().with_tuning(
+    EndpointTuning::new()
+      .with_probe_interval(Duration::from_secs(5))
+      .with_max_members(32)
+      .with_suspicion_mult(7),
+  );
+  let cfg = apply_memberlist_options(EndpointOptions::<(), ()>::new((), ()), &opts);
+  assert_eq!(cfg.probe_interval(), Duration::from_secs(5));
+  assert_eq!(cfg.max_members(), Some(32));
+  assert_eq!(cfg.suspicion_mult(), 7);
+
+  // The unset arm: no tuning overrides ⇒ every knob keeps the machine default.
+  let base = EndpointOptions::<(), ()>::new((), ());
+  let cfg_default = apply_memberlist_options(
+    EndpointOptions::<(), ()>::new((), ()),
+    &MemberlistOptions::new(),
+  );
+  assert_eq!(cfg_default.probe_interval(), base.probe_interval());
+  assert_eq!(cfg_default.max_members(), base.max_members());
+  assert_eq!(cfg_default.suspicion_mult(), base.suspicion_mult());
 }
 
 #[cfg(all(compression, encryption))]
@@ -303,26 +355,45 @@ fn channel_serde_is_tagged_snake_case() {
 #[cfg(feature = "serde")]
 #[test]
 fn memberlist_options_serde_round_trip_and_partial() {
+  use memberlist_proto::EndpointTuning;
+
   // An empty config deserializes to the full default (every override unset).
   let from_empty = serde_json::from_str::<MemberlistOptions>("{}").unwrap();
   assert_eq!(from_empty.gossip_mtu(), None);
   assert_eq!(from_empty.meta_max_size(), None);
   assert!(!from_empty.skip_inbound_label_check());
+  // The nested tuning section deserializes to its all-unset default too.
+  assert_eq!(from_empty.tuning().probe_interval(), None);
+  assert_eq!(from_empty.tuning().max_members(), None);
 
   // A configured subset round-trips, and an omitted field stays default.
   let opts = MemberlistOptions::new()
     .with_gossip_mtu(1400)
-    .with_skip_inbound_label_check(true);
+    .with_skip_inbound_label_check(true)
+    .with_tuning(
+      EndpointTuning::new()
+        .with_probe_interval(Duration::from_secs(2))
+        .with_max_members(64),
+    );
   let json = serde_json::to_string(&opts).unwrap();
   let back = serde_json::from_str::<MemberlistOptions>(&json).unwrap();
   assert_eq!(back.gossip_mtu(), Some(1400));
   assert!(back.skip_inbound_label_check());
   assert_eq!(back.meta_max_size(), None);
+  // The nested tuning knobs survive the round-trip.
+  assert_eq!(back.tuning().probe_interval(), Some(Duration::from_secs(2)));
+  assert_eq!(back.tuning().max_members(), Some(64));
 
-  // A partial config fills the rest from the default.
-  let partial = serde_json::from_str::<MemberlistOptions>(r#"{"meta_max_size":512}"#).unwrap();
+  // A partial config fills the rest from the default — including a `tuning`
+  // section that carries only one knob.
+  let partial = serde_json::from_str::<MemberlistOptions>(
+    r#"{"meta_max_size":512,"tuning":{"suspicion_mult":9}}"#,
+  )
+  .unwrap();
   assert_eq!(partial.meta_max_size(), Some(512));
   assert_eq!(partial.gossip_mtu(), None);
+  assert_eq!(partial.tuning().suspicion_mult(), Some(9));
+  assert_eq!(partial.tuning().probe_interval(), None);
 }
 
 #[cfg(feature = "serde")]
@@ -386,22 +457,33 @@ fn memberlist_options_clap_parses_and_wires_env() {
     memberlist: MemberlistOptions,
   }
 
-  // The scalar flags parse; the bool is a flag.
+  // The scalar flags parse; the bool is a flag; the flattened tuning flags parse.
   let cli = Cli::try_parse_from([
     "app",
     "--memberlist-gossip-mtu",
     "1400",
     "--memberlist-skip-inbound-label-check",
+    "--memberlist-probe-interval",
+    "5s",
+    "--memberlist-max-members",
+    "32",
   ])
   .unwrap();
   assert_eq!(cli.memberlist.gossip_mtu(), Some(1400));
   assert!(cli.memberlist.skip_inbound_label_check());
+  assert_eq!(
+    cli.memberlist.tuning().probe_interval(),
+    Some(Duration::from_secs(5))
+  );
+  assert_eq!(cli.memberlist.tuning().max_members(), Some(32));
   // Unspecified stays default.
   let bare = Cli::try_parse_from(["app"]).unwrap();
   assert_eq!(bare.memberlist.gossip_mtu(), None);
   assert!(!bare.memberlist.skip_inbound_label_check());
+  assert_eq!(bare.memberlist.tuning().probe_interval(), None);
 
   // The env var is wired — assert via command introspection, never `set_var`.
+  // Check both an own flag and a flattened tuning flag.
   let cmd = Cli::command();
   let arg = cmd
     .get_arguments()
@@ -410,6 +492,14 @@ fn memberlist_options_clap_parses_and_wires_env() {
   assert_eq!(
     arg.get_env().and_then(|e| e.to_str()),
     Some("MEMBERLIST_GOSSIP_MTU")
+  );
+  let tuning_arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "memberlist-probe-interval")
+    .expect("memberlist-probe-interval arg is registered");
+  assert_eq!(
+    tuning_arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_PROBE_INTERVAL")
   );
 }
 
@@ -545,12 +635,19 @@ fn memberlist_options_clap_update_preserves_unoverridden_fields() {
     memberlist: MemberlistOptions,
   }
 
+  use memberlist_proto::EndpointTuning;
+
   let base = || {
     let opts = MemberlistOptions::new()
       .with_gossip_mtu(1400)
       .with_skip_inbound_label_check(true)
       .with_label(Some(b"team-a".to_vec()))
-      .expect("valid label");
+      .expect("valid label")
+      .with_tuning(
+        EndpointTuning::new()
+          .with_probe_interval(Duration::from_secs(5))
+          .with_max_members(32),
+      );
     #[cfg(compression)]
     let opts = opts.with_compression(
       crate::CompressionOptions::new().with_algorithm(crate::CompressAlgorithm::Lz4),
@@ -578,6 +675,18 @@ fn memberlist_options_clap_update_preserves_unoverridden_fields() {
     cli.memberlist.label(),
     Some(b"team-a".as_slice()),
     "non-default label survives"
+  );
+  // The flattened tuning child's seeded knobs survive a partial parent update —
+  // the "an unrelated flag must not reset nested tuning" guarantee.
+  assert_eq!(
+    cli.memberlist.tuning().probe_interval(),
+    Some(Duration::from_secs(5)),
+    "the flattened tuning child's probe_interval survives a partial parent update"
+  );
+  assert_eq!(
+    cli.memberlist.tuning().max_members(),
+    Some(32),
+    "the flattened tuning child's max_members survives a partial parent update"
   );
   #[cfg(compression)]
   assert_eq!(

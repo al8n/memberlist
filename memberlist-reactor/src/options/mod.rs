@@ -10,7 +10,9 @@ use memberlist_proto::ChecksumOptions;
 use memberlist_proto::CompressionOptions;
 #[cfg(encryption)]
 use memberlist_proto::EncryptionOptions;
-use memberlist_proto::{AliveDelegate, MergeDelegate, label::validate_label, typed::Meta};
+use memberlist_proto::{
+  AliveDelegate, EndpointTuning, MergeDelegate, label::validate_label, typed::Meta,
+};
 
 use crate::cidr::CidrFilter;
 
@@ -26,6 +28,10 @@ use crate::cidr::CidrFilter;
 /// - `meta_max_size` — the local node's `Meta` byte ceiling (a broadcast-size
 ///   cap, not a peer-rejection filter).
 /// - `max_stream_frame_size` — the reliable-stream frame ceiling.
+/// - `tuning` — the SWIM-behavioral tuning knobs (probe / suspicion / gossip
+///   cadence, membership admission ceilings) carried through to the machine via
+///   [`EndpointTuning`](memberlist_proto::EndpointTuning). Every knob defaults
+///   to unset (the machine default).
 /// - `initial_meta` — the local node's initial metadata payload.
 /// - `initial_local_state` — the local node's initial push/pull state snapshot.
 /// - `compression` — the initial gossip+stream compression policy (disabled by
@@ -52,6 +58,12 @@ pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
   meta_max_size: Option<usize>,
   max_stream_frame_size: Option<usize>,
+  // The SWIM-behavioral tuning knobs (probe / suspicion / gossip cadence,
+  // membership ceilings). A nested section whose every field is an unset
+  // override by default, layered onto the machine `EndpointOptions` via
+  // `EndpointTuning::apply_to`. Container `serde(default)` makes a missing
+  // `tuning` key deserialize to the all-unset default.
+  tuning: EndpointTuning,
   // A binary metadata payload: not a sensible config-file or CLI value, so it is
   // left to the validating `with_initial_meta` builder and skipped by both
   // layers (`Option<Meta>` defaults to `None` on deserialize).
@@ -115,6 +127,8 @@ const _: () = {
       env = "MEMBERLIST_MAX_STREAM_FRAME_SIZE"
     )]
     max_stream_frame_size: Option<usize>,
+    #[command(flatten)]
+    tuning: EndpointTuning,
     #[cfg(compression)]
     #[command(flatten)]
     compression: CompressionOptions,
@@ -145,6 +159,7 @@ const _: () = {
         gossip_mtu: c.gossip_mtu,
         meta_max_size: c.meta_max_size,
         max_stream_frame_size: c.max_stream_frame_size,
+        tuning: c.tuning,
         initial_meta: None,
         initial_local_state: None,
         #[cfg(compression)]
@@ -218,6 +233,7 @@ const _: () = {
       // Each flattened child applies its own operator-supplied overrides through
       // its own `value_source` gate, so an unrelated parent flag never resets a
       // child's fields.
+      self.tuning.update_from_arg_matches(m)?;
       #[cfg(compression)]
       self.compression.update_from_arg_matches(m)?;
       #[cfg(checksum)]
@@ -306,6 +322,16 @@ impl MemberlistOptions {
   #[must_use]
   pub fn with_max_stream_frame_size(mut self, size: usize) -> Self {
     self.max_stream_frame_size = Some(size);
+    self
+  }
+
+  /// Sets the SWIM-behavioral tuning knobs (probe / suspicion / gossip cadence,
+  /// membership admission ceilings) carried through to the machine. Each unset
+  /// knob leaves the machine default; see
+  /// [`EndpointTuning`](memberlist_proto::EndpointTuning).
+  #[must_use]
+  pub fn with_tuning(mut self, tuning: EndpointTuning) -> Self {
+    self.tuning = tuning;
     self
   }
 
@@ -421,6 +447,12 @@ impl MemberlistOptions {
   #[must_use]
   pub const fn max_stream_frame_size(&self) -> Option<usize> {
     self.max_stream_frame_size
+  }
+
+  /// The SWIM-behavioral tuning knobs carried through to the machine.
+  #[must_use]
+  pub const fn tuning(&self) -> &EndpointTuning {
+    &self.tuning
   }
 
   /// The configured initial `Meta`, if set.

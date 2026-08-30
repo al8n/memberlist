@@ -98,7 +98,7 @@ where
 }
 
 /// Layers the [`MemberlistOptions`] overrides onto a machine [`EndpointOptions`].
-fn apply_memberlist_options<I, A>(
+pub(crate) fn apply_memberlist_options<I, A>(
   mut cfg: EndpointOptions<I, A>,
   opts: &MemberlistOptions,
 ) -> EndpointOptions<I, A> {
@@ -117,6 +117,9 @@ fn apply_memberlist_options<I, A>(
   if let Some(state) = opts.initial_local_state() {
     cfg = cfg.with_initial_local_state(state.clone());
   }
+  // The SWIM tuning overrides copy through last; their knob set is disjoint from
+  // the size / payload knobs above, so the order does not matter.
+  cfg = opts.tuning().apply_to(cfg);
   cfg
 }
 

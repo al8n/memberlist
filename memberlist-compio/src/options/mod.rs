@@ -10,7 +10,9 @@ use memberlist_proto::ChecksumOptions;
 use memberlist_proto::CompressionOptions;
 #[cfg(encryption)]
 use memberlist_proto::EncryptionOptions;
-use memberlist_proto::{CheapClone, config::EndpointOptions, label::validate_label, typed::Meta};
+use memberlist_proto::{
+  CheapClone, EndpointTuning, config::EndpointOptions, label::validate_label, typed::Meta,
+};
 
 use crate::{
   delegate::{AliveDelegate, MergeDelegate},
@@ -37,6 +39,12 @@ use memberlist_proto::config::{DEFAULT_MAX_STREAM_FRAME_SIZE, DEFAULT_META_MAX_S
 /// - `max_stream_frame_size` — the reliable-stream frame ceiling; bounds the
 ///   per-event size of reliable user / push-pull payloads (and thus the
 ///   delegate-queue memory a peer can drive when a delegate falls behind).
+/// - `tuning` — the SWIM-behavioral tuning knobs (probe / suspicion / gossip
+///   cadence, membership admission ceilings) carried through to the machine via
+///   [`EndpointTuning`](memberlist_proto::EndpointTuning). Every knob defaults
+///   to unset (the machine default); an
+///   `awareness_max_multiplier` of `0` is rejected at
+///   [`Memberlist::new`](crate::Memberlist::new).
 /// - `initial_meta` — the local node's initial metadata payload.
 /// - `initial_local_state` — the local node's initial push/pull
 ///   application-state snapshot.
@@ -73,6 +81,12 @@ pub struct MemberlistOptions {
   gossip_mtu: Option<usize>,
   meta_max_size: Option<usize>,
   max_stream_frame_size: Option<usize>,
+  // The SWIM-behavioral tuning knobs (probe / suspicion / gossip cadence,
+  // membership ceilings). A nested section whose every field is an unset
+  // override by default, layered onto the machine `EndpointOptions` via
+  // `EndpointTuning::apply_to`. Container `serde(default)` makes a missing
+  // `tuning` key deserialize to the all-unset default.
+  tuning: EndpointTuning,
   // `Meta` is an opaque binary payload with no string form and no serde impl,
   // so it is neither a config-file field nor a CLI flag: configure it
   // programmatically via `with_initial_meta`.
@@ -212,6 +226,19 @@ impl MemberlistOptions {
   #[inline]
   pub fn with_max_stream_frame_size(mut self, size: usize) -> Self {
     self.max_stream_frame_size = Some(size);
+    self
+  }
+
+  /// Builder: set the SWIM-behavioral tuning knobs (probe / suspicion / gossip
+  /// cadence, membership admission ceilings) carried through to the machine.
+  /// Each unset knob leaves the machine default; see
+  /// [`EndpointTuning`](memberlist_proto::EndpointTuning). An
+  /// `awareness_max_multiplier` of `0` is rejected at
+  /// [`Memberlist::new`](crate::Memberlist::new).
+  #[must_use]
+  #[inline]
+  pub fn with_tuning(mut self, tuning: EndpointTuning) -> Self {
+    self.tuning = tuning;
     self
   }
 
@@ -356,6 +383,12 @@ impl MemberlistOptions {
     self.max_stream_frame_size
   }
 
+  /// The SWIM-behavioral tuning knobs carried through to the machine.
+  #[inline]
+  pub const fn tuning(&self) -> &EndpointTuning {
+    &self.tuning
+  }
+
   /// The configured initial `Meta`, if any.
   #[inline]
   pub const fn initial_meta(&self) -> Option<&Meta> {
@@ -481,6 +514,7 @@ const _: () = {
   impl Args for MemberlistOptions {
     fn augment_args(cmd: Command) -> Command {
       let cmd = MemberlistOptionsCli::augment_args(cmd);
+      let cmd = EndpointTuning::augment_args(cmd);
       #[cfg(compression)]
       let cmd = CompressionOptions::augment_args(cmd);
       #[cfg(checksum)]
@@ -492,6 +526,7 @@ const _: () = {
 
     fn augment_args_for_update(cmd: Command) -> Command {
       let cmd = MemberlistOptionsCli::augment_args_for_update(cmd);
+      let cmd = EndpointTuning::augment_args_for_update(cmd);
       #[cfg(compression)]
       let cmd = CompressionOptions::augment_args_for_update(cmd);
       #[cfg(checksum)]
@@ -509,6 +544,7 @@ const _: () = {
         gossip_mtu: own.gossip_mtu,
         meta_max_size: own.meta_max_size,
         max_stream_frame_size: own.max_stream_frame_size,
+        tuning: EndpointTuning::from_arg_matches(m)?,
         // The opaque binary fields are not CLI-settable; they default here and
         // are configured programmatically via the builders.
         initial_meta: None,
@@ -566,6 +602,7 @@ const _: () = {
       );
       // Delegate each flattened child to its own value-source-correct update so
       // an unrelated parent flag never resets a child's defaulted knob.
+      self.tuning.update_from_arg_matches(m)?;
       #[cfg(compression)]
       self.compression.update_from_arg_matches(m)?;
       #[cfg(checksum)]
@@ -1311,6 +1348,36 @@ pub(crate) fn validate_max_stream_frame_size(
   Ok(())
 }
 
+/// Validate the newly-exposed SWIM tuning knobs the machine would reject at
+/// construction.
+///
+/// Exactly one tuning knob is a partial input the machine refuses: an
+/// `awareness_max_multiplier` of `0` leaves the awareness tracker
+/// unconstructable (`EndpointInitError::AwarenessMultiplierZero`). compio's
+/// `Transport::run` builds the machine through the PANICKING `Endpoint::new` in
+/// a detached task, so an unvalidated zero would abort that task rather than
+/// surface a clean error. This check rejects it up-front at `Memberlist::new`,
+/// before any socket is bound, mirroring the reject-fail-fast doctrine of the
+/// sibling validators. Every other newly-exposed knob is a total input (a zero
+/// duration is a defined disable semantic, a degenerate multiplier a legal
+/// tuning extreme), so nothing else is gated here.
+///
+/// Called from `Memberlist::new`; every backend (TCP/TLS/QUIC) routes through
+/// that single path, so the check is enforced uniformly.
+pub(crate) fn validate_endpoint_tuning(opts: &MemberlistOptions) -> Result<(), MemberlistError> {
+  if opts.tuning().awareness_max_multiplier() == Some(0) {
+    return Err(MemberlistError::InvalidOption(InvalidOption::new(
+      "awareness_max_multiplier",
+      "the awareness max multiplier must be nonzero: the machine rejects a zero multiplier at \
+         construction (the awareness tracker would be unconstructable), and compio builds the \
+         machine on a detached task through a panicking constructor, so a zero would abort that \
+         task instead of surfacing a clean error"
+        .to_string(),
+    )));
+  }
+  Ok(())
+}
+
 /// Layer the [`MemberlistOptions`] overrides onto a freshly-built
 /// machine-layer [`EndpointOptions`]. Each unset knob leaves the
 /// corresponding `EndpointOptions` default untouched. Called from every
@@ -1336,6 +1403,13 @@ pub(crate) fn apply_memberlist_options<I, A>(
   if let Some(state) = opts.initial_local_state() {
     cfg = cfg.with_initial_local_state(state.clone());
   }
+  // The SWIM tuning overrides copy through last; their knob set is disjoint from
+  // the size / payload knobs above, so the order does not matter. The only
+  // machine-rejectable value among them (`awareness_max_multiplier == 0`) is
+  // caught up-front by `validate_endpoint_tuning` in `Memberlist::new`, so the
+  // `EndpointOptions` this returns is known constructable by the time compio's
+  // `Transport::run` hands it to the panicking `Endpoint::new`.
+  cfg = opts.tuning().apply_to(cfg);
   cfg
 }
 

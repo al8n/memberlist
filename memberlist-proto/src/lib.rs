@@ -153,7 +153,7 @@ pub use broadcast::{
 #[cfg(feature = "cidr")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cidr")))]
 pub use cidr::{CidrAnd, CidrPolicy};
-pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions};
+pub use config::{DEFAULT_GOSSIP_MTU, EndpointOptions, EndpointTuning};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{EndpointInitError, Error, SizeExceeded, StreamError, UserDialBacklogFull};

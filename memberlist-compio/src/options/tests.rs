@@ -473,6 +473,9 @@ fn memberlist_options_default_is_all_unset() {
   assert!(opts.initial_local_state().is_none());
   assert_eq!(opts.label(), None);
   assert!(!opts.skip_inbound_label_check());
+  // The nested tuning section defaults to all-unset.
+  assert_eq!(opts.tuning().probe_interval(), None);
+  assert_eq!(opts.tuning().max_members(), None);
   // `new()` and `default()` agree on every scalar.
   let d = MemberlistOptions::default();
   assert_eq!(d.gossip_mtu(), None);
@@ -693,6 +696,60 @@ fn validate_encryption_options_accepts_usable_policies() {
   );
 }
 
+// The driver-seam assertion, cross-driver parity with the reactor by identical
+// values: the returned `EndpointOptions` is verbatim what compio's
+// `Transport::run` hands to `Endpoint::new`, so exercising the real
+// `apply_memberlist_options` proves the tuning overrides travel the driver path.
+#[test]
+fn apply_memberlist_options_installs_tuning_overrides() {
+  use core::time::Duration;
+
+  let opts = MemberlistOptions::new().with_tuning(
+    EndpointTuning::new()
+      .with_probe_interval(Duration::from_secs(5))
+      .with_max_members(32)
+      .with_suspicion_mult(7),
+  );
+  let cfg = apply_memberlist_options(EndpointOptions::<(), ()>::new((), ()), &opts);
+  assert_eq!(cfg.probe_interval(), Duration::from_secs(5));
+  assert_eq!(cfg.max_members(), Some(32));
+  assert_eq!(cfg.suspicion_mult(), 7);
+
+  // The unset arm: no tuning overrides ⇒ every knob keeps the machine default.
+  let base = EndpointOptions::<(), ()>::new((), ());
+  let cfg_default = apply_memberlist_options(
+    EndpointOptions::<(), ()>::new((), ()),
+    &MemberlistOptions::new(),
+  );
+  assert_eq!(cfg_default.probe_interval(), base.probe_interval());
+  assert_eq!(cfg_default.max_members(), base.max_members());
+  assert_eq!(cfg_default.suspicion_mult(), base.suspicion_mult());
+}
+
+// `awareness_max_multiplier == 0` is the one newly-exposed knob the machine
+// rejects at construction; compio must catch it up-front (its `Transport::run`
+// builds the machine through a panicking constructor on a detached task). A
+// nonzero value and an unset knob are both accepted.
+#[test]
+fn validate_endpoint_tuning_rejects_zero_awareness_multiplier() {
+  // Unset ⇒ Ok.
+  assert!(validate_endpoint_tuning(&MemberlistOptions::new()).is_ok());
+  // A nonzero multiplier ⇒ Ok.
+  assert!(
+    validate_endpoint_tuning(
+      &MemberlistOptions::new().with_tuning(EndpointTuning::new().with_awareness_max_multiplier(1))
+    )
+    .is_ok()
+  );
+  // Zero ⇒ InvalidOption naming the knob.
+  match validate_endpoint_tuning(
+    &MemberlistOptions::new().with_tuning(EndpointTuning::new().with_awareness_max_multiplier(0)),
+  ) {
+    Err(MemberlistError::InvalidOption(_)) => {}
+    other => panic!("a zero awareness multiplier must be InvalidOption, got {other:?}"),
+  }
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn memberlist_options_serde_round_trip_and_partial() {
@@ -710,18 +767,33 @@ fn memberlist_options_serde_round_trip_and_partial() {
     .with_gossip_mtu(1500)
     .with_meta_max_size(256)
     .with_max_stream_frame_size(4096)
-    .with_skip_inbound_label_check(true);
+    .with_skip_inbound_label_check(true)
+    .with_tuning(
+      EndpointTuning::new()
+        .with_probe_interval(core::time::Duration::from_secs(2))
+        .with_max_members(64),
+    );
   let json = serde_json::to_string(&opts).unwrap();
   let back: MemberlistOptions = serde_json::from_str(&json).unwrap();
   assert_eq!(back.gossip_mtu(), Some(1500));
   assert_eq!(back.meta_max_size(), Some(256));
   assert_eq!(back.max_stream_frame_size(), Some(4096));
   assert!(back.skip_inbound_label_check());
-  // A partial config overrides one field and defaults the rest.
-  let partial: MemberlistOptions = serde_json::from_str(r#"{"gossip_mtu": 1234}"#).unwrap();
+  // The nested tuning section survives the round-trip.
+  assert_eq!(
+    back.tuning().probe_interval(),
+    Some(core::time::Duration::from_secs(2))
+  );
+  assert_eq!(back.tuning().max_members(), Some(64));
+  // A partial config overrides one field and defaults the rest — including a
+  // `tuning` section carrying only one knob.
+  let partial: MemberlistOptions =
+    serde_json::from_str(r#"{"gossip_mtu": 1234, "tuning": {"suspicion_mult": 9}}"#).unwrap();
   assert_eq!(partial.gossip_mtu(), Some(1234));
   assert_eq!(partial.meta_max_size(), None);
   assert!(!partial.skip_inbound_label_check());
+  assert_eq!(partial.tuning().suspicion_mult(), Some(9));
+  assert_eq!(partial.tuning().probe_interval(), None);
 }
 
 #[cfg(feature = "serde")]
@@ -744,25 +816,32 @@ fn memberlist_options_clap_parses_and_wires_env() {
     memberlist: MemberlistOptions,
   }
 
-  // The `Option<usize>` and `bool` flags parse; the opaque fields have none.
+  // The `Option<usize>` and `bool` flags parse; the opaque fields have none; the
+  // manually-augmented tuning flags parse too.
   let cli = Cli::try_parse_from([
     "app",
     "--memberlist-gossip-mtu",
     "1500",
     "--memberlist-skip-inbound-label-check",
+    "--memberlist-probe-interval",
+    "5s",
+    "--memberlist-max-members",
+    "32",
   ])
   .unwrap();
   assert_eq!(cli.memberlist.gossip_mtu(), Some(1500));
   assert!(cli.memberlist.skip_inbound_label_check());
-  // Unspecified leaves the gossip-mtu override unset.
   assert_eq!(
-    Cli::try_parse_from(["app"])
-      .unwrap()
-      .memberlist
-      .gossip_mtu(),
-    None
+    cli.memberlist.tuning().probe_interval(),
+    Some(core::time::Duration::from_secs(5))
   );
+  assert_eq!(cli.memberlist.tuning().max_members(), Some(32));
+  // Unspecified leaves the overrides unset.
+  let bare = Cli::try_parse_from(["app"]).unwrap();
+  assert_eq!(bare.memberlist.gossip_mtu(), None);
+  assert_eq!(bare.memberlist.tuning().probe_interval(), None);
   // The env var is wired — assert via command introspection, never `set_var`.
+  // Check both an own flag and a manually-augmented tuning flag.
   let cmd = Cli::command();
   let arg = cmd
     .get_arguments()
@@ -771,6 +850,14 @@ fn memberlist_options_clap_parses_and_wires_env() {
   assert_eq!(
     arg.get_env().and_then(|e| e.to_str()),
     Some("MEMBERLIST_GOSSIP_MTU")
+  );
+  let tuning_arg = cmd
+    .get_arguments()
+    .find(|a| a.get_id().as_str() == "memberlist-probe-interval")
+    .expect("memberlist-probe-interval arg is registered");
+  assert_eq!(
+    tuning_arg.get_env().and_then(|e| e.to_str()),
+    Some("MEMBERLIST_PROBE_INTERVAL")
   );
 }
 
@@ -873,7 +960,12 @@ fn memberlist_options_partial_update_preserves_unset_fields() {
   // partial update supplying ONE unrelated own flag.
   let seeded = MemberlistOptions::new()
     .with_skip_inbound_label_check(true)
-    .with_meta_max_size(4242);
+    .with_meta_max_size(4242)
+    .with_tuning(
+      EndpointTuning::new()
+        .with_probe_interval(core::time::Duration::from_secs(5))
+        .with_max_members(32),
+    );
   #[cfg(compression)]
   let seeded = seeded.with_compression(
     CompressionOptions::new().with_algorithm(memberlist_proto::CompressAlgorithm::Lz4),
@@ -893,6 +985,19 @@ fn memberlist_options_partial_update_preserves_unset_fields() {
   );
   // The seeded `Option` field survives too.
   assert_eq!(cli.o.meta_max_size(), Some(4242));
+  // The manually-augmented tuning child's seeded knobs survive the partial
+  // parent update — the "an unrelated flag must not reset nested tuning"
+  // guarantee.
+  assert_eq!(
+    cli.o.tuning().probe_interval(),
+    Some(core::time::Duration::from_secs(5)),
+    "the tuning child's probe_interval must survive an unrelated partial update"
+  );
+  assert_eq!(
+    cli.o.tuning().max_members(),
+    Some(32),
+    "the tuning child's max_members must survive an unrelated partial update"
+  );
   // The seeded child knob survives the partial parent update.
   #[cfg(compression)]
   assert_eq!(
@@ -927,10 +1032,14 @@ fn memberlist_options_update_applies_explicit_override() {
       "--memberlist-skip-inbound-label-check",
       "--memberlist-gossip-mtu",
       "1600",
+      "--memberlist-suspicion-mult",
+      "11",
     ])
     .expect("explicit override parses");
   assert!(cli.o.skip_inbound_label_check());
   assert_eq!(cli.o.gossip_mtu(), Some(1600));
+  // A tuning flag supplied on update is applied via the delegated child update.
+  assert_eq!(cli.o.tuning().suspicion_mult(), Some(11));
 
   // A child flag supplied on update is applied via the delegated child update.
   #[cfg(compression)]
