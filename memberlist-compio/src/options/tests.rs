@@ -263,6 +263,66 @@ fn validate_advertise_addr_rejects_unroutable_contacts() {
   }
 }
 
+// `canonical_advertise` rewrites ONLY an IPv4-mapped IPv6 address to its IPv4
+// form, preserving the port; a V4 address and a GENUINE V6 address (including
+// its scope_id / flowinfo) pass through bit-for-bit.
+#[test]
+fn canonical_advertise_maps_and_preserves() {
+  use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+  // Mapped IPv6 → IPv4, port preserved.
+  let mapped: SocketAddr = "[::ffff:127.0.0.1]:7946".parse().unwrap();
+  assert_eq!(
+    canonical_advertise(mapped),
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7946)),
+    "a mapped IPv6 advertise canonicalizes to its IPv4 form with the same port"
+  );
+
+  // Genuine V6 with a NONZERO scope_id must pass through bit-for-bit —
+  // `SocketAddr::new(ip.to_canonical(), port)` would silently drop the scope.
+  let scoped = SocketAddr::V6(SocketAddrV6::new(
+    Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+    7946,
+    0x11,
+    42,
+  ));
+  assert_eq!(
+    canonical_advertise(scoped),
+    scoped,
+    "a genuine scoped IPv6 advertise is preserved bit-for-bit (scope_id + flowinfo)"
+  );
+
+  // A genuine non-scoped V6 (e.g. loopback) is also unchanged.
+  let v6_loop: SocketAddr = "[::1]:9000".parse().unwrap();
+  assert_eq!(canonical_advertise(v6_loop), v6_loop);
+
+  // A V4 address is unchanged.
+  let v4: SocketAddr = "10.0.0.5:1234".parse().unwrap();
+  assert_eq!(canonical_advertise(v4), v4);
+}
+
+// The reject-backstop: a still-mapped IPv4-mapped IPv6 advertise address that
+// reaches `validate_advertise_addr` (a custom `Transport` that did not
+// canonicalize) is rejected with `InvalidAdvertiseAddr`, while its canonical
+// IPv4 form is accepted.
+#[test]
+fn validate_advertise_addr_rejects_mapped() {
+  use MemberlistError::InvalidAdvertiseAddr;
+
+  let mapped: SocketAddr = "[::ffff:127.0.0.1]:7946".parse().unwrap();
+  assert!(
+    matches!(validate_advertise_addr(&mapped), Err(InvalidAdvertiseAddr(e)) if e.addr() == mapped),
+    "a still-mapped IPv6 advertise must be rejected"
+  );
+
+  // The canonical IPv4 form of the same host is a usable unicast contact.
+  let canonical: SocketAddr = "127.0.0.1:7946".parse().unwrap();
+  assert!(
+    validate_advertise_addr(&canonical).is_ok(),
+    "the canonical IPv4 form must be accepted"
+  );
+}
+
 #[test]
 fn validate_max_stream_frame_size_bounds() {
   // Unset is accepted (the machine default applies at `T::run`).

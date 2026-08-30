@@ -51,6 +51,41 @@ async fn quic_memberlist_binds_and_shuts_down_cleanly() {
   timed.expect("shutdown Ok");
 }
 
+/// #170: a resolved IPv4-mapped IPv6 advertise (`::ffff:127.0.0.1`) is
+/// canonicalized to its IPv4 form BEFORE the UDP bind, so the QUIC node publishes
+/// a single IPv4 identity. Mirrors the TCP `mapped_advertise_canonicalized_to_v4`
+/// over the QUIC backend's `Transport::new`.
+#[compio::test]
+async fn quic_mapped_advertise_canonicalized_to_v4() {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
+    QuicTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("quic-mapped-adv"))
+      .with_advertise_addr(MaybeResolved::Resolved(
+        "[::ffff:127.0.0.1]:0".parse().unwrap(),
+      ))
+      .with_quic_config(support::self_trusted_quic_config()),
+  );
+  let ml = Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("a mapped advertise must canonicalize and construct over QUIC");
+  let advertise = ml.advertise_address();
+  assert!(
+    advertise.is_ipv4(),
+    "a mapped IPv6 advertise must publish as IPv4 over QUIC, got {advertise}"
+  );
+  assert_ne!(
+    advertise.port(),
+    0,
+    "ephemeral :0 must resolve to a concrete port"
+  );
+  ml.shutdown().await.expect("shutdown");
+}
+
 /// Two-node end-to-end smoke: A dispatch-joins B's listening port, the
 /// QUIC handshake + push/pull exchange completes inside the 5-second
 /// budget, and both nodes converge on `alive_count == 2`. Exercises

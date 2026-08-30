@@ -616,3 +616,66 @@ async fn join_with_against_banner_tcp_service_surfaces_join_failed() {
 
   joiner.shutdown().await.expect("joiner shutdown");
 }
+
+/// #170: a node CONFIGURED with an IPv4-mapped IPv6 advertise (`::ffff:127.0.0.1`)
+/// is canonicalized to its IPv4 identity before binding, so it and a plain-IPv4
+/// peer converge to ONE membership entry — no split identity, no duplicate keyed
+/// at a second address spelling. B (mapped config) joins A (plain V4); both settle
+/// at exactly 2 members and A keys B at a V4 address.
+#[compio::test]
+async fn mapped_and_v4_spellings_converge_to_one_peer() {
+  let a = make_tcp("mapped-a", loopback_addr(0), b"mapped-cluster").await;
+  // B is configured with a mapped IPv6 advertise; canonicalization rewrites it to
+  // 127.0.0.1 before the bind.
+  let b_mapped: SocketAddr = "[::ffff:127.0.0.1]:0".parse().unwrap();
+  let b = make_tcp("mapped-b", b_mapped, b"mapped-cluster").await;
+
+  // B's published identity is its canonical IPv4 form.
+  assert!(
+    b.advertise_address().is_ipv4(),
+    "a mapped advertise must canonicalize to IPv4, got {}",
+    b.advertise_address()
+  );
+
+  b.dispatch_join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("dispatch_join");
+
+  let converged = wait_until(
+    || a.member_count() == 2 && b.member_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={} b={}",
+    a.member_count(),
+    b.member_count()
+  );
+
+  // Exactly 2 — no duplicate entry from a second address spelling.
+  assert_eq!(
+    a.member_count(),
+    2,
+    "A must key B once, not once per spelling"
+  );
+
+  // A keys B at a V4 address (B's canonical identity), never a mapped IPv6.
+  let b_id = b.local_node().id_ref().clone();
+  let b_in_a = a
+    .members()
+    .into_iter()
+    .find(|n| *n.id_ref() == b_id)
+    .expect("A must know B");
+  assert!(
+    b_in_a.address_ref().is_ipv4(),
+    "A must key B at its canonical IPv4 address, got {}",
+    b_in_a.address_ref()
+  );
+
+  a.shutdown().await.expect("a shutdown");
+  b.shutdown().await.expect("b shutdown");
+}

@@ -70,6 +70,64 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
   .is_ok()
 }
 
+/// Build a reactor TCP node advertising `advertise` (used to hand in a mapped
+/// IPv6 advertise), with no admission policy.
+async fn make_advertise(
+  id: &str,
+  advertise: SocketAddr,
+) -> Memberlist<SmolStr, SocketAddr, TokioRuntime> {
+  Memberlist::<SmolStr, _, TokioRuntime>::tcp(
+    &SocketAddrResolver,
+    SmolStr::new(id),
+    MaybeResolved::Resolved(advertise),
+    Options::<SmolStr>::new(),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("bind tcp memberlist")
+}
+
+/// #170: a peer CONFIGURED with an IPv4-mapped IPv6 advertise is canonicalized to
+/// its IPv4 identity before binding, so a V4 driver-level CIDR policy admits it at
+/// BOTH the reliable transport boundary (the recv-source / accept `cidr_blocks`
+/// path on the canonical bind) and membership admission. Without canonicalization
+/// the mapped spelling would miss the V4 net and be wrongly blocked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn v4_policy_admits_mapped_config_peer() {
+  // A enforces a driver-level 127.0.0.0/8 policy (gates the transport boundary
+  // too); B is configured with a mapped advertise → canonical 127.0.0.1.
+  let policy = CidrPolicy::try_from(["127.0.0.0/8"].as_slice()).expect("valid cidr");
+  let a = make_cidr("cidr-mapped-a", policy).await;
+  let b = make_advertise("cidr-mapped-b", "[::ffff:127.0.0.1]:0".parse().unwrap()).await;
+
+  assert!(
+    b.advertise_address().is_ipv4(),
+    "a mapped advertise must canonicalize to IPv4, got {}",
+    b.advertise_address()
+  );
+
+  let a_addr = a.advertise_address();
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+
+  let converged = wait_until(
+    || a.num_members() == 2 && b.num_members() == 2,
+    Duration::from_secs(8),
+  )
+  .await;
+  assert!(
+    converged,
+    "a mapped-config peer must be admitted by a V4 policy at the boundary and in \
+     membership: a={}, b={}",
+    a.num_members(),
+    b.num_members()
+  );
+
+  a.shutdown().await.ok();
+  b.shutdown().await.ok();
+}
+
 /// A node whose CIDR allow-list excludes the peer's network ignores the peer's
 /// Alive, so the peer never enters its membership table — even though the join
 /// exchange itself completes. B reaching two members proves the exchange worked,

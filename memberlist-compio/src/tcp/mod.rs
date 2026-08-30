@@ -181,6 +181,12 @@ where
       }
     };
 
+    // Canonicalize an IPv4-mapped IPv6 advertise (`::ffff:a.b.c.d`) to its IPv4
+    // form BEFORE binding, so the bind, `local_addr()` readback, and machine
+    // identity all see one canonical address — the node cannot split into two
+    // members (or dodge a family-specific CIDR policy) under two spellings.
+    let advertise_socket = crate::options::canonical_advertise(advertise_socket);
+
     // memberlist reaches a node at ONE advertised address, so the UDP gossip
     // socket and the TCP reliable listener MUST share a port. Bind the listener
     // first to claim an OS-assigned free port, then bind the gossip socket to

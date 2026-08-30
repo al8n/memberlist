@@ -356,10 +356,14 @@ impl<I, A, R> Memberlist<I, A, R> {
     }
     let mut addrs = Vec::with_capacity(seeds.len());
     for seed in seeds {
+      // Canonicalize each seed the same way the local advertise address is
+      // canonicalized: an IPv4-mapped IPv6 seed spelling is dialed as its IPv4
+      // form, matching the peer's now-canonical identity and avoiding a
+      // family-mismatched gossip `send_to` from a V4-bound socket.
       match seed {
-        MaybeResolved::Resolved(s) => addrs.push(*s),
+        MaybeResolved::Resolved(s) => addrs.push(canonical_advertise(*s)),
         MaybeResolved::Unresolved(a) => match resolver.resolve(a).await {
-          Ok(resolved) => addrs.extend(resolved),
+          Ok(resolved) => addrs.extend(resolved.into_iter().map(canonical_advertise)),
           Err(e) => return Err((SmallVec::new(), Error::Resolve(Box::new(e)))),
         },
       }
@@ -754,7 +758,10 @@ where
     D: Delegate<Id = I, Address = SocketAddr>,
     G: rand::Rng + Send + Unpin + 'static,
   {
-    let advertise_socket = resolve_one(resolver, advertise).await?;
+    // Canonicalize an IPv4-mapped IPv6 advertise to its IPv4 form before binding,
+    // so bind, `local_addr()` readback, and machine identity all see one address
+    // (a node cannot split into two members under two spellings).
+    let advertise_socket = canonical_advertise(resolve_one(resolver, advertise).await?);
     let socket = <R::Net as Net>::UdpSocket::bind(advertise_socket)
       .await
       .map_err(Error::Io)?;
@@ -1099,7 +1106,10 @@ where
     T::Options: Send + Unpin,
     G: rand::Rng + Send + Unpin + 'static,
   {
-    let advertise_socket = resolve_one(resolver, advertise).await?;
+    // Canonicalize an IPv4-mapped IPv6 advertise to its IPv4 form before binding,
+    // so bind, `local_addr()` readback, and machine identity all see one address
+    // (a node cannot split into two members under two spellings).
+    let advertise_socket = canonical_advertise(resolve_one(resolver, advertise).await?);
     // Bind the TCP listener first to claim an OS-assigned free port, then bind
     // the gossip UDP socket to that same port. Binding UDP first and reusing its
     // port for TCP races: an ephemeral UDP port can land on a TCP port still in
@@ -1569,9 +1579,40 @@ where
   Ok(())
 }
 
+/// Canonicalize a resolved advertise address so an IPv4-mapped IPv6 form
+/// (`::ffff:a.b.c.d`) becomes its plain IPv4 form, giving the node ONE identity.
+/// Mirrors compio's `canonical_advertise`: the advertise address is the node's
+/// published identity and its CIDR-match key, so a mapped IPv6 spelling and its
+/// IPv4 spelling would otherwise split the node into two members and dodge a
+/// family-specific CIDR policy. Applied to the RESOLVED address BEFORE the bind,
+/// so bind, `local_addr()` readback, and machine identity all see one form.
+///
+/// Only the mapped case is rewritten, via `Ipv6Addr::to_ipv4_mapped` (exactly
+/// `::ffff:0:0/96`). A genuine `SocketAddrV6` passes through bit-for-bit —
+/// `to_canonical` is NOT used here because it drops the `scope_id`/`flowinfo` a
+/// scoped address needs.
+fn canonical_advertise(addr: SocketAddr) -> SocketAddr {
+  match addr {
+    SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+      Some(v4) => SocketAddr::new(std::net::IpAddr::V4(v4), v6.port()),
+      // Genuine IPv6: preserve scope_id/flowinfo — SocketAddr::new would drop them.
+      None => addr,
+    },
+    v4 => v4,
+  }
+}
+
 /// Rejects an advertise address peers could not dial: unspecified, multicast,
-/// or broadcast. The port is already concrete (read back post-bind).
+/// or broadcast. The port is already concrete (read back post-bind). Also rejects
+/// a still-mapped IPv4-mapped IPv6 address as a backstop for a custom stream
+/// transport — the standard backends canonicalize it before binding, so this
+/// never fires for them, but it enforces the "identity is canonical" invariant.
 fn validate_advertise(addr: SocketAddr) -> Result<(), Error> {
+  if let SocketAddr::V6(v6) = addr
+    && v6.ip().to_ipv4_mapped().is_some()
+  {
+    return Err(Error::MappedAdvertise(addr));
+  }
   let ip = addr.ip();
   let bad = ip.is_unspecified()
     || ip.is_multicast()

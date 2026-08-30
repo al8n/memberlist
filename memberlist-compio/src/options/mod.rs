@@ -751,6 +751,34 @@ pub(crate) fn validate_driver_options(opts: &RuntimeOptions) -> Result<(), Membe
   Ok(())
 }
 
+/// Canonicalize a resolved advertise address so an IPv4-mapped IPv6 form
+/// (`::ffff:a.b.c.d`) becomes its plain IPv4 form, giving the node ONE identity.
+///
+/// The advertise address is the node's published identity — every peer keys the
+/// node by it and every CIDR check matches against it. A mapped IPv6 address and
+/// its IPv4 spelling reach the same host but are two distinct wire values, so
+/// left unresolved they split the node into two members and let a CIDR policy
+/// written in one family miss the other. Applied to the RESOLVED advertise
+/// address BEFORE the socket bind (bind follows identity), so the bind,
+/// `local_addr()` readback, validation, and machine identity all see the single
+/// canonical form; a mapped config then binds an `AF_INET` socket, which is the
+/// only family that address actually carries traffic on anyway.
+///
+/// Only the mapped case is rewritten, via [`Ipv6Addr::to_ipv4_mapped`] (which
+/// maps exactly `::ffff:0:0/96`, not the deprecated V4-compatible range). A
+/// genuine `SocketAddrV6` is returned bit-for-bit — `to_canonical` is NOT used
+/// here because it drops the `scope_id`/`flowinfo` a scoped address needs.
+pub(crate) fn canonical_advertise(addr: SocketAddr) -> SocketAddr {
+  match addr {
+    SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+      Some(v4) => SocketAddr::new(std::net::IpAddr::V4(v4), v6.port()),
+      // Genuine IPv6: preserve scope_id/flowinfo — SocketAddr::new would drop them.
+      None => addr,
+    },
+    v4 => v4,
+  }
+}
+
 /// Validate that the resolved advertise address is a USABLE UNICAST CONTACT —
 /// an address peers can actually route membership traffic to.
 ///
@@ -791,6 +819,25 @@ pub(crate) fn validate_advertise_addr(advertise_addr: &SocketAddr) -> Result<(),
       InvalidAdvertiseAddr::new(*advertise_addr, reason.to_string()),
     ))
   };
+
+  // A still-mapped IPv4-mapped IPv6 advertise address (`::ffff:a.b.c.d`) is a
+  // split identity: the same host is reachable — and CIDR-matched — under both
+  // its IPv4 and its mapped IPv6 spellings, so peers key it as two members and a
+  // CIDR policy written in one family silently misses the other. The standard
+  // backends canonicalize the resolved advertise address to its IPv4 form BEFORE
+  // binding (see `canonical_advertise`), so this never fires for them; it is a
+  // backstop enforcing the "identity is canonical" invariant against a custom
+  // `Transport` whose stored advertise address this post-construction validator
+  // cannot mutate.
+  if let SocketAddr::V6(v6) = advertise_addr
+    && v6.ip().to_ipv4_mapped().is_some()
+  {
+    return reject(
+      "an IPv4-mapped IPv6 advertise address (::ffff:a.b.c.d) splits node identity across two \
+       address families — canonicalize it to its IPv4 form before binding (the standard \
+       backends do this via canonical_advertise)",
+    );
+  }
 
   let ip = advertise_addr.ip();
   if ip.is_unspecified() {

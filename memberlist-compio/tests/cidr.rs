@@ -59,6 +59,24 @@ async fn make_tcp_cidr(id: &str, policy: CidrPolicy) -> Memberlist<SmolStr, Sock
   .expect("construct tcp memberlist")
 }
 
+/// Build a `Memberlist` advertising an explicit socket (used to hand in a mapped
+/// IPv6 advertise), with no admission policy.
+async fn make_tcp_advertise(id: &str, advertise: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(advertise)),
+  );
+  Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
+}
+
 async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) -> bool {
   let start = std::time::Instant::now();
   while start.elapsed() < deadline {
@@ -68,6 +86,49 @@ async fn wait_until<F: FnMut() -> bool>(mut predicate: F, deadline: Duration) ->
     compio::time::sleep(Duration::from_millis(20)).await;
   }
   predicate()
+}
+
+/// #170: a peer CONFIGURED with an IPv4-mapped IPv6 advertise is canonicalized to
+/// its IPv4 identity before binding, so a V4 CIDR allow-list admits it. Without
+/// canonicalization the mapped spelling would miss the V4 policy (family-strict
+/// containment) and be wrongly blocked — and, symmetrically, the policy's own
+/// `to_canonical` normalization guarantees a mapped check maps to the V4 net.
+#[compio::test]
+async fn v4_policy_admits_mapped_config_peer() {
+  // A admits 127.0.0.0/8 (a V4 net). B is configured with a mapped advertise.
+  let policy = CidrPolicy::try_from(["127.0.0.0/8"].as_slice()).expect("valid cidr");
+  let a = make_tcp("cidr-mapped-a", Some(policy)).await;
+  let b = make_tcp_advertise("cidr-mapped-b", "[::ffff:127.0.0.1]:0".parse().unwrap()).await;
+
+  // B's published identity is its canonical IPv4 form.
+  assert!(
+    b.advertise_address().is_ipv4(),
+    "a mapped advertise must canonicalize to IPv4, got {}",
+    b.advertise_address()
+  );
+
+  b.join(
+    &SocketAddrResolver,
+    &[MaybeResolved::Resolved(a.advertise_address())],
+  )
+  .await
+  .expect("join");
+
+  // A's V4 policy admits B's canonical V4 address, so both reach two members.
+  let converged = wait_until(
+    || a.member_count() == 2 && b.member_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "a mapped-config peer must be admitted by a V4 policy: a={}, b={}",
+    a.member_count(),
+    b.member_count()
+  );
+
+  a.shutdown().await.expect("a shutdown");
+  b.shutdown().await.expect("b shutdown");
 }
 
 /// A node whose CIDR allow-list excludes the peer's network ignores the peer's
