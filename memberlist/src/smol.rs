@@ -4,6 +4,7 @@
 //! smol, so callers never name `R`. The full reactor surface is re-exported.
 pub use memberlist_reactor::*;
 
+#[cfg(any(feature = "tcp", feature = "tls", feature = "quic"))]
 use core::net::SocketAddr;
 
 /// The runtime these constructors bind.
@@ -12,6 +13,11 @@ pub type Runtime = agnostic::smol::SmolRuntime;
 /// A smol-backed memberlist handle — [`memberlist_reactor::Memberlist`] with its
 /// runtime pinned to smol, so callers never name `R`. The unpinned
 /// three-parameter handle stays available as [`crate::reactor::Memberlist`].
+#[cfg(any(feature = "tcp", feature = "tls", feature = "quic"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "tcp", feature = "tls", feature = "quic")))
+)]
 pub type Memberlist<I, A> = memberlist_reactor::Memberlist<I, A, Runtime>;
 
 /// Build a QUIC-backed node on smol. See [`memberlist_reactor::Memberlist::quic`].

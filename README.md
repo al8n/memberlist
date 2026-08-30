@@ -119,8 +119,12 @@ The minimum supported Rust version (MSRV) is **1.96.0** (edition 2024).
 ## Example
 
 Common types (`Options`, `MaybeResolved`, delegates, …) are re-exported from the per-runtime
-module; the runtime-pinned constructors (`tcp` / `tls` / `quic`) live there too
-(`memberlist::tokio`, `memberlist::smol`, `memberlist::compio`).
+module. `memberlist::tokio` and `memberlist::smol` also expose free, runtime-pinned constructor
+fns (`tcp` / `tls` / `quic`) so callers never name the driver's runtime generic. `memberlist::compio`
+is different: it re-exports [`memberlist-compio`]'s `Memberlist` type directly, whose constructor
+is the method-style `Memberlist::new::<T, D, RES, AR>(options, delegate, resolver,
+advertise_resolver)` — the transport is selected by the `T: Transport` type argument (and the
+`Options<T>` value) rather than by a free per-transport fn.
 
 ```rust,ignore
 use core::net::SocketAddr;
