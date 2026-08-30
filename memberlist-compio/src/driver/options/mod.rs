@@ -148,7 +148,9 @@ impl core::str::FromStr for Channel {
     if s.eq_ignore_ascii_case("unbounded") {
       return Ok(Self::Unbounded);
     }
-    let cap = s.strip_prefix("bounded:").or_else(|| s.strip_prefix("bounded="));
+    let cap = s
+      .strip_prefix("bounded:")
+      .or_else(|| s.strip_prefix("bounded="));
     let n = match cap {
       Some(cap) => cap.parse::<usize>().map_err(|_| ParseChannelError(()))?,
       // Legacy fallback: a bare integer, as accepted by other drivers' CLI
@@ -165,7 +167,9 @@ impl core::str::FromStr for Channel {
 /// Opaque — the private unit field seals construction to this module, so the
 /// error can gain detail later without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid observation channel (expected `unbounded`, `bounded:<n>`, or a bare integer capacity)")]
+#[error(
+  "invalid observation channel (expected `unbounded`, `bounded:<n>`, or a bare integer capacity)"
+)]
 pub struct ParseChannelError(());
 
 /// Default delegate observation channel: [`Channel::Bounded`] at 1024 events.

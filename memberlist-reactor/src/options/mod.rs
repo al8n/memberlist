@@ -549,7 +549,9 @@ impl core::str::FromStr for Channel {
     if s.eq_ignore_ascii_case("unbounded") {
       return Ok(Self::Unbounded);
     }
-    let cap = s.strip_prefix("bounded:").or_else(|| s.strip_prefix("bounded="));
+    let cap = s
+      .strip_prefix("bounded:")
+      .or_else(|| s.strip_prefix("bounded="));
     let n = match cap {
       Some(cap) => cap.parse::<usize>().map_err(|_| ParseChannelError(()))?,
       // Legacy fallback: a bare integer, as accepted before the CLI grammar
