@@ -26,6 +26,23 @@
 //! completes its exchange and counts that seed as contacted, while the seed is
 //! not admitted to membership. The join "contacted" count reflects completed
 //! exchanges, not admission — inspect membership to confirm a peer was admitted.
+//!
+//! # Canonical-family matching
+//!
+//! An address is matched in its **canonical** family: the checked IP is passed
+//! through [`IpAddr::to_canonical`] before any network containment test, so an
+//! IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) and its plain IPv4 spelling
+//! (`a.b.c.d`) always yield the SAME verdict. The invariant is
+//! `is_allowed(ip) == is_allowed(ip.to_canonical())` — a host reachable under
+//! two spellings can never be admitted under one and denied under the other.
+//!
+//! The configured networks are NOT canonicalized, so **a policy net must be
+//! written in its address's canonical family**. A net inside the mapped range
+//! `::ffff:0:0/96` (e.g. `::ffff:10.0.0.0/104`) is dead config: no checked
+//! address ever reaches it, because every mapped IP is canonicalized to IPv4
+//! before the test. Write `10.0.0.0/8`, not its mapped form. Same-family
+//! matching is byte-identical to no canonicalization (`to_canonical` is a no-op
+//! for a non-mapped address).
 
 use core::{
   net::{IpAddr, SocketAddr},
@@ -112,8 +129,13 @@ impl CidrPolicy {
   /// leaves a block-all policy; call [`allow_all`](Self::allow_all) to lift the
   /// restriction entirely.
   pub fn remove_by_ip(&mut self, ip: &IpAddr) {
+    // Canonicalize the probe IP for the same reason `is_allowed` does: an
+    // IPv4-mapped IPv6 address must match the same nets its IPv4 spelling would,
+    // so both spellings remove the same networks. `to_canonical` is a no-op for
+    // a non-mapped address.
+    let ip = ip.to_canonical();
     if let Some(allowed) = self.allowed_cidrs.as_mut() {
-      allowed.retain(|net| !net.contains(ip));
+      allowed.retain(|net| !net.contains(&ip));
     }
   }
 
@@ -133,11 +155,19 @@ impl CidrPolicy {
   }
 
   /// Whether `ip` is allowed (allow-all admits every address).
+  ///
+  /// The IP is matched in its canonical family: an IPv4-mapped IPv6 address is
+  /// canonicalized to IPv4 before the containment test, so it and its plain IPv4
+  /// spelling always share a verdict (see the module docs — a net must be written
+  /// in the canonical family; a `::ffff:0:0/96` net is dead config).
   pub fn is_allowed(&self, ip: &IpAddr) -> bool {
+    // Canonicalize first so both spellings of a host give the same verdict; a
+    // no-op for a non-mapped address, so same-family matching is unchanged.
+    let ip = ip.to_canonical();
     self
       .allowed_cidrs
       .as_ref()
-      .is_none_or(|nets| nets.iter().any(|net| net.contains(ip)))
+      .is_none_or(|nets| nets.iter().any(|net| net.contains(&ip)))
   }
 
   /// Whether `ip` is blocked.

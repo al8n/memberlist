@@ -156,6 +156,17 @@ pub enum Error {
   #[error("invalid advertise address {0}: must be a concrete unicast address")]
   InvalidAdvertise(SocketAddr),
 
+  /// The resolved advertise address is an IPv4-mapped IPv6 address
+  /// (`::ffff:a.b.c.d`). It reaches the same host as its IPv4 spelling but is a
+  /// distinct wire value, so leaving it as identity would split the node into two
+  /// members and let a family-specific CIDR policy miss one form. The standard
+  /// backends canonicalize it to IPv4 before binding; this backstop rejects a
+  /// custom stream transport whose stored advertise address stays mapped.
+  #[error(
+    "IPv4-mapped IPv6 advertise address {0} splits node identity across two address families: canonicalize it to its IPv4 form before binding"
+  )]
+  MappedAdvertise(SocketAddr),
+
   /// The configured `close_timeout` is zero. The stream driver bounds each
   /// per-bridge graceful-close drain `write` with this timeout; a zero timeout
   /// fires immediately, so a graceful close abandons (RSTs) its queued push/pull

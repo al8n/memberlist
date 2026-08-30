@@ -33,6 +33,20 @@ wire with the legacy `0.x` hand-rolled codec below.
   shutdown. `Event` is deliberately exhaustive and gains variants in `0.x`
   minor releases; match it exhaustively.
 
+### Behavior changes
+
+- IPv4-mapped IPv6 advertise addresses (`::ffff:a.b.c.d`) are now canonicalized
+  to their IPv4 form before the socket bind, so a node has a single identity
+  across both address families. Previously such a configuration split the node
+  into two membership entries (the same host keyed under both spellings) and let
+  a `CidrPolicy` written in one family silently miss the other. `CidrPolicy`
+  matching is likewise canonical-only: a checked IP is normalized with
+  `to_canonical()` before every containment test, so a policy net must be written
+  in its address's canonical family (a net inside the mapped range `::ffff:0:0/96`
+  never matches). A deployment that advertised a mapped address now announces its
+  IPv4 form — restart / rejoin such a node into this version rather than rolling
+  it, as its published identity changes to the canonical spelling.
+
 ## 0.6.0
 
 ### Features

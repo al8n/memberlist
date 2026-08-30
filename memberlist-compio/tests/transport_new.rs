@@ -521,3 +521,39 @@ async fn transport_new_rejects_unspecified_advertise() {
   .expect("a concrete loopback advertise must construct");
   m.shutdown().await.expect("shutdown");
 }
+
+/// #170: a resolved IPv4-mapped IPv6 advertise (`::ffff:127.0.0.1`) is
+/// canonicalized to its IPv4 form BEFORE the bind, so the node's single published
+/// identity is IPv4 — no split identity across two address families. The bound
+/// ephemeral port resolves to a concrete value. Exercised on TCP; the same
+/// `canonical_advertise` runs in every backend's `Transport::new`.
+#[compio::test]
+async fn mapped_advertise_canonicalized_to_v4() {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("mapped-adv"))
+      .with_advertise_addr(MaybeResolved::Resolved(
+        "[::ffff:127.0.0.1]:0".parse().unwrap(),
+      )),
+  );
+  let m = Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("a mapped advertise must canonicalize and construct");
+  let advertise = m.advertise_address();
+  assert!(
+    advertise.is_ipv4(),
+    "a mapped IPv6 advertise must publish as IPv4, got {advertise}"
+  );
+  assert_eq!(advertise.ip(), std::net::Ipv4Addr::LOCALHOST);
+  assert_ne!(
+    advertise.port(),
+    0,
+    "ephemeral :0 must resolve to a concrete port"
+  );
+  m.shutdown().await.expect("shutdown");
+}
