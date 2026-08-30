@@ -4,6 +4,7 @@
 //! latency (0–100 ms), every Alive node eventually appears in every
 //! other node's member view after sufficient simulation steps."
 
+use memberlist_proto::typed::State;
 use memberlist_simulation::Cluster;
 use proptest::prelude::*;
 use smol_str::{SmolStr, format_smolstr};
@@ -57,16 +58,21 @@ proptest! {
       c.step();
     }
 
-    // Assert: every node knows every other node.
+    // Assert: every node knows every other node as Alive. `member` only
+    // reflects the wire-protocol state fixed at insertion, so a peer that
+    // arrived and was later Suspected/Dead/Left would still satisfy
+    // `is_some()`; `member_liveness` tracks the gossip state machine's
+    // current view and is the accessor the "every node knows every other
+    // node" property actually means.
     for (i, &host_addr) in addrs.iter().enumerate() {
       for (j, peer_id) in ids.iter().enumerate() {
         if i == j {
           continue;
         }
-        let found = c.member(host_addr, peer_id).is_some();
+        let state = c.member_liveness(host_addr, peer_id);
         prop_assert!(
-          found,
-          "node{i} should know {peer_id} (latency={latency_ms}ms, n={n})"
+          state == Some(State::Alive),
+          "node{i} should know {peer_id} as Alive (latency={latency_ms}ms, n={n}), got {state:?}"
         );
       }
     }

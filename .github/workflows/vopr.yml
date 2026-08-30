@@ -26,6 +26,7 @@ on:
     - cron: "0 4 * * *"
   push:
     branches:
+      - main
       - refactor/sansio
       - vopr
     paths:
