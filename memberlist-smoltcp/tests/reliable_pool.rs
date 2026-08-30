@@ -1088,28 +1088,36 @@ fn oversized_push_pull_response_is_not_truncated_by_close() {
   );
 }
 
-/// A graceful close whose drain takes LONGER than `close_timeout` in total but
-/// makes progress every tick (a slow-but-continuously-reading peer) must NOT be
-/// truncated: `close_timeout` is a NO-PROGRESS (idle) bound, not a total-drain
-/// cap.
+/// A graceful close whose drain takes LONGER than `close_timeout` in total is
+/// HARD-CAPPED at `close_timeout`, even when the peer makes progress every tick (a
+/// slow-but-continuously-reading peer): `close_timeout` is a TOTAL-DRAIN cap, set
+/// once at `Closing` entry and never re-armed, NOT a no-progress (idle) bound that
+/// a steady ack trickle can extend indefinitely.
 ///
 /// A replies with a large membership snapshot over a tiny tx ring, so the drain
-/// spans many ticks; `close_timeout` is set FAR below the total drain time. B
-/// reads continuously (every tick acks more), so the drain never stalls. With a
-/// total-duration cap the `Closing` connection would be force-aborted partway
-/// (truncating the reply, leaving B short of the full snapshot); with the idle
-/// timeout the deadline re-arms on each ack and the close completes.
+/// spans many ticks; `close_timeout` is set FAR below the total drain time. B reads
+/// continuously (every tick acks more), so the drain never idles — yet because the
+/// cap does not re-arm on progress, A's `Closing` connection is force-aborted
+/// partway. That truncates the oversized reply, and a partial push/pull frame
+/// decodes to nothing, so B never commits the snapshot and does NOT converge.
+///
+/// This is the driver-level counterpart of the engine's
+/// `ack_trickle_cannot_extend_closing_past_one_window`. Its control is
+/// `oversized_push_pull_response_is_not_truncated_by_close`, which runs the same
+/// oversized-reply construction with the DEFAULT (generous) `close_timeout` and DOES
+/// converge — so the non-convergence here is attributable to the tight cap, not to a
+/// truncation on the ordinary close path.
 #[test]
-fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
+fn slow_but_progressing_close_is_hard_capped_by_close_timeout() {
   const BUDGET: u32 = 4000;
   const STREAM_TIMEOUT_MS: u64 = 4000;
   const NEVER: Duration = Duration::from_secs(3600);
   // A large snapshot over a tiny tx ring → a drain that spans far more ticks than
-  // `close_timeout`.
+  // `close_timeout`, so the total-drain cap force-aborts it mid-drain.
   const INJECTED_PEERS: usize = 120;
   const A_TX_RING: usize = 256;
-  // 50 ms = 5 ticks. The drain spans dozens of ticks, so a total cap would abort
-  // mid-drain; the idle timeout re-arms every tick B acks.
+  // 50 ms = 5 ticks. The drain spans dozens of ticks, so the hard cap fires long
+  // before it completes; a continuously-reading B cannot extend it (no idle re-arm).
   const CLOSE_TIMEOUT_MS: u64 = 50;
   const TICK_MS: u64 = 10;
 
@@ -1165,7 +1173,6 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
 
   let expected = 1 + a_members_before;
   let mut converged = false;
-  let mut ticks = 0u32;
   for _ in 0..BUDGET {
     let _ = a.poll(clk.now(), &mut da);
     let _ = b.poll(clk.now(), &mut db);
@@ -1173,27 +1180,29 @@ fn slow_but_progressing_close_is_not_capped_by_close_timeout() {
       converged = true;
       break;
     }
-    ticks += 1;
     clk.advance_ms(TICK_MS);
   }
 
   assert!(
-    converged,
-    "B converged to only {} of {} members: the graceful close was force-aborted \
-     mid-drain because `close_timeout` ({} ms) was treated as a total-drain cap \
-     rather than a no-progress idle bound — even though B read continuously and \
-     the drain never stalled.",
+    !converged,
+    "B converged to {} of {} members: A's graceful close was NOT hard-capped. A \
+     slow-but-progressing drain must be force-aborted at `close_timeout` ({} ms) — \
+     truncating the oversized reply — not allowed to re-arm the deadline on each ack \
+     and run to completion.",
     b.num_members(),
     expected,
     CLOSE_TIMEOUT_MS,
   );
-  // The drain genuinely spanned far more than `close_timeout` (so a total cap
-  // WOULD have fired): the total elapsed exceeds it by a wide margin.
-  assert!(
-    u64::from(ticks) * TICK_MS > CLOSE_TIMEOUT_MS * 3,
-    "the drain finished too fast ({} ticks) to exercise the idle-vs-total \
-     distinction; raise the snapshot size or lower close_timeout",
-    ticks,
+  // The truncated push/pull reply decodes to nothing, so B learns neither A nor any
+  // injected peer from it and stays a lone member — proving the cap DROPPED the reply
+  // remainder rather than merely delaying it (the control test, with a generous
+  // `close_timeout`, converges to all `expected` members from the same construction).
+  assert_eq!(
+    b.num_members(),
+    1,
+    "B should remain a lone member after the hard-capped close truncated A's reply \
+     (a partial push/pull frame decodes to nothing), but it has {}.",
+    b.num_members(),
   );
 }
 

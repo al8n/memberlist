@@ -170,6 +170,22 @@ impl StreamIo for EmbassyStream<'_> {
     // ephemeral local port from the stack (`get_local_port`), so the engine's
     // requested local port has no effect here. (smoltcp threaded it through; the
     // embassy-net stack owns ephemeral-port selection.)
+    //
+    // Mark the slot `open` SYNCHRONOUSLY here, as the engine commits the dial — not
+    // only later, when the worker picks the `Dial` up. Per the `StreamIo` contract
+    // `is_open` means "not yet closed", and the engine reads `is_open` WITHIN THE SAME
+    // synchronous pump that issues this dial: its `pump_inbound_reliable` fault check
+    // treats a `Dialing` connection reporting `!is_open` as a dial FAILURE. embassy-net
+    // dials asynchronously, so the worker cannot flip `open` until a later wake — one
+    // pump too late, after that one-shot fault check has already reaped the healthy
+    // dial. Setting `open` at the commit point (mirroring the smoltcp driver, whose
+    // synchronous `connect` enters SynSent = `is_open` immediately) makes
+    // `Dialing && !is_open` mean ONLY a genuine dial failure. This sets ONLY `open`:
+    // `established` stays `false` until the worker's handshake completes, so the engine
+    // still does not promote or send on the not-yet-connected socket (`is_established`
+    // reads `established`, `may_send` reads `established && <ring has room>`). A real
+    // dial failure clears `open` again in the worker's failure arm.
+    self.slots[c.0].borrow_mut().open = true;
     self.post_gen(c, Command::Dial(remote), g);
     Ok(())
   }

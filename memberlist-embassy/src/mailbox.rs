@@ -52,9 +52,17 @@ pub(crate) struct Mailbox {
   /// Whether the slot's connection has completed its handshake (worker set on a
   /// successful `connect` / `accept`). Mirrors `StreamIo::is_established`.
   pub established: bool,
-  /// Whether the slot is still usable (`false` once the connection is
-  /// closed/aborted/reset or a dial failed). The engine reaps a slot whose
-  /// `open` is `false` via `StreamIo::is_open`.
+  /// Whether the slot is still open — "not yet closed", per the
+  /// [`StreamIo::is_open`](memberlist_embedded::StreamIo::is_open) contract. Set
+  /// `true` SYNCHRONOUSLY when the engine commits a `Dial` (its
+  /// [`EmbassyStream::connect`](crate::stream_io::EmbassyStream), so the same-pump
+  /// fault check sees a dialing slot as open, matching smoltcp's SynSent) and when an
+  /// accept completes with a peer; cleared to `false` only on a real close / abort /
+  /// reset / peer-RST or a genuine dial failure. The engine reaps a slot whose `open`
+  /// is `false` via `StreamIo::is_open`; a still-`Dialing` slot reporting `!open` is
+  /// exactly the dial-failure signal the engine reads. Independent of
+  /// [`established`](Self::established), which stays `false` until the handshake
+  /// completes, so reporting `open` while dialing never makes the slot send-capable.
   pub open: bool,
   /// The remote address of an accepted/connected peer, set by the worker ONLY
   /// once established with a known `remote_endpoint`. Mirrors smoltcp's accept
