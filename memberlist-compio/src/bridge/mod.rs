@@ -126,6 +126,7 @@ use futures_util::{FutureExt, future::FusedFuture, pin_mut, select_biased};
 use lochan::mpsc::{Receiver, Sender};
 
 use crate::driver::{
+  options::capped_timer,
   shared::ExchangeId,
   stream::{BridgeBytes, BridgeEof, BridgeError, BridgeInbound, BridgeOut},
 };
@@ -478,7 +479,7 @@ where
     // Re-arm the deadline FRESH each iteration: progress (a non-empty partial
     // write) resets the clock, so this is an idle timeout, not a total-duration
     // cap. A slow-but-reading peer advances every chunk and never trips it.
-    let timeout_fut = compio::time::sleep(close_timeout).fuse();
+    let timeout_fut = compio::time::sleep(capped_timer(close_timeout)).fuse();
     pin_mut!(timeout_fut);
     let BufResult(res, slice) = select_biased! {
       // Explicit abort only (a disconnect was mapped to `pending()`). Listed

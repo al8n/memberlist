@@ -52,7 +52,7 @@ use crate::{
   command::{Command, JoinCmd, JoinKind, JoinReply, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
-    options::RuntimeOptions,
+    options::{RuntimeOptions, capped_timer},
     shared::{ExchangeId, cidr_blocks, dispatch_event_delegate, join_reply},
   },
   error::{JoinFailed, MemberlistError, Result, UserDialBacklogFull},
@@ -1467,7 +1467,7 @@ where
   {
     let peek_buf = vec![0u8; recv_buf_len];
     let peek_recv = state.udp_socket.recv_from(peek_buf).fuse();
-    let peek_timer = compio::time::sleep(state.driver_opts.peek_budget()).fuse();
+    let peek_timer = compio::time::sleep(capped_timer(state.driver_opts.peek_budget())).fuse();
     pin_mut!(peek_recv, peek_timer);
     select_biased! {
       gossip = peek_recv => {

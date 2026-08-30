@@ -55,7 +55,7 @@ use crate::{
   command::{Command, JoinCmd, JoinKind, JoinReply, LeaveCmd, ShutdownCmd, UpdateNodeMetadataCmd},
   delegate::Delegate,
   driver::{
-    options::{RuntimeOptions, StreamTransportOptions},
+    options::{RuntimeOptions, StreamTransportOptions, capped_timer},
     shared::{
       ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, join_reply,
       observation_payload_bytes, yield_once,
@@ -959,7 +959,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       // [`crate::DEFAULT_PEEK_BUDGET`].
       let peek_buf = vec![0u8; recv_buf_len];
       let peek_recv = gossip_socket.recv_from(peek_buf).fuse();
-      let peek_timer = compio::time::sleep(driver_opts.peek_budget()).fuse();
+      let peek_timer = compio::time::sleep(capped_timer(driver_opts.peek_budget())).fuse();
       pin_mut!(peek_recv, peek_timer);
       select_biased! {
         gossip = peek_recv => {
@@ -2222,7 +2222,7 @@ fn process_one_action(
         // runtime task and the `bridge_ready_tx` clone for the full
         // kernel timeout.
         let dial = TcpStream::connect(peer).fuse();
-        let timeout = compio::time::sleep(dial_timeout).fuse();
+        let timeout = compio::time::sleep(capped_timer(dial_timeout)).fuse();
         futures_util::pin_mut!(dial, timeout);
         let msg = futures_util::select_biased! {
           res = dial => match res {
