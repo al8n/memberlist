@@ -69,6 +69,12 @@ pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng> {
   /// worker applies to its `TcpSocket` so a blocking connect/write/flush/read to an
   /// unresponsive peer cannot wedge it.
   pub(crate) socket_timeout: embassy_time::Duration,
+  /// Bound (in the embassy-time tick domain) on each worker's best-effort teardown
+  /// RST flush, so a dead on-link peer whose RST cannot egress cannot pin a slot. Set
+  /// strictly below the engine's retiring deadline at construction so a slot's
+  /// teardown is acknowledged before the engine escalates (see the worker's
+  /// `drain_teardown`).
+  pub(crate) teardown_timeout: embassy_time::Duration,
   pub(crate) free: Vec<SlotId>,
 }
 
@@ -91,6 +97,7 @@ where
       mailboxes,
       cmd_wakes,
       socket_timeout,
+      teardown_timeout,
       mut free,
     } = self;
 
@@ -111,6 +118,7 @@ where
         &cmd_wakes[i],
         &shared.pump_wake,
         socket_timeout,
+        teardown_timeout,
       )
     });
 

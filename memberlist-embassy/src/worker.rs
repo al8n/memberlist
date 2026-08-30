@@ -19,6 +19,7 @@ use core::cell::RefCell;
 
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::TcpSocket;
+use embassy_time::{Duration, Timer};
 
 use crate::{
   mailbox::{Command, Mailbox},
@@ -61,7 +62,8 @@ pub(crate) async fn run_slot(
   mb: &RefCell<Mailbox>,
   cmd_wake: &SlotWake,
   pump_wake: &SlotWake,
-  socket_timeout: embassy_time::Duration,
+  socket_timeout: Duration,
+  teardown_timeout: Duration,
 ) -> ! {
   // Bound EVERY blocking socket await (connect / write / flush / read) so a peer
   // that stops responding cannot wedge this worker: embassy-net aborts the socket
@@ -109,7 +111,11 @@ pub(crate) async fn run_slot(
               m.accepted_peer = peer;
               m.established = peer.is_some();
               m.open = peer.is_some();
-              m.command = Command::Idle;
+              // Consume the `Listen` this arm acted on WITHOUT erasing a directive the
+              // engine posted while the handshake completed (see `consume_command`): a
+              // concurrent `Abort`/`Close` survives for the established loop to honor,
+              // rather than being erased into an orphaned, engine-unreachable socket.
+              m.consume_command(Command::Listen(port));
               m.sock_send_queue = socket.send_queue();
             }
             // The pump must observe the new accept so `check_listener` maps it.
@@ -117,22 +123,23 @@ pub(crate) async fn run_slot(
             if peer.is_some() {
               run_established(socket, mb, cmd_wake, pump_wake).await;
             }
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
           Either::First(Err(_)) => {
             // Listen failed (e.g. the socket was not in a clean state). Reset and
             // retry on the next loop.
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
           }
           Either::Second(()) => {
             // A new command arrived mid-accept; abandon the listen and re-read it.
-            // `abort()` returns the socket to Closed so the next command's
-            // accept/connect starts cleanly.
+            // `abort()` moves the socket to `Closed`. Do NOT drain here: this iteration
+            // does not reach `reset_socket`, so the socket's RST egress is bounded once
+            // at the eventual `reset_socket` (if the next command is `Close`/`Abort`) or
+            // simply discarded when the next `connect`/`accept` re-initializes the
+            // socket via smoltcp's `reset()` — draining here would double the teardown
+            // budget for a mid-accept-then-close.
             socket.abort();
-            // Ignoring Err: a best-effort RST flush on a socket with no peer is a
-            // no-op; the reset below re-clears the mailbox regardless.
-            let _ = socket.flush().await;
           }
         }
       }
@@ -167,13 +174,17 @@ pub(crate) async fn run_slot(
               // signal the engine gates `may_send` / `is_established` on. Re-assert it
               // (idempotent) so this success arm mirrors the accept arm above.
               m.open = true;
-              m.command = Command::Idle;
+              // Consume the `Dial` this arm acted on without erasing a directive posted
+              // while the connect completed (see `consume_command`): a concurrent
+              // `Abort`/`Close` survives for `run_established` to honor instead of
+              // orphaning the freshly-established slot.
+              m.consume_command(Command::Dial(remote));
               m.sock_send_queue = socket.send_queue();
             }
             // The pump must observe the established slot to promote its exchange.
             pump_wake.signal(());
             run_established(socket, mb, cmd_wake, pump_wake).await;
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
           Either::First(Err(_)) => {
@@ -187,7 +198,7 @@ pub(crate) async fn run_slot(
             }
             // The pump must observe `open == false` to reap the failed dial.
             pump_wake.signal(());
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
           }
           Either::Second(()) => {
             // A command arrived mid-connect (the engine posted `Abort`, retiring this
@@ -195,7 +206,7 @@ pub(crate) async fn run_slot(
             // the next command starts cleanly, and wake the pump so it observes the
             // slot is reuse-ready (`reset_done`) and can dispatch any deferred dial —
             // without this the dial-churn would stall (freed slots never re-observed).
-            reset_socket(socket, mb).await;
+            reset_socket(socket, mb, teardown_timeout).await;
             pump_wake.signal(());
           }
         }
@@ -203,7 +214,7 @@ pub(crate) async fn run_slot(
       // A Close/Abort posted to an un-established slot has nothing to tear down;
       // clear it and park again.
       Command::Close | Command::Abort => {
-        reset_socket(socket, mb).await;
+        reset_socket(socket, mb, teardown_timeout).await;
       }
       // Idle: park until the engine posts a command. Re-read after the wake.
       Command::Idle => {
@@ -262,7 +273,11 @@ async fn run_established(
           we_finned = true;
           {
             let mut m = mb.borrow_mut();
-            m.command = Command::Idle;
+            // Consume the `Close` without erasing a concurrent `Abort` escalation
+            // (Draining→Aborting; see `consume_command`): it survives for the next
+            // command match to abort + reset rather than half-closing a socket the
+            // engine wanted torn down.
+            m.consume_command(Command::Close);
             m.sock_send_queue = socket.send_queue();
           }
           pump_wake.signal(());
@@ -270,9 +285,11 @@ async fn run_established(
       }
       Command::Abort => {
         socket.abort();
-        // Ignoring Err: abort flush waits for the RST to be sent; failure means
-        // it is already gone. The slot is reset next regardless.
-        let _ = socket.flush().await;
+        // `abort()` moves the socket to `Closed`; its RST egress is bounded ONCE at
+        // the caller's following `reset_socket` (the sole teardown drain). Do NOT drain
+        // here: a second bounded drain would double the teardown budget, so a
+        // non-egressing RST would wait ~the full `close_timeout` before the slot resets
+        // — which the engine's retiring deadline beats, ticking `teardown_overruns`.
         {
           let mut m = mb.borrow_mut();
           m.open = false;
@@ -300,15 +317,22 @@ async fn run_established(
       };
       if drained {
         // Ignoring Err: a reset during the final flush just means the peer already
-        // tore down; our FIN is moot then and the slot is reset regardless.
-        let _ = socket.flush().await;
-        {
-          let mut m = mb.borrow_mut();
-          m.open = false;
-          m.sock_send_queue = 0;
+        // tore down; our FIN is moot then and the slot is reset regardless. Race the
+        // flush against the command wake so a peer that never ACKs our FIN cannot pin
+        // the worker here forever: an `Abort` then pre-empts it (`Either::Second` →
+        // re-check the mailbox), and `reset_socket`'s local RST completes the teardown.
+        match select(socket.flush(), cmd_wake.wait()).await {
+          Either::First(_) => {
+            {
+              let mut m = mb.borrow_mut();
+              m.open = false;
+              m.sock_send_queue = 0;
+            }
+            pump_wake.signal(());
+            return;
+          }
+          Either::Second(()) => continue,
         }
-        pump_wake.signal(());
-        return;
       }
     }
 
@@ -332,8 +356,17 @@ async fn run_established(
         let m = mb.borrow();
         m.outbound.iter().copied().collect()
       };
-      match socket.write(&chunk).await {
-        Ok(written) => {
+      // Race the write against the command wake so an engine `Abort` (or a benign
+      // send/recv pulse) pre-empts a peer-stalled write instead of parking the worker
+      // in `write` forever while a black-holed peer keeps the socket nominally active
+      // (refreshing the inactivity backstop). `Either::Second` means only "re-check the
+      // mailbox": embassy writes are single-commit poll futures, so dropping a
+      // still-pending one loses no bytes, and the top-of-loop command match then honors
+      // any real `Close`/`Abort` while a mere pulse re-drains. `select` polls the write
+      // first, so a write making progress still resolves as `Either::First` even with a
+      // pulse latched — only a genuinely-blocked write yields.
+      match select(socket.write(&chunk), cmd_wake.wait()).await {
+        Either::First(Ok(written)) => {
           {
             let mut m = mb.borrow_mut();
             for _ in 0..written {
@@ -343,15 +376,19 @@ async fn run_established(
           }
           // Ignoring Err: a reset mid-flush means the connection is gone; the read
           // below observes it and tears the slot down. Re-sync the send queue from
-          // the socket regardless.
-          let _ = socket.flush().await;
+          // the socket regardless. Race the flush too — a peer that never ACKs must
+          // not pin the worker here past an `Abort`; `Either::Second` re-checks the
+          // mailbox and the command match tears the slot down.
+          if let Either::Second(()) = select(socket.flush(), cmd_wake.wait()).await {
+            continue;
+          }
           {
             let mut m = mb.borrow_mut();
             m.sock_send_queue = socket.send_queue();
           }
           pump_wake.signal(());
         }
-        Err(_) => {
+        Either::First(Err(_)) => {
           {
             let mut m = mb.borrow_mut();
             m.open = false;
@@ -360,6 +397,7 @@ async fn run_established(
           pump_wake.signal(());
           return;
         }
+        Either::Second(()) => continue,
       }
       // Loop to re-read the command (the engine may now Close) and re-drain.
       continue;
@@ -446,17 +484,59 @@ async fn run_established(
   }
 }
 
+/// Best-effort bounded flush of a torn-down socket's RST, then proceed regardless.
+///
+/// A teardown site `abort()`s the socket (moving it to `Closed`) and then wants the
+/// RST to egress before the socket is reused. But embassy-net's `flush` stays PENDING
+/// while a `Closed` socket still holds its remote tuple, and that tuple clears only
+/// once the RST actually leaves the interface — which never happens for an
+/// ARP-unresolvable on-link peer (the SYN/RST cannot be framed without the peer's link
+/// address). An UNBOUNDED flush there would pin this worker — and thus its pool slot —
+/// forever, so a pre-trust peer that floods dials at dead on-link addresses could
+/// exhaust the reliable pool permanently. Racing the flush against a dedicated timer
+/// bounds every teardown to `timeout`: a reachable peer's RST still egresses (the flush
+/// resolves first), and a dead peer's simply does not — the slot frees either way.
+///
+/// The timer is DEDICATED (an [`embassy_time::Timer`]), NOT the multiplexed command
+/// wake the send flushes race, so a benign concurrent `send`/`recv` pulse cannot cut a
+/// teardown short — only real elapsed time does. `timeout` is derived at construction
+/// to be strictly less than the engine's retiring deadline, so the slot's teardown is
+/// acknowledged before the engine escalates (keeping `teardown_overruns` at 0). After
+/// an abandoned wait the socket stays `Closed` with its stale tuple/queued RST, which
+/// the next `connect`/`accept` discards when smoltcp re-initializes the control block —
+/// so reuse is safe.
+async fn drain_teardown(socket: &mut TcpSocket<'_>, timeout: Duration) {
+  // Ignoring Err/timeout: the RST is best-effort — a dead peer never receives it, and
+  // the socket is reset to a clean, reusable state regardless.
+  let _ = select(socket.flush(), Timer::after(timeout)).await;
+}
+
 /// Return the socket to a clean Closed state and reset the mailbox for the slot's
 /// next reuse.
 ///
 /// `abort()` is idempotent on an already-closed socket and guarantees the socket
-/// leaves any half-open/closing state so the next `accept`/`connect` starts
-/// fresh; the subsequent `flush` lets a pending RST go out. The mailbox reset
-/// clears every per-connection field (preserving ring capacities).
-async fn reset_socket(socket: &mut TcpSocket<'_>, mb: &RefCell<Mailbox>) {
+/// leaves any half-open/closing state so the next `accept`/`connect` starts fresh;
+/// the subsequent bounded flush lets a pending RST egress WHEN IT CAN, but does not
+/// wait for it beyond `teardown_timeout` — a dead on-link peer's RST never egresses,
+/// and an unbounded wait would pin this slot forever (see `drain_teardown`). The
+/// mailbox reset clears every per-connection field (preserving ring capacities).
+///
+/// This is the SOLE bounded teardown drain, so every teardown path drains AT MOST
+/// once. Every terminal path routes through here exactly once: accept success/err,
+/// dial success/err/preempt, a `Close`/`Abort` on an unestablished slot, and every
+/// `run_established` return (its `Close` completion, transport-error, and `Abort`
+/// arms). The `Abort` arm and the accept-preempt deliberately `abort()` WITHOUT their
+/// own drain and rely on this single one — a second bounded drain on the same teardown
+/// would double the budget, letting a non-egressing RST overrun the engine's retiring
+/// deadline. The accept-preempt is the one terminal `abort()` that does not reach here
+/// on its iteration; it needs no drain (the next `connect`/`accept` re-initializes the
+/// socket via smoltcp `reset()`, or a subsequent `Close`/`Abort` routes back here).
+async fn reset_socket(
+  socket: &mut TcpSocket<'_>,
+  mb: &RefCell<Mailbox>,
+  teardown_timeout: Duration,
+) {
   socket.abort();
-  // Ignoring Err: flushing the RST on an already-dead socket is a no-op; the
-  // socket is returned to Closed either way.
-  let _ = socket.flush().await;
+  drain_teardown(socket, teardown_timeout).await;
   mb.borrow_mut().reset();
 }

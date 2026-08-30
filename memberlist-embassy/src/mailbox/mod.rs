@@ -153,4 +153,25 @@ impl Mailbox {
     // socket back to a clean Closed state, so the slot is now reuse-ready.
     self.reset_done = true;
   }
+
+  /// Consume the directive a worker arm just acted on — clearing [`command`] to
+  /// [`Command::Idle`] ONLY IF it still equals `acted`.
+  ///
+  /// A worker handshake/close arm reads its directive, performs the socket op, then
+  /// hands control to code that re-reads `command`. Between the read and this clear
+  /// the engine may have posted a NEW directive (an `Abort` retiring the slot at the
+  /// exchange deadline, or a `Close`→`Abort` escalation) with the slot's wake
+  /// latched. An unconditional `command = Idle` would ERASE that pending directive,
+  /// orphaning an established/closing socket the engine can no longer reach — the
+  /// slot pins. Comparing first leaves a differing directive SET, so the next
+  /// command match honors it (aborts + resets); only the exact directive this arm
+  /// acted on is cleared. [`Command`] is `Eq`, so the comparison is a direct match.
+  pub(crate) fn consume_command(&mut self, acted: Command) {
+    if self.command == acted {
+      self.command = Command::Idle;
+    }
+  }
 }
+
+#[cfg(test)]
+mod tests;

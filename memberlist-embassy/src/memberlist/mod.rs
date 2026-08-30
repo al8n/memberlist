@@ -356,6 +356,24 @@ where
     ))?;
     let socket_timeout = embassy_time::Duration::from_ticks(socket_ticks);
 
+    // Bound each worker's best-effort teardown RST flush (see the worker's
+    // `drain_teardown`). embassy-net's `flush` stays pending while a `Closed` socket
+    // still holds its remote tuple, which for an ARP-unresolvable on-link peer never
+    // clears — so an unbounded teardown flush would pin the slot forever. The bound
+    // must be strictly LESS than the engine's first retiring deadline, which is
+    // `close_timeout` (the engine's `retire` arms `now + close_timeout` and
+    // `reap_retiring` counts a `teardown_overruns` when an abort's teardown is still
+    // unacknowledged a full `close_timeout` on): a slot's teardown must be
+    // acknowledged before that deadline escalates. Half the close timeout leaves a
+    // full `close_timeout / 2` of margin for the command-wake → flush-abandon →
+    // mailbox-reset → engine-reap latency, so `teardown_done` reliably precedes
+    // escalation and `teardown_overruns` stays 0. Converted into the embassy-time tick
+    // domain exactly as `socket_timeout` above (a sub-tick close timeout floors to a
+    // zero bound, which is still strictly below the deadline — teardown just proceeds
+    // to the local reset at once).
+    let teardown_ticks = duration_to_ticks(cfg.close_timeout / 2, embassy_time::TICK_HZ as u128);
+    let teardown_timeout = embassy_time::Duration::from_ticks(teardown_ticks);
+
     // Run the engine's advertise-independent config preflight BEFORE resolving the
     // advertise address or binding the gossip socket. An invalid port, gossip MTU,
     // close timeout, or encryption/checksum keyring fails here deterministically —
@@ -458,6 +476,9 @@ where
       // a slot (and, via the reuse gate, the pool) indefinitely. Already converted +
       // validated in the embassy-time tick domain above.
       socket_timeout,
+      // Bounds every worker's best-effort teardown RST flush (derived strictly below
+      // the engine's retiring deadline above) so a dead on-link dial cannot pin a slot.
+      teardown_timeout,
       // The driver-side free-list is the `StreamIo` pool mirror; the engine owns
       // and drives its own pool, so this starts empty (and stays unused — see
       // `EmbassyStream`'s pool methods).

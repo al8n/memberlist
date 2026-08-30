@@ -48,6 +48,18 @@ pub struct PairedDevice {
   /// test closes this via [`PairedDevice::tx_gate`] to exercise a worker's socket
   /// inactivity timeout.
   tx_open: Rc<Cell<bool>>,
+  /// When `false`, this device cannot ORIGINATE a transmit at all: `transmit`
+  /// returns `None`, so smoltcp holds every queued packet (a SYN, an ACK, or a
+  /// teardown RST) PENDING instead of emitting it, and a socket `flush` STALLS.
+  /// This differs from `tx_open`, which delivers-then-drops INSIDE `consume` — there
+  /// smoltcp still counts the frame sent, so a `flush` resolves. A closed
+  /// `frame_open` models an interface that cannot frame an outbound packet (e.g. an
+  /// ARP-unresolvable next hop), the exact condition a worker's bounded teardown
+  /// drain exists to cap. embassy-net treats the `None` as tx-exhaustion and parks
+  /// (it does not busy-poll — see its `!tx_exhausted` poll guard). A test closes this
+  /// via [`PairedDevice::frame_gate`] to make an ESTABLISHED abort's RST
+  /// non-egressing.
+  frame_open: Rc<Cell<bool>>,
   mac: [u8; 6],
 }
 
@@ -67,6 +79,7 @@ pub fn pair() -> (PairedDevice, PairedDevice) {
       my_waker: waker_a.clone(),
       peer_waker: waker_b.clone(),
       tx_open: Rc::new(Cell::new(true)),
+      frame_open: Rc::new(Cell::new(true)),
       mac: [0x02, 0, 0, 0, 0, 1],
     },
     PairedDevice {
@@ -75,6 +88,7 @@ pub fn pair() -> (PairedDevice, PairedDevice) {
       my_waker: waker_b,
       peer_waker: waker_a,
       tx_open: Rc::new(Cell::new(true)),
+      frame_open: Rc::new(Cell::new(true)),
       mac: [0x02, 0, 0, 0, 0, 2],
     },
   )
@@ -92,6 +106,18 @@ impl PairedDevice {
   /// stops ACKing) — letting a test exercise a worker's socket inactivity timeout.
   pub fn tx_gate(&self) -> Rc<Cell<bool>> {
     self.tx_open.clone()
+  }
+
+  /// A handle to this device's framing gate. Setting it to `false` makes every
+  /// subsequent `transmit` return `None`, so smoltcp cannot emit a queued packet
+  /// (including a teardown RST): the packet stays PENDING and a socket `flush`
+  /// STALLS, modeling an interface that cannot frame an outbound frame. This is
+  /// distinct from [`PairedDevice::tx_gate`], which delivers-then-drops (smoltcp
+  /// still counts the frame sent, so a `flush` resolves). Used to make an
+  /// ESTABLISHED abort's RST non-egressing so a worker's bounded teardown drain is
+  /// exercised.
+  pub fn frame_gate(&self) -> Rc<Cell<bool>> {
+    self.frame_open.clone()
   }
 }
 
@@ -163,6 +189,13 @@ impl Driver for PairedDevice {
   }
 
   fn transmit(&mut self, _cx: &mut Context<'_>) -> Option<PairedTx> {
+    // A closed framing gate cannot originate a transmit: returning `None` makes
+    // smoltcp hold the queued packet PENDING (so a teardown RST cannot egress and a
+    // socket `flush` stalls), modeling an interface that cannot frame an outbound
+    // frame. embassy-net flags this as tx-exhaustion and parks rather than busy-poll.
+    if !self.frame_open.get() {
+      return None;
+    }
     Some(PairedTx {
       tx: self.tx.clone(),
       peer_waker: self.peer_waker.clone(),
