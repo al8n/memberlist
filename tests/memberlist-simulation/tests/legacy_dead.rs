@@ -49,24 +49,37 @@ fn dead_node_no_node() {
 
 // ── 2. `dead_node_left` (legacy line 1734) ────────────────────────────────────
 
-/// Dead where `node == from` marks the peer as Left (voluntary departure).
+/// A remote self-marked Dead (`node == from`) records reclaim-protected
+/// `State::Dead`, never `State::Left`.
 ///
-/// When `target_id == from_id` the Dead message signals that the peer
-/// announced its own departure, which maps to `State::Left` not `State::Dead`.
+/// A self-leave is unattributable in plaintext gossip: SWIM relays the
+/// departing node's own `Dead{X, from: X}` through arbitrary peers, so a peer
+/// cannot tell a genuine self-leave from a forged one. Granting `State::Left` —
+/// which is immediately address-reclaimable and exempt from the
+/// incarnation-staleness guard — off such a payload would let a forger redirect
+/// a live id to an attacker-chosen address. So the target is recorded as
+/// `State::Dead`, reclaim-protected by `dead_node_reclaim_time`; `State::Left`
+/// is reserved for the local node's view of ITSELF leaving.
 ///
-/// After marking Left, a fresh Alive with a higher incarnation at a new address
-/// must be accepted and move the peer back to Alive.
+/// A departed node still returns legitimately: once `dead_node_reclaim_time`
+/// has elapsed, a fresh Alive at a new address is adopted. The address-change
+/// reclaim is a new membership instance, exempt from the incarnation gate.
 ///
 /// Asserts:
-/// - After Dead(from=peer): `State::Left`.
+/// - After Dead(node==from): `State::Dead` (not Left).
 /// - Dead broadcast is queued.
-/// - After Alive(inc=3, new addr): `State::Alive`, meta and address updated.
+/// - Past the reclaim window, an Alive at a new address is adopted:
+///   `State::Alive`, with the address and meta updated.
 ///
-/// Ported from `memberlist-core/src/state/tests.rs:1734 dead_node_left`.
+/// Ported from `memberlist-core/src/state/tests.rs:1734 dead_node_left`,
+/// realigned to the self-leave-takeover hardening.
 #[test]
-fn dead_node_left_semantics() {
+fn dead_node_self_marked_marks_dead_not_left() {
+  let reclaim = Duration::from_millis(10);
   let mut c = Cluster::new();
-  let m1 = c.add_node(SmolStr::new("m1"), addr(23011));
+  let m1 = c.add_node_with(SmolStr::new("m1"), addr(23011), |cfg| {
+    cfg.with_dead_node_reclaim_time(reclaim)
+  });
 
   let peer_id = SmolStr::new("test_node");
   let peer_addr1 = addr(23091);
@@ -81,14 +94,14 @@ fn dead_node_left_semantics() {
   // Drain join event.
   while c.poll_event(m1).is_some() {}
 
-  // Dead with node == from → Left.
+  // Dead with node == from → reclaim-protected Dead (NOT Left).
   let d = Dead::new(1, peer_id.clone(), peer_id.clone());
   c.dead_node(m1, d);
 
   assert_eq!(
     c.get_node_state(m1, &peer_id),
-    Some(State::Left),
-    "peer with Dead(node==from) should be Left"
+    Some(State::Dead),
+    "peer with Dead(node==from) must record reclaim-protected Dead, never Left"
   );
 
   // Dead broadcast must be queued.
@@ -101,8 +114,12 @@ fn dead_node_left_semantics() {
   // Drain leave event.
   while c.poll_event(m1).is_some() {}
 
-  // Rejoin at new address with higher incarnation (Left state allows address
-  // reclaim without waiting for dead_node_reclaim_time).
+  // Age the Dead entry past `dead_node_reclaim_time` so its address becomes
+  // reclaimable, then rejoin at a NEW address with a higher incarnation. The
+  // address-change reclaim adopts the new address and is exempt from the
+  // incarnation gate, so the fresh Alive re-alives the peer — the legitimate
+  // return path a plain reclaim-protected Dead still allows.
+  c.age_node(m1, &peer_id, reclaim + Duration::from_millis(1));
   use memberlist_simulation::Meta;
   let foo_meta: Meta = "foo".try_into().unwrap();
   c.alive_node(
@@ -114,12 +131,22 @@ fn dead_node_left_semantics() {
   assert_eq!(
     c.get_node_state(m1, &peer_id),
     Some(State::Alive),
-    "peer should be Alive again after fresh Alive post-Left"
+    "peer should be Alive again after a reclaim-window rejoin at a new address"
   );
   assert_eq!(
     c.get_node_incarnation(m1, &peer_id),
     Some(3),
     "incarnation should be 3 after rejoin"
+  );
+  assert_eq!(
+    c.member(m1, &peer_id).map(|ns| *ns.address_ref()),
+    Some(peer_addr2),
+    "address must be updated to the rejoin address after reclaim"
+  );
+  assert_eq!(
+    c.member_meta(m1, &peer_id).map(|(meta, _, _)| meta),
+    Some(b"foo".to_vec()),
+    "meta must be updated after reclaim"
   );
 }
 
@@ -393,8 +420,10 @@ fn dead_node_refute() {
 //   higher incarnation; the simulation passes `Dead::new(2, ...)` directly.
 //   The end invariant is the same: `State::Dead` guards prevent re-transition.
 //
-// **dead_node_left — Left vs Dead distinction**:
-//   `Dead::new(inc, peer_id, peer_id)` (node == from) → `State::Left`.
+// **dead_node_self_marked — a self-marked Dead records reclaim-protected Dead**:
+//   `Dead::new(inc, peer_id, peer_id)` (node == from) → `State::Dead`,
+//   reclaim-protected by `dead_node_reclaim_time`.
 //   `Dead::new(inc, peer_id, other_id)` (node != from) → `State::Dead`.
-//   This matches the simulation `process_dead` `self_marked` sentinel at
-//   `memberlist-proto/src/endpoint.rs:724`.
+//   A remote self-marked departure is unattributable in plaintext gossip, so it
+//   is never granted the immediately-reclaimable `State::Left`; `Left` is
+//   reserved for the local node's view of itself leaving.
