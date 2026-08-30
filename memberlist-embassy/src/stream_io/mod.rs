@@ -17,7 +17,7 @@
 use core::{cell::RefCell, net::SocketAddr};
 
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
-use memberlist_embedded::{StreamIo, StreamIoError};
+use memberlist_embedded::{SlotGen, StreamIo, StreamIoError};
 
 use crate::mailbox::{Command, Mailbox};
 use alloc::vec::Vec;
@@ -70,10 +70,21 @@ impl<'a> EmbassyStream<'a> {
     }
   }
 
-  /// Post a command to slot `c`'s mailbox and wake its worker.
+  /// Stamp occupancy `g` onto slot `c`, post a command, and wake its worker.
+  ///
+  /// The generation is recorded so the worker's later teardown acknowledgement
+  /// (`reset` → [`teardown_done`](StreamIo::teardown_done)) is matched to this
+  /// exact occupancy. Every gen-carrying command (`listen` / `connect` / `close` /
+  /// `abort`) stamps it, including `abort` on a never-activated slot (the CIDR /
+  /// routable reject issued before any `connect`), so that retire is acknowledged
+  /// against the generation the engine actually retired.
   #[inline]
-  fn post(&self, c: SlotId, cmd: Command) {
-    self.slots[c.0].borrow_mut().command = cmd;
+  fn post_gen(&self, c: SlotId, cmd: Command, g: SlotGen) {
+    {
+      let mut mb = self.slots[c.0].borrow_mut();
+      mb.generation = g;
+      mb.command = cmd;
+    }
     self.cmd_wakes[c.0].signal(());
   }
 }
@@ -104,23 +115,30 @@ impl StreamIo for EmbassyStream<'_> {
     self.free.len()
   }
 
-  fn reuse_ready(&self, c: Self::Conn) -> bool {
+  fn teardown_done(&self, c: Self::Conn, g: SlotGen) -> bool {
     // embassy-net teardown is ASYNCHRONOUS: `abort`/`close` post a command to the
-    // slot's worker, which resets the `TcpSocket` on a later wake — so a slot the
-    // engine just `give`s back to the pool is NOT yet clean. The worker clears
-    // `reset_done` the instant it begins a `Listen`/`Dial` and re-sets it only after
-    // `reset_socket` (`abort()` + flush + mailbox clear), so this gate is `true`
-    // exactly when the slot's socket is back in a clean Closed state. The engine
-    // consults it before reusing any pooled slot, so a freed-but-still-tearing-down
-    // slot is skipped this tick and retried once its worker has finished the reset —
-    // never re-`listen`ed/`connect`ed over a pending teardown (which would leak the
-    // prior connection's `open`/`accepted_peer`/buffers into the reused slot).
-    self.slots[c.0].borrow().reset_done
+    // slot's worker, which resets the `TcpSocket` on a later wake and (via
+    // `Mailbox::reset`) sets `reset_done` back to `true`. The worker clears
+    // `reset_done` the instant it begins a `Listen`/`Dial` (the socket is now in
+    // use) and re-sets it only after `reset_socket` (`abort()` + flush + mailbox
+    // clear), so `reset_done` is `true` exactly when the socket is back in a clean
+    // Closed state.
+    //
+    // The occupancy generation makes the gate exact: `reset_done` alone would let a
+    // reset that acknowledged a PRIOR occupancy free a later one. `gen == g` pins
+    // the acknowledgement to the occupancy the engine is retiring — a stale/unknown
+    // generation is inert (the mailbox has since moved to a newer generation). A
+    // never-activated occupancy (the CIDR/routable reject aborts before any
+    // `Listen`/`Dial`) still has `reset_done == true` and its generation was just
+    // stamped by `abort`, so it is acknowledged and freed at once — matching the
+    // synchronous drivers' same-tick reclaim of a never-connected socket.
+    let mb = self.slots[c.0].borrow();
+    mb.reset_done && mb.generation == g
   }
 
   // ── Listener / accept ───────────────────────────────────────────────────────
 
-  fn listen(&mut self, c: Self::Conn, port: u16) -> Result<(), StreamIoError> {
+  fn listen(&mut self, c: Self::Conn, port: u16, g: SlotGen) -> Result<(), StreamIoError> {
     // embassy-net binds its listen endpoint to the port; port 0 is rejected by
     // `accept` (`InvalidPort`). The engine only ever passes its non-zero bound
     // port, so this never fires in practice; surface a non-fatal error rather
@@ -128,7 +146,7 @@ impl StreamIo for EmbassyStream<'_> {
     if port == 0 {
       return Err(StreamIoError::Unaddressable);
     }
-    self.post(c, Command::Listen(port));
+    self.post_gen(c, Command::Listen(port), g);
     Ok(())
   }
 
@@ -146,12 +164,13 @@ impl StreamIo for EmbassyStream<'_> {
     c: Self::Conn,
     remote: SocketAddr,
     _local_port: u16,
+    g: SlotGen,
   ) -> Result<(), StreamIoError> {
     // `_local_port` is unused: embassy-net's `TcpSocket::connect` binds its own
     // ephemeral local port from the stack (`get_local_port`), so the engine's
     // requested local port has no effect here. (smoltcp threaded it through; the
     // embassy-net stack owns ephemeral-port selection.)
-    self.post(c, Command::Dial(remote));
+    self.post_gen(c, Command::Dial(remote), g);
     Ok(())
   }
 
@@ -250,12 +269,12 @@ impl StreamIo for EmbassyStream<'_> {
 
   // ── Close ─────────────────────────────────────────────────────────────────────
 
-  fn close(&mut self, c: Self::Conn) {
-    self.post(c, Command::Close);
+  fn close(&mut self, c: Self::Conn, g: SlotGen) {
+    self.post_gen(c, Command::Close, g);
   }
 
-  fn abort(&mut self, c: Self::Conn) {
-    self.post(c, Command::Abort);
+  fn abort(&mut self, c: Self::Conn, g: SlotGen) {
+    self.post_gen(c, Command::Abort, g);
   }
 }
 

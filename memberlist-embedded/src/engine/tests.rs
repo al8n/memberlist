@@ -116,7 +116,17 @@ impl StreamIo for NoStream {
     self.free.len()
   }
 
-  fn listen(&mut self, _c: u32, _port: u16) -> Result<(), crate::StreamIoError> {
+  fn teardown_done(&self, _c: u32, _g: crate::SlotGen) -> bool {
+    // Synchronous mock: a retired slot is immediately reusable.
+    true
+  }
+
+  fn listen(
+    &mut self,
+    _c: u32,
+    _port: u16,
+    _g: crate::SlotGen,
+  ) -> Result<(), crate::StreamIoError> {
     Ok(())
   }
 
@@ -129,6 +139,7 @@ impl StreamIo for NoStream {
     _c: u32,
     _remote: SocketAddr,
     _local_port: u16,
+    _g: crate::SlotGen,
   ) -> Result<(), crate::StreamIoError> {
     Err(crate::StreamIoError::Busy)
   }
@@ -165,9 +176,9 @@ impl StreamIo for NoStream {
     0
   }
 
-  fn close(&mut self, _c: u32) {}
+  fn close(&mut self, _c: u32, _g: crate::SlotGen) {}
 
-  fn abort(&mut self, _c: u32) {}
+  fn abort(&mut self, _c: u32, _g: crate::SlotGen) {}
 }
 
 fn node_addr(port: u16) -> SocketAddr {
@@ -1048,7 +1059,14 @@ impl StreamIo for ProgRel {
     self.free.len()
   }
 
-  fn listen(&mut self, c: u32, _port: u16) -> Result<(), crate::StreamIoError> {
+  fn teardown_done(&self, c: u32, _g: crate::SlotGen) -> bool {
+    // Synchronous mock: a retired slot is reusable once its socket is Closed
+    // (`abort` drops `open` at once; a graceful `close` leaves it open until the
+    // test/fabric drops `open`, mirroring the old `!is_open()` reap gate).
+    !self.sock(c).open
+  }
+
+  fn listen(&mut self, c: u32, _port: u16, _g: crate::SlotGen) -> Result<(), crate::StreamIoError> {
     // A listening socket is open and awaiting a passive open; reset any prior
     // per-slot residue so a reclaimed-then-relistened handle starts clean.
     *self.sock_mut(c) = SockState::idle();
@@ -1065,6 +1083,7 @@ impl StreamIo for ProgRel {
     c: u32,
     remote: SocketAddr,
     _local_port: u16,
+    _g: crate::SlotGen,
   ) -> Result<(), crate::StreamIoError> {
     if self.connect_fails {
       return Err(crate::StreamIoError::Busy);
@@ -1122,13 +1141,13 @@ impl StreamIo for ProgRel {
     self.sock(c).tx_unacked
   }
 
-  fn close(&mut self, c: u32) {
+  fn close(&mut self, c: u32, _g: crate::SlotGen) {
     self.closed.push(c);
     // A graceful close leaves the socket open (FIN in flight) until the test (or
-    // reap) drops `open`; the engine parks it in `closing` for the reap pass.
+    // reap) drops `open`; the engine parks it in `retiring` (Draining) for the reap.
   }
 
-  fn abort(&mut self, c: u32) {
+  fn abort(&mut self, c: u32, _g: crate::SlotGen) {
     self.aborted.push(c);
     let s = self.sock_mut(c);
     s.open = false;
@@ -1270,7 +1289,9 @@ fn pending_dial_when_pool_exhausted_then_dialed_once_slot_frees() {
   // but not the path under test.)
   engine.set_listener(9);
   let mut stream = ProgRel::new(&[5, 9]);
-  stream.listen(9, 7946).expect("mock listen succeeds");
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
 
   let to = node_addr(7002);
   engine
@@ -1421,42 +1442,82 @@ fn reliable_partial_write_parks_remainder_then_flushes_in_order() {
   );
 }
 
-/// The reap pass reclaims a gracefully-closing handle as soon as its socket
-/// reaches a reusable (`!is_open`) state, and force-aborts one whose close has
-/// exceeded `close_timeout` — so a vanished-mid-FIN peer can never permanently
-/// shrink the pool. Both `closing`-map handles are driven directly.
+/// The reap pass reclaims a retired handle as soon as its teardown is
+/// acknowledged (`teardown_done`), and escalates a Draining handle whose close has
+/// exceeded `close_timeout` to Aborting (force-abort) — reclaiming it only once
+/// that abort's teardown is itself acknowledged, so a vanished-mid-FIN peer can
+/// never permanently shrink the pool yet the engine never blind-frees an
+/// unacknowledged teardown. Both `retiring` handles are driven directly.
 #[test]
-fn reap_closing_reclaims_finished_and_force_aborts_timed_out() {
+fn reap_retiring_reclaims_finished_and_escalates_timed_out() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
   let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
   let mut stream = ProgRel::new(&[0, 1]);
-  // Slot 0: a clean close that has reached Closed (`!is_open`). Slot 1: a peer that
-  // vanished mid-FIN — still open, past its deadline.
+  // Slot 0: a clean graceful close that has reached Closed (`teardown_done`). Slot
+  // 1: a peer that vanished mid-FIN — still open, its Draining deadline elapsed.
   stream.sock_mut(0).open = false;
   stream.sock_mut(1).open = true;
   let close_timeout = Duration::from_secs(10);
-  // Park both in `closing`, slot 1 with an already-elapsed deadline.
-  engine.plane_mut().closing.insert(0, now + close_timeout);
-  engine.plane_mut().closing.insert(1, now);
+  // Park both Draining, slot 1 with an already-elapsed deadline.
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now + close_timeout,
+      phase: RetirePhase::Draining,
+    },
+  );
+  engine.plane_mut().retiring.insert(
+    1,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now,
+      phase: RetirePhase::Draining,
+    },
+  );
 
-  assert_eq!(engine.closing_count(), 2, "two handles parked mid-close");
+  assert_eq!(engine.retiring_count(), 2, "two handles retiring");
+  assert_eq!(
+    engine.closing_count(),
+    2,
+    "both are Draining (graceful close)"
+  );
 
-  // Pump at `now`: slot 0 is reusable (reclaimed on the `!is_open` path); slot 1 is
-  // past its deadline (`now >= deadline`) so it is force-aborted then reclaimed.
+  // Pump at `now`: slot 0's teardown is acknowledged (reclaimed on the
+  // `teardown_done` path); slot 1 is past its Draining deadline, so it is escalated
+  // — force-aborted and switched to Aborting — but NOT freed this pass (the engine
+  // never blind-frees an unacknowledged teardown).
   let mut gossip = NoGossip;
   engine.pump(now, &mut gossip, &mut stream);
 
-  assert_eq!(
-    engine.closing_count(),
-    0,
-    "both closing handles must be reaped (one clean, one force-aborted)"
-  );
   assert!(
     stream.aborted.contains(&1),
-    "the vanished-mid-FIN handle past its deadline must be force-aborted"
+    "the vanished-mid-FIN handle past its Draining deadline must be force-aborted"
   );
   assert!(
     !stream.aborted.contains(&0),
     "the cleanly-closed handle must be reclaimed without an abort"
+  );
+  assert_eq!(
+    engine.closing_count(),
+    0,
+    "slot 0 reaped; slot 1 escalated out of Draining into Aborting"
+  );
+  assert_eq!(
+    engine.retiring_count(),
+    1,
+    "the escalated handle stays retiring (Aborting) until its teardown is acknowledged"
+  );
+
+  // The escalation's `abort` dropped slot 1's `open`, so its teardown is now
+  // acknowledged: a second pass reaps it and the ledger empties.
+  let later = now + Duration::from_millis(1);
+  engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    0,
+    "the escalated handle is reclaimed once its abort teardown is acknowledged"
   );
 }
 
@@ -1472,7 +1533,9 @@ fn check_listener_admits_inbound_and_replenishes_the_listener() {
   engine.plane_mut().pool.push(0);
   engine.set_listener(1);
   let mut stream = ProgRel::new(&[0, 1]);
-  stream.listen(1, 7946).expect("mock listen succeeds");
+  stream
+    .listen(1, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
   // The listener's passive open settled with a known, in-policy remote.
   stream.sock_mut(1).accepted = Some(node_addr(7950));
   stream.sock_mut(1).established = true;
@@ -1662,7 +1725,15 @@ impl StreamIo for LinkRel {
     self.free.len()
   }
 
-  fn listen(&mut self, c: u32, _port: u16) -> Result<(), crate::StreamIoError> {
+  fn teardown_done(&self, c: u32, _g: crate::SlotGen) -> bool {
+    // Synchronous fabric mock: a retired occupancy is reusable once its pipe is no
+    // longer open (a RST, or both FINs exchanged) — exactly the pre-ledger reap
+    // gate. A graceful close whose peer FIN has not arrived stays `is_open`, so it
+    // waits in `retiring` (Draining) until the peer FINs, then frees.
+    !self.is_open(c)
+  }
+
+  fn listen(&mut self, c: u32, _port: u16, _g: crate::SlotGen) -> Result<(), crate::StreamIoError> {
     self.role.borrow_mut().insert(c, SlotRole::Listening);
     Ok(())
   }
@@ -1693,6 +1764,7 @@ impl StreamIo for LinkRel {
     c: u32,
     remote: SocketAddr,
     _local_port: u16,
+    _g: crate::SlotGen,
   ) -> Result<(), crate::StreamIoError> {
     let mut fab = self.fabric.borrow_mut();
     let pipe = fab.next_pipe;
@@ -1842,7 +1914,7 @@ impl StreamIo for LinkRel {
     }
   }
 
-  fn close(&mut self, c: u32) {
+  fn close(&mut self, c: u32, _g: crate::SlotGen) {
     if let Some(SlotRole::Bound(pipe, end)) = self.role_of(c) {
       let mut fab = self.fabric.borrow_mut();
       if let Some(p) = fab.pipes.get_mut(&pipe) {
@@ -1854,7 +1926,7 @@ impl StreamIo for LinkRel {
     }
   }
 
-  fn abort(&mut self, c: u32) {
+  fn abort(&mut self, c: u32, _g: crate::SlotGen) {
     if let Some(SlotRole::Bound(pipe, _)) = self.role_of(c) {
       let mut fab = self.fabric.borrow_mut();
       if let Some(p) = fab.pipes.get_mut(&pipe) {
@@ -1949,8 +2021,12 @@ impl LinkPair {
     // mock free-lists so a re-listen does not double-hand a listener.
     a_rel.free.retain(|h| h != a_listener);
     b_rel.free.retain(|h| h != b_listener);
-    a_rel.listen(*a_listener, 7946).expect("listen");
-    b_rel.listen(*b_listener, 7947).expect("listen");
+    a_rel
+      .listen(*a_listener, 7946, crate::SlotGen::START)
+      .expect("listen");
+    b_rel
+      .listen(*b_listener, 7947, crate::SlotGen::START)
+      .expect("listen");
 
     let a2b: Rc<RefCell<Vec<(SocketAddr, Vec<u8>)>>> = Rc::new(RefCell::new(Vec::new()));
     let b2a: Rc<RefCell<Vec<(SocketAddr, Vec<u8>)>>> = Rc::new(RefCell::new(Vec::new()));
@@ -2817,7 +2893,9 @@ fn check_listener_rejects_cidr_blocked_inbound_and_rearms() {
 
   let before = engine.accepted_inbound_count();
   let mut stream = ProgRel::new(&[0, 1]);
-  stream.listen(1, 7946).expect("listen");
+  stream
+    .listen(1, 7946, crate::SlotGen::START)
+    .expect("listen");
   // The passive open settled, but the remote is out-of-policy (192.168/16).
   stream.sock_mut(1).accepted = Some(SocketAddr::new(
     IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)),
@@ -2842,19 +2920,25 @@ fn check_listener_rejects_cidr_blocked_inbound_and_rearms() {
   );
 }
 
-/// `reap_closing` leaves a still-closing handle parked when its socket has not yet
-/// reached a reusable state AND its deadline has not elapsed — it is reclaimed only
-/// later. This pins the keep-parked arm (the complement of the reclaim/abort arms).
+/// `reap_retiring` leaves a still-draining handle parked when its teardown is not
+/// yet acknowledged AND its deadline has not elapsed — it is reclaimed only later.
+/// This pins the keep-parked arm (the complement of the reclaim/escalate arms).
 #[test]
-fn reap_closing_keeps_a_still_closing_handle_parked() {
+fn reap_retiring_keeps_a_still_draining_handle_parked() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
   let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
   let mut stream = ProgRel::new(&[0]);
   // Slot 0 is still flushing its FIN: open, and its deadline is in the future.
   stream.sock_mut(0).open = true;
-  engine
-    .plane_mut()
-    .closing
-    .insert(0, now + Duration::from_secs(60));
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now + Duration::from_secs(60),
+      phase: RetirePhase::Draining,
+    },
+  );
 
   let mut gossip = NoGossip;
   engine.pump(now, &mut gossip, &mut stream);
@@ -2862,7 +2946,7 @@ fn reap_closing_keeps_a_still_closing_handle_parked() {
   assert_eq!(
     engine.closing_count(),
     1,
-    "a still-open, within-deadline closing handle must stay parked for a later tick"
+    "a still-open, within-deadline draining handle must stay parked for a later tick"
   );
   assert!(
     !stream.aborted.contains(&0),
@@ -2965,5 +3049,321 @@ fn encrypted_node_drops_plaintext_inbound_gossip() {
     engine.num_members(),
     1,
     "a plaintext datagram on an encrypted node must be dropped — no ghost admitted"
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generation-tagged slot-teardown protocol (the reuse ledger).
+//
+// A generation-aware async-teardown mock whose `teardown_done` reports `true`
+// ONLY once the test explicitly acknowledges the matching occupancy generation
+// (`ack`) — modelling the embassy-net worker that resets a socket on a later wake
+// and acknowledges the exact occupancy it served. It pins the ledger's
+// generation-tagged reuse gate directly, without a second engine.
+
+struct AckRel {
+  /// Driver-side free-list (unused by the engine, which owns `ReliablePlane::pool`).
+  free: Vec<u32>,
+  /// The occupancy generation whose teardown the "worker" has acknowledged, per
+  /// slot. Absent = not yet acknowledged.
+  acked: BTreeMap<u32, crate::SlotGen>,
+  /// Per-slot open flag (set by `listen`/`connect`; `ack` clears it, modelling the
+  /// socket reaching a clean Closed state).
+  open: BTreeMap<u32, bool>,
+  /// `(slot, gen)` of every `abort`, for assertions.
+  aborts: Vec<(u32, crate::SlotGen)>,
+}
+
+impl AckRel {
+  fn new(handles: &[u32]) -> Self {
+    Self {
+      free: handles.to_vec(),
+      acked: BTreeMap::new(),
+      open: BTreeMap::new(),
+      aborts: Vec::new(),
+    }
+  }
+
+  /// Acknowledge that the worker finished tearing down occupancy `g` of slot `c`
+  /// (the async reset completed), so `teardown_done(c, g)` now reports `true`.
+  fn ack(&mut self, c: u32, g: crate::SlotGen) {
+    self.acked.insert(c, g);
+    self.open.insert(c, false);
+  }
+}
+
+impl StreamIo for AckRel {
+  type Conn = u32;
+
+  fn take_free(&mut self) -> Option<u32> {
+    self.free.pop()
+  }
+
+  fn give(&mut self, c: u32) {
+    self.free.push(c);
+  }
+
+  fn free_count(&self) -> usize {
+    self.free.len()
+  }
+
+  fn teardown_done(&self, c: u32, g: crate::SlotGen) -> bool {
+    // Only the acknowledged occupancy is reusable; a mismatched/unknown gen is inert.
+    self.acked.get(&c) == Some(&g)
+  }
+
+  fn listen(&mut self, c: u32, _port: u16, _g: crate::SlotGen) -> Result<(), crate::StreamIoError> {
+    self.open.insert(c, true);
+    Ok(())
+  }
+
+  fn accepted_peer(&self, _c: u32) -> Option<SocketAddr> {
+    None
+  }
+
+  fn connect(
+    &mut self,
+    c: u32,
+    _remote: SocketAddr,
+    _local_port: u16,
+    _g: crate::SlotGen,
+  ) -> Result<(), crate::StreamIoError> {
+    self.open.insert(c, true);
+    Ok(())
+  }
+
+  fn may_send(&self, _c: u32) -> bool {
+    false
+  }
+
+  fn may_recv(&self, _c: u32) -> bool {
+    false
+  }
+
+  fn is_open(&self, c: u32) -> bool {
+    self.open.get(&c).copied().unwrap_or(false)
+  }
+
+  fn is_established(&self, _c: u32) -> bool {
+    false
+  }
+
+  fn recv(&mut self, _c: u32, _buf: &mut [u8]) -> Option<usize> {
+    None
+  }
+
+  fn recv_finished(&self, _c: u32) -> bool {
+    false
+  }
+
+  fn send(&mut self, _c: u32, _bytes: &[u8]) -> usize {
+    0
+  }
+
+  fn send_queue(&self, _c: u32) -> usize {
+    0
+  }
+
+  fn close(&mut self, _c: u32, _g: crate::SlotGen) {}
+
+  fn abort(&mut self, c: u32, g: crate::SlotGen) {
+    self.aborts.push((c, g));
+  }
+}
+
+/// (a) A retired slot is NOT returned to the pool until the driver acknowledges
+/// its teardown for the retired generation; the matching acknowledgement then
+/// frees it on the next reap.
+#[test]
+fn retiring_slot_is_not_freed_until_teardown_done() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  // A listener is already installed so the freed slot is not immediately re-armed
+  // as the listener (which would hide it from the pool count).
+  engine.set_listener(9);
+  let mut stream = AckRel::new(&[]);
+  engine.plane_mut().slot_gen.insert(0, SlotGen::START);
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now + Duration::from_secs(30),
+      phase: RetirePhase::Aborting,
+    },
+  );
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    1,
+    "an unacknowledged teardown keeps the slot retiring"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    0,
+    "a retiring slot is never in the pool"
+  );
+
+  // The worker acknowledges the occupancy: the next reap frees it.
+  stream.ack(0, SlotGen::START);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    0,
+    "an acknowledged teardown frees the slot"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the freed slot returns to the pool"
+  );
+}
+
+/// (b) A stale (mismatched-generation) acknowledgement never frees a later
+/// occupancy — the reuse gate is generation-tagged, so an ack for a prior
+/// occupancy of the same slot is inert.
+#[test]
+fn a_stale_gen_ack_never_frees_a_later_occupancy() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.set_listener(9);
+  let mut stream = AckRel::new(&[]);
+  // Slot 0 is on its SECOND occupancy (generation START.next()).
+  let g1 = SlotGen::START.next();
+  engine.plane_mut().slot_gen.insert(0, g1);
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: g1,
+      deadline: now + Duration::from_secs(30),
+      phase: RetirePhase::Aborting,
+    },
+  );
+
+  let mut gossip = NoGossip;
+  // A stale acknowledgement for the PRIOR occupancy (START) must not free g1.
+  stream.ack(0, SlotGen::START);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    1,
+    "a mismatched-generation ack must never free a later occupancy"
+  );
+
+  // The matching acknowledgement frees it.
+  stream.ack(0, g1);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    0,
+    "the matching-generation ack frees the slot"
+  );
+}
+
+/// (c) An `Aborting` occupancy whose teardown is never acknowledged past its
+/// deadline re-issues the (idempotent) abort, re-arms the deadline, and counts a
+/// `teardown_overruns` — surfacing the residual pin without ever blind-freeing it.
+#[test]
+fn an_unacknowledged_abort_past_its_deadline_counts_a_teardown_overrun() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.set_listener(9);
+  let mut stream = AckRel::new(&[]);
+  // `engine_with_stream_timeout` fixes `close_timeout` at 10s.
+  let close_timeout = Duration::from_secs(10);
+  engine.plane_mut().slot_gen.insert(0, SlotGen::START);
+  // Already Aborting with an elapsed deadline; the worker never acknowledges.
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now,
+      phase: RetirePhase::Aborting,
+    },
+  );
+
+  let mut gossip = NoGossip;
+  assert_eq!(engine.teardown_overruns(), 0);
+
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.teardown_overruns(),
+    1,
+    "an Aborting deadline expiry counts an overrun"
+  );
+  assert_eq!(
+    engine.retiring_count(),
+    1,
+    "the residual pin is surfaced, never blind-freed"
+  );
+  assert!(
+    stream.aborts.iter().any(|&(c, _)| c == 0),
+    "the overrun re-issues the (idempotent) abort"
+  );
+
+  // The deadline was re-armed to now + close_timeout, so a same-instant pump does
+  // not double-count.
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.teardown_overruns(),
+    1,
+    "the re-armed deadline is not immediately re-expired"
+  );
+
+  // Past the re-armed deadline it counts again.
+  let later = now + close_timeout + Duration::from_millis(1);
+  engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.teardown_overruns(),
+    2,
+    "a second Aborting deadline expiry counts again"
+  );
+}
+
+/// (d) A never-activated occupancy — a retired slot whose socket was never opened
+/// (the CIDR / routable reject inside `dial`, aborting before any `listen` /
+/// `connect`) — round-trips cleanly through the ledger: retire → acknowledge →
+/// free. With a synchronous driver the never-opened socket is already reusable, so
+/// the immediate reap frees it the SAME tick, exactly as the real dial-reject
+/// paths (`reliable_non_routable_dial_fails_before_connect`,
+/// `reliable_dial_connect_rejection_fails_and_reclaims_slot`) rely on.
+#[test]
+fn a_never_activated_occupancy_round_trips_through_the_ledger() {
+  use crate::{RetirePhase, Retiring, SlotGen};
+
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.set_listener(9);
+  // Slot 0 was taken and its generation minted, but never listened/connected, so
+  // its socket is `!open` — a synchronous driver reports its teardown done at once.
+  let mut stream = ProgRel::new(&[0, 9]);
+  assert!(
+    !stream.sock(0).open,
+    "the never-activated slot's socket is closed"
+  );
+  engine.plane_mut().slot_gen.insert(0, SlotGen::START);
+  engine.plane_mut().retiring.insert(
+    0,
+    Retiring {
+      generation: SlotGen::START,
+      deadline: now + Duration::from_secs(30),
+      phase: RetirePhase::Aborting,
+    },
+  );
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.retiring_count(),
+    0,
+    "a never-activated occupancy's teardown is acknowledged and freed the same tick"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the reclaimed slot is back in the pool"
   );
 }
