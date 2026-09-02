@@ -155,13 +155,12 @@ async fn until(mut cond: impl FnMut() -> bool) {
   }
 }
 
-/// A gossip UDP socket that can hold at least as many received datagrams as the
-/// engine reads per pump is rejected at construction. The engine applies every
-/// datagram it pops within the pump that popped it, at most `GOSSIP_READ_CAP` of
-/// them, so a larger socket would leave the excess unread — unobserved and
-/// un-stamped — across the pump's membership sweep. The bound is strict: a socket
-/// sized exactly at the cap is rejected too (an exactly-full ring is
-/// indistinguishable from an over-cap one and costs a spurious re-pump), while the
+/// A gossip UDP socket whose receive-packet capacity reaches the engine's per-pump
+/// work ceiling is rejected at construction. The engine applies every datagram it
+/// pops within the pump that popped it, so the accepted socket capacity IS a
+/// pump's gossip work budget, and `GOSSIP_READ_CAP` is what bounds it. The bound is
+/// strict: a socket sized exactly at the cap is rejected too (a pump takes one
+/// probe pop past the ring's capacity to detect a mid-pump refill), while the
 /// 16-slot socket every other test here uses constructs.
 ///
 /// The rejection comes from the ENGINE, which screens the receive capacity the

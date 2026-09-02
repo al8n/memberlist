@@ -570,7 +570,7 @@ fn oversized_udp_arena_rejected() {
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
   // Driven through the TX slots: the RX count is capped far below any overflow by
-  // the engine's per-pump gossip read cap.
+  // the gossip read cap, which the constructor screens before it sizes the arenas.
   cfg.udp_tx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
   let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
@@ -765,21 +765,29 @@ fn zero_udp_tx_packets_rejected() {
   );
 }
 
-/// A gossip rx ring that can hold at least as many datagrams as the engine reads
-/// per pump is rejected. The engine applies every datagram it pops within the pump
-/// that popped it, at most `GOSSIP_READ_CAP` of them, so a larger ring would leave
-/// the excess unread — unobserved and un-stamped — across the pump's membership
-/// sweep. The bound is strict: the cap itself is rejected (an exactly-full ring is
-/// indistinguishable from an over-cap one and costs a spurious re-poll), and one
+/// A gossip rx ring that reaches the engine's per-pump work ceiling is rejected.
+/// The engine applies every datagram it pops within the pump that popped it, so
+/// the accepted ring size IS a pump's gossip work budget, and `GOSSIP_READ_CAP` is
+/// what bounds it. The bound is strict: the cap itself is rejected (a pump takes
+/// one probe pop past the ring's capacity to detect a mid-pump refill), and one
 /// slot below it constructs.
 ///
-/// The rejection is the ENGINE's: it screens the receive capacity of the gossip
-/// view this driver hands it (the bound socket's own metadata-slot count, which
-/// `udp_rx_packets` sizes), and the driver reports that verdict under the name of
-/// the option to lower. The shipped default is well below the cap and constructs.
+/// The driver screens `udp_rx_packets` among its pure-`Options` guards, BEFORE it
+/// sizes and allocates the UDP metadata ring and payload arena from that same
+/// count — so a count large enough to exhaust memory returns the typed verdict
+/// instead of reaching the allocator, and never reaches the arena-overflow guard
+/// either. The engine raises the same verdict against the bound socket's actual
+/// receive ring, which the driver reports under the name of the option to lower.
+/// The shipped default is well below the cap and constructs.
 #[test]
 fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
+  // `max_datagram` is bounded by the 65507-byte UDP payload ceiling the gossip-MTU
+  // check enforces, so this count cannot overflow the arena's `checked_mul` — its
+  // arenas would simply be far larger than any machine's memory. Without the
+  // pre-allocation screen it would be an allocation, not an error.
+  let huge_but_not_overflowing = usize::MAX / 65_536;
   for (slots, accepted) in [
+    (huge_but_not_overflowing, false),
     (GOSSIP_READ_CAP + 1, false),
     (GOSSIP_READ_CAP, false),
     (GOSSIP_READ_CAP - 1, true),
@@ -806,7 +814,8 @@ fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
     } else {
       assert!(
         matches!(res, Err(InitError::UdpRxPacketsTooLarge)),
-        "{slots} slots is not below the cap and must be rejected"
+        "{slots} slots is not below the cap and must be rejected for the packet count itself, \
+         before any arena is sized or allocated"
       );
     }
   }

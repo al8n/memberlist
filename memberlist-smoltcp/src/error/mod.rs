@@ -218,16 +218,18 @@ pub enum InitError {
   /// engine's per-pump gossip read cap
   /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   ///
-  /// This is the engine's own rejection of the bound gossip socket's receive ring
-  /// ([`memberlist_embedded::InitError::GossipRecvCapacityTooLarge`]), surfaced
-  /// under the name of the option that sizes it. The engine reads at most
-  /// `GOSSIP_READ_CAP` datagrams from the ring per pump and applies every one of
-  /// them at that pump's instant. A ring able to hold as many as the cap or more
-  /// leaves the excess sitting unread — so unobserved and un-stamped — across the
-  /// pump's membership sweep, to be applied only at a later pump's instant. The
-  /// bound is strict rather than inclusive because a ring exactly at the cap that
-  /// happens to be full is indistinguishable from an over-cap one, and would cost
-  /// one spurious re-poll.
+  /// The cap is the engine's per-pump work ceiling: it applies every datagram it
+  /// pops within the pump that popped it, so the accepted ring size is that pump's
+  /// unwrap, decode and apply budget. The bound is strict rather than inclusive
+  /// because a pump takes one probe pop past the ring's declared capacity to detect
+  /// a ring refilling under it.
+  ///
+  /// The driver screens `udp_rx_packets` before it sizes and allocates the UDP
+  /// arenas, so a count large enough to exhaust memory is a returned error rather
+  /// than an allocation. The engine raises the same verdict against the bound
+  /// socket's actual receive ring
+  /// ([`memberlist_embedded::InitError::GossipRecvCapacityTooLarge`]), which this
+  /// variant also carries — surfaced under the name of the option to lower.
   UdpRxPacketsTooLarge,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
@@ -384,9 +386,11 @@ impl InitError {
         gossip_mtu: m.gossip_mtu,
         ceiling: m.ceiling,
       }),
-      // The engine screens the bound gossip socket's receive ring; the driver sizes
-      // that ring from `udp_rx_packets` alone, so the rejection is reported under
-      // the name of the knob the caller must lower.
+      // The engine screens the bound gossip socket's receive ring (the driver's own
+      // pre-allocation screen of `udp_rx_packets` runs first, so this arm covers a
+      // socket whose installed capacity differs from the count it was sized from);
+      // either way the driver sizes that ring from `udp_rx_packets` alone, so the
+      // rejection is reported under the name of the knob the caller must lower.
       E::GossipRecvCapacityTooLarge(_) => InitError::UdpRxPacketsTooLarge,
       E::Endpoint(inner) => InitError::Endpoint(inner),
       #[cfg(encryption)]

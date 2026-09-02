@@ -59,20 +59,17 @@ pub enum InitError {
   /// and the effective ceiling are carried for diagnostics.
   GossipMtuTooLarge(GossipMtuTooLarge),
   /// The driver's gossip receive ring
-  /// ([`GossipIo::recv_capacity`](crate::GossipIo::recv_capacity)) can hold at
-  /// least as many datagrams as the engine reads per pump
+  /// ([`GossipIo::recv_capacity`](crate::GossipIo::recv_capacity)) reaches the
+  /// engine's per-pump work ceiling
   /// ([`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP)).
   ///
-  /// The engine reads at most that many datagrams from the ring per pump and
-  /// applies every one of them at that pump's instant. A ring able to hold as many
-  /// as the cap or more leaves the excess sitting unread — so unobserved and
-  /// un-stamped — across the pump's membership sweep, to be applied only at a later
-  /// pump's instant: a refutation waiting in the ring could then be applied only
-  /// after the timer it refutes had fired. The bound is strict rather than
-  /// inclusive because a ring exactly at the cap that happens to be full is
-  /// indistinguishable from an over-cap one without peeking, so it would cost one
-  /// spurious re-pump on every full read. The capacity reported is carried for
-  /// diagnostics.
+  /// A pump reads the whole ring the view declares and applies every datagram at
+  /// that pump's instant, so the accepted ring size IS the per-pump unwrap, decode
+  /// and apply budget: a ring at or above the cap would let a driver raise that
+  /// budget without limit. The bound is strict rather than inclusive because a pump
+  /// takes one probe pop past the declared capacity to detect a ring refilling
+  /// under it, so only a ring below the cap keeps a pump's reads at or under it.
+  /// The capacity reported is carried for diagnostics.
   GossipRecvCapacityTooLarge(usize),
   /// The SWIM machine endpoint failed to initialize.
   Endpoint(EndpointInitError),

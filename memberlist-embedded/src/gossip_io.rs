@@ -9,7 +9,8 @@ use core::net::SocketAddr;
 /// knowing the underlying stack. Both I/O methods are non-blocking: they move at
 /// most one datagram against buffers the driver's stack tick has already
 /// filled or drained. [`recv_capacity`](Self::recv_capacity) performs no I/O; it
-/// declares the receive ring the engine validates against its per-pump read cap.
+/// declares the receive ring, from which the engine derives how much of it to
+/// read per pump and which it screens against its per-pump work ceiling.
 pub trait GossipIo {
   /// Pop one received datagram into `buf`; `(source, len)` or `None` when the rx ring is empty.
   ///
@@ -25,19 +26,23 @@ pub trait GossipIo {
   /// datagrams the link layer could leave waiting for [`recv`](Self::recv) while
   /// the engine is away.
   ///
-  /// An engine built on this trait reads a bounded number of datagrams per pump
-  /// and applies every one of them at that pump's instant. It therefore validates
-  /// this capacity against its own per-pump read cap when it is constructed and
-  /// rejects a ring that can hold as many datagrams as the cap or more: the excess
-  /// would sit in the ring unread — so unobserved and un-stamped — across a pump's
-  /// membership sweep, and a refutation waiting there could be applied only after
-  /// the timer it refutes had already fired. See
-  /// [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP) and
-  /// [`Engine::try_new_at`](crate::Engine::try_new_at).
+  /// It must be the TRUE capacity of the ring `recv` pops from, for the view being
+  /// pumped. An engine built on this trait derives each pump's read bound from
+  /// this number, so that every datagram the ring held when the pump began is
+  /// popped and applied at that pump's instant, before any membership sweep. A
+  /// stale or wrong declaration is the one thing no engine can defend against: an
+  /// under-declared ring leaves the excess sitting unread — so unobserved and
+  /// un-stamped — across the sweep, and a refutation waiting there could be applied
+  /// only after the timer it refutes had already fired. Report the ring the engine
+  /// will actually read from — the bound socket's own capacity wherever the stack
+  /// exposes it — so the declared value cannot drift from the buffer the driver
+  /// installed, and re-declare it if the ring is ever resized.
   ///
-  /// Report the ring the engine will actually read from — the bound socket's own
-  /// capacity wherever the stack exposes it — so the declared value cannot drift
-  /// from the buffer the driver installed.
+  /// The engine additionally screens this capacity at construction against its own
+  /// per-pump work ceiling and rejects a ring that can hold as many datagrams as
+  /// the ceiling or more, which is what bounds the decode work one pump can cost.
+  /// See [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP) and
+  /// [`Engine::try_new_at`](crate::Engine::try_new_at).
   fn recv_capacity(&self) -> usize;
 
   /// Best-effort enqueue of one datagram to `dest`. Gossip is lossy: drop on a full tx ring.

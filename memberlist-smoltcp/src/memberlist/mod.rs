@@ -491,6 +491,20 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
+    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // BEFORE the UDP arenas are sized and allocated below. This is an allocation
+    // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
+    // arena at `packets * max_datagram`, so a large-but-non-overflowing count
+    // would reach the allocator — an out-of-memory abort on a constrained target —
+    // before the engine could ever screen the socket and return the typed verdict.
+    // Screening the pure-`Options` value here costs nothing and keeps the answer a
+    // returned error. The engine's own check against the bound socket's actual
+    // capacity stays as defence in depth: it is the authority on the ring the
+    // engine will read, and it binds every driver, not just this one.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
+    }
+
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
     // graceful-close drain: a connection still `Closing` past `now +
     // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
@@ -945,6 +959,20 @@ where
     // packet buffers below.
     if cfg.udp_rx_packets == 0 || cfg.udp_tx_packets == 0 {
       return Err(InitError::ZeroUdpPackets);
+    }
+
+    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // BEFORE the UDP arenas are sized and allocated below. This is an allocation
+    // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
+    // arena at `packets * max_datagram`, so a large-but-non-overflowing count
+    // would reach the allocator — an out-of-memory abort on a constrained target —
+    // before the engine could ever screen the socket and return the typed verdict.
+    // Screening the pure-`Options` value here costs nothing and keeps the answer a
+    // returned error. The engine's own check against the bound socket's actual
+    // capacity stays as defence in depth: it is the authority on the ring the
+    // engine will read, and it binds every driver, not just this one.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
     }
 
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable

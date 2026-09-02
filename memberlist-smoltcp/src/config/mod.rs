@@ -33,9 +33,10 @@ pub struct Options {
   /// UDP rx datagram metadata slots.
   ///
   /// Must be strictly below the engine's per-pump gossip read cap
-  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]), which construction enforces: the
-  /// engine applies at most that many datagrams per pump, so a larger ring leaves
-  /// the excess unread across a pump's membership sweep.
+  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]), which construction enforces —
+  /// here, before the UDP arenas this count sizes are allocated, and again in the
+  /// engine against the bound socket. The engine applies every datagram it pops
+  /// within that pump, so this count is the per-pump gossip work budget.
   pub udp_rx_packets: usize,
   /// UDP tx datagram metadata slots.
   pub udp_tx_packets: usize,

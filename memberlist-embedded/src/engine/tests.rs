@@ -4064,16 +4064,16 @@ fn suspect_b(
   (t1, t1 + Duration::from_secs(4))
 }
 
-/// Queue `GOSSIP_READ_CAP - 1` undecodable datagrams and then `B`'s
+/// Fill the fake's declared ring with undecodable datagrams and then `B`'s
 /// `Alive(inc + 1)` refutation, so the refutation is the LAST datagram the pump's
-/// read cap admits.
+/// read bound admits.
 fn junk_then_b_refutation(
   engine: &Engine<SmolStr, u32>,
   gossip: &mut QueueGossip,
   b_addr: SocketAddr,
 ) {
   let junk_src = node_addr(7050);
-  for _ in 0..(GOSSIP_READ_CAP - 1) {
+  for _ in 0..FAKE_RECV_CAPACITY {
     gossip.push(junk_src, junk_datagram());
   }
   let inc = engine
@@ -4109,8 +4109,8 @@ fn assert_b_refuted(engine: &mut Engine<SmolStr, u32>) {
 /// `Alive(inc + 1)` for a `Suspect` B clears the suspicion outright. What decides
 /// the outcome is purely the order of the two within the pump: read-then-tick
 /// keeps B alive, tick-then-read kills it and immediately resurrects it. The
-/// refutation is placed LAST in the ring, behind a cap's worth of junk, so it is
-/// also the final datagram the read cap admits.
+/// refutation is placed LAST in the ring, behind a full ring of junk, so it is
+/// also the final datagram the read bound admits.
 #[test]
 fn same_pump_alive_refutation_precedes_the_tick() {
   let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
@@ -4197,29 +4197,93 @@ fn same_pump_reliable_fault_cannot_sweep_past_this_pumps_gossip() {
   assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
 }
 
-/// One pump reads at most `GOSSIP_READ_CAP` datagrams. The remainder stays in the
+/// The read bound is the PUMPED view's own declared capacity, never the capacity
+/// construction screened — and it holds in every build profile.
+///
+/// `try_new_at` sees one view; `pump` accepts a fresh view on every call, and only
+/// the driver can see the two diverge. Here the engine is built over a conforming
+/// 63-slot view and then pumped with a truthful 65-slot one whose last slot holds
+/// B's refutation, at an instant past B's suspicion deadline. A bound fixed at
+/// `GOSSIP_READ_CAP` would leave that datagram in the ring across step 6's sweep,
+/// so B would die and be resurrected by a later pump — a flap the immediate wake
+/// cannot undo. Deriving the bound from the view in hand applies it first instead,
+/// with no assertion for a release build to strip out.
+#[test]
+fn pumping_a_larger_truthful_view_than_constructed_with_still_applies_everything_before_the_sweep()
+{
+  let (mut engine, mut small, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+  let (_t1, s) = suspect_b(&mut engine, &mut small, &mut stream, f);
+
+  // A second, distinct view: 65 truthful slots — past the engine's cap, and larger
+  // than the 63-slot view construction screened. It arrives full: 64 junk
+  // datagrams, then B's own refutation in the last slot.
+  let over_cap = GOSSIP_READ_CAP + 1;
+  let mut big = QueueGossip::with_recv_capacity(over_cap);
+  let junk_src = node_addr(7050);
+  for _ in 0..(over_cap - 1) {
+    big.push(junk_src, junk_datagram());
+  }
+  let inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  big.push(b_addr, alive_datagram("b", b_addr, inc + 1));
+
+  let t = s + Duration::from_secs(1);
+  assert!(t > s, "this pump runs past B's suspicion deadline");
+  let wake = engine.pump(t, &mut big, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(
+    big.ring_len(),
+    0,
+    "the whole 65-slot ring is read within the pump that observed it"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    1,
+    "the divergence from the screened view is surfaced, not silently trusted"
+  );
+  assert!(
+    wake > Some(t),
+    "a truthful ring, over-cap or not, is emptied and folds no already-due wake"
+  );
+}
+
+/// A view that delivers more datagrams than it declares is read to its declared
+/// capacity plus the one probe pop, and no further. The remainder stays in the
 /// driver's ring — not dropped, not copied into the engine — and is read on the
 /// next pump, which the returned already-due deadline asks for immediately.
+///
+/// Only an under-declaring (or mid-pump refilling) view can reach this: for a
+/// truthful one the declared capacity is the most the ring can hold, so the ring
+/// is always emptied within the pump.
 #[test]
-fn gossip_read_is_capped_per_pump_and_the_remainder_is_read_next_pump() {
+fn a_view_delivering_more_than_it_declares_is_read_to_its_bound_and_re_pumped() {
   let mut engine = make_engine();
   let t = Instant::from_origin(Duration::from_secs(86_400));
   engine.start(t);
-  let mut gossip = QueueGossip::new();
+  // The fake's queue is unbounded, so it can be handed more datagrams than the
+  // capacity it declares — the under-declaration the probe pop exists to catch.
+  let declared = FAKE_RECV_CAPACITY;
+  let bound = declared + 1;
+  let mut gossip = QueueGossip::with_recv_capacity(declared);
   let mut stream = NoStream::with_pool(2);
 
   // Settle the machine's own schedulers first, so the only already-due term the
-  // pump under test can return is the read cap's.
+  // pump under test can return is the gossip one.
   let quiescent = engine.pump(t, &mut gossip, &mut stream);
   assert!(
     quiescent > Some(t),
     "no machine timer may be due at this instant, or the wake assertion proves nothing"
   );
 
-  // `cap + k` distinct, valid Alives, each for its own id and address.
+  // `bound + k` distinct, valid Alives, each for its own id and address.
   let extra = 5usize;
   let src = node_addr(7050);
-  for i in 0..(GOSSIP_READ_CAP + extra) {
+  for i in 0..(bound + extra) {
     let addr = node_addr(8000 + i as u16);
     gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
   }
@@ -4227,8 +4291,8 @@ fn gossip_read_is_capped_per_pump_and_the_remainder_is_read_next_pump() {
   let first = engine.pump(t, &mut gossip, &mut stream);
   assert_eq!(
     engine.num_members(),
-    1 + GOSSIP_READ_CAP,
-    "exactly one cap's worth of Alives is applied in the first pump"
+    1 + bound,
+    "the declared capacity plus the probe pop is applied in the first pump"
   );
   assert_eq!(
     gossip.ring_len(),
@@ -4238,45 +4302,174 @@ fn gossip_read_is_capped_per_pump_and_the_remainder_is_read_next_pump() {
   assert_eq!(
     first,
     Some(t),
-    "stopping at the cap folds an already-due wake so the caller polls again at once"
+    "the probe pop found a datagram past the declaration: fold an already-due wake so the caller \
+     polls again at once"
   );
   assert_eq!(
-    engine.gossip_read_cap_hits(),
-    1,
-    "the cap hit is counted exactly once"
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the view declared a conforming capacity — it under-declared its occupancy, which is not an \
+     over-cap pump"
   );
 
   let second = engine.pump(t, &mut gossip, &mut stream);
   assert_eq!(
     engine.num_members(),
-    1 + GOSSIP_READ_CAP + extra,
+    1 + bound + extra,
     "the remainder is applied on the next pump"
   );
   assert_eq!(gossip.ring_len(), 0, "the ring is now empty");
   assert!(
     second > Some(t),
-    "a pump that emptied the ring folds no already-due wake"
+    "a pump whose probe pop found nothing folds no already-due wake"
   );
   assert_eq!(
-    engine.gossip_read_cap_hits(),
-    1,
-    "a pump that stopped short of the cap counts no hit"
+    engine.gossip_over_cap_pumps(),
+    0,
+    "still no over-cap pump: the declaration never reached the cap"
+  );
+}
+
+/// A conforming ring that is completely full is emptied within the pump and folds
+/// no already-due wake: the bound is the declared capacity plus one, so the probe
+/// pop past a full ring of capacity `C` finds nothing. This is the corner a bound
+/// fixed at the cap could not tell apart from a ring with more behind it, and it
+/// cost one spurious re-pump on every full read.
+#[test]
+fn a_full_conforming_ring_does_not_set_the_wake_term() {
+  let capacity = 8usize;
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut gossip = QueueGossip::with_recv_capacity(capacity);
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's own schedulers first, so the only already-due term the
+  // pump under test could return is the gossip one.
+  let quiescent = engine.pump(t, &mut gossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  let src = node_addr(7050);
+  for i in 0..capacity {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + capacity,
+    "every datagram in the full ring is applied in the pump that popped it"
+  );
+  assert_eq!(gossip.ring_len(), 0, "the full ring is emptied");
+  assert!(
+    wake > Some(t),
+    "a full conforming ring asks for no immediate re-pump"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "a conforming view is not an over-cap pump"
+  );
+}
+
+/// A [`GossipIo`] whose ring the link layer refills as fast as the engine reads
+/// it: every `recv` succeeds, so only the engine's own bound can end the loop.
+struct RefillGossip {
+  /// The ring size the link layer keeps topped up, as declared to the engine.
+  recv_capacity: usize,
+  /// `recv` calls served, so a test can pin the per-pump read bound exactly.
+  recv_calls: usize,
+}
+
+impl RefillGossip {
+  fn new(recv_capacity: usize) -> Self {
+    Self {
+      recv_capacity,
+      recv_calls: 0,
+    }
+  }
+}
+
+impl GossipIo for RefillGossip {
+  fn recv(&mut self, buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+    self.recv_calls += 1;
+    let bytes = junk_datagram();
+    let n = bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&bytes[..n]);
+    Some((node_addr(7050), n))
+  }
+
+  fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+
+  fn recv_capacity(&self) -> usize {
+    self.recv_capacity
+  }
+}
+
+/// A ring that refills while the loop is reading it costs a bounded number of pops
+/// and sets the wake term.
+///
+/// The declared capacity is what a ring can hold between two pumps, so a datagram
+/// found past it means the link layer topped the ring up mid-pump (or the view
+/// under-declares itself). The engine takes exactly one pop past the declaration —
+/// enough to detect that and no more, so an unbounded arrival rate cannot
+/// monopolize a pump — and asks for an immediate re-pump instead.
+#[test]
+fn a_ring_that_refills_mid_pump_sets_the_wake_term() {
+  let capacity = 4usize;
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's schedulers over an empty view — the refilling one can
+  // never report an idle ring — so the only already-due term the pump under test
+  // could return is the gossip one.
+  let quiescent = engine.pump(t, &mut NoGossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  let mut gossip = RefillGossip::new(capacity);
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    gossip.recv_calls,
+    capacity + 1,
+    "an endlessly refilling ring is read to the declared capacity plus the probe pop, no further"
+  );
+  assert_eq!(
+    wake,
+    Some(t),
+    "a datagram past the declaration folds an already-due wake for the remainder"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the declared capacity is below the cap, so a refill is not an over-cap pump"
   );
 }
 
 /// The sweep is never withheld while gossip is outstanding: a pump that stops at
-/// the read cap still fires every timer due at its instant. A design that ticked
-/// only once nothing observed was pending would let a sustained flood silence the
-/// node's own failure detection.
+/// its gossip read bound still fires every timer due at its instant. A design that
+/// ticked only once nothing observed was pending would let a sustained flood
+/// silence the node's own failure detection.
 #[test]
-fn a_due_timer_fires_in_the_pump_that_hits_the_read_cap() {
+fn a_due_timer_fires_in_the_pump_that_stops_at_the_gossip_read_bound() {
   use memberlist_proto::typed::State;
 
   let (mut engine, mut gossip, _b_addr, f, _seq) = arm_detection_probe_on_b();
   let mut stream = NoStream::with_pool(4);
 
+  // More than the fake's declared capacity, so the pump under test cannot empty
+  // the ring and has gossip outstanding when the probe deadline falls due.
   let junk_src = node_addr(7050);
-  for _ in 0..(GOSSIP_READ_CAP + 5) {
+  for _ in 0..(FAKE_RECV_CAPACITY + 6) {
     gossip.push(junk_src, junk_datagram());
   }
 
@@ -4287,25 +4480,30 @@ fn a_due_timer_fires_in_the_pump_that_hits_the_read_cap() {
   assert_eq!(
     engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Suspect),
     1,
-    "the expired probe must suspect B in the very pump that hit the read cap"
+    "the expired probe must suspect B in the very pump that stopped at the read bound"
   );
   assert_eq!(
     wake,
     Some(t),
-    "the read cap folds an already-due wake for the datagrams still in the ring"
+    "the probe pop found more behind the declaration: fold an already-due wake for the datagrams \
+     still in the ring"
   );
-  assert_eq!(engine.gossip_read_cap_hits(), 1, "one cap hit is counted");
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the fake declares a conforming capacity, so no over-cap pump is counted"
+  );
   assert_eq!(
     gossip.ring_len(),
     5,
-    "the pump read exactly the cap and left the rest in the ring"
+    "the pump read exactly the declared capacity plus the probe pop and left the rest in the ring"
   );
 }
 
 /// After `leave` the engine still POPS gossip — the ring is the driver's and would
 /// otherwise back up — but it decodes none of it, changes no membership, and never
-/// asks to be re-pumped. The pop stays bounded by the read cap, so a flood aimed at
-/// a node that has left costs at most a cap's worth of memcpys per pump.
+/// asks to be re-pumped. The pop stays bounded by the pumped view's read bound, so
+/// a flood aimed at a node that has left costs at most that many memcpys per pump.
 #[test]
 fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
   let mut engine = make_engine();
@@ -4318,7 +4516,7 @@ fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
   let members_before = engine.num_members();
   let extra = 8usize;
   let src = node_addr(7050);
-  for i in 0..(GOSSIP_READ_CAP + extra) {
+  for i in 0..(FAKE_RECV_CAPACITY + 1 + extra) {
     let addr = node_addr(8000 + i as u16);
     gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
   }
@@ -4332,12 +4530,12 @@ fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
   assert_eq!(
     gossip.ring_len(),
     extra,
-    "the post-leave pop is bounded by the read cap, not run to exhaustion"
+    "the post-leave pop is bounded by the view's read bound, not run to exhaustion"
   );
   assert_eq!(
-    engine.gossip_read_cap_hits(),
+    engine.gossip_over_cap_pumps(),
     0,
-    "a left node counts no cap hit — the wake term it feeds is gated on running"
+    "the fake declares a conforming capacity, so no over-cap pump is counted"
   );
   assert_ne!(
     wake,
@@ -4411,22 +4609,22 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
 }
 
 /// Nothing the engine observed is still pending when the machine ticks, at every
-/// ring size a driver can present.
+/// ring size a driver can present — and no size costs a spurious wake.
 ///
-/// Below the read cap the ring is emptied and the pump folds no already-due wake.
-/// At exactly the cap the ring is also emptied and everything applied, but the
-/// engine cannot tell an exactly-emptied ring from one with more behind it without
-/// peeking, so it folds one spurious already-due wake — which is why construction
-/// requires a declared ring STRICTLY below the cap. The cap-sized case stays
-/// reachable here because the fake declares a conforming ring and is then handed
-/// that many datagrams.
+/// Each view here is TRUTHFUL: it declares the ring size it is then handed, which
+/// is the most a real ring of that size could hold. The pump's bound is that
+/// declaration plus one, so the ring is always emptied and the probe pop always
+/// comes back empty, whatever the size. Even a full ring at the cap — the corner
+/// that used to cost one spurious re-pump — folds no already-due wake now; it is
+/// only counted as the over-cap pump it is, since construction would have rejected
+/// that view.
 #[test]
 fn nothing_observed_is_pending_when_the_machine_ticks() {
-  for ring in [1usize, 8, 16, GOSSIP_READ_CAP] {
+  for ring in [1usize, 8, 16, GOSSIP_READ_CAP - 1, GOSSIP_READ_CAP] {
     let mut engine = make_engine();
     let t = Instant::from_origin(Duration::from_secs(86_400));
     engine.start(t);
-    let mut gossip = QueueGossip::new();
+    let mut gossip = QueueGossip::with_recv_capacity(ring);
     let mut stream = NoStream::with_pool(2);
 
     let quiescent = engine.pump(t, &mut gossip, &mut stream);
@@ -4448,28 +4646,22 @@ fn nothing_observed_is_pending_when_the_machine_ticks() {
       1 + ring,
       "ring {ring}: every datagram read was applied in that same pump"
     );
-    if ring < GOSSIP_READ_CAP {
-      assert!(
-        wake > Some(t),
-        "ring {ring}: a conforming ring folds no already-due wake"
-      );
-      assert_eq!(
-        engine.gossip_read_cap_hits(),
-        0,
-        "ring {ring}: a conforming ring never reaches the cap"
-      );
-    } else {
-      assert_eq!(
-        wake,
-        Some(t),
-        "ring {ring}: a ring exactly at the cap costs one spurious re-pump"
-      );
-      assert_eq!(
-        engine.gossip_read_cap_hits(),
-        1,
-        "ring {ring}: the exactly-full ring is indistinguishable from an over-cap one"
-      );
-    }
+    assert!(
+      wake > Some(t),
+      "ring {ring}: a truthful ring is emptied, so no already-due wake is folded"
+    );
+    // The settle pump above and the pump under test both ran over this view, and
+    // the counter counts PUMPS over an over-cap view, not distinct views.
+    let pumps_over_this_view = 2;
+    assert_eq!(
+      engine.gossip_over_cap_pumps(),
+      if ring >= GOSSIP_READ_CAP {
+        pumps_over_this_view
+      } else {
+        0
+      },
+      "ring {ring}: every pump over an over-cap view is counted, and a conforming one never is"
+    );
   }
 }
 
@@ -4478,12 +4670,11 @@ fn nothing_observed_is_pending_when_the_machine_ticks() {
 /// `GossipRecvCapacityTooLarge`, carrying the capacity the view declared. A ring
 /// one slot below the cap constructs.
 ///
-/// This is what makes the over-cap ingress scenario unconstructible rather than
-/// merely discouraged. A 65-slot ring could hold 64 datagrams plus an Alive in slot
-/// 65; phase 2 stops at the cap, so that Alive would sit unread — unobserved and
-/// un-stamped — across the pump's membership sweep, and the suspicion timeout it
-/// refutes would fire in step 6 of that same pump, the refutation landing only at a
-/// later pump's instant. The screen is on the trait, so it binds every `GossipIo`,
+/// What the screen enforces is the per-pump WORK CEILING, not the correctness
+/// bound: phase 2 reads to whatever capacity the pumped view declares, so a
+/// 65-slot ring is emptied ahead of that pump's sweep either way. Capping the ring
+/// a driver may present is what keeps the unwrap/decode/apply a single pump can be
+/// made to do bounded. The screen sits on the trait, so it binds every `GossipIo`,
 /// including one implemented outside this workspace.
 #[test]
 fn a_gossip_io_whose_ring_reaches_the_read_cap_cannot_construct_an_engine() {
