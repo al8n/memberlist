@@ -491,6 +491,20 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
+    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // BEFORE the UDP arenas are sized and allocated below. This is an allocation
+    // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
+    // arena at `packets * max_datagram`, so a large-but-non-overflowing count
+    // would reach the allocator — an out-of-memory abort on a constrained target —
+    // before the engine could ever screen the socket and return the typed verdict.
+    // Screening the pure-`Options` value here costs nothing and keeps the answer a
+    // returned error. The engine's own check against the bound socket's actual
+    // capacity stays as defence in depth: it is the authority on the ring the
+    // engine will read, and it binds every driver, not just this one.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
+    }
+
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
     // graceful-close drain: a connection still `Closing` past `now +
     // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
@@ -664,13 +678,22 @@ where
     // and membership admission. Seed the machine's gossip RNG from the
     // domain-separated `gossip_seed` (step 5), never the raw interface seed; the
     // core performs no entropy acquisition of its own.
-    let mut engine = Engine::try_new_at(
-      embedded_cfg,
-      transform,
-      ep_cfg,
-      now,
-      SmallRng::seed_from_u64(gossip_seed),
-    )
+    let mut engine = {
+      // The engine screens the gossip receive ring against its per-pump read cap,
+      // so it is handed a view over the socket just bound — the same view `poll`
+      // will pump it with. The borrow of the socket set ends with this block, well
+      // before the TCP pool is registered below.
+      let sockets_cell = RefCell::new(&mut sockets);
+      let gossip = SmoltcpGossip::new(&sockets_cell, udp);
+      Engine::try_new_at(
+        embedded_cfg,
+        transform,
+        ep_cfg,
+        now,
+        SmallRng::seed_from_u64(gossip_seed),
+        &gossip,
+      )
+    }
     .map_err(InitError::from_embedded)?;
 
     // Allocate pooled TCP sockets for the reliable plane and register their
@@ -938,6 +961,20 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
+    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // BEFORE the UDP arenas are sized and allocated below. This is an allocation
+    // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
+    // arena at `packets * max_datagram`, so a large-but-non-overflowing count
+    // would reach the allocator — an out-of-memory abort on a constrained target —
+    // before the engine could ever screen the socket and return the typed verdict.
+    // Screening the pure-`Options` value here costs nothing and keeps the answer a
+    // returned error. The engine's own check against the bound socket's actual
+    // capacity stays as defence in depth: it is the authority on the ring the
+    // engine will read, and it binds every driver, not just this one.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
+    }
+
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
     // graceful-close drain: a connection still `Closing` past `now +
     // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
@@ -1100,8 +1137,16 @@ where
     // policy carried on `embedded_cfg`. The caller owns the gossip RNG: hand `rng`
     // straight to the engine without deriving a seed (the `gossip_seed_from` path
     // is `try_new`'s alone); the core performs no entropy acquisition of its own.
-    let mut engine = Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng)
-      .map_err(InitError::from_embedded)?;
+    let mut engine = {
+      // The engine screens the gossip receive ring against its per-pump read cap,
+      // so it is handed a view over the socket just bound — the same view `poll`
+      // will pump it with. The borrow of the socket set ends with this block, well
+      // before the TCP pool is registered below.
+      let sockets_cell = RefCell::new(&mut sockets);
+      let gossip = SmoltcpGossip::new(&sockets_cell, udp);
+      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng, &gossip)
+    }
+    .map_err(InitError::from_embedded)?;
 
     // Allocate pooled TCP sockets for the reliable plane and register their
     // handles with the engine's reliable plane (the pool authority). Each socket

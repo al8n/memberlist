@@ -52,8 +52,8 @@ pub use time::{EmbassyInstant, now};
 // types — and `ControlError`, the encryption key-rotation error — exist only
 // when their transform backend is built into this crate.
 pub use memberlist_embedded::{
-  AliveDelegate, MAX_RESOLVED_ADDRS_PER_SEED, MaybeOwned, MaybeResolved, MergeDelegate,
-  ResolvedAddrs, TransformOptions, transform::LabelError,
+  AliveDelegate, GOSSIP_READ_CAP, MAX_RESOLVED_ADDRS_PER_SEED, MaybeOwned, MaybeResolved,
+  MergeDelegate, ResolvedAddrs, TransformOptions, transform::LabelError,
 };
 // `ControlError` is the encryption key-rotation error; it exists in the shared
 // core only when an encryption backend is built in.

@@ -58,6 +58,19 @@ pub enum InitError {
   /// and the unchecked arena arithmetic would overflow. The configured value
   /// and the effective ceiling are carried for diagnostics.
   GossipMtuTooLarge(GossipMtuTooLarge),
+  /// The driver's gossip receive ring
+  /// ([`GossipIo::recv_capacity`](crate::GossipIo::recv_capacity)) reaches the
+  /// engine's per-pump work ceiling
+  /// ([`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP)).
+  ///
+  /// A pump reads the whole ring the view declares and applies every datagram at
+  /// that pump's instant, so the accepted ring size IS the per-pump unwrap, decode
+  /// and apply budget: a ring at or above the cap would let a driver raise that
+  /// budget without limit. The bound is strict rather than inclusive because a pump
+  /// takes one probe pop past the declared capacity to detect a ring refilling
+  /// under it, so only a ring below the cap keeps a pump's reads at or under it.
+  /// The capacity reported is carried for diagnostics.
+  GossipRecvCapacityTooLarge(usize),
   /// The SWIM machine endpoint failed to initialize.
   Endpoint(EndpointInitError),
   /// The configured encryption keyring cannot be used by this build.
@@ -140,6 +153,12 @@ impl fmt::Display for InitError {
       InitError::ZeroPort => f.write_str("port is zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
+      InitError::GossipRecvCapacityTooLarge(n) => write!(
+        f,
+        "the gossip receive ring holds {n} datagrams, which must be below the engine's \
+         per-pump gossip read cap ({})",
+        crate::GOSSIP_READ_CAP
+      ),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
       #[cfg(encryption)]
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),

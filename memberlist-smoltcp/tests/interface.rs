@@ -12,8 +12,9 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceOptions, IpCidr, Medium,
-  Memberlist, Options, Route, SocketAddrResolver, TransformOptions,
+  EthernetAddress, GOSSIP_READ_CAP, GossipMtuTooLarge, HardwareAddress, InitError,
+  InterfaceOptions, IpCidr, Medium, Memberlist, Options, Route, SocketAddrResolver,
+  TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -568,7 +569,9 @@ fn oversized_udp_arena_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
-  cfg.udp_rx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
+  // Driven through the TX slots: the RX count is capped far below any overflow by
+  // the gossip read cap, which the constructor screens before it sizes the arenas.
+  cfg.udp_tx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
   let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
@@ -760,6 +763,62 @@ fn zero_udp_tx_packets_rejected() {
     matches!(res, Err(InitError::ZeroUdpPackets)),
     "zero udp_tx_packets must be rejected as ZeroUdpPackets"
   );
+}
+
+/// A gossip rx ring that reaches the engine's per-pump work ceiling is rejected.
+/// The engine applies every datagram it pops within the pump that popped it, so
+/// the accepted ring size IS a pump's gossip work budget, and `GOSSIP_READ_CAP` is
+/// what bounds it. The bound is strict: the cap itself is rejected (a pump takes
+/// one probe pop past the ring's capacity to detect a mid-pump refill), and one
+/// slot below it constructs.
+///
+/// The driver screens `udp_rx_packets` among its pure-`Options` guards, BEFORE it
+/// sizes and allocates the UDP metadata ring and payload arena from that same
+/// count — so a count large enough to exhaust memory returns the typed verdict
+/// instead of reaching the allocator, and never reaches the arena-overflow guard
+/// either. The engine raises the same verdict against the bound socket's actual
+/// receive ring, which the driver reports under the name of the option to lower.
+/// The shipped default is well below the cap and constructs.
+#[test]
+fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
+  // `max_datagram` is bounded by the 65507-byte UDP payload ceiling the gossip-MTU
+  // check enforces, so this count cannot overflow the arena's `checked_mul` — its
+  // arenas would simply be far larger than any machine's memory. Without the
+  // pre-allocation screen it would be an allocation, not an error.
+  let huge_but_not_overflowing = usize::MAX / 65_536;
+  for (slots, accepted) in [
+    (huge_but_not_overflowing, false),
+    (GOSSIP_READ_CAP + 1, false),
+    (GOSSIP_READ_CAP, false),
+    (GOSSIP_READ_CAP - 1, true),
+    (Options::new().udp_rx_packets, true),
+  ] {
+    let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+    let now: Instant = harness::Clock::new().now();
+    let mut cfg = Options::new();
+    cfg.udp_rx_packets = slots;
+    let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+      cfg,
+      InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+      TransformOptions::default(),
+      ep("a", 1),
+      &SocketAddrResolver,
+      &mut dev,
+      now,
+    );
+    if accepted {
+      assert!(
+        res.is_ok(),
+        "{slots} slots is below the cap and must construct"
+      );
+    } else {
+      assert!(
+        matches!(res, Err(InitError::UdpRxPacketsTooLarge)),
+        "{slots} slots is not below the cap and must be rejected for the packet count itself, \
+         before any arena is sized or allocated"
+      );
+    }
+  }
 }
 
 /// A zero `close_timeout` is rejected: it would force-abort every graceful

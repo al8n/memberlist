@@ -30,6 +30,7 @@ use memberlist_proto::{
 use crate::{
   config::Options,
   error::{InitError, OpError, SocketTimeoutOutOfRange},
+  gossip_io::EmbassyGossip,
   mailbox::{Command, Mailbox},
   resolver::AddressResolver,
   runner::Runner,
@@ -211,8 +212,10 @@ where
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
-  ///   machine-endpoint init failure).
+  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
+  ///   capacity reaches the engine's per-pump gossip read cap
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   or a machine-endpoint init failure).
   /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
   ///   seeding the default gossip RNG.
   ///
@@ -290,8 +293,10 @@ where
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
-  ///   machine-endpoint init failure).
+  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
+  ///   capacity reaches the engine's per-pump gossip read cap
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   or a machine-endpoint init failure).
   ///
   /// # Panics
   ///
@@ -418,8 +423,15 @@ where
     // becomes a typed `InitError::Engine` rather than a panic. The caller-supplied
     // `rng` seeds the machine's gossip RNG: the integrator owns entropy here,
     // exactly as it owns the embassy-net stack's seed.
-    let mut engine: Engine<I, SlotId, R> =
-      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng).map_err(InitError::from)?;
+    let mut engine: Engine<I, SlotId, R> = {
+      // The engine screens the gossip receive ring against its per-pump read cap,
+      // so it is handed a view over the socket just bound — the same view the
+      // runner's pump loop builds each wake. The borrow ends here, before the
+      // socket is moved into the returned runner.
+      let gossip = EmbassyGossip::new(&udp_socket);
+      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng, &gossip)
+    }
+    .map_err(InitError::from)?;
 
     // Seed the engine's reliable-plane pool with every slot id, then dedicate slot
     // 0 to the listener. The engine owns this pool (it reaches it directly, not

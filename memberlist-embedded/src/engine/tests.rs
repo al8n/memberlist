@@ -18,6 +18,12 @@ fn test_rng() -> SmallRng {
   SmallRng::seed_from_u64(42)
 }
 
+/// The receive ring every gossip fake here declares. Their queues are `Vec`-backed
+/// and have no fixed bound, so they declare the largest ring the engine accepts —
+/// one slot below its per-pump read cap — and every fake is usable both as the
+/// construction-time capacity witness and as the pumped view.
+const FAKE_RECV_CAPACITY: usize = GOSSIP_READ_CAP - 1;
+
 struct NoGossip;
 
 impl GossipIo for NoGossip {
@@ -26,6 +32,10 @@ impl GossipIo for NoGossip {
   }
 
   fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+
+  fn recv_capacity(&self) -> usize {
+    FAKE_RECV_CAPACITY
+  }
 }
 
 /// A [`GossipIo`] that records every outbound datagram so a test can inspect
@@ -53,6 +63,10 @@ impl GossipIo for CaptureGossip {
   fn send(&mut self, bytes: &[u8], _dest: SocketAddr) {
     self.sent.push(bytes.to_vec());
   }
+
+  fn recv_capacity(&self) -> usize {
+    FAKE_RECV_CAPACITY
+  }
 }
 
 /// Drive `engine` until it emits at least one outbound gossip datagram (or the
@@ -66,8 +80,8 @@ fn capture_gossip(transform: TransformOptions) -> Vec<Vec<u8>> {
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
-  let mut engine =
-    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("valid configuration");
+  let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng(), &NoGossip)
+    .expect("valid configuration");
   engine.start(now);
   // A peer to gossip TO, so `pump` emits at least one outbound gossip datagram.
   engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
@@ -191,8 +205,15 @@ fn make_engine() -> Engine<SmolStr, u32> {
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-    .expect("valid configuration must construct without error")
+  Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("valid configuration must construct without error")
 }
 
 /// `set_compression_options` is accepted and the engine remains operational
@@ -267,9 +288,15 @@ fn cidr_policy_gates_membership_admission_by_advertised_address() {
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   engine.start(now);
 
   // Routable but outside 10.0.0.0/8 — rejected by the policy.
@@ -312,9 +339,15 @@ fn set_alive_delegate_preserves_the_cidr_policy() {
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   // An accept-all delegate installed AFTER the policy must not loosen it.
   engine.set_alive_delegate(AcceptAll);
   engine.start(now);
@@ -356,9 +389,15 @@ fn cidr_blocked_send_reliable_fails_not_succeeds() {
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
 
   // Seed a reliable slot for the dial plus a listener slot, so the Connect drives
   // a real dial this tick rather than deferring to PendingDial.
@@ -412,9 +451,15 @@ fn rejected_inbound_accept_returns_its_slot_to_the_pool() {
   // node stays running, so `check_listener` always takes the `None` arm.
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
     .with_max_inbound_streams(Some(0));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
 
   // Two free reliable slots plus a listener on a third: capacity is three.
   engine.plane_mut().pool.push(10);
@@ -451,9 +496,15 @@ fn cidr_blocked_unreliable_send_emits_no_datagram() {
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   engine.start(now);
   let mut stream = NoStream::with_pool(0);
 
@@ -747,7 +798,7 @@ fn try_new_at_accepts_disabled_checksum() {
   let transform = TransformOptions::default().with_checksum(ChecksumOptions::new());
 
   assert!(
-    Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now, test_rng()).is_ok(),
+    Engine::<SmolStr, u32>::try_new_at(cfg, transform, ep_cfg, now, test_rng(), &NoGossip).is_ok(),
     "a disabled checksum policy must always construct"
   );
 }
@@ -757,13 +808,22 @@ struct QueueGossip {
   inbound: Vec<(SocketAddr, Vec<u8>)>,
   /// Outbound datagrams captured from `send`.
   outbound: Vec<(Vec<u8>, SocketAddr)>,
+  /// What [`GossipIo::recv_capacity`] declares. The `inbound` queue itself is
+  /// unbounded, so this is the ring size the fake CLAIMS — settable so a test can
+  /// present the engine with a capacity it must reject.
+  recv_capacity: usize,
 }
 
 impl QueueGossip {
   fn new() -> Self {
+    Self::with_recv_capacity(FAKE_RECV_CAPACITY)
+  }
+
+  fn with_recv_capacity(recv_capacity: usize) -> Self {
     Self {
       inbound: Vec::new(),
       outbound: Vec::new(),
+      recv_capacity,
     }
   }
 
@@ -785,6 +845,10 @@ impl GossipIo for QueueGossip {
 
   fn send(&mut self, bytes: &[u8], dest: SocketAddr) {
     self.outbound.push((bytes.to_vec(), dest));
+  }
+
+  fn recv_capacity(&self) -> usize {
+    self.recv_capacity
   }
 }
 
@@ -814,7 +878,7 @@ fn gossip_carries_and_checks_the_configured_label() {
     .with_label(Some(b"alpha".to_vec()))
     .expect("valid label");
   let mut engine =
-    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("valid config");
+    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng(), &NoGossip).expect("valid config");
   engine.start(now);
 
   // ── Ingress: unlabeled datagram must be dropped. ─────────────────────────
@@ -1175,9 +1239,15 @@ fn engine_with_stream_timeout(stream_timeout: Duration) -> (Engine<SmolStr, u32>
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
     .with_stream_timeout(stream_timeout);
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   engine.start(now);
   (engine, now)
 }
@@ -1968,6 +2038,10 @@ impl GossipIo for GossipWire {
   fn send(&mut self, bytes: &[u8], dest: SocketAddr) {
     self.outbound.borrow_mut().push((dest, bytes.to_vec()));
   }
+
+  fn recv_capacity(&self) -> usize {
+    FAKE_RECV_CAPACITY
+  }
 }
 
 /// A linked two-engine fixture sharing one reliable fabric and a cross-wired
@@ -2000,9 +2074,15 @@ impl LinkPair {
         .with_close_timeout(Duration::from_secs(10));
       let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new(id), addr)
         .with_stream_timeout(Duration::from_secs(5));
-      let mut e: Engine<SmolStr, u32> =
-        Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-          .expect("construct");
+      let mut e: Engine<SmolStr, u32> = Engine::try_new_at(
+        cfg,
+        TransformOptions::default(),
+        ep_cfg,
+        now,
+        test_rng(),
+        &NoGossip,
+      )
+      .expect("construct");
       e.start(now);
       e
     };
@@ -2561,8 +2641,14 @@ fn new_at_builds_and_port_reads_back() {
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("p"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let engine: Engine<SmolStr, u32> =
-    Engine::new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng());
+  let engine: Engine<SmolStr, u32> = Engine::new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  );
   assert_eq!(
     engine.port(),
     7946,
@@ -2595,7 +2681,8 @@ fn try_new_at_rejects_each_misconfiguration() {
         TransformOptions::default(),
         ep,
         now,
-        test_rng()
+        test_rng(),
+        &NoGossip
       ),
       Err(InitError::ZeroPort)
     ),
@@ -2614,7 +2701,8 @@ fn try_new_at_rejects_each_misconfiguration() {
         TransformOptions::default(),
         ep,
         now,
-        test_rng()
+        test_rng(),
+        &NoGossip
       ),
       Err(InitError::ZeroCloseTimeout)
     ),
@@ -2631,7 +2719,8 @@ fn try_new_at_rejects_each_misconfiguration() {
         TransformOptions::default(),
         ep,
         now,
-        test_rng()
+        test_rng(),
+        &NoGossip
       ),
       Err(InitError::GossipMtuTooLarge(_))
     ),
@@ -2650,7 +2739,8 @@ fn try_new_at_rejects_each_misconfiguration() {
         TransformOptions::default(),
         ep,
         now,
-        test_rng()
+        test_rng(),
+        &NoGossip
       ),
       Err(InitError::NonRoutableAdvertiseAddr(_))
     ),
@@ -2666,7 +2756,8 @@ fn try_new_at_rejects_each_misconfiguration() {
         TransformOptions::default(),
         ep,
         now,
-        test_rng()
+        test_rng(),
+        &NoGossip
       ),
       Err(InitError::AdvertisePortMismatch)
     ),
@@ -2688,8 +2779,8 @@ fn try_new_at_honors_skip_inbound_label_check() {
     .with_label(Some(b"cluster".to_vec()))
     .expect("valid label")
     .with_skip_inbound_label_check(true);
-  let mut engine =
-    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("construct with skip-label");
+  let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng(), &NoGossip)
+    .expect("construct with skip-label");
   engine.start(now);
   let mut gossip = NoGossip;
   let mut stream = NoStream::with_pool(2);
@@ -2715,9 +2806,15 @@ fn send_many_to_cidr_blocked_destination_emits_no_datagram() {
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("c"), node_addr(7946));
   let now = Instant::from_origin(Duration::from_secs(86_400));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   engine.start(now);
   let mut stream = NoStream::with_pool(0);
 
@@ -2893,9 +2990,15 @@ fn check_listener_rejects_cidr_blocked_inbound_and_rearms() {
     .with_close_timeout(Duration::from_secs(10))
     .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("c"), node_addr(7946));
-  let mut engine: Engine<SmolStr, u32> =
-    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, now, test_rng())
-      .expect("construct");
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    now,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("construct");
   // A spare slot to re-arm the listener from after the reject.
   engine.plane_mut().pool.push(0);
   engine.set_listener(1);
@@ -3035,8 +3138,8 @@ fn encrypted_node_drops_plaintext_inbound_gossip() {
   let key = SecretKey::Aes256([0x11; 32]);
   let transform = TransformOptions::default()
     .with_encryption(EncryptionOptions::new().with_keyring(Keyring::new(key)));
-  let mut engine =
-    Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng()).expect("construct encrypted");
+  let mut engine = Engine::try_new_at(cfg, transform, ep_cfg, now, test_rng(), &NoGossip)
+    .expect("construct encrypted");
   engine.start(now);
 
   // A perfectly valid PLAINTEXT Alive — but this node expects encrypted frames, so
@@ -3826,4 +3929,812 @@ fn error_delivered_is_one_shot() {
     engine.poll_event().is_none(),
     "a latched connection surfaces no further fault"
   );
+}
+
+/// Number of datagrams still waiting in the fake driver ring.
+impl QueueGossip {
+  fn ring_len(&self) -> usize {
+    self.inbound.len()
+  }
+}
+
+/// Encode a plaintext, unlabelled `Alive` for `(id, addr)` at `incarnation`, as a
+/// peer's gossip datagram would arrive on the wire.
+fn alive_datagram(id: &str, addr: SocketAddr, incarnation: u32) -> Vec<u8> {
+  use memberlist_proto::{
+    EncodeOptions, codec,
+    typed::{Alive, Message},
+  };
+
+  let msg = Message::<SmolStr, SocketAddr>::Alive(Alive::new(
+    incarnation,
+    Node::new(SmolStr::new(id), addr),
+  ));
+  codec::encode_outgoing(&msg, &EncodeOptions::new(None))
+    .expect("encode Alive")
+    .to_vec()
+}
+
+/// An undecodable gossip datagram: it costs a pop and an unwrap attempt, and is
+/// dropped before the machine sees anything.
+fn junk_datagram() -> Vec<u8> {
+  std::vec![0xABu8; 24]
+}
+
+/// Bring up a running engine whose sole other member is peer `B`, then pump the
+/// clock forward until the SWIM failure-detection probe fires a direct `Ping` at
+/// `B`. Returns the engine, its gossip fake, `B`'s address, the pump instant `F`
+/// at which the probe was sent, and the probe's ack sequence number decoded from
+/// that `Ping`. At the initial (healthy) awareness score the probe's authoritative
+/// failure deadline is `F + probe_interval` (the 1s default).
+///
+/// `cfg` carries whatever engine options the caller needs (a CIDR policy, say);
+/// the port must stay 7946 so `B` is reachable from the local advertise address.
+fn arm_detection_probe_on_b_with(
+  cfg: Options,
+) -> (Engine<SmolStr, u32>, QueueGossip, SocketAddr, Instant, u32) {
+  use memberlist_proto::{DecodeOptions, codec, typed::Message};
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("local"), node_addr(7946));
+  let start = Instant::from_origin(Duration::from_secs(86_400));
+  let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    ep_cfg,
+    start,
+    test_rng(),
+    &NoGossip,
+  )
+  .expect("valid configuration");
+  engine.start(start);
+  // A distinct, routable address so B is a separate member and the probe's direct
+  // Ping is addressed to it.
+  let b_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7947);
+  engine.inject_alive(SmolStr::new("b"), b_addr, start);
+
+  let mut gossip = QueueGossip::new();
+  let mut stream = NoStream::with_pool(4);
+  // The probe interval is 1s; step coarsely until the direct Ping at B appears.
+  let mut t = start;
+  for _ in 0..200 {
+    t += Duration::from_millis(50);
+    engine.pump(t, &mut gossip, &mut stream);
+    // Scan (and clear) this pump's egress for a Ping addressed to B; decode it to
+    // recover the ack sequence number the machine expects back.
+    let mut seq = None;
+    for (bytes, dest) in core::mem::take(&mut gossip.outbound) {
+      if dest != b_addr {
+        continue;
+      }
+      let Ok(plain) = codec::decode_incoming(bytes::Bytes::from(bytes), &DecodeOptions::new(None))
+      else {
+        continue;
+      };
+      let Ok(msgs) = codec::parse_messages::<SmolStr, SocketAddr>(plain) else {
+        continue;
+      };
+      for msg in msgs {
+        if let Message::Ping(p) = msg {
+          seq = Some(p.sequence_number());
+        }
+      }
+    }
+    if let Some(seq) = seq {
+      return (engine, gossip, b_addr, t, seq);
+    }
+  }
+  panic!("the failure-detection probe never fired a direct Ping at B");
+}
+
+/// [`arm_detection_probe_on_b_with`] under the plain default options.
+fn arm_detection_probe_on_b() -> (Engine<SmolStr, u32>, QueueGossip, SocketAddr, Instant, u32) {
+  arm_detection_probe_on_b_with(
+    Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10)),
+  )
+}
+
+/// Let the armed probe on `B` expire so `B` transitions to `Suspect`, and return
+/// `(t1, S)`: the pump instant at which it was suspected, and the instant its
+/// suspicion deadline falls due.
+///
+/// With the default `probe_interval` (1s) and `suspicion_mult` (4) over a
+/// two-member cluster the node-count scale is 1.0 and `k` collapses to 0
+/// (`n < suspicion_mult`), so the suspicion timer is fixed at
+/// `probe_interval * suspicion_mult` = 4s from `t1`.
+fn suspect_b(
+  engine: &mut Engine<SmolStr, u32>,
+  gossip: &mut QueueGossip,
+  stream: &mut NoStream,
+  f: Instant,
+) -> (Instant, Instant) {
+  use memberlist_proto::typed::State;
+
+  let t1 = f + Duration::from_millis(1100);
+  engine.pump(t1, gossip, stream);
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Suspect),
+    1,
+    "the expired detection probe must suspect B, or the test proves nothing"
+  );
+  // Discard the events the arming produced; the assertions below watch only the
+  // events the refutation pump emits.
+  while engine.poll_event().is_some() {}
+  (t1, t1 + Duration::from_secs(4))
+}
+
+/// Fill the fake's declared ring with undecodable datagrams and then `B`'s
+/// `Alive(inc + 1)` refutation, so the refutation is the LAST datagram the pump's
+/// read bound admits.
+fn junk_then_b_refutation(
+  engine: &Engine<SmolStr, u32>,
+  gossip: &mut QueueGossip,
+  b_addr: SocketAddr,
+) {
+  let junk_src = node_addr(7050);
+  for _ in 0..FAKE_RECV_CAPACITY {
+    gossip.push(junk_src, junk_datagram());
+  }
+  let inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  gossip.push(b_addr, alive_datagram("b", b_addr, inc + 1));
+}
+
+/// Assert `B` came out of the pump `Alive` with no membership flap.
+fn assert_b_refuted(engine: &mut Engine<SmolStr, u32>) {
+  use memberlist_proto::typed::State;
+
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Alive),
+    1,
+    "B's own refutation, read in this pump, must leave it Alive"
+  );
+  while let Some(ev) = engine.poll_event() {
+    assert!(
+      !matches!(ev, Event::NodeLeft(_) | Event::NodeJoined(_)),
+      "B must not flap: no death and no re-join event"
+    );
+  }
+}
+
+/// A refutation read in the same pump that crosses its subject's suspicion
+/// deadline wins, because phase 2 applies every datagram it pops before step 6
+/// can fire a timer.
+///
+/// `process_alive` has no instant cutoff — only the incarnation gate — so an
+/// `Alive(inc + 1)` for a `Suspect` B clears the suspicion outright. What decides
+/// the outcome is purely the order of the two within the pump: read-then-tick
+/// keeps B alive, tick-then-read kills it and immediately resurrects it. The
+/// refutation is placed LAST in the ring, behind a full ring of junk, so it is
+/// also the final datagram the read bound admits.
+#[test]
+fn same_pump_alive_refutation_precedes_the_tick() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+  let (_t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
+
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  assert!(t > s, "this pump runs past B's suspicion deadline");
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(
+    gossip.ring_len(),
+    0,
+    "a full cap's worth of datagrams is read and applied within the pump"
+  );
+}
+
+/// Reliable-plane input ticks the machine too: `handle_transport_data` ends in
+/// `run_tick`, whose membership step is the same sweep step 6 runs. Feeding it
+/// before this pump's gossip would let arbitrary bytes on an unrelated connection
+/// fire a suspicion the gossip ring already refutes — so phase 3 must follow phase
+/// 2. The bytes here are junk: input the record layer will reject is enough,
+/// because the tick happens on the feed, not on the parse.
+#[test]
+fn same_pump_reliable_input_cannot_sweep_past_this_pumps_gossip() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  // Admit an inbound reliable connection on a pump before the deadline, so the
+  // pump under test only has to feed its bytes.
+  let mut stream = armed_inbound_listener(&mut engine);
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(t1 + Duration::from_millis(100), &mut gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the inbound reliable connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+
+  stream.sock_mut(1).rx = std::vec![0xABu8; 64];
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// The reliable plane ticks the machine on its FAULT paths too: a socket that died
+/// without a graceful peer FIN routes to `handle_transport_error`, which — like
+/// `handle_transport_data` — ends in `run_tick`. A peer that merely RSTs its
+/// connection must not sweep past this pump's gossip either.
+#[test]
+fn same_pump_reliable_fault_cannot_sweep_past_this_pumps_gossip() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  let mut stream = armed_inbound_listener(&mut engine);
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(t1 + Duration::from_millis(100), &mut gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the inbound reliable connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The peer RSTs: the socket closes with no graceful FIN and nothing to read,
+  // which phase 3 surfaces to the machine as a transport fault.
+  stream.sock_mut(1).open = false;
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// The read bound is the PUMPED view's own declared capacity, never the capacity
+/// construction screened — and it holds in every build profile.
+///
+/// `try_new_at` sees one view; `pump` accepts a fresh view on every call, and only
+/// the driver can see the two diverge. Here the engine is built over a conforming
+/// 63-slot view and then pumped with a truthful 65-slot one whose last slot holds
+/// B's refutation, at an instant past B's suspicion deadline. A bound fixed at
+/// `GOSSIP_READ_CAP` would leave that datagram in the ring across step 6's sweep,
+/// so B would die and be resurrected by a later pump — a flap the immediate wake
+/// cannot undo. Deriving the bound from the view in hand applies it first instead,
+/// with no assertion for a release build to strip out.
+#[test]
+fn pumping_a_larger_truthful_view_than_constructed_with_still_applies_everything_before_the_sweep()
+{
+  let (mut engine, mut small, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+  let (_t1, s) = suspect_b(&mut engine, &mut small, &mut stream, f);
+
+  // A second, distinct view: 65 truthful slots — past the engine's cap, and larger
+  // than the 63-slot view construction screened. It arrives full: 64 junk
+  // datagrams, then B's own refutation in the last slot.
+  let over_cap = GOSSIP_READ_CAP + 1;
+  let mut big = QueueGossip::with_recv_capacity(over_cap);
+  let junk_src = node_addr(7050);
+  for _ in 0..(over_cap - 1) {
+    big.push(junk_src, junk_datagram());
+  }
+  let inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  big.push(b_addr, alive_datagram("b", b_addr, inc + 1));
+
+  let t = s + Duration::from_secs(1);
+  assert!(t > s, "this pump runs past B's suspicion deadline");
+  let wake = engine.pump(t, &mut big, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(
+    big.ring_len(),
+    0,
+    "the whole 65-slot ring is read within the pump that observed it"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    1,
+    "the divergence from the screened view is surfaced, not silently trusted"
+  );
+  assert!(
+    wake > Some(t),
+    "a truthful ring, over-cap or not, is emptied and folds no already-due wake"
+  );
+}
+
+/// A view that delivers more datagrams than it declares is read to its declared
+/// capacity plus the one probe pop, and no further. The remainder stays in the
+/// driver's ring — not dropped, not copied into the engine — and is read on the
+/// next pump, which the returned already-due deadline asks for immediately.
+///
+/// Only an under-declaring (or mid-pump refilling) view can reach this: for a
+/// truthful one the declared capacity is the most the ring can hold, so the ring
+/// is always emptied within the pump.
+#[test]
+fn a_view_delivering_more_than_it_declares_is_read_to_its_bound_and_re_pumped() {
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  // The fake's queue is unbounded, so it can be handed more datagrams than the
+  // capacity it declares — the under-declaration the probe pop exists to catch.
+  let declared = FAKE_RECV_CAPACITY;
+  let bound = declared + 1;
+  let mut gossip = QueueGossip::with_recv_capacity(declared);
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's own schedulers first, so the only already-due term the
+  // pump under test can return is the gossip one.
+  let quiescent = engine.pump(t, &mut gossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  // `bound + k` distinct, valid Alives, each for its own id and address.
+  let extra = 5usize;
+  let src = node_addr(7050);
+  for i in 0..(bound + extra) {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let first = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + bound,
+    "the declared capacity plus the probe pop is applied in the first pump"
+  );
+  assert_eq!(
+    gossip.ring_len(),
+    extra,
+    "the remainder waits in the driver's ring, neither dropped nor engine-held"
+  );
+  assert_eq!(
+    first,
+    Some(t),
+    "the probe pop found a datagram past the declaration: fold an already-due wake so the caller \
+     polls again at once"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the view declared a conforming capacity — it under-declared its occupancy, which is not an \
+     over-cap pump"
+  );
+
+  let second = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + bound + extra,
+    "the remainder is applied on the next pump"
+  );
+  assert_eq!(gossip.ring_len(), 0, "the ring is now empty");
+  assert!(
+    second > Some(t),
+    "a pump whose probe pop found nothing folds no already-due wake"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "still no over-cap pump: the declaration never reached the cap"
+  );
+}
+
+/// A conforming ring that is completely full is emptied within the pump and folds
+/// no already-due wake: the bound is the declared capacity plus one, so the probe
+/// pop past a full ring of capacity `C` finds nothing. This is the corner a bound
+/// fixed at the cap could not tell apart from a ring with more behind it, and it
+/// cost one spurious re-pump on every full read.
+#[test]
+fn a_full_conforming_ring_does_not_set_the_wake_term() {
+  let capacity = 8usize;
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut gossip = QueueGossip::with_recv_capacity(capacity);
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's own schedulers first, so the only already-due term the
+  // pump under test could return is the gossip one.
+  let quiescent = engine.pump(t, &mut gossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  let src = node_addr(7050);
+  for i in 0..capacity {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + capacity,
+    "every datagram in the full ring is applied in the pump that popped it"
+  );
+  assert_eq!(gossip.ring_len(), 0, "the full ring is emptied");
+  assert!(
+    wake > Some(t),
+    "a full conforming ring asks for no immediate re-pump"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "a conforming view is not an over-cap pump"
+  );
+}
+
+/// A [`GossipIo`] whose ring the link layer refills as fast as the engine reads
+/// it: every `recv` succeeds, so only the engine's own bound can end the loop.
+struct RefillGossip {
+  /// The ring size the link layer keeps topped up, as declared to the engine.
+  recv_capacity: usize,
+  /// `recv` calls served, so a test can pin the per-pump read bound exactly.
+  recv_calls: usize,
+}
+
+impl RefillGossip {
+  fn new(recv_capacity: usize) -> Self {
+    Self {
+      recv_capacity,
+      recv_calls: 0,
+    }
+  }
+}
+
+impl GossipIo for RefillGossip {
+  fn recv(&mut self, buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+    self.recv_calls += 1;
+    let bytes = junk_datagram();
+    let n = bytes.len().min(buf.len());
+    buf[..n].copy_from_slice(&bytes[..n]);
+    Some((node_addr(7050), n))
+  }
+
+  fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+
+  fn recv_capacity(&self) -> usize {
+    self.recv_capacity
+  }
+}
+
+/// A ring that refills while the loop is reading it costs a bounded number of pops
+/// and sets the wake term.
+///
+/// The declared capacity is what a ring can hold between two pumps, so a datagram
+/// found past it means the link layer topped the ring up mid-pump (or the view
+/// under-declares itself). The engine takes exactly one pop past the declaration —
+/// enough to detect that and no more, so an unbounded arrival rate cannot
+/// monopolize a pump — and asks for an immediate re-pump instead.
+#[test]
+fn a_ring_that_refills_mid_pump_sets_the_wake_term() {
+  let capacity = 4usize;
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's schedulers over an empty view — the refilling one can
+  // never report an idle ring — so the only already-due term the pump under test
+  // could return is the gossip one.
+  let quiescent = engine.pump(t, &mut NoGossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  let mut gossip = RefillGossip::new(capacity);
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    gossip.recv_calls,
+    capacity + 1,
+    "an endlessly refilling ring is read to the declared capacity plus the probe pop, no further"
+  );
+  assert_eq!(
+    wake,
+    Some(t),
+    "a datagram past the declaration folds an already-due wake for the remainder"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the declared capacity is below the cap, so a refill is not an over-cap pump"
+  );
+}
+
+/// The sweep is never withheld while gossip is outstanding: a pump that stops at
+/// its gossip read bound still fires every timer due at its instant. A design that
+/// ticked only once nothing observed was pending would let a sustained flood
+/// silence the node's own failure detection.
+#[test]
+fn a_due_timer_fires_in_the_pump_that_stops_at_the_gossip_read_bound() {
+  use memberlist_proto::typed::State;
+
+  let (mut engine, mut gossip, _b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+
+  // More than the fake's declared capacity, so the pump under test cannot empty
+  // the ring and has gossip outstanding when the probe deadline falls due.
+  let junk_src = node_addr(7050);
+  for _ in 0..(FAKE_RECV_CAPACITY + 6) {
+    gossip.push(junk_src, junk_datagram());
+  }
+
+  // Past the probe's authoritative failure deadline (`F + probe_interval`).
+  let t = f + Duration::from_millis(1100);
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Suspect),
+    1,
+    "the expired probe must suspect B in the very pump that stopped at the read bound"
+  );
+  assert_eq!(
+    wake,
+    Some(t),
+    "the probe pop found more behind the declaration: fold an already-due wake for the datagrams \
+     still in the ring"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the fake declares a conforming capacity, so no over-cap pump is counted"
+  );
+  assert_eq!(
+    gossip.ring_len(),
+    5,
+    "the pump read exactly the declared capacity plus the probe pop and left the rest in the ring"
+  );
+}
+
+/// After `leave` the engine still POPS gossip — the ring is the driver's and would
+/// otherwise back up — but it decodes none of it, changes no membership, and never
+/// asks to be re-pumped. The pop stays bounded by the pumped view's read bound, so
+/// a flood aimed at a node that has left costs at most that many memcpys per pump.
+#[test]
+fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut gossip = QueueGossip::new();
+  let mut stream = NoStream::with_pool(2);
+  engine.leave(t).expect("a running engine leaves cleanly");
+
+  let members_before = engine.num_members();
+  let extra = 8usize;
+  let src = node_addr(7050);
+  for i in 0..(FAKE_RECV_CAPACITY + 1 + extra) {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    members_before,
+    "a left node admits no member from gossip"
+  );
+  assert_eq!(
+    gossip.ring_len(),
+    extra,
+    "the post-leave pop is bounded by the view's read bound, not run to exhaustion"
+  );
+  assert_eq!(
+    engine.gossip_over_cap_pumps(),
+    0,
+    "the fake declares a conforming capacity, so no over-cap pump is counted"
+  );
+  assert_ne!(
+    wake,
+    Some(t),
+    "a left node never asks to be re-pumped for gossip it will not decode"
+  );
+
+  engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(gossip.ring_len(), 0, "the rest is popped on the next pump");
+  assert_eq!(
+    engine.num_members(),
+    members_before,
+    "still no membership change"
+  );
+}
+
+/// The early rebalance dials a `PendingDial` parked on a previous pump, and a dial
+/// the transport rejects synchronously terminalizes through the machine — whose
+/// tick sweeps membership at this pump's instant. Running that before the gossip
+/// phase, as the pump did previously, let an unrelated outbound dial fire a
+/// suspicion this pump's ring already refutes. The rebalance therefore runs after
+/// both evidence feeds, while still preceding the machine tick that a parked dial
+/// needs it to precede.
+#[cfg(feature = "cidr")]
+#[test]
+fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = Options::new()
+    .with_port(7946)
+    .with_close_timeout(Duration::from_secs(10))
+    // B (10.0.0.2) and the local node (10.0.0.1) are both in policy; the dial
+    // target below is not.
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b_with(cfg);
+  let mut stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
+
+  // A listener is installed and the pool is empty, so the dial below has to park
+  // as a `PendingDial` rather than taking a slot straight away.
+  engine.set_listener(1);
+  let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+  engine
+    .send_reliable(blocked, bytes::Bytes::from_static(b"blocked-bytes"), t1)
+    .expect("send_reliable queues the exchange");
+
+  let t2 = t1 + Duration::from_millis(100);
+  engine.pump(t2, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the dial must park with no slot, or the early rebalance has nothing to do"
+  );
+  while engine.poll_event().is_some() {}
+
+  // Free the slot the parked dial will claim in the pump under test. The listener
+  // is already present, so `ensure_listener` leaves it for the dial.
+  engine.plane_mut().pool.push(0);
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "the early rebalance must have dialed the parked exchange in this pump"
+  );
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// Nothing the engine observed is still pending when the machine ticks, at every
+/// ring size a driver can present — and no size costs a spurious wake.
+///
+/// Each view here is TRUTHFUL: it declares the ring size it is then handed, which
+/// is the most a real ring of that size could hold. The pump's bound is that
+/// declaration plus one, so the ring is always emptied and the probe pop always
+/// comes back empty, whatever the size. Even a full ring at the cap — the corner
+/// that used to cost one spurious re-pump — folds no already-due wake now; it is
+/// only counted as the over-cap pump it is, since construction would have rejected
+/// that view.
+#[test]
+fn nothing_observed_is_pending_when_the_machine_ticks() {
+  for ring in [1usize, 8, 16, GOSSIP_READ_CAP - 1, GOSSIP_READ_CAP] {
+    let mut engine = make_engine();
+    let t = Instant::from_origin(Duration::from_secs(86_400));
+    engine.start(t);
+    let mut gossip = QueueGossip::with_recv_capacity(ring);
+    let mut stream = NoStream::with_pool(2);
+
+    let quiescent = engine.pump(t, &mut gossip, &mut stream);
+    assert!(
+      quiescent > Some(t),
+      "ring {ring}: no machine timer may be due at this instant"
+    );
+
+    let src = node_addr(7050);
+    for i in 0..ring {
+      let addr = node_addr(8000 + i as u16);
+      gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+    }
+
+    let wake = engine.pump(t, &mut gossip, &mut stream);
+    assert_eq!(gossip.ring_len(), 0, "ring {ring}: the ring is emptied");
+    assert_eq!(
+      engine.num_members(),
+      1 + ring,
+      "ring {ring}: every datagram read was applied in that same pump"
+    );
+    assert!(
+      wake > Some(t),
+      "ring {ring}: a truthful ring is emptied, so no already-due wake is folded"
+    );
+    // The settle pump above and the pump under test both ran over this view, and
+    // the counter counts PUMPS over an over-cap view, not distinct views.
+    let pumps_over_this_view = 2;
+    assert_eq!(
+      engine.gossip_over_cap_pumps(),
+      if ring >= GOSSIP_READ_CAP {
+        pumps_over_this_view
+      } else {
+        0
+      },
+      "ring {ring}: every pump over an over-cap view is counted, and a conforming one never is"
+    );
+  }
+}
+
+/// An engine cannot be constructed over a gossip view whose declared receive ring
+/// reaches the per-pump read cap: `try_new_at` rejects it with the typed
+/// `GossipRecvCapacityTooLarge`, carrying the capacity the view declared. A ring
+/// one slot below the cap constructs.
+///
+/// What the screen enforces is the per-pump WORK CEILING, not the correctness
+/// bound: phase 2 reads to whatever capacity the pumped view declares, so a
+/// 65-slot ring is emptied ahead of that pump's sweep either way. Capping the ring
+/// a driver may present is what keeps the unwrap/decode/apply a single pump can be
+/// made to do bounded. The screen sits on the trait, so it binds every `GossipIo`,
+/// including one implemented outside this workspace.
+#[test]
+fn a_gossip_io_whose_ring_reaches_the_read_cap_cannot_construct_an_engine() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let cfg = || {
+    Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+  };
+  let ep_cfg = || memberlist_proto::EndpointOptions::new(SmolStr::new("cap"), node_addr(7946));
+
+  // One slot over the cap, and the cap itself: the bound is strict.
+  for declared in [GOSSIP_READ_CAP + 1, GOSSIP_READ_CAP] {
+    let gossip = QueueGossip::with_recv_capacity(declared);
+    let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+      cfg(),
+      TransformOptions::default(),
+      ep_cfg(),
+      now,
+      test_rng(),
+      &gossip,
+    );
+    match rejected {
+      Err(InitError::GossipRecvCapacityTooLarge(n)) => assert_eq!(
+        n, declared,
+        "the rejection carries the capacity the view declared"
+      ),
+      Err(other) => panic!("a {declared}-slot ring must be rejected for its capacity, got {other}"),
+      Ok(_) => panic!("a {declared}-slot ring must not construct an engine"),
+    }
+  }
+
+  // The largest conforming ring still constructs a working single-node engine.
+  let gossip = QueueGossip::with_recv_capacity(GOSSIP_READ_CAP - 1);
+  let engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg(),
+    TransformOptions::default(),
+    ep_cfg(),
+    now,
+    test_rng(),
+    &gossip,
+  )
+  .expect("a ring one slot below the cap must construct");
+  assert_eq!(engine.num_members(), 1, "the constructed engine is usable");
+}
+
+/// Arm `engine` with a reliable listener on slot 1 and one spare (slot 0) to
+/// replenish from, backed by a fresh `ProgRel`. The mock admits the passive open
+/// on the first `check_listener` that runs after the caller marks slot 1
+/// `accepted` + `established`, which is what gives the test a live inbound
+/// exchange to drive reliable input through.
+fn armed_inbound_listener(engine: &mut Engine<SmolStr, u32>) -> ProgRel {
+  engine.plane_mut().pool.push(0);
+  engine.set_listener(1);
+  let mut stream = ProgRel::new(&[0, 1]);
+  stream
+    .listen(1, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // A settled passive open from an in-policy remote, ready for the next accept.
+  stream.sock_mut(1).accepted = Some(node_addr(7950));
+  stream.sock_mut(1).established = true;
+  stream
 }

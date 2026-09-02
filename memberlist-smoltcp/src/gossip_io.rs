@@ -71,4 +71,17 @@ impl GossipIo for SmoltcpGossip<'_, '_> {
     // this datagram and SWIM recovers on the next gossip round.
     let _ = sock.send_slice(bytes, to_endpoint(dest));
   }
+
+  fn recv_capacity(&self) -> usize {
+    // The bound socket's own metadata-slot count, not the configured
+    // `udp_rx_packets` it was built from: reading the ring the engine will
+    // actually drain leaves no way for the declared capacity to drift from the
+    // buffer installed. A shared borrow suffices and is released here, so it
+    // never overlaps the `borrow_mut` the I/O methods take.
+    self
+      .sockets
+      .borrow()
+      .get::<udp::Socket>(self.udp)
+      .packet_recv_capacity()
+  }
 }

@@ -1,12 +1,31 @@
 use super::{Shared, advertise_address, is_joined};
 use crate::{error::OpError, stream_io::SlotId};
 use core::{net::SocketAddr, time::Duration};
-use memberlist_embedded::{Engine, Options as EngineConfig, TransformOptions};
+use memberlist_embedded::{
+  Engine, GOSSIP_READ_CAP, GossipIo, Options as EngineConfig, TransformOptions,
+};
 use memberlist_proto::{EndpointOptions, Instant, SeedableRng, SmallRng, event::Event};
 use smol_str::SmolStr;
 
 fn sa(last: u8) -> SocketAddr {
   SocketAddr::from(([169, 254, 0, last], 7946))
+}
+
+/// A gossip view that carries no traffic: these tests exercise the waiter and
+/// event plumbing, never a pump. It exists so the engine constructor can screen a
+/// receive ring, and declares the largest conforming one.
+struct NoGossip;
+
+impl GossipIo for NoGossip {
+  fn recv(&mut self, _buf: &mut [u8]) -> Option<(SocketAddr, usize)> {
+    None
+  }
+
+  fn send(&mut self, _bytes: &[u8], _dest: SocketAddr) {}
+
+  fn recv_capacity(&self) -> usize {
+    GOSSIP_READ_CAP - 1
+  }
 }
 
 /// Build a single-node engine wrapped as `Shared` for the waiter/buffer tests.
@@ -18,6 +37,7 @@ fn shared_node(id: &str, last: u8) -> Shared<SmolStr> {
     EndpointOptions::new(SmolStr::new(id), sa(last)),
     now,
     SmallRng::seed_from_u64(7),
+    &NoGossip,
   );
   Shared::new(engine)
 }
@@ -36,6 +56,7 @@ fn out_of_order_reliable_completions_resolve_their_own_waiter() {
     EndpointOptions::new(SmolStr::new("t"), sa(1)),
     now,
     SmallRng::seed_from_u64(7),
+    &NoGossip,
   );
   let shared: Shared<SmolStr> = Shared::new(engine);
 

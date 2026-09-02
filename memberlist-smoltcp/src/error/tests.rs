@@ -56,6 +56,7 @@ fn all_variants() -> Vec<InitError> {
     InitError::ZeroTcpSocketBuffer,
     InitError::TcpRxBufferTooLarge,
     InitError::ZeroUdpPackets,
+    InitError::UdpRxPacketsTooLarge,
     InitError::ZeroCloseTimeout,
   ]
 }

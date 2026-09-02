@@ -87,6 +87,39 @@ fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
   (gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD).max(1500)
 }
 
+/// The largest gossip receive ring an [`Engine`] accepts at construction, and so
+/// the ceiling on the work one [`Engine::pump`] spends on gossip ingress.
+///
+/// This is a CONSTRUCTION-TIME POLICY, not the read loop's bound.
+/// [`Engine::try_new_at`] rejects a [`GossipIo`] whose declared
+/// [`recv_capacity`](GossipIo::recv_capacity) reaches this number. Every datagram
+/// a pump pops is unwrapped, decoded and applied to the machine within that pump,
+/// at that pump's instant, and none is carried across a pump — so the largest ring
+/// the engine accepts is at once the per-pump decode bound and the transient
+/// memory a pump can spend on gossip ingress.
+///
+/// The read loop bounds each pump by the capacity the view being PUMPED declares,
+/// never by this constant (see [`Engine::pump`]). Correctness must not depend on
+/// the pumped view being the one construction screened: only the driver can see
+/// that divergence, so a pump over an over-cap view is read in full — a bounded,
+/// driver-declared amount of extra work in exchange for never leaving an observed
+/// datagram behind a membership sweep — and counted in
+/// [`Engine::gossip_over_cap_pumps`].
+///
+/// A driver's gossip receive ring must stay STRICTLY BELOW this cap (smoltcp
+/// defaults to 8 metadata slots, the in-repo embassy sockets to 16). Strictly
+/// below rather than at it because phase 2's bound is the declared capacity plus
+/// one probe pop: a ring below the cap keeps every conforming pump's reads at or
+/// under `GOSSIP_READ_CAP`, so the constant is the ceiling it names with no
+/// off-by-one slack.
+///
+/// The bound is a count, not a byte budget. The implied byte ceiling is
+/// `GOSSIP_READ_CAP × gossip_recv_buf_size(gossip_mtu)` — per-pump AEAD and
+/// decode work scales with bytes, so the count is a CPU ceiling only at the
+/// configured MTU. A byte dimension may join the count when the cap becomes a
+/// configurable knob.
+pub const GOSSIP_READ_CAP: usize = 64;
+
 /// Validate every construction-time config field that does NOT depend on the
 /// resolved advertise address.
 ///
@@ -320,6 +353,16 @@ pub struct Engine<I, C, R = SmallRng> {
   /// gates membership admission via the routable-address alive filter, which the
   /// constructor installs with this policy as its inner predicate.
   cidr_policy: CidrFilter,
+  /// Count of pumps whose gossip view declared a receive capacity at or above
+  /// [`GOSSIP_READ_CAP`].
+  ///
+  /// Construction rejects such a ring, so a non-zero value means the driver pumps
+  /// a different — or since-resized — view than the one it constructed with: a
+  /// contract violation only the driver can see. Membership stays correct either
+  /// way, because phase 2 reads whatever the pumped view declares; what a non-zero
+  /// count reports is that the per-pump work ceiling the cap sets is no longer
+  /// being honored.
+  gossip_over_cap_pumps: u64,
 }
 
 // Construction, config, accessors, and the membership-machine forwarders —
@@ -405,6 +448,19 @@ where
   #[inline]
   pub fn teardown_overruns(&self) -> u64 {
     self.plane.teardown_overruns
+  }
+
+  /// Diagnostic count of pumps whose gossip view declared a receive capacity at
+  /// or above [`GOSSIP_READ_CAP`].
+  ///
+  /// [`try_new_at`](Self::try_new_at) rejects such a ring, so a non-zero value
+  /// means the pumped view is not the one construction screened — a different
+  /// socket, or one resized since. The reads stay bounded and every popped
+  /// datagram is still applied within its pump; what is lost is the per-pump work
+  /// ceiling. A driver that pumps the view it validated leaves this at zero.
+  #[inline]
+  pub fn gossip_over_cap_pumps(&self) -> u64 {
+    self.gossip_over_cap_pumps
   }
 
   /// Whether a passive-open listener slot is currently installed.
@@ -1050,16 +1106,18 @@ where
   /// # Panics
   ///
   /// Panics if [`try_new_at`](Self::try_new_at) returns an [`InitError`] — e.g.
-  /// on a zero/over-ceiling gossip MTU, a non-routable or port-mismatched
-  /// advertise address, or a machine-endpoint init failure.
+  /// on a zero/over-ceiling gossip MTU, an over-cap gossip receive ring, a
+  /// non-routable or port-mismatched advertise address, or a machine-endpoint
+  /// init failure.
   pub fn new_at(
     cfg: Options,
     transform: TransformOptions,
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
     rng: R,
+    gossip: &impl GossipIo,
   ) -> Self {
-    Self::try_new_at(cfg, transform, ep_cfg, now, rng)
+    Self::try_new_at(cfg, transform, ep_cfg, now, rng, gossip)
       .expect("Engine::new_at: invalid configuration; use try_new_at to handle")
   }
 
@@ -1081,6 +1139,24 @@ where
   ///   `Endpoint` so timers start from a consistent origin).
   /// - `rng`: the gossip RNG, already seeded by the driver from its entropy
   ///   source. The core performs no entropy acquisition of its own.
+  /// - `gossip`: the datagram view the driver will pump this engine with. It is
+  ///   only read here, for [`GossipIo::recv_capacity`]; no datagram is moved and
+  ///   the view is not retained (`pump` takes its own `&mut` view per call).
+  ///
+  /// # The gossip work ceiling
+  ///
+  /// This is where the per-pump WORK CEILING is enforced: the gossip receive ring
+  /// must hold strictly fewer datagrams than [`GOSSIP_READ_CAP`]. Taking the view
+  /// here — rather than trusting each driver to screen its own socket — is what
+  /// binds every driver to it, including one written outside this workspace.
+  ///
+  /// It is not what makes `pump` phase 2 correct; that is structural at pump time.
+  /// The read loop derives its bound from the capacity the view it is handed
+  /// declares, so every datagram present when a pump starts is applied before that
+  /// pump's membership sweep for ANY truthful view, screened here or not. What
+  /// this screen buys is the size of that bound: a pump over an unscreened
+  /// over-cap view is still read in full, and counted in
+  /// [`gossip_over_cap_pumps`](Self::gossip_over_cap_pumps).
   ///
   /// # Errors
   ///
@@ -1091,6 +1167,8 @@ where
   /// - [`InitError::ZeroCloseTimeout`] — `cfg.close_timeout` is zero.
   /// - [`InitError::GossipMtuTooLarge`] — the configured gossip MTU's on-wire
   ///   datagram cannot fit a UDP packet.
+  /// - [`InitError::GossipRecvCapacityTooLarge`] — `gossip` declares a receive
+  ///   ring that can hold at least [`GOSSIP_READ_CAP`] datagrams.
   /// - [`InitError::NonRoutableAdvertiseAddr`] — the advertise address is the
   ///   unspecified address, a multicast/broadcast IP, or port 0.
   /// - [`InitError::AdvertisePortMismatch`] — the advertised port differs from
@@ -1111,6 +1189,7 @@ where
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
     rng: R,
+    gossip: &impl GossipIo,
   ) -> Result<Self, InitError> {
     // Validate every advertise-independent config field (port, gossip-MTU
     // ceiling, close timeout, and the encryption keyring) up front. Sharing this
@@ -1119,6 +1198,21 @@ where
     // binds any socket. The advertise-dependent checks (non-routable advertise,
     // port mismatch) remain below, where the resolved address is in hand.
     validate_runtime_config(&cfg, &transform, ep_cfg.gossip_mtu())?;
+
+    // Keep the driver's gossip rx ring strictly below this engine's per-pump read
+    // cap. This bounds WORK, not correctness: phase 2 derives its read bound from
+    // the capacity of the view it is actually pumped with, so a truthful ring of
+    // any size is emptied before that pump's membership sweep. What the cap buys is
+    // a bounded amount of unwrap/decode/apply per pump on a driver that pumps what
+    // it validated. Screening the view the driver hands over — not each driver's
+    // own socket knob — is what makes the ceiling bind EVERY `GossipIo`, including
+    // one implemented outside this workspace. Strict, not inclusive: phase 2's
+    // bound is the declared capacity plus one probe pop, so a ring strictly below
+    // the cap keeps a conforming pump's reads at or under it.
+    let recv_capacity = gossip.recv_capacity();
+    if recv_capacity >= GOSSIP_READ_CAP {
+      return Err(InitError::GossipRecvCapacityTooLarge(recv_capacity));
+    }
 
     // Size the inbound-gossip scratch from the configured gossip MTU BEFORE
     // `ep_cfg` is moved into `Endpoint::try_new_at`. The buffer must hold the
@@ -1224,6 +1318,7 @@ where
       last_completed_send: None,
       label,
       cidr_policy,
+      gossip_over_cap_pumps: 0,
     })
   }
 
@@ -2145,19 +2240,54 @@ where
   ///    the pool.
   /// 1b. **Accept inbound** — if the listener completed a passive open, hand it
   ///    to the machine and replenish the listener from the pool.
-  /// 1c. **Rebalance** — self-heal a missing listener, then assign any remaining
-  ///    free slots to deferred dials (listener-first).
-  /// 2a/2b. **Gossip ingress** — drain received datagrams into `handle_gossip`,
-  ///    then decode buffered raw frames through the codec and feed typed messages
-  ///    back via `handle_packet`.
+  /// 2. **Gossip ingress** — pop from the driver's receive ring up to the capacity
+  ///    that view declares, plus one probe pop, unwrapping, decoding and feeding
+  ///    each datagram's typed messages to `handle_packet` as it is popped.
   /// 3. **Reliable ingress pump** — drain each connection's rx into
   ///    `handle_transport_data`; deliver a one-shot EOF on peer FIN.
+  /// 1c. **Rebalance** — self-heal a missing listener, then assign any remaining
+  ///    free slots to deferred dials (listener-first).
   /// 5. **Join-seed drain** — `start_push_pull(seed, Join, now)` per queued seed.
   /// 6. **Machine tick** — `handle_timeout` fires due timers.
   /// 7a–7e. **Stream actions + egress** — drain `poll_action`, promote, pump
   ///    outbound, flush deferred FINs, complete `Closing` drains, re-rebalance,
   ///    then drain + send outbound gossip.
-  /// 8. **Deadline** — `min(machine_next, closing_next)`.
+  /// 8. **Deadline** — `min(machine_next, closing_next, gossip_more)`.
+  ///
+  /// # Observation is the read
+  ///
+  /// Every gossip datagram this pump pops is applied at this pump's `now` before
+  /// any machine call that can run the membership sweep: 1a and 1b make no such
+  /// call, and 3, 1c, 5, 6 and 7 all follow phase 2. Every reliable byte read in
+  /// phase 3 is likewise fed before 1c, 5, 6 and 7. Nothing observed is carried
+  /// across a pump, so no timer can overtake evidence the engine holds, and the
+  /// machine sees one real instant per pump — the instant at which the engine
+  /// read what it feeds.
+  ///
+  /// # The gossip read bound
+  ///
+  /// Phase 2 pops at most the capacity THIS view declares
+  /// ([`GossipIo::recv_capacity`]) plus one. A ring of capacity `C` holds at most
+  /// `C` datagrams, so a truthful view of any size is emptied within the pump that
+  /// observed it, in every build profile: nothing the driver had waiting when the
+  /// pump began survives to sit behind a sweep. The bound is taken from the view
+  /// in hand rather than from [`GOSSIP_READ_CAP`] because `pump` accepts a fresh
+  /// view on every call and cannot know whether this one is what
+  /// [`try_new_at`](Self::try_new_at) screened; the cap governs which rings that
+  /// constructor accepts, and so how large this bound is on a conforming driver.
+  ///
+  /// The extra pop is the refill detector, and the sole source of the wake term:
+  /// a `(C + 1)`th datagram means the ring refilled while the loop ran, or the
+  /// view under-declares its capacity, so step 8 asks for an immediate re-pump. A
+  /// conforming ring never sets it — not even an exactly-full one, whose probe pop
+  /// finds nothing.
+  ///
+  /// One same-instant ordering residual survives, on the reliable plane only:
+  /// within phase 3 an earlier connection's feed can run a transitive sweep before
+  /// a later connection's bytes — read at the same instant — are fed, so a
+  /// refutable deadline falling within the last pump interval can fire ahead of
+  /// the evidence that would have refuted it. It is pre-existing on main and in
+  /// the standard drivers, and closing it needs a non-ticking feed in the machine.
   pub fn pump<G, S>(&mut self, now: Instant, gossip: &mut G, stream: &mut S) -> Option<Instant>
   where
     G: GossipIo,
@@ -2179,6 +2309,10 @@ where
     //   1c. `rebalance_pool`  — self-heal a missing listener, then deferred dials
     //                           take any remaining slots (listener-first)
     //
+    // They are no longer adjacent: the two ingress feeds (phases 2 and 3) run
+    // between them, because `rebalance_pool` can sweep the machine and `1b`
+    // cannot. Their relative order — and with it listener priority — is unchanged.
+    //
     // 1b. Accept an inbound connection completed on the listener and replenish the
     // listener from the pool.
     //
@@ -2194,6 +2328,136 @@ where
     // Accept-and-replenish first claims it for the listener instead.
     self.check_listener(now, stream);
 
+    // 2. Gossip ingress: pop, decode and apply one datagram at a time, bounded by
+    // the capacity the PUMPED view declares plus one probe pop.
+    //
+    // Observation is the read: a datagram enters the engine's view when this loop
+    // pops it, and it is applied to the machine at this pump's `now` — before any
+    // later phase can run the membership sweep. Nothing is queued for a later
+    // pump, so there is no held evidence for a timer to overtake and no reason for
+    // the machine to be handed anything but the real instant.
+    //
+    // The bound comes from the view in hand, not from `GOSSIP_READ_CAP`: `pump`
+    // takes a fresh view on every call, so nothing here can know this is the view
+    // construction screened, and correctness must not rest on that. A ring of
+    // capacity C holds at most C datagrams, so C pops empty ANY truthful view — 8
+    // slots, 63, or 65 — and everything the driver had waiting when this pump began
+    // is applied at this instant, ahead of every sweep-capable phase, in every
+    // build profile.
+    //
+    // The probe pop is the refill/lie detector and the sole source of the wake
+    // term: a (C+1)th datagram can only mean the ring refilled while the loop ran
+    // or the declaration is wrong, so step 8 asks the caller to come back at once
+    // rather than sleep on a timer with unread traffic behind it. A conforming ring
+    // that happens to be exactly full pops C and finds nothing on the probe, so it
+    // costs no spurious re-pump. Reads stay bounded at C + 1 per pump for ANY
+    // `GossipIo`, including one whose ring the link layer refills while the loop
+    // runs.
+    //
+    // The machine's own `handle_gossip` / `poll_memberlist_ingress` round-trip is
+    // deliberately bypassed: it would copy every datagram into a machine-side
+    // buffer for this same pump to poll straight back out. Feeding `handle_packet`
+    // directly is equivalent — it re-checks the running state itself, and the
+    // `last_now` anchor `handle_gossip` would have written is re-established by
+    // step 6's `handle_timeout(now)` on every pump.
+    //
+    // A view declaring at or above the cap is a contract violation: construction
+    // rejects such a ring, so this pump is being run over a different or
+    // since-resized view than the one screened. Read it in full anyway — a bounded,
+    // driver-declared amount of extra work is always the better trade against a
+    // datagram left behind a membership sweep — and surface the divergence, which
+    // otherwise only the driver can see.
+    let declared = gossip.recv_capacity();
+    if declared >= GOSSIP_READ_CAP {
+      self.gossip_over_cap_pumps += 1;
+    }
+    // A ring of capacity `declared` holds at most that many datagrams, so the one
+    // extra pop succeeds only on a ring that refilled mid-pump or under-declared.
+    // Saturating because a nonsense declaration must not wrap the bound to zero and
+    // stall ingress outright.
+    let bound = declared.saturating_add(1);
+
+    // The lifecycle state is read once: only `leave` changes it, and `leave` is a
+    // between-pumps call.
+    let running = self.endpoint.is_running();
+    let mut popped = 0usize;
+    {
+      // The receive scratch, the machine endpoint, the cluster label and the CIDR
+      // policy are separate fields, so all four can be borrowed across the loop at
+      // once as disjoint field paths.
+      let buf = self.gossip_recv.as_mut_slice();
+      let endpoint = &mut self.endpoint;
+      let cidr_policy = &self.cidr_policy;
+      let label = &self.label;
+      while popped < bound {
+        // The driver's datagram I/O pops one datagram per `recv` call and returns
+        // `None` once the rx ring is empty.
+        let Some((src, n)) = gossip.recv(buf) else {
+          break;
+        };
+        // Charge EVERY pop, whatever becomes of it: the bound is on reads of the
+        // driver's ring, which is the resource an inbound flood drives.
+        popped += 1;
+        // Three reasons to drop a popped datagram without decoding it:
+        //
+        // - the node has left, so there is no membership left to update (the
+        //   machine's `handle_packet` re-checks this too; refusing here also
+        //   spares a post-leave flood every unwrap and decode);
+        // - a zero-length read, the driver's marker for a datagram too large for
+        //   this scratch buffer, which it consumed and skipped so one oversized
+        //   datagram cannot stall the in-budget ones queued behind it;
+        // - a CIDR-blocked source (the transport-source filter; the
+        //   advertised-address filter is the composed routable-address alive
+        //   delegate).
+        if !running || n == 0 || cidr_blocks(cidr_policy, src.ip()) {
+          continue;
+        }
+        // Strip the Encrypted-then-Checksumed-then-Compressed wrapper stack FIRST
+        // (each layer is identity when its wrapper is absent, so the plaintext path
+        // is preserved exactly). With an encryption backend the endpoint's
+        // keyring-aware unwrap also enforces the strict-mode entry check on an
+        // encrypted cluster; without one the base unwrap strips any checksum and
+        // compression wrappers (and is identity for a plain frame). A corrupt frame,
+        // an unknown or not-built-in algorithm, an oversized wrapper, or a checksum
+        // mismatch is an Err. Drop on Err — a plaintext datagram on an encrypted
+        // node, or a corrupt frame, must not reach the decoder. Gossip is lossy and
+        // self-healing.
+        #[cfg(encryption)]
+        let decrypted = match endpoint.decrypt_gossip(&buf[..n]) {
+          Ok(p) => bytes::Bytes::from(p),
+          Err(_) => continue,
+        };
+        #[cfg(not(encryption))]
+        let decrypted = match memberlist_proto::framing::unwrap_transforms(
+          &buf[..n],
+          endpoint.endpoint_ref().gossip_mtu(),
+        ) {
+          Ok(p) => bytes::Bytes::from(p.into_owned()),
+          Err(_) => continue,
+        };
+        let opts = memberlist_proto::codec::DecodeOptions::new(label.clone());
+        // Drop malformed inbound datagrams silently — bad network input must not
+        // panic the node; SWIM is self-healing. (`decode_incoming` Err = label
+        // mismatch / framing error; `parse_messages` Err = malformed frame.)
+        if let Ok(plain) = memberlist_proto::codec::decode_incoming(decrypted, &opts) {
+          if let Ok(msgs) = memberlist_proto::codec::parse_messages::<I, SocketAddr>(plain) {
+            for msg in msgs {
+              endpoint.handle_packet(src, msg, now);
+            }
+          }
+        }
+      }
+    }
+    // The probe pop found a datagram past the declared capacity while running, so
+    // the ring refilled under the loop (or the view under-declares it) and may
+    // still hold more: step 8 folds an already-due wake for them.
+    let gossip_more = running && popped > declared;
+
+    // 3. Reliable ingress pump: drain each active exchange's socket rx buffer into
+    // the machine. Must run before the machine tick so the machine sees fresh
+    // inbound bytes (including the peer-FIN EOF) when firing timers.
+    self.pump_inbound_reliable(now, stream);
+
     // 1c. Self-heal a still-missing listener, then assign any remaining free slots
     // to deferred dials (listener-first). This runs the SAME rebalance as the late
     // call after the in-tick frees below (step 7), here over whatever
@@ -2201,72 +2465,14 @@ where
     // (step 6) is required: a `PendingDial` deferred on a PRIOR tick must be
     // assigned a freed slot and dialed before step 6's `handle_timeout` could
     // elapse its bridge and tear it down — so the early site cannot move later.
+    // Running it AFTER both evidence feeds is required for the same reason in the
+    // other direction: a dial this call rejects synchronously (a CIDR-blocked or
+    // unroutable peer) terminalizes through the machine, whose tick would sweep
+    // membership at `now` — ahead of this pump's gossip and reliable evidence if it
+    // ran first. A prior-tick `PendingDial` parked here is unaffected by the two
+    // feeds: they mark only their own bridges dirty, and a parked dial's bridge has
+    // no residual work, so nothing between 1b and here can elapse it.
     self.rebalance_pool(now, stream);
-
-    // 2a. Drain inbound gossip datagrams into the machine's raw ingress buffer.
-    {
-      // The reusable receive scratch and the machine endpoint are separate fields,
-      // so both can be borrowed across the drain loop at once.
-      let buf = self.gossip_recv.as_mut_slice();
-      let endpoint = &mut self.endpoint;
-      let cidr_policy = &self.cidr_policy;
-      // The driver's datagram I/O pops one datagram per `recv` call and returns
-      // `None` once the rx ring is empty (an over-budget datagram larger than this
-      // buffer is consumed and skipped by the driver, so one oversized datagram
-      // cannot stall the in-budget datagrams queued behind it).
-      while let Some((src, n)) = gossip.recv(buf) {
-        // Drop a gossip datagram from a CIDR-blocked source before the machine
-        // sees it (the transport-source filter; the advertised-address filter is
-        // the composed routable-address alive delegate).
-        if !cidr_blocks(cidr_policy, src.ip()) {
-          endpoint.handle_gossip(src, &buf[..n], now);
-        }
-      }
-    }
-
-    // 2b. Unwrap the encryption/compression transforms, then decode each raw
-    // gossip frame and feed typed messages back.
-    while let Some((src, raw)) = self.endpoint.poll_memberlist_ingress() {
-      // Strip the Encrypted-then-Checksumed-then-Compressed wrapper stack FIRST
-      // (each layer is identity when its wrapper is absent, so the plaintext path
-      // is preserved exactly). With an encryption backend the endpoint's
-      // keyring-aware unwrap also enforces the strict-mode entry check on an
-      // encrypted cluster; without one the base unwrap strips any checksum and
-      // compression wrappers (and is identity for a plain frame). A corrupt frame,
-      // an unknown or not-built-in algorithm, an oversized wrapper, or a checksum
-      // mismatch is an Err. Drop on Err — a plaintext datagram on an encrypted
-      // node, or a corrupt frame, must not reach the decoder. Gossip is lossy and
-      // self-healing.
-      #[cfg(encryption)]
-      let decrypted = match self.endpoint.decrypt_gossip(&raw) {
-        Ok(p) => bytes::Bytes::from(p),
-        Err(_) => continue,
-      };
-      #[cfg(not(encryption))]
-      let decrypted = match memberlist_proto::framing::unwrap_transforms(
-        &raw,
-        self.endpoint.endpoint_ref().gossip_mtu(),
-      ) {
-        Ok(p) => bytes::Bytes::from(p.into_owned()),
-        Err(_) => continue,
-      };
-      let opts = memberlist_proto::codec::DecodeOptions::new(self.label.clone());
-      // Drop malformed inbound datagrams silently — bad network input must not
-      // panic the node; SWIM is self-healing. (`decode_incoming` Err = label
-      // mismatch / framing error; `parse_messages` Err = malformed frame.)
-      if let Ok(plain) = memberlist_proto::codec::decode_incoming(decrypted, &opts) {
-        if let Ok(msgs) = memberlist_proto::codec::parse_messages::<I, SocketAddr>(plain) {
-          for msg in msgs {
-            self.endpoint.handle_packet(src, msg, now);
-          }
-        }
-      }
-    }
-
-    // 3. Reliable ingress pump: drain each active exchange's socket rx buffer into
-    // the machine. Must run before the machine tick so the machine sees fresh
-    // inbound bytes (including the peer-FIN EOF) when firing timers.
-    self.pump_inbound_reliable(now, stream);
 
     // 5. Drain join seeds: each seed queued by `join()` gets a push/pull exchange
     // initiated now. `start_push_pull` internally calls `service_dials` +
@@ -2364,7 +2570,7 @@ where
     // 7e. Egress: drain outbound gossip transmits, encode, and send.
     self.drain_gossip_transmits(gossip);
 
-    // 8. Next deadline = min(machine, closing).
+    // 8. Next deadline = min(machine, closing, gossip-read-capped).
     //
     // The returned instant is the wake contract: a caller that sleeps until it
     // (combined with its own link-layer next-event deadline) must wake in time to
@@ -2385,6 +2591,14 @@ where
     //   Folding the soonest of BOTH in guarantees the caller wakes by
     //   `close_timeout` to escalate it, so pool / listener recovery is bounded by
     //   `Options::close_timeout` as documented.
+    // - the gossip term — an already-due `now`, set only when phase 2's probe pop
+    //   found a datagram past the pumped view's declared capacity while running, so
+    //   the ring refilled under the loop (or under-declares itself) and may still
+    //   hold more. It asks a deadline-driven caller to service its other work and
+    //   poll again at once rather than sleep on a timer while observed traffic sits
+    //   unread. A truthful ring never sets it — not even an exactly-full one, whose
+    //   probe pop finds nothing — and a node that has left never sets it (the term
+    //   is gated on the running state).
     //
     // `pending_dial` deliberately contributes NO deadline of its own: a buffered
     // dial is serviced when a slot frees, never on a clock of its own, and every
@@ -2420,7 +2634,7 @@ where
       )
       .min()
       .copied();
-    min_opt(machine, closing)
+    min_opt(min_opt(machine, closing), gossip_more.then_some(now))
   }
 
   /// Open a TCP dial for the `Dialing` connection `eid` on its assigned slot `c`.

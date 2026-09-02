@@ -23,9 +23,10 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
 use memberlist_embassy::{
-  CompressionOptions, EndpointOptions, MaybeResolved, Memberlist, Options, Runner,
-  SocketAddrResolver, TransformOptions, event::Event, now,
+  CompressionOptions, EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist,
+  Options, Runner, SocketAddrResolver, TransformOptions, event::Event, now,
 };
+use memberlist_embedded::InitError as EngineInitError;
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
 
@@ -152,6 +153,83 @@ async fn until(mut cond: impl FnMut() -> bool) {
     }
     Timer::after(Duration::from_millis(10)).await;
   }
+}
+
+/// A gossip UDP socket whose receive-packet capacity reaches the engine's per-pump
+/// work ceiling is rejected at construction. The engine applies every datagram it
+/// pops within the pump that popped it, so the accepted socket capacity IS a
+/// pump's gossip work budget, and `GOSSIP_READ_CAP` is what bounds it. The bound is
+/// strict: a socket sized exactly at the cap is rejected too (a pump takes one
+/// probe pop past the ring's capacity to detect a mid-pump refill), while the
+/// 16-slot socket every other test here uses constructs.
+///
+/// The rejection comes from the ENGINE, which screens the receive capacity the
+/// gossip view over this socket declares, and reaches the caller through this
+/// driver's `InitError::Engine`.
+#[test]
+fn udp_socket_at_or_above_the_gossip_read_cap_rejected() {
+  /// A receive-packet ring sized exactly at the engine's per-pump read cap.
+  struct OverCapBufs {
+    rx_meta: [PacketMetadata; GOSSIP_READ_CAP],
+    rx: [u8; 16 * 1024],
+    tx_meta: [PacketMetadata; 16],
+    tx: [u8; 16 * 1024],
+    tcp_rx: [[u8; TCP_BUF]; POOL],
+    tcp_tx: [[u8; TCP_BUF]; POOL],
+  }
+
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x3333_4444);
+
+  let mut over = OverCapBufs {
+    rx_meta: [PacketMetadata::EMPTY; GOSSIP_READ_CAP],
+    rx: [0u8; 16 * 1024],
+    tx_meta: [PacketMetadata::EMPTY; 16],
+    tx: [0u8; 16 * 1024],
+    tcp_rx: [[0u8; TCP_BUF]; POOL],
+    tcp_tx: [[0u8; TCP_BUF]; POOL],
+  };
+  let udp = UdpSocket::new(
+    stack,
+    &mut over.rx_meta,
+    &mut over.rx,
+    &mut over.tx_meta,
+    &mut over.tx,
+  );
+  let mut rx_iter = over.tcp_rx.iter_mut();
+  let mut tx_iter = over.tcp_tx.iter_mut();
+  let tcp = core::array::from_fn::<_, POOL, _>(|_| {
+    TcpSocket::new(
+      stack,
+      rx_iter.next().expect("POOL rx buffers"),
+      tx_iter.next().expect("POOL tx buffers"),
+    )
+  });
+  let rejected = block_on(Memberlist::<SmolStr, SocketAddr>::new_with_rng::<_, POOL>(
+    Options::new(),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("over"), addr(1, 7946)),
+    &SocketAddrResolver,
+    udp,
+    tcp,
+    now(),
+    SmallRng::seed_from_u64(1),
+  ));
+  match rejected.map(|_| ()) {
+    Err(InitError::Engine(EngineInitError::GossipRecvCapacityTooLarge(n))) => assert_eq!(
+      n, GOSSIP_READ_CAP,
+      "the rejection carries the socket's receive-packet capacity"
+    ),
+    Err(other) => {
+      panic!("a socket sized at the read cap must be rejected for its capacity, got {other}")
+    }
+    Ok(()) => panic!("a socket sized at the read cap must be rejected"),
+  }
+
+  // The 16-slot socket the rest of this suite uses is below the cap and builds.
+  let mut bufs = NodeBufs::new();
+  let (_ml, _run) = node(stack, &mut bufs, "under", 1, 2);
 }
 
 /// The sync query/accessor surface reports a coherent single-node view at

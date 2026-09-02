@@ -62,4 +62,12 @@ impl GossipIo for EmbassyGossip<'_> {
     // datagram and SWIM recovers on the next gossip round — no error is surfaced.
     let _ = self.0.poll_send_to(bytes, IpEndpoint::from(dest), &mut cx);
   }
+
+  fn recv_capacity(&self) -> usize {
+    // The metadata-slot count of the receive buffer the caller supplied to
+    // `UdpSocket::new`: the number of datagrams embassy-net can leave queued for
+    // the next pump. Read from the socket itself so the declared capacity cannot
+    // drift from the buffer actually installed.
+    self.0.packet_recv_capacity()
+  }
 }
