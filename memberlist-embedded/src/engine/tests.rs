@@ -4131,12 +4131,13 @@ fn same_pump_alive_refutation_precedes_the_tick() {
   );
 }
 
-/// Reliable-plane input ticks the machine too: `handle_transport_data` ends in
-/// `run_tick`, whose membership step is the same sweep step 6 runs. Feeding it
-/// before this pump's gossip would let arbitrary bytes on an unrelated connection
-/// fire a suspicion the gossip ring already refutes — so phase 3 must follow phase
-/// 2. The bytes here are junk: input the record layer will reject is enough,
-/// because the tick happens on the feed, not on the parse.
+/// Reliable-plane input reaches the machine through a coordinator tick as well,
+/// so arbitrary bytes on an unrelated connection must not fire a suspicion the
+/// gossip ring already refutes. Two independent properties hold that: phase 3
+/// follows phase 2, and this engine's coordinator does not advance membership
+/// time on a feed at all, so the sweep runs only at step 6. The bytes here are
+/// junk: input the record layer will reject is enough, because the class is
+/// about the feed, not the parse.
 #[test]
 fn same_pump_reliable_input_cannot_sweep_past_this_pumps_gossip() {
   let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
@@ -4165,10 +4166,10 @@ fn same_pump_reliable_input_cannot_sweep_past_this_pumps_gossip() {
   assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
 }
 
-/// The reliable plane ticks the machine on its FAULT paths too: a socket that died
-/// without a graceful peer FIN routes to `handle_transport_error`, which — like
-/// `handle_transport_data` — ends in `run_tick`. A peer that merely RSTs its
-/// connection must not sweep past this pump's gossip either.
+/// The reliable plane reaches the machine on its FAULT paths too: a socket that
+/// died without a graceful peer FIN routes to `handle_transport_error`, which —
+/// like `handle_transport_data` — runs a coordinator tick. A peer that merely
+/// RSTs its connection must not sweep past this pump's gossip either.
 #[test]
 fn same_pump_reliable_fault_cannot_sweep_past_this_pumps_gossip() {
   let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
@@ -4737,4 +4738,197 @@ fn armed_inbound_listener(engine: &mut Engine<SmolStr, u32>) -> ProgRel {
   stream.sock_mut(1).accepted = Some(node_addr(7950));
   stream.sock_mut(1).established = true;
   stream
+}
+
+/// A proto dialer's coalesced `[label || push/pull request]` bytes, advertising
+/// `b` at `b_inc` as `Alive` — the refutation an engine merges when the request
+/// decodes. `pad` bytes of application snapshot inflate the request; at
+/// `16 * 1024` it spans several of the phase-3 read loop's `READ_BUF` chunks.
+///
+/// The dialer's record layer and transforms are built from the SAME
+/// [`TransformOptions::default()`] the engine fixtures construct their
+/// coordinator with, so the bytes decode identically under every feature
+/// combination the crate is gated on.
+fn push_pull_refuting_b(
+  dialer_addr: SocketAddr,
+  engine_addr: SocketAddr,
+  b_addr: SocketAddr,
+  b_inc: u32,
+  now: Instant,
+  pad: usize,
+) -> Vec<u8> {
+  let transform = TransformOptions::default();
+  let ep: Endpoint<SmolStr, SocketAddr, SmallRng> = Endpoint::new_at(
+    EndpointOptions::new(SmolStr::new("dialer"), dialer_addr),
+    now,
+    test_rng(),
+  );
+  let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords, SmallRng> = StreamEndpoint::new(
+    ep,
+    LabelOptions::new_in(transform.label().map(|b| b.to_vec()), ()),
+    Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
+    Box::new(|addr: &SocketAddr| *addr),
+  );
+  #[cfg(compression)]
+  dialer.set_compression_options(transform.compression);
+  #[cfg(encryption)]
+  dialer.set_encryption_options(transform.encryption);
+
+  dialer.handle_alive(
+    b_addr,
+    Alive::new(b_inc, Node::new(SmolStr::new("b"), b_addr)),
+    now,
+  );
+  if pad > 0 {
+    dialer
+      .set_local_state_snapshot(bytes::Bytes::from(std::vec![0u8; pad]))
+      .expect("the padding snapshot is well within the reliable frame budget");
+  }
+  dialer.start_push_pull(engine_addr, PushPullKind::Join, now);
+  while dialer.poll_action().is_some() {}
+  let mut blob = Vec::new();
+  while let Some((_id, _peer, chunk)) = dialer.poll_transport_transmit() {
+    blob.extend_from_slice(&chunk);
+  }
+  blob
+}
+
+/// Assert `B` came out of the pump `Alive` and never flapped. Unlike
+/// [`assert_b_refuted`] this tolerates the membership events a real peer's
+/// push/pull necessarily produces for the DIALER's own node — only `B`'s events
+/// are under test.
+fn assert_b_refuted_over_reliable(engine: &mut Engine<SmolStr, u32>) {
+  use memberlist_proto::typed::State;
+
+  let b = SmolStr::new("b");
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &b && ns.state() == State::Alive),
+    1,
+    "B's own refutation, read in this pump, must leave it Alive"
+  );
+  while let Some(ev) = engine.poll_event() {
+    if let Event::NodeLeft(ns) | Event::NodeJoined(ns) = ev {
+      assert!(
+        ns.id_ref() != &b,
+        "B must not flap: no death and no re-join event"
+      );
+    }
+  }
+}
+
+/// Admit one inbound reliable connection on a pump before `B`'s suspicion
+/// deadline, so the pump under test has only to feed its bytes. Returns the
+/// mock stream with the connection live on slot 1.
+fn accept_one_inbound(
+  engine: &mut Engine<SmolStr, u32>,
+  gossip: &mut QueueGossip,
+  at: Instant,
+) -> ProgRel {
+  let mut stream = armed_inbound_listener(engine);
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(at, gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the inbound reliable connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+  stream
+}
+
+/// The reliable unit a peer sends can exceed the phase-3 read buffer, so ONE
+/// pump feeds it to the machine as several `handle_transport_data` calls. No
+/// feed may sweep membership between those chunks: the `Alive(inc + 1)` the last
+/// chunk completes refutes a suspicion this pump is already past, so a sweep on
+/// an earlier chunk would fire `NodeLeft(B)` and the refutation would then read
+/// as a `NodeJoined(B)` rejoin — a flap on a peer that never died.
+///
+/// Deterministic by construction: one connection, and the read loop's chunking
+/// is a plain `min(rx.len, READ_BUF)` drain, so the split is not hash- or
+/// schedule-dependent.
+#[test]
+fn chunked_push_pull_refutation_in_one_pump_does_not_flap() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  let mut stream = accept_one_inbound(&mut engine, &mut gossip, t1 + Duration::from_millis(100));
+
+  let b_inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  let blob = push_pull_refuting_b(
+    node_addr(7950),
+    node_addr(7946),
+    b_addr,
+    b_inc + 1,
+    t1,
+    16 * 1024,
+  );
+  assert!(
+    blob.len() > 2 * 4096,
+    "the request must span more than two read-buffer chunks, got {} bytes",
+    blob.len()
+  );
+  stream.sock_mut(1).rx = blob;
+  stream.sock_mut(1).peer_fin = true;
+
+  let t = s + Duration::from_secs(1);
+  assert!(t > s, "this pump runs past B's suspicion deadline");
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted_over_reliable(&mut engine);
+}
+
+/// The inter-connection form of the same class: one pump feeds junk on one
+/// connection and `B`'s refutation on another. With the pump's single sweep at
+/// step 6 the outcome does not depend on which connection phase 3 reaches
+/// first, so this passes for either order.
+///
+/// It is a guard, not a detector: phase 3 iterates a `HashMap`, so on an engine
+/// whose feeds do sweep it only fails when the hash order happens to put the
+/// junk connection first. The deterministic guard for the class is the chunked
+/// single-connection test above.
+#[test]
+fn two_connections_in_one_pump_junk_then_refutation_does_not_flap() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  let mut stream = accept_one_inbound(&mut engine, &mut gossip, t1 + Duration::from_millis(100));
+
+  // The accept replenished the listener from the spare slot; arm THAT one too so
+  // a second inbound connection is live for the pump under test.
+  stream.sock_mut(0).accepted = Some(node_addr(7951));
+  stream.sock_mut(0).established = true;
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(t1 + Duration::from_millis(200), &mut gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the second inbound connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+
+  let b_inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  let blob = push_pull_refuting_b(node_addr(7951), node_addr(7946), b_addr, b_inc + 1, t1, 0);
+  assert!(
+    blob.len() < 4096,
+    "the small request must fit one read-buffer chunk, got {} bytes",
+    blob.len()
+  );
+  stream.sock_mut(1).rx = std::vec![0xABu8; 64];
+  stream.sock_mut(0).rx = blob;
+  stream.sock_mut(0).peer_fin = true;
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted_over_reliable(&mut engine);
 }

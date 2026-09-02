@@ -1170,6 +1170,501 @@ mod tcp {
     );
   }
 
+  /// A real dialer's coalesced `[label || push/pull request]` bytes, where the
+  /// push advertises `m_id` at `m_inc` as `State::Suspect` — the remote
+  /// accusation the acceptor merges when its handshake settles.
+  fn dialer_push_pull_advertising_suspect(
+    dialer_port: u16,
+    m_id: &SmolStr,
+    m_addr: SocketAddr,
+    m_inc: u32,
+    coord_addr: SocketAddr,
+    now: Instant,
+  ) -> Vec<u8> {
+    use crate::typed::{Alive, Suspect};
+    let cfg = LabelOptions::new_in(Some(b"cluster-x".to_vec()), ());
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(dialer_port),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+    dialer.handle_alive(
+      m_addr,
+      Alive::new(m_inc, crate::Node::new(m_id.clone(), m_addr)),
+      now,
+    );
+    dialer.handle_suspect(
+      m_addr,
+      Suspect::new(m_inc, m_id.clone(), SmolStr::new("accuser")),
+      now,
+    );
+    let _ = dialer.start_push_pull(coord_addr, PushPullKind::Join, now);
+    let _ = dialer.poll_action();
+    let mut bytes = Vec::new();
+    while let Some((_id, _peer, chunk)) = dialer.poll_transport_transmit() {
+      bytes.extend_from_slice(&chunk);
+    }
+    bytes
+  }
+
+  /// Drain `coord`'s events, reporting whether `NodeLeft(m)` and
+  /// `NodeJoined(m)` were among them.
+  fn drain_left_joined(
+    coord: &mut StreamEndpoint<SmolStr, SocketAddr, RawRecords>,
+    m: &SmolStr,
+  ) -> (bool, bool) {
+    use crate::event::Event;
+    let (mut left, mut joined) = (false, false);
+    while let Some(ev) = coord.poll_event() {
+      match ev {
+        Event::NodeLeft(ns) if ns.id_ref() == m => left = true,
+        Event::NodeJoined(ns) if ns.id_ref() == m => joined = true,
+        _ => {}
+      }
+    }
+    (left, joined)
+  }
+
+  /// The gate defaults to the historical behavior and round-trips through its
+  /// accessor pair.
+  #[test]
+  fn feed_advances_membership_time_defaults_to_true_and_round_trips() {
+    let mut coord = coord(7330);
+    assert!(
+      coord.feed_advances_membership_time(),
+      "a fresh coordinator's feeds advance membership time",
+    );
+    coord.set_feed_advances_membership_time(false);
+    assert!(
+      !coord.feed_advances_membership_time(),
+      "the setter clears it"
+    );
+    coord.set_feed_advances_membership_time(true);
+    assert!(
+      coord.feed_advances_membership_time(),
+      "the setter restores it"
+    );
+  }
+
+  /// Default gate: a feed runs the membership sweep inside itself. A junk
+  /// connection fed at a due suspicion deadline fires the suspicion — `M` goes
+  /// `Dead` and `NodeLeft(M)` is emitted by the feed, with no explicit
+  /// `handle_timeout` anywhere. Guards the mechanism, not just the symptom:
+  /// exactly one membership-time advance, i.e. the tick the feed runs is the
+  /// historical `run_tick` body.
+  #[test]
+  fn default_feed_advances_membership_time_exactly_once() {
+    use crate::typed::State;
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+
+    let mut coord = coord_with_suspect_member(7331, &m, m_addr, inc, now);
+    assert_eq!(
+      coord.membership_time_advances(),
+      0,
+      "seeding membership advances no time",
+    );
+
+    let t = now + Duration::from_secs(30);
+    let exchange = coord
+      .accept_connection(m_addr, t)
+      .expect("connection admitted while running");
+    coord.handle_transport_data(exchange, &[0xFF; 4], true, t);
+
+    assert_eq!(
+      coord.membership_time_advances(),
+      1,
+      "the default feed ran the membership sweep exactly once",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Dead),
+      "the feed's own sweep expired the suspicion",
+    );
+    let (left, _joined) = drain_left_joined(&mut coord, &m);
+    assert!(left, "NodeLeft(M) is emitted by the feed itself");
+  }
+
+  /// Gate cleared: the same feed still services its bridge — the junk
+  /// connection is reaped and its terminal action surfaces — but runs no
+  /// membership sweep, so `M` stays `Suspect`. The unswept deadline is not
+  /// lost: `poll_timeout` keeps reporting it due.
+  #[test]
+  fn gated_feed_services_the_bridge_but_does_not_sweep() {
+    use crate::typed::State;
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+
+    let mut coord = coord_with_suspect_member(7332, &m, m_addr, inc, now);
+    coord.set_feed_advances_membership_time(false);
+
+    let t = now + Duration::from_secs(30);
+    let exchange = coord
+      .accept_connection(m_addr, t)
+      .expect("connection admitted while running");
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "the accept installed a bridge"
+    );
+    coord.handle_transport_data(exchange, &[0xFF; 4], true, t);
+
+    assert_eq!(
+      coord.membership_time_advances(),
+      0,
+      "a gated feed advances membership time zero times",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Suspect),
+      "the due suspicion is deferred, not fired",
+    );
+    let (left, _joined) = drain_left_joined(&mut coord, &m);
+    assert!(!left, "no NodeLeft(M): nothing swept the suspicion");
+
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "the gated feed still reaped the junk bridge",
+    );
+    let teardown = core::iter::from_fn(|| coord.poll_action()).any(|a| {
+      matches!(
+        a,
+        StreamAction::Close(r) | StreamAction::Abort(r) if r.id() == exchange
+      )
+    });
+    assert!(
+      teardown,
+      "the gated feed still surfaced the junk exchange's teardown",
+    );
+
+    let due = coord
+      .poll_timeout()
+      .expect("an absolute deadline is still reported");
+    assert!(
+      due <= t,
+      "the unswept suspicion deadline is still reported due (deferred, not lost)",
+    );
+  }
+
+  /// The driver's explicit tick sweeps whatever the gate is: the deferred
+  /// suspicion fires there, and every call advances membership time once.
+  #[test]
+  fn explicit_handle_timeout_sweeps_regardless_of_the_gate() {
+    use crate::typed::State;
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+
+    let mut coord = coord_with_suspect_member(7333, &m, m_addr, inc, now);
+    coord.set_feed_advances_membership_time(false);
+
+    let t = now + Duration::from_secs(30);
+    coord.handle_timeout(t);
+    assert_eq!(
+      coord.membership_time_advances(),
+      1,
+      "the explicit tick advances membership time even with the gate cleared",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Dead),
+      "the deferred suspicion fires on the explicit tick",
+    );
+    let (left, _joined) = drain_left_joined(&mut coord, &m);
+    assert!(left, "NodeLeft(M) is emitted on the explicit tick");
+
+    coord.handle_timeout(t + Duration::from_secs(1));
+    assert_eq!(
+      coord.membership_time_advances(),
+      2,
+      "every explicit tick advances membership time",
+    );
+  }
+
+  /// The class this gate closes. Two connections are fed on one driver wake at
+  /// a due suspicion deadline: a junk/EOF one first, then one carrying the
+  /// `Alive(inc + 1)` that refutes the suspicion. With the gate cleared neither
+  /// feed sweeps, so the refutation is applied before the wake's single
+  /// explicit sweep — `M` ends `Alive` with no `NodeLeft` / `NodeJoined` pair.
+  #[test]
+  fn two_connections_one_wake_junk_then_refutation_does_not_flap() {
+    use crate::typed::{Message, State};
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+    let coord_addr = addr(7334);
+
+    let mut coord = coord_with_suspect_member(7334, &m, m_addr, inc, now);
+    coord.set_feed_advances_membership_time(false);
+
+    let t = now + Duration::from_secs(30);
+    let blob = dialer_push_pull_advertising_alive(7335, &m, m_addr, inc + 1, coord_addr, t);
+    let e1 = coord
+      .accept_connection(addr(7336), t)
+      .expect("first connection admitted");
+    let e2 = coord
+      .accept_connection(m_addr, t)
+      .expect("second connection admitted");
+
+    coord.handle_transport_data(e1, &[0xFF; 4], true, t);
+    coord.handle_transport_data(e2, &blob, true, t);
+    assert_eq!(
+      coord.membership_time_advances(),
+      0,
+      "neither feed of the wake swept",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Alive),
+      "the second feed's refutation cancelled the suspicion",
+    );
+
+    coord.handle_timeout(t);
+    assert_eq!(
+      coord.membership_time_advances(),
+      1,
+      "the driver's tick is the wake's single membership sweep",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Alive),
+      "M is still Alive after the wake's sweep",
+    );
+    assert_eq!(
+      coord.endpoint_ref().node_incarnation(&m),
+      Some(inc + 1),
+      "M carries the refuting incarnation",
+    );
+
+    let (left, joined) = drain_left_joined(&mut coord, &m);
+    assert!(
+      !left,
+      "no NodeLeft(M): the suspicion was cancelled, never fired"
+    );
+    assert!(
+      !joined,
+      "no NodeJoined(M): a Suspect -> Alive cancel is not a rejoin"
+    );
+
+    let broadcasts = coord.endpoint_mut().drain_broadcasts();
+    assert!(
+      broadcasts.iter().any(|msg| matches!(
+        msg,
+        Message::Alive(a) if a.node_ref().id_ref() == &m && a.incarnation() == inc + 1
+      )),
+      "the refutation Alive(M, inc+1) is broadcast",
+    );
+    assert!(
+      !broadcasts
+        .iter()
+        .any(|msg| matches!(msg, Message::Dead(d) if d.node_ref() == &m)),
+      "no Dead(M) is broadcast",
+    );
+  }
+
+  /// The gate defers the SWEEP; it does not make a feed membership-inert.
+  /// Evidence merged out of an inbound push/pull still drives a transition at
+  /// the feed instant — here a remote `Suspect` accusation moves a locally
+  /// `Alive` member — exactly as it does on the gossip plane.
+  #[test]
+  fn gated_feed_still_applies_merged_remote_evidence() {
+    use crate::typed::{Alive, State};
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+    let coord_addr = addr(7337);
+
+    let mut coord = coord(7337);
+    coord.handle_alive(
+      m_addr,
+      Alive::new(inc, crate::Node::new(m.clone(), m_addr)),
+      now,
+    );
+    while coord.poll_event().is_some() {}
+    let _ = coord.endpoint_mut().drain_broadcasts();
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Alive),
+      "M starts Alive",
+    );
+    coord.set_feed_advances_membership_time(false);
+
+    let t = now + Duration::from_secs(1);
+    let blob = dialer_push_pull_advertising_suspect(7338, &m, m_addr, inc, coord_addr, t);
+    let exchange = coord
+      .accept_connection(m_addr, t)
+      .expect("connection admitted while running");
+    coord.handle_transport_data(exchange, &blob, true, t);
+
+    assert_eq!(
+      coord.membership_time_advances(),
+      0,
+      "the feed ran no membership sweep",
+    );
+    assert_eq!(
+      coord.endpoint_ref().member_liveness(&m),
+      Some(State::Suspect),
+      "the merged remote accusation still transitions M at the feed instant",
+    );
+  }
+
+  /// The other evidence path the gate must leave alone: a reliable-ping ack is
+  /// judged against its probe's own ABSOLUTE failure deadline, not against the
+  /// tick that carries it. An ack applied at or after that deadline terminates
+  /// the probe and suspects the target AT THE FEED INSTANT — gating it would
+  /// rescue a probe that has already spent its budget.
+  #[test]
+  fn gated_feed_still_fails_a_probe_on_a_past_deadline_ack() {
+    use crate::{
+      event::Transmit,
+      typed::{Alive, Message, State},
+    };
+    let now = Instant::now();
+    // The responder coordinator is the ping's target, so it must carry the
+    // exact id/address the probe addresses (`endpoint()` names a node
+    // `n-<port>` at loopback `<port>`).
+    let m_port = 7341u16;
+    let m = SmolStr::new(format!("n-{m_port}"));
+    let m_addr = addr(m_port);
+    let coord_addr = addr(7340);
+
+    let mut prober = coord(7340);
+    prober.handle_alive(
+      m_addr,
+      Alive::new(1, crate::Node::new(m.clone(), m_addr)),
+      now,
+    );
+    while prober.poll_event().is_some() {}
+    prober.start_scheduling(now);
+
+    // The probe scheduler starts a Detection probe on the only peer. Its
+    // cumulative failure deadline is `t0 + probe_interval` (awareness clean),
+    // and `t0` is past the scheduler's randomized first-fire stagger (bounded
+    // by one `probe_interval`).
+    let t0 = now + Duration::from_secs(2);
+    prober.handle_timeout(t0);
+    let mut probe_seq = None;
+    while let Some(tx) = prober.poll_memberlist_transmit() {
+      // The probe's datagram is compounded with whatever gossip is queued.
+      let messages: &[Message<SmolStr, SocketAddr>] = match &tx {
+        Transmit::Packet(p) => core::slice::from_ref(p.message_ref()),
+        Transmit::Compound(c) => c.messages_slice(),
+      };
+      for msg in messages {
+        if let Message::Ping(ping) = msg {
+          probe_seq = Some(ping.sequence_number());
+        }
+      }
+    }
+    let probe_seq = probe_seq.expect("the probe scheduler emitted a direct Ping");
+
+    // Open the probe's reliable fallback with a stream deadline well past the
+    // probe's own, so the ack below reaches the FSM instead of being rejected
+    // by the stream's byte gate — the ack-versus-deadline race the probe's
+    // cutoff exists to decide.
+    let fallback_sid = prober.start_reliable_ping(
+      m.clone(),
+      m_addr,
+      probe_seq,
+      t0 + Duration::from_secs(60),
+      t0,
+    );
+    // The scheduler tick above also started its own push/pull exchange, so the
+    // fallback's connection is identified by its `StreamId`, not by position.
+    let mut fallback = None;
+    while let Some(act) = prober.poll_action() {
+      if let StreamAction::Connect(c) = act
+        && c.stream_id() == fallback_sid
+      {
+        fallback = Some(c.id());
+      }
+    }
+    let fallback = fallback.expect("the fallback dial surfaced a Connect");
+    let mut request = Vec::new();
+    while let Some((id, _peer, chunk)) = prober.poll_transport_transmit() {
+      if id == fallback {
+        request.extend_from_slice(&chunk);
+      }
+    }
+    assert!(!request.is_empty(), "the fallback queued its ping request");
+
+    // The target answers the ping over the same connection.
+    let mut responder = coord(m_port);
+    let inbound = responder
+      .accept_connection(coord_addr, t0)
+      .expect("the target admits the fallback connection");
+    responder.handle_transport_data(inbound, &request, false, t0);
+    let mut ack = Vec::new();
+    while let Some((_id, _peer, chunk)) = responder.poll_transport_transmit() {
+      ack.extend_from_slice(&chunk);
+    }
+    assert!(!ack.is_empty(), "the target answered with an ack");
+
+    prober.set_feed_advances_membership_time(false);
+    let advances_before = prober.membership_time_advances();
+
+    // The ack lands after the probe's cumulative deadline (`t0 + 1 s`).
+    let t2 = t0 + Duration::from_secs(2);
+    // The peer answered and hung up, so the response rides its FIN — the
+    // one-shot request/response shape of a reliable ping.
+    prober.handle_transport_data(fallback, &ack, true, t2);
+
+    assert_eq!(
+      prober.membership_time_advances(),
+      advances_before,
+      "the gated feed ran no membership sweep",
+    );
+    assert_eq!(
+      prober.endpoint_ref().member_liveness(&m),
+      Some(State::Suspect),
+      "the past-deadline ack still terminated the probe at the feed instant",
+    );
+  }
+
+  /// The configuration and lifecycle entry points never advanced membership
+  /// time and still do not: only a tick does, and the gate does not change
+  /// which entry points run one.
+  #[test]
+  fn configuration_and_lifecycle_paths_never_advance_membership_time() {
+    let now = Instant::now();
+    let m = SmolStr::new("m-node");
+    let m_addr = addr(7303);
+    let inc = 5u32;
+
+    let mut coord = coord_with_suspect_member(7342, &m, m_addr, inc, now);
+    let t = now + Duration::from_secs(30);
+
+    for gate in [true, false] {
+      coord.set_feed_advances_membership_time(gate);
+      let before = coord.membership_time_advances();
+      let _ = coord.accept_connection(addr(7343), t);
+      let _ = coord.start_push_pull(addr(7344), PushPullKind::Join, t);
+      let _ = coord.poll_timeout();
+      assert_eq!(
+        coord.membership_time_advances(),
+        before,
+        "no `start_*` / accept / poll path advances membership time (gate = {gate})",
+      );
+    }
+
+    let before = coord.membership_time_advances();
+    coord.leave(t).expect("a running endpoint can leave");
+    assert_eq!(
+      coord.membership_time_advances(),
+      before,
+      "leave advances no membership time",
+    );
+  }
+
   /// A meta blob at exactly `META_MAX` — the largest a member may advertise
   /// under the oversized rig config.
   const META_MAX: usize = 256;

@@ -1287,13 +1287,23 @@ where
     // Build the coordinator with all transforms disabled, then layer in each
     // configured transform whose backend is built in. With none built in the
     // base coordinator carries no transform state and the planes stay plaintext.
-    #[allow(unused_mut)]
     let mut endpoint = StreamEndpoint::new(
       ep,
       label_opts,
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
       Box::new(|addr: &SocketAddr| *addr),
     );
+    // A pump feeds every reliable connection (phase 3) and every synchronous
+    // dial rejection (1c and 7) before its single machine tick (step 6). None
+    // of those feeds may run the membership sweep in between: a refutation
+    // carried by a later connection of the same pump — or by a later 4 KiB
+    // chunk of the same connection, which the phase-3 read loop feeds
+    // separately — would land after the sweep had already turned the suspicion
+    // it refutes into a `Dead`. With the sweep confined to step 6, and with no
+    // early exit between phase 3 and it, every pump sweeps exactly once, after
+    // all of its evidence. Evidence-driven transitions are untouched: they
+    // still apply at the instant of the feed that carries them.
+    endpoint.set_feed_advances_membership_time(false);
     #[cfg(compression)]
     endpoint.set_compression_options(transform.compression);
     #[cfg(encryption)]
@@ -2244,11 +2254,13 @@ where
   ///    that view declares, plus one probe pop, unwrapping, decoding and feeding
   ///    each datagram's typed messages to `handle_packet` as it is popped.
   /// 3. **Reliable ingress pump** — drain each connection's rx into
-  ///    `handle_transport_data`; deliver a one-shot EOF on peer FIN.
+  ///    `handle_transport_data`; deliver a one-shot EOF on peer FIN. These
+  ///    feeds do not advance membership time.
   /// 1c. **Rebalance** — self-heal a missing listener, then assign any remaining
   ///    free slots to deferred dials (listener-first).
   /// 5. **Join-seed drain** — `start_push_pull(seed, Join, now)` per queued seed.
-  /// 6. **Machine tick** — `handle_timeout` fires due timers.
+  /// 6. **Machine tick** — `handle_timeout` fires due timers; the pump's
+  ///    single membership sweep.
   /// 7a–7e. **Stream actions + egress** — drain `poll_action`, promote, pump
   ///    outbound, flush deferred FINs, complete `Closing` drains, re-rebalance,
   ///    then drain + send outbound gossip.
@@ -2282,12 +2294,20 @@ where
   /// conforming ring never sets it — not even an exactly-full one, whose probe pop
   /// finds nothing.
   ///
-  /// One same-instant ordering residual survives, on the reliable plane only:
-  /// within phase 3 an earlier connection's feed can run a transitive sweep before
-  /// a later connection's bytes — read at the same instant — are fed, so a
-  /// refutable deadline falling within the last pump interval can fire ahead of
-  /// the evidence that would have refuted it. It is pre-existing on main and in
-  /// the standard drivers, and closing it needs a non-ticking feed in the machine.
+  /// The reliable plane holds the same property. The coordinator is built with
+  /// its feeds not advancing membership time, so no phase-3 feed — and no
+  /// synchronous dial rejection at 1c or 7 — runs the membership sweep. Step 6
+  /// is the pump's only sweep, and it sees every gossip datagram and every
+  /// reliable byte, EOF and transport fault this pump observed, including the
+  /// second and later `READ_BUF` chunks of one connection. So no refutable
+  /// deadline can fire between two feeds of the same pump.
+  ///
+  /// Evidence-driven transitions still apply at the instant of the feed that
+  /// carries them, exactly as on the gossip plane: a reliable ping ack is
+  /// judged against its probe's own absolute failure deadline, and a merged
+  /// remote `Left` / `Dead` / `Suspect` applies where it lands. What a feed
+  /// cannot do is expire a suspicion — that is step 6's alone — so none can
+  /// synthesize a `Dead` that a later feed of the same pump would refute.
   pub fn pump<G, S>(&mut self, now: Instant, gossip: &mut G, stream: &mut S) -> Option<Instant>
   where
     G: GossipIo,
@@ -2310,8 +2330,9 @@ where
     //                           take any remaining slots (listener-first)
     //
     // They are no longer adjacent: the two ingress feeds (phases 2 and 3) run
-    // between them, because `rebalance_pool` can sweep the machine and `1b`
-    // cannot. Their relative order — and with it listener priority — is unchanged.
+    // between them, because `rebalance_pool` reaches the machine's synchronous
+    // dial-rejection path and `1b` does not. Their relative order — and with it
+    // listener priority — is unchanged.
     //
     // 1b. Accept an inbound connection completed on the listener and replenish the
     // listener from the pool.
@@ -2465,13 +2486,15 @@ where
     // (step 6) is required: a `PendingDial` deferred on a PRIOR tick must be
     // assigned a freed slot and dialed before step 6's `handle_timeout` could
     // elapse its bridge and tear it down — so the early site cannot move later.
-    // Running it AFTER both evidence feeds is required for the same reason in the
-    // other direction: a dial this call rejects synchronously (a CIDR-blocked or
-    // unroutable peer) terminalizes through the machine, whose tick would sweep
-    // membership at `now` — ahead of this pump's gossip and reliable evidence if it
-    // ran first. A prior-tick `PendingDial` parked here is unaffected by the two
-    // feeds: they mark only their own bridges dirty, and a parked dial's bridge has
-    // no residual work, so nothing between 1b and here can elapse it.
+    // Running it AFTER both evidence feeds keeps the other direction ordered too:
+    // a dial this call rejects synchronously (a CIDR-blocked or unroutable peer)
+    // terminalizes through the machine, and the coordinator's feeds are the paths
+    // whose membership-sweep the pump has confined to step 6 — so keeping the
+    // rejection behind this pump's gossip and reliable evidence holds the phase
+    // order together independently of that setting. A prior-tick `PendingDial`
+    // parked here is unaffected by the two feeds: they mark only their own bridges
+    // dirty, and a parked dial's bridge has no residual work, so nothing between 1b
+    // and here can elapse it.
     self.rebalance_pool(now, stream);
 
     // 5. Drain join seeds: each seed queued by `join()` gets a push/pull exchange

@@ -32,6 +32,18 @@ wire with the legacy `0.x` hand-rolled codec below.
   reliable-send / join waiter resolves at leave rather than hanging until
   shutdown. `Event` is deliberately exhaustive and gains variants in `0.x`
   minor releases; match it exhaustively.
+- `StreamEndpoint` gains `feed_advances_membership_time` /
+  `set_feed_advances_membership_time`. By default (`true`) the reliable-plane
+  feeds (`handle_transport_data`, `handle_transport_error`,
+  `handle_dial_failed`) run the full coordinator tick, membership sweep
+  included — today's behavior, unchanged. A driver that feeds several
+  connections per wake can clear it so `Endpoint::handle_timeout` runs only
+  from the coordinator's own `handle_timeout`, making the driver's explicit
+  tick the single membership sweep of a wake; evidence-driven transitions
+  (a reliable ping ack against its probe's deadline, a merged remote
+  `Left` / `Dead` / `Suspect`) still apply at every feed instant. The embedded
+  engine opts in, so its pump applies all of a pump's gossip and reliable
+  input before one sweep; the async drivers keep the default.
 
 ### Behavior changes
 
