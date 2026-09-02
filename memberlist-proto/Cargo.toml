@@ -187,7 +187,7 @@ humantime = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 
 # Wire types, codec, and framing.
-buffa = { version = "0.8", default-features = false }
+buffa = { version = "0.9", default-features = false }
 cheap-clone = { workspace = true, features = [
   "smol_str_0_3",
   "bytes_1",
