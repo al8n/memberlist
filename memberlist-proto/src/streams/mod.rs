@@ -28,6 +28,13 @@
 //! same-tick-settled handshake must cancel a same-tick suspicion expiry as a
 //! `Suspect -> Alive` cancel, not fire a spurious `Dead -> Alive` flap.
 //!
+//! That order holds WITHIN one tick. A driver that feeds several connections —
+//! or several transport reads of one connection — per wake gets one tick per
+//! feed, so by default a membership sweep runs BETWEEN two feeds of the same
+//! wake. [`StreamEndpoint::set_feed_advances_membership_time`] turns that off,
+//! making the driver's own `handle_timeout` the wake's single sweep so every
+//! refutation the wake carries is applied before it.
+//!
 //! # Transport half-close anchors
 //!
 //! A record layer with an in-band close (TLS `close_notify`) anchors its
@@ -357,6 +364,11 @@ where
   /// (Sans-I/O forbids `Instant::now()`). Stays `None` only before the very
   /// first `handle_*` / `start_*` call.
   last_now: Option<Instant>,
+  /// Whether the reliable-plane feeds — [`Self::handle_transport_data`],
+  /// [`Self::handle_transport_error`], [`Self::handle_dial_failed`] — advance
+  /// membership time, i.e. run [`Endpoint::handle_timeout`] inside their tick.
+  /// `true` by default. See [`Self::set_feed_advances_membership_time`].
+  feed_advances_membership_time: bool,
   /// Latch set by [`Self::set_encryption_options`] when it failed at least
   /// one bridge as part of a runtime policy change. A terminal bridge
   /// returns no per-bridge timeout, and an idle endpoint may have no
@@ -394,6 +406,15 @@ where
   /// an id is added when its exchange is created (dial / accept) and removed when
   /// the mint is taken (or the bridge terminalizes before settling).
   unminted: BTreeSet<ExchangeId>,
+  /// Test-only counter incremented once per [`Endpoint::handle_timeout`] call
+  /// the coordinator's tick makes, i.e. once per membership-time advance.
+  /// Exists ONLY for the regression tests that assert the MECHANISM rather
+  /// than a downstream symptom: that a feed advances membership time exactly
+  /// once by default, and zero times once
+  /// [`Self::set_feed_advances_membership_time`] has cleared the gate.
+  /// Never compiled into production builds.
+  #[cfg(all(test, feature = "tcp"))]
+  membership_time_advances: u64,
 }
 
 /// Compress one outbound gossip datagram for the wire — the body of
@@ -504,6 +525,88 @@ where
   /// graceful-drain `close_timeout` for the post-`Close` residual flush.
   pub fn stream_timeout(&self) -> core::time::Duration {
     self.ep.stream_timeout()
+  }
+
+  /// Whether the reliable-plane feeds advance membership time.
+  /// See [`Self::set_feed_advances_membership_time`].
+  pub const fn feed_advances_membership_time(&self) -> bool {
+    self.feed_advances_membership_time
+  }
+
+  /// Choose whether the reliable-plane feeds
+  /// ([`Self::handle_transport_data`], [`Self::handle_transport_error`],
+  /// [`Self::handle_dial_failed`]) advance membership time.
+  ///
+  /// With `true` (the default) every feed runs the full coordinator tick,
+  /// [`Endpoint::handle_timeout`] included: a suspicion, probe, forward,
+  /// intent, or scheduler deadline due at the feed's `now` fires inside that
+  /// feed. A driver that feeds several connections — or several transport
+  /// reads of one connection — on one wake therefore runs the membership sweep
+  /// BETWEEN them, so a refutation carried by a later feed of that same wake (a
+  /// push/pull `Alive`) lands after the sweep has already turned the suspicion
+  /// it refutes into a `Dead`: a `NodeLeft` followed by a `NodeJoined`, a pair
+  /// the machine's own within-tick order (apply ingress, then sweep) never
+  /// produces.
+  ///
+  /// With `false` a feed still runs every other step of the tick — bridge
+  /// pump, label / handshake-settled mint, buffered-plaintext replay, bridge
+  /// and stream deadline reaps, [`Event::ExchangeCompleted`], `Close` /
+  /// `Abort` actions, dial servicing, and outbound transmits — but not
+  /// [`Endpoint::handle_timeout`], which then runs only from
+  /// [`Self::handle_timeout`]. That is already the contract of every other
+  /// entry point ([`Self::handle_gossip`], [`Self::handle_packet`],
+  /// [`Self::accept_connection`], the `start_*` wrappers and the `leave*`
+  /// family never advance membership time), and the one the QUIC coordinator's
+  /// inbound path keeps unconditionally — there only its `handle_timeout`
+  /// advances membership time, so a probe `Ack` riding an inbound datagram can
+  /// never be timed out before it is decoded.
+  ///
+  /// # What a feed still does with the gate cleared
+  ///
+  /// Clearing the gate defers the membership SWEEP; it does not make a feed
+  /// membership-inert. Evidence applied at the feed instant still drives
+  /// transitions, exactly as it already does on the gossip plane: a reliable
+  /// ping ack delivered at or after its probe's cumulative failure deadline
+  /// still terminates that probe and Suspects the peer, and a merged remote
+  /// `Left` / `Dead` / `Suspect` entry still applies. Neither is gated, and
+  /// neither may be: the ack is judged against the probe's own ABSOLUTE
+  /// deadline, so gating it would rescue a probe past its budget.
+  ///
+  /// What the gate removes is the only way a feed can synthesize a `Dead` out
+  /// of the passage of time — expiring a suspicion, which happens solely
+  /// inside [`Endpoint::handle_timeout`]. The strongest transition a gated feed
+  /// can still make is `Alive -> Suspect`, which a later feed of the same wake
+  /// can refute; the `NodeLeft`-then-`NodeJoined` pair above needs a `Dead` no
+  /// feed can now produce.
+  ///
+  /// # Driver contract
+  ///
+  /// REQUIRED: honor [`Self::poll_timeout`]. A deadline no feed swept keeps
+  /// being reported due — the returned instant is a minimum over ABSOLUTE
+  /// deadlines, so it stays at or before the driver's `now` until a
+  /// [`Self::handle_timeout`] sweeps it. A driver that wakes on its poll
+  /// deadline therefore DEFERS a sweep; it never loses one.
+  ///
+  /// RECOMMENDED: call [`Self::handle_timeout`] after the wake's last feed, as
+  /// the embedded engine's pump does. That bounds the deferral to one wake and
+  /// buys the property the gate exists for — all of the wake's evidence is
+  /// applied before its single sweep.
+  ///
+  /// The inbound push/pull reply is served from a snapshot only the sweep
+  /// rebuilds, so with the gate cleared the second and later replies of a wake
+  /// reflect membership as of the previous [`Self::handle_timeout`] rather than
+  /// a mid-wake refresh: one wake stale, and merged by the receiver under the
+  /// ordinary incarnation rules.
+  ///
+  /// The default leaves every existing driver byte-identical. The gate is
+  /// opt-in and currently taken up by the embedded engine alone; the async
+  /// drivers batch several feeds per wake and so remain subject to the
+  /// same-wake ordering it removes, which is a separate change with its own
+  /// timing validation. Changing the value while running is safe and takes
+  /// effect on the next feed; the supported shape is to set it once at
+  /// construction.
+  pub fn set_feed_advances_membership_time(&mut self, advance: bool) {
+    self.feed_advances_membership_time = advance;
   }
 
   /// The configured cross-transport compression options.
@@ -876,10 +979,13 @@ where
       dial_pending: VecDeque::new(),
       pending_outbound_kinds: FxHashMap::default(),
       last_now: None,
+      feed_advances_membership_time: true,
       policy_reap_pending: false,
       dirty: BTreeSet::new(),
       pumped: BTreeSet::new(),
       unminted: BTreeSet::new(),
+      #[cfg(all(test, feature = "tcp"))]
+      membership_time_advances: 0,
     }
   }
 
@@ -899,6 +1005,15 @@ where
   #[cfg(all(test, feature = "tls"))]
   pub(crate) fn pending_outbound_kinds_len(&self) -> usize {
     self.pending_outbound_kinds.len()
+  }
+
+  /// Count of membership-time advances ([`Endpoint::handle_timeout`] calls
+  /// made by the coordinator's tick). A feed must bump this exactly once with
+  /// [`Self::feed_advances_membership_time`] set and not at all once it is
+  /// cleared; [`Self::handle_timeout`] bumps it either way.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn membership_time_advances(&self) -> u64 {
+    self.membership_time_advances
   }
 
   /// Build the coordinator with an explicit cross-transport compression
@@ -2486,6 +2601,9 @@ where
   ///
   /// Routes `bytes` into the owning bridge's
   /// [`StreamBridge::handle_transport_data`], then runs a coordinator tick.
+  /// Whether that tick advances membership time — runs the membership sweep
+  /// [`Endpoint::handle_timeout`] — is [`Self::feed_advances_membership_time`];
+  /// every other step of the tick runs either way.
   ///
   /// `eof = true` signals the transport `read == 0` half-close anchor — the
   /// out-of-band peer-FIN a transport with no in-band close (plain TCP)
@@ -2501,13 +2619,16 @@ where
   /// A `(bytes.len() > 0, eof = true)` delivery — bytes followed by an
   /// observed `read == 0` on the same wake — is fed in two steps: the bytes
   /// first (one full pump), then an empty-slice EOF (the recv-half retirement
-  /// anchor). The single coordinator tick at the end advances time once.
+  /// anchor). Both steps share the single coordinator tick at the end, which
+  /// advances membership time once — or not at all, when
+  /// [`Self::feed_advances_membership_time`] is cleared and the driver's own
+  /// [`Self::handle_timeout`] is the wake's only sweep.
   pub fn handle_transport_data(&mut self, id: ExchangeId, bytes: &[u8], eof: bool, now: Instant) {
     self.last_now = Some(now);
     if let Some(bridge) = self.conns.get_mut(id) {
       if !bytes.is_empty() {
         // Ignoring Err: an `Err` means the bridge terminalized (label /
-        // decode / transport failure); `run_tick`'s `pump_bridges` reaps it
+        // decode / transport failure); the tick's `pump_bridges` reaps it
         // and emits the `Close` action. There is no separate action here.
         let _ = bridge.handle_transport_data(bytes, now);
       }
@@ -2523,7 +2644,7 @@ where
       }
     }
     self.dirty.insert(id);
-    self.run_tick(now);
+    self.tick(now, self.feed_advances_membership_time);
   }
 
   /// The driver's outbound dial task for exchange `id` failed to connect
@@ -2543,13 +2664,16 @@ where
   /// exchange as a genuine failure regardless of kind, so the driver's parked
   /// reliable-send waiter resolves with an error. A no-op if the exchange's
   /// bridge was already reaped (a same-tick `Close`/`Abort` from the machine).
+  ///
+  /// The tick this runs advances membership time only while
+  /// [`Self::feed_advances_membership_time`] is set.
   pub fn handle_dial_failed(&mut self, id: ExchangeId, now: Instant) {
     self.last_now = Some(now);
     if let Some(bridge) = self.conns.get_mut(id) {
       bridge.fail_dial_retired();
     }
     self.dirty.insert(id);
-    self.run_tick(now);
+    self.tick(now, self.feed_advances_membership_time);
   }
 
   /// The driver observed a mid-exchange transport ERROR (a read/write I/O
@@ -2565,13 +2689,16 @@ where
   /// down that benign path would falsely resolve the exchange's `send_reliable`
   /// as success though the write never reached the peer. A no-op if the bridge
   /// was already reaped (a same-tick `Close` / `Abort` from the machine).
+  ///
+  /// The tick this runs advances membership time only while
+  /// [`Self::feed_advances_membership_time`] is set.
   pub fn handle_transport_error(&mut self, id: ExchangeId, now: Instant) {
     self.last_now = Some(now);
     if let Some(bridge) = self.conns.get_mut(id) {
       bridge.fail_connection_lost();
     }
     self.dirty.insert(id);
-    self.run_tick(now);
+    self.tick(now, self.feed_advances_membership_time);
   }
 
   /// Initiate an outbound push/pull state exchange with `peer` and attempt the
@@ -2701,6 +2828,12 @@ where
     self.run_tick(now);
   }
 
+  /// The driver's explicit tick: the full per-tick step order, membership
+  /// sweep included.
+  fn run_tick(&mut self, now: Instant) {
+    self.tick(now, true);
+  }
+
   /// The fixed per-tick step order (load-bearing — see module docs).
   ///
   /// Step (2) (pump every bridge + drain each non-terminal stream's
@@ -2745,7 +2878,15 @@ where
   /// on bridges already serviced upstream. There is NO connection drained-reap
   /// step (connection-per-exchange — a reaped bridge frees its own connection
   /// via the `Close` action).
-  fn run_tick(&mut self, now: Instant) {
+  ///
+  /// `advance_membership_time` gates step (3) (`ep.handle_timeout`) and only
+  /// that step: `true` for the driver's explicit [`Self::handle_timeout`], and
+  /// [`Self::feed_advances_membership_time`] for the reliable-plane feeds, so a
+  /// driver can make its explicit tick the single membership sweep of a wake.
+  /// Every other step runs on every tick — a gated feed still reaps its
+  /// bridge and stream deadlines, mints and replays a settled handshake, and
+  /// applies the evidence it carries.
+  fn tick(&mut self, now: Instant, advance_membership_time: bool) {
     // (1) inbound feed already done by the caller (`handle_transport_data`).
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
     self.pump_bridges(now);
@@ -2758,8 +2899,15 @@ where
     // must cancel a suspicion expiry as a Suspect -> Alive, not fire
     // Dead -> Alive).
     self.pump_bridges(now);
-    // (3) THEN membership timers (probe cumulative-deadline, suspicion).
-    self.ep.handle_timeout(now);
+    // (3) THEN membership timers (probe cumulative-deadline, suspicion) — only
+    // on a tick that advances membership time.
+    if advance_membership_time {
+      #[cfg(all(test, feature = "tcp"))]
+      {
+        self.membership_time_advances = self.membership_time_advances.saturating_add(1);
+      }
+      self.ep.handle_timeout(now);
+    }
     // (5) dial requests emitted by (3).
     self.service_dials(now);
     // (5.5) promote any dial bridge whose records are not handshaking from
