@@ -12,6 +12,14 @@ use core::time::Duration;
 /// and its closing socket are reclaimed on the same order of timescale.
 pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default [`Options::ingress_packets_per_poll`]: 16 device packets.
+///
+/// Twice the default `udp_rx_packets`, so a burst that fills the gossip ring
+/// still leaves per-poll budget for the reliable plane's segments, while a
+/// sustained flood is cut off after a bounded amount of stack work and the engine
+/// runs on every call.
+pub const DEFAULT_INGRESS_PACKETS_PER_POLL: usize = 16;
+
 /// Sizing and ports for [`Memberlist`](crate::Memberlist). All buffers are
 /// fixed-capacity at construction (smoltcp has no growable backing on no_std);
 /// gossip overflow drops, reliable overflow backpressures.
@@ -32,11 +40,11 @@ pub struct Options {
   pub tcp_socket_tx_bytes: usize,
   /// UDP rx datagram metadata slots.
   ///
-  /// Must be strictly below the engine's per-pump gossip read cap
-  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]), which construction enforces —
-  /// here, before the UDP arenas this count sizes are allocated, and again in the
-  /// engine against the bound socket. The engine applies every datagram it pops
-  /// within that pump, so this count is the per-pump gossip work budget.
+  /// Must be strictly below [`gossip_read_cap`](Self::gossip_read_cap), which
+  /// construction enforces — here, before the UDP arenas this count sizes are
+  /// allocated, and again in the engine against the bound socket. The engine
+  /// applies every datagram it pops within that pump, so this count is the
+  /// per-pump gossip work budget.
   pub udp_rx_packets: usize,
   /// UDP tx datagram metadata slots.
   pub udp_tx_packets: usize,
@@ -44,6 +52,45 @@ pub struct Options {
   pub udp_rx_payload_bytes: usize,
   /// UDP tx payload byte arena.
   pub udp_tx_payload_bytes: usize,
+  /// The engine's per-pump gossip work ceiling, forwarded to
+  /// [`memberlist_embedded::Options::gossip_read_cap`].
+  ///
+  /// Construction rejects a [`udp_rx_packets`](Self::udp_rx_packets) at or above
+  /// it (before the UDP arenas are allocated), and the engine rejects a bound
+  /// gossip socket whose receive ring reaches it. A pump applies every datagram it
+  /// pops, so this bounds the unwrap/decode/apply work one
+  /// [`poll`](crate::Memberlist::poll) spends on gossip; its byte implication is
+  /// `gossip_read_cap × (gossip_mtu + transform overhead)`.
+  ///
+  /// Must be non-zero. Defaults to [`memberlist_embedded::GOSSIP_READ_CAP`].
+  pub gossip_read_cap: usize,
+  /// Maximum device packets one [`poll`](crate::Memberlist::poll) feeds into the
+  /// smoltcp stack before it runs the engine.
+  ///
+  /// smoltcp's own `Interface::poll` drains the device until it stops yielding,
+  /// which is unbounded work when packets arrive faster than they are processed —
+  /// its documented DoS caveat. A caller-driven super-loop has no preemption, so
+  /// an unbounded ingress phase would starve every SWIM timer, the application's
+  /// event drain, and whatever else shares the loop. `poll` therefore feeds at
+  /// most this many packets per call and always reaches the engine; when the
+  /// budget is spent with the device still yielding, `poll` returns an
+  /// already-due deadline meaning "device backlog remains: service your other
+  /// work, then poll again".
+  ///
+  /// This is a device-fairness knob, INDEPENDENT of the gossip ring: a gossip
+  /// datagram arriving with no free slot in [`udp_rx_packets`](Self::udp_rx_packets)
+  /// is tail-dropped by smoltcp's UDP socket inside the ingress loop whatever this
+  /// value is (`udp::Socket::process` drops on a full rx buffer). So raising it
+  /// buys TCP and device progress per poll, not gossip intake — raise
+  /// `udp_rx_packets` (below [`gossip_read_cap`](Self::gossip_read_cap)) for that.
+  ///
+  /// The tradeoff is throughput against latency: a larger budget clears more of a
+  /// device backlog per call and amortises the per-poll engine work, while a
+  /// smaller one returns to the caller — and to the SWIM timers — sooner under
+  /// sustained ingress. Must be non-zero; the default of 16 is twice the shipped
+  /// `udp_rx_packets`, so an idle-to-busy burst that fills the gossip ring still
+  /// leaves budget for the reliable plane's segments in the same poll.
+  pub ingress_packets_per_poll: usize,
   /// Maximum time a gracefully-closing TCP socket may stay parked before it is
   /// force-aborted and returned to the pool.
   ///
@@ -75,6 +122,8 @@ impl Default for Options {
       udp_tx_packets: 8,
       udp_rx_payload_bytes: 8 * 1500,
       udp_tx_payload_bytes: 8 * 1500,
+      gossip_read_cap: memberlist_embedded::GOSSIP_READ_CAP,
+      ingress_packets_per_poll: DEFAULT_INGRESS_PACKETS_PER_POLL,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
       #[cfg(feature = "cidr")]
       cidr_policy: None,
@@ -104,6 +153,20 @@ impl Options {
   /// Override the graceful-close timeout (see [`Options::close_timeout`]).
   pub fn with_close_timeout(mut self, d: Duration) -> Self {
     self.close_timeout = d;
+    self
+  }
+
+  /// Override the engine's per-pump gossip work ceiling (see
+  /// [`Options::gossip_read_cap`]). Must be non-zero.
+  pub fn with_gossip_read_cap(mut self, cap: usize) -> Self {
+    self.gossip_read_cap = cap;
+    self
+  }
+
+  /// Override the per-poll device ingress budget (see
+  /// [`Options::ingress_packets_per_poll`]). Must be non-zero.
+  pub fn with_ingress_packets_per_poll(mut self, n: usize) -> Self {
+    self.ingress_packets_per_poll = n;
     self
   }
 

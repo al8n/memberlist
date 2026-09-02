@@ -304,11 +304,12 @@ fn invalid_config_is_rejected_before_resolution() {
 // inbound reliable streams; without that re-arm the listener stays `Closed` and the
 // DoS is permanent rather than bounded to one timeout window.
 
+use core::cell::RefCell;
 use smoltcp::{
   phy::{ChecksumCapabilities, DeviceCapabilities, RxToken, TxToken},
   time::Instant as SmolInstant,
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{collections::VecDeque, rc::Rc};
 
 /// A shared in-memory IP-frame FIFO (one direction of a paired link).
 #[derive(Clone)]
@@ -446,5 +447,238 @@ fn poll_re_arms_a_listener_reaped_by_the_inactivity_timeout() {
     "poll must re-arm the listener the inactivity timeout reaped, so the node \
      accepts inbound reliable streams again (mutation anchor: without poll's \
      re-arm the listener stays Closed and this is false)"
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bounded stack ingress. smoltcp's `Interface::poll` drains the device until it
+// stops yielding, so a device that keeps producing packets keeps the call inside
+// smoltcp: on a caller-driven super-loop with no preemption that starves every
+// SWIM timer, the event drain, and whatever else shares the loop. `poll` feeds a
+// bounded number of packets instead and always reaches the engine, signalling the
+// unread remainder with an already-due deadline.
+
+use core::cell::Cell;
+
+/// A device with a scripted receive supply, counting what the stack takes and
+/// emits.
+///
+/// `remaining == None` is an inexhaustible backlog — the hostile/overloaded case,
+/// which the unbounded entry point would never finish draining. The frames are
+/// 20 zero bytes: a non-empty frame the stack accounts for as processed, whose IP
+/// version matches neither v4 nor v6, so it is dropped without touching a socket
+/// or emitting a reply.
+struct FloodDevice {
+  remaining: Option<usize>,
+  receives: Rc<Cell<usize>>,
+  emitted: Rc<Cell<usize>>,
+}
+
+impl FloodDevice {
+  /// A device with nothing to deliver.
+  fn quiet() -> Self {
+    Self {
+      remaining: Some(0),
+      receives: Rc::new(Cell::new(0)),
+      emitted: Rc::new(Cell::new(0)),
+    }
+  }
+
+  /// Supply `n` more frames, or an inexhaustible backlog when `n` is `None`.
+  fn supply(&mut self, n: Option<usize>) {
+    self.remaining = n;
+  }
+
+  /// Frames the stack has taken from the device (one per ingress iteration).
+  fn receives(&self) -> usize {
+    self.receives.get()
+  }
+
+  /// Frames the stack has actually put on the wire.
+  fn emitted(&self) -> usize {
+    self.emitted.get()
+  }
+
+  fn reset_counters(&mut self) {
+    self.receives.set(0);
+    self.emitted.set(0);
+  }
+}
+
+/// A TX token that counts the frames the stack emits.
+struct CountingTx(Rc<Cell<usize>>);
+
+impl TxToken for CountingTx {
+  fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+    let mut buf = std::vec![0u8; len];
+    let r = f(&mut buf);
+    self.0.set(self.0.get() + 1);
+    r
+  }
+}
+
+impl Device for FloodDevice {
+  type RxToken<'a> = IpRx;
+  type TxToken<'a> = CountingTx;
+
+  fn receive(&mut self, _t: SmolInstant) -> Option<(IpRx, CountingTx)> {
+    match self.remaining {
+      Some(0) => return None,
+      Some(ref mut n) => *n -= 1,
+      None => {}
+    }
+    self.receives.set(self.receives.get() + 1);
+    Some((IpRx(std::vec![0u8; 20]), CountingTx(self.emitted.clone())))
+  }
+
+  fn transmit(&mut self, _t: SmolInstant) -> Option<CountingTx> {
+    Some(CountingTx(self.emitted.clone()))
+  }
+
+  fn capabilities(&self) -> DeviceCapabilities {
+    let mut caps = DeviceCapabilities::default();
+    caps.medium = Medium::Ip;
+    caps.max_transmission_unit = 1500;
+    caps.checksum = ChecksumCapabilities::ignored();
+    caps
+  }
+}
+
+/// Build a started node with one statically-known peer, quiesced over `dev`.
+///
+/// The peer gives the SWIM schedulers a destination, so a due probe or gossip
+/// deadline produces an observable datagram on the wire.
+fn node_with_peer(
+  cfg: crate::Options,
+  dev: &mut FloodDevice,
+  now: memberlist_proto::Instant,
+) -> Memberlist<SmolStr, SocketAddr, FloodDevice> {
+  let mut m: Memberlist<SmolStr, SocketAddr, _> = Memberlist::new(
+    cfg,
+    ip_iface(),
+    TransformOptions::default(),
+    memberlist_proto::EndpointOptions::new(SmolStr::new("a"), addr(7946)),
+    &crate::SocketAddrResolver,
+    dev,
+    now,
+  );
+  m.start(now);
+  m.inject_alive(
+    SmolStr::new("peer"),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7946),
+    now,
+  );
+  // Drain the start-up burst so the counters below see only the poll under test.
+  m.poll(now, dev);
+  m
+}
+
+/// One `poll` over a device with an inexhaustible backlog RETURNS, having taken
+/// exactly the configured budget of packets, run the engine — an already-due
+/// timer fires and its datagram reaches the wire — and asked to be polled again
+/// at once.
+///
+/// This is the starvation regression. With the unbounded entry point the same
+/// device never lets the call reach the engine at all, so no SWIM deadline is
+/// ever enforced and the caller's loop never regains control.
+#[test]
+fn poll_bounds_ingress_fires_due_timers_and_asks_to_be_polled_again() {
+  for budget in [1usize, 4, crate::config::DEFAULT_INGRESS_PACKETS_PER_POLL] {
+    let t0 = memberlist_proto::Instant::from_origin(Duration::from_secs(86_400));
+    let mut dev = FloodDevice::quiet();
+    let mut m = node_with_peer(
+      crate::Options::new().with_ingress_packets_per_poll(budget),
+      &mut dev,
+      t0,
+    );
+
+    // Far enough past every periodic deadline armed at `start` that at least one
+    // is due, whatever the randomized schedule picked.
+    let t1 = t0 + Duration::from_secs(60);
+    dev.supply(None);
+    dev.reset_counters();
+    let next = m.poll(t1, &mut dev);
+
+    assert_eq!(
+      dev.receives(),
+      budget,
+      "budget {budget}: the ingress phase takes exactly the configured number of packets \
+       from a device that never runs dry"
+    );
+    assert!(
+      dev.emitted() > 0,
+      "budget {budget}: an already-due engine timer must fire inside the flooded poll and its \
+       datagram must reach the wire (mutation anchor: an unbounded ingress phase never \
+       reaches the engine)"
+    );
+    assert_eq!(
+      next,
+      Some(t1),
+      "budget {budget}: an exhausted budget means device backlog remains, so the caller is \
+       asked to poll again at once rather than sleep on a timer"
+    );
+  }
+}
+
+/// A device that runs dry inside the budget yields the stack's and the engine's
+/// real deadline — the already-due instant is reserved for an actual backlog, not
+/// folded on every poll.
+#[test]
+fn poll_returns_a_real_deadline_when_the_device_runs_dry_inside_the_budget() {
+  const BUDGET: usize = 8;
+  let t0 = memberlist_proto::Instant::from_origin(Duration::from_secs(86_400));
+  let mut dev = FloodDevice::quiet();
+  let mut m = node_with_peer(
+    crate::Options::new().with_ingress_packets_per_poll(BUDGET),
+    &mut dev,
+    t0,
+  );
+
+  let t1 = t0 + Duration::from_secs(60);
+  dev.supply(Some(BUDGET - 1));
+  dev.reset_counters();
+  let next = m.poll(t1, &mut dev);
+
+  assert_eq!(
+    dev.receives(),
+    BUDGET - 1,
+    "the loop stops as soon as the device reports nothing left, without spending the budget"
+  );
+  assert!(
+    next > Some(t1),
+    "a drained device leaves no backlog, so the returned deadline is the real next wake, \
+     not an already-due re-poll: got {next:?}"
+  );
+}
+
+/// Negative control for the bound: smoltcp's own `Interface::poll` — the entry
+/// point this driver no longer calls — drains the device to exhaustion whatever
+/// the driver's budget says, taking every one of the many-times-the-budget frames
+/// offered here plus the one that reports empty. Given the inexhaustible device
+/// of the regression above it would not return at all, which is precisely why the
+/// driver runs the bounded phases instead.
+#[test]
+fn smoltcp_interface_poll_ignores_the_drivers_ingress_budget() {
+  const OFFERED: usize = 4 * crate::config::DEFAULT_INGRESS_PACKETS_PER_POLL;
+  let mut dev = FloodDevice::quiet();
+  let mut cfg = IfConfig::new(HardwareAddress::Ip);
+  cfg.random_seed = 0x51a2_1166;
+  let mut iface = Interface::new(cfg, &mut dev, SmolInstant::from_millis(0));
+  iface.update_ip_addrs(|addrs| {
+    addrs
+      .push(IpCidr::new(crate::IpAddress::v4(10, 0, 0, 1), 24))
+      .expect("push ip");
+  });
+  let mut sockets = SocketSet::new(Vec::new());
+
+  dev.supply(Some(OFFERED));
+  dev.reset_counters();
+  iface.poll(SmolInstant::from_millis(1_000), &mut dev, &mut sockets);
+
+  assert_eq!(
+    dev.receives(),
+    OFFERED,
+    "the unbounded entry point drains the device to exhaustion, so no configured budget \
+     bounds it"
   );
 }

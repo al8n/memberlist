@@ -47,8 +47,8 @@ pub enum InitError {
   /// The shared engine rejected the configuration (see
   /// [`memberlist_embedded::InitError`]): a zero/over-ceiling gossip MTU, a
   /// non-routable or port-mismatched advertise address, a zero port or
-  /// close-timeout, a gossip UDP socket whose receive-packet capacity reaches the
-  /// engine's per-pump gossip read cap
+  /// close-timeout, a zero gossip read cap, a gossip UDP socket whose
+  /// receive-packet capacity reaches the engine's per-pump gossip read cap
   /// ([`GossipRecvCapacityTooLarge`](memberlist_embedded::InitError::GossipRecvCapacityTooLarge)),
   /// an unusable encryption keyring, or a machine-endpoint init failure (including
   /// an entropy draw failure).

@@ -5,10 +5,11 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::{
-  CompressionOptions, EncryptionOptions, Keyring, SecretKey, SeedableRng, SmallRng,
-  typed::NodeState,
-};
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
+use memberlist_proto::{SeedableRng, SmallRng, typed::NodeState};
 use smol_str::SmolStr;
 use std::vec::Vec;
 
@@ -218,6 +219,7 @@ fn make_engine() -> Engine<SmolStr, u32> {
 
 /// `set_compression_options` is accepted and the engine remains operational
 /// (a subsequent `pump` does not panic or error).
+#[cfg(compression)]
 #[test]
 fn set_compression_options_accepted_and_engine_still_pumps() {
   let mut engine = make_engine();
@@ -605,6 +607,7 @@ fn control_setters_reject_after_leave() {
     ),
     "queue_user_broadcast must reject after leave"
   );
+  #[cfg(compression)]
   assert!(
     matches!(
       engine.set_compression_options(CompressionOptions::default()),
@@ -612,6 +615,7 @@ fn control_setters_reject_after_leave() {
     ),
     "set_compression_options must reject after leave"
   );
+  #[cfg(encryption)]
   assert!(
     matches!(
       engine.set_encryption_options(EncryptionOptions::default()),
@@ -706,6 +710,7 @@ fn disabled_checksum_leaves_no_checksumed_tag_on_outbound_gossip() {
 }
 
 /// `set_encryption_options` with no keyring (disabled) is always accepted.
+#[cfg(encryption)]
 #[test]
 fn set_encryption_options_disabled_is_always_ok() {
   let mut engine = make_engine();
@@ -744,6 +749,7 @@ fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() 
 /// the engine's identical re-check inside `try_new_at` cannot disagree. Repeated
 /// calls return the same verdict, and whether that verdict is `Ok` depends only on
 /// whether the AES-GCM backend is compiled in — never on entropy availability.
+#[cfg(encryption)]
 #[test]
 fn validate_runtime_config_for_encryption_is_deterministic() {
   let key = SecretKey::Aes256([0x42; 32]);
@@ -785,7 +791,9 @@ fn validate_runtime_config_for_encryption_is_deterministic() {
 }
 
 /// A disabled (no-algorithm) checksum policy always constructs cleanly — there
-/// is no backend to probe, so `try_new_at` succeeds regardless of feature set.
+/// is no backend to probe, so `try_new_at` succeeds whichever checksum backend is
+/// compiled in.
+#[cfg(checksum)]
 #[test]
 fn try_new_at_accepts_disabled_checksum() {
   use memberlist_proto::ChecksumOptions;
@@ -1010,7 +1018,8 @@ fn gossip_carries_and_checks_the_configured_label() {
 // the pool, EOF delivered once, exchange terminalizes Succeeded/Failed) rather
 // than convergence side effects.
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use core::cell::RefCell;
+use std::{collections::BTreeMap, rc::Rc};
 
 /// The simulated TCP state of one mock reliable socket, as the engine observes
 /// it through `StreamIo`. A test programs these directly (the single-engine
@@ -4720,6 +4729,89 @@ fn a_gossip_io_whose_ring_reaches_the_read_cap_cannot_construct_an_engine() {
   )
   .expect("a ring one slot below the cap must construct");
   assert_eq!(engine.num_members(), 1, "the constructed engine is usable");
+}
+
+/// The ring screen follows the CONFIGURED ceiling, not the constant: an engine
+/// built with a cap of 8 rejects a 9-slot ring (and the 8-slot ring at the cap),
+/// and accepts a 7-slot one — all of which the default cap of 64 would have
+/// admitted. The rejection still carries the capacity the view declared.
+#[test]
+fn the_ring_screen_follows_the_configured_cap() {
+  const CAP: usize = 8;
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let cfg = || {
+    Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_gossip_read_cap(CAP)
+  };
+  let ep_cfg = || memberlist_proto::EndpointOptions::new(SmolStr::new("cap"), node_addr(7946));
+
+  for declared in [CAP + 1, CAP] {
+    let gossip = QueueGossip::with_recv_capacity(declared);
+    let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+      cfg(),
+      TransformOptions::default(),
+      ep_cfg(),
+      now,
+      test_rng(),
+      &gossip,
+    );
+    match rejected {
+      Err(InitError::GossipRecvCapacityTooLarge(n)) => assert_eq!(
+        n, declared,
+        "the rejection carries the capacity the view declared"
+      ),
+      Err(other) => panic!("a {declared}-slot ring must be rejected under a cap of {CAP}: {other}"),
+      Ok(_) => panic!(
+        "a {declared}-slot ring must not construct under a cap of {CAP} (the default 64 would admit it)"
+      ),
+    }
+  }
+
+  let gossip = QueueGossip::with_recv_capacity(CAP - 1);
+  let engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg(),
+    TransformOptions::default(),
+    ep_cfg(),
+    now,
+    test_rng(),
+    &gossip,
+  )
+  .expect("a ring one slot below the configured cap must construct");
+  assert_eq!(engine.num_members(), 1, "the constructed engine is usable");
+}
+
+/// A zero gossip read cap is rejected as the knob it is, by the shared preflight
+/// and by construction alike. Zero admits no ring at all (the screen is strictly
+/// below the cap), so reporting it as a ring-capacity failure would name the wrong
+/// field: no `udp_rx_packets` / socket size could ever satisfy it.
+#[test]
+fn a_zero_gossip_read_cap_is_rejected_as_the_knob_it_is() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let cfg = Options::new().with_port(7946).with_gossip_read_cap(0);
+
+  assert!(
+    matches!(
+      validate_runtime_config(&cfg, &TransformOptions::default(), 1400),
+      Err(InitError::ZeroGossipReadCap)
+    ),
+    "the shared preflight rejects a zero cap before a driver resolves or binds anything"
+  );
+
+  let gossip = QueueGossip::with_recv_capacity(0);
+  let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    memberlist_proto::EndpointOptions::new(SmolStr::new("cap"), node_addr(7946)),
+    now,
+    test_rng(),
+    &gossip,
+  );
+  assert!(
+    matches!(rejected, Err(InitError::ZeroGossipReadCap)),
+    "construction rejects a zero cap even for an empty ring, naming the knob"
+  );
 }
 
 /// Arm `engine` with a reliable listener on slot 1 and one spare (slot 0) to

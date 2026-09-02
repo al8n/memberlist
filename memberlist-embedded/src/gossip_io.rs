@@ -41,7 +41,8 @@ pub trait GossipIo {
   /// The engine additionally screens this capacity at construction against its own
   /// per-pump work ceiling and rejects a ring that can hold as many datagrams as
   /// the ceiling or more, which is what bounds the decode work one pump can cost.
-  /// See [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP) and
+  /// See [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) (whose
+  /// default is [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP)) and
   /// [`Engine::try_new_at`](crate::Engine::try_new_at).
   fn recv_capacity(&self) -> usize;
 

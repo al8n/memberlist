@@ -1002,7 +1002,7 @@ where
   /// drained either at `ExchangeMeta` allocation or on the pre-`ExchangeMeta`
   /// failure paths inside `service_dials`). Test-only, used to prove the
   /// failure paths do not leak entries.
-  #[cfg(all(test, feature = "tls"))]
+  #[cfg(test)]
   pub(crate) fn pending_outbound_kinds_len(&self) -> usize {
     self.pending_outbound_kinds.len()
   }

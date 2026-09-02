@@ -15,17 +15,21 @@ use memberlist_proto::{
   typed::NodeState,
 };
 use smoltcp::{
-  iface::{Config as IfConfig, Interface, SocketHandle, SocketSet},
+  iface::{
+    Config as IfConfig, Interface, PollIngressSingleResult, PollResult, SocketHandle, SocketSet,
+  },
   phy::Device,
   socket::{tcp, udp},
 };
 
+use smoltcp::wire::{IPV4_HEADER_LEN, IPV6_HEADER_LEN, UDP_HEADER_LEN};
+
 use crate::{
   InitError, InterfaceOptions, JoinError, Options, Resolver, TransformOptions,
   addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_duration, to_smoltcp_instant},
-  error::{GossipMtuTooLarge, MediumMismatch},
+  error::{GossipDatagramExceedsDeviceMtu, GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
-  interface::{HardwareAddress, Medium},
+  interface::{HardwareAddress, IpCidr, Medium},
   stream_io::SmoltcpStream,
 };
 use core::marker::PhantomData;
@@ -34,6 +38,19 @@ use std::{boxed::Box, sync::Arc, vec::Vec};
 /// The maximum UDP payload (`u16` length minus the 8-byte UDP header), the
 /// hard ceiling for an on-wire gossip datagram. Matches the async drivers.
 const UDP_PAYLOAD_MAX: usize = 65507;
+
+/// The largest on-wire gossip datagram a node with this `gossip_mtu` can emit:
+/// the machine caps an outbound datagram's PLAINTEXT at `gossip_mtu`, and the
+/// enabled transforms add at most one encryption wrapper and one checksum wrapper
+/// on top of it.
+///
+/// The UDP arenas are floored at this per slot, and the device-MTU guard measures
+/// it against the bound link, so both read one definition. `gossip_mtu` is bounded
+/// above by the UDP payload ceiling before either uses this, so the addition
+/// cannot overflow.
+const fn max_gossip_datagram(gossip_mtu: usize) -> usize {
+  gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD
+}
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
@@ -142,7 +159,8 @@ fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
 fn embedded_options(cfg: &Options) -> memberlist_embedded::Options {
   let opts = memberlist_embedded::Options::new()
     .with_port(cfg.port)
-    .with_close_timeout(cfg.close_timeout);
+    .with_close_timeout(cfg.close_timeout)
+    .with_gossip_read_cap(cfg.gossip_read_cap);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]
@@ -204,6 +222,11 @@ pub struct Memberlist<I, A, D, R = SmallRng> {
   sockets: SocketSet<'static>,
   /// Handle into `sockets` for the gossip UDP socket.
   udp: SocketHandle,
+  /// Maximum device packets one [`poll`](Self::poll) feeds into the stack before
+  /// it runs the engine (`Options::ingress_packets_per_poll`). Retained because
+  /// the bound applies to every poll, not just construction; validated non-zero
+  /// there.
+  ingress_packets_per_poll: usize,
   /// The transport-agnostic driving core: the SWIM machine, the reliable-plane
   /// connection state machine and its `SocketHandle` pool, the gossip codec
   /// pipeline, and the join-seed queue. The driver owns only the smoltcp sockets;
@@ -309,6 +332,13 @@ where
   ///   neither unicast nor unspecified (checked here so smoltcp's
   ///   `check_ip_addrs` can never `panic!`).
   /// - [`InitError::MissingIpAddress`] — `iface.ip_addrs` is empty.
+  /// - [`InitError::GossipDatagramExceedsDeviceMtu`] — the largest gossip
+  ///   datagram `ep_cfg.gossip_mtu()` and the enabled transforms can produce does
+  ///   not fit `device.capabilities().ip_mtu()` once the UDP header and the widest
+  ///   IP header of the configured address families are added. This build has no
+  ///   IP fragmentation, so such a datagram would be enqueued and then silently
+  ///   discarded on egress; lower `gossip_mtu` or bind a wider device. The check
+  ///   is against the LOCAL link only — a remote path can still be narrower.
   /// - [`InitError::TooManyIpAddresses`] / [`InitError::TooManyRoutes`] — more
   ///   addresses or routes than smoltcp's interface can hold.
   /// - [`InitError::Entropy`] — `iface.random_seed` was `None` and the system
@@ -367,7 +397,12 @@ where
     //    supported but differs from the device's is a `MediumMismatch`.
     let expected =
       hardware_address_medium(&iface.hardware_addr).ok_or(InitError::UnsupportedMedium)?;
-    let actual = device.capabilities().medium;
+    // Read the device's capabilities ONCE: the medium is checked here, and the IP
+    // MTU below bounds the largest gossip datagram this configuration can emit.
+    // smoltcp itself caches these at `Interface::new`, so the device is expected to
+    // report the same values throughout its life.
+    let caps = device.capabilities();
+    let actual = caps.medium;
     if expected != actual {
       return Err(InitError::MediumMismatch(MediumMismatch {
         expected,
@@ -454,6 +489,43 @@ where
       }));
     }
 
+    // Reject a gossip datagram the BOUND DEVICE cannot carry in one IP packet.
+    // The ceiling above bounds the datagram against the protocol's 65507-byte UDP
+    // limit; this bounds it against the link actually in hand, which construction
+    // already knows. This crate enables neither of smoltcp's fragmentation
+    // features, so an oversized datagram is not fragmented and not refused: the UDP
+    // socket accepts it (gossip is best-effort, `send_slice` only checks the arena),
+    // and the next egress pass dequeues it and drops it — `dispatch_ip` returns
+    // success without transmitting when the IP packet exceeds `ip_mtu()`. Large
+    // metadata, user packets and compounded gossip would vanish while small probes
+    // kept working: partial convergence and false suspicion on a node that looks
+    // healthy. Reject it here instead, before any allocation.
+    //
+    // The comparison mirrors `dispatch_ip`'s own: the IP packet is the header plus
+    // the UDP header plus the largest transformed datagram the machine can emit, and
+    // it must fit `ip_mtu()` (the device MTU less any medium header). The IP header
+    // is the widest of the configured address families — a dual-stack interface must
+    // satisfy both, and IPv6's 40-byte header is the binding one.
+    let ip_header = if iface
+      .ip_addrs
+      .iter()
+      .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+    {
+      IPV6_HEADER_LEN
+    } else {
+      IPV4_HEADER_LEN
+    };
+    let required = ip_header + UDP_HEADER_LEN + max_gossip_datagram(ep_cfg.gossip_mtu());
+    let available = caps.ip_mtu();
+    if required > available {
+      return Err(InitError::GossipDatagramExceedsDeviceMtu(
+        GossipDatagramExceedsDeviceMtu {
+          required,
+          available,
+        },
+      ));
+    }
+
     // Reject a sub-2 TCP pool. Construction dedicates one pooled socket to the
     // listener and uses the rest for dials/accepts: 0 sockets is no listener and
     // no reliable plane at all, and 1 leaves the listener holding the only socket
@@ -491,7 +563,16 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
-    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // Reject a zero per-poll device ingress budget. `poll` feeds the stack at most
+    // that many packets before running the engine, so zero would feed it none: no
+    // gossip datagram, TCP segment or handshake could ever reach the node, while
+    // every poll still reported a device backlog. Checked with the other
+    // pure-`Options` guards.
+    if cfg.ingress_packets_per_poll == 0 {
+      return Err(InitError::ZeroIngressPacketsPerPoll);
+    }
+
+    // Reject a gossip rx ring at or above the CONFIGURED per-pump gossip read cap
     // BEFORE the UDP arenas are sized and allocated below. This is an allocation
     // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
     // arena at `packets * max_datagram`, so a large-but-non-overflowing count
@@ -501,7 +582,7 @@ where
     // returned error. The engine's own check against the bound socket's actual
     // capacity stays as defence in depth: it is the authority on the ring the
     // engine will read, and it binds every driver, not just this one.
-    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+    if cfg.udp_rx_packets >= cfg.gossip_read_cap {
       return Err(InitError::UdpRxPacketsTooLarge);
     }
 
@@ -604,8 +685,7 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram =
-      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram = max_gossip_datagram(ep_cfg.gossip_mtu());
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -740,6 +820,7 @@ where
       iface_random_seed: random_seed,
       sockets,
       udp,
+      ingress_packets_per_poll: cfg.ingress_packets_per_poll,
       engine,
       _device: PhantomData,
       _a: PhantomData,
@@ -837,7 +918,12 @@ where
     //    supported but differs from the device's is a `MediumMismatch`.
     let expected =
       hardware_address_medium(&iface.hardware_addr).ok_or(InitError::UnsupportedMedium)?;
-    let actual = device.capabilities().medium;
+    // Read the device's capabilities ONCE: the medium is checked here, and the IP
+    // MTU below bounds the largest gossip datagram this configuration can emit.
+    // smoltcp itself caches these at `Interface::new`, so the device is expected to
+    // report the same values throughout its life.
+    let caps = device.capabilities();
+    let actual = caps.medium;
     if expected != actual {
       return Err(InitError::MediumMismatch(MediumMismatch {
         expected,
@@ -924,6 +1010,43 @@ where
       }));
     }
 
+    // Reject a gossip datagram the BOUND DEVICE cannot carry in one IP packet.
+    // The ceiling above bounds the datagram against the protocol's 65507-byte UDP
+    // limit; this bounds it against the link actually in hand, which construction
+    // already knows. This crate enables neither of smoltcp's fragmentation
+    // features, so an oversized datagram is not fragmented and not refused: the UDP
+    // socket accepts it (gossip is best-effort, `send_slice` only checks the arena),
+    // and the next egress pass dequeues it and drops it — `dispatch_ip` returns
+    // success without transmitting when the IP packet exceeds `ip_mtu()`. Large
+    // metadata, user packets and compounded gossip would vanish while small probes
+    // kept working: partial convergence and false suspicion on a node that looks
+    // healthy. Reject it here instead, before any allocation.
+    //
+    // The comparison mirrors `dispatch_ip`'s own: the IP packet is the header plus
+    // the UDP header plus the largest transformed datagram the machine can emit, and
+    // it must fit `ip_mtu()` (the device MTU less any medium header). The IP header
+    // is the widest of the configured address families — a dual-stack interface must
+    // satisfy both, and IPv6's 40-byte header is the binding one.
+    let ip_header = if iface
+      .ip_addrs
+      .iter()
+      .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+    {
+      IPV6_HEADER_LEN
+    } else {
+      IPV4_HEADER_LEN
+    };
+    let required = ip_header + UDP_HEADER_LEN + max_gossip_datagram(ep_cfg.gossip_mtu());
+    let available = caps.ip_mtu();
+    if required > available {
+      return Err(InitError::GossipDatagramExceedsDeviceMtu(
+        GossipDatagramExceedsDeviceMtu {
+          required,
+          available,
+        },
+      ));
+    }
+
     // Reject a sub-2 TCP pool. Construction dedicates one pooled socket to the
     // listener and uses the rest for dials/accepts: 0 sockets is no listener and
     // no reliable plane at all, and 1 leaves the listener holding the only socket
@@ -961,7 +1084,16 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
-    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // Reject a zero per-poll device ingress budget. `poll` feeds the stack at most
+    // that many packets before running the engine, so zero would feed it none: no
+    // gossip datagram, TCP segment or handshake could ever reach the node, while
+    // every poll still reported a device backlog. Checked with the other
+    // pure-`Options` guards.
+    if cfg.ingress_packets_per_poll == 0 {
+      return Err(InitError::ZeroIngressPacketsPerPoll);
+    }
+
+    // Reject a gossip rx ring at or above the CONFIGURED per-pump gossip read cap
     // BEFORE the UDP arenas are sized and allocated below. This is an allocation
     // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
     // arena at `packets * max_datagram`, so a large-but-non-overflowing count
@@ -971,7 +1103,7 @@ where
     // returned error. The engine's own check against the bound socket's actual
     // capacity stays as defence in depth: it is the authority on the ring the
     // engine will read, and it binds every driver, not just this one.
-    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+    if cfg.udp_rx_packets >= cfg.gossip_read_cap {
       return Err(InitError::UdpRxPacketsTooLarge);
     }
 
@@ -1064,8 +1196,7 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram =
-      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram = max_gossip_datagram(ep_cfg.gossip_mtu());
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -1192,6 +1323,7 @@ where
       iface_random_seed: random_seed,
       sockets,
       udp,
+      ingress_packets_per_poll: cfg.ingress_packets_per_poll,
       engine,
       _device: PhantomData,
       _a: PhantomData,
@@ -1740,33 +1872,98 @@ where
   /// caller that sleeps exactly to it always wakes in time to honor them —
   /// including reclaiming a closing socket by `Options::close_timeout`.
   ///
+  /// # The already-due deadline: work remains
+  ///
+  /// A returned instant at or before `now` is not a timer; it means **a device
+  /// backlog remains — service your other work, then poll again**. It is folded
+  /// when the ingress phase spends its whole
+  /// [`ingress_packets_per_poll`](crate::Options::ingress_packets_per_poll) budget
+  /// with the device still yielding packets. The unread remainder stays in the
+  /// device's own receive queue, ahead of the stack, and is drained by the
+  /// immediately following poll. A caller must not sleep on it: run the rest of
+  /// its loop and come straight back. A caller that treats every returned instant
+  /// uniformly — sleep until it, never before — is already correct, since sleeping
+  /// until an instant already past returns at once.
+  ///
   /// # Order
   ///
-  /// 1. **Stack tick** — `iface.poll` drains the device and services TCP/UDP.
-  /// 2. **Engine pump** — the engine runs every protocol phase over a
+  /// 1. **Stack maintenance** — advance the interface's clock and run its
+  ///    time-driven upkeep.
+  /// 2. **Bounded ingress** — feed the stack at most `ingress_packets_per_poll`
+  ///    device packets, stopping early when the device has none left. This
+  ///    replaces smoltcp's own `Interface::poll`, whose ingress loop runs until
+  ///    the device stops yielding and is therefore unbounded when packets arrive
+  ///    faster than they are processed (smoltcp documents this DoS caveat on
+  ///    `poll` and offers `poll_ingress_single` for exactly this reason). A
+  ///    caller-driven super-loop has no preemption, so an unbounded ingress phase
+  ///    would starve every SWIM timer and every other task sharing the loop.
+  /// 3. **Stack egress** — completing the tick, since smoltcp applies a socket's
+  ///    inactivity timeout on its dispatch path: this is where the link layer's
+  ///    own reaping becomes visible to the engine that reads the sockets next.
+  /// 4. **Engine pump** — the engine runs every protocol phase over a
   ///    [`SmoltcpGossip`] + [`SmoltcpStream`] view of the just-ticked sockets:
   ///    reap closing sockets, accept inbound and replenish the listener,
   ///    rebalance deferred dials, drain UDP gossip ingress through the codec,
   ///    pump reliable ingress, drain join seeds, fire machine timers, then drain
   ///    stream actions and TCP/UDP egress. See
   ///    [`Engine::pump`](memberlist_embedded::Engine::pump) for the full ordered
-  ///    phase list.
-  /// 3. **Deadline** — fold the smoltcp stack's next scheduled event (`poll_at`)
-  ///    into the engine's returned `min(machine, closing)` wakeup, so a caller
-  ///    sleeping to the result wakes in time for the stack's retransmit /
-  ///    delayed-ACK timers as well as every engine-owned deadline.
+  ///    phase list. It runs on EVERY poll, whatever the device is doing.
+  /// 5. **Egress again** — put what the pump just produced on the wire in this
+  ///    same poll, rather than leaving it for the next one: its gossip datagrams,
+  ///    its reliable segments, and the RST of anything it aborted, the last ahead
+  ///    of any later poll's rebalance reusing that socket for a new role.
+  /// 6. **Deadline** — fold the smoltcp stack's next scheduled event (`poll_at`)
+  ///    into the engine's returned `min(machine, closing)` wakeup, plus `now`
+  ///    itself if the ingress budget was exhausted, so a caller sleeping to the
+  ///    result wakes in time for the stack's retransmit / delayed-ACK timers, for
+  ///    every engine-owned deadline, and at once while a device backlog remains.
   pub fn poll(&mut self, now: Instant, device: &mut D) -> Option<Instant>
   where
     D: Device,
   {
     let s_now = to_smoltcp_instant(now);
 
-    // 1. Stack tick.
-    // `PollResult` is ignored — the engine drives its own state over the views
-    // below; we do not gate machine work on stack idle/active.
-    self.iface.poll(s_now, device, &mut self.sockets);
+    // 1. Stack maintenance. `Interface::poll` begins by stamping this instant onto
+    // the interface and running its time-driven upkeep (fragment-reassembly expiry,
+    // SLAAC); `poll_maintenance` is that same step, exposed for callers that drive
+    // the phases themselves. It must run even on a poll that feeds no packet, so
+    // the stack's notion of "now" tracks the caller's clock.
+    self.iface.poll_maintenance(s_now);
 
-    // 2. Engine pump over a view of the just-ticked sockets. smoltcp keeps the
+    // 2. Bounded ingress. This is the loop `Interface::poll` runs unbounded: each
+    // `poll_ingress_single` takes at most one packet from the device and drives it
+    // through the interface into the sockets, so capping the iteration count caps
+    // the work. `None` means the device had nothing more and the backlog is clear;
+    // any other result means a packet was processed and there may be more.
+    //
+    // Spending the whole budget without ever seeing `None` is the only signal that
+    // the device still has traffic waiting: the remainder sits in the DEVICE's own
+    // queue, untouched by the stack, and the immediately following poll drains it.
+    // That is what step 5 turns into an already-due deadline.
+    let mut budget_exhausted = true;
+    for _ in 0..self.ingress_packets_per_poll {
+      if self
+        .iface
+        .poll_ingress_single(s_now, device, &mut self.sockets)
+        == PollIngressSingleResult::None
+      {
+        budget_exhausted = false;
+        break;
+      }
+    }
+
+    // 3. Stack egress, completing the tick `Interface::poll` would have performed:
+    // maintenance, ingress, then egress to exhaustion. It is not optional dressing
+    // — smoltcp applies a socket's inactivity timeout inside its dispatch, on the
+    // egress path (`tcp::Socket::dispatch` aborts a socket whose peer has been
+    // silent past `set_timeout`), so the engine's view of which sockets the link
+    // layer has reaped is established here, before the pump reads it. `poll_egress`
+    // is bounded per call and reports whether it changed any socket state, so it is
+    // looped to exhaustion exactly as `Interface::poll` does; the input is only
+    // what this node already chose to send.
+    while self.iface.poll_egress(s_now, device, &mut self.sockets) != PollResult::None {}
+
+    // 4. Engine pump over a view of the just-ticked sockets. smoltcp keeps the
     // gossip UDP socket and the reliable-plane TCP pool in ONE `SocketSet`, so the
     // gossip and stream views share mutable access to it through a `RefCell` held
     // for the pump's duration; each view's methods take a brief `borrow_mut` and
@@ -1782,10 +1979,10 @@ where
       self.engine.pump(now, &mut gossip, &mut stream)
     };
 
-    // 2b. Re-arm a listener the inactivity timeout just reaped, routing it through
+    // 4b. Re-arm a listener the inactivity timeout just reaped, routing it through
     // the engine's occupancy ledger. When an unauthenticated half-open (a
     // `SynReceived` whose final ACK is withheld) — or a stalled established exchange
-    // — sits idle past the socket timeout, step 1's stack tick drives that socket to
+    // — sits idle past the socket timeout, the ingress phase drives that socket to
     // `Closed`. The engine keeps its handle installed as the listener (it swaps the
     // slot out only on a completed accept, and never re-arms a socket the link layer
     // closed underneath it), so without this the single direct-smoltcp listener
@@ -1808,18 +2005,34 @@ where
       self.engine.rearm_reaped_listener(now, &mut stream);
     }
 
-    // 3. Fold the smoltcp stack's next scheduled event into the engine's returned
+    // 5. Egress again, for what this poll's pump produced: its gossip datagrams,
+    // its reliable-plane segments, and the RSTs of anything it aborted. Without
+    // this pass those bytes would sit in the socket buffers until the next poll's
+    // stack tick, so every emission would cost the caller a second round; with it,
+    // an abort's RST also leaves the interface in the poll that ordered it, ahead
+    // of any later `listen`/`connect` that would reset the socket and erase the
+    // tuple the RST needs.
+    while self.iface.poll_egress(s_now, device, &mut self.sockets) != PollResult::None {}
+
+    // 6. Fold the smoltcp stack's next scheduled event into the engine's returned
     // deadline. The engine returns only `min(machine, closing)` — the SWIM timers
     // and the soonest gracefully-closing socket's force-abort instant — because it
     // owns no link layer. The driver adds the stack's `poll_at` (retransmit /
     // delayed-ACK / etc.) so a caller sleeping to the result wakes in time for
     // both. `poll_at` is re-read AFTER the pump so it reflects any socket the pump
     // just opened/closed (e.g. a dial whose SYN is queued reports ~now).
+    //
+    // An exhausted ingress budget folds `now` itself: the device still holds
+    // traffic the stack has not seen, so the caller must come back at once rather
+    // than sleep on a timer with unread packets behind it.
     let stack = self
       .iface
       .poll_at(s_now, &self.sockets)
       .map(from_smoltcp_instant);
-    min_opt(stack, next)
+    min_opt(
+      min_opt(stack, next),
+      if budget_exhausted { Some(now) } else { None },
+    )
   }
 }
 

@@ -23,7 +23,9 @@ extern crate std;
 compile_error!("memberlist-smoltcp requires the `std` or `alloc` feature");
 
 pub use config::Options;
-pub use error::{GossipMtuTooLarge, InitError, JoinError, MediumMismatch};
+pub use error::{
+  GossipDatagramExceedsDeviceMtu, GossipMtuTooLarge, InitError, JoinError, MediumMismatch,
+};
 pub use interface::{
   EthernetAddress, HardwareAddress, InterfaceOptions, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
   Medium, Route,

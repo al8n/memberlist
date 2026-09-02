@@ -3,6 +3,7 @@ use crate::interface::{
   EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Medium, Route,
 };
 use core::net::{Ipv4Addr, SocketAddr};
+use std::{vec, vec::Vec};
 
 fn sample_cidr() -> IpCidr {
   IpCidr::new(IpAddress::v4(224, 0, 0, 1), 24)
@@ -51,12 +52,18 @@ fn all_variants() -> Vec<InitError> {
       gossip_mtu: 70_000,
       ceiling: 65_467,
     }),
+    InitError::GossipDatagramExceedsDeviceMtu(GossipDatagramExceedsDeviceMtu {
+      required: 1_520,
+      available: 1_500,
+    }),
     InitError::UdpArenaTooLarge,
     InitError::TcpPoolTooSmall,
     InitError::ZeroTcpSocketBuffer,
     InitError::TcpRxBufferTooLarge,
     InitError::ZeroUdpPackets,
     InitError::UdpRxPacketsTooLarge,
+    InitError::ZeroGossipReadCap,
+    InitError::ZeroIngressPacketsPerPoll,
     InitError::ZeroCloseTimeout,
   ]
 }
@@ -184,11 +191,13 @@ fn source_chains_only_for_wrapping_variants() {
       .source()
       .is_some()
   );
+  #[cfg(encryption)]
   assert!(
     InitError::Encryption(memberlist_proto::EncryptionError::AuthFailed)
       .source()
       .is_some()
   );
+  #[cfg(checksum)]
   assert!(
     InitError::Checksum(memberlist_proto::ChecksumError::Mismatch)
       .source()

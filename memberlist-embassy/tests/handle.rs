@@ -22,9 +22,11 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
+#[cfg(compression)]
+use memberlist_embassy::CompressionOptions;
 use memberlist_embassy::{
-  CompressionOptions, EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist,
-  Options, Runner, SocketAddrResolver, TransformOptions, event::Event, now,
+  EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, Options, Runner,
+  SocketAddrResolver, TransformOptions, event::Event, now,
 };
 use memberlist_embedded::InitError as EngineInitError;
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
@@ -306,13 +308,16 @@ fn single_node_accessor_surface_is_coherent() {
 
   // Swapping the compression policy at runtime is a pure forward that leaves the
   // membership view untouched (it only re-policies future encodes).
-  ml.set_compression_options(CompressionOptions::new())
-    .expect("compression options set on a running node");
-  assert_eq!(
-    ml.num_members(),
-    1,
-    "re-policying compression keeps the view"
-  );
+  #[cfg(compression)]
+  {
+    ml.set_compression_options(CompressionOptions::new())
+      .expect("compression options set on a running node");
+    assert_eq!(
+      ml.num_members(),
+      1,
+      "re-policying compression keeps the view"
+    );
+  }
 }
 
 /// The `#[doc(hidden)]` reliable-plane diagnostics report the construction-time

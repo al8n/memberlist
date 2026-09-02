@@ -49,6 +49,13 @@ pub enum InitError {
   /// immediately — the drain never runs and an in-flight push/pull response is
   /// truncated. Must be non-zero.
   ZeroCloseTimeout,
+  /// [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) is zero.
+  ///
+  /// The cap is the per-pump gossip work ceiling, and the receive-ring screen is
+  /// STRICTLY BELOW it, so a zero cap admits no ring at all: every driver would
+  /// fail construction with a capacity error naming a ceiling nothing can meet.
+  /// Must be non-zero.
+  ZeroGossipReadCap,
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
   /// A driver sizes its gossip arenas from
@@ -60,8 +67,8 @@ pub enum InitError {
   GossipMtuTooLarge(GossipMtuTooLarge),
   /// The driver's gossip receive ring
   /// ([`GossipIo::recv_capacity`](crate::GossipIo::recv_capacity)) reaches the
-  /// engine's per-pump work ceiling
-  /// ([`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP)).
+  /// engine's configured per-pump work ceiling
+  /// ([`Options::gossip_read_cap`](crate::Options::gossip_read_cap)).
   ///
   /// A pump reads the whole ring the view declares and applies every datagram at
   /// that pump's instant, so the accepted ring size IS the per-pump unwrap, decode
@@ -152,11 +159,12 @@ impl fmt::Display for InitError {
       }
       InitError::ZeroPort => f.write_str("port is zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
+      InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::GossipRecvCapacityTooLarge(n) => write!(
         f,
         "the gossip receive ring holds {n} datagrams, which must be below the engine's \
-         per-pump gossip read cap ({})",
+         configured per-pump gossip read cap (Options::gossip_read_cap, default {})",
         crate::GOSSIP_READ_CAP
       ),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),

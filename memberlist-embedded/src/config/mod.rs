@@ -6,8 +6,9 @@
 //! TCP pool size — on top of this; those govern memory the driver allocates,
 //! not protocol behaviour, so they stay on the driver. This struct holds only
 //! the knobs the [`Engine`](crate::Engine) reads directly: the bound port (used
-//! to `listen` and to derive ephemeral dial ports) and the graceful-close
-//! timeout that bounds the reliable plane's drain.
+//! to `listen` and to derive ephemeral dial ports), the graceful-close timeout
+//! that bounds the reliable plane's drain, and the per-pump gossip work ceiling
+//! that bounds which gossip receive rings the engine accepts.
 
 use core::time::Duration;
 
@@ -54,6 +55,25 @@ pub struct Options {
   /// reclaimed the moment its teardown is acknowledged; the timeout only governs
   /// the vanished-, stalled-, or trickling-peer case.
   pub close_timeout: Duration,
+  /// The per-pump gossip work ceiling: the largest gossip receive ring the
+  /// [`Engine`](crate::Engine) accepts at construction.
+  ///
+  /// This is a CONSTRUCTION-TIME policy, not the read loop's bound.
+  /// [`Engine::try_new_at`](crate::Engine::try_new_at) rejects a
+  /// [`GossipIo`](crate::GossipIo) whose declared
+  /// [`recv_capacity`](crate::GossipIo::recv_capacity) is at or above this value;
+  /// a pump then reads the ring the view in hand declares, so on an integration
+  /// that pumps the view it constructed with, per-pump unwrap/decode/apply work is
+  /// bounded by this count.
+  ///
+  /// The bound is a count, not a byte budget. Its byte implication is
+  /// `gossip_read_cap × gossip_recv_buf_size(gossip_mtu)`: per-pump AEAD and
+  /// decode cost scales with bytes, so the count is a CPU ceiling only at the
+  /// configured MTU. Raising it raises both.
+  ///
+  /// Must be non-zero ([`InitError::ZeroGossipReadCap`](crate::InitError::ZeroGossipReadCap));
+  /// [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP) is the default.
+  pub gossip_read_cap: usize,
   /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
   /// inbound reliable connections by peer address at the transport boundary, AND
   /// inbound alives by the peer's self-advertised address at membership
@@ -69,6 +89,7 @@ impl Default for Options {
     Self {
       port: 7946,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
+      gossip_read_cap: crate::GOSSIP_READ_CAP,
       #[cfg(feature = "cidr")]
       cidr_policy: None,
     }
@@ -91,6 +112,13 @@ impl Options {
   /// Override the graceful-close timeout (see [`Options::close_timeout`]).
   pub fn with_close_timeout(mut self, d: Duration) -> Self {
     self.close_timeout = d;
+    self
+  }
+
+  /// Override the per-pump gossip work ceiling (see
+  /// [`Options::gossip_read_cap`]). Must be non-zero.
+  pub fn with_gossip_read_cap(mut self, cap: usize) -> Self {
+    self.gossip_read_cap = cap;
     self
   }
 

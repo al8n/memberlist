@@ -174,6 +174,23 @@ pub enum InitError {
   /// wrap to an undersized arena in release). The configured value and the
   /// effective ceiling are carried for diagnostics.
   GossipMtuTooLarge(GossipMtuTooLarge),
+  /// The largest gossip datagram this configuration can emit does not fit the
+  /// bound device's IP MTU.
+  ///
+  /// This crate enables neither of smoltcp's IP fragmentation features, so an
+  /// oversized datagram is neither fragmented nor refused: the UDP socket accepts
+  /// it (gossip is best-effort, and `send_slice` checks only the payload arena) and
+  /// the next egress pass dequeues it and discards it — smoltcp's `dispatch_ip`
+  /// reports success without transmitting when the IP packet exceeds `ip_mtu()`.
+  /// Large metadata, user packets, compounded gossip and transformed frames would
+  /// silently vanish while small probes kept working: partial convergence and false
+  /// suspicion on a node that looks healthy.
+  ///
+  /// The device MTU is not path speculation — it is known and cached at
+  /// construction — so the constructor rejects the combination instead. A remote
+  /// path can still be narrower than the local link; sizing `gossip_mtu` for the
+  /// path remains the operator's.
+  GossipDatagramExceedsDeviceMtu(GossipDatagramExceedsDeviceMtu),
   /// A UDP arena byte count (`udp_*_packets × max on-wire datagram`) overflows
   /// `usize`.
   ///
@@ -215,8 +232,8 @@ pub enum InitError {
   /// Both must be non-zero.
   ZeroUdpPackets,
   /// [`Options::udp_rx_packets`](crate::Options::udp_rx_packets) is not below the
-  /// engine's per-pump gossip read cap
-  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
+  /// configured per-pump gossip read cap
+  /// ([`Options::gossip_read_cap`](crate::Options::gossip_read_cap)).
   ///
   /// The cap is the engine's per-pump work ceiling: it applies every datagram it
   /// pops within the pump that popped it, so the accepted ring size is that pump's
@@ -231,6 +248,20 @@ pub enum InitError {
   /// ([`memberlist_embedded::InitError::GossipRecvCapacityTooLarge`]), which this
   /// variant also carries — surfaced under the name of the option to lower.
   UdpRxPacketsTooLarge,
+  /// [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) is zero.
+  ///
+  /// The cap is the engine's per-pump gossip work ceiling, and both the driver's
+  /// `udp_rx_packets` screen and the engine's receive-ring screen are STRICTLY
+  /// BELOW it, so a zero cap admits no gossip ring at all. Must be non-zero.
+  ZeroGossipReadCap,
+  /// [`Options::ingress_packets_per_poll`](crate::Options::ingress_packets_per_poll)
+  /// is zero.
+  ///
+  /// It is the per-poll device ingress budget. Zero would feed the stack no
+  /// packet at all, so nothing inbound — no gossip datagram, no TCP segment, no
+  /// handshake — could ever reach the node while `poll` still reported a device
+  /// backlog on every call. Must be non-zero.
+  ZeroIngressPacketsPerPoll,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
@@ -239,6 +270,33 @@ pub enum InitError {
   /// immediately — the drain never runs and an in-flight push/pull response is
   /// truncated. Must be non-zero.
   ZeroCloseTimeout,
+}
+
+/// The largest gossip datagram this configuration can emit exceeds what the bound
+/// device can carry in one unfragmented IP packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GossipDatagramExceedsDeviceMtu {
+  /// Bytes one maximum-size gossip datagram needs in an IP packet: the widest IP
+  /// header the configured address families use, plus the 8-byte UDP header, plus
+  /// `gossip_mtu` and the enabled transforms' wrapper overhead.
+  pub required: usize,
+  /// Bytes the bound device can carry in one IP packet — its MTU less any medium
+  /// header (smoltcp's `DeviceCapabilities::ip_mtu`), which is the same figure
+  /// smoltcp's own dispatch compares against before dropping.
+  pub available: usize,
+}
+
+impl fmt::Display for GossipDatagramExceedsDeviceMtu {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "the largest gossip datagram this configuration can emit needs {} bytes of IP packet \
+       but the bound device carries only {} (no IP fragmentation is compiled in, so an \
+       oversized datagram would be enqueued and then silently discarded): lower gossip_mtu, \
+       drop a transform, or bind a device with a larger MTU",
+      self.required, self.available
+    )
+  }
 }
 
 /// The configured gossip MTU exceeds the largest plaintext payload whose on-wire
@@ -336,6 +394,7 @@ impl fmt::Display for InitError {
       #[cfg(checksum)]
       InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
+      InitError::GossipDatagramExceedsDeviceMtu(m) => write!(f, "{m}"),
       InitError::UdpArenaTooLarge => {
         f.write_str("UDP arena byte count (packets × max datagram) overflows usize")
       }
@@ -351,11 +410,14 @@ impl fmt::Display for InitError {
       InitError::ZeroUdpPackets => {
         f.write_str("udp_rx_packets and udp_tx_packets must be non-zero")
       }
-      InitError::UdpRxPacketsTooLarge => write!(
-        f,
-        "udp_rx_packets must be below the engine's per-pump gossip read cap ({})",
-        memberlist_embedded::GOSSIP_READ_CAP
+      InitError::UdpRxPacketsTooLarge => f.write_str(
+        "udp_rx_packets must be below the configured per-pump gossip read cap \
+         (Options::gossip_read_cap)",
       ),
+      InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
+      InitError::ZeroIngressPacketsPerPoll => {
+        f.write_str("ingress_packets_per_poll must be non-zero")
+      }
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
     }
   }
@@ -382,6 +444,7 @@ impl InitError {
       E::AdvertisePortMismatch => InitError::AdvertisePortMismatch,
       E::ZeroPort => InitError::ZeroPort,
       E::ZeroCloseTimeout => InitError::ZeroCloseTimeout,
+      E::ZeroGossipReadCap => InitError::ZeroGossipReadCap,
       E::GossipMtuTooLarge(m) => InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: m.gossip_mtu,
         ceiling: m.ceiling,

@@ -70,6 +70,41 @@ loop {
 }
 ```
 
+### Bounded ingress and the already-due deadline
+
+`poll` feeds the smoltcp stack at most `Options::ingress_packets_per_poll` device
+packets (default 16) before it runs the engine, so a device that keeps yielding
+cannot starve the SWIM timers or the rest of your loop. smoltcp's own
+`Interface::poll` drains the device until it is empty and documents that as
+unbounded work; this driver runs the bounded phases instead.
+
+When that budget is spent with the device still yielding, `poll` returns an
+instant **at or before the `now` you passed in**. That is not a timer: it means
+*a device backlog remains — service your other work, then poll again*. Do not
+sleep on it. A loop that sleeps *until* the returned instant and never before is
+already correct, since sleeping until a past instant returns immediately.
+
+The budget is device fairness, not gossip intake: a gossip datagram arriving with
+no free slot in `udp_rx_packets` is dropped by the UDP socket regardless of it.
+Raise `udp_rx_packets` (kept below `gossip_read_cap`) to accept more gossip per
+poll; raise `ingress_packets_per_poll` to clear more of a device backlog per poll.
+
+### Gossip budget and the device MTU
+
+`EndpointOptions::gossip_mtu` is a plaintext budget; on the wire a datagram also
+carries the enabled transforms' wrapper overhead, the UDP header, and an IP
+header. This crate builds smoltcp without IP fragmentation, so a datagram wider
+than the bound device's IP MTU is not fragmented and not refused — it is enqueued
+and then discarded on egress, losing large metadata, user packets and compounded
+gossip while small probes keep working.
+
+Construction therefore rejects that combination up front
+(`InitError::GossipDatagramExceedsDeviceMtu`, carrying the bytes needed and the
+bytes available). A dual-stack interface is held to IPv6's wider header. Note the
+default 1400-byte budget does not fit a 1280-byte IPv6-minimum link. The check
+covers the LOCAL link only; sizing `gossip_mtu` for a narrower remote path is
+still yours.
+
 ## Feature flags
 
 | Feature | Description |
