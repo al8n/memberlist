@@ -80,12 +80,8 @@ hashbrown = { version = "0.17", default-features = false, features = [
 
 [dev-dependencies]
 smol_str.workspace = true
-# Enable the lz4 + AES-GCM backends for the transform round-trip tests
-# (`tests/transform.rs`). Declared on the dev build only so the library's own
-# build stays backend-free and the no_std/bare-metal compile checks exercise the
-# disabled-transform identity paths.
-memberlist-proto = { workspace = true, default-features = false, features = [
-  "tcp",
-  "lz4",
-  "aes-gcm",
-] }
+# No transform backend is enabled here: the round-trip tests in `tests/transform.rs`
+# are gated on this crate's own `lz4` / `aes-gcm` features, so the backend arrives
+# with the feature set the build selects. A dev-dependency enabling a backend on
+# `memberlist-proto` would enable it for every lane, including the ones whose whole
+# purpose is to build without it.

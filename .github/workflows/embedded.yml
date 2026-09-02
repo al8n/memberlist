@@ -21,6 +21,15 @@ on:
       - "art"
   workflow_dispatch:
 
+# Cargo resolves features once for every package named in a single invocation and
+# hands each of them the union. Naming the engine and the drivers together would
+# therefore build the engine with whatever the drivers' dev-dependencies ask of
+# it, and a lane whose whole purpose is to build without a feature would build
+# with it. Every feature lane below loops over this list instead, one invocation
+# per package.
+env:
+  PACKAGES: memberlist-embedded memberlist-smoltcp memberlist-embassy
+
 jobs:
   # Bare-metal compile gate: the `no_std` + `alloc` engine and both embedded
   # drivers must build for a real Cortex-M target. A `no_std` lib also compiles on
@@ -46,13 +55,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
-      - run: >
-          cargo check
-          -p memberlist-embedded
-          -p memberlist-smoltcp
-          -p memberlist-embassy
-          --no-default-features --features alloc
-          --target thumbv7em-none-eabihf
+      - name: Bare-metal check
+        run: |
+          for pkg in $PACKAGES; do
+            cargo check -p "$pkg" --no-default-features --features alloc --target thumbv7em-none-eabihf
+          done
 
   # Host test gate: the shared engine and both drivers carry host-runnable test
   # suites (block_on + bounded virtual time) that the bare-metal check above does
@@ -77,20 +84,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+      # `cargo fmt` selects no features, so one invocation covers all three.
       - name: Format
         run: cargo fmt -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --check
       - name: Clippy
-        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,aes-gcm,cidr --no-deps -- -D warnings
+        run: |
+          for pkg in $PACKAGES; do
+            cargo clippy -p "$pkg" --all-targets --features lz4,crc32,aes-gcm,cidr --no-deps -- -D warnings
+          done
       - name: Clippy (no encryption backend)
-        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,cidr --no-deps -- -D warnings
+        run: |
+          for pkg in $PACKAGES; do
+            cargo clippy -p "$pkg" --all-targets --features lz4,crc32,cidr --no-deps -- -D warnings
+          done
       - name: Clippy (no_std + alloc)
-        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --no-default-features --features alloc --no-deps -- -D warnings
+        run: |
+          for pkg in $PACKAGES; do
+            cargo clippy -p "$pkg" --all-targets --no-default-features --features alloc --no-deps -- -D warnings
+          done
       - name: Test
-        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,aes-gcm,cidr
+        run: |
+          for pkg in $PACKAGES; do
+            cargo test -p "$pkg" --features lz4,crc32,aes-gcm,cidr
+          done
       - name: Test (no encryption backend)
-        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,cidr
+        run: |
+          for pkg in $PACKAGES; do
+            cargo test -p "$pkg" --features lz4,crc32,cidr
+          done
       - name: Test (no_std + alloc)
-        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --no-default-features --features alloc
+        run: |
+          for pkg in $PACKAGES; do
+            cargo test -p "$pkg" --no-default-features --features alloc
+          done
 
   # Execution proof: build the `memberlist-embassy-qemu` firmware and run it under
   # QEMU. The crate's `.cargo/config.toml` supplies the target, the linker script,
