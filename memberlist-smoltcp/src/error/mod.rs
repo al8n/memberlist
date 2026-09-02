@@ -215,8 +215,8 @@ pub enum InitError {
   /// Both must be non-zero.
   ZeroUdpPackets,
   /// [`Options::udp_rx_packets`](crate::Options::udp_rx_packets) is not below the
-  /// engine's per-pump gossip read cap
-  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
+  /// configured per-pump gossip read cap
+  /// ([`Options::gossip_read_cap`](crate::Options::gossip_read_cap)).
   ///
   /// The cap is the engine's per-pump work ceiling: it applies every datagram it
   /// pops within the pump that popped it, so the accepted ring size is that pump's
@@ -231,6 +231,12 @@ pub enum InitError {
   /// ([`memberlist_embedded::InitError::GossipRecvCapacityTooLarge`]), which this
   /// variant also carries — surfaced under the name of the option to lower.
   UdpRxPacketsTooLarge,
+  /// [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) is zero.
+  ///
+  /// The cap is the engine's per-pump gossip work ceiling, and both the driver's
+  /// `udp_rx_packets` screen and the engine's receive-ring screen are STRICTLY
+  /// BELOW it, so a zero cap admits no gossip ring at all. Must be non-zero.
+  ZeroGossipReadCap,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
@@ -351,11 +357,11 @@ impl fmt::Display for InitError {
       InitError::ZeroUdpPackets => {
         f.write_str("udp_rx_packets and udp_tx_packets must be non-zero")
       }
-      InitError::UdpRxPacketsTooLarge => write!(
-        f,
-        "udp_rx_packets must be below the engine's per-pump gossip read cap ({})",
-        memberlist_embedded::GOSSIP_READ_CAP
+      InitError::UdpRxPacketsTooLarge => f.write_str(
+        "udp_rx_packets must be below the configured per-pump gossip read cap \
+         (Options::gossip_read_cap)",
       ),
+      InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
     }
   }
@@ -382,6 +388,7 @@ impl InitError {
       E::AdvertisePortMismatch => InitError::AdvertisePortMismatch,
       E::ZeroPort => InitError::ZeroPort,
       E::ZeroCloseTimeout => InitError::ZeroCloseTimeout,
+      E::ZeroGossipReadCap => InitError::ZeroGossipReadCap,
       E::GossipMtuTooLarge(m) => InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: m.gossip_mtu,
         ceiling: m.ceiling,

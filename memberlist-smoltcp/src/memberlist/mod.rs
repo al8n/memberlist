@@ -142,7 +142,8 @@ fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
 fn embedded_options(cfg: &Options) -> memberlist_embedded::Options {
   let opts = memberlist_embedded::Options::new()
     .with_port(cfg.port)
-    .with_close_timeout(cfg.close_timeout);
+    .with_close_timeout(cfg.close_timeout)
+    .with_gossip_read_cap(cfg.gossip_read_cap);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]
@@ -491,7 +492,7 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
-    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // Reject a gossip rx ring at or above the CONFIGURED per-pump gossip read cap
     // BEFORE the UDP arenas are sized and allocated below. This is an allocation
     // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
     // arena at `packets * max_datagram`, so a large-but-non-overflowing count
@@ -501,7 +502,7 @@ where
     // returned error. The engine's own check against the bound socket's actual
     // capacity stays as defence in depth: it is the authority on the ring the
     // engine will read, and it binds every driver, not just this one.
-    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+    if cfg.udp_rx_packets >= cfg.gossip_read_cap {
       return Err(InitError::UdpRxPacketsTooLarge);
     }
 
@@ -961,7 +962,7 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
-    // Reject a gossip rx ring at or above the engine's per-pump gossip read cap
+    // Reject a gossip rx ring at or above the CONFIGURED per-pump gossip read cap
     // BEFORE the UDP arenas are sized and allocated below. This is an allocation
     // guard: `udp_rx_packets` scales the metadata ring AND floors the payload
     // arena at `packets * max_datagram`, so a large-but-non-overflowing count
@@ -971,7 +972,7 @@ where
     // returned error. The engine's own check against the bound socket's actual
     // capacity stays as defence in depth: it is the authority on the ring the
     // engine will read, and it binds every driver, not just this one.
-    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+    if cfg.udp_rx_packets >= cfg.gossip_read_cap {
       return Err(InitError::UdpRxPacketsTooLarge);
     }
 

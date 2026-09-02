@@ -821,6 +821,64 @@ fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
   }
 }
 
+/// The driver's pre-allocation screen follows the CONFIGURED ceiling, not the
+/// default constant: with `gossip_read_cap` lowered to 8, an 8-slot `udp_rx_packets`
+/// — the shipped default, which the default cap of 64 admits — is rejected under
+/// the name of the option to lower, and 7 slots constructs.
+#[test]
+fn udp_rx_packets_is_screened_against_the_configured_gossip_read_cap() {
+  const CAP: usize = 8;
+  for (slots, accepted) in [(CAP + 1, false), (CAP, false), (CAP - 1, true)] {
+    let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+    let now: Instant = harness::Clock::new().now();
+    let mut cfg = Options::new().with_gossip_read_cap(CAP);
+    cfg.udp_rx_packets = slots;
+    let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+      cfg,
+      InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+      TransformOptions::default(),
+      ep("a", 1),
+      &SocketAddrResolver,
+      &mut dev,
+      now,
+    );
+    if accepted {
+      assert!(
+        res.is_ok(),
+        "{slots} slots is below the configured cap of {CAP} and must construct"
+      );
+    } else {
+      assert!(
+        matches!(res, Err(InitError::UdpRxPacketsTooLarge)),
+        "{slots} slots is not below the configured cap of {CAP} and must be rejected, \
+         even though the default cap would admit it"
+      );
+    }
+  }
+}
+
+/// A zero `gossip_read_cap` is rejected as the knob itself. The ring screens are
+/// strictly below the cap, so zero admits no gossip ring at all: reporting it as a
+/// packet-count failure would name a field no value could fix.
+#[test]
+fn zero_gossip_read_cap_rejected() {
+  let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+  let now: Instant = harness::Clock::new().now();
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+    Options::new().with_gossip_read_cap(0),
+    InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+    TransformOptions::default(),
+    ep("a", 1),
+    &SocketAddrResolver,
+    &mut dev,
+    now,
+  );
+  assert!(
+    matches!(res, Err(InitError::ZeroGossipReadCap)),
+    "a zero gossip_read_cap must be rejected as ZeroGossipReadCap"
+  );
+}
+
 /// A zero `close_timeout` is rejected: it would force-abort every graceful
 /// reliable close immediately (deadline == `now`), truncating in-flight push/pull
 /// responses instead of draining them.

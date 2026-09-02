@@ -214,7 +214,8 @@ where
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
   ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
   ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
+  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
   ///   or a machine-endpoint init failure).
   /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
   ///   seeding the default gossip RNG.
@@ -295,7 +296,8 @@ where
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
   ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
   ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
+  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
   ///   or a machine-endpoint init failure).
   ///
   /// # Panics

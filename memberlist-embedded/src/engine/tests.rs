@@ -4722,6 +4722,89 @@ fn a_gossip_io_whose_ring_reaches_the_read_cap_cannot_construct_an_engine() {
   assert_eq!(engine.num_members(), 1, "the constructed engine is usable");
 }
 
+/// The ring screen follows the CONFIGURED ceiling, not the constant: an engine
+/// built with a cap of 8 rejects a 9-slot ring (and the 8-slot ring at the cap),
+/// and accepts a 7-slot one — all of which the default cap of 64 would have
+/// admitted. The rejection still carries the capacity the view declared.
+#[test]
+fn the_ring_screen_follows_the_configured_cap() {
+  const CAP: usize = 8;
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let cfg = || {
+    Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10))
+      .with_gossip_read_cap(CAP)
+  };
+  let ep_cfg = || memberlist_proto::EndpointOptions::new(SmolStr::new("cap"), node_addr(7946));
+
+  for declared in [CAP + 1, CAP] {
+    let gossip = QueueGossip::with_recv_capacity(declared);
+    let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+      cfg(),
+      TransformOptions::default(),
+      ep_cfg(),
+      now,
+      test_rng(),
+      &gossip,
+    );
+    match rejected {
+      Err(InitError::GossipRecvCapacityTooLarge(n)) => assert_eq!(
+        n, declared,
+        "the rejection carries the capacity the view declared"
+      ),
+      Err(other) => panic!("a {declared}-slot ring must be rejected under a cap of {CAP}: {other}"),
+      Ok(_) => panic!(
+        "a {declared}-slot ring must not construct under a cap of {CAP} (the default 64 would admit it)"
+      ),
+    }
+  }
+
+  let gossip = QueueGossip::with_recv_capacity(CAP - 1);
+  let engine: Engine<SmolStr, u32> = Engine::try_new_at(
+    cfg(),
+    TransformOptions::default(),
+    ep_cfg(),
+    now,
+    test_rng(),
+    &gossip,
+  )
+  .expect("a ring one slot below the configured cap must construct");
+  assert_eq!(engine.num_members(), 1, "the constructed engine is usable");
+}
+
+/// A zero gossip read cap is rejected as the knob it is, by the shared preflight
+/// and by construction alike. Zero admits no ring at all (the screen is strictly
+/// below the cap), so reporting it as a ring-capacity failure would name the wrong
+/// field: no `udp_rx_packets` / socket size could ever satisfy it.
+#[test]
+fn a_zero_gossip_read_cap_is_rejected_as_the_knob_it_is() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let cfg = Options::new().with_port(7946).with_gossip_read_cap(0);
+
+  assert!(
+    matches!(
+      validate_runtime_config(&cfg, &TransformOptions::default(), 1400),
+      Err(InitError::ZeroGossipReadCap)
+    ),
+    "the shared preflight rejects a zero cap before a driver resolves or binds anything"
+  );
+
+  let gossip = QueueGossip::with_recv_capacity(0);
+  let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    memberlist_proto::EndpointOptions::new(SmolStr::new("cap"), node_addr(7946)),
+    now,
+    test_rng(),
+    &gossip,
+  );
+  assert!(
+    matches!(rejected, Err(InitError::ZeroGossipReadCap)),
+    "construction rejects a zero cap even for an empty ring, naming the knob"
+  );
+}
+
 /// Arm `engine` with a reliable listener on slot 1 and one spare (slot 0) to
 /// replenish from, backed by a fresh `ProgRel`. The mock admits the passive open
 /// on the first `check_listener` that runs after the caller marks slot 1
