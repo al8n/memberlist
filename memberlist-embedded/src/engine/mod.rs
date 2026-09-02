@@ -97,14 +97,16 @@ fn gossip_recv_buf_size(gossip_mtu: usize) -> usize {
 /// ingress.
 ///
 /// A driver's gossip receive ring must stay STRICTLY BELOW this cap (smoltcp
-/// defaults to 8 metadata slots, the in-repo embassy sockets to 16; both drivers
-/// reject a larger ring at construction). A ring able to hold as many datagrams
-/// as the cap or more leaves the excess sitting in the ring — unread, so
-/// unobserved and un-stamped — across this pump's membership sweep, to be applied
-/// only at a later pump's instant. Strictly below is required rather than equal
-/// because the engine cannot distinguish "the ring was exactly emptied" from
-/// "more remain" without peeking: a full ring of exactly `GOSSIP_READ_CAP`
-/// datagrams would report the cap as hit and cost one spurious re-pump.
+/// defaults to 8 metadata slots, the in-repo embassy sockets to 16).
+/// [`Engine::try_new_at`] enforces it for every driver, by screening the
+/// [`GossipIo::recv_capacity`] the view it is handed declares. A ring able to
+/// hold as many datagrams as the cap or more leaves the excess sitting in the
+/// ring — unread, so unobserved and un-stamped — across this pump's membership
+/// sweep, to be applied only at a later pump's instant. Strictly below is
+/// required rather than equal because the engine cannot distinguish "the ring
+/// was exactly emptied" from "more remain" without peeking: a full ring of
+/// exactly `GOSSIP_READ_CAP` datagrams would report the cap as hit and cost one
+/// spurious re-pump.
 ///
 /// The bound is a count, not a byte budget. The implied byte ceiling is
 /// `GOSSIP_READ_CAP × gossip_recv_buf_size(gossip_mtu)` — per-pump AEAD and
@@ -1099,16 +1101,18 @@ where
   /// # Panics
   ///
   /// Panics if [`try_new_at`](Self::try_new_at) returns an [`InitError`] — e.g.
-  /// on a zero/over-ceiling gossip MTU, a non-routable or port-mismatched
-  /// advertise address, or a machine-endpoint init failure.
+  /// on a zero/over-ceiling gossip MTU, an over-cap gossip receive ring, a
+  /// non-routable or port-mismatched advertise address, or a machine-endpoint
+  /// init failure.
   pub fn new_at(
     cfg: Options,
     transform: TransformOptions,
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
     rng: R,
+    gossip: &impl GossipIo,
   ) -> Self {
-    Self::try_new_at(cfg, transform, ep_cfg, now, rng)
+    Self::try_new_at(cfg, transform, ep_cfg, now, rng, gossip)
       .expect("Engine::new_at: invalid configuration; use try_new_at to handle")
   }
 
@@ -1130,6 +1134,17 @@ where
   ///   `Endpoint` so timers start from a consistent origin).
   /// - `rng`: the gossip RNG, already seeded by the driver from its entropy
   ///   source. The core performs no entropy acquisition of its own.
+  /// - `gossip`: the datagram view the driver will pump this engine with. It is
+  ///   only read here, for [`GossipIo::recv_capacity`]; no datagram is moved and
+  ///   the view is not retained (`pump` takes its own `&mut` view per call).
+  ///
+  /// # The gossip read-cap invariant
+  ///
+  /// This is the SINGLE enforcement point of the invariant `pump` phase 2 relies
+  /// on: the gossip receive ring must hold strictly fewer datagrams than
+  /// [`GOSSIP_READ_CAP`]. Taking the view here — rather than trusting each driver
+  /// to screen its own socket — is what binds every driver to it, including one
+  /// written outside this workspace.
   ///
   /// # Errors
   ///
@@ -1140,6 +1155,8 @@ where
   /// - [`InitError::ZeroCloseTimeout`] — `cfg.close_timeout` is zero.
   /// - [`InitError::GossipMtuTooLarge`] — the configured gossip MTU's on-wire
   ///   datagram cannot fit a UDP packet.
+  /// - [`InitError::GossipRecvCapacityTooLarge`] — `gossip` declares a receive
+  ///   ring that can hold at least [`GOSSIP_READ_CAP`] datagrams.
   /// - [`InitError::NonRoutableAdvertiseAddr`] — the advertise address is the
   ///   unspecified address, a multicast/broadcast IP, or port 0.
   /// - [`InitError::AdvertisePortMismatch`] — the advertised port differs from
@@ -1160,6 +1177,7 @@ where
     ep_cfg: EndpointOptions<I, SocketAddr>,
     now: Instant,
     rng: R,
+    gossip: &impl GossipIo,
   ) -> Result<Self, InitError> {
     // Validate every advertise-independent config field (port, gossip-MTU
     // ceiling, close timeout, and the encryption keyring) up front. Sharing this
@@ -1168,6 +1186,21 @@ where
     // binds any socket. The advertise-dependent checks (non-routable advertise,
     // port mismatch) remain below, where the resolved address is in hand.
     validate_runtime_config(&cfg, &transform, ep_cfg.gossip_mtu())?;
+
+    // Keep the driver's gossip rx ring strictly below this engine's per-pump read
+    // cap. Phase 2 pops at most `GOSSIP_READ_CAP` datagrams and applies every one
+    // of them at that pump's instant; a ring able to hold as many or more would
+    // leave the excess unread across the pump's membership sweep, so a refutation
+    // already sitting in the ring could be applied only after the timer it refutes
+    // had fired. Screening the view the driver hands over — not each driver's own
+    // socket knob — is what makes this hold for EVERY `GossipIo`, including one
+    // implemented outside this workspace. Strict, not inclusive: a ring exactly at
+    // the cap that happens to be full is indistinguishable from an over-cap one
+    // without peeking, so it would cost a spurious re-pump on every full read.
+    let recv_capacity = gossip.recv_capacity();
+    if recv_capacity >= GOSSIP_READ_CAP {
+      return Err(InitError::GossipRecvCapacityTooLarge(recv_capacity));
+    }
 
     // Size the inbound-gossip scratch from the configured gossip MTU BEFORE
     // `ep_cfg` is moved into `Endpoint::try_new_at`. The buffer must hold the
@@ -2218,8 +2251,9 @@ where
   /// across a pump, so no timer can overtake evidence the engine holds, and the
   /// machine sees one real instant per pump — the instant at which the engine
   /// read what it feeds. Per-pump work is bounded by the driver's rings and by
-  /// [`GOSSIP_READ_CAP`]; a driver's gossip receive ring must stay below that cap
-  /// (both drivers validate it at construction).
+  /// [`GOSSIP_READ_CAP`]; a driver's gossip receive ring must stay below that cap,
+  /// which [`try_new_at`](Self::try_new_at) enforces against the view's declared
+  /// [`GossipIo::recv_capacity`].
   ///
   /// One same-instant ordering residual survives, on the reliable plane only:
   /// within phase 3 an earlier connection's feed can run a transitive sweep before
@@ -2289,6 +2323,20 @@ where
     // `last_now` anchor `handle_gossip` would have written is re-established by
     // step 6's `handle_timeout(now)` on every pump.
     //
+    // The ring this pump reads must be the one construction screened. A driver
+    // that validated with one view and pumps with another (a different socket, a
+    // resized buffer) would silently reopen the cross-pump residency the cap
+    // exists to close, and only the driver can see that divergence — so assert it
+    // where the read happens. Debug-only: the constructor already rejected an
+    // over-cap ring, and release builds pay nothing.
+    debug_assert!(
+      gossip.recv_capacity() < GOSSIP_READ_CAP,
+      "the pumped gossip receive ring holds {} datagrams, at or above the per-pump read cap {}: \
+       construction screened a different view",
+      gossip.recv_capacity(),
+      GOSSIP_READ_CAP
+    );
+
     // The lifecycle state is read once: only `leave` changes it, and `leave` is a
     // between-pumps call.
     let running = self.endpoint.is_running();

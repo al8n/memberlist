@@ -30,6 +30,7 @@ use memberlist_proto::{
 use crate::{
   config::Options,
   error::{InitError, OpError, SocketTimeoutOutOfRange},
+  gossip_io::EmbassyGossip,
   mailbox::{Command, Mailbox},
   resolver::AddressResolver,
   runner::Runner,
@@ -200,9 +201,6 @@ where
   /// - [`InitError::ZeroBridgeRing`] — a zero
   ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
   ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
-  /// - [`InitError::UdpRxCapacityTooLarge`] — the supplied gossip UDP socket can
-  ///   hold at least as many received datagrams as the engine reads per pump
-  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   /// - [`InitError::SocketTimeoutOutOfRange`] —
   ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
   ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
@@ -214,8 +212,10 @@ where
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
-  ///   machine-endpoint init failure).
+  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
+  ///   capacity reaches the engine's per-pump gossip read cap
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   or a machine-endpoint init failure).
   /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
   ///   seeding the default gossip RNG.
   ///
@@ -282,9 +282,6 @@ where
   /// - [`InitError::ZeroBridgeRing`] — a zero
   ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
   ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
-  /// - [`InitError::UdpRxCapacityTooLarge`] — the supplied gossip UDP socket can
-  ///   hold at least as many received datagrams as the engine reads per pump
-  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   /// - [`InitError::SocketTimeoutOutOfRange`] —
   ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
   ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
@@ -296,8 +293,10 @@ where
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
   ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, an unusable encryption keyring, or a
-  ///   machine-endpoint init failure).
+  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
+  ///   capacity reaches the engine's per-pump gossip read cap
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
+  ///   or a machine-endpoint init failure).
   ///
   /// # Panics
   ///
@@ -334,18 +333,6 @@ where
     }
     if cfg.tcp_socket_rx_bytes == 0 || cfg.tcp_socket_tx_bytes == 0 {
       return Err(InitError::ZeroBridgeRing);
-    }
-    // Keep the caller's gossip rx ring strictly below the engine's per-pump read
-    // cap. The engine reads at most `GOSSIP_READ_CAP` datagrams per pump and
-    // applies every one at that pump's instant; a socket that can hold as many or
-    // more would leave the excess unread across the pump's membership sweep, so a
-    // refutation already sitting in the ring could be applied only after the timer
-    // it refutes had fired. Strict, not inclusive: a ring exactly at the cap that
-    // happens to be full is indistinguishable from an over-cap one and costs a
-    // spurious re-pump.
-    let udp_rx_capacity = udp_socket.packet_recv_capacity();
-    if udp_rx_capacity >= memberlist_embedded::GOSSIP_READ_CAP {
-      return Err(InitError::UdpRxCapacityTooLarge(udp_rx_capacity));
     }
     // The per-socket inactivity timeout is a backstop that must fire strictly AFTER the
     // engine's own deadlines (the reliable-exchange `stream_timeout` and the
@@ -436,8 +423,15 @@ where
     // becomes a typed `InitError::Engine` rather than a panic. The caller-supplied
     // `rng` seeds the machine's gossip RNG: the integrator owns entropy here,
     // exactly as it owns the embassy-net stack's seed.
-    let mut engine: Engine<I, SlotId, R> =
-      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng).map_err(InitError::from)?;
+    let mut engine: Engine<I, SlotId, R> = {
+      // The engine screens the gossip receive ring against its per-pump read cap,
+      // so it is handed a view over the socket just bound — the same view the
+      // runner's pump loop builds each wake. The borrow ends here, before the
+      // socket is moved into the returned runner.
+      let gossip = EmbassyGossip::new(&udp_socket);
+      Engine::try_new_at(embedded_cfg, transform, ep_cfg, now, rng, &gossip)
+    }
+    .map_err(InitError::from)?;
 
     // Seed the engine's reliable-plane pool with every slot id, then dedicate slot
     // 0 to the listener. The engine owns this pool (it reaches it directly, not

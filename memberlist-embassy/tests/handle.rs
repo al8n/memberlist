@@ -26,6 +26,7 @@ use memberlist_embassy::{
   CompressionOptions, EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist,
   Options, Runner, SocketAddrResolver, TransformOptions, event::Event, now,
 };
+use memberlist_embedded::InitError as EngineInitError;
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
 
@@ -162,6 +163,10 @@ async fn until(mut cond: impl FnMut() -> bool) {
 /// sized exactly at the cap is rejected too (an exactly-full ring is
 /// indistinguishable from an over-cap one and costs a spurious re-pump), while the
 /// 16-slot socket every other test here uses constructs.
+///
+/// The rejection comes from the ENGINE, which screens the receive capacity the
+/// gossip view over this socket declares, and reaches the caller through this
+/// driver's `InitError::Engine`.
 #[test]
 fn udp_socket_at_or_above_the_gossip_read_cap_rejected() {
   /// A receive-packet ring sized exactly at the engine's per-pump read cap.
@@ -213,7 +218,7 @@ fn udp_socket_at_or_above_the_gossip_read_cap_rejected() {
     SmallRng::seed_from_u64(1),
   ));
   match rejected.map(|_| ()) {
-    Err(InitError::UdpRxCapacityTooLarge(n)) => assert_eq!(
+    Err(InitError::Engine(EngineInitError::GossipRecvCapacityTooLarge(n))) => assert_eq!(
       n, GOSSIP_READ_CAP,
       "the rejection carries the socket's receive-packet capacity"
     ),

@@ -772,12 +772,18 @@ fn zero_udp_tx_packets_rejected() {
 /// sweep. The bound is strict: the cap itself is rejected (an exactly-full ring is
 /// indistinguishable from an over-cap one and costs a spurious re-poll), and one
 /// slot below it constructs.
+///
+/// The rejection is the ENGINE's: it screens the receive capacity of the gossip
+/// view this driver hands it (the bound socket's own metadata-slot count, which
+/// `udp_rx_packets` sizes), and the driver reports that verdict under the name of
+/// the option to lower. The shipped default is well below the cap and constructs.
 #[test]
 fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
   for (slots, accepted) in [
     (GOSSIP_READ_CAP + 1, false),
     (GOSSIP_READ_CAP, false),
     (GOSSIP_READ_CAP - 1, true),
+    (Options::new().udp_rx_packets, true),
   ] {
     let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
     let now: Instant = harness::Clock::new().now();

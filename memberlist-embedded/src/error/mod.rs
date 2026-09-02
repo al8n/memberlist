@@ -58,6 +58,22 @@ pub enum InitError {
   /// and the unchecked arena arithmetic would overflow. The configured value
   /// and the effective ceiling are carried for diagnostics.
   GossipMtuTooLarge(GossipMtuTooLarge),
+  /// The driver's gossip receive ring
+  /// ([`GossipIo::recv_capacity`](crate::GossipIo::recv_capacity)) can hold at
+  /// least as many datagrams as the engine reads per pump
+  /// ([`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP)).
+  ///
+  /// The engine reads at most that many datagrams from the ring per pump and
+  /// applies every one of them at that pump's instant. A ring able to hold as many
+  /// as the cap or more leaves the excess sitting unread — so unobserved and
+  /// un-stamped — across the pump's membership sweep, to be applied only at a later
+  /// pump's instant: a refutation waiting in the ring could then be applied only
+  /// after the timer it refutes had fired. The bound is strict rather than
+  /// inclusive because a ring exactly at the cap that happens to be full is
+  /// indistinguishable from an over-cap one without peeking, so it would cost one
+  /// spurious re-pump on every full read. The capacity reported is carried for
+  /// diagnostics.
+  GossipRecvCapacityTooLarge(usize),
   /// The SWIM machine endpoint failed to initialize.
   Endpoint(EndpointInitError),
   /// The configured encryption keyring cannot be used by this build.
@@ -140,6 +156,12 @@ impl fmt::Display for InitError {
       InitError::ZeroPort => f.write_str("port is zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
+      InitError::GossipRecvCapacityTooLarge(n) => write!(
+        f,
+        "the gossip receive ring holds {n} datagrams, which must be below the engine's \
+         per-pump gossip read cap ({})",
+        crate::GOSSIP_READ_CAP
+      ),
       InitError::Endpoint(e) => write!(f, "SWIM endpoint initialization failed: {e}"),
       #[cfg(encryption)]
       InitError::Encryption(e) => write!(f, "encryption configuration is unusable: {e}"),

@@ -218,13 +218,16 @@ pub enum InitError {
   /// engine's per-pump gossip read cap
   /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   ///
-  /// The engine reads at most that many datagrams from this ring per pump and
-  /// applies every one of them at that pump's instant. A ring able to hold as many
-  /// as the cap or more leaves the excess sitting unread — so unobserved and
-  /// un-stamped — across the pump's membership sweep, to be applied only at a later
-  /// pump's instant. The bound is strict rather than inclusive because a ring
-  /// exactly at the cap that happens to be full is indistinguishable from an
-  /// over-cap one, and would cost one spurious re-poll.
+  /// This is the engine's own rejection of the bound gossip socket's receive ring
+  /// ([`memberlist_embedded::InitError::GossipRecvCapacityTooLarge`]), surfaced
+  /// under the name of the option that sizes it. The engine reads at most
+  /// `GOSSIP_READ_CAP` datagrams from the ring per pump and applies every one of
+  /// them at that pump's instant. A ring able to hold as many as the cap or more
+  /// leaves the excess sitting unread — so unobserved and un-stamped — across the
+  /// pump's membership sweep, to be applied only at a later pump's instant. The
+  /// bound is strict rather than inclusive because a ring exactly at the cap that
+  /// happens to be full is indistinguishable from an over-cap one, and would cost
+  /// one spurious re-poll.
   UdpRxPacketsTooLarge,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
@@ -362,9 +365,12 @@ impl InitError {
   ///
   /// The driver pre-validates the port, gossip MTU, close timeout, and advertise
   /// address before building the engine, so in practice the engine fails only with
-  /// [`Endpoint`](memberlist_embedded::InitError::Endpoint) (machine init) or
+  /// [`Endpoint`](memberlist_embedded::InitError::Endpoint) (machine init),
   /// [`Encryption`](memberlist_embedded::InitError::Encryption) (an unusable
-  /// keyring). The remaining variants are mapped to their driver equivalents
+  /// keyring), or
+  /// [`GossipRecvCapacityTooLarge`](memberlist_embedded::InitError::GossipRecvCapacityTooLarge)
+  /// (an over-cap gossip receive ring, which only the engine screens). The
+  /// remaining variants are mapped to their driver equivalents
   /// anyway so the conversion is total and stays correct if the driver's
   /// pre-checks are ever reordered or relaxed.
   pub(crate) fn from_embedded(e: memberlist_embedded::InitError) -> Self {
@@ -378,6 +384,10 @@ impl InitError {
         gossip_mtu: m.gossip_mtu,
         ceiling: m.ceiling,
       }),
+      // The engine screens the bound gossip socket's receive ring; the driver sizes
+      // that ring from `udp_rx_packets` alone, so the rejection is reported under
+      // the name of the knob the caller must lower.
+      E::GossipRecvCapacityTooLarge(_) => InitError::UdpRxPacketsTooLarge,
       E::Endpoint(inner) => InitError::Endpoint(inner),
       #[cfg(encryption)]
       E::Encryption(inner) => InitError::Encryption(inner),

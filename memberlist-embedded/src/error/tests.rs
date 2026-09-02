@@ -7,7 +7,7 @@ use super::{GossipMtuTooLarge, InitError};
 fn every_init_error_variant_displays_and_reports_its_source() {
   let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
   // (variant, whether `source()` should be `Some`).
-  let cases: [(InitError, bool); 8] = [
+  let cases: [(InitError, bool); 9] = [
     (InitError::NonRoutableAdvertiseAddr(addr), false),
     (InitError::AdvertisePortMismatch, false),
     (InitError::ZeroPort, false),
@@ -17,6 +17,10 @@ fn every_init_error_variant_displays_and_reports_its_source() {
         gossip_mtu: 70_000,
         ceiling: 65_000,
       }),
+      false,
+    ),
+    (
+      InitError::GossipRecvCapacityTooLarge(crate::GOSSIP_READ_CAP),
       false,
     ),
     (
