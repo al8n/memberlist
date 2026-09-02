@@ -200,6 +200,9 @@ where
   /// - [`InitError::ZeroBridgeRing`] — a zero
   ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
   ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
+  /// - [`InitError::UdpRxCapacityTooLarge`] — the supplied gossip UDP socket can
+  ///   hold at least as many received datagrams as the engine reads per pump
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   /// - [`InitError::SocketTimeoutOutOfRange`] —
   ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
   ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
@@ -279,6 +282,9 @@ where
   /// - [`InitError::ZeroBridgeRing`] — a zero
   ///   [`Options::tcp_socket_rx_bytes`](crate::Options::tcp_socket_rx_bytes) /
   ///   [`tcp_socket_tx_bytes`](crate::Options::tcp_socket_tx_bytes).
+  /// - [`InitError::UdpRxCapacityTooLarge`] — the supplied gossip UDP socket can
+  ///   hold at least as many received datagrams as the engine reads per pump
+  ///   ([`memberlist_embedded::GOSSIP_READ_CAP`]).
   /// - [`InitError::SocketTimeoutOutOfRange`] —
   ///   [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs
   ///   it into smoltcp (floored to whole microseconds at the platform tick rate), is not
@@ -328,6 +334,18 @@ where
     }
     if cfg.tcp_socket_rx_bytes == 0 || cfg.tcp_socket_tx_bytes == 0 {
       return Err(InitError::ZeroBridgeRing);
+    }
+    // Keep the caller's gossip rx ring strictly below the engine's per-pump read
+    // cap. The engine reads at most `GOSSIP_READ_CAP` datagrams per pump and
+    // applies every one at that pump's instant; a socket that can hold as many or
+    // more would leave the excess unread across the pump's membership sweep, so a
+    // refutation already sitting in the ring could be applied only after the timer
+    // it refutes had fired. Strict, not inclusive: a ring exactly at the cap that
+    // happens to be full is indistinguishable from an over-cap one and costs a
+    // spurious re-pump.
+    let udp_rx_capacity = udp_socket.packet_recv_capacity();
+    if udp_rx_capacity >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxCapacityTooLarge(udp_rx_capacity));
     }
     // The per-socket inactivity timeout is a backstop that must fire strictly AFTER the
     // engine's own deadlines (the reliable-exchange `stream_timeout` and the

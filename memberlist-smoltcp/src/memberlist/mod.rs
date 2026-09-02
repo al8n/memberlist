@@ -491,6 +491,17 @@ where
       return Err(InitError::ZeroUdpPackets);
     }
 
+    // Keep the gossip rx ring strictly below the engine's per-pump read cap. The
+    // engine reads at most `GOSSIP_READ_CAP` datagrams per pump and applies every
+    // one at that pump's instant; a ring that can hold as many or more would leave
+    // the excess unread across the pump's membership sweep, so a refutation already
+    // sitting in the ring could be applied only after the timer it refutes had
+    // fired. Strict, not inclusive: a ring exactly at the cap that happens to be
+    // full is indistinguishable from an over-cap one and costs a spurious re-poll.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
+    }
+
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable
     // graceful-close drain: a connection still `Closing` past `now +
     // close_timeout` is force-aborted. Zero sets that deadline to `now`, so every
@@ -936,6 +947,17 @@ where
     // packet buffers below.
     if cfg.udp_rx_packets == 0 || cfg.udp_tx_packets == 0 {
       return Err(InitError::ZeroUdpPackets);
+    }
+
+    // Keep the gossip rx ring strictly below the engine's per-pump read cap. The
+    // engine reads at most `GOSSIP_READ_CAP` datagrams per pump and applies every
+    // one at that pump's instant; a ring that can hold as many or more would leave
+    // the excess unread across the pump's membership sweep, so a refutation already
+    // sitting in the ring could be applied only after the timer it refutes had
+    // fired. Strict, not inclusive: a ring exactly at the cap that happens to be
+    // full is indistinguishable from an over-cap one and costs a spurious re-poll.
+    if cfg.udp_rx_packets >= memberlist_embedded::GOSSIP_READ_CAP {
+      return Err(InitError::UdpRxPacketsTooLarge);
     }
 
     // Reject a zero graceful-close timeout. `close_timeout` bounds the reliable

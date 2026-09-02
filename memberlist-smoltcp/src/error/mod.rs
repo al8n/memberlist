@@ -214,6 +214,18 @@ pub enum InitError {
   /// so gossip can never be received (or sent): a silently-dead gossip plane.
   /// Both must be non-zero.
   ZeroUdpPackets,
+  /// [`Options::udp_rx_packets`](crate::Options::udp_rx_packets) is not below the
+  /// engine's per-pump gossip read cap
+  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
+  ///
+  /// The engine reads at most that many datagrams from this ring per pump and
+  /// applies every one of them at that pump's instant. A ring able to hold as many
+  /// as the cap or more leaves the excess sitting unread — so unobserved and
+  /// un-stamped — across the pump's membership sweep, to be applied only at a later
+  /// pump's instant. The bound is strict rather than inclusive because a ring
+  /// exactly at the cap that happens to be full is indistinguishable from an
+  /// over-cap one, and would cost one spurious re-poll.
+  UdpRxPacketsTooLarge,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
@@ -334,6 +346,11 @@ impl fmt::Display for InitError {
       InitError::ZeroUdpPackets => {
         f.write_str("udp_rx_packets and udp_tx_packets must be non-zero")
       }
+      InitError::UdpRxPacketsTooLarge => write!(
+        f,
+        "udp_rx_packets must be below the engine's per-pump gossip read cap ({})",
+        memberlist_embedded::GOSSIP_READ_CAP
+      ),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
     }
   }

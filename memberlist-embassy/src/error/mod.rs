@@ -29,6 +29,19 @@ pub enum InitError {
   /// drain, and a zero-byte outbound ring can never accept a byte from the
   /// engine to write — a silently-dead reliable plane. Both must be non-zero.
   ZeroBridgeRing,
+  /// The supplied gossip UDP socket's receive-packet capacity is not below the
+  /// engine's per-pump gossip read cap
+  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]).
+  ///
+  /// The engine reads at most that many datagrams from this socket per pump and
+  /// applies every one of them at that pump's instant. A ring able to hold as many
+  /// as the cap or more leaves the excess sitting unread — so unobserved and
+  /// un-stamped — across the pump's membership sweep, to be applied only at a later
+  /// pump's instant. The bound is strict rather than inclusive because a ring
+  /// exactly at the cap that happens to be full is indistinguishable from an
+  /// over-cap one, and would cost one spurious re-pump. Size the socket's packet
+  /// metadata buffer below the cap; the capacity found is carried for diagnostics.
+  UdpRxCapacityTooLarge(usize),
   /// The per-socket inactivity timeout is out of the valid range.
   ///
   /// [`Options::socket_timeout`](crate::Options::socket_timeout), as embassy-net installs it
@@ -79,6 +92,13 @@ impl InitError {
   #[inline]
   pub const fn is_zero_bridge_ring(&self) -> bool {
     matches!(self, InitError::ZeroBridgeRing)
+  }
+
+  /// Whether the supplied gossip UDP socket could hold at least as many received
+  /// datagrams as the engine reads per pump.
+  #[inline]
+  pub const fn is_udp_rx_capacity_too_large(&self) -> bool {
+    matches!(self, InitError::UdpRxCapacityTooLarge(_))
   }
 
   /// Whether the per-socket inactivity timeout was out of range.
@@ -143,6 +163,12 @@ impl fmt::Display for InitError {
       InitError::ZeroBridgeRing => {
         f.write_str("tcp_socket_rx_bytes and tcp_socket_tx_bytes must both be non-zero")
       }
+      InitError::UdpRxCapacityTooLarge(n) => write!(
+        f,
+        "the gossip UDP socket holds {n} received datagrams, which must be below the \
+         engine's per-pump gossip read cap ({})",
+        memberlist_embedded::GOSSIP_READ_CAP
+      ),
       InitError::SocketTimeoutOutOfRange(s) => write!(
         f,
         "socket_timeout ({:?}), as installed into smoltcp (floored to whole microseconds \

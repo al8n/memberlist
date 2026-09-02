@@ -31,6 +31,11 @@ pub struct Options {
   /// Per-TCP-socket tx ring bytes.
   pub tcp_socket_tx_bytes: usize,
   /// UDP rx datagram metadata slots.
+  ///
+  /// Must be strictly below the engine's per-pump gossip read cap
+  /// ([`memberlist_embedded::GOSSIP_READ_CAP`]), which construction enforces: the
+  /// engine applies at most that many datagrams per pump, so a larger ring leaves
+  /// the excess unread across a pump's membership sweep.
   pub udp_rx_packets: usize,
   /// UDP tx datagram metadata slots.
   pub udp_tx_packets: usize,

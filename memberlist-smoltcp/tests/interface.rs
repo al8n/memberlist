@@ -12,8 +12,9 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  EthernetAddress, GossipMtuTooLarge, HardwareAddress, InitError, InterfaceOptions, IpCidr, Medium,
-  Memberlist, Options, Route, SocketAddrResolver, TransformOptions,
+  EthernetAddress, GOSSIP_READ_CAP, GossipMtuTooLarge, HardwareAddress, InitError,
+  InterfaceOptions, IpCidr, Medium, Memberlist, Options, Route, SocketAddrResolver,
+  TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -568,7 +569,9 @@ fn oversized_udp_arena_rejected() {
   let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
   let now: Instant = harness::Clock::new().now();
   let mut cfg = Options::new();
-  cfg.udp_rx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
+  // Driven through the TX slots: the RX count is capped far below any overflow by
+  // the engine's per-pump gossip read cap.
+  cfg.udp_tx_packets = usize::MAX; // × (gossip_mtu + overhead) overflows usize
   let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
     cfg,
     InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
@@ -760,6 +763,47 @@ fn zero_udp_tx_packets_rejected() {
     matches!(res, Err(InitError::ZeroUdpPackets)),
     "zero udp_tx_packets must be rejected as ZeroUdpPackets"
   );
+}
+
+/// A gossip rx ring that can hold at least as many datagrams as the engine reads
+/// per pump is rejected. The engine applies every datagram it pops within the pump
+/// that popped it, at most `GOSSIP_READ_CAP` of them, so a larger ring would leave
+/// the excess unread — unobserved and un-stamped — across the pump's membership
+/// sweep. The bound is strict: the cap itself is rejected (an exactly-full ring is
+/// indistinguishable from an over-cap one and costs a spurious re-poll), and one
+/// slot below it constructs.
+#[test]
+fn udp_rx_packets_at_or_above_the_gossip_read_cap_rejected() {
+  for (slots, accepted) in [
+    (GOSSIP_READ_CAP + 1, false),
+    (GOSSIP_READ_CAP, false),
+    (GOSSIP_READ_CAP - 1, true),
+  ] {
+    let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+    let now: Instant = harness::Clock::new().now();
+    let mut cfg = Options::new();
+    cfg.udp_rx_packets = slots;
+    let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+      cfg,
+      InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+      TransformOptions::default(),
+      ep("a", 1),
+      &SocketAddrResolver,
+      &mut dev,
+      now,
+    );
+    if accepted {
+      assert!(
+        res.is_ok(),
+        "{slots} slots is below the cap and must construct"
+      );
+    } else {
+      assert!(
+        matches!(res, Err(InitError::UdpRxPacketsTooLarge)),
+        "{slots} slots is not below the cap and must be rejected"
+      );
+    }
+  }
 }
 
 /// A zero `close_timeout` is rejected: it would force-abort every graceful

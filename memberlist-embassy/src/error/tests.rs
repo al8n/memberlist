@@ -29,6 +29,11 @@ fn init_error_variants_display_and_source() {
   assert!(zero_ring.source().is_none());
   assert!(zero_ring.is_zero_bridge_ring());
 
+  let udp_rx = InitError::UdpRxCapacityTooLarge(memberlist_embedded::GOSSIP_READ_CAP);
+  assert!(!udp_rx.to_string().is_empty());
+  assert!(udp_rx.source().is_none());
+  assert!(udp_rx.is_udp_rx_capacity_too_large());
+
   let out_of_range = InitError::SocketTimeoutOutOfRange(SocketTimeoutOutOfRange {
     socket_timeout: Duration::from_secs(1),
     close_timeout: Duration::from_secs(10),
