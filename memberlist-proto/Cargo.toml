@@ -215,7 +215,7 @@ hash32 = { version = "1", optional = true, default-features = false }
 # Compression backends — opt-in (see the compression-* features).
 brotli = { version = "8", optional = true, default-features = false }
 snap = { version = "1", optional = true }
-lz4_flex = { version = "0.13", optional = true, default-features = false }
+lz4_flex = { version = "0.14", optional = true, default-features = false }
 zstd = { version = "0.13", optional = true }
 
 # AEAD backends — opt-in (see the encryption-* features). The AEAD traits come
