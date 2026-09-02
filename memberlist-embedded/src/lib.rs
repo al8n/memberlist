@@ -35,7 +35,7 @@ pub mod transform;
 
 pub use addr::socket_addr_is_routable;
 pub use config::{DEFAULT_CLOSE_TIMEOUT, Options};
-pub use engine::{Engine, validate_runtime_config};
+pub use engine::{Engine, GOSSIP_READ_CAP, validate_runtime_config};
 #[cfg(encryption)]
 #[cfg_attr(
   docsrs,

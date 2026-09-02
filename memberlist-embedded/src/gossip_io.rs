@@ -11,6 +11,11 @@ use core::net::SocketAddr;
 /// filled or drained.
 pub trait GossipIo {
   /// Pop one received datagram into `buf`; `(source, len)` or `None` when the rx ring is empty.
+  ///
+  /// The ring must be FIFO, and it should hold fewer datagrams than the engine
+  /// reads per pump: an engine built on this trait bounds its per-pump reads, so a
+  /// larger ring leaves the excess un-stamped across a pump (see the engine's
+  /// `pump` for its cap).
   fn recv(&mut self, buf: &mut [u8]) -> Option<(SocketAddr, usize)>;
 
   /// Best-effort enqueue of one datagram to `dest`. Gossip is lossy: drop on a full tx ring.
