@@ -22,12 +22,14 @@ use smoltcp::{
   socket::{tcp, udp},
 };
 
+use smoltcp::wire::{IPV4_HEADER_LEN, IPV6_HEADER_LEN, UDP_HEADER_LEN};
+
 use crate::{
   InitError, InterfaceOptions, JoinError, Options, Resolver, TransformOptions,
   addr::{from_smoltcp_instant, to_endpoint, to_smoltcp_duration, to_smoltcp_instant},
-  error::{GossipMtuTooLarge, MediumMismatch},
+  error::{GossipDatagramExceedsDeviceMtu, GossipMtuTooLarge, MediumMismatch},
   gossip_io::SmoltcpGossip,
-  interface::{HardwareAddress, Medium},
+  interface::{HardwareAddress, IpCidr, Medium},
   stream_io::SmoltcpStream,
 };
 use core::marker::PhantomData;
@@ -36,6 +38,19 @@ use std::{boxed::Box, sync::Arc, vec::Vec};
 /// The maximum UDP payload (`u16` length minus the 8-byte UDP header), the
 /// hard ceiling for an on-wire gossip datagram. Matches the async drivers.
 const UDP_PAYLOAD_MAX: usize = 65507;
+
+/// The largest on-wire gossip datagram a node with this `gossip_mtu` can emit:
+/// the machine caps an outbound datagram's PLAINTEXT at `gossip_mtu`, and the
+/// enabled transforms add at most one encryption wrapper and one checksum wrapper
+/// on top of it.
+///
+/// The UDP arenas are floored at this per slot, and the device-MTU guard measures
+/// it against the bound link, so both read one definition. `gossip_mtu` is bounded
+/// above by the UDP payload ceiling before either uses this, so the addition
+/// cannot overflow.
+const fn max_gossip_datagram(gossip_mtu: usize) -> usize {
+  gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD
+}
 
 /// The largest the encrypted wrapper can inflate a gossip datagram, or `0` when
 /// no encryption backend is built in. The proto const exists only under an
@@ -317,6 +332,13 @@ where
   ///   neither unicast nor unspecified (checked here so smoltcp's
   ///   `check_ip_addrs` can never `panic!`).
   /// - [`InitError::MissingIpAddress`] — `iface.ip_addrs` is empty.
+  /// - [`InitError::GossipDatagramExceedsDeviceMtu`] — the largest gossip
+  ///   datagram `ep_cfg.gossip_mtu()` and the enabled transforms can produce does
+  ///   not fit `device.capabilities().ip_mtu()` once the UDP header and the widest
+  ///   IP header of the configured address families are added. This build has no
+  ///   IP fragmentation, so such a datagram would be enqueued and then silently
+  ///   discarded on egress; lower `gossip_mtu` or bind a wider device. The check
+  ///   is against the LOCAL link only — a remote path can still be narrower.
   /// - [`InitError::TooManyIpAddresses`] / [`InitError::TooManyRoutes`] — more
   ///   addresses or routes than smoltcp's interface can hold.
   /// - [`InitError::Entropy`] — `iface.random_seed` was `None` and the system
@@ -375,7 +397,12 @@ where
     //    supported but differs from the device's is a `MediumMismatch`.
     let expected =
       hardware_address_medium(&iface.hardware_addr).ok_or(InitError::UnsupportedMedium)?;
-    let actual = device.capabilities().medium;
+    // Read the device's capabilities ONCE: the medium is checked here, and the IP
+    // MTU below bounds the largest gossip datagram this configuration can emit.
+    // smoltcp itself caches these at `Interface::new`, so the device is expected to
+    // report the same values throughout its life.
+    let caps = device.capabilities();
+    let actual = caps.medium;
     if expected != actual {
       return Err(InitError::MediumMismatch(MediumMismatch {
         expected,
@@ -460,6 +487,43 @@ where
         gossip_mtu: ep_cfg.gossip_mtu(),
         ceiling: gossip_mtu_ceiling,
       }));
+    }
+
+    // Reject a gossip datagram the BOUND DEVICE cannot carry in one IP packet.
+    // The ceiling above bounds the datagram against the protocol's 65507-byte UDP
+    // limit; this bounds it against the link actually in hand, which construction
+    // already knows. This crate enables neither of smoltcp's fragmentation
+    // features, so an oversized datagram is not fragmented and not refused: the UDP
+    // socket accepts it (gossip is best-effort, `send_slice` only checks the arena),
+    // and the next egress pass dequeues it and drops it — `dispatch_ip` returns
+    // success without transmitting when the IP packet exceeds `ip_mtu()`. Large
+    // metadata, user packets and compounded gossip would vanish while small probes
+    // kept working: partial convergence and false suspicion on a node that looks
+    // healthy. Reject it here instead, before any allocation.
+    //
+    // The comparison mirrors `dispatch_ip`'s own: the IP packet is the header plus
+    // the UDP header plus the largest transformed datagram the machine can emit, and
+    // it must fit `ip_mtu()` (the device MTU less any medium header). The IP header
+    // is the widest of the configured address families — a dual-stack interface must
+    // satisfy both, and IPv6's 40-byte header is the binding one.
+    let ip_header = if iface
+      .ip_addrs
+      .iter()
+      .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+    {
+      IPV6_HEADER_LEN
+    } else {
+      IPV4_HEADER_LEN
+    };
+    let required = ip_header + UDP_HEADER_LEN + max_gossip_datagram(ep_cfg.gossip_mtu());
+    let available = caps.ip_mtu();
+    if required > available {
+      return Err(InitError::GossipDatagramExceedsDeviceMtu(
+        GossipDatagramExceedsDeviceMtu {
+          required,
+          available,
+        },
+      ));
     }
 
     // Reject a sub-2 TCP pool. Construction dedicates one pooled socket to the
@@ -621,8 +685,7 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram =
-      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram = max_gossip_datagram(ep_cfg.gossip_mtu());
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets
@@ -855,7 +918,12 @@ where
     //    supported but differs from the device's is a `MediumMismatch`.
     let expected =
       hardware_address_medium(&iface.hardware_addr).ok_or(InitError::UnsupportedMedium)?;
-    let actual = device.capabilities().medium;
+    // Read the device's capabilities ONCE: the medium is checked here, and the IP
+    // MTU below bounds the largest gossip datagram this configuration can emit.
+    // smoltcp itself caches these at `Interface::new`, so the device is expected to
+    // report the same values throughout its life.
+    let caps = device.capabilities();
+    let actual = caps.medium;
     if expected != actual {
       return Err(InitError::MediumMismatch(MediumMismatch {
         expected,
@@ -940,6 +1008,43 @@ where
         gossip_mtu: ep_cfg.gossip_mtu(),
         ceiling: gossip_mtu_ceiling,
       }));
+    }
+
+    // Reject a gossip datagram the BOUND DEVICE cannot carry in one IP packet.
+    // The ceiling above bounds the datagram against the protocol's 65507-byte UDP
+    // limit; this bounds it against the link actually in hand, which construction
+    // already knows. This crate enables neither of smoltcp's fragmentation
+    // features, so an oversized datagram is not fragmented and not refused: the UDP
+    // socket accepts it (gossip is best-effort, `send_slice` only checks the arena),
+    // and the next egress pass dequeues it and drops it — `dispatch_ip` returns
+    // success without transmitting when the IP packet exceeds `ip_mtu()`. Large
+    // metadata, user packets and compounded gossip would vanish while small probes
+    // kept working: partial convergence and false suspicion on a node that looks
+    // healthy. Reject it here instead, before any allocation.
+    //
+    // The comparison mirrors `dispatch_ip`'s own: the IP packet is the header plus
+    // the UDP header plus the largest transformed datagram the machine can emit, and
+    // it must fit `ip_mtu()` (the device MTU less any medium header). The IP header
+    // is the widest of the configured address families — a dual-stack interface must
+    // satisfy both, and IPv6's 40-byte header is the binding one.
+    let ip_header = if iface
+      .ip_addrs
+      .iter()
+      .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+    {
+      IPV6_HEADER_LEN
+    } else {
+      IPV4_HEADER_LEN
+    };
+    let required = ip_header + UDP_HEADER_LEN + max_gossip_datagram(ep_cfg.gossip_mtu());
+    let available = caps.ip_mtu();
+    if required > available {
+      return Err(InitError::GossipDatagramExceedsDeviceMtu(
+        GossipDatagramExceedsDeviceMtu {
+          required,
+          available,
+        },
+      ));
     }
 
     // Reject a sub-2 TCP pool. Construction dedicates one pooled socket to the
@@ -1091,8 +1196,7 @@ where
     // 32-bit target (e.g. `usize::MAX / 65507 ≈ 65541` packet slots), so use
     // `checked_mul` and reject an overflowing arena rather than wrapping to an
     // undersized one.
-    let max_datagram =
-      ep_cfg.gossip_mtu() + ENCRYPTED_WRAPPER_OVERHEAD + CHECKSUMED_WRAPPER_OVERHEAD;
+    let max_datagram = max_gossip_datagram(ep_cfg.gossip_mtu());
     let udp_rx_arena = cfg.udp_rx_payload_bytes.max(
       cfg
         .udp_rx_packets

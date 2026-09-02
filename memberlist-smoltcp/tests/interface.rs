@@ -12,9 +12,9 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use memberlist_proto::{EndpointOptions, Instant};
 use memberlist_smoltcp::{
-  EthernetAddress, GOSSIP_READ_CAP, GossipMtuTooLarge, HardwareAddress, InitError,
-  InterfaceOptions, IpCidr, Medium, Memberlist, Options, Route, SocketAddrResolver,
-  TransformOptions,
+  EthernetAddress, GOSSIP_READ_CAP, GossipDatagramExceedsDeviceMtu, GossipMtuTooLarge,
+  HardwareAddress, InitError, InterfaceOptions, IpCidr, Medium, Memberlist, Options, Route,
+  SocketAddrResolver, TransformOptions,
 };
 use smol_str::SmolStr;
 
@@ -900,4 +900,134 @@ fn zero_close_timeout_rejected() {
     matches!(res, Err(InitError::ZeroCloseTimeout)),
     "a zero close_timeout must be rejected as ZeroCloseTimeout"
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The bound device's IP MTU bounds the gossip budget. This build enables neither
+// of smoltcp's IP fragmentation features, so a datagram larger than the link can
+// carry is neither fragmented nor refused: the UDP socket accepts it and the next
+// egress pass dequeues and discards it. Construction knows the device MTU, so the
+// combination is rejected there instead of black-holing large gossip at runtime.
+
+/// Try to construct a node with `gossip_mtu` over a device of `device_mtu`,
+/// optionally giving the interface an IPv6 address alongside its IPv4 one.
+fn try_with_device_mtu(
+  device_mtu: usize,
+  gossip_mtu: Option<usize>,
+  dual_stack: bool,
+) -> Result<(), InitError> {
+  let (mut dev, _peer) = harness::link(device_mtu);
+  let now: Instant = harness::Clock::new().now();
+  let mut iface = InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1));
+  if dual_stack {
+    iface = iface.with_ip_addr(IpCidr::new(
+      IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)).into(),
+      64,
+    ));
+  }
+  let mut ep_cfg = ep("a", 1);
+  if let Some(mtu) = gossip_mtu {
+    ep_cfg = ep_cfg.with_gossip_mtu(mtu);
+  }
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+    Options::new(),
+    iface,
+    TransformOptions::default(),
+    ep_cfg,
+    &SocketAddrResolver,
+    &mut dev,
+    now,
+  );
+  // Drop the node without moving it into an assertion: `Memberlist` is not `Debug`.
+  res.map(|_| ())
+}
+
+/// The bytes a datagram needs beyond `gossip_mtu` itself on this build: the IPv4
+/// and UDP headers plus whatever wrapper overhead the enabled transforms add.
+/// Read off a rejection rather than recomputed, so the assertions below track the
+/// feature set the suite is compiled with.
+fn per_datagram_overhead() -> usize {
+  match try_with_device_mtu(1500, Some(4096), false) {
+    Err(InitError::GossipDatagramExceedsDeviceMtu(GossipDatagramExceedsDeviceMtu {
+      required,
+      available,
+    })) => {
+      assert_eq!(
+        available, 1500,
+        "Medium::Ip has no medium header to subtract"
+      );
+      required - 4096
+    }
+    other => panic!("a 4096-byte gossip budget cannot fit a 1500-byte link: {other:?}"),
+  }
+}
+
+/// A 1500-byte device carries the default gossip budget, and the boundary is
+/// exact: the largest budget that fits constructs, one byte more is rejected, and
+/// the rejection reports the bytes needed against the bytes available.
+#[test]
+fn the_device_ip_mtu_bounds_the_gossip_budget_exactly() {
+  let overhead = per_datagram_overhead();
+
+  assert!(
+    try_with_device_mtu(1500, None, false).is_ok(),
+    "the default gossip budget must fit an ordinary 1500-byte link"
+  );
+
+  let largest = 1500 - overhead;
+  assert!(
+    try_with_device_mtu(1500, Some(largest), false).is_ok(),
+    "a gossip budget whose datagram exactly fills the link's IP MTU must construct"
+  );
+  match try_with_device_mtu(1500, Some(largest + 1), false) {
+    Err(InitError::GossipDatagramExceedsDeviceMtu(m)) => {
+      assert_eq!(
+        (m.required, m.available),
+        (1501, 1500),
+        "the rejection carries the bytes needed and the bytes the device can carry"
+      );
+    }
+    other => panic!("one byte past the link's capacity must be rejected: {other:?}"),
+  }
+}
+
+/// An IPv6-minimum 1280-byte device rejects even the DEFAULT gossip budget: 1400
+/// bytes of plaintext plus headers and transform overhead cannot cross that link,
+/// and without this guard every full-size gossip datagram would be enqueued and
+/// then silently discarded while small probes kept working.
+#[test]
+fn a_1280_byte_device_rejects_the_default_gossip_budget() {
+  match try_with_device_mtu(1280, None, false) {
+    Err(InitError::GossipDatagramExceedsDeviceMtu(m)) => {
+      assert_eq!(m.available, 1280);
+      assert!(
+        m.required > m.available,
+        "the rejection must report needing more than the device carries, got {m}"
+      );
+    }
+    other => panic!("the default gossip budget cannot cross a 1280-byte link: {other:?}"),
+  }
+}
+
+/// A dual-stack interface is measured against the WIDER IPv6 header: a budget that
+/// exactly fills the link over IPv4 no longer fits once the interface can also
+/// source IPv6, and the shortfall is exactly the 20 bytes by which the IPv6 header
+/// exceeds the IPv4 one.
+#[test]
+fn a_dual_stack_interface_is_measured_against_the_ipv6_header() {
+  let largest_v4 = 1500 - per_datagram_overhead();
+  assert!(
+    try_with_device_mtu(1500, Some(largest_v4), false).is_ok(),
+    "the budget fits while the interface can only source IPv4"
+  );
+  match try_with_device_mtu(1500, Some(largest_v4), true) {
+    Err(InitError::GossipDatagramExceedsDeviceMtu(m)) => {
+      assert_eq!(
+        (m.required, m.available),
+        (1520, 1500),
+        "the same budget is measured against IPv6's 40-byte header, 20 more than IPv4's"
+      );
+    }
+    other => panic!("a dual-stack interface must be held to the IPv6 header: {other:?}"),
+  }
 }

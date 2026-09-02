@@ -174,6 +174,23 @@ pub enum InitError {
   /// wrap to an undersized arena in release). The configured value and the
   /// effective ceiling are carried for diagnostics.
   GossipMtuTooLarge(GossipMtuTooLarge),
+  /// The largest gossip datagram this configuration can emit does not fit the
+  /// bound device's IP MTU.
+  ///
+  /// This crate enables neither of smoltcp's IP fragmentation features, so an
+  /// oversized datagram is neither fragmented nor refused: the UDP socket accepts
+  /// it (gossip is best-effort, and `send_slice` checks only the payload arena) and
+  /// the next egress pass dequeues it and discards it — smoltcp's `dispatch_ip`
+  /// reports success without transmitting when the IP packet exceeds `ip_mtu()`.
+  /// Large metadata, user packets, compounded gossip and transformed frames would
+  /// silently vanish while small probes kept working: partial convergence and false
+  /// suspicion on a node that looks healthy.
+  ///
+  /// The device MTU is not path speculation — it is known and cached at
+  /// construction — so the constructor rejects the combination instead. A remote
+  /// path can still be narrower than the local link; sizing `gossip_mtu` for the
+  /// path remains the operator's.
+  GossipDatagramExceedsDeviceMtu(GossipDatagramExceedsDeviceMtu),
   /// A UDP arena byte count (`udp_*_packets × max on-wire datagram`) overflows
   /// `usize`.
   ///
@@ -253,6 +270,33 @@ pub enum InitError {
   /// immediately — the drain never runs and an in-flight push/pull response is
   /// truncated. Must be non-zero.
   ZeroCloseTimeout,
+}
+
+/// The largest gossip datagram this configuration can emit exceeds what the bound
+/// device can carry in one unfragmented IP packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GossipDatagramExceedsDeviceMtu {
+  /// Bytes one maximum-size gossip datagram needs in an IP packet: the widest IP
+  /// header the configured address families use, plus the 8-byte UDP header, plus
+  /// `gossip_mtu` and the enabled transforms' wrapper overhead.
+  pub required: usize,
+  /// Bytes the bound device can carry in one IP packet — its MTU less any medium
+  /// header (smoltcp's `DeviceCapabilities::ip_mtu`), which is the same figure
+  /// smoltcp's own dispatch compares against before dropping.
+  pub available: usize,
+}
+
+impl fmt::Display for GossipDatagramExceedsDeviceMtu {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "the largest gossip datagram this configuration can emit needs {} bytes of IP packet \
+       but the bound device carries only {} (no IP fragmentation is compiled in, so an \
+       oversized datagram would be enqueued and then silently discarded): lower gossip_mtu, \
+       drop a transform, or bind a device with a larger MTU",
+      self.required, self.available
+    )
+  }
 }
 
 /// The configured gossip MTU exceeds the largest plaintext payload whose on-wire
@@ -350,6 +394,7 @@ impl fmt::Display for InitError {
       #[cfg(checksum)]
       InitError::Checksum(e) => write!(f, "checksum configuration is unusable: {e}"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
+      InitError::GossipDatagramExceedsDeviceMtu(m) => write!(f, "{m}"),
       InitError::UdpArenaTooLarge => {
         f.write_str("UDP arena byte count (packets × max datagram) overflows usize")
       }

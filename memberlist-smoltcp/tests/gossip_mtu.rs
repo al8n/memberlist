@@ -51,8 +51,10 @@ fn oversized_gossip_datagram_is_received() {
   // frame: this smoltcp build does not enable IPv4 fragmentation, so an
   // over-MTU datagram could not traverse a 1500-MTU link at all. The point
   // under test is the driver's RECEIVE-buffer sizing, not IP fragmentation, so
-  // the link is widened to isolate it.
-  let (mut da, mut db) = harness::link(4096);
+  // the link is widened to isolate it. It must exceed `GOSSIP_MTU` with room to
+  // spare, since construction requires the IP and UDP headers and the enabled
+  // transforms' wrapper overhead to fit alongside the payload budget.
+  let (mut da, mut db) = harness::link(8192);
   let mut clk = harness::Clock::new();
   let now = clk.now();
 
