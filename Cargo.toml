@@ -43,7 +43,7 @@ async-channel = "2"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
-varing = { version = "0.13", default-features = false }
+varing = { version = "0.14", default-features = false }
 cfg-if = "1"
 clap = { version = "4", default-features = false, features = ["std", "derive", "env"] }
 compio = { version = "0.19", default-features = false }
