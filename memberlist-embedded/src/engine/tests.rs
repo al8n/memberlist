@@ -3827,3 +3827,555 @@ fn error_delivered_is_one_shot() {
     "a latched connection surfaces no further fault"
   );
 }
+
+/// Number of datagrams still waiting in the fake driver ring.
+impl QueueGossip {
+  fn ring_len(&self) -> usize {
+    self.inbound.len()
+  }
+}
+
+/// Encode a plaintext, unlabelled `Alive` for `(id, addr)` at `incarnation`, as a
+/// peer's gossip datagram would arrive on the wire.
+fn alive_datagram(id: &str, addr: SocketAddr, incarnation: u32) -> Vec<u8> {
+  use memberlist_proto::{
+    EncodeOptions, codec,
+    typed::{Alive, Message},
+  };
+
+  let msg = Message::<SmolStr, SocketAddr>::Alive(Alive::new(
+    incarnation,
+    Node::new(SmolStr::new(id), addr),
+  ));
+  codec::encode_outgoing(&msg, &EncodeOptions::new(None))
+    .expect("encode Alive")
+    .to_vec()
+}
+
+/// An undecodable gossip datagram: it costs a pop and an unwrap attempt, and is
+/// dropped before the machine sees anything.
+fn junk_datagram() -> Vec<u8> {
+  std::vec![0xABu8; 24]
+}
+
+/// Bring up a running engine whose sole other member is peer `B`, then pump the
+/// clock forward until the SWIM failure-detection probe fires a direct `Ping` at
+/// `B`. Returns the engine, its gossip fake, `B`'s address, the pump instant `F`
+/// at which the probe was sent, and the probe's ack sequence number decoded from
+/// that `Ping`. At the initial (healthy) awareness score the probe's authoritative
+/// failure deadline is `F + probe_interval` (the 1s default).
+///
+/// `cfg` carries whatever engine options the caller needs (a CIDR policy, say);
+/// the port must stay 7946 so `B` is reachable from the local advertise address.
+fn arm_detection_probe_on_b_with(
+  cfg: Options,
+) -> (Engine<SmolStr, u32>, QueueGossip, SocketAddr, Instant, u32) {
+  use memberlist_proto::{DecodeOptions, codec, typed::Message};
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("local"), node_addr(7946));
+  let start = Instant::from_origin(Duration::from_secs(86_400));
+  let mut engine: Engine<SmolStr, u32> =
+    Engine::try_new_at(cfg, TransformOptions::default(), ep_cfg, start, test_rng())
+      .expect("valid configuration");
+  engine.start(start);
+  // A distinct, routable address so B is a separate member and the probe's direct
+  // Ping is addressed to it.
+  let b_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 7947);
+  engine.inject_alive(SmolStr::new("b"), b_addr, start);
+
+  let mut gossip = QueueGossip::new();
+  let mut stream = NoStream::with_pool(4);
+  // The probe interval is 1s; step coarsely until the direct Ping at B appears.
+  let mut t = start;
+  for _ in 0..200 {
+    t += Duration::from_millis(50);
+    engine.pump(t, &mut gossip, &mut stream);
+    // Scan (and clear) this pump's egress for a Ping addressed to B; decode it to
+    // recover the ack sequence number the machine expects back.
+    let mut seq = None;
+    for (bytes, dest) in core::mem::take(&mut gossip.outbound) {
+      if dest != b_addr {
+        continue;
+      }
+      let Ok(plain) = codec::decode_incoming(bytes::Bytes::from(bytes), &DecodeOptions::new(None))
+      else {
+        continue;
+      };
+      let Ok(msgs) = codec::parse_messages::<SmolStr, SocketAddr>(plain) else {
+        continue;
+      };
+      for msg in msgs {
+        if let Message::Ping(p) = msg {
+          seq = Some(p.sequence_number());
+        }
+      }
+    }
+    if let Some(seq) = seq {
+      return (engine, gossip, b_addr, t, seq);
+    }
+  }
+  panic!("the failure-detection probe never fired a direct Ping at B");
+}
+
+/// [`arm_detection_probe_on_b_with`] under the plain default options.
+fn arm_detection_probe_on_b() -> (Engine<SmolStr, u32>, QueueGossip, SocketAddr, Instant, u32) {
+  arm_detection_probe_on_b_with(
+    Options::new()
+      .with_port(7946)
+      .with_close_timeout(Duration::from_secs(10)),
+  )
+}
+
+/// Let the armed probe on `B` expire so `B` transitions to `Suspect`, and return
+/// `(t1, S)`: the pump instant at which it was suspected, and the instant its
+/// suspicion deadline falls due.
+///
+/// With the default `probe_interval` (1s) and `suspicion_mult` (4) over a
+/// two-member cluster the node-count scale is 1.0 and `k` collapses to 0
+/// (`n < suspicion_mult`), so the suspicion timer is fixed at
+/// `probe_interval * suspicion_mult` = 4s from `t1`.
+fn suspect_b(
+  engine: &mut Engine<SmolStr, u32>,
+  gossip: &mut QueueGossip,
+  stream: &mut NoStream,
+  f: Instant,
+) -> (Instant, Instant) {
+  use memberlist_proto::typed::State;
+
+  let t1 = f + Duration::from_millis(1100);
+  engine.pump(t1, gossip, stream);
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Suspect),
+    1,
+    "the expired detection probe must suspect B, or the test proves nothing"
+  );
+  // Discard the events the arming produced; the assertions below watch only the
+  // events the refutation pump emits.
+  while engine.poll_event().is_some() {}
+  (t1, t1 + Duration::from_secs(4))
+}
+
+/// Queue `GOSSIP_READ_CAP - 1` undecodable datagrams and then `B`'s
+/// `Alive(inc + 1)` refutation, so the refutation is the LAST datagram the pump's
+/// read cap admits.
+fn junk_then_b_refutation(
+  engine: &Engine<SmolStr, u32>,
+  gossip: &mut QueueGossip,
+  b_addr: SocketAddr,
+) {
+  let junk_src = node_addr(7050);
+  for _ in 0..(GOSSIP_READ_CAP - 1) {
+    gossip.push(junk_src, junk_datagram());
+  }
+  let inc = engine
+    .endpoint
+    .endpoint_ref()
+    .node_incarnation(&SmolStr::new("b"))
+    .expect("B is a member");
+  gossip.push(b_addr, alive_datagram("b", b_addr, inc + 1));
+}
+
+/// Assert `B` came out of the pump `Alive` with no membership flap.
+fn assert_b_refuted(engine: &mut Engine<SmolStr, u32>) {
+  use memberlist_proto::typed::State;
+
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Alive),
+    1,
+    "B's own refutation, read in this pump, must leave it Alive"
+  );
+  while let Some(ev) = engine.poll_event() {
+    assert!(
+      !matches!(ev, Event::NodeLeft(_) | Event::NodeJoined(_)),
+      "B must not flap: no death and no re-join event"
+    );
+  }
+}
+
+/// A refutation read in the same pump that crosses its subject's suspicion
+/// deadline wins, because phase 2 applies every datagram it pops before step 6
+/// can fire a timer.
+///
+/// `process_alive` has no instant cutoff — only the incarnation gate — so an
+/// `Alive(inc + 1)` for a `Suspect` B clears the suspicion outright. What decides
+/// the outcome is purely the order of the two within the pump: read-then-tick
+/// keeps B alive, tick-then-read kills it and immediately resurrects it. The
+/// refutation is placed LAST in the ring, behind a cap's worth of junk, so it is
+/// also the final datagram the read cap admits.
+#[test]
+fn same_pump_alive_refutation_precedes_the_tick() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+  let (_t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
+
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  assert!(t > s, "this pump runs past B's suspicion deadline");
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(
+    gossip.ring_len(),
+    0,
+    "a full cap's worth of datagrams is read and applied within the pump"
+  );
+}
+
+/// Reliable-plane input ticks the machine too: `handle_transport_data` ends in
+/// `run_tick`, whose membership step is the same sweep step 6 runs. Feeding it
+/// before this pump's gossip would let arbitrary bytes on an unrelated connection
+/// fire a suspicion the gossip ring already refutes — so phase 3 must follow phase
+/// 2. The bytes here are junk: input the record layer will reject is enough,
+/// because the tick happens on the feed, not on the parse.
+#[test]
+fn same_pump_reliable_input_cannot_sweep_past_this_pumps_gossip() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  // Admit an inbound reliable connection on a pump before the deadline, so the
+  // pump under test only has to feed its bytes.
+  let mut stream = armed_inbound_listener(&mut engine);
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(t1 + Duration::from_millis(100), &mut gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the inbound reliable connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+
+  stream.sock_mut(1).rx = std::vec![0xABu8; 64];
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// The reliable plane ticks the machine on its FAULT paths too: a socket that died
+/// without a graceful peer FIN routes to `handle_transport_error`, which — like
+/// `handle_transport_data` — ends in `run_tick`. A peer that merely RSTs its
+/// connection must not sweep past this pump's gossip either.
+#[test]
+fn same_pump_reliable_fault_cannot_sweep_past_this_pumps_gossip() {
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut probe_stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut probe_stream, f);
+
+  let mut stream = armed_inbound_listener(&mut engine);
+  let accepted_before = engine.accepted_inbound_count();
+  engine.pump(t1 + Duration::from_millis(100), &mut gossip, &mut stream);
+  assert_eq!(
+    engine.accepted_inbound_count(),
+    accepted_before + 1,
+    "the inbound reliable connection must be admitted, or the test proves nothing"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The peer RSTs: the socket closes with no graceful FIN and nothing to read,
+  // which phase 3 surfaces to the machine as a transport fault.
+  stream.sock_mut(1).open = false;
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// One pump reads at most `GOSSIP_READ_CAP` datagrams. The remainder stays in the
+/// driver's ring — not dropped, not copied into the engine — and is read on the
+/// next pump, which the returned already-due deadline asks for immediately.
+#[test]
+fn gossip_read_is_capped_per_pump_and_the_remainder_is_read_next_pump() {
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut gossip = QueueGossip::new();
+  let mut stream = NoStream::with_pool(2);
+
+  // Settle the machine's own schedulers first, so the only already-due term the
+  // pump under test can return is the read cap's.
+  let quiescent = engine.pump(t, &mut gossip, &mut stream);
+  assert!(
+    quiescent > Some(t),
+    "no machine timer may be due at this instant, or the wake assertion proves nothing"
+  );
+
+  // `cap + k` distinct, valid Alives, each for its own id and address.
+  let extra = 5usize;
+  let src = node_addr(7050);
+  for i in 0..(GOSSIP_READ_CAP + extra) {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let first = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + GOSSIP_READ_CAP,
+    "exactly one cap's worth of Alives is applied in the first pump"
+  );
+  assert_eq!(
+    gossip.ring_len(),
+    extra,
+    "the remainder waits in the driver's ring, neither dropped nor engine-held"
+  );
+  assert_eq!(
+    first,
+    Some(t),
+    "stopping at the cap folds an already-due wake so the caller polls again at once"
+  );
+  assert_eq!(
+    engine.gossip_read_cap_hits(),
+    1,
+    "the cap hit is counted exactly once"
+  );
+
+  let second = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    1 + GOSSIP_READ_CAP + extra,
+    "the remainder is applied on the next pump"
+  );
+  assert_eq!(gossip.ring_len(), 0, "the ring is now empty");
+  assert!(
+    second > Some(t),
+    "a pump that emptied the ring folds no already-due wake"
+  );
+  assert_eq!(
+    engine.gossip_read_cap_hits(),
+    1,
+    "a pump that stopped short of the cap counts no hit"
+  );
+}
+
+/// The sweep is never withheld while gossip is outstanding: a pump that stops at
+/// the read cap still fires every timer due at its instant. A design that ticked
+/// only once nothing observed was pending would let a sustained flood silence the
+/// node's own failure detection.
+#[test]
+fn a_due_timer_fires_in_the_pump_that_hits_the_read_cap() {
+  use memberlist_proto::typed::State;
+
+  let (mut engine, mut gossip, _b_addr, f, _seq) = arm_detection_probe_on_b();
+  let mut stream = NoStream::with_pool(4);
+
+  let junk_src = node_addr(7050);
+  for _ in 0..(GOSSIP_READ_CAP + 5) {
+    gossip.push(junk_src, junk_datagram());
+  }
+
+  // Past the probe's authoritative failure deadline (`F + probe_interval`).
+  let t = f + Duration::from_millis(1100);
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.num_members_by(|ns| ns.id_ref() == &SmolStr::new("b") && ns.state() == State::Suspect),
+    1,
+    "the expired probe must suspect B in the very pump that hit the read cap"
+  );
+  assert_eq!(
+    wake,
+    Some(t),
+    "the read cap folds an already-due wake for the datagrams still in the ring"
+  );
+  assert_eq!(engine.gossip_read_cap_hits(), 1, "one cap hit is counted");
+  assert_eq!(
+    gossip.ring_len(),
+    5,
+    "the pump read exactly the cap and left the rest in the ring"
+  );
+}
+
+/// After `leave` the engine still POPS gossip — the ring is the driver's and would
+/// otherwise back up — but it decodes none of it, changes no membership, and never
+/// asks to be re-pumped. The pop stays bounded by the read cap, so a flood aimed at
+/// a node that has left costs at most a cap's worth of memcpys per pump.
+#[test]
+fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
+  let mut engine = make_engine();
+  let t = Instant::from_origin(Duration::from_secs(86_400));
+  engine.start(t);
+  let mut gossip = QueueGossip::new();
+  let mut stream = NoStream::with_pool(2);
+  engine.leave(t).expect("a running engine leaves cleanly");
+
+  let members_before = engine.num_members();
+  let extra = 8usize;
+  let src = node_addr(7050);
+  for i in 0..(GOSSIP_READ_CAP + extra) {
+    let addr = node_addr(8000 + i as u16);
+    gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+  }
+
+  let wake = engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.num_members(),
+    members_before,
+    "a left node admits no member from gossip"
+  );
+  assert_eq!(
+    gossip.ring_len(),
+    extra,
+    "the post-leave pop is bounded by the read cap, not run to exhaustion"
+  );
+  assert_eq!(
+    engine.gossip_read_cap_hits(),
+    0,
+    "a left node counts no cap hit — the wake term it feeds is gated on running"
+  );
+  assert_ne!(
+    wake,
+    Some(t),
+    "a left node never asks to be re-pumped for gossip it will not decode"
+  );
+
+  engine.pump(t, &mut gossip, &mut stream);
+  assert_eq!(gossip.ring_len(), 0, "the rest is popped on the next pump");
+  assert_eq!(
+    engine.num_members(),
+    members_before,
+    "still no membership change"
+  );
+}
+
+/// The early rebalance dials a `PendingDial` parked on a previous pump, and a dial
+/// the transport rejects synchronously terminalizes through the machine — whose
+/// tick sweeps membership at this pump's instant. Running that before the gossip
+/// phase, as the pump did previously, let an unrelated outbound dial fire a
+/// suspicion this pump's ring already refutes. The rebalance therefore runs after
+/// both evidence feeds, while still preceding the machine tick that a parked dial
+/// needs it to precede.
+#[cfg(feature = "cidr")]
+#[test]
+fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = Options::new()
+    .with_port(7946)
+    .with_close_timeout(Duration::from_secs(10))
+    // B (10.0.0.2) and the local node (10.0.0.1) are both in policy; the dial
+    // target below is not.
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let (mut engine, mut gossip, b_addr, f, _seq) = arm_detection_probe_on_b_with(cfg);
+  let mut stream = NoStream::with_pool(4);
+  let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
+
+  // A listener is installed and the pool is empty, so the dial below has to park
+  // as a `PendingDial` rather than taking a slot straight away.
+  engine.set_listener(1);
+  let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
+  engine
+    .send_reliable(blocked, bytes::Bytes::from_static(b"blocked-bytes"), t1)
+    .expect("send_reliable queues the exchange");
+
+  let t2 = t1 + Duration::from_millis(100);
+  engine.pump(t2, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the dial must park with no slot, or the early rebalance has nothing to do"
+  );
+  while engine.poll_event().is_some() {}
+
+  // Free the slot the parked dial will claim in the pump under test. The listener
+  // is already present, so `ensure_listener` leaves it for the dial.
+  engine.plane_mut().pool.push(0);
+  junk_then_b_refutation(&engine, &mut gossip, b_addr);
+
+  let t = s + Duration::from_secs(1);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "the early rebalance must have dialed the parked exchange in this pump"
+  );
+  assert_b_refuted(&mut engine);
+  assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
+}
+
+/// Nothing the engine observed is still pending when the machine ticks, at every
+/// ring size a driver can present.
+///
+/// Below the read cap the ring is emptied and the pump folds no already-due wake.
+/// At exactly the cap the ring is also emptied and everything applied, but the
+/// engine cannot tell an exactly-emptied ring from one with more behind it without
+/// peeking, so it folds one spurious already-due wake — which is why both drivers
+/// require a ring STRICTLY below the cap.
+#[test]
+fn nothing_observed_is_pending_when_the_machine_ticks() {
+  for ring in [1usize, 8, 16, GOSSIP_READ_CAP] {
+    let mut engine = make_engine();
+    let t = Instant::from_origin(Duration::from_secs(86_400));
+    engine.start(t);
+    let mut gossip = QueueGossip::new();
+    let mut stream = NoStream::with_pool(2);
+
+    let quiescent = engine.pump(t, &mut gossip, &mut stream);
+    assert!(
+      quiescent > Some(t),
+      "ring {ring}: no machine timer may be due at this instant"
+    );
+
+    let src = node_addr(7050);
+    for i in 0..ring {
+      let addr = node_addr(8000 + i as u16);
+      gossip.push(src, alive_datagram(&std::format!("n{i}"), addr, 1));
+    }
+
+    let wake = engine.pump(t, &mut gossip, &mut stream);
+    assert_eq!(gossip.ring_len(), 0, "ring {ring}: the ring is emptied");
+    assert_eq!(
+      engine.num_members(),
+      1 + ring,
+      "ring {ring}: every datagram read was applied in that same pump"
+    );
+    if ring < GOSSIP_READ_CAP {
+      assert!(
+        wake > Some(t),
+        "ring {ring}: a conforming ring folds no already-due wake"
+      );
+      assert_eq!(
+        engine.gossip_read_cap_hits(),
+        0,
+        "ring {ring}: a conforming ring never reaches the cap"
+      );
+    } else {
+      assert_eq!(
+        wake,
+        Some(t),
+        "ring {ring}: a ring exactly at the cap costs one spurious re-pump"
+      );
+      assert_eq!(
+        engine.gossip_read_cap_hits(),
+        1,
+        "ring {ring}: the exactly-full ring is indistinguishable from an over-cap one"
+      );
+    }
+  }
+}
+
+/// Arm `engine` with a reliable listener on slot 1 and one spare (slot 0) to
+/// replenish from, backed by a fresh `ProgRel`. The mock admits the passive open
+/// on the first `check_listener` that runs after the caller marks slot 1
+/// `accepted` + `established`, which is what gives the test a live inbound
+/// exchange to drive reliable input through.
+fn armed_inbound_listener(engine: &mut Engine<SmolStr, u32>) -> ProgRel {
+  engine.plane_mut().pool.push(0);
+  engine.set_listener(1);
+  let mut stream = ProgRel::new(&[0, 1]);
+  stream
+    .listen(1, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // A settled passive open from an in-policy remote, ready for the next accept.
+  stream.sock_mut(1).accepted = Some(node_addr(7950));
+  stream.sock_mut(1).established = true;
+  stream
+}
