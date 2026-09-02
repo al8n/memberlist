@@ -65,7 +65,7 @@ A complete, runnable wiring (two nodes joining on an emulated Cortex-M) lives in
 
 | Feature | Description |
 |---------|-------------|
-| `std` *(default)* | host builds and the test harness |
+| `std` *(default)* | host builds, and this crate's tests — the harness needs a host time driver and executor, so the tests are `std` builds |
 | `alloc` | `no_std` with a global allocator (bare metal) — build with `--no-default-features --features alloc` |
 | `lz4` / `-snappy` / `-zstd` / `-brotli` | compression (gossip + reliable) |
 | `aes-gcm` / `-chacha20-poly1305` | AEAD encryption (gossip + plain-TCP reliable) |

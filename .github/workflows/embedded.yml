@@ -25,10 +25,17 @@ on:
 # hands each of them the union. Naming the engine and the drivers together would
 # therefore build the engine with whatever the drivers' dev-dependencies ask of
 # it, and a lane whose whole purpose is to build without a feature would build
-# with it. Every feature lane below loops over this list instead, one invocation
-# per package.
+# with it. Every feature lane below loops over one of these lists instead, one
+# invocation per package.
+#
+# `ALLOC_TEST_PACKAGES` is the subset whose *tests* still resolve an alloc-only
+# graph. `memberlist-embassy` is not in it: its harness needs a time driver and
+# an executor on the host, and cargo unifies those dev-dependency features into
+# the very dependency instances the library uses, so its alloc lane is the
+# library alone.
 env:
   PACKAGES: memberlist-embedded memberlist-smoltcp memberlist-embassy
+  ALLOC_TEST_PACKAGES: memberlist-embedded memberlist-smoltcp
 
 jobs:
   # Bare-metal compile gate: the `no_std` + `alloc` engine and both embedded
@@ -70,7 +77,9 @@ jobs:
   # an AEAD backend (so nothing test-side may depend unconditionally on
   # encryption), and the advertised `no_std + alloc` set, whose TESTS the
   # bare-metal check above cannot build — that target has no test runner, so the
-  # smallest supported configuration is exercised here on the host instead.
+  # smallest supported configuration is exercised here on the host instead. The
+  # engine and the smoltcp driver run their tests under that set; the embassy
+  # driver builds its library under it and runs its tests under the other two.
   host-tests:
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +93,73 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+      # Each reduced lane below is defined by what it must build WITHOUT, and
+      # cargo resolves features over the graph an invocation actually builds — so
+      # such a lane is only as strong as the graph it resolves. These assertions
+      # read that graph back, one package at a time, and fail the job if the
+      # excluded thing is in it.
+      #
+      # `--format '{p} [{f}]'` prints every package with the features actually
+      # resolved for it. An `-e features` edge list is not enough on its own: it
+      # omits the root package's own feature mappings.
+      #
+      # `no-build,no-proc-macro` drops the host-side toolchain — the wire codegen's
+      # build script and its dependencies, and proc macros. Those compile for the
+      # build host and may legitimately carry `std`; what is left is the graph that
+      # compiles for the target.
+      #
+      # `no-dev` is used only for the lane that builds no dev-dependencies
+      # (`cargo build` / `cargo clippy --lib`). The lanes that run tests are
+      # asserted WITH dev-dependencies, because cargo unifies a dev-dependency's
+      # features into the same instance of a package the library depends on too.
+      - name: Assert the reduced feature graphs
+        run: |
+          set -euo pipefail
+          aead='aes-gcm|chacha20poly1305'
+          target_std='(\[|,)std(,|\])'
+
+          # Fails on a match, and refuses to pass on a graph that does not carry
+          # the crates under test: an empty or wrong tree must not satisfy an
+          # "is absent" check by default.
+          assert_graph() {
+            local desc=$1 forbid=$2 edges=$3
+            shift 3
+            local graph
+            if ! graph=$(cargo tree "$@" -e "$edges" --prefix none --format '{p} [{f}]'); then
+              echo "::error::${desc}: cargo tree failed"
+              return 1
+            fi
+            local expect
+            for expect in 'memberlist-proto v' 'memberlist-embedded v'; do
+              if ! grep -qF -- "$expect" <<<"$graph"; then
+                echo "::error::${desc}: '${expect}' is absent, so this check would pass vacuously"
+                return 1
+              fi
+            done
+            if grep -E -- "$forbid" <<<"$graph"; then
+              echo "::error::${desc}: the packages listed above are excluded from this lane"
+              return 1
+            fi
+            echo "ok: ${desc}"
+          }
+
+          rc=0
+          # Guards the two "no encryption backend" lanes: neither AEAD crate may
+          # be in the graph, so nothing test-side can depend on one unconditionally.
+          for pkg in $PACKAGES; do
+            assert_graph "no encryption backend: ${pkg}" "$aead" no-build,no-proc-macro \
+              -p "$pkg" --features lz4,crc32,cidr || rc=1
+          done
+          # Guards the alloc lanes, which stand in for the bare-metal target: no
+          # AEAD backend, and no `std` on anything that compiles for that target.
+          for pkg in $ALLOC_TEST_PACKAGES; do
+            assert_graph "no_std + alloc: ${pkg}" "${aead}|${target_std}" no-build,no-proc-macro \
+              -p "$pkg" --no-default-features --features alloc || rc=1
+          done
+          assert_graph "no_std + alloc, library only: memberlist-embassy" "${aead}|${target_std}" \
+            no-build,no-dev,no-proc-macro \
+            -p memberlist-embassy --no-default-features --features alloc || rc=1
+          exit "$rc"
       # `cargo fmt` selects no features, so one invocation covers all three.
       - name: Format
         run: cargo fmt -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --check
@@ -99,7 +175,7 @@ jobs:
           done
       - name: Clippy (no_std + alloc)
         run: |
-          for pkg in $PACKAGES; do
+          for pkg in $ALLOC_TEST_PACKAGES; do
             cargo clippy -p "$pkg" --all-targets --no-default-features --features alloc --no-deps -- -D warnings
           done
       - name: Test
@@ -114,9 +190,19 @@ jobs:
           done
       - name: Test (no_std + alloc)
         run: |
-          for pkg in $PACKAGES; do
+          for pkg in $ALLOC_TEST_PACKAGES; do
             cargo test -p "$pkg" --no-default-features --features alloc
           done
+      # `--all-targets` would build memberlist-embassy's dev-dependencies, whose
+      # host time driver and executor put `std` on the very `embassy-time` and
+      # `smol_str` instances the library uses — the alloc-only graph this lane
+      # exists to exercise would not be the one it built. `cargo build` and
+      # `cargo clippy --lib` build no dev-dependencies, so the lane keeps its
+      # meaning; the tests it can no longer carry all run in the two lanes above.
+      - name: "Build + clippy (no_std + alloc, library only — the host test harness requires std; the driver's tests run in the full and no-encryption lanes)"
+        run: |
+          cargo build -p memberlist-embassy --no-default-features --features alloc
+          cargo clippy -p memberlist-embassy --lib --no-default-features --features alloc --no-deps -- -D warnings
 
   # Execution proof: build the `memberlist-embassy-qemu` firmware and run it under
   # QEMU. The crate's `.cargo/config.toml` supplies the target, the linker script,
