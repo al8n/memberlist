@@ -70,6 +70,25 @@ loop {
 }
 ```
 
+### Bounded ingress and the already-due deadline
+
+`poll` feeds the smoltcp stack at most `Options::ingress_packets_per_poll` device
+packets (default 16) before it runs the engine, so a device that keeps yielding
+cannot starve the SWIM timers or the rest of your loop. smoltcp's own
+`Interface::poll` drains the device until it is empty and documents that as
+unbounded work; this driver runs the bounded phases instead.
+
+When that budget is spent with the device still yielding, `poll` returns an
+instant **at or before the `now` you passed in**. That is not a timer: it means
+*a device backlog remains — service your other work, then poll again*. Do not
+sleep on it. A loop that sleeps *until* the returned instant and never before is
+already correct, since sleeping until a past instant returns immediately.
+
+The budget is device fairness, not gossip intake: a gossip datagram arriving with
+no free slot in `udp_rx_packets` is dropped by the UDP socket regardless of it.
+Raise `udp_rx_packets` (kept below `gossip_read_cap`) to accept more gossip per
+poll; raise `ingress_packets_per_poll` to clear more of a device backlog per poll.
+
 ## Feature flags
 
 | Feature | Description |

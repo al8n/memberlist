@@ -237,6 +237,14 @@ pub enum InitError {
   /// `udp_rx_packets` screen and the engine's receive-ring screen are STRICTLY
   /// BELOW it, so a zero cap admits no gossip ring at all. Must be non-zero.
   ZeroGossipReadCap,
+  /// [`Options::ingress_packets_per_poll`](crate::Options::ingress_packets_per_poll)
+  /// is zero.
+  ///
+  /// It is the per-poll device ingress budget. Zero would feed the stack no
+  /// packet at all, so nothing inbound — no gossip datagram, no TCP segment, no
+  /// handshake — could ever reach the node while `poll` still reported a device
+  /// backlog on every call. Must be non-zero.
+  ZeroIngressPacketsPerPoll,
   /// [`Options::close_timeout`](crate::Options::close_timeout) is zero.
   ///
   /// `close_timeout` bounds the graceful reliable-close drain: a connection
@@ -362,6 +370,9 @@ impl fmt::Display for InitError {
          (Options::gossip_read_cap)",
       ),
       InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
+      InitError::ZeroIngressPacketsPerPoll => {
+        f.write_str("ingress_packets_per_poll must be non-zero")
+      }
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
     }
   }
