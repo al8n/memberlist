@@ -22,9 +22,11 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use futures::executor::block_on;
+#[cfg(feature = "aes-gcm")]
+use memberlist_embassy::{EncryptionOptions, Keyring, SecretKey};
 use memberlist_embassy::{
-  EncryptionOptions, EndpointOptions, Keyring, LabelError, MaybeResolved, Memberlist, Options,
-  Runner, SecretKey, SocketAddrResolver, TransformOptions, now,
+  EndpointOptions, LabelError, MaybeResolved, Memberlist, Options, Runner, SocketAddrResolver,
+  TransformOptions, now,
 };
 use memberlist_proto::{SeedableRng, SmallRng};
 use smol_str::SmolStr;
@@ -122,6 +124,7 @@ async fn drive<T>(
 }
 
 /// A shared AES-256-GCM key used across the encryption tests.
+#[cfg(feature = "aes-gcm")]
 fn shared_key() -> EncryptionOptions {
   let key = SecretKey::Aes256([0x42u8; 32]);
   EncryptionOptions::new().with_keyring(Keyring::new(key))
@@ -135,6 +138,7 @@ fn shared_key() -> EncryptionOptions {
 /// encryption codec. A broken codec (or a key mismatch) would prevent the
 /// join push/pull exchange from decoding, so a successful join + 2-member
 /// view is a real end-to-end encrypted-path assertion.
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_gossip_round_trips() {
   let (dev_a, dev_b) = pair();
@@ -479,6 +483,7 @@ fn gossip_label_isolates_clusters() {
 /// This proves `set_encryption_options` is reflected by the next TCP
 /// push/pull attempt, and that fail→pass is achievable within a single
 /// test lifetime.
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn runtime_set_encryption_rotates_key() {
   let key1 = SecretKey::Aes256([0xAAu8; 32]);

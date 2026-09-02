@@ -20,10 +20,11 @@ use core::{
 };
 
 use memberlist_proto::{EndpointOptions, Instant};
-use memberlist_smoltcp::{
-  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, LabelError, Memberlist,
-  Options, SecretKey, SocketAddrResolver, TransformOptions,
-};
+#[cfg(feature = "lz4")]
+use memberlist_smoltcp::{CompressAlgorithm, CompressionOptions};
+#[cfg(feature = "aes-gcm")]
+use memberlist_smoltcp::{EncryptionOptions, Keyring, SecretKey};
+use memberlist_smoltcp::{LabelError, Memberlist, Options, SocketAddrResolver, TransformOptions};
 use smol_str::SmolStr;
 
 fn addr(ip: u8, port: u16) -> SocketAddr {
@@ -45,6 +46,7 @@ fn mk(id: &str, ip: u8) -> EndpointOptions<SmolStr, SocketAddr> {
 
 /// A single shared 256-bit AES-GCM key — the cluster secret both encrypted
 /// nodes hold.
+#[cfg(feature = "aes-gcm")]
 fn shared_encryption() -> EncryptionOptions {
   let key = SecretKey::Aes256([0x42; 32]);
   EncryptionOptions::new().with_keyring(Keyring::new(key))
@@ -53,6 +55,7 @@ fn shared_encryption() -> EncryptionOptions {
 /// Both nodes share a keyring: their AES-GCM-wrapped gossip round-trips, so the
 /// pair converges and STAYS Alive across a window long enough that a broken
 /// transform (dropped datagrams) would have demoted each peer to Dead.
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_gossip_round_trips() {
   // 80 ticks × 10 ms = 800 ms — past the ~550 ms worst-case probe→dead path, so
@@ -114,6 +117,7 @@ fn encrypted_gossip_round_trips() {
 /// therefore demotes B: A does NOT keep B Alive. (With both plaintext — the
 /// pre-transform behaviour — A would have happily kept B Alive, which is the
 /// hole this test closes.)
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn encrypted_node_rejects_plaintext_gossip() {
   // Long enough for A's probe→suspect→dead path (~550 ms worst case) to run to
@@ -311,6 +315,7 @@ fn gossip_label_isolates_clusters() {
 ///   (which holds key1) can read it. Both nodes stay Alive for the full
 ///   discriminating window — proving the rotation is reflected immediately on
 ///   the next gossip emission.
+#[cfg(feature = "aes-gcm")]
 #[test]
 fn runtime_set_encryption_rotates_key() {
   let key1 = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xAA; 32])));
@@ -422,6 +427,7 @@ fn runtime_set_encryption_rotates_key() {
 
 /// Both nodes enable LZ4 compression: their compressed gossip round-trips, so
 /// the pair converges and STAYS Alive across a discriminating window.
+#[cfg(feature = "lz4")]
 #[test]
 fn compressed_gossip_round_trips() {
   const TICKS: u32 = 80;

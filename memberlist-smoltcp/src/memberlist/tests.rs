@@ -304,11 +304,12 @@ fn invalid_config_is_rejected_before_resolution() {
 // inbound reliable streams; without that re-arm the listener stays `Closed` and the
 // DoS is permanent rather than bounded to one timeout window.
 
+use core::cell::RefCell;
 use smoltcp::{
   phy::{ChecksumCapabilities, DeviceCapabilities, RxToken, TxToken},
   time::Instant as SmolInstant,
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{collections::VecDeque, rc::Rc};
 
 /// A shared in-memory IP-frame FIFO (one direction of a paired link).
 #[derive(Clone)]

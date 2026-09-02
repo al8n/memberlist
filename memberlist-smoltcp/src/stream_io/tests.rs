@@ -1,6 +1,7 @@
 use super::*;
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc, vec, vec::Vec};
+use core::cell::RefCell;
+use std::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 
 use core::net::{IpAddr, Ipv4Addr};
 use smoltcp::{

@@ -5,10 +5,11 @@ use core::{
   time::Duration,
 };
 
-use memberlist_proto::{
-  CompressionOptions, EncryptionOptions, Keyring, SecretKey, SeedableRng, SmallRng,
-  typed::NodeState,
-};
+#[cfg(compression)]
+use memberlist_proto::CompressionOptions;
+#[cfg(encryption)]
+use memberlist_proto::{EncryptionOptions, Keyring, SecretKey};
+use memberlist_proto::{SeedableRng, SmallRng, typed::NodeState};
 use smol_str::SmolStr;
 use std::vec::Vec;
 
@@ -218,6 +219,7 @@ fn make_engine() -> Engine<SmolStr, u32> {
 
 /// `set_compression_options` is accepted and the engine remains operational
 /// (a subsequent `pump` does not panic or error).
+#[cfg(compression)]
 #[test]
 fn set_compression_options_accepted_and_engine_still_pumps() {
   let mut engine = make_engine();
@@ -605,6 +607,7 @@ fn control_setters_reject_after_leave() {
     ),
     "queue_user_broadcast must reject after leave"
   );
+  #[cfg(compression)]
   assert!(
     matches!(
       engine.set_compression_options(CompressionOptions::default()),
@@ -612,6 +615,7 @@ fn control_setters_reject_after_leave() {
     ),
     "set_compression_options must reject after leave"
   );
+  #[cfg(encryption)]
   assert!(
     matches!(
       engine.set_encryption_options(EncryptionOptions::default()),
@@ -706,6 +710,7 @@ fn disabled_checksum_leaves_no_checksumed_tag_on_outbound_gossip() {
 }
 
 /// `set_encryption_options` with no keyring (disabled) is always accepted.
+#[cfg(encryption)]
 #[test]
 fn set_encryption_options_disabled_is_always_ok() {
   let mut engine = make_engine();
@@ -744,6 +749,7 @@ fn set_encryption_options_accepts_valid_aes256_keyring_and_engine_still_pumps() 
 /// the engine's identical re-check inside `try_new_at` cannot disagree. Repeated
 /// calls return the same verdict, and whether that verdict is `Ok` depends only on
 /// whether the AES-GCM backend is compiled in — never on entropy availability.
+#[cfg(encryption)]
 #[test]
 fn validate_runtime_config_for_encryption_is_deterministic() {
   let key = SecretKey::Aes256([0x42; 32]);
@@ -785,7 +791,9 @@ fn validate_runtime_config_for_encryption_is_deterministic() {
 }
 
 /// A disabled (no-algorithm) checksum policy always constructs cleanly — there
-/// is no backend to probe, so `try_new_at` succeeds regardless of feature set.
+/// is no backend to probe, so `try_new_at` succeeds whichever checksum backend is
+/// compiled in.
+#[cfg(checksum)]
 #[test]
 fn try_new_at_accepts_disabled_checksum() {
   use memberlist_proto::ChecksumOptions;
@@ -1010,7 +1018,8 @@ fn gossip_carries_and_checks_the_configured_label() {
 // the pool, EOF delivered once, exchange terminalizes Succeeded/Failed) rather
 // than convergence side effects.
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use core::cell::RefCell;
+use std::{collections::BTreeMap, rc::Rc};
 
 /// The simulated TCP state of one mock reliable socket, as the engine observes
 /// it through `StreamIo`. A test programs these directly (the single-engine

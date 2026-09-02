@@ -54,9 +54,16 @@ jobs:
           --no-default-features --features alloc
           --target thumbv7em-none-eabihf
 
-  # Host test gate: the smoltcp and embassy drivers carry host-runnable test
+  # Host test gate: the shared engine and both drivers carry host-runnable test
   # suites (block_on + bounded virtual time) that the bare-metal check above does
-  # not exercise. Run them on a std host, plus fmt + clippy for both libs.
+  # not exercise. Run them on a std host, plus fmt + clippy for all three libs.
+  #
+  # Three feature sets, because a test target that only ever builds under one of
+  # them is not continuously tested: the full transform set, the same set without
+  # an AEAD backend (so nothing test-side may depend unconditionally on
+  # encryption), and the advertised `no_std + alloc` set, whose TESTS the
+  # bare-metal check above cannot build — that target has no test runner, so the
+  # smallest supported configuration is exercised here on the host instead.
   host-tests:
     runs-on: ubuntu-latest
     steps:
@@ -71,11 +78,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
       - name: Format
-        run: cargo fmt -p memberlist-smoltcp -p memberlist-embassy --check
+        run: cargo fmt -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --check
       - name: Clippy
-        run: cargo clippy -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,aes-gcm,cidr --no-deps -- -D warnings
+        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,aes-gcm,cidr --no-deps -- -D warnings
+      - name: Clippy (no encryption backend)
+        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --features lz4,crc32,cidr --no-deps -- -D warnings
+      - name: Clippy (no_std + alloc)
+        run: cargo clippy -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --all-targets --no-default-features --features alloc --no-deps -- -D warnings
       - name: Test
-        run: cargo test -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,aes-gcm,cidr
+        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,aes-gcm,cidr
+      - name: Test (no encryption backend)
+        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --features lz4,crc32,cidr
+      - name: Test (no_std + alloc)
+        run: cargo test -p memberlist-embedded -p memberlist-smoltcp -p memberlist-embassy --no-default-features --features alloc
 
   # Execution proof: build the `memberlist-embassy-qemu` firmware and run it under
   # QEMU. The crate's `.cargo/config.toml` supplies the target, the linker script,
