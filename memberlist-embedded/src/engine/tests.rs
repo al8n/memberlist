@@ -2122,6 +2122,129 @@ fn selection_window_is_bounded_and_counts_stay_exact() {
   );
 }
 
+/// An offer that finds NO free queue slot admits nothing, and costs the offered set
+/// no turn: the rotation stays on the entry that already ranked first, so the next
+/// offer with room admits exactly the address the full ones would have.
+///
+/// This is what makes the fairness bound a statement about capacity-bearing offers.
+/// Were a zero-room offer to advance the rotation PAST the entry it could not serve,
+/// a caller re-offering into a persistently full queue would walk the rotation over
+/// its whole set while admitting nothing, and the entry that came up each time would
+/// be skipped once room finally appeared — starvation driven by the retries meant to
+/// prevent it.
+///
+/// The queue is kept full by a PARKED seed head rather than by withholding the pump:
+/// with the pool empty the head the queue already gave up cannot be dialed, and while
+/// a seed head is parked the pump admits no further seed — so the pump runs between
+/// every offer here and the one queued address stays queued.
+#[test]
+fn offers_that_find_no_room_neither_count_nor_lose_progress() {
+  let cfg = admission_cfg().with_max_pending_seeds(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(30));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  // The pool is empty, so the first seed becomes the parked head: it holds the
+  // queue's place in the dial order and cannot make progress until a slot appears.
+  let parked = node_addr(7001);
+  engine.join(&[parked]).expect("join is accepted");
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the first seed must park for want of a slot"
+  );
+
+  // The one queue slot now holds an address that cannot leave it: no room, and no
+  // head rule to give it up while a seed head is already parked.
+  let held = node_addr(7002);
+  engine.join(&[held]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the cap is one, and that one slot is taken"
+  );
+
+  // Three offers of the same two addresses, each meeting a full queue.
+  let lower = node_addr(7003);
+  let higher = node_addr(7004);
+  assert!(lower < higher, "the ports must order the pair");
+  for offer in 1..=3u64 {
+    engine.join(&[lower, higher]).expect("join is accepted");
+    engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.pending_seed_count(),
+      1,
+      "offer {offer} met a full queue, so it admitted nothing"
+    );
+    assert_eq!(
+      engine.pending_seeds.front(),
+      Some(&held),
+      "and displaced nothing already queued"
+    );
+    assert_eq!(
+      engine.join_seeds_dropped(),
+      2 * offer,
+      "both its entries are shed and counted, offer {offer}"
+    );
+    assert_eq!(
+      engine.join_rotation,
+      Some(lower),
+      "and the rotation rests on the entry that ranks first, offer {offer}"
+    );
+  }
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "none of those entries was already queued or already being exchanged with"
+  );
+
+  // Free the head: a slot appears, the parked head is dialed, and the address behind
+  // it becomes the new head — so the queue empties and room returns.
+  engine.plane_mut().pool.push(1);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the freed slot must dial the parked head"
+  );
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, parked)],
+    "and that dial is the head, got {:?}",
+    stream.connects
+  );
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "with nothing parked, the queued address is taken as the new head"
+  );
+
+  // The next offer of the same pair admits the address the full offers had ranked
+  // first — the three of them cost the set no turn.
+  engine.join(&[lower, higher]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seeds.front(),
+    Some(&lower),
+    "the entry the zero-room offers left the rotation on must be the one admitted"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    7,
+    "only the one entry this offer had no room for is a further drop"
+  );
+  assert_eq!(
+    engine.join_rotation,
+    Some(higher),
+    "and the rotation now moves on to the entry this offer could not serve"
+  );
+}
+
 /// Seeds are handed to the machine as the pool can back them, plus ONE head that
 /// holds the queue's place in the dial order. Everything past the head stays a bare
 /// address — no bridge, no full-state encoding, no deadline — so a long seed list

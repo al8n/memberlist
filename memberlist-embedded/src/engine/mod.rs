@@ -972,20 +972,27 @@ where
   /// cyclically from the rotation: every address at or after it first, ascending,
   /// then the addresses before it, also ascending. A call admits the lowest-ranked
   /// entries it has room for, and the rotation then moves to the first entry it had
-  /// no room for, so that entry ranks first next time. Repeated offers of ONE
-  /// address set therefore admit its entries round-robin over that order, every
-  /// entry reached within `⌈distinct routable addresses ÷ free queue slots⌉` offers
-  /// — no reachable seed can be starved behind one that keeps failing, however the
-  /// caller orders the list, and however a re-resolution reorders it. Distinct
-  /// addresses never tie, so no two of them can share a turn: the order is over the
-  /// address itself, down to an IPv6 address's `flowinfo` and `scope_id`.
+  /// no room for, so that entry ranks first next time. Distinct addresses never tie,
+  /// so no two of them can share a turn: the order is over the address itself, down
+  /// to an IPv6 address's `flowinfo` and `scope_id`.
+  ///
+  /// Repeated offers of ONE address set therefore admit its entries round-robin over
+  /// that order, and the bound is over the offers that CARRY CAPACITY: every address
+  /// of a re-offered set `S` is admitted within `⌈|S| ÷ r⌉` offers that each find at
+  /// least `r` free queue slots. An offer that finds the queue FULL admits nothing —
+  /// it sheds every entry it ranked and leaves the rotation on the lowest-ranked of
+  /// them, which is the entry that already ranked first — so it neither counts
+  /// toward that bound nor costs the set a turn. No reachable seed can therefore be
+  /// starved behind one that keeps failing, however the caller orders the list,
+  /// however a re-resolution reorders it, and however many offers meet a full
+  /// queue.
   ///
   /// That bound is over the addresses offered TOGETHER, because the rotation is
   /// engine-wide and a call can only advance it past the entries that call saw. A
   /// driver or application running several join loops must therefore offer the
-  /// UNION of their lists: `memberlist-embassy`'s `join` does, merging every live
-  /// join future's seeds into one offer, and `memberlist-smoltcp`'s asks its caller
-  /// for one merged list. Two loops that instead offer DISJOINT sets larger than the
+  /// UNION of their lists: `memberlist-embassy`'s run loop does, offering every live
+  /// join future's seeds as one list, and `memberlist-smoltcp`'s asks its caller for
+  /// one merged list. Two loops that instead offer DISJOINT sets larger than the
   /// queue cap alternately share the one rotation while neither ever names the
   /// other's addresses, so each defers the other's turns — and for an interleaving
   /// whose dials all fail inside the very pump that made them, indefinitely. What
@@ -1005,9 +1012,14 @@ where
   ///
   /// A call holds at most `free queue slots + 1` candidates at a time — the one
   /// beyond the free slots is what names the next rotation — so its scratch is
-  /// bounded by `max_pending_seeds + 1` addresses however long the offer is, and an
-  /// offer of `n` entries costs `O(n × free queue slots)`. Neither cost grows with
-  /// the size of the cluster or with how often the caller retries.
+  /// bounded by `max_pending_seeds + 1` addresses however long the offer is. An
+  /// offer of `n` entries costs
+  /// `O(n × (queued seeds + live connections + free queue slots))`: every routable
+  /// entry is checked against the seed queue and against the connection table before
+  /// it is ranked against the candidates the call is holding. On this tier those
+  /// three populations are the seed cap, the reliable pool size, and the seed cap
+  /// again, so none of them grows with the size of the cluster or with how often the
+  /// caller retries.
   ///
   /// # Ordering
   ///
