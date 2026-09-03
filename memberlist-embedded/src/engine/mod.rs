@@ -3623,6 +3623,13 @@ where
   /// head — the youngest intent in the plane — would evict sends admitted before it
   /// existed, inverting the very order this trim keeps.
   ///
+  /// Both seed rules therefore read exactly what the rebalance left them. The head
+  /// rule's "at most one parked seed" is a predicate over the seed-originated parked
+  /// entries, which this never removes, so a trim cannot let a second head in; and
+  /// step 8's seed wake is gated on the pool, which this never touches — a parked
+  /// dial holds no slot, so shedding one frees nothing and leaves the pool exactly as
+  /// the dial site left it.
+  ///
   /// So the TOTAL parked population may stand above the ceiling by what the engine
   /// itself admitted: the seeds phase 5 admitted against measured capacity whose
   /// slots the older parked dials took first, plus at most one head past that
