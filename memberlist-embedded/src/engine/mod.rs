@@ -1306,13 +1306,14 @@ where
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
       Box::new(|addr: &SocketAddr| *addr),
     );
-    // A pump feeds every reliable connection (phase 3) and every synchronous
-    // dial rejection (1c and 7) before its single machine tick (step 6). None
-    // of those feeds may run the membership sweep in between: a refutation
-    // carried by a later connection of the same pump — or by a later 4 KiB
-    // chunk of the same connection, which the phase-3 read loop feeds
-    // separately — would land after the sweep had already turned the suspicion
-    // it refutes into a `Dead`. With the sweep confined to step 6, and with no
+    // A pump feeds every reliable connection (phase 3) before its single machine
+    // tick (step 6). None of those feeds may run the membership sweep in
+    // between: a refutation carried by a later connection of the same pump — or
+    // by a later 4 KiB chunk of the same connection, which the phase-3 read loop
+    // feeds separately — would land after the sweep had already turned the
+    // suspicion it refutes into a `Dead`. The same setting also keeps the
+    // synchronous dial rejections of phase 7 from sweeping a SECOND time in the
+    // tick that has already swept. With the sweep confined to step 6, and with no
     // early exit between phase 3 and it, every pump sweeps exactly once, after
     // all of its evidence. Evidence-driven transitions are untouched: they
     // still apply at the instant of the feed that carries them.
@@ -2269,14 +2270,14 @@ where
   /// 3. **Reliable ingress pump** — drain each connection's rx into
   ///    `handle_transport_data`; deliver a one-shot EOF on peer FIN. These
   ///    feeds do not advance membership time.
-  /// 1c. **Rebalance** — self-heal a missing listener, then assign any remaining
-  ///    free slots to deferred dials (listener-first).
+  /// 1c. **Listener self-heal** — re-arm a still-missing listener from the pool.
   /// 5. **Join-seed drain** — `start_push_pull(seed, Join, now)` per queued seed.
   /// 6. **Machine tick** — `handle_timeout` fires due timers; the pump's
   ///    single membership sweep.
-  /// 7a–7e. **Stream actions + egress** — drain `poll_action`, promote, pump
-  ///    outbound, flush deferred FINs, complete `Closing` drains, re-rebalance,
-  ///    then drain + send outbound gossip.
+  /// 7a–7e. **Stream actions + egress** — drain `poll_action` (every `Connect`
+  ///    parks), promote, pump outbound, flush deferred FINs, complete `Closing`
+  ///    drains, rebalance (the pump's SOLE dial site), then drain + send outbound
+  ///    gossip.
   /// 8. **Deadline** — `min(machine_next, closing_next, gossip_more)`.
   ///
   /// # Observation is the read
@@ -2309,7 +2310,7 @@ where
   ///
   /// The reliable plane holds the same property. The coordinator is built with
   /// its feeds not advancing membership time, so no phase-3 feed — and no
-  /// synchronous dial rejection at 1c or 7 — runs the membership sweep. Step 6
+  /// synchronous dial rejection at 7d'' — runs the membership sweep. Step 6
   /// is the pump's only sweep, and it sees every gossip datagram and every
   /// reliable byte, EOF and transport fault this pump observed, including the
   /// second and later `READ_BUF` chunks of one connection. So no refutable
@@ -2336,16 +2337,14 @@ where
     // listener gets first claim on a free slot and a deferred outbound dial takes
     // only what remains. The whole reliable plane can be driven from a single
     // spare slot, so an inbound peer must never be starved of a slot by outbound
-    // intent. The two steps below run in this exact order:
+    // intent. The listener steps run in this exact order:
     //
-    //   1b. `check_listener`  — consume an accept-ready listener + replenish
-    //   1c. `rebalance_pool`  — self-heal a missing listener, then deferred dials
-    //                           take any remaining slots (listener-first)
+    //   1b. `check_listener`   — consume an accept-ready listener + replenish
+    //   1c. `ensure_listener`  — self-heal a still-missing listener
     //
     // They are no longer adjacent: the two ingress feeds (phases 2 and 3) run
-    // between them, because `rebalance_pool` reaches the machine's synchronous
-    // dial-rejection path and `1b` does not. Their relative order — and with it
-    // listener priority — is unchanged.
+    // between them. Deferred dials take what the listener leaves, but only at
+    // 7d'', after the machine tick — see 1c.
     //
     // 1b. Accept an inbound connection completed on the listener and replenish the
     // listener from the pool.
@@ -2492,23 +2491,26 @@ where
     // inbound bytes (including the peer-FIN EOF) when firing timers.
     self.pump_inbound_reliable(now, stream);
 
-    // 1c. Self-heal a still-missing listener, then assign any remaining free slots
-    // to deferred dials (listener-first). This runs the SAME rebalance as the late
-    // call after the in-tick frees below (step 7), here over whatever
-    // `reap_retiring` freed plus the spare pool. Running it BEFORE the machine tick
-    // (step 6) is required: a `PendingDial` deferred on a PRIOR tick must be
-    // assigned a freed slot and dialed before step 6's `handle_timeout` could
-    // elapse its bridge and tear it down — so the early site cannot move later.
-    // Running it AFTER both evidence feeds keeps the other direction ordered too:
-    // a dial this call rejects synchronously (a CIDR-blocked or unroutable peer)
-    // terminalizes through the machine, and the coordinator's feeds are the paths
-    // whose membership-sweep the pump has confined to step 6 — so keeping the
-    // rejection behind this pump's gossip and reliable evidence holds the phase
-    // order together independently of that setting. A prior-tick `PendingDial`
-    // parked here is unaffected by the two feeds: they mark only their own bridges
-    // dirty, and a parked dial's bridge has no residual work, so nothing between 1b
-    // and here can elapse it.
-    self.rebalance_pool(now, stream);
+    // 1c. Self-heal a still-missing listener over whatever `reap_retiring` freed
+    // plus the spare pool. Listener ONLY: no dial is issued here, and this call
+    // reaches no machine path at all.
+    //
+    // Dials are issued exclusively by the late rebalance (7d''), AFTER the machine
+    // tick. Assigning a slot here instead would put the engine's scheduling ahead of
+    // the machine's expiry judgment: a `PendingDial` whose exchange deadline has
+    // already elapsed at `now` would take a slot and issue a SYN that step 6 then
+    // fails and 7a immediately RSTs, pinning the slot through a whole teardown cycle
+    // instead of leaving it for the next viable dial. Dialing first saves nothing in
+    // the other direction either — `connect` does not touch the bridge, so an
+    // exchange whose deadline has elapsed is doomed by step 6 at this same instant
+    // whichever order the two run in.
+    //
+    // The listener self-heal keeps its early slot because it is pure engine state:
+    // `check_listener` replenishes only on the accept path, so a listener lost to a
+    // rejected accept (or to a reaped slot) is re-armed here at the front of the
+    // tick, and the whole phase stays LISTENER-FIRST — this call claims at most one
+    // slot before 7d'' hands the rest to deferred dials.
+    self.ensure_listener(stream);
 
     // 5. Drain join seeds: each seed queued by `join()` gets a push/pull exchange
     // initiated now. `start_push_pull` internally calls `service_dials` +
@@ -2563,27 +2565,33 @@ where
     // FINs the same tick rather than waiting for the next.
     self.flush_closing(now, stream);
 
-    // 7d''. Re-run the listener/dial rebalance over every slot the machine tick and
-    // teardown just freed back to the pool IN THIS TICK. The early 1c rebalance ran
-    // before step 6 and saw only what the 1a reap had freed; the slot-freeing
-    // teardown paths run LATER (after the machine tick fires the `Close`/`Abort`
-    // actions), so a slot freed here would otherwise sit idle until the next pump —
-    // stranding a deferred `PendingDial` or a missing listener until some unrelated
-    // timer happened to wake the driver, possibly past the waiting exchange's own
-    // bridge deadline (which would then kill it before it ever got the slot).
-    // Servicing the frees in-tick lets a freed slot immediately back the oldest
-    // waiting dial — its SYN egress is then driven by the stack deadline, which the
-    // driver reports as ~now — or restore the listener, so the returned wakeup is
-    // naturally correct with no `pending_dial` deadline term needed.
+    // 7d''. The pump's SOLE dial site: run the listener/dial rebalance over the
+    // whole pool — the spare slots 1a freed plus every slot the machine tick and
+    // teardown just freed back IN THIS TICK — and hand them to parked dials
+    // oldest-first, listener-first.
+    //
+    // Every dial the engine issues happens here, after step 6, and that placement is
+    // the expiry check. The machine owns each exchange's deadline and judges it
+    // against this pump's own `now`: step 6's `handle_timeout` marks every bridge
+    // dirty, `pump_bridges` fails AND reaps an elapsed one in the same pass, and 7a
+    // drains the resulting `Abort` — which for a parked dial is a pure removal (no
+    // socket to reset). So an exchange that survives to this call has `deadline >
+    // now` by the machine's own judgment, and the engine compares no instant of its
+    // own: it can neither fail a dial early nor start one late. Slots freed by that
+    // very teardown are handed straight to the next viable waiting dial rather than
+    // sitting idle until the next pump — its SYN egress is then driven by the stack
+    // deadline, which the driver reports as ~now — or restore the listener, so the
+    // returned wakeup is naturally correct with no `pending_dial` deadline term
+    // needed.
     //
     // A slot returns to the pool ONLY through a reap (`retire` runs an immediate
     // reap, and 1a runs the periodic one): a teardown whose completion the driver
     // acknowledges this tick — a synchronous driver's clean/aborted socket — is
     // freed by that immediate reap and serviced here; one still tearing down waits
-    // in `retiring` and is freed by a LATER tick's 1a reap, whose freed slots the
-    // next tick's 1c rebalance claims. Either way this late rebalance dominates
-    // every in-tick free; if a new late free path is ever added, it must precede
-    // this call or the end-of-tick invariant below regresses.
+    // in `retiring` and is freed by a LATER tick's 1a reap and serviced by that
+    // tick's own call to this site. Either way this late rebalance dominates every
+    // in-tick free; if a new late free path is ever added, it must precede this call
+    // or the end-of-tick invariant below regresses.
     self.rebalance_pool(now, stream);
 
     // Invariant held at end-of-tick: if the reliable pool is non-empty then a
@@ -2645,9 +2653,11 @@ where
     // tearing down is reaped to the pool only on a LATER tick by `reap_retiring`,
     // and the driver's own link-layer deadline (the smoltcp socket's pending-RST
     // dispatch, ~now) plus the folded `retiring` escalation deadline both guarantee
-    // that tick runs; the next tick's early rebalance then dials the waiting
-    // connection. Either way the unblocking event is already covered, so a
-    // `pending_dial` term would be redundant.
+    // that tick runs; that tick's own rebalance then dials the waiting connection.
+    // Either way the unblocking event is already covered, so a `pending_dial` term
+    // would be redundant — and the deadline a parked dial DOES own is already in the
+    // `machine` term above, since `StreamEndpoint::poll_timeout` folds every live
+    // bridge's own deadline, its still-handshaking ones included.
     //
     // The driver folds its own link-layer next-event deadline into the returned
     // instant before sleeping.
@@ -2684,8 +2694,8 @@ where
   /// `Connection` is removed, and an EOF is latched on the bridge as a best-effort
   /// cancel. (For a `Handshaking` bridge that EOF is consumed only post-promotion,
   /// so the bridge is ultimately retired by its own dial/handshake deadline; the
-  /// driver has no prompt dial-cancel path.) Shared by the live `Connect` drain and
-  /// the deferred `drain_pending_dials` retry so both dial identically.
+  /// driver has no prompt dial-cancel path.) Reached only from
+  /// `drain_pending_dials`, the pump's single dial site.
   fn dial<S>(
     &mut self,
     eid: ExchangeId,
@@ -2750,22 +2760,30 @@ where
   ///
   /// Services the waiting connections oldest-first — by ascending `ExchangeId`,
   /// which is the machine's monotonically increasing per-endpoint correlation
-  /// token, so the oldest deferred dial is dialed first. Stops the moment the pool
-  /// empties again so the rest stay parked for a later tick. Called each `pump` LAST
-  /// in the accept/replenish/dial phase — after `reap_retiring`, `check_listener`,
-  /// and the `ensure_listener` self-heal — so the inbound listener has already taken
-  /// its slot and a deferred dial claims only what remains, yet a slot freed by a
-  /// timed-out dead-seed bridge is still promptly spent on the oldest waiting viable
-  /// dial rather than the intent being lost.
+  /// token, so the oldest deferred dial is dialed first and a dial requested this
+  /// very tick can never overtake one that has been waiting. Stops the moment the
+  /// pool empties again so the rest stay parked for a later tick. This is the ONLY
+  /// place the engine dials, and it runs once per `pump`, in the late rebalance
+  /// (7d'') — after `reap_retiring`, `check_listener`, the `ensure_listener`
+  /// self-heal and the machine tick — so the inbound listener has already taken its
+  /// slot, a deferred dial claims only what remains, and no dial is issued for an
+  /// exchange whose deadline the tick just judged elapsed.
   ///
-  /// A connection already retired (its bridge timed out and issued a `Close`) was
-  /// removed from `connections` by `teardown`, so this never dials a dead exchange.
-  /// Each assigned connection's parked `out` bytes and `fin_pending` FIN survive the
-  /// transition and flush/fire once the socket is Established.
+  /// A connection already retired (its bridge timed out and issued a `Close`/`Abort`)
+  /// was removed from `connections` by `teardown` / `abort_exchange`, so this never
+  /// dials a dead exchange. Each assigned connection's parked `out` bytes and
+  /// `fin_pending` FIN survive the transition and flush/fire once the socket is
+  /// Established.
   fn drain_pending_dials<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
   {
+    // Nothing to assign: skip the collect and the sort entirely. An exhausted pool is
+    // the common case on a busy node, and the work below is O(P log P) in the parked
+    // population — pure waste when there is not one slot to hand out.
+    if self.plane.pool.is_empty() {
+      return;
+    }
     // Collect the waiting dials oldest-first. The borrow of `connections` is
     // released before the dial loop mutates the plane.
     let mut waiting: MediumVec<(ExchangeId, SocketAddr)> = self
@@ -2810,12 +2828,12 @@ where
   /// Idempotent and LISTENER-FIRST — `ensure_listener` claims at most one slot
   /// before `drain_pending_dials` touches the pool, so an inbound listener is never
   /// starved by deferred outbound intent — and a no-op when the pool is empty or
-  /// there is no unmet demand. Run at two points each `pump`: early (1c), over the
-  /// slots `reap_retiring` freed plus the spare pool, BEFORE the machine tick so a
-  /// prior-tick `PendingDial` is dialed before its bridge can time out; and late
-  /// (7d''), over every slot the machine's teardown / close paths freed THIS tick, so
-  /// an in-tick free immediately backs a waiting dial or restores the listener
-  /// rather than sitting idle until the next pump.
+  /// there is no unmet demand. Run ONCE per `pump`, late (7d''), over the spare pool
+  /// plus every slot the machine's teardown / close paths freed THIS tick, so an
+  /// in-tick free immediately backs a waiting dial or restores the listener rather
+  /// than sitting idle until the next pump. Placing the pump's only dial site after
+  /// the machine tick is what keeps the machine the sole judge of exchange expiry;
+  /// the early phase (1c) calls `ensure_listener` alone.
   fn rebalance_pool<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
@@ -2826,13 +2844,12 @@ where
 
   /// Drain all `StreamAction`s emitted by the machine this tick.
   ///
-  /// `Connect` — take a pooled slot, create a `Dialing` [`Connection`] (slot
-  /// assigned), and `dial` it. When the pool is exhausted a `PendingDial` connection
-  /// (no slot) is recorded instead and `drain_pending_dials` assigns a slot once one
-  /// frees, so the intent is never lost. If the connect call itself errors the slot
-  /// is returned to the pool, the connection is removed, and the bridge is retired by
-  /// its own dial/handshake deadline, since the driver has no prompt dial-cancel
-  /// path.
+  /// `Connect` — record a `PendingDial` [`Connection`] (no slot). This phase never
+  /// dials: the pump's single dial site is the late rebalance (7d''), which runs
+  /// after the machine tick has had its say on every exchange deadline, so a parked
+  /// dial the machine failed this tick is removed by its `Abort` before any slot can
+  /// be spent on it. `drain_pending_dials` then assigns slots oldest-first, so the
+  /// intent is never lost and never jumps the queue.
   ///
   /// `Shutdown` — the SEND-half close signal: the local side finished sending but
   /// the bridge is still awaiting the peer's reply and/or FIN. The graceful
@@ -2870,40 +2887,34 @@ where
           let peer = info.peer();
           // Record the originating StreamId so a driver awaiting this exchange can
           // correlate its terminal `ExchangeCompleted` by StreamId, not by arrival
-          // order. Recorded unconditionally (even when the pool is exhausted and the
-          // dial defers to `PendingDial`): the exchange exists and will complete.
+          // order. Recorded unconditionally — the exchange exists and will complete,
+          // whether its dial is issued later this tick or never issued at all.
           self.outbound_stream_ids.insert(eid, info.stream_id());
 
-          // Every pooled slot is reusable by construction (a slot still tearing down
-          // lives in `retiring`, not the pool); when the pool is exhausted the dial
-          // defers to `PendingDial` until a retire is acknowledged and a slot frees.
-          match self.plane.pool.take() {
-            Some(c) => {
-              // A slot is free: mint its occupancy generation, create the Dialing
-              // connection (slot assigned), and issue the connect this same tick.
-              let g = self.advance_slot_gen(c);
-              self
-                .plane
-                .connections
-                .insert(eid, Connection::dialing(peer, c));
-              self.dial(eid, peer, c, g, now, stream);
-            }
-            None => {
-              // Pool exhausted (or every freed slot still resetting): no slot free to
-              // back this dial right now. The Connect action was consumed by
-              // poll_action and is never re-emitted, so dropping it would LOSE the
-              // dial intent. Record a PendingDial connection (no slot yet) instead;
-              // this same tick's request bytes and a same-tick Shutdown accumulate on
-              // it, and `drain_pending_dials` assigns a slot once `reap_retiring` frees
-              // one (e.g. when a dead seed's bridge times out). This is what lets a
-              // multi-seed `join()` reach a viable later seed even when earlier dead
-              // seeds momentarily hold every slot.
-              self
-                .plane
-                .connections
-                .insert(eid, Connection::pending_dial(peer));
-            }
-          }
+          // PARK, never dial here. The Connect action was consumed by `poll_action`
+          // and is never re-emitted, so dropping it would LOSE the dial intent; a
+          // `PendingDial` connection (no slot yet) records it, accumulates this same
+          // tick's request bytes and a same-tick `Shutdown`, and is handed a slot by
+          // the late rebalance (7d'') — the pump's SINGLE dial site.
+          //
+          // Parking unconditionally is what makes the dial site follow the machine
+          // tick: an exchange whose deadline elapsed while parked is failed and
+          // reaped by step 6, and the resulting `Abort` (drained just below, in this
+          // very loop) removes the connection before 7d'' looks for work — so no slot
+          // is ever spent on a SYN for an exchange the machine has already given up
+          // on. Dialing inline here would put that judgment before the tick that
+          // makes it. Nothing is lost by deferring within the tick: no phase between
+          // here and 7d'' can advance a freshly issued dial (7b needs an established
+          // socket, which a same-tick `connect` never is; 7c writes only under
+          // `may_send`), and the SYN egresses on the same post-pump stack poll.
+          //
+          // FIFO is a consequence: 7d'' drains the whole parked set oldest-first by
+          // `ExchangeId`, so a Connect minted this tick can never overtake one that
+          // has been waiting since an earlier tick.
+          self
+            .plane
+            .connections
+            .insert(eid, Connection::pending_dial(peer));
         }
 
         StreamAction::Shutdown(r) => {

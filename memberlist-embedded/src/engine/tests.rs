@@ -1088,6 +1088,9 @@ struct ProgRel {
   closed: Vec<u32>,
   /// Handles `abort()` was called on (RST).
   aborted: Vec<u32>,
+  /// Every `(handle, remote)` the engine issued a link-layer `connect` for, in
+  /// order — the record of which dials actually reached the wire.
+  connects: Vec<(u32, SocketAddr)>,
   /// When set, every `connect` is rejected with `Busy` — modelling a link layer
   /// that refuses the dial before any SYN, which the engine's `dial` reclaims
   /// and terminalizes as a failure.
@@ -1110,6 +1113,7 @@ impl ProgRel {
       sent: Vec::new(),
       closed: Vec::new(),
       aborted: Vec::new(),
+      connects: Vec::new(),
       connect_fails: false,
     }
   }
@@ -1167,6 +1171,7 @@ impl StreamIo for ProgRel {
     if self.connect_fails {
       return Err(crate::StreamIoError::Busy);
     }
+    self.connects.push((c, remote));
     // A dial opens the socket; the test flips `established` to model the
     // handshake completing on a later tick. Record the remote as the eventual
     // accepted peer for symmetry, though the dialer side never reads it.
@@ -1414,6 +1419,125 @@ fn pending_dial_when_pool_exhausted_then_dialed_once_slot_frees() {
     0,
     "the freed slot was consumed by the deferred dial"
   );
+}
+
+/// A parked dial whose exchange deadline elapses WHILE it is parked is never
+/// dialed: the machine tick judges the expiry first and the exchange is already
+/// terminal by the time the pump reaches its single dial site, so the freed slot
+/// is never spent on a doomed SYN.
+///
+/// The engine compares no instant of its own here. The deadline belongs to the
+/// machine, and step 6's `handle_timeout` fails and reaps the bridge in one pass,
+/// so the parked connection is removed by the resulting `Abort` before the late
+/// rebalance looks for work. The slot stays in the pool for the next viable dial
+/// instead of being pinned through a connect-then-RST cycle.
+#[test]
+fn parked_dial_expired_while_parked_is_never_dialed() {
+  use memberlist_proto::event::{ExchangeKind, ExchangeStatus};
+
+  let stream_timeout = Duration::from_secs(5);
+  let (mut engine, now) = engine_with_stream_timeout(stream_timeout);
+  // A listener is present but the dial pool is empty, so the `Connect` parks.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let to = node_addr(7002);
+  engine
+    .send_reliable(to, bytes::Bytes::from_static(b"doomed"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the dial must park, or there is no expiry-while-parked window to test"
+  );
+  while engine.poll_event().is_some() {}
+
+  // A slot frees, but only after the exchange deadline has already elapsed.
+  engine.plane_mut().pool.push(5);
+  let late = now + stream_timeout + Duration::from_secs(1);
+  engine.pump(late, &mut gossip, &mut stream);
+
+  assert!(
+    stream.connects.is_empty(),
+    "an exchange the machine has already failed must never reach connect, got {:?}",
+    stream.connects
+  );
+  assert!(
+    stream.aborted.is_empty(),
+    "no socket may be dialed and then RST for an expired exchange, got {:?}",
+    stream.aborted
+  );
+  assert!(
+    !StreamIo::is_open(&stream, 5),
+    "the freed slot must never have been opened"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "the expired exchange must be gone from the parked set"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the freed slot stays available for the next viable dial"
+  );
+
+  let mut outcome = None;
+  while let Some(ev) = engine.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      if ec.kind() == ExchangeKind::UserMessage {
+        outcome = Some(ec.outcome());
+      }
+    }
+  }
+  assert_eq!(
+    outcome,
+    Some(ExchangeStatus::Failed),
+    "the expired exchange terminalizes through the machine's own failure path"
+  );
+}
+
+/// With no free slot there is nothing to assign, so the dial drain returns before
+/// collecting and sorting the parked set: the parked dials survive untouched and
+/// no `connect` is issued. This is the common shape on a saturated node, where the
+/// scan would otherwise be paid twice over for nothing.
+#[test]
+fn parked_dials_are_untouched_while_the_pool_is_empty() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Two sends with an empty pool: both park, oldest first by ExchangeId.
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"a"), now)
+    .expect("send_reliable queues the exchange");
+  engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"b"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  for _ in 0..3 {
+    engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.pending_dial_count(),
+      2,
+      "an empty pool must leave every parked dial exactly where it is"
+    );
+    assert!(
+      stream.connects.is_empty(),
+      "no slot is free, so no dial may reach connect, got {:?}",
+      stream.connects
+    );
+  }
 }
 
 /// A reliable exchange whose dial connects but whose handshake never completes is
@@ -4562,16 +4686,16 @@ fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
   );
 }
 
-/// The early rebalance dials a `PendingDial` parked on a previous pump, and a dial
-/// the transport rejects synchronously terminalizes through the machine — whose
-/// tick sweeps membership at this pump's instant. Running that before the gossip
-/// phase, as the pump did previously, let an unrelated outbound dial fire a
-/// suspicion this pump's ring already refutes. The rebalance therefore runs after
-/// both evidence feeds, while still preceding the machine tick that a parked dial
-/// needs it to precede.
+/// The rebalance dials a `PendingDial` parked on a previous pump, and a dial the
+/// transport rejects synchronously terminalizes through the machine — whose tick
+/// sweeps membership at this pump's instant. Running that before the gossip phase,
+/// as the pump once did, let an unrelated outbound dial fire a suspicion this
+/// pump's ring already refutes. The dial site therefore sits at the END of the
+/// tick (7d''), after both evidence feeds and after the machine tick, so a
+/// rejection can never precede the evidence that refutes it.
 #[cfg(feature = "cidr")]
 #[test]
-fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
+fn dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   use memberlist_proto::CidrPolicy;
 
   let cfg = Options::new()
@@ -4584,8 +4708,8 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   let mut stream = NoStream::with_pool(4);
   let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
 
-  // A listener is installed and the pool is empty, so the dial below has to park
-  // as a `PendingDial` rather than taking a slot straight away.
+  // A listener is installed and the pool is empty, so the dial below has no slot
+  // to claim even at the late rebalance and is still parked when the next pump runs.
   engine.set_listener(1);
   let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
   engine
@@ -4597,7 +4721,7 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   assert_eq!(
     engine.pending_dial_count(),
     1,
-    "the dial must park with no slot, or the early rebalance has nothing to do"
+    "the dial must still be parked, or the rebalance under test has nothing to do"
   );
   while engine.poll_event().is_some() {}
 
@@ -4612,7 +4736,7 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   assert_eq!(
     engine.pending_dial_count(),
     0,
-    "the early rebalance must have dialed the parked exchange in this pump"
+    "the rebalance must have dialed the parked exchange in this pump"
   );
   assert_b_refuted(&mut engine);
   assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");
