@@ -32,7 +32,7 @@ use smallvec_wrapper::MediumVec;
 
 use crate::{
   GossipIo, InitError, Options, SlotGen, StreamIo, TransformOptions,
-  addr::{seed_rank_key, socket_addr_is_routable},
+  addr::socket_addr_is_routable,
   cidr::{CidrFilter, cidr_blocks},
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane, RetirePhase, Retiring},
@@ -355,10 +355,16 @@ pub struct Engine<I, C, R = SmallRng> {
   /// drives the actual exchange state, while this queue records which seeds are
   /// still waiting for a first contact attempt.
   pending_seeds: VecDeque<SocketAddr>,
-  /// Where the next [`join`](Self::join) admission starts on the per-address rank
-  /// circle: the [`seed_rank_key`] of the first seed the previous call had no room
-  /// for. Every rank in a call is taken relative to this, so that seed ranks first
-  /// on the next offer and successive offers sweep the circle round-robin.
+  /// Where the next [`join`](Self::join) admission starts in the address order:
+  /// the address of the first seed the previous call had no room for, or `None`
+  /// while no call has yet had to shed anything.
+  ///
+  /// Addresses are totally ordered by [`SocketAddr`] itself, and a call ranks them
+  /// cyclically from this point: every address at or after it first, in ascending
+  /// order, then the addresses before it, also ascending. So the seed the previous
+  /// call turned away ranks first on the next offer, and successive offers sweep
+  /// the whole set round-robin, wrapping back to the smallest address once the
+  /// largest has had its turn. `None` starts that sweep at the smallest address.
   ///
   /// The rotation lives here, and not in a driver's retry loop, because the engine's
   /// admission contract is that the caller re-offers its whole seed list and this
@@ -374,15 +380,15 @@ pub struct Engine<I, C, R = SmallRng> {
   /// positional cursor only rotates while the order holds still: a re-resolution
   /// that reorders the candidates, or a second caller's differently-ordered offer,
   /// moves the same index onto a different address, and an offer alternating
-  /// between two orders can land on the failing seed every single time. A rank key
-  /// is a property of the address, so neither reordering nor which caller made the
-  /// offer changes who gets the slot.
+  /// between two orders can land on the failing seed every single time. The order
+  /// here is a property of the addresses alone, so neither reordering nor which
+  /// caller made the offer changes who gets the slot.
   ///
   /// One rotation serves the whole engine, and a call advances it only past entries
   /// that call saw, so the round-robin sweeps whatever is offered together. A driver
   /// running several join loops offers their union for that reason — see
   /// [`join`](Self::join).
-  join_rotation: u64,
+  join_rotation: Option<SocketAddr>,
   /// Maps each outbound reliable exchange's [`ExchangeId`] to the [`StreamId`] the
   /// originating `send_reliable` / `join` / probe call returned, captured from the
   /// `Connect` action (which carries both ids). [`poll_event`](Self::poll_event)
@@ -961,15 +967,18 @@ where
   /// does not suppress the seed, since it is a different exchange and would leave
   /// the join with nothing outstanding.
   ///
-  /// Which seeds a full queue keeps depends only on the SET of addresses offered:
-  /// each address carries a stable rank derived from the address itself, a call
-  /// admits the lowest-ranked entries it has room for, and the rotation then moves
-  /// to the first entry it had no room for, so that entry ranks first next time.
-  /// Repeated offers of ONE address set therefore admit its entries round-robin
-  /// over that stable order, every entry reached within
-  /// `⌈distinct routable addresses ÷ free queue slots⌉` offers — no reachable seed
-  /// can be starved behind one that keeps failing, however the caller orders the
-  /// list, and however a re-resolution reorders it.
+  /// Which seeds a full queue keeps depends only on the SET of addresses offered.
+  /// Addresses are totally ordered by [`SocketAddr`] itself, and a call ranks them
+  /// cyclically from the rotation: every address at or after it first, ascending,
+  /// then the addresses before it, also ascending. A call admits the lowest-ranked
+  /// entries it has room for, and the rotation then moves to the first entry it had
+  /// no room for, so that entry ranks first next time. Repeated offers of ONE
+  /// address set therefore admit its entries round-robin over that order, every
+  /// entry reached within `⌈distinct routable addresses ÷ free queue slots⌉` offers
+  /// — no reachable seed can be starved behind one that keeps failing, however the
+  /// caller orders the list, and however a re-resolution reorders it. Distinct
+  /// addresses never tie, so no two of them can share a turn: the order is over the
+  /// address itself, down to an IPv6 address's `flowinfo` and `scope_id`.
   ///
   /// That bound is over the addresses offered TOGETHER, because the rotation is
   /// engine-wide and a call can only advance it past the entries that call saw. A
@@ -983,6 +992,22 @@ where
   /// softens it short of that is the dedup above: a seed admitted from one set stays
   /// deduped for the life of its exchange, so a dial that takes any time at all
   /// leaves the turns in between to the addresses that have not been tried.
+  ///
+  /// Both counters count offered ENTRIES, not distinct addresses, so what a caller
+  /// reads back reconciles against the length of the list it passed: every entry is
+  /// queued, deduped, dropped, or non-routable, and exactly one of those. One
+  /// address repeated within a single offer is therefore counted once per
+  /// repetition — as [`join_seeds_deduped`](Self::join_seeds_deduped) for a repeat
+  /// the call is still holding that address for, and as
+  /// [`join_seeds_dropped`](Self::join_seeds_dropped) for one that ranks past
+  /// everything the call has room to consider. Only a non-routable entry is counted
+  /// as neither.
+  ///
+  /// A call holds at most `free queue slots + 1` candidates at a time — the one
+  /// beyond the free slots is what names the next rotation — so its scratch is
+  /// bounded by `max_pending_seeds + 1` addresses however long the offer is, and an
+  /// offer of `n` entries costs `O(n × free queue slots)`. Neither cost grows with
+  /// the size of the cluster or with how often the caller retries.
   ///
   /// # Ordering
   ///
@@ -1009,69 +1034,33 @@ where
       return Ok(());
     }
 
-    // Admit by RANK, not by position. An entry's rank is its stable per-address key
-    // taken relative to the rotation, so which entries a full queue keeps depends
-    // only on the SET of addresses offered — never on the order this caller listed
-    // them in, nor on which caller offered them. Picking the lowest-ranked entries
-    // by repeated linear scan rather than by sorting leaves the caller's list
-    // untouched and allocates only this index list, whose length is bounded by the
-    // queue cap rather than by the length of the offer.
-    let mut admitted: MediumVec<usize> = MediumVec::new();
-    let mut room = self
+    // Admit by RANK, not by position. An entry's rank is its own address taken
+    // cyclically from the rotation, so which entries a full queue keeps depends only
+    // on the SET of addresses offered — never on the order this caller listed them
+    // in, nor on which caller offered them.
+    //
+    // One pass keeps the best `room + 1` candidates in rank order. The entry beyond
+    // `room` is what names the next rotation, so identifying it costs no second pass
+    // over the offer, and holding only that many keeps the scratch bounded by the
+    // queue cap however long the offer is. The caller's list is never reordered.
+    let room = self
       .cfg
       .max_pending_seeds
       .saturating_sub(self.pending_seeds.len());
-    while room > 0 {
-      let mut best: Option<(usize, u64)> = None;
-      for (idx, seed) in seeds.iter().enumerate() {
-        // Skip a non-routable seed (unspecified/multicast/broadcast IP or port 0):
-        // it could only produce a doomed dial — the link layer's `connect` rejects
-        // the unspecified address and port 0, and the rest are addresses no dial
-        // can usefully reach. Queue only seeds a dial can actually complete.
-        if !socket_addr_is_routable(seed) {
-          continue;
-        }
+    let window = room.saturating_add(1);
+    // Read once: every rank in this call is taken from the same point, and the
+    // rotation only moves after the whole offer has been ranked against it.
+    let rotation = self.join_rotation;
+    let mut best: MediumVec<(SocketAddr, usize)> = MediumVec::new();
 
-        let rank = seed_rank_key(seed).wrapping_sub(self.join_rotation);
-        // Rank first, admissibility second. `>=` also discards ties, so repeats of
-        // one address within this offer resolve to the first of them, and the
-        // admissibility test — the costlier half of which walks the connection
-        // table — runs only for an entry that would actually win the slot.
-        if best.is_some_and(|(_, best_rank)| rank >= best_rank) {
-          continue;
-        }
-        // A repeat of an address this call already picked consumes no second slot;
-        // the pass below counts it as deduped rather than shed.
-        if admitted.iter().any(|&taken| seeds[taken] == *seed) {
-          continue;
-        }
-        if self.is_join_candidate(seed) {
-          best = Some((idx, rank));
-        }
-      }
-
-      let Some((idx, _)) = best else {
-        break;
-      };
-      admitted.push(idx);
-      room -= 1;
-    }
-
-    // Queue the admitted seeds in the order the caller listed them. Rank decides
-    // WHICH entries a full queue keeps; the caller's own order still decides the
-    // order they are dialed in, so a call that sheds nothing leaves the dial order
-    // exactly as it was offered.
-    admitted.sort_unstable();
-    for &idx in admitted.iter() {
-      self.pending_seeds.push_back(seeds[idx]);
-    }
-
-    // Classify every entry the admission pass did not take, exactly once each.
-    let mut first_unserved: Option<(u64, u64)> = None;
     for (idx, seed) in seeds.iter().enumerate() {
-      // A non-routable seed is not counted as shed: it is a malformed seed rather
-      // than shed load, and the engine has always discarded it silently.
-      if !socket_addr_is_routable(seed) || admitted.contains(&idx) {
+      // Skip a non-routable seed (unspecified/multicast/broadcast IP or port 0):
+      // it could only produce a doomed dial — the link layer's `connect` rejects
+      // the unspecified address and port 0, and the rest are addresses no dial can
+      // usefully reach. Queue only seeds a dial can actually complete. Discarded
+      // silently and counted as neither shed nor duplicate: it is a malformed seed
+      // rather than load the cap turned away.
+      if !socket_addr_is_routable(seed) {
         continue;
       }
 
@@ -1080,27 +1069,59 @@ where
         continue;
       }
 
-      // Queue full. Shed the surplus and count it rather than failing the call: the
-      // return type carries no fitting variant, and truncating best-effort discovery
-      // intent is preferable to rejecting a whole seed list because part of it did
-      // not fit. The cap only bites on more distinct routable seeds at once than a
-      // small reliable pool could service within any sane join deadline.
-      self.join_seeds_dropped += 1;
-      let key = seed_rank_key(seed);
-      let rank = key.wrapping_sub(self.join_rotation);
-      if first_unserved.is_none_or(|(_, lowest)| rank < lowest) {
-        first_unserved = Some((key, rank));
+      // A repeat of an address this call is already holding consumes no second
+      // slot, and is a duplicate rather than shed load.
+      if best.iter().any(|(held, _)| held == seed) {
+        self.join_seeds_deduped += 1;
+        continue;
+      }
+
+      let rank = cyclic_rank(seed, rotation);
+      let at = best.partition_point(|(held, _)| cyclic_rank(held, rotation) < rank);
+      // `at == window` only when the buffer is already full and this entry ranks
+      // below every entry in it, since `at <= best.len() <= window` always.
+      if at == window {
+        // Queue full. Shed the surplus and count it rather than failing the call:
+        // the return type carries no fitting variant, and truncating best-effort
+        // discovery intent is preferable to rejecting a whole seed list because
+        // part of it did not fit. The cap only bites on more distinct routable
+        // seeds at once than a small reliable pool could service within any sane
+        // join deadline.
+        self.join_seeds_dropped += 1;
+        continue;
+      }
+
+      best.insert(at, (*seed, idx));
+      if best.len() > window {
+        // The entry this one displaced off the end of the window is shed.
+        best.pop();
+        self.join_seeds_dropped += 1;
       }
     }
 
     // Only a call that actually shed a seed moves the rotation, and it moves to the
-    // lowest-ranked seed it had no room for: that seed ranks 0 on the next offer, so
-    // it is admitted ahead of every other entry, and successive offers sweep the
-    // whole address set. A call that fit everything it offered leaves the rotation
-    // alone — there is no unserved entry to resume from, and moving it would rotate
-    // an offer that never needed rotating.
-    if let Some((key, _)) = first_unserved {
-      self.join_rotation = key;
+    // lowest-ranked seed it had no room for: that seed ranks first on the next
+    // offer, so it is admitted ahead of every other entry, and successive offers
+    // sweep the whole address set. A call that fit everything it offered leaves the
+    // rotation alone — there is no unserved entry to resume from, and moving it
+    // would rotate an offer that never needed rotating.
+    //
+    // With `room == 0` the window is 1, so the single best candidate IS the entry
+    // beyond the room: it is shed, it becomes the rotation, and nothing is queued.
+    if best.len() > room {
+      let (unserved, _) = best[room];
+      self.join_seeds_dropped += 1;
+      self.join_rotation = Some(unserved);
+      best.truncate(room);
+    }
+
+    // Queue the admitted seeds in the order the caller listed them. Rank decides
+    // WHICH entries a full queue keeps; the caller's own order still decides the
+    // order they are dialed in, so a call that sheds nothing leaves the dial order
+    // exactly as it was offered.
+    best.sort_unstable_by_key(|&(_, idx)| idx);
+    for &(addr, _) in best.iter() {
+      self.pending_seeds.push_back(addr);
     }
     Ok(())
   }
@@ -1414,6 +1435,24 @@ where
   }
 }
 
+/// Where `addr` falls in the join-admission cycle that starts at `rotation`.
+///
+/// [`SocketAddr`] is totally ordered, so the addresses of one offer lay out on a
+/// line; the rotation cuts that line and joins the two halves into a cycle. The
+/// leading `bool` is that cut — `false` for the addresses at or after the
+/// rotation, `true` for the ones before it, so the first half sorts ahead of the
+/// wrapped-around second half — and the address itself orders within each half.
+/// With no rotation the cycle simply starts at the smallest address.
+///
+/// Comparing the addresses themselves rather than a digest of them is what makes
+/// the order a strict one: [`Ord`] here agrees with [`Eq`] down to an IPv6
+/// address's `flowinfo` and `scope_id`, so two distinct destinations can never
+/// share a rank, and neither can starve the other by taking its turn forever.
+#[inline]
+fn cyclic_rank(addr: &SocketAddr, rotation: Option<SocketAddr>) -> (bool, SocketAddr) {
+  (rotation.is_some_and(|from| *addr < from), *addr)
+}
+
 // Construction and reliable-plane diagnostics — the connection handle `C` is
 // only stored (never moved by value or used to key a map here), so these need
 // node identity alone.
@@ -1651,7 +1690,7 @@ where
       plane: ReliablePlane::new(),
       gossip_recv,
       pending_seeds: VecDeque::new(),
-      join_rotation: 0,
+      join_rotation: None,
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
       label,

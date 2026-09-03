@@ -1666,12 +1666,16 @@ fn join_seeds_over_cap_are_dropped_and_counted() {
 /// A caller re-offering a seed list longer than the queue cap must reach every
 /// entry in it, not only the prefix that fits.
 ///
-/// The starving shape: the first seed's dial fails instantly, so by the next offer
-/// it is neither queued nor mid-exchange and is admissible all over again. Scanning
-/// in caller order every time would refill the only queue slot with it and drop the
-/// reachable seed behind it, on every offer, forever. Resuming the scan where the
-/// previous call ran out of room queues the seed that missed its turn instead, so
-/// the reachable one is dialed on the very next offer.
+/// The starving shape: the seed that takes the first turn fails its dial instantly,
+/// so by the next offer it is neither queued nor mid-exchange and is admissible all
+/// over again. Admitting the same first turn every time would refill the only queue
+/// slot with it and drop the reachable seed behind it, on every offer, forever.
+/// Resuming where the previous call ran out of room queues the seed that missed its
+/// turn instead, so the reachable one is dialed on the very next offer.
+///
+/// First here means first in ADDRESS order, not first in the caller's list, so the
+/// fixture puts `dead` below `live` in that order to be sure it is the fast-failing
+/// seed that takes the turn the rotation then has to move past.
 #[cfg(feature = "cidr")]
 #[test]
 fn re_offered_seeds_past_the_cap_are_admitted_round_robin() {
@@ -1692,7 +1696,9 @@ fn re_offered_seeds_past_the_cap_are_admitted_round_robin() {
     .listen(9, 7946, crate::SlotGen::START)
     .expect("mock listen succeeds");
 
-  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
+  // Below `live` in address order, so the fast-failing seed is the one that takes
+  // the first turn and the rotation is what has to move past it.
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
   let live = node_addr(7003);
   let mut gossip = NoGossip;
 
@@ -1768,7 +1774,9 @@ fn reordered_re_offers_cannot_starve_a_reachable_seed() {
     .listen(9, 7946, crate::SlotGen::START)
     .expect("mock listen succeeds");
 
-  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
+  // Below `live` in address order, so the fast-failing seed is the one that takes
+  // the first turn and the rotation is what has to move past it.
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
   let live = node_addr(7003);
   let mut gossip = NoGossip;
 
@@ -1834,16 +1842,18 @@ fn positional_cursor_reaches(
 /// The rotation is engine-wide and a call advances it only past the entries that
 /// call saw, so the round-robin bound is over the addresses one offer names. Named
 /// together, `[dead1, live]` and `[dead2, dead3]` are four distinct addresses on one
-/// rank circle against a single free slot, so the bound is `⌈4 ÷ 1⌉` offers: `live`
-/// is dialed within four however the ranks happen to fall, and each offer sheds the
-/// three the slot had no room for.
+/// cycle against a single free slot, so the bound is `⌈4 ÷ 1⌉` offers: `live` is
+/// dialed within four wherever it sits in the address order, and each offer sheds
+/// the three the slot had no room for. The fixture puts `live` last in that order,
+/// so the sweep here is walked in full and the whole four-offer bound is exercised
+/// rather than a lucky prefix of it.
 ///
-/// The negative control is the design the rank key replaced. A positional cursor
-/// round-robins a single list perfectly well, but two disjoint lists offered
+/// The negative control is the design the address cycle replaced. A positional
+/// cursor round-robins a single list perfectly well, but two disjoint lists offered
 /// alternately pin it: each list resumes at the index the other's offer left behind,
 /// so with one slot the cursor lands on a failing seed every single time and `live`
 /// is never admitted at all. That is the shape both halves of this contract remove —
-/// the rank key so an offered set sweeps whatever order it arrives in, and the
+/// the address cycle so an offered set sweeps whatever order it arrives in, and the
 /// driver's union so the two lists arrive as one set.
 #[cfg(feature = "cidr")]
 #[test]
@@ -1863,10 +1873,12 @@ fn the_union_of_two_lists_offered_together_reaches_every_reachable_seed() {
     .expect("mock listen succeeds");
 
   // Every `dead` is outside the policy, so its dial fails inside the pump that
-  // admitted it and frees the slot again before the next offer.
-  let dead1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
-  let dead2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 7004);
-  let dead3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)), 7005);
+  // admitted it and frees the slot again before the next offer. All three sort
+  // below `live`, so `live` takes the last of the four turns and the sweep is
+  // walked end to end.
+  let dead1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let dead2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 2)), 7004);
+  let dead3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 3)), 7005);
   let live = node_addr(7003);
   // The two lists as one offer, exactly as a driver that merges its live join loops
   // hands them over.
@@ -1918,7 +1930,99 @@ fn the_union_of_two_lists_offered_together_reaches_every_reachable_seed() {
     positional_cursor_reaches(&[&[dead1, live], &[dead2, dead3]], live, 20),
     None,
     "two disjoint lists offered alternately pin a positional cursor on a failing seed \
-     forever — the starvation the rank key and the driver's union remove"
+     forever — the starvation the address cycle and the driver's union remove"
+  );
+}
+
+/// Run two offers of `pair` against a queue with exactly one free slot, returning
+/// the address admitted by each, in order.
+///
+/// The policy admits this node but neither seed, so every dial is rejected before
+/// `connect` and its exchange terminalizes inside the pump that made it — the slot
+/// is free again by the next offer and both entries are admissible every time. What
+/// picks between them is therefore the admission order alone.
+#[cfg(feature = "cidr")]
+fn admitted_over_two_offers(pair: [SocketAddr; 2]) -> [SocketAddr; 2] {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  let mut admitted = [pair[0]; 2];
+  for slot in admitted.iter_mut() {
+    engine.join(&pair).expect("join is accepted");
+    *slot = *engine
+      .pending_seeds
+      .front()
+      .expect("the free slot must take one of the pair");
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+  }
+  admitted
+}
+
+/// Admission orders seeds by the ADDRESS, so two endpoints that differ in any field
+/// at all take turns instead of one holding the slot forever.
+///
+/// Ranking through a digest of the address cannot promise that: a digest has fewer
+/// bits than the addresses it summarizes, so two distinct endpoints can share one
+/// value, and a tie the selection resolves by offered position then hands the slot
+/// to the same entry on every offer — the other is never dialed at all, however long
+/// the caller retries. An IPv6 pair differing only in `flowinfo` or `scope_id` makes
+/// that collision structural rather than a matter of luck, because those fields
+/// address a destination but are not part of its IP or port.
+///
+/// The order over `SocketAddr` agrees with equality on every one of those fields, so
+/// distinct endpoints never tie, and the pair here alternates: the lower takes the
+/// first turn, the rotation moves to the higher, and the higher takes the second.
+#[cfg(feature = "cidr")]
+#[test]
+fn join_admission_is_a_total_order_over_addresses() {
+  // One IPv6 host and port, two scope ids: the same bytes on the wire, two
+  // different destinations.
+  let host = core::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 7);
+  let scoped_lo = SocketAddr::V6(core::net::SocketAddrV6::new(host, 7002, 0, 1));
+  let scoped_hi = SocketAddr::V6(core::net::SocketAddrV6::new(host, 7002, 0, 2));
+  assert!(
+    scoped_lo < scoped_hi,
+    "the scope id must separate two otherwise identical endpoints"
+  );
+  assert_eq!(
+    admitted_over_two_offers([scoped_lo, scoped_hi]),
+    [scoped_lo, scoped_hi],
+    "a pair differing only in scope id must take alternate turns, not one of them \
+     every turn"
+  );
+  // Offered the other way round the outcome must not move: the order is over the
+  // addresses, not over the caller's list.
+  assert_eq!(
+    admitted_over_two_offers([scoped_hi, scoped_lo]),
+    [scoped_lo, scoped_hi],
+    "the caller's order must not decide which of the pair goes first"
+  );
+
+  // The same contract one family down, where the port is the only distinguishing
+  // field.
+  let ported_lo = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let ported_hi = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7003);
+  assert!(
+    ported_lo < ported_hi,
+    "the port must separate two endpoints on one host"
+  );
+  assert_eq!(
+    admitted_over_two_offers([ported_lo, ported_hi]),
+    [ported_lo, ported_hi],
+    "a pair differing only in port must take alternate turns"
   );
 }
 
@@ -1931,17 +2035,10 @@ fn a_duplicate_within_one_offer_is_deduped_not_dropped() {
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
   let (mut engine, _now) = engine_from(cfg, ep_cfg);
 
-  // The single slot goes to whichever of the pair ranks lower, so name that one
-  // `a`: its repeat is then the duplicate, and `b` is what the cap sheds.
-  let (a, b) = {
-    let x = node_addr(7002);
-    let y = node_addr(7003);
-    if seed_rank_key(&x) < seed_rank_key(&y) {
-      (x, y)
-    } else {
-      (y, x)
-    }
-  };
+  // Both are on one host, so the ports order them: `a` takes the only slot, its
+  // repeat is the duplicate, and `b` is what the cap sheds.
+  let a = node_addr(7002);
+  let b = node_addr(7003);
 
   engine.join(&[a, a, b]).expect("join is accepted");
 
@@ -1964,6 +2061,64 @@ fn a_duplicate_within_one_offer_is_deduped_not_dropped() {
     engine.join_seeds_dropped(),
     1,
     "only the distinct address the cap turned away is a drop"
+  );
+}
+
+/// A single offer far longer than the queue costs the engine a scratch of one entry
+/// per free slot plus one, and leaves both counters reconcilable against the length
+/// of the list the caller passed.
+///
+/// The bound is structural rather than timed, so there is no timing assertion here:
+/// what pins it is that the selection never holds more than that, which shows in the
+/// outcome — the queue keeps exactly the lowest-ranked entries, the rotation names
+/// the single entry just past them, and every other offered entry is counted once.
+/// Offering the list from the largest address down is the adversarial order for a
+/// bounded selection: every entry after the window fills displaces one already held,
+/// so the scratch is rewritten on every step and nothing is decided by arrival order.
+///
+/// The queue order is the second half of the contract. Ranking picks WHICH entries a
+/// full queue keeps; the caller's own order still decides the order they are dialed
+/// in, so the four survivors come back in the descending order they were offered in,
+/// not in the ascending order that selected them.
+#[test]
+fn selection_window_is_bounded_and_counts_stay_exact() {
+  let cfg = admission_cfg().with_max_pending_seeds(4);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..1000u32).rev().map(addr).collect();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    4,
+    "the queue must hold exactly the cap, however long the offer"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    996,
+    "every offered entry the cap turned away is counted exactly once"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "a thousand distinct addresses hold no duplicate"
+  );
+  assert_eq!(
+    engine.join_rotation,
+    Some(addr(4)),
+    "the rotation names the one entry just past the room the queue had"
+  );
+  assert_eq!(
+    engine.pending_seeds.iter().copied().collect::<Vec<_>>(),
+    std::vec![addr(3), addr(2), addr(1), addr(0)],
+    "the four lowest-ranked addresses must queue in the order the caller offered them"
   );
 }
 

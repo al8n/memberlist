@@ -38,55 +38,5 @@ fn ip_is_unicast(ip: &IpAddr) -> bool {
   }
 }
 
-/// A stable per-address key, for ordering addresses by identity alone.
-///
-/// The value depends only on the address — its family, its IP bytes (IPv4 zero
-/// extended into the low half, IPv6 taken whole) and its port — so two callers
-/// naming the same endpoint get the same key, and a caller that reorders its
-/// list, or re-resolves it into a different order, does not change any key.
-/// That is what lets a queue with room for only part of an offered set pick the
-/// same subset however the set is presented, and step to the next subset on the
-/// following offer.
-///
-/// The mixing is a plain [splitmix64] finalizer chain: it spreads addresses that
-/// differ in one octet or only in the port across the whole 64-bit range, so
-/// consecutive addresses in a subnet do not clump into one arc of the key
-/// circle. It is deliberately unkeyed and unseeded — stability WITHIN a process
-/// is the whole requirement, and seeds are local configuration under this
-/// crate's crash-stop threat model rather than attacker-supplied input, so
-/// there is no adversary to make key collisions worth defending against.
-///
-/// [splitmix64]: https://prng.di.unimi.it/splitmix64.c
-#[inline]
-#[must_use]
-pub(crate) fn seed_rank_key(addr: &SocketAddr) -> u64 {
-  // The family tag keeps an IPv4 address distinct from the IPv6 address holding
-  // the same trailing bytes (`10.0.0.1` vs `::10.0.0.1`), which are different
-  // destinations on the wire.
-  let (family, high, low) = match addr.ip() {
-    IpAddr::V4(v4) => (4u64, 0u64, u64::from(u32::from_be_bytes(v4.octets()))),
-    IpAddr::V6(v6) => {
-      let octets = v6.octets();
-      let mut high = [0u8; 8];
-      let mut low = [0u8; 8];
-      high.copy_from_slice(&octets[..8]);
-      low.copy_from_slice(&octets[8..]);
-      (6u64, u64::from_be_bytes(high), u64::from_be_bytes(low))
-    }
-  };
-
-  let key = splitmix64_finalize(family ^ high);
-  let key = splitmix64_finalize(key ^ low);
-  splitmix64_finalize(key ^ u64::from(addr.port()))
-}
-
-/// The splitmix64 finalizer: an invertible avalanche over 64 bits.
-#[inline]
-const fn splitmix64_finalize(z: u64) -> u64 {
-  let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-  let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-  z ^ (z >> 31)
-}
-
 #[cfg(test)]
 mod tests;
