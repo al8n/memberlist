@@ -202,8 +202,9 @@ async fn until(mut cond: impl FnMut() -> bool) {
 
 /// Issue a `join` purely to drive dial/abort churn: a dead seed never converges,
 /// so `join` (which resolves only on convergence) is raced against a short timer
-/// and abandoned. The dial intent is still enqueued on the engine, so the churn
-/// happens regardless of whether this future resolves.
+/// and abandoned. The seeds are registered with the node's join loop and it offers
+/// them on the wake, so the churn happens regardless of whether this future
+/// resolves.
 async fn churn_join(ml: &Memberlist<SmolStr, SocketAddr>, seeds: &[SocketAddr]) {
   let resolved: Vec<MaybeResolved<SocketAddr>> =
     seeds.iter().map(|s| MaybeResolved::Resolved(*s)).collect();
@@ -1169,6 +1170,10 @@ fn join_after_leave_with_a_peer_still_rejects() {
 /// same public API the guard test above uses, rather than a live exchange: what
 /// must be proven is the ORDER of the two checks when the wait resumes, and a
 /// real join would have to win a race against the leave to reach that state.
+///
+/// The resume is immediate rather than timed, which also pins the second half of
+/// the contract: `leave()` wakes a parked join, so it reports the departure without
+/// waiting out its backstop interval.
 #[test]
 fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
   let (dev, _peer) = pair();
@@ -1195,16 +1200,15 @@ fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
     );
     ml.leave().expect("leave a running node");
 
-    // Past the quarter-second re-offer interval the parked wait is due on both its
-    // wake sources, so this poll runs the loop's checks.
-    Timer::after(Duration::from_millis(400)).await;
+    // The leave pulsed the join wake, so the parked wait is due immediately — no
+    // timer, so a resume that only the backstop could explain fails here.
     match futures::poll!(joining.as_mut()) {
       core::task::Poll::Ready(res) => {
         let err = res.expect_err("a parked join must not report success once the node has left");
         assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
       }
       core::task::Poll::Pending => {
-        panic!("the parked join did not resume after the re-offer interval elapsed")
+        panic!("the parked join did not resume on the wake `leave` pulsed")
       }
     }
   });

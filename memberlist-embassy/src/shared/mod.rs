@@ -11,14 +11,18 @@
 //! every `RefCell` borrow either side takes completes before the next `.await`,
 //! so no borrow ever spans a suspension point.
 
-use core::{cell::RefCell, net::SocketAddr, time::Duration};
+use core::{
+  cell::{Cell, RefCell},
+  net::SocketAddr,
+  time::Duration,
+};
 
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use memberlist_embedded::Engine;
 use memberlist_proto::{
-  SmallRng,
+  Instant, SmallRng,
   event::{Event, PingId, StreamId},
 };
 
@@ -59,20 +63,42 @@ pub(crate) struct Waiters {
   pub(crate) sends: Vec<PendingSend>,
 }
 
+/// The node-wide floor on how often the live joins' seeds are offered to the
+/// engine, and the interval a parked join re-checks on.
+///
+/// Both uses are the same bound seen from the two ends. Offering is a NODE-wide
+/// activity — one offer carries every live join's seeds — so this paces how fast a
+/// seed whose exchange just failed can be dialed again: a peer whose single reliable
+/// listener is occupied RSTs each dial at link speed, and an unpaced re-offer would
+/// spin dial → RST → event → dial with no floor at all. A quarter second holds that
+/// to one SYN per seed per interval, negligible next to a node's other traffic and
+/// far inside the seconds-long deadline a caller puts around a join.
+///
+/// It is also what a parked join waits on when no event wakes it. `join_wake` has a
+/// single consumer, so a pulse can go to another concurrent joiner; re-checking on
+/// this interval costs a missed waiter one interval rather than the caller's whole
+/// deadline. Latency in the common case comes from the wake, not from here — the
+/// Runner pulses it whenever it drained machine events.
+pub(crate) const JOIN_OFFER_INTERVAL_MILLIS: u64 = 250;
+
+/// [`JOIN_OFFER_INTERVAL_MILLIS`] as the machine-clock duration the offer pacing
+/// measures with. The driver's runtime-clock counterpart lives with the join future
+/// that waits on it, derived from the same constant so the two cannot drift.
+pub(crate) const JOIN_OFFER_INTERVAL: Duration = Duration::from_millis(JOIN_OFFER_INTERVAL_MILLIS);
+
 /// The distinct seed addresses of every live [`join`](crate::Memberlist::join)
 /// future, each counted by how many of those futures offer it.
 ///
-/// A join future re-offers its resolved seed list until the node is joined, and the
+/// The node offers these seeds to the engine once per [`JOIN_OFFER_INTERVAL`] while
+/// any join is live. Offering the UNION is what the registry exists for: the
 /// engine's over-cap seed admission rotates over the addresses offered TOGETHER —
-/// one engine-wide rotation, which a call can only advance past the entries it
-/// actually saw. Two futures offering disjoint lists longer than the seed queue can
-/// hold would therefore share that rotation while neither ever names the other's
-/// addresses, and could delay each other without bound. Registering every live
-/// future's seeds here lets each offer carry their union, so the one rotation
-/// sweeps all of them.
+/// one engine-wide rotation, which an offer can only advance past the entries it
+/// actually named. Separate offers of disjoint lists longer than the seed queue can
+/// hold would share that rotation while neither ever named the other's addresses,
+/// and could delay each other without bound.
 ///
 /// Every address a live future offers is registered. Refusing one would put that
-/// future's seeds outside the offers the others carry, which is precisely the
+/// future's seeds outside the offer the others ride in, which is precisely the
 /// unmerged interleaving the union exists to remove, so no constant bounds this
 /// registry. What bounds it instead is the SUM OF THE LIVE JOIN FUTURES' OWN
 /// RESOLVED SEED LISTS — memory the application already holds, since each live
@@ -81,35 +107,49 @@ pub(crate) struct Waiters {
 /// longer offering leaves nothing behind.
 #[derive(Default)]
 pub(crate) struct JoinOffers {
-  /// `(address, number of live join futures offering it)`. A flat vector rather
-  /// than a map: every use walks the whole thing anyway to build the union, so a
-  /// lookup structure would buy nothing over the linear scan.
-  entries: Vec<(SocketAddr, usize)>,
+  /// The distinct offered addresses. This IS the union the node offers: the offer
+  /// hands the engine this slice, so no call copies or rebuilds it.
+  addrs: Vec<SocketAddr>,
+  /// `counts[i]` is how many live join futures are offering `addrs[i]`. Parallel to
+  /// `addrs` — same length, same indices — so an address and its refcount are added
+  /// and removed together.
+  counts: Vec<usize>,
 }
 
 impl JoinOffers {
   /// Record one more live offer of `addr`.
   fn register(&mut self, addr: SocketAddr) {
-    if let Some(entry) = self.entries.iter_mut().find(|(a, _)| *a == addr) {
+    if let Some(pos) = self.addrs.iter().position(|a| *a == addr) {
       // Saturating: the count is how many join futures are alive naming this one
       // address, which cannot approach `usize::MAX` (each is a live future holding
       // its own seed list), and saturating keeps the arithmetic total rather than
       // resting on that.
-      entry.1 = entry.1.saturating_add(1);
+      self.counts[pos] = self.counts[pos].saturating_add(1);
       return;
     }
-    self.entries.push((addr, 1));
+    self.addrs.push(addr);
+    self.counts.push(1);
   }
 
   /// Drop one live offer of `addr`, removing the entry when the last one goes.
   fn unregister(&mut self, addr: SocketAddr) {
-    let Some(pos) = self.entries.iter().position(|(a, _)| *a == addr) else {
+    let Some(pos) = self.addrs.iter().position(|a| *a == addr) else {
       return;
     };
-    let count = &mut self.entries[pos].1;
+    let count = &mut self.counts[pos];
     *count = count.saturating_sub(1);
     if *count == 0 {
-      self.entries.swap_remove(pos);
+      // The two vectors are indexed alike, so they are removed alike — a swap on one
+      // without the other would re-label every surviving count.
+      self.addrs.swap_remove(pos);
+      self.counts.swap_remove(pos);
+    }
+    if self.addrs.is_empty() {
+      // No join is live, so nothing needs the capacity the busiest moment grew:
+      // release it rather than hold a node's peak seed count for the rest of its
+      // uptime. Fresh empty vectors allocate nothing, so this is a free reset.
+      self.addrs = Vec::new();
+      self.counts = Vec::new();
     }
   }
 }
@@ -128,27 +168,6 @@ pub(crate) struct JoinOffer<'a> {
   /// Every one of them is registered in `offers`, so `Drop` releases exactly the
   /// set this guard took.
   addrs: Vec<SocketAddr>,
-}
-
-impl JoinOffer<'_> {
-  /// Fill `out` with the addresses this future's next offer should carry: its own
-  /// seeds first, then every address any other live join future is offering.
-  ///
-  /// Own-seeds-first is the chosen order, not something correctness rests on: the
-  /// engine's admission is ORDER-INDEPENDENT — it ranks the offered entries by
-  /// address, not by offered position — so every live future offers the same SET,
-  /// and the order only fixes which entries the caller's own list contributes
-  /// first. `out` is the caller's reused buffer, so a steady re-offer loop
-  /// allocates nothing.
-  pub(crate) fn fill_union(&self, out: &mut Vec<SocketAddr>) {
-    out.clear();
-    out.extend_from_slice(&self.addrs);
-    for (addr, _) in self.offers.borrow().entries.iter() {
-      if !out.contains(addr) {
-        out.push(*addr);
-      }
-    }
-  }
 }
 
 impl Drop for JoinOffer<'_> {
@@ -191,11 +210,19 @@ pub(crate) struct Shared<I, R = SmallRng> {
   pub(crate) app_events: RefCell<VecDeque<Event<I, SocketAddr>>>,
   /// The parked-op waiter tables.
   pub(crate) waiters: RefCell<Waiters>,
-  /// The seeds every live `join` future is offering, so each of them can offer
-  /// their union rather than its own list alone. Holds every address those futures
-  /// name, bounded by the resolved seed lists they already hold — see
-  /// [`JoinOffers`].
+  /// The seeds every live `join` future is offering. The Runner offers their union
+  /// as ONE list, so a join future registers here and waits rather than offering
+  /// anything itself. Holds every address those futures name, bounded by the
+  /// resolved seed lists they already hold — see [`JoinOffers`].
   pub(crate) join_offers: RefCell<JoinOffers>,
+  /// When the node may make its next join offer, in the machine clock domain the
+  /// Runner pumps with. `None` means no offer is pending — either no join is live,
+  /// or none has been made yet — so the next registration is offered at once
+  /// instead of waiting out an interval measured against a join that has ended.
+  ///
+  /// Private to this module: it is the offer step's own bookkeeping, and every
+  /// caller reaches it through [`Shared::offer_join_seeds_at`].
+  next_join_offer: Cell<Option<Instant>>,
 }
 
 /// Cap on the buffered application-event queue. A never-draining application then
@@ -216,6 +243,7 @@ where
       app_events: RefCell::new(VecDeque::new()),
       waiters: RefCell::new(Waiters::default()),
       join_offers: RefCell::new(JoinOffers::default()),
+      next_join_offer: Cell::new(None),
     }
   }
 
@@ -247,7 +275,55 @@ where
 
   /// Number of distinct addresses the live join futures are offering between them.
   pub(crate) fn join_offer_addr_count(&self) -> usize {
-    self.join_offers.borrow().entries.len()
+    self.join_offers.borrow().addrs.len()
+  }
+
+  /// Make the node's one join offer if it is due, and report both whether this call
+  /// offered and when the next offer is due.
+  ///
+  /// Offering is a NODE-wide activity, not a per-join one: one offer carries the
+  /// union of every live join's seeds, so F concurrent joins cost one offer and one
+  /// dial per seed per interval rather than F of each. The Runner calls this once
+  /// per pump iteration, immediately before `pump`, so an admitted seed gets its
+  /// `Connect` in the very same pump.
+  ///
+  /// Returns `(false, None)` — and forgets the pacing — when there is nothing to
+  /// offer: no live join, or a node that has left (which refuses offers anyway).
+  /// Otherwise returns when the next offer is due, which the Runner folds into its
+  /// sleep deadline so a node with live joins wakes to re-offer even when the
+  /// machine has no earlier work of its own.
+  ///
+  /// Borrows only; never awaits. `join_offers` and `engine` are separate cells, so
+  /// holding the registry across the engine call aliases nothing.
+  pub(crate) fn offer_join_seeds_at(&self, now: Instant) -> (bool, Option<Instant>) {
+    let offers = self.join_offers.borrow();
+    if offers.addrs.is_empty() || self.engine.borrow().ensure_running().is_err() {
+      self.next_join_offer.set(None);
+      return (false, None);
+    }
+
+    // Paced: at most one offer per interval, however many joins are live and however
+    // often they wake the pump.
+    if let Some(next) = self.next_join_offer.get()
+      && now < next
+    {
+      return (false, Some(next));
+    }
+
+    // Ignoring Err: `join` refuses only a node that is not running, which the guard
+    // above just ruled out with no suspension point in between; a join future
+    // observes the lifecycle itself either way.
+    let _ = self.engine.borrow_mut().join(&offers.addrs);
+    let next = now + JOIN_OFFER_INTERVAL;
+    self.next_join_offer.set(Some(next));
+    (true, Some(next))
+  }
+
+  /// The Runner's view of [`offer_join_seeds_at`](Self::offer_join_seeds_at): make
+  /// the offer if it is due and report when the next one is.
+  #[inline]
+  pub(crate) fn offer_join_seeds(&self, now: Instant) -> Option<Instant> {
+    self.offer_join_seeds_at(now).1
   }
 
   /// Pop one buffered application event for the handle's `poll_event`.
@@ -259,6 +335,15 @@ where
   #[inline]
   pub(crate) fn wake_pump(&self) {
     self.pump_wake.signal(());
+  }
+
+  /// Wake a parked `join` (membership or the node's lifecycle may have changed).
+  ///
+  /// Single-consumer, so this reaches one of several concurrent joiners; the others
+  /// re-check on their own interval backstop.
+  #[inline]
+  pub(crate) fn wake_joins(&self) {
+    self.join_wake.signal(());
   }
 
   /// Register a pending ping waiter and return its reply signal.
@@ -332,7 +417,7 @@ where
       q.push_back(ev);
     }
     if any {
-      self.join_wake.signal(());
+      self.wake_joins();
     }
   }
 

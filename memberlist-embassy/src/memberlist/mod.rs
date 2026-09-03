@@ -50,18 +50,14 @@ use alloc::boxed::Box;
 /// effectively-past deadline that would abort a TCP slot immediately.
 const MAX_SOCKET_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(86_400);
 
-/// How often [`Memberlist::join`] re-offers its resolved seed list to the engine
-/// while the node is still not joined.
+/// [`JOIN_OFFER_INTERVAL`](shared::JOIN_OFFER_INTERVAL) in the `embassy-time` tick
+/// domain: how long a parked [`Memberlist::join`] waits before re-checking on its
+/// own when no wake reaches it.
 ///
-/// This paces the retry rather than gating its latency: the Runner's event wake
-/// already resolves the join the instant it lands, so this bounds only how fast a
-/// seed whose exchange failed can be dialed again. A peer whose single reliable
-/// listener is occupied RSTs each dial at link speed, so an unpaced retry would
-/// spin dial → RST → re-offer with no floor at all; a quarter second holds that to
-/// one SYN per seed per interval — slow enough to be negligible next to a node's
-/// other traffic, and fast enough that a join recovers well inside the seconds-long
-/// deadline a caller puts around this future.
-const RE_OFFER_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(250);
+/// Derived from the same millisecond constant the Runner paces its offers with, so
+/// the waiter's backstop and the node's offer rate cannot drift apart.
+const JOIN_WAIT_BACKSTOP: embassy_time::Duration =
+  embassy_time::Duration::from_millis(shared::JOIN_OFFER_INTERVAL_MILLIS);
 
 /// Floor a portable `core::Duration` to whole `embassy_time` ticks at `tick_hz`,
 /// exactly as [`embassy_time::Duration::from_ticks`] will store it.
@@ -548,23 +544,25 @@ where
   /// [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
   /// [`MaybeResolved::Resolved`].
   ///
-  /// Enqueues a push/pull to each resolved seed on the engine, then parks until
-  /// `is_joined()` — woken by the Runner whenever it drains machine events, with a
-  /// timer backstop so a wake the single-consumer signal delivered to another
-  /// concurrent joiner never hangs this one. A non-routable seed is dropped by the
-  /// engine. The caller owns the overall deadline (drive this under a `select`
-  /// with a timeout).
+  /// The resolved seeds are REGISTERED with the node's join loop, which offers the
+  /// union of every live join's seeds to the engine once per interval until each of
+  /// them completes; this future then parks until `is_joined()`, woken by the Runner
+  /// whenever it drains machine events, with a timer backstop so a wake the
+  /// single-consumer signal delivered to another concurrent joiner never hangs this
+  /// one. A call's seeds are withdrawn when its future ends — returned, cancelled or
+  /// dropped. A non-routable seed is dropped by the engine. The caller owns the
+  /// overall deadline (drive this under a `select` with a timeout).
   ///
   /// # Retry
   ///
-  /// The same resolved seed list is RE-OFFERED to the engine while the node is
-  /// still not joined, because a single attempt per seed is not enough: a seed
-  /// dial can lose the race for the peer's single reliable listener (the peer RSTs
-  /// the second concurrent connection in its handshake window) and the engine then
-  /// fails and forgets that seed-originated exchange. Without a re-offer nothing
-  /// would be outstanding and this future would wait out the caller's whole
-  /// deadline; with one, the seed is re-queued as soon as its failed exchange is
-  /// gone and the join completes the moment the peer can accept again.
+  /// The registered seeds are RE-OFFERED while the node is still not joined, because
+  /// a single attempt per seed is not enough: a seed dial can lose the race for the
+  /// peer's single reliable listener (the peer RSTs the second concurrent connection
+  /// in its handshake window) and the engine then fails and forgets that
+  /// seed-originated exchange. Without a re-offer nothing would be outstanding and
+  /// this future would wait out the caller's whole deadline; with one, the seed is
+  /// re-queued as soon as its failed exchange is gone and the join completes the
+  /// moment the peer can accept again.
   ///
   /// What bounds the retry is the engine's own admission (see
   /// [`Engine::join`](memberlist_embedded::Engine::join)): a seed already queued,
@@ -573,15 +571,16 @@ where
   /// surplus distinct seeds past
   /// [`max_pending_seeds`](crate::Options::max_pending_seeds) are dropped and
   /// counted. Re-offers are additionally paced so a peer that RSTs every dial
-  /// cannot drive a dial/fail/re-offer spin. The loop stops when the node is joined
+  /// cannot drive a dial/fail/re-offer spin. Waiting stops when the node is joined
   /// (`Ok`) or the node is no longer running (`Err(OpError::NotRunning)`).
   ///
-  /// Concurrent joins are MERGED: every call live at once offers the union of their
-  /// resolved seed lists, so the engine's round-robin over a full seed queue covers
-  /// all of their seeds together — its guarantee is over what one offer names, and
-  /// separate loops offering disjoint lists would instead share one rotation blind
-  /// to each other's addresses. A call's seeds leave the union the moment it ends,
-  /// including when the caller drops the future at its own deadline.
+  /// Concurrent joins SHARE that one offer, rather than each running a loop of their
+  /// own. The engine's round-robin over a full seed queue guarantees only what ONE
+  /// offer names, so separate loops offering disjoint lists would share one rotation
+  /// blind to each other's addresses; the union covers all of their seeds together.
+  /// Sharing the offer is also what bounds the work and the wire traffic: F
+  /// concurrent joins cost one offer and one dial per seed per interval, not F of
+  /// each, however many of them name the same fast-failing seed.
   ///
   /// # Errors
   ///
@@ -653,80 +652,63 @@ where
       return Err(OpError::NoAddresses);
     }
 
-    // Join the registry of live offers before offering anything. The engine's
-    // over-cap seed admission rotates over the addresses of ONE offer, so two join
-    // futures offering disjoint lists separately would share that rotation while
-    // neither ever named the other's seeds; every offer below therefore carries the
-    // union of all the live futures' seeds. The guard releases this future's seeds
-    // on every exit path — a normal return, a `?`, or the caller dropping the future
-    // at one of its awaits — so a join that is no longer running leaves nothing in
-    // the union behind it.
-    let offer = self.shared.register_join_offer(&resolved);
-    // Reused across offers so the steady re-offer loop allocates nothing.
-    let mut union: Vec<SocketAddr> = Vec::new();
+    // Check the lifecycle where the first offer used to be made, so a `leave()` that
+    // landed after the last seed resolved surfaces as `NotRunning` before this call
+    // registers anything or wakes the node's join loop.
+    self
+      .shared
+      .engine
+      .borrow()
+      .ensure_running()
+      .map_err(|_| OpError::NotRunning)?;
 
-    // Offer the seeds, then keep re-offering them until the node is joined. The
-    // engine treats a seed list as best-effort discovery intent and dedups an
-    // address that is already queued or already has a live join-originated
-    // exchange, so this loop is the retry the engine's admission is designed for:
-    // it never duplicates an attempt in flight, and it re-queues a seed the instant
-    // its exchange is gone — including one whose dial lost the peer's handshake
-    // window to an unrelated connection and was RST. Offering the union is
-    // idempotent under the same dedup: a seed another future already got queued or
-    // dialed is skipped here rather than started twice.
-    //
-    // The first offer also stays where it was relative to seed resolution, so a
-    // `leave()` that landed after the last seed resolved still surfaces as
-    // `NotRunning` before this future waits on anything.
+    // Register the seeds with the node's join loop and wake it. The Runner makes ONE
+    // offer per interval carrying every live join's seeds, so this future offers
+    // nothing itself: it registers and waits. The guard releases these seeds on every
+    // exit path — a normal return, a `?`, or the caller dropping the future at one of
+    // its awaits — so a join that is no longer running leaves nothing in the node's
+    // offer behind it.
+    let _offer = self.shared.register_join_offer(&resolved);
+    self.shared.wake_pump();
+
+    // Wait for convergence. The Runner pulses `join_wake` whenever it drained machine
+    // events — which includes a seed exchange's terminal `ExchangeCompleted`, so a
+    // lost dial is observed here without waiting out an interval — and `leave()`
+    // pulses it too. That signal has a single consumer, so a pulse can go to another
+    // concurrent joiner; the backstop timer is what bounds a missed one to an
+    // interval rather than to the caller's whole deadline.
     loop {
-      offer.fill_union(&mut union);
+      // Lifecycle before membership, on every pass. `leave()` does not clear the
+      // member list, so `is_joined()` still holds for a node another handle clone
+      // left while this future was parked — and reporting a successful join for a
+      // node that is leaving would contradict the running guard this method opens
+      // with. The engine's own state is the authority, so the check reads it rather
+      // than tracking the leave.
       self
         .shared
         .engine
-        .borrow_mut()
-        .join(&union)
+        .borrow()
+        .ensure_running()
         .map_err(|_| OpError::NotRunning)?;
-      self.shared.wake_pump();
-
-      // Park for at most one re-offer interval, resolving the moment the node
-      // joins. The Runner pulses `join_wake` whenever it drained machine events —
-      // which includes a seed exchange's terminal `ExchangeCompleted`, so a lost
-      // dial is observed here without waiting out the interval — and the interval
-      // itself is both the backstop for a pulse the single-consumer signal handed
-      // to another concurrent joiner and the floor on the re-offer rate. That floor
-      // is what the pacing needs: a peer whose listener is occupied RSTs each dial
-      // immediately, and re-offering on the resulting event alone would spin
-      // dial → RST → event → dial as fast as the link can carry a SYN.
-      let deadline = embassy_time::Instant::now() + RE_OFFER_INTERVAL;
-      loop {
-        // Lifecycle before membership, on every pass through this loop. `leave()`
-        // does not clear the member list, so `is_joined()` still holds for a node
-        // that another handle clone left while this future was parked — and
-        // reporting a successful join for a node that is leaving would contradict
-        // the running guard this same method opens with. The engine's own state is
-        // the authority, so the check reads it rather than tracking the leave.
-        self
-          .shared
-          .engine
-          .borrow()
-          .ensure_running()
-          .map_err(|_| OpError::NotRunning)?;
-        if shared::is_joined(&self.shared) {
-          return Ok(());
-        }
-        if embassy_time::Instant::now() >= deadline {
-          break;
-        }
-        // Ignoring the `Either`: whichever of the event wake or the deadline fired,
-        // the loop re-checks `is_joined` and the deadline.
-        let _ =
-          embassy_futures::select::select(self.shared.join_wake.wait(), Timer::at(deadline)).await;
+      if shared::is_joined(&self.shared) {
+        return Ok(());
       }
+      // Ignoring the `Either`: whichever of the wake or the backstop fired, the loop
+      // re-checks the lifecycle and membership.
+      let _ = embassy_futures::select::select(
+        self.shared.join_wake.wait(),
+        Timer::after(JOIN_WAIT_BACKSTOP),
+      )
+      .await;
     }
   }
 
   /// Begin leaving the cluster (gossip the departure). Returns immediately after
   /// enqueuing; the `LeftCluster` event surfaces via [`poll_event`](Self::poll_event).
+  ///
+  /// A [`join`](Self::join) parked awaiting convergence is woken so it reports
+  /// `NotRunning` promptly rather than waiting out its backstop interval (the pulse
+  /// reaches one waiter; the backstop covers any others).
   ///
   /// Returns `Err(OpError::NotRunning)` if the node is not in a running state
   /// (already left or never started).
@@ -739,6 +721,7 @@ where
       .leave(now)
       .map_err(|_| OpError::NotRunning);
     self.shared.wake_pump();
+    self.shared.wake_joins();
     r
   }
 
@@ -1122,6 +1105,17 @@ where
   #[inline]
   pub fn join_seeds_deduped(&self) -> u64 {
     self.shared.engine.borrow().join_seeds_deduped()
+  }
+
+  /// Run the node's join-offer step here and now, reporting whether it offered.
+  ///
+  /// The SAME step the [`Runner`] takes at the top of each pump — pacing included,
+  /// so a second call inside one interval reports `false` — exposed for tests that
+  /// drive no run loop and would otherwise observe no offer at all.
+  #[doc(hidden)]
+  #[inline]
+  pub fn offer_join_seeds_now(&self) -> bool {
+    self.shared.offer_join_seeds_at(time::now()).0
   }
 
   /// Replace the gossip+stream compression policy at runtime. Returns

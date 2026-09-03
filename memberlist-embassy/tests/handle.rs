@@ -631,27 +631,29 @@ fn reliable_send_after_leave_reports_not_running_over_the_backlog() {
   }
 }
 
-/// Two `join` calls live at once offer the UNION of their resolved seeds, and a call
-/// that ends takes only its own seeds back out of it.
+/// The node's offer carries the UNION of the seeds of every `join` live at that
+/// moment, and a call that ends takes only its own seeds back out of it.
 ///
 /// The engine's over-cap seed admission rotates over the addresses ONE offer names,
-/// so concurrent joins that each offered only their own list would share that
-/// rotation while neither ever named the other's seeds. What this proves, in order:
+/// so concurrent joins offering their own lists separately would share that rotation
+/// while neither ever named the other's seeds. What this proves, in order:
 ///
 /// 1. both calls' seeds are registered, so the union is the four distinct addresses;
-/// 2. the second call's offer actually CARRIED all four — the engine classifies every
-///    entry of an offer exactly once, so against a seed queue already holding its one
-///    admission, three drops plus one dedup is a four-address offer where that call's
-///    own list alone could only have produced two;
+/// 2. the offer made while both are live actually CARRIED all four — the engine
+///    classifies every entry of an offer exactly once, so against a seed queue
+///    already holding its one admission, three drops plus one dedup is a
+///    four-address offer where either call's own list alone could only have produced
+///    two;
 /// 3. dropping the second future — the cancellation path a caller's own join deadline
 ///    takes — unregisters exactly its two addresses and leaves the first call's;
-/// 4. the first call's next re-offer then names two addresses again (one drop plus one
-///    dedup), so a join that is no longer running leaves nothing in the union.
+/// 4. the next offer then names two addresses again (one drop plus one dedup), so a
+///    join that is no longer running leaves nothing in the union.
 ///
-/// No [`Runner`] drives the pump here, so nothing is dialed and the seed queue never
-/// drains: the engine's admission counters are then a direct read of what each offer
-/// named. A one-seed queue makes every entry past the first admission visible as a
-/// drop or a dedup.
+/// No [`Runner`] drives the pump here, so the offers are made through the same step
+/// the run loop takes, nothing is dialed, and the seed queue never drains: the
+/// engine's admission counters are then a direct read of what each offer named. A
+/// one-seed queue makes every entry past the first admission visible as a drop or a
+/// dedup.
 #[test]
 fn concurrent_joins_offer_their_union() {
   let (dev, _peer) = pair();
@@ -683,7 +685,7 @@ fn concurrent_joins_offer_their_union() {
     let mut joining_second = Box::pin(ml.join(&SocketAddrResolver, &second));
 
     // Each first poll resolves the seeds (the resolver never suspends), registers
-    // them, makes one offer, and parks on the re-offer interval.
+    // them with the node's join loop, and parks. The future offers nothing itself.
     assert!(
       poll!(joining_first.as_mut()).is_pending(),
       "the first join must park: the node has no peer to converge on"
@@ -695,13 +697,23 @@ fn concurrent_joins_offer_their_union() {
     );
     assert_eq!(
       ml.pending_seed_count(),
+      0,
+      "and offers nothing itself — offering is the run loop's step"
+    );
+
+    assert!(
+      ml.offer_join_seeds_now(),
+      "the node offers the registered seeds"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
       1,
-      "its offer fills the one-seed queue"
+      "that offer fills the one-seed queue"
     );
     assert_eq!(
       ml.join_seeds_dropped(),
       1,
-      "and sheds the other of its two addresses"
+      "and sheds the other of the two addresses"
     );
 
     assert!(
@@ -713,16 +725,21 @@ fn concurrent_joins_offer_their_union() {
       4,
       "both live joins are registered, so the union is four distinct addresses"
     );
+
+    // Past the offer interval the node offers again — now everything both live
+    // joins named.
+    Timer::after(Duration::from_millis(400)).await;
+    assert!(ml.offer_join_seeds_now(), "the next offer is due");
     assert_eq!(
       ml.join_seeds_dropped(),
       4,
-      "the second offer met a full queue, so its three admissible entries are shed"
+      "that offer met a full queue, so its three admissible entries are shed"
     );
     assert_eq!(
       ml.join_seeds_deduped(),
       1,
-      "its fourth entry is the address already queued — only reachable if that offer \
-       carried the first join's seeds too"
+      "its fourth entry is the address already queued — only reachable if the offer \
+       carried both joins' seeds"
     );
     assert_eq!(
       ml.pending_seed_count(),
@@ -738,17 +755,12 @@ fn concurrent_joins_offer_their_union() {
       "a cancelled join leaves only the still-running join's seeds in the union"
     );
 
-    // Past the re-offer interval the surviving join offers again — now the two
-    // addresses that are left.
     Timer::after(Duration::from_millis(400)).await;
-    assert!(
-      poll!(joining_first.as_mut()).is_pending(),
-      "the surviving join re-offers and parks again"
-    );
+    assert!(ml.offer_join_seeds_now(), "and the next offer is due again");
     assert_eq!(
       ml.join_seeds_dropped(),
       5,
-      "the re-offer names two addresses against a full queue: one shed"
+      "it names two addresses against a full queue: one shed"
     );
     assert_eq!(
       ml.join_seeds_deduped(),
@@ -760,6 +772,109 @@ fn concurrent_joins_offer_their_union() {
       ml.join_offer_addr_count(),
       2,
       "re-offering does not re-register anything"
+    );
+    assert!(
+      poll!(joining_first.as_mut()).is_pending(),
+      "and the surviving join is still parked, waiting on the node's offers"
+    );
+  });
+}
+
+/// Eight concurrent joins cost the node ONE offer, not eight.
+///
+/// Re-offering is node-wide: the run loop makes a single offer per interval carrying
+/// the union of every live join's seeds, and the join futures only register and wait.
+/// Were each future to run its own re-offer loop instead, F of them would rebuild and
+/// re-offer an F-address union apiece — Θ(F²) entries for the engine to classify per
+/// interval — and each would dial the same seed again.
+///
+/// The counters here are the whole offer: eight one-seed joins are registered, one
+/// offer classifies exactly eight entries (one queued, seven shed by the one-slot
+/// cap), and a second call inside the same interval is paced away, so what the engine
+/// sees in an interval does not grow with the number of callers. No future holds a
+/// union buffer of its own — the offer hands the engine the registry's own address
+/// slice — so the memory is one entry per distinct address however many joins name
+/// it, which is what `join_offer_addr_count` reads back.
+#[test]
+fn many_concurrent_joins_make_one_union_offer() {
+  const JOINS: usize = 8;
+
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_seeds(1),
+    "many",
+    1,
+    1,
+  );
+
+  // One distinct seed per join, so the union is exactly `JOINS` addresses.
+  let seeds: Vec<[MaybeResolved<SocketAddr>; 1]> = (0..JOINS)
+    .map(|i| [MaybeResolved::Resolved(addr(20 + i as u8, 7946))])
+    .collect();
+
+  block_on(async {
+    // Boxed so every future stays alive — and registered — for the whole test.
+    let mut joining: Vec<_> = seeds
+      .iter()
+      .map(|s| Box::pin(ml.join(&SocketAddrResolver, s)))
+      .collect();
+    for (i, j) in joining.iter_mut().enumerate() {
+      assert!(
+        poll!(j.as_mut()).is_pending(),
+        "join {i} must park: the node has no peer to converge on"
+      );
+    }
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      JOINS,
+      "every live join is registered, one entry per distinct address"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
+      0,
+      "and none of them offered anything itself"
+    );
+
+    assert!(
+      ml.offer_join_seeds_now(),
+      "the node makes its one offer for this interval"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
+      1,
+      "the one-slot queue takes one address"
+    );
+    assert_eq!(
+      ml.join_seeds_dropped(),
+      (JOINS - 1) as u64,
+      "and the offer's other seven entries are shed"
+    );
+    assert_eq!(
+      ml.join_seeds_deduped(),
+      0,
+      "eight distinct addresses hold no duplicate"
+    );
+
+    // One offer's worth of work, and no more: a second call inside the interval is
+    // paced away rather than classifying another eight entries.
+    assert!(
+      !ml.offer_join_seeds_now(),
+      "a second offer inside the same interval must be paced away"
+    );
+    assert_eq!(
+      ml.join_seeds_dropped(),
+      (JOINS - 1) as u64,
+      "so the engine classified exactly one offer's entries"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
+      1,
+      "and the seed queue is untouched"
     );
   });
 }

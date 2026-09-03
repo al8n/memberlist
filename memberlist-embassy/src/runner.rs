@@ -4,11 +4,11 @@
 //! One embassy task owns the [`Runner`] and calls [`Runner::run`]. Inside, two
 //! kinds of future run concurrently under one `join`:
 //!
-//! - the **pump loop** — re-pump the engine over a fresh
-//!   [`EmbassyGossip`](crate::EmbassyGossip) + [`EmbassyStream`](crate::EmbassyStream)
-//!   view, drain the machine's events to resolve parked handle ops, then sleep on
-//!   whichever of {UDP recv-ready, a worker/handle pump-wake, the folded deadline
-//!   timer} fires first;
+//! - the **pump loop** — make the node's paced join offer, re-pump the engine over a
+//!   fresh [`EmbassyGossip`](crate::EmbassyGossip) +
+//!   [`EmbassyStream`](crate::EmbassyStream) view, drain the machine's events to
+//!   resolve parked handle ops, then sleep on whichever of {UDP recv-ready, a
+//!   worker/handle pump-wake, the folded deadline timer} fires first;
 //! - the **N workers** — each [`run_slot`](crate::worker::run_slot) owns one
 //!   `TcpSocket` and its `RefCell<Mailbox>`, looping internally forever.
 //!
@@ -139,8 +139,13 @@ where
   }
 }
 
-/// The engine-pump half of [`Runner::run`]: re-pump on each wake and resolve
-/// parked handle ops from the drained events.
+/// The engine-pump half of [`Runner::run`]: offer the live joins' seeds when an
+/// offer is due, re-pump on each wake, and resolve parked handle ops from the
+/// drained events.
+///
+/// The join offer belongs here rather than in the join futures because it is
+/// node-wide: one offer per interval carries every live join's seeds, so concurrent
+/// joins neither multiply the work nor re-dial one shared seed once per call.
 async fn pump_loop<I, R>(
   shared: &Shared<I, R>,
   udp: &UdpSocket<'_>,
@@ -155,6 +160,13 @@ where
 {
   loop {
     let now = time::now();
+
+    // Make the node's ONE join offer for this interval, carrying the union of every
+    // live `join` future's seeds. It runs immediately before the pump so a seed the
+    // engine admits gets its `Connect` in that same pump, and it is here rather than
+    // in the join futures because offering is node-wide: F concurrent joins cost one
+    // offer and one dial per seed per interval, not F of each.
+    let next_offer = shared.offer_join_seeds(now);
 
     // Pump the engine over a fresh view of the gossip socket and the slot
     // mailboxes. The pump is synchronous: its borrows of the engine and the
@@ -171,6 +183,14 @@ where
     // Resolve any handle ops whose terminal event the pump just emitted, and
     // pulse `join_wake` so a parked `join` re-checks membership.
     shared.drain_events();
+
+    // Sleep no longer than the next join offer is due: with joins live but no
+    // machine work scheduled, that offer is the only thing this loop has to wake
+    // for.
+    let next = match (next, next_offer) {
+      (Some(machine), Some(offer)) => Some(machine.min(offer)),
+      (machine, offer) => machine.or(offer),
+    };
 
     // Wait for the next thing worth re-pumping for: an inbound gossip datagram, a
     // worker/handle pump-wake, or the folded deadline. A worker pulses

@@ -1,4 +1,4 @@
-use super::{Shared, advertise_address, is_joined};
+use super::{JOIN_OFFER_INTERVAL, Shared, advertise_address, is_joined};
 use crate::{error::OpError, stream_io::SlotId};
 use alloc::{vec, vec::Vec};
 use core::{net::SocketAddr, time::Duration};
@@ -27,6 +27,12 @@ impl GossipIo for NoGossip {
   fn recv_capacity(&self) -> usize {
     GOSSIP_READ_CAP - 1
   }
+}
+
+/// The union the node would offer: the registry's address slice itself, which the
+/// offer hands the engine without copying.
+fn union(shared: &Shared<SmolStr>) -> Vec<SocketAddr> {
+  shared.join_offers.borrow().addrs.clone()
 }
 
 /// Build a single-node engine wrapped as `Shared` for the waiter/buffer tests.
@@ -232,7 +238,6 @@ fn free_helpers_forward_the_engine_view() {
 #[test]
 fn a_shared_seed_survives_until_the_last_join_holding_it_ends() {
   let shared = shared_node("refcount", 1);
-  let mut union = Vec::new();
 
   let first = shared.register_join_offer(&[sa(10), sa(11)]);
   let second = shared.register_join_offer(&[sa(11), sa(12)]);
@@ -241,19 +246,11 @@ fn a_shared_seed_survives_until_the_last_join_holding_it_ends() {
     3,
     "the shared address is one entry, not two"
   );
-
-  first.fill_union(&mut union);
   assert_eq!(
-    union.len(),
-    3,
-    "each offer names all three distinct addresses"
+    union(&shared),
+    vec![sa(10), sa(11), sa(12)],
+    "the offer names all three distinct addresses, once each"
   );
-  assert_eq!(
-    &union[..2],
-    &[sa(10), sa(11)],
-    "an offer leads with its own seeds, in its own order"
-  );
-  assert!(union.contains(&sa(12)), "and carries the other join's seed");
 
   drop(first);
   assert_eq!(
@@ -262,13 +259,13 @@ fn a_shared_seed_survives_until_the_last_join_holding_it_ends() {
     "the ended join's exclusive seed leaves, while the shared one stays for the join \
      still offering it"
   );
-  second.fill_union(&mut union);
+  let after_first = union(&shared);
   assert!(
-    union.contains(&sa(11)),
-    "so the surviving join keeps offering it"
+    after_first.contains(&sa(11)),
+    "so the node keeps offering it"
   );
   assert!(
-    !union.contains(&sa(10)),
+    !after_first.contains(&sa(10)),
     "while the ended join's exclusive seed is gone"
   );
 
@@ -294,10 +291,8 @@ fn a_repeated_seed_within_one_join_registers_once() {
     "the repeat is not a second entry"
   );
 
-  let mut union = Vec::new();
-  offer.fill_union(&mut union);
   assert_eq!(
-    union,
+    union(&shared),
     vec![sa(10), sa(11)],
     "and an offer carries each address once"
   );
@@ -337,27 +332,18 @@ fn union_registry_has_no_silent_cap() {
     "every offered address is registered, none silently refused"
   );
 
-  // Either join's offer carries the whole union: same set, each leading with its own
-  // seeds.
-  let mut union = Vec::new();
-  for (offer, own) in [(&first, &first_addrs), (&second, &second_addrs)] {
-    offer.fill_union(&mut union);
-    assert_eq!(
-      union.len(),
-      70,
-      "an offer carries every registered address, once each"
+  // The one offer carries the whole union.
+  let offered = union(&shared);
+  assert_eq!(
+    offered.len(),
+    70,
+    "the offer carries every registered address, once each"
+  );
+  for addr in first_addrs.iter().chain(second_addrs.iter()) {
+    assert!(
+      offered.contains(addr),
+      "and names every address either join registered"
     );
-    assert_eq!(
-      &union[..own.len()],
-      &own[..],
-      "leading with its own seeds, in its own order"
-    );
-    for addr in first_addrs.iter().chain(second_addrs.iter()) {
-      assert!(
-        union.contains(addr),
-        "and naming every address the other join registered"
-      );
-    }
   }
 
   drop(first);
@@ -371,5 +357,115 @@ fn union_registry_has_no_silent_cap() {
     shared.join_offer_addr_count(),
     0,
     "and the last guard leaves nothing behind"
+  );
+}
+
+/// The registry gives its memory back when the last join ends, rather than holding a
+/// node's busiest moment for the rest of its uptime.
+///
+/// The union is the registry's own address vector, so its capacity is whatever the
+/// largest concurrent set of joins grew it to — 70 addresses here. Emptying it by
+/// removing entries would leave that buffer allocated with nothing in it, on a
+/// device whose whole heap may be a few kilobytes.
+#[test]
+fn registry_releases_capacity_when_the_last_join_ends() {
+  let shared = shared_node("release", 1);
+
+  let first: Vec<SocketAddr> = (10u8..50).map(sa).collect();
+  let second: Vec<SocketAddr> = (50u8..80).map(sa).collect();
+  let first = shared.register_join_offer(&first);
+  let second = shared.register_join_offer(&second);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    70,
+    "the two joins name 70 distinct addresses between them"
+  );
+  assert!(
+    shared.join_offers.borrow().addrs.capacity() >= 70,
+    "the registry grew to hold them"
+  );
+
+  drop(first);
+  drop(second);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    0,
+    "the last guard leaves nothing registered"
+  );
+  let offers = shared.join_offers.borrow();
+  assert_eq!(
+    offers.addrs.capacity(),
+    0,
+    "and the address buffer is released, not merely emptied"
+  );
+  assert_eq!(
+    offers.counts.capacity(),
+    0,
+    "as is the refcount buffer beside it"
+  );
+}
+
+/// The node makes ONE offer per interval, and forgets its pacing whenever there is
+/// nothing to offer — because no join is live, or because the node has left.
+///
+/// Forgetting matters both ways round. A join registering after a quiet spell must
+/// be offered at once rather than waiting out an interval measured against a join
+/// that has already ended; and a left node must offer nothing at all, since the
+/// engine refuses a left node's seeds and the join futures resolve on the lifecycle
+/// themselves.
+#[test]
+fn one_offer_per_interval_and_none_at_all_once_left() {
+  let shared = shared_node("pacing", 1);
+  let t0 = Instant::from_origin(Duration::from_secs(1));
+
+  assert_eq!(
+    shared.offer_join_seeds_at(t0),
+    (false, None),
+    "with no join live there is nothing to offer"
+  );
+
+  let offer = shared.register_join_offer(&[sa(10)]);
+  let (offered, next) = shared.offer_join_seeds_at(t0);
+  assert!(offered, "the first registration is offered at once");
+  assert_eq!(
+    next,
+    Some(t0 + JOIN_OFFER_INTERVAL),
+    "and the next offer is due one interval later"
+  );
+  assert!(
+    !shared.offer_join_seeds_at(t0).0,
+    "a second call inside the interval is paced, not a second offer"
+  );
+  assert!(
+    shared.offer_join_seeds_at(t0 + JOIN_OFFER_INTERVAL).0,
+    "and the interval's end is due, not still paced"
+  );
+
+  drop(offer);
+  assert_eq!(
+    shared.offer_join_seeds_at(t0 + JOIN_OFFER_INTERVAL),
+    (false, None),
+    "the last join ending leaves nothing to offer"
+  );
+  assert!(
+    shared.next_join_offer.get().is_none(),
+    "and the pacing is forgotten, so the next join is offered at once"
+  );
+
+  // A left node: registered seeds, but no offer the engine would accept.
+  let _offer = shared.register_join_offer(&[sa(11)]);
+  shared
+    .engine
+    .borrow_mut()
+    .leave(t0 + JOIN_OFFER_INTERVAL)
+    .expect("leave a running node");
+  assert_eq!(
+    shared.offer_join_seeds_at(t0 + JOIN_OFFER_INTERVAL),
+    (false, None),
+    "a left node offers nothing, however many joins are still registered"
+  );
+  assert!(
+    shared.next_join_offer.get().is_none(),
+    "and holds no pacing state for a node that will never offer again"
   );
 }

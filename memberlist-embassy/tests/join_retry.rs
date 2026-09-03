@@ -19,6 +19,10 @@
 //! offer the union of their seeds, so the reachable peer is reached over the wire
 //! even when only one of the two calls holds its address and the other's seeds
 //! contend for the same single-slot seed queue.
+//!
+//! The third pins the COST of that retry. Re-offering is node-wide — one offer per
+//! interval carrying every live join's seeds — so tripling the number of live joins
+//! naming one fast-failing seed must not triple how often it is dialed.
 
 // nested `if let X = ev { if cond }` kept for readability, as in the crate roots.
 #![allow(clippy::collapsible_if)]
@@ -150,6 +154,49 @@ async fn drive<T>(
     Either::First(v) => v,
     Either::Second(_) => panic!("test timed out after {TEST_TIMEOUT:?}"),
   }
+}
+
+/// Drive `op` against one memberlist run loop, one embassy-net stack run loop, and
+/// the test timeout — the single-node counterpart of [`drive`], for a test whose
+/// only peer is an address no dial can reach.
+async fn drive_solo<T>(
+  op: impl core::future::Future<Output = T>,
+  ml: Runner<'_, SmolStr, POOL_A>,
+  net: &mut NetRunner<'_, PairedDevice>,
+) -> T {
+  let infra = select(net.run(), ml.run());
+  match select(op, select(infra, Timer::after(TEST_TIMEOUT))).await {
+    Either::First(v) => v,
+    Either::Second(_) => panic!("test timed out after {TEST_TIMEOUT:?}"),
+  }
+}
+
+/// Count the seed dials to `peer` that failed over `window`, draining the handle's
+/// event queue as it goes.
+///
+/// A seed-originated push/pull that fails is one dial attempt: the engine terminalizes
+/// the exchange the moment the dial is refused, so one such event is one trip to the
+/// wire (or, for a CIDR-blocked destination, one dial the policy refused in its place).
+async fn count_failed_dials(
+  ml: &Memberlist<SmolStr, SocketAddr>,
+  window: Duration,
+  peer: SocketAddr,
+) -> usize {
+  let deadline = Instant::now() + window;
+  let mut dials = 0;
+  while Instant::now() < deadline {
+    match ml.poll_event() {
+      Some(Event::ExchangeCompleted(ec)) => {
+        if ec.kind() == ExchangeKind::PushPull && !ec.outcome().is_succeeded() && *ec.peer() == peer
+        {
+          dials += 1;
+        }
+      }
+      Some(_) => {}
+      None => Timer::after(Duration::from_millis(2)).await,
+    }
+  }
+  dials
 }
 
 /// Poll `pred` until it holds or `budget` elapses, yielding between checks so the
@@ -425,5 +472,134 @@ fn concurrent_joins_converge_on_a_seed_only_one_of_them_holds() {
     ml_b.accepted_inbound_count(),
     1,
     "the shared seed is dialed once for both joins, not once per join"
+  );
+}
+
+/// Observation window for each phase of the rate comparison — several offer
+/// intervals long, so a phase counts a handful of dials rather than one.
+const RATE_WINDOW: Duration = Duration::from_millis(1000);
+/// How much later than the second join the third one registers, so the three are
+/// staggered across the offer interval rather than starting together.
+const STAGGER: Duration = Duration::from_millis(120);
+
+/// Three joins naming one fast-failing seed dial it no more often than one join does.
+///
+/// Offering is a NODE-wide activity: the run loop makes ONE offer per interval
+/// carrying the union of every live join's seeds. A seed whose dial fails inside the
+/// pump that admitted it is therefore re-dialed once per interval however many joins
+/// are waiting on it — the engine's dedup cannot help here, because the failed
+/// exchange is gone before the next offer arrives, so what holds the rate down is the
+/// single paced offer alone.
+///
+/// The comparison is the assertion. One join runs for a window and its dials are
+/// counted; two more joins naming the same seed then register at staggered points and
+/// the same window is counted again. Were each future to run its own re-offer loop,
+/// the three phases-apart loops would offer at three different phases of the interval
+/// and the count would rise with them; with one node-wide offer it does not move. The
+/// window is measured rather than assumed, so the test needs no copy of the driver's
+/// interval and stays honest if that interval changes.
+///
+/// A's CIDR policy admits the paired link and nothing else, so the seed is a routable
+/// address the engine queues and dials, whose dial the policy then refuses inside the
+/// same pump — a deterministic fast failure, with no peer having to cooperate.
+#[cfg(feature = "cidr")]
+#[test]
+fn staggered_joins_dial_a_shared_failing_seed_once_per_interval() {
+  use memberlist_proto::CidrPolicy;
+
+  let (dev_a, _peer) = pair();
+  let mut res_a = StackResources::<{ POOL_A + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+
+  let mut bufs_a = NodeBufs::<POOL_A>::new();
+  let (udp_a, tcp_a) = build_sockets(stack_a, &mut bufs_a);
+
+  let start = now();
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL_A>(
+    Options::new()
+      .with_cidr_policy(CidrPolicy::try_from(["169.254.0.0/16"].as_slice()).expect("valid cidr")),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)),
+    &SocketAddrResolver,
+    udp_a,
+    tcp_a,
+    start,
+    SmallRng::seed_from_u64(1),
+  ))
+  .expect("build node a");
+
+  let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), PORT);
+  let seeds = [MaybeResolved::Resolved(blocked)];
+
+  block_on(async {
+    let op = async {
+      let mut first = Box::pin(ml_a.join(&SocketAddrResolver, &seeds));
+
+      // Phase 1: one join. Its dials over the window set the baseline rate.
+      let one = match select(
+        first.as_mut(),
+        count_failed_dials(&ml_a, RATE_WINDOW, blocked),
+      )
+      .await
+      {
+        Either::First(_) => panic!("a join whose only seed is CIDR-blocked cannot converge"),
+        Either::Second(dials) => dials,
+      };
+      assert!(
+        one >= 2,
+        "the window must hold several offers for the comparison to mean anything, got {one} dials"
+      );
+
+      // Phase 2: two more joins naming the SAME seed, registered at different points
+      // in the interval, over an identical window.
+      let others = async {
+        let second = ml_a.join(&SocketAddrResolver, &seeds);
+        let third = async {
+          Timer::after(STAGGER).await;
+          ml_a.join(&SocketAddrResolver, &seeds).await
+        };
+        // Ignoring the results: neither join can resolve — their only seed is one
+        // A's own policy blocks — so this await never returns, and the racing
+        // counter is what ends the phase.
+        let _ = join(second, third).await;
+      };
+      let watch = async {
+        // Once all three are live, the shared seed is still ONE registered address:
+        // the offer names it once, so it can be dialed at most once per offer.
+        Timer::after(STAGGER + Duration::from_millis(20)).await;
+        assert_eq!(
+          ml_a.join_offer_addr_count(),
+          1,
+          "three joins naming one address must register one entry between them"
+        );
+      };
+      let three = match select(
+        join(first.as_mut(), others),
+        join(watch, count_failed_dials(&ml_a, RATE_WINDOW, blocked)),
+      )
+      .await
+      {
+        Either::First(_) => panic!("a join whose only seed is CIDR-blocked cannot converge"),
+        Either::Second(((), dials)) => dials,
+      };
+
+      assert!(
+        three <= one + 1,
+        "three joins on one seed dialed it {three} times against {one} for a single \
+         join — the offer rate must not follow the number of callers (the +1 allows \
+         one interval boundary)"
+      );
+    };
+    drive_solo(op, run_a, &mut net_a).await;
+  });
+
+  assert!(
+    !ml_a.is_joined(),
+    "the node cannot have joined through a seed its own policy blocks"
+  );
+  assert_eq!(
+    ml_a.join_offer_addr_count(),
+    0,
+    "every join future has ended, so none leaves its seed registered"
   );
 }
