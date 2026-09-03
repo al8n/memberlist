@@ -420,9 +420,10 @@ pub struct Engine<I, C, R = SmallRng> {
   /// [`Options::max_pending_dials`] beyond what the free pool could take. Each was
   /// terminalized through the machine's never-connected failure path, so a non-zero
   /// value means the node shed dial work under a caller-driven backlog. The newest
-  /// intent is trimmed first and join seeds are exempt, so what this counts is
-  /// protocol-paced dial work and application sends that got past the
-  /// `send_reliable` pre-check.
+  /// intent is trimmed first, and join seeds stand outside the bound — neither shed
+  /// by it nor counted against it — so what this counts is protocol-paced dial work
+  /// and application sends that got past the `send_reliable` pre-check, and a join
+  /// can never make it rise.
   pending_dial_rejections: u64,
   /// Count of pumps whose gossip view declared a receive capacity at or above the
   /// configured [`Options::gossip_read_cap`].
@@ -551,11 +552,13 @@ where
 
   /// Diagnostic count of parked dials trimmed by the beyond-capacity bound
   /// ([`Options::max_pending_dials`]) and terminalized as failures instead of left
-  /// parked. The bound is enforced after each action drain, newest intent first,
-  /// and join seeds are exempt. Application sends are refused at the
-  /// [`send_reliable`](Self::send_reliable) call site before they can reach it, so
-  /// a non-zero value usually means protocol-paced dial work (a periodic push/pull,
-  /// a reliable-ping fallback) was shed under a caller-driven backlog.
+  /// parked. The bound is over caller- and protocol-originated parked dials; it is
+  /// enforced after each action drain, newest intent first, and join seeds stand
+  /// outside it (at most one head waits past measured capacity). Application sends
+  /// are refused at the [`send_reliable`](Self::send_reliable) call site before they
+  /// can reach it, so a non-zero value usually means protocol-paced dial work (a
+  /// periodic push/pull, a reliable-ping fallback) was shed under a caller-driven
+  /// backlog.
   #[inline]
   pub fn pending_dial_rejections(&self) -> u64 {
     self.pending_dial_rejections
@@ -2417,12 +2420,14 @@ where
   /// # Backpressure
   ///
   /// Returns [`Error::UserDialBacklogFull`](memberlist_proto::Error::UserDialBacklogFull)
-  /// when reliable dials are already waiting [`Options::max_pending_dials`] beyond
-  /// what the free pool could take. That is admission control on this node's OWN
-  /// application load — backpressure, not a delivery failure: the payload is not
-  /// queued and nothing is retried for you, so pace the sends and try again once
-  /// outstanding exchanges complete. The carried limit is the node-wide
-  /// beyond-capacity bound.
+  /// when caller- and protocol-originated dials are already waiting
+  /// [`Options::max_pending_dials`] beyond what the free pool could take. That is
+  /// admission control on this node's OWN application load — backpressure, not a
+  /// delivery failure: the payload is not queued and nothing is retried for you, so
+  /// pace the sends and try again once outstanding exchanges complete. The carried
+  /// limit is the node-wide beyond-capacity bound. A parked join seed is not part of
+  /// it — the engine admits seeds against its own measured pool capacity — so a node
+  /// that is joining never spends the caller's budget.
   ///
   /// The lifecycle answer always wins: a left node reports `NotRunning` however
   /// full its backlog is, because no amount of pacing will let it send again.
@@ -2448,13 +2453,19 @@ where
     // pumps — `start_user_message` queues its `Connect` synchronously — so the
     // already-committed API dials are added in.
     //
+    // What is measured is the caller- and protocol-originated parked dials only. A
+    // parked join seed is the engine's OWN admission against measured pool
+    // capacity — it is holding the seed queue's place in the dial order, ahead of
+    // this very send — so charging it to the caller would refuse a send merely
+    // because the node happened to be joining.
+    //
     // This is the call-site signal, not the authority: the hard bound is applied to
     // every dial source when the actions drain. A send admitted here can still be
     // refused there if the pool shrank in between (the listener replenishing itself
     // from the pool is the one case), and then reports through its
     // `ExchangeCompleted { Failed }` like any other dial failure.
     let cap = self.cfg.max_pending_dials;
-    let committed = self.plane.pending_dial_count() + self.api_dials_since_pump;
+    let committed = self.plane.pending_non_seed_dial_count() + self.api_dials_since_pump;
     if committed.saturating_sub(self.plane.pool.free_len()) >= cap {
       return Err(memberlist_proto::Error::UserDialBacklogFull(
         memberlist_proto::UserDialBacklogFull::new(to, cap),
@@ -3337,9 +3348,13 @@ where
   /// ([`Options::max_pending_dials`]) over the parked set the action drain leaves
   /// behind.
   ///
-  /// The bound is on the EXCESS — parked dials minus free slots — not the raw
-  /// parked count, so free slots are never left idle by the cap: with F free slots
-  /// a burst parks the first F + cap and the rest is trimmed.
+  /// The bound covers caller- and protocol-originated dials, and it is on the
+  /// EXCESS — those parked dials minus free slots — not on a raw count, so free
+  /// slots are never left idle by the cap: with F free slots a burst parks the
+  /// first F + cap and the rest is trimmed. The invariant left behind is exactly
+  /// that: non-seed parked dials minus free slots is at most the bound. It is also
+  /// why the `take` below always finds as many victims as it asks for — every
+  /// entry the excess is counted from is one the filter admits.
   ///
   /// Run AFTER the whole drain, and that placement is what makes the count exact.
   /// The machine surfaces every `Connect` before any `Shutdown` / `Close` / `Abort`
@@ -3353,11 +3368,19 @@ where
   /// The NEWEST parked dials go first (highest `ExchangeId`), so what survives is
   /// the oldest intent — the same order 7d'' spends slots in.
   ///
-  /// Seed-originated entries are exempt. The engine admitted each against measured
-  /// pool capacity, and the oldest is the head that holds a queued seed's place in
-  /// the dial FIFO; shedding it would hand that place straight back to the newer
-  /// sends it exists to be ahead of. So the invariant this leaves is over the rest:
-  /// non-seed parked dials minus free slots is at most the bound.
+  /// Seed-originated entries stand outside the bound entirely — neither shed by it
+  /// nor counted against it. The engine admitted each against measured pool
+  /// capacity, and the oldest is the head that holds a queued seed's place in the
+  /// dial FIFO; shedding it would hand that place straight back to the newer sends
+  /// it exists to be ahead of. Counting it is the mirror error: a join arriving
+  /// after a cap-saturating burst would push that burst past the ceiling, and the
+  /// head — the youngest intent in the plane — would evict sends admitted before it
+  /// existed, inverting the very order this trim keeps.
+  ///
+  /// So the TOTAL parked population may stand above the bound by what the engine
+  /// itself admitted: at most one head past measured capacity, plus bulk seeds that
+  /// free slots already backed. That surplus is bounded by the pool size plus one,
+  /// never by the caller.
   ///
   /// Refusal is `handle_dial_failed`, the machine's documented never-connected
   /// path: the exchange terminalizes `Failed` and its `ExchangeCompleted` still
@@ -3367,9 +3390,9 @@ where
   ///
   /// O(P log P) in the parked population only when over the cap, O(1) otherwise.
   fn trim_pending_dials(&mut self, now: Instant) {
-    let parked = self.plane.pending_dial_count();
+    let non_seed_parked = self.plane.pending_non_seed_dial_count();
     let free = self.plane.pool.free_len();
-    let over = parked
+    let over = non_seed_parked
       .saturating_sub(free)
       .saturating_sub(self.cfg.max_pending_dials);
     if over == 0 {

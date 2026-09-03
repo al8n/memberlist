@@ -2288,9 +2288,10 @@ fn a_fresh_connect_survives_a_tick_that_reaps_the_saturating_dials() {
   );
 }
 
-/// Over the cap, the trim sheds the NEWEST intent first and exempts the seed head,
-/// so what survives is the oldest application send plus the seed holding the join
-/// queue's place. Every shed send still resolves the `StreamId` its caller holds.
+/// Over the cap, the trim sheds the NEWEST intent first, so what survives is the
+/// oldest application sends the bound still admits, plus the seed head holding the
+/// join queue's place. The head is outside the bound: it is neither shed nor able to
+/// push a send over. Every shed send still resolves the `StreamId` its caller holds.
 #[test]
 fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
   let cfg = admission_cfg().with_max_pending_dials(2);
@@ -2314,14 +2315,15 @@ fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
   engine
     .send_reliable(oldest, bytes::Bytes::from_static(b"oldest"), now)
     .expect("the first send is admitted");
-  let shed_first = engine
+  let kept_middle = engine
     .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"middle"), now)
     .expect("the second send is admitted");
-  let shed_second = engine
+  let shed = engine
     .send_reliable(node_addr(7004), bytes::Bytes::from_static(b"newest"), now)
     .expect("the third send is admitted");
 
-  // Queued last, so the seed's exchange is the NEWEST of the four — and still exempt.
+  // Queued last, so the seed's exchange is the NEWEST of the four — and still
+  // outside the bound, neither shed by it nor counted against it.
   engine.join(&[node_addr(7005)]).expect("join is accepted");
 
   let mut gossip = NoGossip;
@@ -2329,17 +2331,17 @@ fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
 
   assert_eq!(
     engine.pending_dial_rejections(),
-    2,
-    "two dials stood beyond the bound and were shed"
+    1,
+    "one send stood beyond the bound over non-seed dials and was shed"
   );
   assert_eq!(
     engine.pending_dial_count(),
-    2,
-    "the oldest send and the seed head remain parked"
+    3,
+    "the two oldest sends and the seed head remain parked"
   );
   assert!(
     engine.plane_mut().has_parked_seed(),
-    "the seed head is exempt from the trim however new it is"
+    "the seed head is outside the trim however new it is"
   );
 
   let mut resolved = Vec::new();
@@ -2350,12 +2352,14 @@ fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
       }
     }
   }
-  resolved.sort_by_key(|s| s.as_u64());
-  let mut expected = std::vec![shed_first, shed_second];
-  expected.sort_by_key(|s| s.as_u64());
   assert_eq!(
-    resolved, expected,
-    "each shed send's completion must resolve the StreamId its caller holds"
+    resolved,
+    std::vec![shed],
+    "the shed send's completion must resolve the StreamId its caller holds"
+  );
+  assert!(
+    !resolved.contains(&kept_middle),
+    "the trim takes the newest intent first, so the middle send must not be failed"
   );
 
   // A slot frees: it goes to the OLDEST survivor, proving the trim kept the right
@@ -2366,6 +2370,97 @@ fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
     stream.connects.iter().any(|(_, peer)| *peer == oldest),
     "the oldest surviving send is dialed, got {:?}",
     stream.connects
+  );
+}
+
+/// The bound is over the caller's and the protocol's own parked dials, so a join
+/// that arrives AFTER a burst has saturated it cannot make the trim fire. The queue
+/// head is the engine's own admission and the youngest intent in the plane; counting
+/// it would have the trim shed the newest of the sends admitted before the join
+/// existed — the head evicting intent that preceded it, the exact inverse of the
+/// oldest-survives order the trim keeps.
+#[test]
+fn a_late_join_head_never_evicts_an_older_admitted_send() {
+  const CAP: usize = 2;
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks and the bound saturates at
+  // exactly CAP, with no free slot to widen it.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..CAP as u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    CAP,
+    "every admitted send parked"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the burst sits exactly at the bound, so nothing is shed"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The join arrives after the burst. Its head is admitted past measured capacity
+  // and parks as the NEWEST exchange in the plane.
+  engine.join(&[node_addr(7005)]).expect("join is accepted");
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the join's head must park, or there is nothing over capacity to test"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "a join must not shed a send that was admitted before it"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    CAP + 1,
+    "the head parks ON TOP of the saturated burst; no send may be evicted for it"
+  );
+  while let Some(ev) = engine.poll_event() {
+    assert!(
+      !matches!(ev, Event::ExchangeCompleted(_)),
+      "no admitted send may be terminalized by the arrival of a join"
+    );
+  }
+
+  // Counting the head with the sends is exactly what would fire the trim: measured
+  // over ALL parked entries the plane stands one past the bound, and the victim that
+  // excess would take is the newest send — admitted, and older than the head that
+  // displaced it. Measured over the non-seed entries alone it is not over at all.
+  assert_eq!(
+    engine
+      .pending_dial_count()
+      .saturating_sub(engine.pool_free_count())
+      .saturating_sub(CAP),
+    1,
+    "the all-entries excess is one; only the non-seed excess is zero"
+  );
+
+  // The caller's own budget is spent all the same: the bound over non-seed entries
+  // is saturated, so the next send is still refused at the call site.
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the caller's bound is saturated whether or not a seed is parked"
   );
 }
 

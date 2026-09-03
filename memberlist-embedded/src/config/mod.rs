@@ -119,22 +119,27 @@ pub struct Options {
   /// Must be non-zero ([`InitError::ZeroMaxPendingSeeds`](crate::InitError::ZeroMaxPendingSeeds));
   /// [`DEFAULT_MAX_PENDING_SEEDS`] is the default.
   pub max_pending_seeds: usize,
-  /// Largest number of reliable dials that may wait BEYOND what the free pool
-  /// could take right now.
+  /// Largest number of caller- and protocol-originated reliable dials that may wait
+  /// BEYOND what the free pool could take right now.
   ///
-  /// The bound is on the excess — parked dials minus free slots — not on the raw
-  /// parked count, so free slots are never left idle by the cap: a burst of dials
-  /// with `F` free slots parks the first `F + max_pending_dials` and the rest is
-  /// shed. Each waiting dial holds its request bytes (up to one
+  /// The bound is on the excess — those parked dials minus free slots — not on the
+  /// raw parked count, so free slots are never left idle by the cap: a burst of
+  /// dials with `F` free slots parks the first `F + max_pending_dials` and the rest
+  /// is shed. Each waiting dial holds its request bytes (up to one
   /// `max_stream_frame_size`) and a machine-side bridge until it is dialed or
   /// fails, so the excess is what actually costs memory on a node whose pool is
   /// already spoken for.
   ///
   /// It is enforced after each action drain, so the parked set it measures is the
   /// one that survived this tick's teardowns rather than one still holding entries
-  /// the same drain is about to remove. The NEWEST intent is shed first, and join
-  /// seeds are exempt — the engine admitted each against measured pool capacity,
-  /// and the oldest holds a queued seed's place in the dial order.
+  /// the same drain is about to remove. The NEWEST intent is shed first.
+  ///
+  /// Join seeds stand OUTSIDE the bound — neither shed by it nor counted against
+  /// it. The engine admits each against measured pool capacity, plus at most one
+  /// queue head waiting past that capacity to hold the seed queue's place in the
+  /// dial order. So the total parked population can stand above this ceiling by the
+  /// engine's own join admissions, bounded by the pool size plus one; what a caller
+  /// can put there is bounded by the ceiling itself.
   ///
   /// [`Engine::send_reliable`](crate::Engine::send_reliable) reports the bound at
   /// the call site as `UserDialBacklogFull` — backpressure, not a delivery

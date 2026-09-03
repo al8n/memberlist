@@ -449,6 +449,25 @@ impl<C> ReliablePlane<C> {
       .count()
   }
 
+  /// Number of parked ([`ConnState::PendingDial`]) exchanges that did NOT come from
+  /// a join seed — the caller- and protocol-originated dials the engine's
+  /// beyond-capacity bound is measured over.
+  ///
+  /// A seed-originated entry is the engine's OWN admission against measured pool
+  /// capacity, so it stands outside that bound: counting it would let a join
+  /// admitted after a burst push the burst's own dials over the ceiling, and the
+  /// newest of them would be shed for a head younger than every one of them. Use
+  /// [`pending_dial_count`](Self::pending_dial_count) wherever the whole parked
+  /// population is what matters instead — spending free slots, and the engine's
+  /// end-of-tick invariant.
+  pub fn pending_non_seed_dial_count(&self) -> usize {
+    self
+      .connections
+      .values()
+      .filter(|c| !c.from_seed && c.state == ConnState::PendingDial)
+      .count()
+  }
+
   /// Whether any join-seed exchange is currently parked in
   /// [`ConnState::PendingDial`].
   ///
