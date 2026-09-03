@@ -32,7 +32,8 @@ pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// address until the pump admits it, so the ceiling is on intent, not memory.
 pub const DEFAULT_MAX_PENDING_SEEDS: usize = 32;
 
-/// Default [`Options::max_pending_dials`]: 8 dials beyond what the pool can take.
+/// Default [`Options::max_pending_dials`]: 8 dials waiting on a pool that could
+/// back none of them.
 ///
 /// Twice the reliable pool a small embedded node typically runs, so a burst is
 /// absorbed rather than truncated, while a runaway caller is stopped well before
@@ -122,31 +123,35 @@ pub struct Options {
   /// Must be non-zero ([`InitError::ZeroMaxPendingSeeds`](crate::InitError::ZeroMaxPendingSeeds));
   /// [`DEFAULT_MAX_PENDING_SEEDS`] is the default.
   pub max_pending_seeds: usize,
-  /// Largest number of caller- and protocol-originated reliable dials that may wait
-  /// BEYOND what the free pool could take right now.
+  /// Largest number of caller- and protocol-originated reliable dials that may stay
+  /// parked on a pool that could back none of them.
   ///
-  /// The bound is on the excess — those parked dials minus free slots — not on the
-  /// raw parked count, so free slots are never left idle by the cap: a burst of
-  /// dials with `F` free slots parks the first `F + max_pending_dials` and the rest
-  /// is shed. Each waiting dial holds its request bytes (up to one
-  /// `max_stream_frame_size`) and a machine-side bridge until it is dialed or
-  /// fails, so the excess is what actually costs memory on a node whose pool is
-  /// already spoken for.
+  /// A HARD post-pump ceiling: after any [`pump`](crate::Engine::pump) at most this
+  /// many such dials are parked. It is enforced last among the reliable phases, once
+  /// the pump's dial site has spent every free slot — on the listener first, then on
+  /// the oldest parked exchanges — so no free slot is ever left idle by the cap, and
+  /// what the cap then measures is exactly the intent the pool could not back. Each
+  /// waiting dial holds its request bytes (up to one `max_stream_frame_size`) and a
+  /// machine-side bridge until it is dialed or fails, so that unbacked remainder is
+  /// what actually costs memory. The NEWEST intent is shed first, leaving the oldest.
   ///
-  /// It is enforced after each action drain, so the parked set it measures is the
-  /// one that survived this tick's teardowns rather than one still holding entries
-  /// the same drain is about to remove. The NEWEST intent is shed first.
+  /// It is enforced after the action drain as well, so the parked set it measures is
+  /// the one that survived this tick's teardowns rather than one still holding
+  /// entries the same drain is about to remove.
   ///
-  /// Join seeds stand OUTSIDE the bound — neither shed by it nor counted against
+  /// Join seeds stand OUTSIDE the ceiling — neither shed by it nor counted against
   /// it. The engine admits each against measured pool capacity, plus at most one
   /// queue head waiting past that capacity to hold the seed queue's place in the
   /// dial order. So the total parked population can stand above this ceiling by the
   /// engine's own join admissions, bounded by the pool size plus one; what a caller
   /// can put there is bounded by the ceiling itself.
   ///
-  /// [`Engine::send_reliable`](crate::Engine::send_reliable) reports the bound at
-  /// the call site as `UserDialBacklogFull` — backpressure, not a delivery
-  /// failure — so an application can pace itself. Any other dial source (the
+  /// [`Engine::send_reliable`](crate::Engine::send_reliable) reports the ceiling at
+  /// the call site as `UserDialBacklogFull` — backpressure, not a delivery failure —
+  /// so an application can pace itself. That check measures the backlog against the
+  /// slots free right now, which the pump will spend on it before anything new can
+  /// park, so a send admitted there can still be shed by the ceiling if those slots
+  /// went to the listener or to an older seed head. Any other dial source (the
   /// periodic push/pull, a reliable-ping fallback) is failed through the machine's
   /// own never-connected path instead and counted by
   /// [`Engine::pending_dial_rejections`](crate::Engine::pending_dial_rejections);
@@ -212,8 +217,8 @@ impl Options {
     self
   }
 
-  /// Override the beyond-capacity parked-dial ceiling (see
-  /// [`Options::max_pending_dials`]). Must be non-zero.
+  /// Override the parked-dial ceiling (see [`Options::max_pending_dials`]). Must be
+  /// non-zero.
   pub fn with_max_pending_dials(mut self, cap: usize) -> Self {
     self.max_pending_dials = cap;
     self

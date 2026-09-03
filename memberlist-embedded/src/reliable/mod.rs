@@ -451,7 +451,7 @@ impl<C> ReliablePlane<C> {
 
   /// Number of parked ([`ConnState::PendingDial`]) exchanges that did NOT come from
   /// a join seed — the caller- and protocol-originated dials the engine's
-  /// beyond-capacity bound is measured over.
+  /// parked-dial ceiling is measured over.
   ///
   /// A seed-originated entry is the engine's OWN admission against measured pool
   /// capacity, so it stands outside that bound: counting it would let a join

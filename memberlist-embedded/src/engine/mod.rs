@@ -450,14 +450,14 @@ pub struct Engine<I, C, R = SmallRng> {
   /// reliable ping to the address is not counted here and does not suppress the
   /// seed.
   join_seeds_deduped: u64,
-  /// Count of parked dials trimmed after a stream-action drain because they stood
-  /// [`Options::max_pending_dials`] beyond what the free pool could take. Each was
-  /// terminalized through the machine's never-connected failure path, so a non-zero
-  /// value means the node shed dial work under a caller-driven backlog. The newest
-  /// intent is trimmed first, and join seeds stand outside the bound — neither shed
-  /// by it nor counted against it — so what this counts is protocol-paced dial work
-  /// and application sends that got past the `send_reliable` pre-check, and a join
-  /// can never make it rise.
+  /// Count of parked dials trimmed after the pump's dial site because more than
+  /// [`Options::max_pending_dials`] of them were still waiting on a pool that could
+  /// back none of them. Each was terminalized through the machine's never-connected
+  /// failure path, so a non-zero value means the node shed dial work under a
+  /// caller-driven backlog. The newest intent is trimmed first, and join seeds stand
+  /// outside the ceiling — neither shed by it nor counted against it — so what this
+  /// counts is protocol-paced dial work and application sends that got past the
+  /// `send_reliable` pre-check, and a join can never make it rise.
   pending_dial_rejections: u64,
   /// The most candidates any [`join`](Self::join) call has held in its ranking
   /// window at once, and whether that window ever left its inline storage.
@@ -595,15 +595,16 @@ where
     self.join_seeds_deduped
   }
 
-  /// Diagnostic count of parked dials trimmed by the beyond-capacity bound
+  /// Diagnostic count of parked dials trimmed by the parked-dial ceiling
   /// ([`Options::max_pending_dials`]) and terminalized as failures instead of left
-  /// parked. The bound is over caller- and protocol-originated parked dials; it is
-  /// enforced after each action drain, newest intent first, and join seeds stand
-  /// outside it (at most one head waits past measured capacity). Application sends
-  /// are refused at the [`send_reliable`](Self::send_reliable) call site before they
-  /// can reach it, so a non-zero value usually means protocol-paced dial work (a
-  /// periodic push/pull, a reliable-ping fallback) was shed under a caller-driven
-  /// backlog.
+  /// parked. The ceiling is a HARD post-pump bound on caller- and
+  /// protocol-originated parked dials: it is enforced after the pump's dial site has
+  /// spent every free slot, newest intent first, so at most `max_pending_dials` of
+  /// them are parked once any pump returns. Join seeds stand outside it (at most one
+  /// head waits past measured capacity). Application sends are refused at the
+  /// [`send_reliable`](Self::send_reliable) call site before they can reach it, so a
+  /// non-zero value usually means protocol-paced dial work (a periodic push/pull, a
+  /// reliable-ping fallback) was shed under a caller-driven backlog.
   #[inline]
   pub fn pending_dial_rejections(&self) -> u64 {
     self.pending_dial_rejections
@@ -1032,9 +1033,11 @@ where
   /// entry is checked against the seed queue and against the connection table before
   /// it is ranked against the candidates the call is holding. That connection scan
   /// covers the WHOLE table, parked `PendingDial` entries included, so the population
-  /// it walks is the reliable pool size plus the [`Options::max_pending_dials`]
-  /// parked dials the trim allows beyond it, plus at most one parked seed head (the
-  /// pump admits one past the free pool, and only while no seed is parked already).
+  /// it walks is the reliable pool size (every slot-holding connection) plus what the
+  /// last pump left parked: at most [`Options::max_pending_dials`] caller- and
+  /// protocol-originated dials, the ceiling the pump enforces after its dial site,
+  /// plus the seeds the engine itself admitted against measured capacity and at most
+  /// one head past it — a seed surplus bounded by the pool plus one.
   /// Queued seeds and free slots are both bounded by [`Options::max_pending_seeds`],
   /// so the per-offer cost on this tier is
   /// `O(n × (max_pending_seeds + pool + max_pending_dials))` — none of which grows
@@ -2637,7 +2640,7 @@ where
   /// admission control on this node's OWN application load — backpressure, not a
   /// delivery failure: the payload is not queued and nothing is retried for you, so
   /// pace the sends and try again once outstanding exchanges complete. The carried
-  /// limit is the node-wide beyond-capacity bound. A parked join seed is not part of
+  /// limit is the node-wide parked-dial ceiling. A parked join seed is not part of
   /// it — the engine admits seeds against its own measured pool capacity — so a node
   /// that is joining never spends the caller's budget.
   ///
@@ -2671,11 +2674,16 @@ where
     // this very send — so charging it to the caller would refuse a send merely
     // because the node happened to be joining.
     //
-    // This is the call-site signal, not the authority: the hard bound is applied to
-    // every dial source when the actions drain. A send admitted here can still be
-    // refused there if the pool shrank in between (the listener replenishing itself
-    // from the pool is the one case), and then reports through its
-    // `ExchangeCompleted { Failed }` like any other dial failure.
+    // The excess over the free slots is the right arithmetic HERE, where the hard
+    // ceiling's is not yet available: those free slots are spent on this very
+    // backlog, oldest-first, before anything new can park, so a send that fits
+    // within them is not backlog at all. The ceiling itself is the post-pump
+    // authority — applied to every dial source after the pump's dial site, over what
+    // the pool could not back — so this is the call-site signal, not the answer. A
+    // send admitted here can still be shed there if the free slots went elsewhere
+    // (the listener replenishing itself from the pool, an older seed head taking one
+    // in the dial FIFO), and then reports through its `ExchangeCompleted { Failed }`
+    // like any other dial failure.
     let cap = self.cfg.max_pending_dials;
     let committed = self.plane.pending_non_seed_dial_count() + self.api_dials_since_pump;
     if committed.saturating_sub(self.plane.pool.free_len()) >= cap {
@@ -2732,9 +2740,9 @@ where
   /// 6. **Machine tick** — `handle_timeout` fires due timers; the pump's
   ///    single membership sweep.
   /// 7a–7e. **Stream actions + egress** — drain `poll_action` (every `Connect`
-  ///    parks), trim the parked set to the beyond-capacity bound, promote, pump
-  ///    outbound, flush deferred FINs, complete `Closing` drains, rebalance (the
-  ///    pump's SOLE dial site), then drain + send outbound gossip.
+  ///    parks), promote, pump outbound, flush deferred FINs, complete `Closing`
+  ///    drains, rebalance (the pump's SOLE dial site), trim what is still parked to
+  ///    its ceiling, then drain + send outbound gossip.
   /// 8. **Deadline** — `min(machine_next, closing_next, gossip_more, seeds_waiting)`.
   ///
   /// # Observation is the read
@@ -2767,7 +2775,7 @@ where
   ///
   /// The reliable plane holds the same property. The coordinator is built with
   /// its feeds not advancing membership time, so no phase-3 feed — and no
-  /// parked-dial trim at 7a' or synchronous dial rejection at 7d'' — runs the
+  /// synchronous dial rejection at 7d'' or parked-dial trim at 7d''' — runs the
   /// membership sweep. Step 6
   /// is the pump's only sweep, and it sees every gossip datagram and every
   /// reliable byte, EOF and transport fault this pump observed, including the
@@ -3050,17 +3058,6 @@ where
     // memberlist-proto/src/streams/mod.rs).
     self.drain_stream_actions(now, stream);
 
-    // 7a'. Enforce the beyond-capacity parked-dial bound over what the drain left.
-    //
-    // It runs here, and not inside the drain, because the machine surfaces every
-    // `Connect` before any teardown of the same tick: mid-drain the parked set still
-    // holds the entries this tick's `Abort`s are about to remove. Applied there, a
-    // fresh protocol-paced dial would be refused against dials that no longer exist
-    // by the end of the loop — liveness work shed while capacity was actually being
-    // freed. Applied here the count is exact, and still ahead of 7d'', so a trimmed
-    // dial never reaches the wire.
-    self.trim_pending_dials(now);
-
     // 7b. Promote dialing connections whose handshake completed this tick to
     // Established, so the egress pump and the deferred-FIN gate below see an
     // accurate lifecycle state.
@@ -3114,11 +3111,33 @@ where
     // or the end-of-tick invariant below regresses.
     self.rebalance_pool(now, stream);
 
+    // 7d'''. Enforce the parked-dial ceiling over what the dial site left behind.
+    //
+    // Placed AFTER the rebalance because the rebalance is what decides which parked
+    // entries the pool can actually back. Ahead of it, a trim can only credit the
+    // free slots to the non-seed backlog and assume they will be spent there; every
+    // slot that instead goes to an older seed head (the rebalance serves the oldest
+    // parked exchange, seed or not) or to a missing listener (`ensure_listener` runs
+    // first inside it) leaves the pump one entry over the ceiling with nothing free
+    // behind it. Here the answer is already settled: by the end-of-tick invariant
+    // below a free slot and a parked dial cannot coexist, so every entry still
+    // parked is one the pool could not back and the ceiling bounds exactly those —
+    // a HARD post-pump bound rather than a bound on the excess.
+    //
+    // Still after the action drain, which is what makes the count exact: the machine
+    // surfaces every `Connect` before any teardown of the same tick, so a bound
+    // applied mid-drain would measure a fresh protocol-paced dial against entries
+    // the same loop is about to remove. And nothing trimmed here ever reached the
+    // wire — the rebalance moved everything it dialed out of `PendingDial`, which is
+    // the only state the trim can see.
+    self.trim_pending_dials(now);
+
     // Invariant held at end-of-tick: if the reliable pool is non-empty then a
     // listener is present AND no connection remains in `PendingDial`. The late
-    // rebalance above is the last pool-touching reliable phase — the gossip egress
-    // touches only the gossip socket, never the reliable pool — so the invariant
-    // cannot be disturbed before the deadline is computed below. Every pooled slot
+    // rebalance above is the last pool-touching reliable phase — the trim between
+    // them removes parked entries, which hold no slot, and the gossip egress touches
+    // only the gossip socket — so the invariant cannot be disturbed before the
+    // deadline is computed below. Every pooled slot
     // is reusable by construction now (a slot still tearing down lives in
     // `retiring`, never the pool), so there is no readiness qualifier: a non-empty
     // pool is unconditionally a listener + deferred-dial the rebalance must have
@@ -3489,11 +3508,12 @@ where
           // `ExchangeId`, so a Connect minted this tick can never overtake one that
           // has been waiting since an earlier tick.
           //
-          // Unconditional also with respect to the parked-dial bound: that is
-          // applied by `trim_pending_dials`, once this whole drain has finished, so
-          // it counts against a set from which this drain's own `Abort`s have
-          // already been removed. Refusing inline here would measure the fresh dial
-          // against entries that no longer exist by the end of the loop.
+          // Unconditional also with respect to the parked-dial ceiling: that is
+          // applied by `trim_pending_dials` after the dial site has spent every free
+          // slot, so it counts against a set from which this drain's own `Abort`s
+          // have already been removed and which the pool has already been given its
+          // chance to back. Refusing inline here would measure the fresh dial against
+          // entries that no longer exist by the end of the loop.
           let conn = if from_seed {
             Connection::pending_dial_from_seed(peer)
           } else {
@@ -3556,31 +3576,45 @@ where
     self.seed_stream_ids.clear();
   }
 
-  /// Enforce the beyond-capacity parked-dial bound
-  /// ([`Options::max_pending_dials`]) over the parked set the action drain leaves
-  /// behind.
+  /// Enforce the parked-dial ceiling ([`Options::max_pending_dials`]) over what the
+  /// pump's dial site left parked.
   ///
-  /// The bound covers caller- and protocol-originated dials, and it is on the
-  /// EXCESS — those parked dials minus free slots — not on a raw count, so free
-  /// slots are never left idle by the cap: with F free slots a burst parks the
-  /// first F + cap and the rest is trimmed. The invariant left behind is exactly
-  /// that: non-seed parked dials minus free slots is at most the bound. It is also
-  /// why the `take` below always finds as many victims as it asks for — every
-  /// entry the excess is counted from is one the filter admits.
+  /// The ceiling covers caller- and protocol-originated dials, and it is ABSOLUTE:
+  /// after this call at most `max_pending_dials` of them are parked, whatever the
+  /// pool did with its free slots. Run last among the reliable phases (after 7d''),
+  /// which is what lets it be absolute rather than a bound on the excess. The
+  /// rebalance has already spent every free slot — on the listener first, then on
+  /// parked exchanges oldest-first — so a free slot and a parked dial cannot coexist
+  /// by the time this runs (the pump's end-of-tick invariant). Every entry still
+  /// parked is therefore one the pool could not back, and counting free slots
+  /// against the ceiling would be counting zero. It also means no free slot is ever
+  /// left idle by the cap: a slot the rebalance could spend was spent, on the oldest
+  /// intent, before anything was shed.
   ///
-  /// Run AFTER the whole drain, and that placement is what makes the count exact.
-  /// The machine surfaces every `Connect` before any `Shutdown` / `Close` / `Abort`
-  /// of the same tick, so mid-drain the parked set still holds every entry this
-  /// tick's teardowns are about to remove — including the cap-saturating dials that
-  /// step 6 just expired. A bound applied inline at the `Connect` arm would measure
-  /// a fresh protocol-paced dial (a periodic push/pull, a reliable-ping fallback)
-  /// against that stale population and shed liveness work while capacity was in
-  /// fact being freed by the very same drain. By this point those `Abort`s have run.
+  /// Run ahead of the rebalance instead, the ceiling is not a ceiling: the trim has
+  /// to credit each free slot to the non-seed backlog before knowing where the
+  /// rebalance will put it, and a slot that goes to an older seed head or to a
+  /// missing listener leaves the pump one entry over the cap with nothing free
+  /// behind it.
+  ///
+  /// Still AFTER the whole action drain, which is what makes the count exact. The
+  /// machine surfaces every `Connect` before any `Shutdown` / `Close` / `Abort` of
+  /// the same tick, so mid-drain the parked set still holds every entry this tick's
+  /// teardowns are about to remove — including the cap-saturating dials that step 6
+  /// just expired. A bound applied inline at the `Connect` arm would measure a fresh
+  /// protocol-paced dial (a periodic push/pull, a reliable-ping fallback) against
+  /// that stale population and shed liveness work while capacity was in fact being
+  /// freed by the very same drain. By this point those `Abort`s have run.
+  ///
+  /// Nothing shed here ever reached the wire: the rebalance moves everything it
+  /// dialed out of [`ConnState::PendingDial`], the only state this filter admits.
+  /// The `take` below therefore always finds as many victims as it asks for — the
+  /// count is taken over exactly the population the filter walks.
   ///
   /// The NEWEST parked dials go first (highest `ExchangeId`), so what survives is
-  /// the oldest intent — the same order 7d'' spends slots in.
+  /// the oldest intent — the mirror of the order 7d'' spends slots in.
   ///
-  /// Seed-originated entries stand outside the bound entirely — neither shed by it
+  /// Seed-originated entries stand outside the ceiling entirely — neither shed by it
   /// nor counted against it. The engine admitted each against measured pool
   /// capacity, and the oldest is the head that holds a queued seed's place in the
   /// dial FIFO; shedding it would hand that place straight back to the newer sends
@@ -3589,10 +3623,11 @@ where
   /// head — the youngest intent in the plane — would evict sends admitted before it
   /// existed, inverting the very order this trim keeps.
   ///
-  /// So the TOTAL parked population may stand above the bound by what the engine
-  /// itself admitted: at most one head past measured capacity, plus bulk seeds that
-  /// free slots already backed. That surplus is bounded by the pool size plus one,
-  /// never by the caller.
+  /// So the TOTAL parked population may stand above the ceiling by what the engine
+  /// itself admitted: the seeds phase 5 admitted against measured capacity whose
+  /// slots the older parked dials took first, plus at most one head past that
+  /// capacity. That surplus is bounded by the pool size plus one, never by the
+  /// caller.
   ///
   /// Refusal is `handle_dial_failed`, the machine's documented never-connected
   /// path: the exchange terminalizes `Failed` and its `ExchangeCompleted` still
@@ -3602,10 +3637,9 @@ where
   ///
   /// O(P log P) in the parked population only when over the cap, O(1) otherwise.
   fn trim_pending_dials(&mut self, now: Instant) {
-    let non_seed_parked = self.plane.pending_non_seed_dial_count();
-    let free = self.plane.pool.free_len();
-    let over = non_seed_parked
-      .saturating_sub(free)
+    let over = self
+      .plane
+      .pending_non_seed_dial_count()
       .saturating_sub(self.cfg.max_pending_dials);
     if over == 0 {
       return;

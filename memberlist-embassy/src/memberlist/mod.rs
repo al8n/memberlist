@@ -786,7 +786,8 @@ where
   ///   [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials)
   ///   beyond what the free pool could take. Backpressure on this node's own
   ///   application load: pace the sends and retry once outstanding exchanges
-  ///   complete.
+  ///   complete. The engine's post-pump ceiling can still shed a send admitted
+  ///   here, which surfaces as `SendFailed`.
   /// * [`OpError::SendFailed`] — the exchange was dispatched but terminated
   ///   without success (dial failure, decode/record fault, or deadline).
   /// * [`OpError::NotRunning`] — the machine refused the operation because the

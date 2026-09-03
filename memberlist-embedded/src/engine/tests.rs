@@ -3100,6 +3100,193 @@ fn a_late_join_head_never_evicts_an_older_admitted_send() {
   );
 }
 
+/// The ceiling is a POST-PUMP bound, so it holds even when the free slot the pool
+/// had goes somewhere other than the backlog it would have been credited to. The
+/// dial site serves the OLDEST parked exchange first, seed or not; a ceiling applied
+/// ahead of it can only assume that slot will be spent on the non-seed backlog, and
+/// when an older seed head takes it instead the pump ends one entry over the cap
+/// with no free slot behind it.
+#[test]
+fn the_parked_dial_ceiling_holds_when_a_freed_slot_goes_to_an_older_seed() {
+  const CAP: usize = 2;
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60))
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to dial.
+  let peer = node_addr(7947);
+  engine.inject_alive(SmolStr::new("peer"), peer, now);
+
+  // The seed head parks with no slot to take, so it is the OLDEST parked exchange in
+  // the plane and the dial site reaches it ahead of every send below.
+  let seed = node_addr(7005);
+  engine.join(&[seed]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the seed head must park, or nothing in the plane is older than the sends"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "only the head is outstanding"
+  );
+  while engine.poll_event().is_some() {}
+
+  // CAP sends, minted after the head and dated at the pump's own instant so their
+  // exchange deadlines outlive it.
+  let t = now + Duration::from_millis(150);
+  let sends = [node_addr(7002), node_addr(7003)];
+  for to in sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"x"), t)
+      .expect("sends up to the ceiling are admitted");
+  }
+  // ONE slot, free when the dial site runs.
+  engine.plane_mut().pool.push(6);
+
+  // `t` is past the push/pull interval, so step 6 mints one fresh protocol dial in
+  // the same tick: CAP + 1 non-seed dials park behind a single free slot the older
+  // seed head is first in line for.
+  engine.pump(t, &mut gossip, &mut stream);
+
+  let parked_non_seed = engine.plane_mut().pending_non_seed_dial_count();
+  assert!(
+    parked_non_seed <= CAP,
+    "the ceiling is absolute: at most {CAP} caller- and protocol-originated dials may \
+     stay parked after a pump, got {parked_non_seed}"
+  );
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the free slot went to the older seed head, so no seed is left parked"
+  );
+  assert!(
+    stream.connects.iter().any(|(_, p)| *p == seed),
+    "the head's dial is the one that reached the wire, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "exactly the one entry the pool could not back is shed"
+  );
+
+  // The NEWEST non-seed intent is this tick's protocol dial, so that is the entry
+  // taken: its exchange is gone from the plane while both older sends stay parked.
+  let live: Vec<SocketAddr> = engine
+    .plane_mut()
+    .connections
+    .values()
+    .map(|c| c.peer)
+    .collect();
+  assert!(
+    !live.contains(&peer),
+    "the newest non-seed intent — this tick's protocol dial — is the one shed, \
+     but {peer} is still in {live:?}"
+  );
+  for to in sends {
+    assert!(
+      live.contains(&to),
+      "the older sends survive the trim, but {to} is gone from {live:?}"
+    );
+  }
+}
+
+/// The same ceiling holds when the free slot goes to the LISTENER. `ensure_listener`
+/// claims its slot inside the rebalance, ahead of every parked dial, so a ceiling
+/// applied earlier in the tick credits the backlog with a slot the listener is about
+/// to take — and the pump ends over the cap with the listener correctly re-armed.
+#[test]
+fn the_parked_dial_ceiling_holds_when_the_listener_takes_the_only_free_slot() {
+  const CAP: usize = 2;
+  let stream_timeout = Duration::from_millis(100);
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(stream_timeout)
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  engine.plane_mut().pool.push(5);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let peer = node_addr(7947);
+  engine.inject_alive(SmolStr::new("peer"), peer, now);
+
+  // One dial takes the only pooled slot and never establishes: its exchange deadline
+  // is what frees that slot again, mid-tick, at the pump below.
+  let victim = node_addr(7001);
+  engine
+    .send_reliable(victim, bytes::Bytes::from_static(b"x"), now)
+    .expect("the first send is admitted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    stream.connects.iter().any(|(_, p)| *p == victim),
+    "the pooled slot was spent on the first send"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    0,
+    "and nothing is left in the pool behind it"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The listener's passive open settles, so the next pump hands its slot to the
+  // accepted exchange and finds nothing in the pool to replenish from: the node
+  // spends that tick with NO listener until a slot frees.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  let t = now + Duration::from_millis(150);
+  let sends = [node_addr(7002), node_addr(7003)];
+  for to in sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"x"), t)
+      .expect("sends up to the ceiling are admitted");
+  }
+  let dialed_before = stream.connects.len();
+
+  // All in one tick: the victim's exchange elapses and its `Abort` frees the only
+  // slot, step 6 mints a fresh protocol dial, and CAP + 1 non-seed dials stand parked
+  // when the rebalance hands that slot to the missing listener.
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert!(
+    engine.listener_present(),
+    "the freed slot re-armed the listener, which claims it ahead of every dial"
+  );
+  let parked_non_seed = engine.plane_mut().pending_non_seed_dial_count();
+  assert!(
+    parked_non_seed <= CAP,
+    "the ceiling is absolute: at most {CAP} caller- and protocol-originated dials may \
+     stay parked after a pump, got {parked_non_seed}"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "exactly the one entry the pool could not back is shed"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    dialed_before,
+    "the slot went to the listener, so no parked dial reached the wire, got {:?}",
+    stream.connects
+  );
+}
+
 /// Both admission ceilings are rejected at zero, by the shared preflight and by
 /// construction alike: a zero seed queue could never join, and a zero parked-dial
 /// bound would refuse every dial a momentarily-empty pool could not take at once.

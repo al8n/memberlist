@@ -63,14 +63,16 @@ pub struct Options {
   /// Must be non-zero. Defaults to
   /// [`memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS`].
   pub max_pending_seeds: usize,
-  /// The engine's beyond-capacity parked-dial ceiling, forwarded to
+  /// The engine's parked-dial ceiling, forwarded to
   /// [`memberlist_embedded::Options::max_pending_dials`].
   ///
-  /// The bound is on the EXCESS — parked dials minus free pool slots — so a burst
-  /// with `F` free slots parks the first `F + max_pending_dials` and refuses the
-  /// rest, which [`send_reliable`](crate::Memberlist::send_reliable) reports at the
-  /// call site as [`OpError::DialBacklogFull`](crate::OpError::DialBacklogFull). The
-  /// engine's field docs carry the full contract.
+  /// A hard post-pump bound: after any pump at most `max_pending_dials` caller- and
+  /// protocol-originated dials are parked on a pool that could back none of them,
+  /// the free slots having already been spent on the oldest of them. A burst past
+  /// that is shed newest-first, and
+  /// [`send_reliable`](crate::Memberlist::send_reliable) refuses at the call site
+  /// with [`OpError::DialBacklogFull`](crate::OpError::DialBacklogFull) before an
+  /// exchange is built. The engine's field docs carry the full contract.
   ///
   /// Must be non-zero. Defaults to
   /// [`memberlist_embedded::DEFAULT_MAX_PENDING_DIALS`].
@@ -153,7 +155,7 @@ impl Options {
     self
   }
 
-  /// Override the engine's beyond-capacity parked-dial ceiling (see
+  /// Override the engine's parked-dial ceiling (see
   /// [`Options::max_pending_dials`]). Must be non-zero.
   pub fn with_max_pending_dials(mut self, cap: usize) -> Self {
     self.max_pending_dials = cap;
