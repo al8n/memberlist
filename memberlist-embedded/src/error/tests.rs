@@ -16,6 +16,8 @@ fn every_init_error_variant_displays_and_reports_its_source() {
     (InitError::ZeroPort, false),
     (InitError::ZeroCloseTimeout, false),
     (InitError::ZeroGossipReadCap, false),
+    (InitError::ZeroMaxPendingSeeds, false),
+    (InitError::ZeroMaxPendingDials, false),
     (
       InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: 70_000,

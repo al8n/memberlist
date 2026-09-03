@@ -1247,12 +1247,22 @@ impl StreamIo for ProgRel {
 /// terminal `Abort` within a couple of clock advances rather than the default
 /// many seconds.
 fn engine_with_stream_timeout(stream_timeout: Duration) -> (Engine<SmolStr, u32>, Instant) {
-  let now = Instant::from_origin(Duration::from_secs(86_400));
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
     .with_stream_timeout(stream_timeout);
+  engine_from(cfg, ep_cfg)
+}
+
+/// Build and start an engine from a fully-specified pair of options, for the
+/// admission tests that need to set a cap or a timer interval the shorthand
+/// builders above do not expose.
+fn engine_from(
+  cfg: Options,
+  ep_cfg: memberlist_proto::EndpointOptions<SmolStr, SocketAddr>,
+) -> (Engine<SmolStr, u32>, Instant) {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
     cfg,
     TransformOptions::default(),
@@ -1536,6 +1546,453 @@ fn parked_dials_are_untouched_while_the_pool_is_empty() {
       stream.connects.is_empty(),
       "no slot is free, so no dial may reach connect, got {:?}",
       stream.connects
+    );
+  }
+}
+
+/// Options with the engine defaults plus a caller-chosen tweak, for the
+/// admission tests.
+fn admission_cfg() -> Options {
+  Options::new()
+    .with_port(7946)
+    .with_close_timeout(Duration::from_secs(10))
+}
+
+/// The join seed queue holds each address at most once, and a seed already being
+/// exchanged with is not re-queued. Both are what stops the natural
+/// retry-until-joined loop from re-encoding the whole local membership on every
+/// call: one address means one push/pull exchange in flight, however many times
+/// it is offered.
+#[test]
+fn join_dedups_duplicate_seeds_within_and_across_calls() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let a = node_addr(7002);
+  engine.join(&[a, a, a]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "one address must queue once however many times it is offered"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    2,
+    "the two repeats must be counted as deduped, not queued"
+  );
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "one seed address must produce exactly one dial, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "one seed address must produce exactly one outbound exchange"
+  );
+
+  // Offered again while the exchange it started is still live: still one exchange.
+  engine.join(&[a]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "a seed with a live reliable connection must not be re-queued"
+  );
+  assert_eq!(engine.join_seeds_deduped(), 3, "the re-offer is counted");
+
+  // Complete the handshake so the parked push/pull request reaches the wire, and
+  // confirm it went out once, on the one connection.
+  stream.sock_mut(1).established = true;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    !stream.sent.is_empty(),
+    "the admitted seed's push/pull request must reach the wire"
+  );
+  assert!(
+    stream.sent.iter().all(|(h, _)| *h == 1),
+    "every byte must belong to the single seed exchange, got {:?}",
+    stream.sent.iter().map(|(h, _)| *h).collect::<Vec<_>>()
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "no second dial may appear for the same seed"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "still exactly one outbound exchange"
+  );
+}
+
+/// Seeds offered past the queue ceiling are dropped and counted, and the call
+/// still succeeds: a seed list is best-effort discovery intent, so its tail not
+/// fitting must not fail the whole call.
+#[test]
+fn join_seeds_over_cap_are_dropped_and_counted() {
+  let cfg = admission_cfg().with_max_pending_seeds(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  engine
+    .join(&[node_addr(7002), node_addr(7003), node_addr(7004)])
+    .expect("an over-cap seed list is still accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "the queue must hold exactly the cap"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    1,
+    "the surplus seed must be counted as dropped"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "distinct addresses are not duplicates"
+  );
+}
+
+/// Seeds are handed to the machine only as the pool can back them. A seed the
+/// pool cannot serve stays a bare address — no bridge, no full-state encoding, no
+/// deadline — and is admitted on a later pump, so a long seed list costs one
+/// encoding per slot rather than one per seed.
+#[test]
+fn join_admits_seeds_incrementally_to_pool_capacity() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  engine
+    .join(&[node_addr(7002), node_addr(7003), node_addr(7004)])
+    .expect("join is accepted");
+  assert_eq!(engine.pending_seed_count(), 3, "all three seeds queue");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "only the one seed the single free slot can back is admitted"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "an admitted seed takes the slot it was admitted against, so nothing parks"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "exactly one exchange — and so one full-state encoding — was started"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "exactly one dial, got {:?}",
+    stream.connects
+  );
+
+  // A second slot appears: exactly one more seed is admitted.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the freed slot admits exactly one more seed"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    2,
+    "and exactly one more dial, got {:?}",
+    stream.connects
+  );
+}
+
+/// A seed left queued for want of capacity is work the ENGINE deferred, so the
+/// pump asks for an immediate re-pump the moment a slot is free to admit it
+/// against — but not while the pool is empty, when there is nothing to admit it
+/// against and some other deadline governs the wake.
+#[test]
+fn queued_seeds_with_a_free_slot_request_an_immediate_repump() {
+  let stream_timeout = Duration::from_secs(5);
+  let (mut engine, now) = engine_with_stream_timeout(stream_timeout);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // The one free slot is spoken for by a reliable send before the seed is queued.
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"first"), now)
+    .expect("send_reliable queues the exchange");
+  let a = node_addr(7003);
+  engine.join(&[a]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  let wake = engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the send already claimed the only slot, so the seed stays queued"
+  );
+  assert_eq!(
+    stream.connects,
+    std::vec![(5, node_addr(7002))],
+    "only the send was dialed"
+  );
+  assert!(
+    wake.is_some_and(|w| w > now),
+    "with an empty pool there is nothing to admit against, so no immediate re-pump"
+  );
+
+  // The send's exchange deadline elapses: its slot is aborted and reaped back into
+  // the pool within this same tick, leaving a free slot and a still-queued seed.
+  let later = now + stream_timeout + Duration::from_secs(1);
+  let wake = engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the failed send's slot is reaped back in-tick"
+  );
+  assert_eq!(engine.pending_seed_count(), 1, "the seed is still queued");
+  assert_eq!(
+    wake,
+    Some(later),
+    "a queued seed with a free slot must ask for an immediate re-pump"
+  );
+
+  // That re-pump admits it.
+  engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_seed_count(), 0, "the seed is admitted");
+  assert!(
+    stream.connects.contains(&(5, a)),
+    "the reaped slot is spent on the queued seed, got {:?}",
+    stream.connects
+  );
+}
+
+/// `send_reliable` refuses once dials are already waiting the configured bound
+/// beyond what the pool could take, and says so at the call site as typed
+/// backpressure rather than parking yet another request.
+#[test]
+fn send_reliable_backpressure_bounds_parked_dials() {
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let over = engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now);
+  match over {
+    Err(memberlist_proto::Error::UserDialBacklogFull(full)) => {
+      assert_eq!(full.limit(), 3, "the carried limit is the configured bound");
+      assert_eq!(full.peer(), node_addr(7010), "and the refused destination");
+    }
+    other => panic!("expected UserDialBacklogFull, got {other:?}"),
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    3,
+    "exactly the admitted sends parked"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the API pre-check spared the action drain any refusal"
+  );
+
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7011), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the bound still holds once the parked set itself carries the backlog"
+  );
+}
+
+/// The bound applies to EVERY dial source, not just the application's. A
+/// protocol-paced dial requested while the caller has saturated the bound is
+/// failed through the machine's never-connected path — counted, and terminal —
+/// rather than parked past the cap, and never reaches the wire.
+#[test]
+fn machine_originated_connect_over_cap_is_failed_not_parked() {
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60))
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to target.
+  engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_dial_count(), 3, "the bound is saturated");
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "nothing has been refused yet"
+  );
+  while engine.poll_event().is_some() {}
+
+  // Advance past the push/pull interval so the machine requests its own dial.
+  let t = now + Duration::from_millis(150);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "the machine-paced dial must be refused, not parked"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    3,
+    "the parked set must not grow past the bound"
+  );
+
+  assert!(
+    stream.connects.is_empty(),
+    "a refused dial must never reach the wire, got {:?}",
+    stream.connects
+  );
+}
+
+/// A dial refused by the bound still carries its originating `StreamId` through
+/// to its terminal completion, and the correlation entry is pruned afterwards. A
+/// driver resolves a parked reliable-send waiter by that `StreamId`, so a refusal
+/// recorded before the correlation would leave the waiter hanging.
+///
+/// This is also the one shape in which an application send admitted at the call
+/// site is still refused at the action drain: the listener replenishing itself
+/// from the pool takes the free slot the pre-check measured against.
+#[test]
+fn over_cap_rejection_keeps_the_stream_id_correlation() {
+  let cfg = admission_cfg().with_max_pending_dials(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // The listener's passive open has settled, so this pump consumes it and
+  // replenishes the listener from the pool — the free slot the sends measured
+  // against is gone by the time the actions drain.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"first"), now)
+    .expect("the first send is admitted");
+  let refused_sid = engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"second"), now)
+    .expect("the second send is admitted against the then-free slot");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    2,
+    "both sends were correlated as their Connects drained"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "the slot the listener took leaves the second send over the bound"
+  );
+  assert_eq!(engine.pending_dial_count(), 1, "only the first send parked");
+
+  let mut resolved = None;
+  while let Some(ev) = engine.poll_event() {
+    if matches!(ev, Event::ExchangeCompleted(_)) {
+      if let Some(sid) = engine.last_completed_send() {
+        resolved = Some(sid);
+      }
+    }
+  }
+  assert_eq!(
+    resolved,
+    Some(refused_sid),
+    "the refused send's completion must resolve the StreamId its caller holds"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "the refused exchange's correlation entry is pruned, leaving only the parked send"
+  );
+}
+
+/// Both admission ceilings are rejected at zero, by the shared preflight and by
+/// construction alike: a zero seed queue could never join, and a zero parked-dial
+/// bound would refuse every dial a momentarily-empty pool could not take at once.
+#[test]
+fn zero_admission_caps_are_rejected_as_the_knobs_they_are() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+
+  for (cfg, name) in [
+    (admission_cfg().with_max_pending_seeds(0), "seeds"),
+    (admission_cfg().with_max_pending_dials(0), "dials"),
+  ] {
+    let preflight = validate_runtime_config(&cfg, &TransformOptions::default(), 1400);
+    match (name, &preflight) {
+      ("seeds", Err(InitError::ZeroMaxPendingSeeds)) => {}
+      ("dials", Err(InitError::ZeroMaxPendingDials)) => {}
+      _ => panic!("{name}: preflight must name the zeroed knob, got {preflight:?}"),
+    }
+
+    let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+      cfg,
+      TransformOptions::default(),
+      memberlist_proto::EndpointOptions::new(SmolStr::new("z"), node_addr(7946)),
+      now,
+      test_rng(),
+      &NoGossip,
+    );
+    assert!(
+      rejected.is_err(),
+      "{name}: construction must reject the zeroed knob too"
     );
   }
 }

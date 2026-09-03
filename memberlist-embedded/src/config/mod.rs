@@ -7,8 +7,9 @@
 //! not protocol behaviour, so they stay on the driver. This struct holds only
 //! the knobs the [`Engine`](crate::Engine) reads directly: the bound port (used
 //! to `listen` and to derive ephemeral dial ports), the graceful-close timeout
-//! that bounds the reliable plane's drain, and the per-pump gossip work ceiling
-//! that bounds which gossip receive rings the engine accepts.
+//! that bounds the reliable plane's drain, the per-pump gossip work ceiling that
+//! bounds which gossip receive rings the engine accepts, and the two admission
+//! bounds that cap how much reliable dial intent a caller can accumulate.
 
 use core::time::Duration;
 
@@ -21,6 +22,23 @@ use core::time::Duration;
 /// exchange and its closing connection are reclaimed on the same order of
 /// timescale.
 pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default [`Options::max_pending_seeds`]: 32 seed addresses.
+///
+/// One `join` call may resolve four hostnames into
+/// [`MAX_RESOLVED_ADDRS_PER_SEED`](crate::MAX_RESOLVED_ADDRS_PER_SEED) addresses
+/// each, so 32 admits a full multi-name seed list without truncation while still
+/// bounding what a repeated caller can accumulate. A queued seed costs only its
+/// address until the pump admits it, so the ceiling is on intent, not memory.
+pub const DEFAULT_MAX_PENDING_SEEDS: usize = 32;
+
+/// Default [`Options::max_pending_dials`]: 8 dials beyond what the pool can take.
+///
+/// Twice the reliable pool a small embedded node typically runs, so a burst is
+/// absorbed rather than truncated, while a runaway caller is stopped well before
+/// the parked requests dominate memory: each parked dial can hold up to one
+/// `max_stream_frame_size` of request bytes plus its machine-side bridge.
+pub const DEFAULT_MAX_PENDING_DIALS: usize = 8;
 
 /// Ports and timeouts for the [`Engine`](crate::Engine).
 ///
@@ -74,6 +92,47 @@ pub struct Options {
   /// Must be non-zero ([`InitError::ZeroGossipReadCap`](crate::InitError::ZeroGossipReadCap));
   /// [`GOSSIP_READ_CAP`](crate::GOSSIP_READ_CAP) is the default.
   pub gossip_read_cap: usize,
+  /// Largest number of join seed addresses that may wait in the engine's queue
+  /// at once.
+  ///
+  /// [`Engine::join`](crate::Engine::join) queues each routable seed it has not
+  /// already queued and is not already exchanging state with; the pump then
+  /// admits them a few at a time, as the reliable pool has room. This caps how
+  /// many may WAIT. A seed offered past the cap is dropped and counted
+  /// ([`Engine::join_seeds_dropped`](crate::Engine::join_seeds_dropped)) rather
+  /// than rejecting the call: a seed list is best-effort discovery intent, and the
+  /// engine already drops non-routable seeds silently.
+  ///
+  /// The cap only bites on more than this many DISTINCT routable seeds queued at
+  /// once. A small embedded pool could not service that many inside any sane join
+  /// deadline anyway — each unreachable seed occupies a slot for a full
+  /// `stream_timeout`.
+  ///
+  /// Must be non-zero ([`InitError::ZeroMaxPendingSeeds`](crate::InitError::ZeroMaxPendingSeeds));
+  /// [`DEFAULT_MAX_PENDING_SEEDS`] is the default.
+  pub max_pending_seeds: usize,
+  /// Largest number of reliable dials that may wait BEYOND what the free pool
+  /// could take right now.
+  ///
+  /// The bound is on the excess — parked dials minus free slots — not on the raw
+  /// parked count, so free slots are never left idle by the cap: a burst of dials
+  /// with `F` free slots parks the first `F + max_pending_dials` and refuses the
+  /// rest. Each waiting dial holds its request bytes (up to one
+  /// `max_stream_frame_size`) and a machine-side bridge until it is dialed or
+  /// fails, so the excess is what actually costs memory on a node whose pool is
+  /// already spoken for.
+  ///
+  /// [`Engine::send_reliable`](crate::Engine::send_reliable) reports the bound at
+  /// the call site as `UserDialBacklogFull` — backpressure, not a delivery
+  /// failure — so an application can pace itself. Any other dial source (the
+  /// periodic push/pull, a reliable-ping fallback) is failed through the machine's
+  /// own never-connected path instead and counted by
+  /// [`Engine::pending_dial_rejections`](crate::Engine::pending_dial_rejections);
+  /// both retry on their own schedule.
+  ///
+  /// Must be non-zero ([`InitError::ZeroMaxPendingDials`](crate::InitError::ZeroMaxPendingDials));
+  /// [`DEFAULT_MAX_PENDING_DIALS`] is the default.
+  pub max_pending_dials: usize,
   /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
   /// inbound reliable connections by peer address at the transport boundary, AND
   /// inbound alives by the peer's self-advertised address at membership
@@ -90,6 +149,8 @@ impl Default for Options {
       port: 7946,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
       gossip_read_cap: crate::GOSSIP_READ_CAP,
+      max_pending_seeds: DEFAULT_MAX_PENDING_SEEDS,
+      max_pending_dials: DEFAULT_MAX_PENDING_DIALS,
       #[cfg(feature = "cidr")]
       cidr_policy: None,
     }
@@ -119,6 +180,20 @@ impl Options {
   /// [`Options::gossip_read_cap`]). Must be non-zero.
   pub fn with_gossip_read_cap(mut self, cap: usize) -> Self {
     self.gossip_read_cap = cap;
+    self
+  }
+
+  /// Override the join-seed queue ceiling (see [`Options::max_pending_seeds`]).
+  /// Must be non-zero.
+  pub fn with_max_pending_seeds(mut self, cap: usize) -> Self {
+    self.max_pending_seeds = cap;
+    self
+  }
+
+  /// Override the beyond-capacity parked-dial ceiling (see
+  /// [`Options::max_pending_dials`]). Must be non-zero.
+  pub fn with_max_pending_dials(mut self, cap: usize) -> Self {
+    self.max_pending_dials = cap;
     self
   }
 
