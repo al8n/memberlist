@@ -2007,8 +2007,9 @@ where
     // `rearm_reaped_listener` expresses the reap as an occupancy RETIRE + REACQUIRE
     // (abort → `Aborting` → the reap frees it once the RST egress is acknowledged →
     // re-`listen` a fresh occupancy), NOT a raw in-place re-listen. That is what
-    // closes #161 for the listener too: the reaping stack tick already emitted
-    // the abort RST (its tuple is cleared), so the retired occupancy is acknowledged
+    // keeps the listener's aborted socket from being reused before its RST has
+    // egressed: the reaping stack tick already emitted the abort RST (its tuple
+    // is cleared), so the retired occupancy is acknowledged
     // and the listener re-armed THIS poll; re-`listen`ing in place a socket whose
     // RST had NOT yet egressed would `reset()` it and suppress that RST. A socket
     // mid-handshake (`SynReceived`, still `is_open()`) or a healthy `Listen` is left

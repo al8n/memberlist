@@ -891,7 +891,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
     // the listener), and the listener is re-established from `d1`'s freed socket
     // while `d2` is STILL deferred — the freed socket went to the listener, not the
     // dial. The `d1` socket's abort now retires through the ledger and is reclaimed
-    // only once its reset RST has egressed (#161), one poll after the bridge
+    // only once its reset RST has egressed, one poll after the bridge
     // elapses, so the accept and the reclaim need not fall in the SAME poll; wait
     // until BOTH the accept has happened AND the listener is present, then witness
     // that `d2` never stole the one free socket (it is still `PendingDial`). Under

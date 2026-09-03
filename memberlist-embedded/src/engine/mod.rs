@@ -1973,9 +1973,10 @@ where
   /// (`abort` → `Aborting` → the reap frees it once the RST egress is
   /// acknowledged) and a fresh listener is re-acquired from the pool, minting the
   /// NEXT generation. Expressing the reap as an occupancy retire+reacquire — not a
-  /// raw re-listen — is what closes #161 for the listener too: re-`listen`ing a
-  /// socket whose abort RST has not yet egressed would suppress that RST (the
-  /// link layer's `listen` resets the socket and clears the pending reset).
+  /// raw re-listen — is what keeps the listener's aborted socket from being
+  /// reused before its RST has egressed: re-`listen`ing a socket whose abort
+  /// RST has not yet egressed would suppress that RST (the link layer's
+  /// `listen` resets the socket and clears the pending reset).
   ///
   /// A no-op when there is no listener or its socket is still open (a healthy
   /// `Listen`, or an in-progress half-open the accept path handles).

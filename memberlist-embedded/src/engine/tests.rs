@@ -5030,7 +5030,7 @@ fn a_never_activated_occupancy_round_trips_through_the_ledger() {
   );
 }
 
-// --- #159 F1/F2/F6: engine teardown / close-deadline / inbound-fault policy ---
+// --- Engine teardown, close-deadline and inbound-fault policy ---
 
 /// Drive an outbound reliable user-message to `Established` on slot 0 (listener on
 /// slot 1), returning the engine, the mock, the clock, and the exchange's
