@@ -310,56 +310,66 @@ fn a_repeated_seed_within_one_join_registers_once() {
   );
 }
 
-/// Past the registry cap a join's surplus seeds go unregistered, and the guard then
-/// releases only what it took — but its OWN offers still carry its whole list, so
-/// the cap costs the merging with other joins and never the caller's discovery
-/// intent.
+/// The registry holds every address the live joins offer, however many that is. One
+/// that silently refused an address would put a later join's seeds outside the
+/// earlier joins' offers — exactly the unmerged interleaving the union exists to
+/// remove — so it has no cap, and its size is instead bounded by what the live
+/// futures already hold: their own resolved seed lists, released in full when each
+/// of them ends.
 #[test]
-fn a_join_past_the_registry_cap_still_offers_its_whole_list() {
-  let shared = shared_node("capped", 1);
+fn union_registry_has_no_silent_cap() {
+  let shared = shared_node("union", 1);
 
-  // Fill the registry exactly, then add one more join whose seeds cannot all fit.
-  let filler: Vec<SocketAddr> = (0..super::JOIN_OFFER_ADDRS_CAP)
-    .map(|i| SocketAddr::from(([10, 0, (i >> 8) as u8, i as u8], 7946)))
-    .collect();
-  let held = shared.register_join_offer(&filler);
+  // Two disjoint lists, 70 distinct addresses between them, from two separate joins.
+  let first_addrs: Vec<SocketAddr> = (10u8..50).map(sa).collect();
+  let second_addrs: Vec<SocketAddr> = (50u8..80).map(sa).collect();
   assert_eq!(
-    shared.join_offer_addr_count(),
-    super::JOIN_OFFER_ADDRS_CAP,
-    "the registry is at its cap"
+    first_addrs.len() + second_addrs.len(),
+    70,
+    "the two joins name 70 distinct addresses between them"
   );
 
-  let surplus = [sa(200), sa(201)];
-  let offer = shared.register_join_offer(&surplus);
+  let first = shared.register_join_offer(&first_addrs);
+  let second = shared.register_join_offer(&second_addrs);
   assert_eq!(
     shared.join_offer_addr_count(),
-    super::JOIN_OFFER_ADDRS_CAP,
-    "a full registry takes no new address"
+    70,
+    "every offered address is registered, none silently refused"
   );
 
+  // Either join's offer carries the whole union: same set, each leading with its own
+  // seeds.
   let mut union = Vec::new();
-  offer.fill_union(&mut union);
-  assert_eq!(
-    &union[..2],
-    &surplus,
-    "the unregistered join still offers its own seeds"
-  );
-  assert_eq!(
-    union.len(),
-    super::JOIN_OFFER_ADDRS_CAP + 2,
-    "alongside the whole registry"
-  );
+  for (offer, own) in [(&first, &first_addrs), (&second, &second_addrs)] {
+    offer.fill_union(&mut union);
+    assert_eq!(
+      union.len(),
+      70,
+      "an offer carries every registered address, once each"
+    );
+    assert_eq!(
+      &union[..own.len()],
+      &own[..],
+      "leading with its own seeds, in its own order"
+    );
+    for addr in first_addrs.iter().chain(second_addrs.iter()) {
+      assert!(
+        union.contains(addr),
+        "and naming every address the other join registered"
+      );
+    }
+  }
 
-  drop(offer);
+  drop(first);
   assert_eq!(
     shared.join_offer_addr_count(),
-    super::JOIN_OFFER_ADDRS_CAP,
-    "a guard that registered nothing releases nothing"
+    second_addrs.len(),
+    "an ended join releases exactly the seeds it registered, leaving the other's"
   );
-  drop(held);
+  drop(second);
   assert_eq!(
     shared.join_offer_addr_count(),
     0,
-    "and the registry empties with the join that filled it"
+    "and the last guard leaves nothing behind"
   );
 }
