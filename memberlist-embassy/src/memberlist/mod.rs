@@ -687,7 +687,7 @@ where
   }
 
   /// Reliably deliver `payload` to `to` over a dedicated TCP stream, resolving
-  /// once the exchange completes (`Ok`) or fails ([`OpError::SendFailed`]).
+  /// once the exchange completes (`Ok`) or fails.
   ///
   /// Issues the user-message exchange on the engine and parks on a signal the
   /// Runner fires when THIS send's exchange terminates. Completion is correlated
@@ -695,18 +695,40 @@ where
   /// `Connect`), so overlapping or out-of-order completions — concurrent sends, or
   /// sends to different peers finishing in any order — each resolve their own
   /// caller, never by arrival order.
+  ///
+  /// # Errors
+  ///
+  /// * [`OpError::DialBacklogFull`] — refused at the call site, before any
+  ///   exchange is built, because reliable dials already wait
+  ///   [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials)
+  ///   beyond what the free pool could take. Backpressure on this node's own
+  ///   application load: pace the sends and retry once outstanding exchanges
+  ///   complete.
+  /// * [`OpError::SendFailed`] — the exchange was dispatched but terminated
+  ///   without success (dial failure, decode/record fault, or deadline).
+  /// * [`OpError::NotRunning`] — the machine refused the operation because the
+  ///   node is no longer in a running state (e.g. it has left the cluster).
   pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError>
   where
     // Dispatching a reliable exchange schedules gossip work that draws from the RNG.
     R: Rng,
   {
     let now = time::now();
-    let sid: StreamId = self
+    let dispatched = self
       .shared
       .engine
       .borrow_mut()
-      .send_reliable(to, payload, now)
-      .map_err(|_| OpError::NotRunning)?;
+      .send_reliable(to, payload, now);
+    let sid: StreamId = match dispatched {
+      Ok(sid) => sid,
+      // A full dial backlog is call-site backpressure on this node's OWN load, so it
+      // must stay distinguishable from the lifecycle refusal: the caller can pace and
+      // retry the first, while the second says the node will never send again.
+      Err(memberlist_proto::Error::UserDialBacklogFull(_)) => {
+        return Err(OpError::DialBacklogFull);
+      }
+      Err(_) => return Err(OpError::NotRunning),
+    };
     let reply = self.shared.register_send(sid);
     self.shared.wake_pump();
     reply.wait().await

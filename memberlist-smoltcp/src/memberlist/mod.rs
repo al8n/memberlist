@@ -1902,10 +1902,12 @@ where
   ///    own reaping becomes visible to the engine that reads the sockets next.
   /// 4. **Engine pump** — the engine runs every protocol phase over a
   ///    [`SmoltcpGossip`] + [`SmoltcpStream`] view of the just-ticked sockets:
-  ///    reap closing sockets, accept inbound and replenish the listener,
-  ///    rebalance deferred dials, drain UDP gossip ingress through the codec,
-  ///    pump reliable ingress, drain join seeds, fire machine timers, then drain
-  ///    stream actions and TCP/UDP egress. See
+  ///    reap closing sockets, accept inbound and replenish the listener, drain UDP
+  ///    gossip ingress through the codec, pump reliable ingress, self-heal the
+  ///    listener, admit join seeds against free pool capacity, fire machine timers
+  ///    (the pump's single membership sweep), drain stream actions (every dial
+  ///    parks), then rebalance — the pump's SOLE dial site, after the tick — and
+  ///    TCP/UDP egress. See
   ///    [`Engine::pump`](memberlist_embedded::Engine::pump) for the full ordered
   ///    phase list. It runs on EVERY poll, whatever the device is doing.
   /// 5. **Egress again** — put what the pump just produced on the wire in this

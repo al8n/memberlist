@@ -77,6 +77,16 @@ fn op_error_variants_display_and_predicates() {
   let not_running = OpError::NotRunning;
   assert!(!not_running.to_string().is_empty());
   assert!(not_running.is_not_running());
+  assert!(not_running.source().is_none());
+
+  let backlog = OpError::DialBacklogFull;
+  assert!(!backlog.to_string().is_empty());
+  assert!(backlog.is_dial_backlog_full());
+  assert!(backlog.source().is_none());
+  // Backpressure and the lifecycle refusal are distinct answers: one is worth
+  // retrying, the other never is.
+  assert!(!backlog.is_not_running());
+  assert!(!not_running.is_dial_backlog_full());
 
   // The `Resolve` variant boxes a generic error and forwards its source.
   let resolve = OpError::Resolve(Box::new(SampleResolveError));

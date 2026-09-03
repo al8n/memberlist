@@ -21,14 +21,14 @@ use embassy_net::{
   udp::{PacketMetadata, UdpSocket},
 };
 use embassy_time::{Duration, Timer};
-use futures::executor::block_on;
+use futures::{FutureExt, executor::block_on};
 #[cfg(compression)]
 use memberlist_embassy::CompressionOptions;
 use memberlist_embassy::{
   EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, Options, Runner,
   SocketAddrResolver, TransformOptions, event::Event, now,
 };
-use memberlist_embedded::InitError as EngineInitError;
+use memberlist_embedded::{InitError as EngineInitError, Options as EngineOptions};
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
 
@@ -389,6 +389,64 @@ fn directed_send_paths_accept_small_and_reject_oversized() {
     ml.queue_user_broadcast(huge).is_err(),
     "an over-MTU broadcast must be rejected"
   );
+}
+
+/// A reliable send refused because the dial backlog is full surfaces as
+/// `OpError::DialBacklogFull` — the engine's call-site backpressure — and NOT as
+/// `OpError::NotRunning`, which would tell the caller the node had left the cluster
+/// and that retrying is pointless.
+///
+/// The engine bounds parked dials in EXCESS of the free reliable pool, so the first
+/// `free + max_pending_dials` sends are admitted and the next is refused. No
+/// [`Runner`] drives the pump here, so an admitted send parks on its completion
+/// signal (`now_or_never` yields `None`), while the refused one answers on its first
+/// poll, before it ever reaches that signal.
+#[test]
+fn reliable_send_past_the_dial_backlog_reports_backpressure() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = node(stack, &mut bufs, "backlog", 1, 1);
+
+  // This driver's `Options` carries no dial ceiling of its own, so the node runs the
+  // engine default; read it from the same source the driver hands the engine rather
+  // than restating the number here.
+  let cap = EngineOptions::new().max_pending_dials;
+  let admitted = ml.pool_free_count() + cap;
+
+  // Within the free pool plus the excess bound every send is admitted and parks on
+  // its completion signal: nothing pumps, so none of them can resolve.
+  for i in 0..admitted {
+    assert!(
+      ml.send_reliable(addr(10 + i as u8, 7946), bytes::Bytes::from_static(b"x"))
+        .now_or_never()
+        .is_none(),
+      "send {i} of {admitted} is within the bound, so it must be admitted and park, \
+       not answer at the call site"
+    );
+  }
+
+  // One past the bound: committed dials now exceed the free pool by the whole
+  // ceiling, so the engine refuses this one where the caller can see it.
+  match ml
+    .send_reliable(
+      addr(10 + admitted as u8, 7946),
+      bytes::Bytes::from_static(b"over"),
+    )
+    .now_or_never()
+  {
+    Some(Err(e)) => assert!(
+      e.is_dial_backlog_full(),
+      "an over-bound reliable send must report the full dial backlog as backpressure, \
+       got {e}"
+    ),
+    Some(Ok(())) => panic!("an over-bound reliable send must not report success"),
+    None => panic!(
+      "an over-bound reliable send must be refused at the call site, not parked on a \
+       completion signal"
+    ),
+  }
 }
 
 /// `leave` is idempotent on a single node: the first call begins the departure

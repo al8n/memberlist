@@ -1219,26 +1219,26 @@ fn slow_but_progressing_close_is_hard_capped_by_close_timeout() {
   );
 }
 
-/// A second outbound exchange deferred to `PendingDial` behind the only free dial
-/// socket must be dialed the instant the FIRST exchange frees that socket — even
-/// when the freeing happens LATE in the same `poll` (in the teardown that runs
-/// after the machine tick) and the node is driven purely by the deadlines `poll`
-/// returns.
+/// A second outbound exchange deferred behind the only free dial socket must be
+/// dialed the instant the FIRST exchange frees that socket — even when the freeing
+/// happens LATE in the same `poll` (in the teardown that runs after the machine
+/// tick) and the node is driven purely by the deadlines `poll` returns.
 ///
-/// # The bug this guards
+/// # What this guards
 ///
-/// The accept/replenish/dial rebalance runs EARLY in `poll`, before the machine
-/// tick. But a socket is also returned to the pool LATE — by `teardown` (a clean
+/// A socket returns to the pool LATE in a poll — by `teardown` (a clean
 /// `Closed`/`TimeWait` exchange, or an abrupt abort) and by `flush_closing` (a
-/// drain-deadline abort) — all of which run AFTER the early rebalance. If the
-/// rebalance ran only early, a socket freed by the first exchange completing would
-/// sit idle until the NEXT poll, and the returned wakeup would carry no term for
-/// "a socket just freed and a dial is waiting". A caller that sleeps exactly to
-/// the returned deadline would then sleep until the waiting exchange's OWN bridge
-/// deadline — at which point the machine kills it before it ever got the socket.
-/// Re-running the rebalance after the late frees services the freed socket
-/// in-tick, so the deferred dial is issued immediately and its SYN egress is
-/// driven by the (near-now) stack deadline instead.
+/// drain-deadline abort), all of which run AFTER the machine tick. That socket must
+/// be re-offered within the SAME poll, by whichever of the two routes the waiting
+/// intent sits on: the post-tick rebalance — the pump's sole dial site — hands it to
+/// the oldest parked dial, or, for an intent still held in the seed queue because
+/// join admits seeds against real pool capacity rather than encoding a bridge it
+/// could not dial, the pump returns an already-due wake so the caller comes straight
+/// back and the next poll admits it. Without either route the freed socket would sit
+/// idle until some later poll while the returned wakeup carried no term for "a
+/// socket just freed and a dial is waiting", and a caller that sleeps exactly to
+/// that deadline would sleep on to the waiting exchange's OWN bridge kill — at which
+/// point the machine tears it down before it ever got the socket.
 ///
 /// # Construction
 ///

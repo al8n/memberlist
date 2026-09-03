@@ -198,6 +198,16 @@ pub enum OpError {
   /// The machine rejected the operation because the node is not in a running
   /// state (e.g. it has already left the cluster).
   NotRunning,
+  /// The engine refused a [`send_reliable`](crate::Memberlist::send_reliable) at
+  /// the call site because reliable dials already wait
+  /// [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials) beyond
+  /// what the free reliable pool could take.
+  ///
+  /// Backpressure on THIS node's own application load — not a delivery failure and
+  /// not a lifecycle error: the payload was never dispatched and nothing is retried
+  /// for you, so pace the sends and try again once outstanding exchanges complete
+  /// and return their sockets.
+  DialBacklogFull,
   /// The address resolver failed while resolving a [`join`](crate::Memberlist::join)
   /// seed.
   ///
@@ -230,6 +240,12 @@ impl OpError {
     matches!(self, OpError::NotRunning)
   }
 
+  /// Whether a reliable send was refused because the dial backlog is full.
+  #[inline]
+  pub const fn is_dial_backlog_full(&self) -> bool {
+    matches!(self, OpError::DialBacklogFull)
+  }
+
   /// Whether the resolver failed on a join seed.
   #[inline]
   pub const fn is_resolve(&self) -> bool {
@@ -249,6 +265,10 @@ impl fmt::Display for OpError {
       OpError::PingTimeout => f.write_str("ping timed out: no ack within the probe timeout"),
       OpError::SendFailed => f.write_str("reliable send failed"),
       OpError::NotRunning => f.write_str("node is not in a running state"),
+      OpError::DialBacklogFull => f.write_str(
+        "reliable dial backlog is full: the send was refused as backpressure, not a failure — \
+         retry once outstanding exchanges complete",
+      ),
       OpError::Resolve(e) => write!(f, "seed address resolution failed: {e}"),
       OpError::NoAddresses => f.write_str("no wire address resolved for any seed"),
     }

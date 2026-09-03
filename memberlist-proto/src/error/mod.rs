@@ -98,18 +98,26 @@ pub enum Error {
   #[error("the ping target's identity is not wire-encodable, so its Ping is unsendable")]
   UnencodablePingTarget,
 
-  /// The per-peer reliable user-message dial backlog to this peer is full: the
-  /// QUIC coordinator already holds its configured
-  /// `QuicOptions::max_pending_user_dials_per_peer` limit of OUTSTANDING
-  /// (still-dialing) reliable user-message intents to the peer, so a further
-  /// `QuicEndpoint::start_user_message` is refused at the call site as visible
-  /// self-backpressure rather than parking yet another intent toward its dial
-  /// deadline. This is admission control on the node's OWN application load —
-  /// backpressure, not a delivery failure: retry once the peer establishes or
-  /// grants stream credit and the backlog drains. Push/pull and reliable-ping
-  /// dials are exempt (protocol-paced and liveness-critical) and never counted
-  /// against this bound. Carries the peer and the limit (see
-  /// [`UserDialBacklogFull`]).
+  /// The reliable user-message dial backlog is full: the coordinator or engine
+  /// that owns the caller's reliable dials already holds its configured bound of
+  /// OUTSTANDING (still-dialing) user-message dial intents, so a further
+  /// `start_user_message` is refused at the call site as visible self-backpressure
+  /// rather than parking yet another intent toward its dial deadline. This is
+  /// admission control on the node's OWN application load — backpressure, not a
+  /// delivery failure: the payload is not queued and nothing is retried for the
+  /// caller, so pace the sends and try again once the backlog drains.
+  /// Protocol-paced push/pull and reliable-ping dials are liveness-critical and
+  /// are never refused through THIS error.
+  ///
+  /// Two producers raise it, each with its own scope. The QUIC coordinator counts
+  /// outstanding intents PER PEER against
+  /// `QuicOptions::max_pending_user_dials_per_peer`, and the backlog drains as
+  /// that peer establishes or grants stream credit. The embedded engine counts
+  /// them NODE-WIDE against `memberlist_embedded::Options::max_pending_dials` —
+  /// parked dials in EXCESS of what its free reliable pool could take — and the
+  /// backlog drains as outstanding exchanges complete and return their sockets.
+  ///
+  /// Carries the peer and the limit (see [`UserDialBacklogFull`]).
   #[error(
     "reliable user-message dial backlog to {} is full ({} outstanding intents); backpressure, not failure — retry once the peer drains",
     _0.peer(),
@@ -145,9 +153,11 @@ impl SizeExceeded {
   }
 }
 
-/// Payload for [`Error::UserDialBacklogFull`]: the peer whose per-peer reliable
-/// user-message dial backlog is full and the configured
-/// `QuicOptions::max_pending_user_dials_per_peer` limit it reached.
+/// Payload for [`Error::UserDialBacklogFull`]: the peer whose reliable
+/// user-message dial was refused, and the configured backlog limit the producer
+/// reached — `QuicOptions::max_pending_user_dials_per_peer` for the QUIC
+/// coordinator's per-peer bound, `memberlist_embedded::Options::max_pending_dials`
+/// for the embedded engine's node-wide one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserDialBacklogFull {
   peer: SocketAddr,
@@ -155,19 +165,19 @@ pub struct UserDialBacklogFull {
 }
 
 impl UserDialBacklogFull {
-  /// Build from the target peer and the per-peer outstanding-dial limit.
+  /// Build from the target peer and the producer's outstanding-dial limit.
   #[inline]
   pub const fn new(peer: SocketAddr, limit: usize) -> Self {
     Self { peer, limit }
   }
 
-  /// The peer whose reliable user-message dial backlog is full.
+  /// The peer whose reliable user-message dial was refused.
   #[inline(always)]
   pub const fn peer(&self) -> SocketAddr {
     self.peer
   }
 
-  /// The configured per-peer outstanding-dial limit that was reached.
+  /// The configured outstanding-dial limit the producer reached.
   #[inline(always)]
   pub const fn limit(&self) -> usize {
     self.limit
