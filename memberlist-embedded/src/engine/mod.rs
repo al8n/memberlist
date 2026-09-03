@@ -999,6 +999,11 @@ where
     // Drop any seeds still queued from a pre-leave join: the drain initiates no
     // new push/pull, so they must not dial once we begin leaving.
     self.pending_seeds.clear();
+    // Forget the out-of-pump send tally with them. It exists to make the admission
+    // arithmetic see dial intent the parked set does not yet hold, and nothing it
+    // counted can be admitted again — a left node starts no dial — so carrying it
+    // would only inflate the demand a later pump measures against.
+    self.api_dials_since_pump = 0;
     self.endpoint.leave(now)
   }
 
@@ -2374,6 +2379,9 @@ where
   /// queued and nothing is retried for you, so pace the sends and try again once
   /// outstanding exchanges complete. The carried limit is the node-wide
   /// beyond-capacity bound.
+  ///
+  /// The lifecycle answer always wins: a left node reports `NotRunning` however
+  /// full its backlog is, because no amount of pacing will let it send again.
   #[inline]
   pub fn send_reliable(
     &mut self,
@@ -2381,6 +2389,14 @@ where
     payload: bytes::Bytes,
     now: Instant,
   ) -> Result<StreamId, memberlist_proto::Error> {
+    // Lifecycle before backpressure. Both refuse the send, but they tell the caller
+    // opposite things: `UserDialBacklogFull` is retryable self-backpressure, while
+    // `NotRunning` is terminal. A left node whose backlog happens to be saturated
+    // must not answer the retryable one and invite a caller to keep trying — the
+    // backlog it is measured against can never drain, since `leave` stops the
+    // schedulers and the machine starts no new exchange.
+    self.ensure_running()?;
+
     // Refuse before the machine builds an exchange it could only park: encoding the
     // payload into a bridge whose dial the action drain would then refuse costs a
     // frame's worth of work and gives the caller a completion event instead of an

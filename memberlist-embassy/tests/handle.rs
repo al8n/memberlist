@@ -25,7 +25,7 @@ use futures::{FutureExt, executor::block_on};
 #[cfg(compression)]
 use memberlist_embassy::CompressionOptions;
 use memberlist_embassy::{
-  EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, Options, Runner,
+  EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, OpError, Options, Runner,
   SocketAddrResolver, TransformOptions, event::Event, now,
 };
 use memberlist_embedded::InitError as EngineInitError;
@@ -558,6 +558,76 @@ fn reliable_send_past_the_dial_backlog_reports_backpressure() {
       "an over-bound reliable send must be refused at the call site, not parked on a \
        completion signal"
     ),
+  }
+}
+
+/// Once the node has left, a reliable send reports `OpError::NotRunning` even with
+/// the dial backlog saturated. `DialBacklogFull` invites the caller to pace and
+/// retry; after `leave` there is nothing to wait for, so answering it would keep a
+/// caller retrying a node that will never send again.
+#[test]
+fn reliable_send_after_leave_reports_not_running_over_the_backlog() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+
+  const MAX_PENDING_DIALS: usize = 2;
+  let (ml, _run) = node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_dials(MAX_PENDING_DIALS),
+    "left-backlog",
+    1,
+    1,
+  );
+  let admitted = ml.pool_free_count() + MAX_PENDING_DIALS;
+
+  // Saturate the backlog exactly as the backpressure test does, then confirm the
+  // node still answers the retryable refusal while it is running.
+  for i in 0..admitted {
+    assert!(
+      ml.send_reliable(addr(10 + i as u8, 7946), bytes::Bytes::from_static(b"x"))
+        .now_or_never()
+        .is_none(),
+      "send {i} of {admitted} is within the bound, so it must be admitted and park"
+    );
+  }
+  match ml
+    .send_reliable(
+      addr(10 + admitted as u8, 7946),
+      bytes::Bytes::from_static(b"over"),
+    )
+    .now_or_never()
+  {
+    Some(Err(e)) => assert!(
+      e.is_dial_backlog_full(),
+      "a running node over the bound must report backpressure, got {e}"
+    ),
+    other => panic!("expected the running node to refuse with backpressure, got {other:?}"),
+  }
+
+  // No pump runs between these, so the backlog the next send meets is the same one.
+  ml.leave().expect("leave from a running node");
+
+  match ml
+    .send_reliable(
+      addr(10 + admitted as u8 + 1, 7946),
+      bytes::Bytes::from_static(b"after-leave"),
+    )
+    .now_or_never()
+  {
+    Some(Err(e)) => {
+      assert!(
+        !e.is_dial_backlog_full(),
+        "a left node must not answer a reliable send as retryable backpressure, got {e}"
+      );
+      assert!(
+        matches!(e, OpError::NotRunning),
+        "a left node must refuse a reliable send as NotRunning, got {e}"
+      );
+    }
+    other => panic!("expected the left node to refuse the send, got {other:?}"),
   }
 }
 

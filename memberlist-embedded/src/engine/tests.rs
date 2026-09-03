@@ -1840,6 +1840,61 @@ fn send_reliable_backpressure_bounds_parked_dials() {
   );
 }
 
+/// A left node answers `NotRunning`, not backpressure, however saturated its dial
+/// backlog is. The two refusals mean opposite things — pace and retry versus never
+/// again — so a lifecycle verdict must not arrive disguised as a retryable one.
+///
+/// The backlog is carried by the PARKED set here, which `leave` does not clear, so
+/// the pre-check still measures a saturated node on the send that follows: the only
+/// thing that can spare the caller the retryable answer is the lifecycle check
+/// running first.
+#[test]
+fn send_reliable_reports_the_lifecycle_before_the_dial_backlog() {
+  let cfg = admission_cfg().with_max_pending_dials(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks and the bound saturates.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..2u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    2,
+    "both sends park, so the backlog lives in the parked set"
+  );
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the backlog is saturated while the node is still running"
+  );
+
+  // Leave, and do NOT pump: the parked dials the pre-check measures are untouched.
+  engine.leave(now).expect("leave from a running node");
+  assert_eq!(
+    engine.pending_dial_count(),
+    2,
+    "leave alone does not unwind the parked dials, so the backlog still reads full"
+  );
+
+  match engine.send_reliable(node_addr(7011), bytes::Bytes::from_static(b"x"), now) {
+    Err(memberlist_proto::Error::NotRunning) => {}
+    other => panic!("a left node must refuse a reliable send as NotRunning, got {other:?}"),
+  }
+}
+
 /// The bound applies to EVERY dial source, not just the application's. A
 /// protocol-paced dial requested while the caller has saturated the bound is
 /// failed through the machine's never-connected path — counted, and terminal —
