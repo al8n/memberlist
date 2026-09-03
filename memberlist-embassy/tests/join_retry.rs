@@ -1,0 +1,323 @@
+//! A join whose seed dial loses the peer's reliable-listener race must recover on
+//! its own, without the caller restarting it.
+//!
+//! A node accepts inbound reliable connections on ONE listener slot at a time, and
+//! re-arms it only from whatever the pool has free at that instant. A node whose
+//! pool is momentarily exhausted therefore has no listening socket at all, and its
+//! stack RSTs the next SYN. The engine deliberately does NOT suppress a join seed
+//! against an unrelated connection to the same address, so a seed dial can be the
+//! one that loses that race: its exchange fails and is forgotten, leaving the
+//! caller's join with nothing outstanding.
+//!
+//! The engine's contract is that the caller re-offers its seeds until joined, and
+//! [`Memberlist::join`] is that caller. This test drives the whole shape over two
+//! real embassy-net stacks: B loses its listener to two unrelated inbound
+//! connections, A's join dial is RST, the connections release, and the ORIGINAL
+//! join future — never restarted — completes.
+
+// nested `if let X = ev { if cond }` kept for readability, as in the crate roots.
+#![allow(clippy::collapsible_if)]
+
+mod support;
+
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use embassy_futures::{
+  join::join,
+  select::{Either, select},
+};
+use embassy_net::{
+  Config as NetConfig, IpEndpoint, Ipv4Cidr, Runner as NetRunner, Stack, StackResources,
+  StaticConfigV4,
+  tcp::TcpSocket,
+  udp::{PacketMetadata, UdpSocket},
+};
+use embassy_time::{Duration, Instant, Timer};
+use futures::executor::block_on;
+use memberlist_embassy::{
+  EndpointOptions, MaybeResolved, Memberlist, Options, Runner, SocketAddrResolver,
+  TransformOptions, now,
+};
+use memberlist_proto::{
+  SeedableRng, SmallRng,
+  event::{Event, ExchangeKind},
+};
+use smol_str::SmolStr;
+
+use support::paired_device::{PairedDevice, pair};
+
+/// A's TCP pool: enough slots that A always has one free to dial B with, so the
+/// only contended resource in the test is B's listener.
+const POOL_A: usize = 4;
+/// B's TCP pool: the functional minimum the driver accepts — one listener plus one
+/// accept/dial slot. Two concurrent inbound connections consume both, so B has
+/// nothing left to re-arm its listener from and its stack RSTs the next SYN.
+const POOL_B: usize = 2;
+/// Per-TCP-socket rx/tx buffer bytes.
+const TCP_BUF: usize = 4096;
+/// The reliable/gossip port both nodes bind.
+const PORT: u16 = 7946;
+/// Wall-clock cap on the test so a wedged plane fails fast. Larger than the
+/// loopback suite's because the recovery deliberately waits out a re-offer
+/// interval plus B's teardown of the two released connections.
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on each intermediate `wait_for` step, kept well under `TEST_TIMEOUT` so a
+/// step that never happens fails with its own message instead of the timeout.
+const STEP_BUDGET: Duration = Duration::from_secs(3);
+
+fn addr(last: u8, port: u16) -> SocketAddr {
+  SocketAddr::new(IpAddr::V4(Ipv4Addr::new(169, 254, 1, last)), port)
+}
+
+/// All the owned buffers one node's sockets borrow, sized for an `N`-slot pool.
+struct NodeBufs<const N: usize> {
+  udp_rx_meta: [PacketMetadata; 16],
+  udp_rx: [u8; 16 * 1024],
+  udp_tx_meta: [PacketMetadata; 16],
+  udp_tx: [u8; 16 * 1024],
+  tcp_rx: [[u8; TCP_BUF]; N],
+  tcp_tx: [[u8; TCP_BUF]; N],
+}
+
+impl<const N: usize> NodeBufs<N> {
+  fn new() -> Self {
+    Self {
+      udp_rx_meta: [PacketMetadata::EMPTY; 16],
+      udp_rx: [0u8; 16 * 1024],
+      udp_tx_meta: [PacketMetadata::EMPTY; 16],
+      udp_tx: [0u8; 16 * 1024],
+      tcp_rx: [[0u8; TCP_BUF]; N],
+      tcp_tx: [[0u8; TCP_BUF]; N],
+    }
+  }
+}
+
+/// Build one node's `UdpSocket` + `[TcpSocket; N]` over its `Stack` and bufs.
+fn build_sockets<'a, const N: usize>(
+  stack: Stack<'a>,
+  bufs: &'a mut NodeBufs<N>,
+) -> (UdpSocket<'a>, [TcpSocket<'a>; N]) {
+  let udp = UdpSocket::new(
+    stack,
+    &mut bufs.udp_rx_meta,
+    &mut bufs.udp_rx,
+    &mut bufs.udp_tx_meta,
+    &mut bufs.udp_tx,
+  );
+  let mut rx_iter = bufs.tcp_rx.iter_mut();
+  let mut tx_iter = bufs.tcp_tx.iter_mut();
+  let tcp = core::array::from_fn::<_, N, _>(|_| {
+    let rx = rx_iter.next().expect("N rx buffers");
+    let tx = tx_iter.next().expect("N tx buffers");
+    TcpSocket::new(stack, rx, tx)
+  });
+  (udp, tcp)
+}
+
+/// Build a static-IPv4 embassy-net stack over a paired device.
+fn build_stack<'a, const S: usize>(
+  device: PairedDevice,
+  resources: &'a mut StackResources<S>,
+  last: u8,
+  seed: u64,
+) -> (Stack<'a>, NetRunner<'a, PairedDevice>) {
+  let config = NetConfig::ipv4_static(StaticConfigV4 {
+    address: Ipv4Cidr::new(Ipv4Addr::new(169, 254, 1, last), 16),
+    gateway: None,
+    dns_servers: Default::default(),
+  });
+  embassy_net::new(device, config, resources, seed)
+}
+
+/// Drive `op` against both memberlist run loops, both embassy-net stack run loops,
+/// and the test timeout. Returns the op's value, or panics on timeout.
+async fn drive<T>(
+  op: impl core::future::Future<Output = T>,
+  ml_a: Runner<'_, SmolStr, POOL_A>,
+  ml_b: Runner<'_, SmolStr, POOL_B>,
+  net_a: &mut NetRunner<'_, PairedDevice>,
+  net_b: &mut NetRunner<'_, PairedDevice>,
+) -> T {
+  let nets = select(net_a.run(), net_b.run());
+  let mls = select(ml_a.run(), ml_b.run());
+  let infra = select(nets, mls);
+  match select(op, select(infra, Timer::after(TEST_TIMEOUT))).await {
+    Either::First(v) => v,
+    Either::Second(_) => panic!("test timed out after {TEST_TIMEOUT:?}"),
+  }
+}
+
+/// Poll `pred` until it holds or `budget` elapses, yielding between checks so the
+/// run loops make progress. Returns whether it held.
+async fn wait_for(mut pred: impl FnMut() -> bool, budget: Duration) -> bool {
+  let deadline = Instant::now() + budget;
+  loop {
+    if pred() {
+      return true;
+    }
+    if Instant::now() >= deadline {
+      return false;
+    }
+    Timer::after(Duration::from_millis(2)).await;
+  }
+}
+
+/// The original join future recovers by itself after its seed dial loses B's
+/// reliable listener to unrelated inbound connections.
+///
+/// Sequence: two unrelated connections exhaust B's pool so B has no listener; A's
+/// `join([B])` dials into that window and is RST, failing the seed-originated
+/// push/pull; the connections release and B re-arms; the same join future — never
+/// restarted, never re-offered by the test — completes `Ok`.
+#[test]
+fn join_recovers_after_losing_the_listener_to_an_unrelated_connection() {
+  let (dev_a, dev_b) = pair();
+  // A also opens the two unrelated sockets, so its stack needs slots beyond the
+  // memberlist pool and gossip socket.
+  let mut res_a = StackResources::<{ POOL_A + 4 }>::new();
+  let mut res_b = StackResources::<{ POOL_B + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::<POOL_A>::new();
+  let mut bufs_b = NodeBufs::<POOL_B>::new();
+  let (udp_a, tcp_a) = build_sockets(stack_a, &mut bufs_a);
+  let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
+
+  // Buffers for the two unrelated connections that occupy B's pool. They carry no
+  // payload, so a small ring is enough.
+  let mut hog0_rx = [0u8; 256];
+  let mut hog0_tx = [0u8; 256];
+  let mut hog1_rx = [0u8; 256];
+  let mut hog1_tx = [0u8; 256];
+
+  let start = now();
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL_A>(
+    Options::new(),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)),
+    &SocketAddrResolver,
+    udp_a,
+    tcp_a,
+    start,
+    SmallRng::seed_from_u64(1),
+  ))
+  .expect("build node a");
+  let (ml_b, run_b) = block_on(Memberlist::new_with_rng::<_, POOL_B>(
+    Options::new(),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)),
+    &SocketAddrResolver,
+    udp_b,
+    tcp_b,
+    start,
+    SmallRng::seed_from_u64(2),
+  ))
+  .expect("build node b");
+
+  block_on(async {
+    let mut hog0 = TcpSocket::new(stack_a, &mut hog0_rx, &mut hog0_tx);
+    let mut hog1 = TcpSocket::new(stack_a, &mut hog1_rx, &mut hog1_tx);
+    let b_reliable = IpEndpoint::from(addr(2, PORT));
+
+    let op = async {
+      // 1. Take B's listener away. The first connection lands on B's listener slot
+      //    and B re-arms from its one free slot; the second lands on that, leaving
+      //    the pool empty and no listener installed.
+      hog0
+        .connect(b_reliable)
+        .await
+        .expect("first unrelated connection to B");
+      // Let B finish accepting and re-arm from its last free slot before the second
+      // connection — otherwise the second SYN races the re-arm and is itself RST,
+      // which is the very collision under test but at the wrong point in the script.
+      assert!(
+        wait_for(
+          || ml_b.accepted_inbound_count() == 1 && ml_b.listener_present(),
+          STEP_BUDGET
+        )
+        .await,
+        "B did not accept the first connection and re-arm its listener"
+      );
+      hog1
+        .connect(b_reliable)
+        .await
+        .expect("second unrelated connection to B");
+      assert!(
+        wait_for(|| !ml_b.listener_present(), STEP_BUDGET).await,
+        "B still has a listener after two inbound connections filled its pool"
+      );
+      assert_eq!(
+        ml_b.pool_free_count(),
+        0,
+        "B's pool must be exhausted for the listener to stay down"
+      );
+      // Start from a clean event queue so the failure observed below is this join's.
+      while ml_a.poll_event().is_some() {}
+
+      // 2. Start the join INTO that window and, alongside it, the script that
+      //    checks the dial loses and then releases B. `join` resolves only when
+      //    BOTH finish, so the assertion is on the ORIGINAL join future.
+      let seeds = [MaybeResolved::Resolved(addr(2, PORT))];
+      let joining = ml_a.join(&SocketAddrResolver, &seeds);
+      let script = async {
+        // The seed dial hits a port with no listening socket and is RST, so its
+        // push/pull exchange terminates Failed.
+        let deadline = Instant::now() + STEP_BUDGET;
+        let mut lost = false;
+        while Instant::now() < deadline {
+          match ml_a.poll_event() {
+            Some(Event::ExchangeCompleted(ec)) => {
+              if ec.kind() == ExchangeKind::PushPull && !ec.outcome().is_succeeded() {
+                assert_eq!(
+                  *ec.peer(),
+                  addr(2, PORT),
+                  "the failed push/pull must be the seed exchange to B"
+                );
+                lost = true;
+                break;
+              }
+            }
+            Some(_) => {}
+            None => Timer::after(Duration::from_millis(2)).await,
+          }
+        }
+        assert!(
+          lost,
+          "A's seed dial did not fail against B's missing listener"
+        );
+        assert!(
+          !ml_a.is_joined(),
+          "A must not be joined while its only seed dial has failed"
+        );
+
+        // 3. Release B: reset both unrelated connections so B reaps the slots and
+        //    re-arms its listener.
+        hog0.abort();
+        // Ignoring Err: the flush only pushes the RST out; a peer that already tore
+        // the connection down makes it fail, which is the state we wanted anyway.
+        let _ = hog0.flush().await;
+        hog1.abort();
+        // Ignoring Err: as above.
+        let _ = hog1.flush().await;
+        assert!(
+          wait_for(|| ml_b.listener_present(), STEP_BUDGET).await,
+          "B did not re-arm its listener after the unrelated connections closed"
+        );
+      };
+
+      let (joined, ()) = join(joining, script).await;
+      joined.expect("the original join future recovered and completed");
+    };
+    drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+  });
+
+  assert!(
+    ml_a.is_joined(),
+    "A did not converge after recovering the lost seed dial"
+  );
+  assert!(
+    ml_a.by_id(&SmolStr::new("b")).is_some(),
+    "A does not know B by id after the recovered join"
+  );
+}

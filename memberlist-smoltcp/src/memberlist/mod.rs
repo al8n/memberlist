@@ -1722,6 +1722,14 @@ where
   /// (unspecified/multicast/broadcast IP or port 0) is dropped by the engine: it
   /// could only produce a doomed dial.
   ///
+  /// One call is an offer, not an attempt guarantee: a seed dial can still fail —
+  /// for instance by losing the race for the peer's single reliable listener, which
+  /// RSTs the second concurrent connection in its handshake window — after which
+  /// nothing for that seed is outstanding. Callers must therefore RE-OFFER the seed
+  /// list until `is_joined()`, which is safe at any rate: the engine dedups a seed
+  /// that is already queued or already covered by a live join-originated exchange,
+  /// so a re-offer never duplicates an attempt in flight.
+  ///
   /// # Errors
   ///
   /// Returns [`JoinError::Control`] (`NotRunning`) after `leave()` — a left node

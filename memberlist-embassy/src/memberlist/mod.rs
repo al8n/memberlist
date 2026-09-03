@@ -50,6 +50,19 @@ use alloc::boxed::Box;
 /// effectively-past deadline that would abort a TCP slot immediately.
 const MAX_SOCKET_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(86_400);
 
+/// How often [`Memberlist::join`] re-offers its resolved seed list to the engine
+/// while the node is still not joined.
+///
+/// This paces the retry rather than gating its latency: the Runner's event wake
+/// already resolves the join the instant it lands, so this bounds only how fast a
+/// seed whose exchange failed can be dialed again. A peer whose single reliable
+/// listener is occupied RSTs each dial at link speed, so an unpaced retry would
+/// spin dial → RST → re-offer with no floor at all; a quarter second holds that to
+/// one SYN per seed per interval — slow enough to be negligible next to a node's
+/// other traffic, and fast enough that a join recovers well inside the seconds-long
+/// deadline a caller puts around this future.
+const RE_OFFER_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(250);
+
 /// Floor a portable `core::Duration` to whole `embassy_time` ticks at `tick_hz`,
 /// exactly as [`embassy_time::Duration::from_ticks`] will store it.
 ///
@@ -536,10 +549,32 @@ where
   /// [`MaybeResolved::Resolved`].
   ///
   /// Enqueues a push/pull to each resolved seed on the engine, then parks until
-  /// `is_joined()` (woken by the Runner on each membership change, with a short
-  /// timer backstop so a missed wake never hangs). A non-routable seed is dropped
-  /// by the engine. The caller owns the overall deadline (drive this under a
-  /// `select` with a timeout).
+  /// `is_joined()` — woken by the Runner whenever it drains machine events, with a
+  /// timer backstop so a wake the single-consumer signal delivered to another
+  /// concurrent joiner never hangs this one. A non-routable seed is dropped by the
+  /// engine. The caller owns the overall deadline (drive this under a `select`
+  /// with a timeout).
+  ///
+  /// # Retry
+  ///
+  /// The same resolved seed list is RE-OFFERED to the engine while the node is
+  /// still not joined, because a single attempt per seed is not enough: a seed
+  /// dial can lose the race for the peer's single reliable listener (the peer RSTs
+  /// the second concurrent connection in its handshake window) and the engine then
+  /// fails and forgets that seed-originated exchange. Without a re-offer nothing
+  /// would be outstanding and this future would wait out the caller's whole
+  /// deadline; with one, the seed is re-queued as soon as its failed exchange is
+  /// gone and the join completes the moment the peer can accept again.
+  ///
+  /// What bounds the retry is the engine's own admission (see
+  /// [`Engine::join`](memberlist_embedded::Engine::join)): a seed already queued,
+  /// or already covered by a live join-originated exchange, is deduped rather than
+  /// dialed a second time, so a re-offer never duplicates an attempt in flight, and
+  /// surplus distinct seeds past
+  /// [`max_pending_seeds`](crate::Options::max_pending_seeds) are dropped and
+  /// counted. Re-offers are additionally paced so a peer that RSTs every dial
+  /// cannot drive a dial/fail/re-offer spin. The loop stops when the node is joined
+  /// (`Ok`) or the node is no longer running (`Err(OpError::NotRunning)`).
   ///
   /// # Errors
   ///
@@ -607,28 +642,48 @@ where
       return Err(OpError::NoAddresses);
     }
 
-    self
-      .shared
-      .engine
-      .borrow_mut()
-      .join(&resolved)
-      .map_err(|_| OpError::NotRunning)?;
-    self.shared.wake_pump();
-
-    // Park until joined. The Runner pulses `join_wake` on every membership change;
-    // race it against a short timer so a wake the single-consumer signal delivered
-    // to another concurrent joiner only costs an interval, never a hang.
+    // Offer the seeds, then keep re-offering them until the node is joined. The
+    // engine treats a seed list as best-effort discovery intent and dedups an
+    // address that is already queued or already has a live join-originated
+    // exchange, so this loop is the retry the engine's admission is designed for:
+    // it never duplicates an attempt in flight, and it re-queues a seed the instant
+    // its exchange is gone — including one whose dial lost the peer's handshake
+    // window to an unrelated connection and was RST.
+    //
+    // The first offer also stays where it was relative to seed resolution, so a
+    // `leave()` that landed after the last seed resolved still surfaces as
+    // `NotRunning` before this future waits on anything.
     loop {
-      if shared::is_joined(&self.shared) {
-        return Ok(());
+      self
+        .shared
+        .engine
+        .borrow_mut()
+        .join(&resolved)
+        .map_err(|_| OpError::NotRunning)?;
+      self.shared.wake_pump();
+
+      // Park for at most one re-offer interval, resolving the moment the node
+      // joins. The Runner pulses `join_wake` whenever it drained machine events —
+      // which includes a seed exchange's terminal `ExchangeCompleted`, so a lost
+      // dial is observed here without waiting out the interval — and the interval
+      // itself is both the backstop for a pulse the single-consumer signal handed
+      // to another concurrent joiner and the floor on the re-offer rate. That floor
+      // is what the pacing needs: a peer whose listener is occupied RSTs each dial
+      // immediately, and re-offering on the resulting event alone would spin
+      // dial → RST → event → dial as fast as the link can carry a SYN.
+      let deadline = embassy_time::Instant::now() + RE_OFFER_INTERVAL;
+      loop {
+        if shared::is_joined(&self.shared) {
+          return Ok(());
+        }
+        if embassy_time::Instant::now() >= deadline {
+          break;
+        }
+        // Ignoring the `Either`: whichever of the event wake or the deadline fired,
+        // the loop re-checks `is_joined` and the deadline.
+        let _ =
+          embassy_futures::select::select(self.shared.join_wake.wait(), Timer::at(deadline)).await;
       }
-      // Ignoring the `Either`: whichever of the membership wake or the timer fired,
-      // the loop simply re-checks `is_joined`.
-      let _ = embassy_futures::select::select(
-        self.shared.join_wake.wait(),
-        Timer::after(embassy_time::Duration::from_millis(20)),
-      )
-      .await;
     }
   }
 
