@@ -10,10 +10,15 @@
 //! caller's join with nothing outstanding.
 //!
 //! The engine's contract is that the caller re-offers its seeds until joined, and
-//! [`Memberlist::join`] is that caller. This test drives the whole shape over two
-//! real embassy-net stacks: B loses its listener to two unrelated inbound
+//! [`Memberlist::join`] is that caller. The first test drives the whole shape over
+//! two real embassy-net stacks: B loses its listener to two unrelated inbound
 //! connections, A's join dial is RST, the connections release, and the ORIGINAL
 //! join future — never restarted — completes.
+//!
+//! The second covers the other half of that retry loop: two joins running at once
+//! offer the union of their seeds, so the reachable peer is reached over the wire
+//! even when only one of the two calls holds its address and the other's seeds
+//! contend for the same single-slot seed queue.
 
 // nested `if let X = ev { if cond }` kept for readability, as in the crate roots.
 #![allow(clippy::collapsible_if)]
@@ -319,5 +324,106 @@ fn join_recovers_after_losing_the_listener_to_an_unrelated_connection() {
   assert!(
     ml_a.by_id(&SmolStr::new("b")).is_some(),
     "A does not know B by id after the recovered join"
+  );
+}
+
+/// Two joins running at once on one node converge when the ONLY reachable seed sits
+/// in the second call's list and the first call's list is entirely unreachable.
+///
+/// Every live join offers the union of the running calls' seeds, so both offers here
+/// name `{dead1, dead2, B}` — three addresses against a seed queue that holds one at
+/// a time, with A's CIDR policy failing each dead dial inside the pump that admitted
+/// it. What this proves over real stacks is that merging the offers costs neither
+/// call anything: B is reached and the push/pull completes while the sibling call's
+/// dead seeds keep taking turns in the same queue, the shared address is dialed once
+/// rather than once per call (the engine dedups a seed already covered by a live join
+/// exchange, whichever call offered it), and BOTH futures then resolve `Ok` on the
+/// membership they converged on.
+#[cfg(feature = "cidr")]
+#[test]
+fn concurrent_joins_converge_on_a_seed_only_one_of_them_holds() {
+  use memberlist_proto::CidrPolicy;
+
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL_A + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL_B + 2 }>::new();
+  let (stack_a, mut net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, mut net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::<POOL_A>::new();
+  let mut bufs_b = NodeBufs::<POOL_B>::new();
+  let (udp_a, tcp_a) = build_sockets(stack_a, &mut bufs_a);
+  let (udp_b, tcp_b) = build_sockets(stack_b, &mut bufs_b);
+
+  let start = now();
+  // A's policy covers the paired link and nothing else, so the two seeds below are
+  // rejected before `connect` and free the one seed-queue slot within the same pump.
+  let (ml_a, run_a) = block_on(Memberlist::new_with_rng::<_, POOL_A>(
+    Options::new()
+      .with_max_pending_seeds(1)
+      .with_cidr_policy(CidrPolicy::try_from(["169.254.0.0/16"].as_slice()).expect("valid cidr")),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("a"), addr(1, PORT)),
+    &SocketAddrResolver,
+    udp_a,
+    tcp_a,
+    start,
+    SmallRng::seed_from_u64(1),
+  ))
+  .expect("build node a");
+  let (ml_b, run_b) = block_on(Memberlist::new_with_rng::<_, POOL_B>(
+    Options::new(),
+    TransformOptions::default(),
+    EndpointOptions::new(SmolStr::new("b"), addr(2, PORT)),
+    &SocketAddrResolver,
+    udp_b,
+    tcp_b,
+    start,
+    SmallRng::seed_from_u64(2),
+  ))
+  .expect("build node b");
+
+  block_on(async {
+    let unreachable = [
+      MaybeResolved::Resolved(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        PORT,
+      )),
+      MaybeResolved::Resolved(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+        PORT,
+      )),
+    ];
+    let reachable = [MaybeResolved::Resolved(addr(2, PORT))];
+
+    let op = async {
+      let (dead_side, live_side) = join(
+        ml_a.join(&SocketAddrResolver, &unreachable),
+        ml_a.join(&SocketAddrResolver, &reachable),
+      )
+      .await;
+      dead_side.expect("the join holding only unreachable seeds completes on convergence");
+      live_side.expect("the join holding the reachable seed completes");
+    };
+    drive(op, run_a, run_b, &mut net_a, &mut net_b).await;
+  });
+
+  assert!(
+    ml_a.is_joined(),
+    "A did not converge on the seed only one of its two joins held"
+  );
+  assert!(
+    ml_a.by_id(&SmolStr::new("b")).is_some(),
+    "A does not know B by id after the merged join"
+  );
+  assert_eq!(
+    ml_a.join_offer_addr_count(),
+    0,
+    "both joins have returned, so neither leaves seeds registered behind it"
+  );
+  assert_eq!(
+    ml_b.accepted_inbound_count(),
+    1,
+    "the shared seed is dialed once for both joins, not once per join"
   );
 }

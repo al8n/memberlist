@@ -576,6 +576,13 @@ where
   /// cannot drive a dial/fail/re-offer spin. The loop stops when the node is joined
   /// (`Ok`) or the node is no longer running (`Err(OpError::NotRunning)`).
   ///
+  /// Concurrent joins are MERGED: every call live at once offers the union of their
+  /// resolved seed lists, so the engine's round-robin over a full seed queue covers
+  /// all of their seeds together — its guarantee is over what one offer names, and
+  /// separate loops offering disjoint lists would instead share one rotation blind
+  /// to each other's addresses. A call's seeds leave the union the moment it ends,
+  /// including when the caller drops the future at its own deadline.
+  ///
   /// # Errors
   ///
   /// Returns `Err(OpError::NotRunning)` after `leave()` — a left node initiates no
@@ -646,23 +653,38 @@ where
       return Err(OpError::NoAddresses);
     }
 
+    // Join the registry of live offers before offering anything. The engine's
+    // over-cap seed admission rotates over the addresses of ONE offer, so two join
+    // futures offering disjoint lists separately would share that rotation while
+    // neither ever named the other's seeds; every offer below therefore carries the
+    // union of all the live futures' seeds. The guard releases this future's seeds
+    // on every exit path — a normal return, a `?`, or the caller dropping the future
+    // at one of its awaits — so a join that is no longer running leaves nothing in
+    // the union behind it.
+    let offer = self.shared.register_join_offer(&resolved);
+    // Reused across offers so the steady re-offer loop allocates nothing.
+    let mut union: Vec<SocketAddr> = Vec::new();
+
     // Offer the seeds, then keep re-offering them until the node is joined. The
     // engine treats a seed list as best-effort discovery intent and dedups an
     // address that is already queued or already has a live join-originated
     // exchange, so this loop is the retry the engine's admission is designed for:
     // it never duplicates an attempt in flight, and it re-queues a seed the instant
     // its exchange is gone — including one whose dial lost the peer's handshake
-    // window to an unrelated connection and was RST.
+    // window to an unrelated connection and was RST. Offering the union is
+    // idempotent under the same dedup: a seed another future already got queued or
+    // dialed is skipped here rather than started twice.
     //
     // The first offer also stays where it was relative to seed resolution, so a
     // `leave()` that landed after the last seed resolved still surfaces as
     // `NotRunning` before this future waits on anything.
     loop {
+      offer.fill_union(&mut union);
       self
         .shared
         .engine
         .borrow_mut()
-        .join(&resolved)
+        .join(&union)
         .map_err(|_| OpError::NotRunning)?;
       self.shared.wake_pump();
 
@@ -1066,6 +1088,40 @@ where
   #[inline]
   pub fn pending_dial_count(&self) -> usize {
     self.shared.engine.borrow().pending_dial_count()
+  }
+
+  // ── Join-seed diagnostics (test/operator visibility) ─────────────────────────
+
+  /// Number of distinct seed addresses the [`join`](Self::join) calls currently
+  /// live on this handle are offering between them — the size of the union each of
+  /// them hands the engine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_offer_addr_count(&self) -> usize {
+    self.shared.join_offer_addr_count()
+  }
+
+  /// Number of join seeds the engine has queued but not yet handed to the machine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn pending_seed_count(&self) -> usize {
+    self.shared.engine.borrow().pending_seed_count()
+  }
+
+  /// Diagnostic count of join seeds the engine shed because its queue was already
+  /// at [`Options::max_pending_seeds`](crate::Options::max_pending_seeds).
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_seeds_dropped(&self) -> u64 {
+    self.shared.engine.borrow().join_seeds_dropped()
+  }
+
+  /// Diagnostic count of join seeds the engine skipped as already queued or already
+  /// covered by a live join exchange.
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_seeds_deduped(&self) -> u64 {
+    self.shared.engine.borrow().join_seeds_deduped()
   }
 
   /// Replace the gossip+stream compression policy at runtime. Returns

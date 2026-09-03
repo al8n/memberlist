@@ -1,5 +1,6 @@
 use super::{Shared, advertise_address, is_joined};
 use crate::{error::OpError, stream_io::SlotId};
+use alloc::{vec, vec::Vec};
 use core::{net::SocketAddr, time::Duration};
 use memberlist_embedded::{
   Engine, GOSSIP_READ_CAP, GossipIo, Options as EngineConfig, TransformOptions,
@@ -218,5 +219,147 @@ fn free_helpers_forward_the_engine_view() {
     advertise_address(&shared),
     sa(9),
     "the advertise address is the configured one"
+  );
+}
+
+/// One address named by two live joins is held by a refcount, not a flag: the union
+/// keeps it while either of them is still offering, and it leaves only when the last
+/// one does.
+///
+/// A registry that stored membership alone would drop the shared address as soon as
+/// the first guard went, taking a seed the surviving join is still trying to reach
+/// out of its own offers.
+#[test]
+fn a_shared_seed_survives_until_the_last_join_holding_it_ends() {
+  let shared = shared_node("refcount", 1);
+  let mut union = Vec::new();
+
+  let first = shared.register_join_offer(&[sa(10), sa(11)]);
+  let second = shared.register_join_offer(&[sa(11), sa(12)]);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    3,
+    "the shared address is one entry, not two"
+  );
+
+  first.fill_union(&mut union);
+  assert_eq!(
+    union.len(),
+    3,
+    "each offer names all three distinct addresses"
+  );
+  assert_eq!(
+    &union[..2],
+    &[sa(10), sa(11)],
+    "an offer leads with its own seeds, in its own order"
+  );
+  assert!(union.contains(&sa(12)), "and carries the other join's seed");
+
+  drop(first);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    2,
+    "the ended join's exclusive seed leaves, while the shared one stays for the join \
+     still offering it"
+  );
+  second.fill_union(&mut union);
+  assert!(
+    union.contains(&sa(11)),
+    "so the surviving join keeps offering it"
+  );
+  assert!(
+    !union.contains(&sa(10)),
+    "while the ended join's exclusive seed is gone"
+  );
+
+  drop(second);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    0,
+    "the last guard releases everything it held"
+  );
+}
+
+/// A repeated address within one join's seed list takes ONE registry entry and ONE
+/// reference, so the guard's release balances its registration exactly rather than
+/// leaving the address pinned in the union forever.
+#[test]
+fn a_repeated_seed_within_one_join_registers_once() {
+  let shared = shared_node("repeat", 1);
+
+  let offer = shared.register_join_offer(&[sa(10), sa(10), sa(11)]);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    2,
+    "the repeat is not a second entry"
+  );
+
+  let mut union = Vec::new();
+  offer.fill_union(&mut union);
+  assert_eq!(
+    union,
+    vec![sa(10), sa(11)],
+    "and an offer carries each address once"
+  );
+
+  drop(offer);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    0,
+    "one registration, one release"
+  );
+}
+
+/// Past the registry cap a join's surplus seeds go unregistered, and the guard then
+/// releases only what it took — but its OWN offers still carry its whole list, so
+/// the cap costs the merging with other joins and never the caller's discovery
+/// intent.
+#[test]
+fn a_join_past_the_registry_cap_still_offers_its_whole_list() {
+  let shared = shared_node("capped", 1);
+
+  // Fill the registry exactly, then add one more join whose seeds cannot all fit.
+  let filler: Vec<SocketAddr> = (0..super::JOIN_OFFER_ADDRS_CAP)
+    .map(|i| SocketAddr::from(([10, 0, (i >> 8) as u8, i as u8], 7946)))
+    .collect();
+  let held = shared.register_join_offer(&filler);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    super::JOIN_OFFER_ADDRS_CAP,
+    "the registry is at its cap"
+  );
+
+  let surplus = [sa(200), sa(201)];
+  let offer = shared.register_join_offer(&surplus);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    super::JOIN_OFFER_ADDRS_CAP,
+    "a full registry takes no new address"
+  );
+
+  let mut union = Vec::new();
+  offer.fill_union(&mut union);
+  assert_eq!(
+    &union[..2],
+    &surplus,
+    "the unregistered join still offers its own seeds"
+  );
+  assert_eq!(
+    union.len(),
+    super::JOIN_OFFER_ADDRS_CAP + 2,
+    "alongside the whole registry"
+  );
+
+  drop(offer);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    super::JOIN_OFFER_ADDRS_CAP,
+    "a guard that registered nothing releases nothing"
+  );
+  drop(held);
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    0,
+    "and the registry empties with the join that filled it"
   );
 }

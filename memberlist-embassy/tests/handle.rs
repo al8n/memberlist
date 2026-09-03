@@ -1,7 +1,7 @@
 //! Public-handle coverage for [`Memberlist`]: the sync query/accessor surface,
 //! the directed best-effort send paths and their MTU error branches, the
-//! `leave` running-state contract, and a multi-node join → leave → query run
-//! over the loopback harness.
+//! `leave` running-state contract, the union concurrent `join` calls offer, and a
+//! multi-node join → leave → query run over the loopback harness.
 //!
 //! Mirrors `loopback.rs`'s substrate (two paired embassy-net stacks driven under
 //! one `block_on`, raced against a wall-clock timeout). The single-node sweeps
@@ -21,7 +21,7 @@ use embassy_net::{
   udp::{PacketMetadata, UdpSocket},
 };
 use embassy_time::{Duration, Timer};
-use futures::{FutureExt, executor::block_on};
+use futures::{FutureExt, executor::block_on, poll};
 #[cfg(compression)]
 use memberlist_embassy::CompressionOptions;
 use memberlist_embassy::{
@@ -629,6 +629,139 @@ fn reliable_send_after_leave_reports_not_running_over_the_backlog() {
     }
     other => panic!("expected the left node to refuse the send, got {other:?}"),
   }
+}
+
+/// Two `join` calls live at once offer the UNION of their resolved seeds, and a call
+/// that ends takes only its own seeds back out of it.
+///
+/// The engine's over-cap seed admission rotates over the addresses ONE offer names,
+/// so concurrent joins that each offered only their own list would share that
+/// rotation while neither ever named the other's seeds. What this proves, in order:
+///
+/// 1. both calls' seeds are registered, so the union is the four distinct addresses;
+/// 2. the second call's offer actually CARRIED all four — the engine classifies every
+///    entry of an offer exactly once, so against a seed queue already holding its one
+///    admission, three drops plus one dedup is a four-address offer where that call's
+///    own list alone could only have produced two;
+/// 3. dropping the second future — the cancellation path a caller's own join deadline
+///    takes — unregisters exactly its two addresses and leaves the first call's;
+/// 4. the first call's next re-offer then names two addresses again (one drop plus one
+///    dedup), so a join that is no longer running leaves nothing in the union.
+///
+/// No [`Runner`] drives the pump here, so nothing is dialed and the seed queue never
+/// drains: the engine's admission counters are then a direct read of what each offer
+/// named. A one-seed queue makes every entry past the first admission visible as a
+/// drop or a dedup.
+#[test]
+fn concurrent_joins_offer_their_union() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_seeds(1),
+    "union",
+    1,
+    1,
+  );
+
+  let first = [
+    MaybeResolved::Resolved(addr(11, 7946)),
+    MaybeResolved::Resolved(addr(12, 7946)),
+  ];
+  let second = [
+    MaybeResolved::Resolved(addr(13, 7946)),
+    MaybeResolved::Resolved(addr(14, 7946)),
+  ];
+
+  block_on(async {
+    // Boxed so the futures can be polled by reference and then genuinely DROPPED —
+    // a pinned stack local would outlive the binding and never run its guard.
+    let mut joining_first = Box::pin(ml.join(&SocketAddrResolver, &first));
+    let mut joining_second = Box::pin(ml.join(&SocketAddrResolver, &second));
+
+    // Each first poll resolves the seeds (the resolver never suspends), registers
+    // them, makes one offer, and parks on the re-offer interval.
+    assert!(
+      poll!(joining_first.as_mut()).is_pending(),
+      "the first join must park: the node has no peer to converge on"
+    );
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      2,
+      "the first join registers its own two seeds"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
+      1,
+      "its offer fills the one-seed queue"
+    );
+    assert_eq!(
+      ml.join_seeds_dropped(),
+      1,
+      "and sheds the other of its two addresses"
+    );
+
+    assert!(
+      poll!(joining_second.as_mut()).is_pending(),
+      "the second join must park alongside the first"
+    );
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      4,
+      "both live joins are registered, so the union is four distinct addresses"
+    );
+    assert_eq!(
+      ml.join_seeds_dropped(),
+      4,
+      "the second offer met a full queue, so its three admissible entries are shed"
+    );
+    assert_eq!(
+      ml.join_seeds_deduped(),
+      1,
+      "its fourth entry is the address already queued — only reachable if that offer \
+       carried the first join's seeds too"
+    );
+    assert_eq!(
+      ml.pending_seed_count(),
+      1,
+      "a full queue admits nothing, so the offer changed no membership intent"
+    );
+
+    // Cancel the second join. Its guard releases exactly its own addresses.
+    drop(joining_second);
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      2,
+      "a cancelled join leaves only the still-running join's seeds in the union"
+    );
+
+    // Past the re-offer interval the surviving join offers again — now the two
+    // addresses that are left.
+    Timer::after(Duration::from_millis(400)).await;
+    assert!(
+      poll!(joining_first.as_mut()).is_pending(),
+      "the surviving join re-offers and parks again"
+    );
+    assert_eq!(
+      ml.join_seeds_dropped(),
+      5,
+      "the re-offer names two addresses against a full queue: one shed"
+    );
+    assert_eq!(
+      ml.join_seeds_deduped(),
+      2,
+      "and one already queued — two entries in all, so the cancelled join's seeds are \
+       gone from the offer"
+    );
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      2,
+      "re-offering does not re-register anything"
+    );
+  });
 }
 
 /// `leave` is idempotent on a single node: the first call begins the departure

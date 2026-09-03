@@ -59,6 +59,104 @@ pub(crate) struct Waiters {
   pub(crate) sends: Vec<PendingSend>,
 }
 
+/// The distinct seed addresses of every live [`join`](crate::Memberlist::join)
+/// future, each counted by how many of those futures offer it.
+///
+/// A join future re-offers its resolved seed list until the node is joined, and the
+/// engine's over-cap seed admission rotates over the addresses offered TOGETHER —
+/// one engine-wide rotation, which a call can only advance past the entries it
+/// actually saw. Two futures offering disjoint lists longer than the seed queue can
+/// hold would therefore share that rotation while neither ever names the other's
+/// addresses, and could delay each other without bound. Registering every live
+/// future's seeds here lets each offer carry their union, so the one rotation
+/// sweeps all of them.
+#[derive(Default)]
+pub(crate) struct JoinOffers {
+  /// `(address, number of live join futures offering it)`. A flat vector rather
+  /// than a map: the entry count is capped at [`JOIN_OFFER_ADDRS_CAP`], and every
+  /// use walks the whole thing anyway to build the union.
+  entries: Vec<(SocketAddr, usize)>,
+}
+
+impl JoinOffers {
+  /// Record one more live offer of `addr`, reporting whether it is now registered.
+  ///
+  /// `false` only when `addr` is new and the cap is already reached.
+  fn register(&mut self, addr: SocketAddr) -> bool {
+    if let Some(entry) = self.entries.iter_mut().find(|(a, _)| *a == addr) {
+      // Saturating: the count is how many join futures are alive naming this one
+      // address, which cannot approach `usize::MAX` (each is a live future holding
+      // its own seed list), and saturating keeps the arithmetic total rather than
+      // resting on that.
+      entry.1 = entry.1.saturating_add(1);
+      return true;
+    }
+    if self.entries.len() >= JOIN_OFFER_ADDRS_CAP {
+      return false;
+    }
+    self.entries.push((addr, 1));
+    true
+  }
+
+  /// Drop one live offer of `addr`, removing the entry when the last one goes.
+  fn unregister(&mut self, addr: SocketAddr) {
+    let Some(pos) = self.entries.iter().position(|(a, _)| *a == addr) else {
+      return;
+    };
+    let count = &mut self.entries[pos].1;
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+      self.entries.swap_remove(pos);
+    }
+  }
+}
+
+/// One live [`join`](crate::Memberlist::join) future's registration in
+/// [`JoinOffers`], which it holds for as long as it is offering.
+///
+/// The guard is what makes the registry cancellation-safe: a `join` future parks on
+/// an await the caller can drop at any moment — its own join deadline, a `select`
+/// that lost, a task teardown — and `Drop` runs on every one of those paths as well
+/// as on a normal return, so a future that is no longer offering never leaves its
+/// seeds in the union the running joins carry.
+pub(crate) struct JoinOffer<'a> {
+  offers: &'a RefCell<JoinOffers>,
+  /// This future's own resolved seeds, deduplicated, in the order it offered them.
+  addrs: Vec<SocketAddr>,
+  /// How many leading entries of `addrs` are registered in `offers`, so `Drop`
+  /// releases exactly what this guard took. Short of the full list only when the
+  /// registry hit [`JOIN_OFFER_ADDRS_CAP`].
+  registered: usize,
+}
+
+impl JoinOffer<'_> {
+  /// Fill `out` with the addresses this future's next offer should carry: its own
+  /// seeds first, then every address any other live join future is offering.
+  ///
+  /// Own-seeds-first so an offer always carries the caller's whole list even on the
+  /// path where the registry cap had no room for part of it — the merging is then
+  /// all that is lost, never the caller's own discovery intent. `out` is the
+  /// caller's reused buffer, so a steady re-offer loop allocates nothing.
+  pub(crate) fn fill_union(&self, out: &mut Vec<SocketAddr>) {
+    out.clear();
+    out.extend_from_slice(&self.addrs);
+    for (addr, _) in self.offers.borrow().entries.iter() {
+      if !out.contains(addr) {
+        out.push(*addr);
+      }
+    }
+  }
+}
+
+impl Drop for JoinOffer<'_> {
+  fn drop(&mut self) {
+    let mut offers = self.offers.borrow_mut();
+    for addr in self.addrs.iter().take(self.registered) {
+      offers.unregister(*addr);
+    }
+  }
+}
+
 /// The state both the handle and the run loop reach.
 ///
 /// Shared via [`Rc`] (single-core cooperative). `I` is the node id type; `R` is
@@ -90,12 +188,27 @@ pub(crate) struct Shared<I, R = SmallRng> {
   pub(crate) app_events: RefCell<VecDeque<Event<I, SocketAddr>>>,
   /// The parked-op waiter tables.
   pub(crate) waiters: RefCell<Waiters>,
+  /// The seeds every live `join` future is offering, so each of them can offer
+  /// their union rather than its own list alone. See [`JoinOffers`].
+  pub(crate) join_offers: RefCell<JoinOffers>,
 }
 
 /// Cap on the buffered application-event queue. A never-draining application then
 /// drops the OLDEST surplus events (best-effort, like the std drivers' bounded
 /// observation channel) rather than growing memory without bound.
 const APP_EVENTS_CAP: usize = 1024;
+
+/// Cap on the DISTINCT addresses the live-join registry holds.
+///
+/// The registry merges concurrent joins into one offer; it is not a second copy of
+/// the application's discovery intent. Bounding it keeps the union each offer
+/// carries — which the engine scans once per free seed-queue slot — independent of
+/// how many join futures an application happens to spawn. Past the cap a further
+/// future's seeds simply go unregistered: its own offers still carry its whole list,
+/// so only the merging with the other loops' seeds is lost. Well above any plausible
+/// number of concurrent joins on one embedded node, so the degraded path is a
+/// backstop rather than a working mode.
+const JOIN_OFFER_ADDRS_CAP: usize = 64;
 
 impl<I, R> Shared<I, R>
 where
@@ -109,7 +222,44 @@ where
       join_wake: Signal::new(),
       app_events: RefCell::new(VecDeque::new()),
       waiters: RefCell::new(Waiters::default()),
+      join_offers: RefCell::new(JoinOffers::default()),
     }
+  }
+
+  /// Register `seeds` as one live join future's offer and hand back the guard that
+  /// releases them again when that future ends — returned, cancelled or dropped.
+  ///
+  /// Registration stops at the first address the cap has no room for, so the guard
+  /// holds a prefix it can release exactly.
+  pub(crate) fn register_join_offer(&self, seeds: &[SocketAddr]) -> JoinOffer<'_> {
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+      if !addrs.contains(seed) {
+        addrs.push(*seed);
+      }
+    }
+
+    let mut registered = 0;
+    {
+      let mut offers = self.join_offers.borrow_mut();
+      for addr in addrs.iter() {
+        if !offers.register(*addr) {
+          break;
+        }
+        registered += 1;
+      }
+    }
+
+    JoinOffer {
+      offers: &self.join_offers,
+      addrs,
+      registered,
+    }
+  }
+
+  /// Number of distinct addresses the live join futures are offering between them.
+  pub(crate) fn join_offer_addr_count(&self) -> usize {
+    self.join_offers.borrow().entries.len()
   }
 
   /// Pop one buffered application event for the handle's `poll_event`.
