@@ -63,6 +63,8 @@ fn all_variants() -> Vec<InitError> {
     InitError::ZeroUdpPackets,
     InitError::UdpRxPacketsTooLarge,
     InitError::ZeroGossipReadCap,
+    InitError::ZeroMaxPendingSeeds,
+    InitError::ZeroMaxPendingDials,
     InitError::ZeroIngressPacketsPerPoll,
     InitError::ZeroCloseTimeout,
   ]
@@ -144,6 +146,18 @@ fn from_embedded_maps_each_mode() {
   assert!(matches!(
     InitError::from_embedded(E::ZeroCloseTimeout),
     InitError::ZeroCloseTimeout
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroGossipReadCap),
+    InitError::ZeroGossipReadCap
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroMaxPendingSeeds),
+    InitError::ZeroMaxPendingSeeds
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroMaxPendingDials),
+    InitError::ZeroMaxPendingDials
   ));
   assert!(matches!(
     InitError::from_embedded(E::NonRoutableAdvertiseAddr(sample_socket_addr())),

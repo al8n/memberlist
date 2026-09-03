@@ -113,14 +113,18 @@ fn checked_socket_timeout(
 ///
 /// The driver's `crate::Options` carries link-layer sizing (the bridge ring
 /// capacities, the per-socket timeout) that stays on the driver, while
-/// `memberlist_embedded::Options` carries only the port and close timeout (plus
-/// the CIDR policy) the engine reads directly. Built once, up front, so the same
-/// value drives both the construction preflight
+/// `memberlist_embedded::Options` carries the protocol policy the engine reads
+/// directly — the port, the close timeout, the per-pump gossip work ceiling, the
+/// two reliable-dial admission ceilings, and the CIDR policy. Built once, up
+/// front, so the same value drives both the construction preflight
 /// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
 fn embedded_options(cfg: &Options) -> EngineConfig {
   let opts = EngineConfig::new()
     .with_port(cfg.port)
-    .with_close_timeout(cfg.close_timeout);
+    .with_close_timeout(cfg.close_timeout)
+    .with_gossip_read_cap(cfg.gossip_read_cap)
+    .with_max_pending_seeds(cfg.max_pending_seeds)
+    .with_max_pending_dials(cfg.max_pending_dials);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]
@@ -211,12 +215,14 @@ where
   /// - [`InitError::NoAddresses`] — the resolver returned no address for the
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
-  ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
-  ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
-  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
-  ///   or a machine-endpoint init failure).
+  ///   port / close-timeout, a zero
+  ///   [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) /
+  ///   [`max_pending_seeds`](crate::Options::max_pending_seeds) /
+  ///   [`max_pending_dials`](crate::Options::max_pending_dials), a non-routable or
+  ///   port-mismatched advertise address, an over-ceiling gossip MTU, a gossip UDP
+  ///   socket whose receive-packet capacity reaches the configured per-pump gossip
+  ///   read cap, an unusable encryption keyring, or a machine-endpoint init
+  ///   failure).
   /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
   ///   seeding the default gossip RNG.
   ///
@@ -293,12 +299,14 @@ where
   /// - [`InitError::NoAddresses`] — the resolver returned no address for the
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
-  ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
-  ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
-  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
-  ///   or a machine-endpoint init failure).
+  ///   port / close-timeout, a zero
+  ///   [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) /
+  ///   [`max_pending_seeds`](crate::Options::max_pending_seeds) /
+  ///   [`max_pending_dials`](crate::Options::max_pending_dials), a non-routable or
+  ///   port-mismatched advertise address, an over-ceiling gossip MTU, a gossip UDP
+  ///   socket whose receive-packet capacity reaches the configured per-pump gossip
+  ///   read cap, an unusable encryption keyring, or a machine-endpoint init
+  ///   failure).
   ///
   /// # Panics
   ///

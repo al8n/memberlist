@@ -879,6 +879,59 @@ fn zero_gossip_read_cap_rejected() {
   );
 }
 
+/// A zero `max_pending_seeds` is rejected as the knob itself. The engine queues a
+/// join seed only while the queue is below the cap, so zero queues nothing: every
+/// `join` would return `Ok` having silently dropped every seed.
+///
+/// The verdict comes from the ENGINE's config preflight, which construction runs
+/// before it touches the link layer, and reaches the caller under the name of the
+/// driver option to raise rather than as a generic endpoint failure.
+#[test]
+fn zero_max_pending_seeds_rejected() {
+  let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+  let now: Instant = harness::Clock::new().now();
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+    Options::new().with_max_pending_seeds(0),
+    InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+    TransformOptions::default(),
+    ep("a", 1),
+    &SocketAddrResolver,
+    &mut dev,
+    now,
+  );
+  assert!(
+    matches!(res, Err(InitError::ZeroMaxPendingSeeds)),
+    "a zero max_pending_seeds must be rejected as ZeroMaxPendingSeeds"
+  );
+}
+
+/// A zero `max_pending_dials` is rejected as the knob itself. The cap bounds parked
+/// dials in EXCESS of the free pool, so zero refuses every dial the pool cannot
+/// absorb at once — including the first one made while the pool is momentarily
+/// empty — leaving a busy node unable to join or send a reliable message.
+///
+/// The verdict comes from the ENGINE's config preflight, which construction runs
+/// before it touches the link layer, and reaches the caller under the name of the
+/// driver option to raise rather than as a generic endpoint failure.
+#[test]
+fn zero_max_pending_dials_rejected() {
+  let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+  let now: Instant = harness::Clock::new().now();
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+    Options::new().with_max_pending_dials(0),
+    InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+    TransformOptions::default(),
+    ep("a", 1),
+    &SocketAddrResolver,
+    &mut dev,
+    now,
+  );
+  assert!(
+    matches!(res, Err(InitError::ZeroMaxPendingDials)),
+    "a zero max_pending_dials must be rejected as ZeroMaxPendingDials"
+  );
+}
+
 /// A zero `close_timeout` is rejected: it would force-abort every graceful
 /// reliable close immediately (deadline == `now`), truncating in-flight push/pull
 /// responses instead of draining them.

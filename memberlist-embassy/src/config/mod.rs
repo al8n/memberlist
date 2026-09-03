@@ -4,8 +4,10 @@
 //! configuration are owned by the caller (built via [`embassy_net::new`]), so —
 //! unlike the smoltcp driver — this config carries no medium / address / route
 //! knobs. It holds only what the driver itself needs: the bound port, the bridge
-//! ring capacities (which also bound the per-slot mailbox byte rings), and the
-//! engine's graceful-close timeout.
+//! ring capacities (which also bound the per-slot mailbox byte rings), the
+//! per-socket inactivity timeout, and the engine policy the driver forwards — the
+//! graceful-close timeout, the per-pump gossip work ceiling, and the two
+//! reliable-dial admission ceilings.
 
 use core::time::Duration;
 
@@ -39,6 +41,40 @@ pub struct Options {
   /// `close_timeout`, or a legitimately slow exchange could be aborted early.
   /// Defaults to a generous multiple of the close timeout.
   pub socket_timeout: Duration,
+  /// The engine's per-pump gossip work ceiling, forwarded to
+  /// [`memberlist_embedded::Options::gossip_read_cap`].
+  ///
+  /// The engine rejects a gossip [`UdpSocket`](embassy_net::udp::UdpSocket) whose
+  /// receive-packet ring reaches it, and a pump applies every datagram it pops, so
+  /// this bounds the unwrap/decode/apply work one wake spends on gossip. The
+  /// engine's field docs carry the full contract.
+  ///
+  /// Must be non-zero. Defaults to [`memberlist_embedded::GOSSIP_READ_CAP`].
+  pub gossip_read_cap: usize,
+  /// The engine's join-seed queue ceiling, forwarded to
+  /// [`memberlist_embedded::Options::max_pending_seeds`].
+  ///
+  /// [`join`](crate::Memberlist::join) queues each routable seed it is not already
+  /// queuing or exchanging state with, and the [`Runner`](crate::Runner) admits them
+  /// as the reliable pool has room; this caps how many may WAIT, and a seed offered
+  /// past it is dropped rather than failing the call. The engine's field docs carry
+  /// the full contract.
+  ///
+  /// Must be non-zero. Defaults to
+  /// [`memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS`].
+  pub max_pending_seeds: usize,
+  /// The engine's beyond-capacity parked-dial ceiling, forwarded to
+  /// [`memberlist_embedded::Options::max_pending_dials`].
+  ///
+  /// The bound is on the EXCESS — parked dials minus free pool slots — so a burst
+  /// with `F` free slots parks the first `F + max_pending_dials` and refuses the
+  /// rest, which [`send_reliable`](crate::Memberlist::send_reliable) reports at the
+  /// call site as [`OpError::DialBacklogFull`](crate::OpError::DialBacklogFull). The
+  /// engine's field docs carry the full contract.
+  ///
+  /// Must be non-zero. Defaults to
+  /// [`memberlist_embedded::DEFAULT_MAX_PENDING_DIALS`].
+  pub max_pending_dials: usize,
   /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
   /// inbound reliable connections by peer address at the transport boundary, AND
   /// inbound alives by the peer's self-advertised address at membership
@@ -57,6 +93,9 @@ impl Default for Options {
       tcp_socket_tx_bytes: 4096,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
       socket_timeout: Duration::from_secs(15),
+      gossip_read_cap: memberlist_embedded::GOSSIP_READ_CAP,
+      max_pending_seeds: memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS,
+      max_pending_dials: memberlist_embedded::DEFAULT_MAX_PENDING_DIALS,
       #[cfg(feature = "cidr")]
       cidr_policy: None,
     }
@@ -97,6 +136,27 @@ impl Options {
   /// Override the per-socket inactivity timeout (see [`Options::socket_timeout`]).
   pub fn with_socket_timeout(mut self, d: Duration) -> Self {
     self.socket_timeout = d;
+    self
+  }
+
+  /// Override the engine's per-pump gossip work ceiling (see
+  /// [`Options::gossip_read_cap`]). Must be non-zero.
+  pub fn with_gossip_read_cap(mut self, cap: usize) -> Self {
+    self.gossip_read_cap = cap;
+    self
+  }
+
+  /// Override the engine's join-seed queue ceiling (see
+  /// [`Options::max_pending_seeds`]). Must be non-zero.
+  pub fn with_max_pending_seeds(mut self, cap: usize) -> Self {
+    self.max_pending_seeds = cap;
+    self
+  }
+
+  /// Override the engine's beyond-capacity parked-dial ceiling (see
+  /// [`Options::max_pending_dials`]). Must be non-zero.
+  pub fn with_max_pending_dials(mut self, cap: usize) -> Self {
+    self.max_pending_dials = cap;
     self
   }
 

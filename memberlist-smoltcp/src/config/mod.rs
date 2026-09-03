@@ -101,6 +101,29 @@ pub struct Options {
   /// recovery. A healthy close completes well before this and is reclaimed the
   /// moment it reaches `Closed`; the timeout only governs the vanished-peer case.
   pub close_timeout: Duration,
+  /// The engine's join-seed queue ceiling, forwarded to
+  /// [`memberlist_embedded::Options::max_pending_seeds`].
+  ///
+  /// [`join`](crate::Memberlist::join) queues each routable seed it is not already
+  /// queuing or exchanging state with, and a [`poll`](crate::Memberlist::poll)
+  /// admits them as the TCP pool has room; this caps how many may WAIT, and a seed
+  /// offered past it is dropped rather than failing the call. The engine's field
+  /// docs carry the full contract.
+  ///
+  /// Must be non-zero. Defaults to
+  /// [`memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS`].
+  pub max_pending_seeds: usize,
+  /// The engine's beyond-capacity parked-dial ceiling, forwarded to
+  /// [`memberlist_embedded::Options::max_pending_dials`].
+  ///
+  /// The bound is on the EXCESS — parked dials minus free pool sockets — so a burst
+  /// with `F` free sockets parks the first `F + max_pending_dials` and refuses the
+  /// rest, which [`send_reliable`](crate::Memberlist::send_reliable) reports at the
+  /// call site as backpressure. The engine's field docs carry the full contract.
+  ///
+  /// Must be non-zero. Defaults to
+  /// [`memberlist_embedded::DEFAULT_MAX_PENDING_DIALS`].
+  pub max_pending_dials: usize,
   /// CIDR peer-admission policy. Filters inbound gossip by datagram source and
   /// inbound reliable connections by peer address at the transport boundary, AND
   /// inbound alives by the peer's self-advertised address at membership
@@ -125,6 +148,8 @@ impl Default for Options {
       gossip_read_cap: memberlist_embedded::GOSSIP_READ_CAP,
       ingress_packets_per_poll: DEFAULT_INGRESS_PACKETS_PER_POLL,
       close_timeout: DEFAULT_CLOSE_TIMEOUT,
+      max_pending_seeds: memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS,
+      max_pending_dials: memberlist_embedded::DEFAULT_MAX_PENDING_DIALS,
       #[cfg(feature = "cidr")]
       cidr_policy: None,
     }
@@ -167,6 +192,20 @@ impl Options {
   /// [`Options::ingress_packets_per_poll`]). Must be non-zero.
   pub fn with_ingress_packets_per_poll(mut self, n: usize) -> Self {
     self.ingress_packets_per_poll = n;
+    self
+  }
+
+  /// Override the engine's join-seed queue ceiling (see
+  /// [`Options::max_pending_seeds`]). Must be non-zero.
+  pub fn with_max_pending_seeds(mut self, cap: usize) -> Self {
+    self.max_pending_seeds = cap;
+    self
+  }
+
+  /// Override the engine's beyond-capacity parked-dial ceiling (see
+  /// [`Options::max_pending_dials`]). Must be non-zero.
+  pub fn with_max_pending_dials(mut self, cap: usize) -> Self {
+    self.max_pending_dials = cap;
     self
   }
 

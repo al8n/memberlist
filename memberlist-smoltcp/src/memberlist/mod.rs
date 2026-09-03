@@ -152,15 +152,18 @@ fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
 ///
 /// The `Options` name collision: the driver's `crate::Options` carries
 /// link-layer sizing (socket buffers, UDP arenas, `tcp_pool_size`) that stays on
-/// the driver, while `memberlist_embedded::Options` carries only the port and
-/// close timeout (plus the CIDR policy) the engine reads directly. Built once,
-/// up front, so the same value drives both the construction preflight
+/// the driver, while `memberlist_embedded::Options` carries the protocol policy
+/// the engine reads directly — the port, the close timeout, the per-pump gossip
+/// work ceiling, the two reliable-dial admission ceilings, and the CIDR policy.
+/// Built once, up front, so the same value drives both the construction preflight
 /// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
 fn embedded_options(cfg: &Options) -> memberlist_embedded::Options {
   let opts = memberlist_embedded::Options::new()
     .with_port(cfg.port)
     .with_close_timeout(cfg.close_timeout)
-    .with_gossip_read_cap(cfg.gossip_read_cap);
+    .with_gossip_read_cap(cfg.gossip_read_cap)
+    .with_max_pending_seeds(cfg.max_pending_seeds)
+    .with_max_pending_dials(cfg.max_pending_dials);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]

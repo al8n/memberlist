@@ -28,7 +28,7 @@ use memberlist_embassy::{
   EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, Options, Runner,
   SocketAddrResolver, TransformOptions, event::Event, now,
 };
-use memberlist_embedded::{InitError as EngineInitError, Options as EngineOptions};
+use memberlist_embedded::InitError as EngineInitError;
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
 use smol_str::SmolStr;
 
@@ -103,20 +103,22 @@ fn build_stack<'a>(
   embassy_net::new(device, config, resources, seed)
 }
 
-/// Build one node (id, last-octet, seed) over an existing stack and bufs.
-fn node<'a>(
+/// Build one node (id, last-octet, seed) over an existing stack and bufs with a
+/// caller-supplied `Options`, surfacing the construction verdict.
+fn try_node_with<'a>(
   stack: Stack<'a>,
   bufs: &'a mut NodeBufs,
+  cfg: Options,
   id: &str,
   last: u8,
   seed: u64,
-) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
+) -> Result<(Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>), InitError> {
   let (udp, tcp) = build_sockets(stack, bufs);
   // `SocketAddrResolver` resolves synchronously (it never suspends), so drive the
   // now-async constructor to completion inline — this helper stays sync and its
   // call sites (which run before the test's own `block_on`) are unchanged.
   block_on(Memberlist::new_with_rng::<_, POOL>(
-    Options::new(),
+    cfg,
     TransformOptions::default(),
     EndpointOptions::new(SmolStr::new(id), addr(last, 7946)),
     &SocketAddrResolver,
@@ -125,7 +127,29 @@ fn node<'a>(
     now(),
     SmallRng::seed_from_u64(seed),
   ))
-  .expect("build node")
+}
+
+/// Build one node with a caller-supplied `Options` that is expected to construct.
+fn node_with<'a>(
+  stack: Stack<'a>,
+  bufs: &'a mut NodeBufs,
+  cfg: Options,
+  id: &str,
+  last: u8,
+  seed: u64,
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
+  try_node_with(stack, bufs, cfg, id, last, seed).expect("build node")
+}
+
+/// Build one node (id, last-octet, seed) on the shipped defaults.
+fn node<'a>(
+  stack: Stack<'a>,
+  bufs: &'a mut NodeBufs,
+  id: &str,
+  last: u8,
+  seed: u64,
+) -> (Memberlist<SmolStr, SocketAddr>, Runner<'a, SmolStr, POOL>) {
+  node_with(stack, bufs, Options::new(), id, last, seed)
 }
 
 /// Drive `op` against both memberlist run loops, both stack run loops, and the
@@ -232,6 +256,87 @@ fn udp_socket_at_or_above_the_gossip_read_cap_rejected() {
   // The 16-slot socket the rest of this suite uses is below the cap and builds.
   let mut bufs = NodeBufs::new();
   let (_ml, _run) = node(stack, &mut bufs, "under", 1, 2);
+}
+
+/// A zero `gossip_read_cap` is rejected as the knob itself. The receive-ring screen
+/// is strictly below the cap, so zero admits no gossip ring at all — every socket
+/// would be refused for a capacity no value could meet.
+///
+/// The verdict comes from the engine's config preflight, which construction runs
+/// before it resolves the advertise address or binds a socket, and reaches the
+/// caller through this driver's `InitError::Engine`.
+#[test]
+fn zero_gossip_read_cap_rejected() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let rejected = try_node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_gossip_read_cap(0),
+    "zero-read-cap",
+    1,
+    1,
+  );
+  match rejected.map(|_| ()) {
+    Err(InitError::Engine(EngineInitError::ZeroGossipReadCap)) => {}
+    Err(other) => panic!("a zero gossip_read_cap must be rejected as the knob itself, got {other}"),
+    Ok(()) => panic!("a zero gossip_read_cap must be rejected"),
+  }
+}
+
+/// A zero `max_pending_seeds` is rejected as the knob itself. The engine queues a
+/// join seed only while the queue is below the cap, so zero queues nothing: every
+/// `join` would return `Ok` having silently dropped every seed.
+#[test]
+fn zero_max_pending_seeds_rejected() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let rejected = try_node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_seeds(0),
+    "zero-seeds",
+    1,
+    1,
+  );
+  match rejected.map(|_| ()) {
+    Err(InitError::Engine(EngineInitError::ZeroMaxPendingSeeds)) => {}
+    Err(other) => {
+      panic!("a zero max_pending_seeds must be rejected as the knob itself, got {other}")
+    }
+    Ok(()) => panic!("a zero max_pending_seeds must be rejected"),
+  }
+}
+
+/// A zero `max_pending_dials` is rejected as the knob itself. The cap bounds parked
+/// dials in EXCESS of the free pool, so zero refuses every dial the pool cannot
+/// absorb at once — including the first one made while the pool is momentarily
+/// empty — leaving a busy node unable to join or send a reliable message.
+#[test]
+fn zero_max_pending_dials_rejected() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let rejected = try_node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_dials(0),
+    "zero-dials",
+    1,
+    1,
+  );
+  match rejected.map(|_| ()) {
+    Err(InitError::Engine(EngineInitError::ZeroMaxPendingDials)) => {}
+    Err(other) => {
+      panic!("a zero max_pending_dials must be rejected as the knob itself, got {other}")
+    }
+    Ok(()) => panic!("a zero max_pending_dials must be rejected"),
+  }
 }
 
 /// The sync query/accessor surface reports a coherent single-node view at
@@ -407,13 +512,20 @@ fn reliable_send_past_the_dial_backlog_reports_backpressure() {
   let mut res = StackResources::<{ POOL + 2 }>::new();
   let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
   let mut bufs = NodeBufs::new();
-  let (ml, _run) = node(stack, &mut bufs, "backlog", 1, 1);
 
-  // This driver's `Options` carries no dial ceiling of its own, so the node runs the
-  // engine default; read it from the same source the driver hands the engine rather
-  // than restating the number here.
-  let cap = EngineOptions::new().max_pending_dials;
-  let admitted = ml.pool_free_count() + cap;
+  // Drive an explicit ceiling through the driver's own `Options` rather than the
+  // engine default, so the bound this test asserts is the one it configured — and a
+  // small one, to keep the admitted burst short.
+  const MAX_PENDING_DIALS: usize = 2;
+  let (ml, _run) = node_with(
+    stack,
+    &mut bufs,
+    Options::new().with_max_pending_dials(MAX_PENDING_DIALS),
+    "backlog",
+    1,
+    1,
+  );
+  let admitted = ml.pool_free_count() + MAX_PENDING_DIALS;
 
   // Within the free pool plus the excess bound every send is admitted and parks on
   // its completion signal: nothing pumps, so none of them can resolve.
