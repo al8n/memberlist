@@ -1736,6 +1736,191 @@ fn re_offered_seeds_past_the_cap_are_admitted_round_robin() {
   );
 }
 
+/// The same seed SET offered in a DIFFERENT order each time must still reach every
+/// entry in it.
+///
+/// A cursor into the previous list rotates only while the caller's order holds
+/// still. Alternating `[dead, live]` with `[live, dead]` — what a re-resolution
+/// that reorders its candidates produces — puts the resumed index back on the
+/// failing seed every time, so the reachable one is never dialed at all. Ranking by
+/// ADDRESS instead makes the seed a call had no room for rank first on the next
+/// one, whatever position the caller then gives it. That bounds a two-address set
+/// at two offers: the first admits one of the pair, and if that was the failing
+/// seed the rotation now names the other.
+#[cfg(feature = "cidr")]
+#[test]
+fn reordered_re_offers_cannot_starve_a_reachable_seed() {
+  use memberlist_proto::CidrPolicy;
+
+  // The policy covers this node and `live`, but not `dead`: a blocked peer's dial
+  // is rejected before `connect`, which terminalizes the exchange and frees its
+  // slot in the same pump, so `dead` is admissible all over again by the next
+  // offer.
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
+  let live = node_addr(7003);
+  let mut gossip = NoGossip;
+
+  let mut offers = 0u64;
+  while offers < 20 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    if offers.is_multiple_of(2) {
+      engine.join(&[dead, live]).expect("join is accepted");
+    } else {
+      engine.join(&[live, dead]).expect("join is accepted");
+    }
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed however the caller reorders the list, got {:?}",
+    stream.connects
+  );
+  assert!(
+    offers <= 2,
+    "a two-address set must reach its reachable entry within two offers, took {offers}"
+  );
+  assert!(
+    !stream.connects.iter().any(|(_, a)| *a == dead),
+    "a blocked seed is rejected before connect, so it may never reach the wire"
+  );
+}
+
+/// Two callers offering DIFFERENT seed lists into one queue must not shut each
+/// other's entries out.
+///
+/// A positional cursor cannot survive this at all: each list is scanned from the
+/// index the other list's offer left behind, so with a one-slot queue the two lists
+/// pin each other on their first entry and the reachable seed in `[dead1, live]` is
+/// never admitted, however long either caller retries. Ranks come from the
+/// addresses, so each offer sheds relative to the same order and the rotation walks
+/// on to entries that have not had a turn.
+///
+/// The two lists share the one rotation, so a seed's turn can be deferred by the
+/// other list's offers: the reachable seed here is admitted on the third offer
+/// rather than the first, within the four distinct addresses on the rank circle.
+#[cfg(feature = "cidr")]
+#[test]
+fn interleaved_offers_from_two_lists_reach_every_reachable_seed() {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Every `dead` is outside the policy, so its dial fails inside the pump that
+  // admitted it and frees the slot again before the next offer.
+  let dead1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
+  let dead2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 7004);
+  let dead3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)), 7005);
+  let live = node_addr(7003);
+  let mut gossip = NoGossip;
+
+  let mut offers = 0u64;
+  while offers < 20 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    if offers.is_multiple_of(2) {
+      engine.join(&[dead1, live]).expect("join is accepted");
+    } else {
+      engine.join(&[dead2, dead3]).expect("join is accepted");
+    }
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed despite the other list's offers, got {:?}",
+    stream.connects
+  );
+  assert!(
+    offers <= 4,
+    "the reachable seed must be reached within the four distinct addresses offered, took {offers}"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    offers,
+    "every offer holds two candidates and the queue one slot, so each sheds exactly one"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "no address is offered twice while it is queued or mid-exchange"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "only the routable seed reaches the wire, got {:?}",
+    stream.connects
+  );
+}
+
+/// A repeat of an address WITHIN one offer is a duplicate, not shed load: it takes
+/// no second slot, and it must be counted as deduped rather than as a seed the cap
+/// turned away. Only the distinct address that found no room is a drop.
+#[test]
+fn a_duplicate_within_one_offer_is_deduped_not_dropped() {
+  let cfg = admission_cfg().with_max_pending_seeds(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  // The single slot goes to whichever of the pair ranks lower, so name that one
+  // `a`: its repeat is then the duplicate, and `b` is what the cap sheds.
+  let (a, b) = {
+    let x = node_addr(7002);
+    let y = node_addr(7003);
+    if seed_rank_key(&x) < seed_rank_key(&y) {
+      (x, y)
+    } else {
+      (y, x)
+    }
+  };
+
+  engine.join(&[a, a, b]).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seeds.front(),
+    Some(&a),
+    "the lower-ranked address takes the only slot"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the repeat must not take a second slot"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    1,
+    "the repeat is a duplicate of an address this very call queued"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    1,
+    "only the distinct address the cap turned away is a drop"
+  );
+}
+
 /// Seeds are handed to the machine as the pool can back them, plus ONE head that
 /// holds the queue's place in the dial order. Everything past the head stays a bare
 /// address — no bridge, no full-state encoding, no deadline — so a long seed list

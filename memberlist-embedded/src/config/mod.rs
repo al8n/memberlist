@@ -101,7 +101,10 @@ pub struct Options {
   /// seed offered past the cap is dropped and counted
   /// ([`Engine::join_seeds_dropped`](crate::Engine::join_seeds_dropped)) rather
   /// than rejecting the call: a seed list is best-effort discovery intent, and the
-  /// engine already drops non-routable seeds silently.
+  /// engine already drops non-routable seeds silently. WHICH seeds a full queue
+  /// sheds follows a stable per-address order rather than the caller's, so
+  /// repeated offers of an over-cap list reach every entry in it round-robin (see
+  /// [`Engine::join`](crate::Engine::join)).
   ///
   /// A queued seed waits behind at most the dials already outstanding when the pump
   /// admitted it, never behind ones requested later: alongside the seeds the pool

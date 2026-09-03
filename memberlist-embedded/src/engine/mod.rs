@@ -32,7 +32,7 @@ use smallvec_wrapper::MediumVec;
 
 use crate::{
   GossipIo, InitError, Options, SlotGen, StreamIo, TransformOptions,
-  addr::socket_addr_is_routable,
+  addr::{seed_rank_key, socket_addr_is_routable},
   cidr::{CidrFilter, cidr_blocks},
   error::GossipMtuTooLarge,
   reliable::{ConnState, Connection, ReliablePlane, RetirePhase, Retiring},
@@ -355,19 +355,29 @@ pub struct Engine<I, C, R = SmallRng> {
   /// drives the actual exchange state, while this queue records which seeds are
   /// still waiting for a first contact attempt.
   pending_seeds: VecDeque<SocketAddr>,
-  /// Where the next [`join`](Self::join) scan starts within the offered seed list:
-  /// the index of the first entry the previous call had no room to queue, taken
-  /// modulo the length of whatever list is offered next.
+  /// Where the next [`join`](Self::join) admission starts on the per-address rank
+  /// circle: the [`seed_rank_key`] of the first seed the previous call had no room
+  /// for. Every rank in a call is taken relative to this, so that seed ranks first
+  /// on the next offer and successive offers sweep the circle round-robin.
   ///
   /// The rotation lives here, and not in a driver's retry loop, because the engine's
   /// admission contract is that the caller re-offers its whole seed list and this
   /// side dedups the repeats — a caller that had to reorder its own list to get past
   /// the cap would need to know the cap, and every driver would need the same
-  /// bookkeeping. Scanning in caller order every time admits the same prefix forever:
-  /// a list longer than `max_pending_seeds` drops its tail on every offer, so a
-  /// reachable seed sitting behind one that keeps failing fast is never dialed at
-  /// all, however long the caller retries.
-  join_cursor: usize,
+  /// bookkeeping. Admitting in caller order every time admits the same prefix
+  /// forever: a list longer than `max_pending_seeds` drops its tail on every offer,
+  /// so a reachable seed sitting behind one that keeps failing fast is never dialed
+  /// at all, however long the caller retries.
+  ///
+  /// Rotating by ADDRESS rather than by position in the previous list is what makes
+  /// that hold for a list the caller does not present identically every time. A
+  /// positional cursor only rotates while the order holds still: a re-resolution
+  /// that reorders the candidates, or a second caller's differently-ordered offer,
+  /// moves the same index onto a different address, and an offer alternating
+  /// between two orders can land on the failing seed every single time. A rank key
+  /// is a property of the address, so neither reordering nor which caller made the
+  /// offer changes who gets the slot.
+  join_rotation: u64,
   /// Maps each outbound reliable exchange's [`ExchangeId`] to the [`StreamId`] the
   /// originating `send_reliable` / `join` / probe call returned, captured from the
   /// `Connect` action (which carries both ids). [`poll_event`](Self::poll_event)
@@ -946,11 +956,24 @@ where
   /// does not suppress the seed, since it is a different exchange and would leave
   /// the join with nothing outstanding.
   ///
-  /// Which seeds a full queue sheds rotates across calls: a scan resumes at the
-  /// entry the previous call first had no room for, and wraps, so repeated offers
-  /// of a list longer than the queue cap reach every entry round-robin. A caller
-  /// re-offering its list therefore never starves a reachable seed behind one that
-  /// keeps failing.
+  /// Which seeds a full queue keeps depends only on the SET of addresses offered:
+  /// each address carries a stable rank derived from the address itself, a call
+  /// admits the lowest-ranked entries it has room for, and the rotation then moves
+  /// to the first entry it had no room for, so that entry ranks first next time.
+  /// Repeated offers of one address set therefore admit its entries round-robin
+  /// over that stable order, every entry reached within
+  /// `⌈distinct routable addresses ÷ free queue slots⌉` offers — no reachable seed
+  /// can be starved behind one that keeps failing, however the caller orders the
+  /// list, however a re-resolution reorders it, and whichever caller makes a given
+  /// offer.
+  ///
+  /// Offers of DIFFERENT address sets share the one rotation, and each moves it
+  /// past its own unserved entry, so a seed's turn can be deferred by the other
+  /// set's offers — and for an interleaving whose dials all fail inside the very
+  /// pump that made them, indefinitely. What keeps that from arising is the dedup
+  /// above: a seed admitted from one set stays deduped for the life of its
+  /// exchange, so a dial that takes any time at all leaves the turns in between to
+  /// the addresses that have not been tried.
   ///
   /// # Ordering
   ///
@@ -972,98 +995,140 @@ where
     // Reject rather than enqueue work the pump would skip.
     self.ensure_running()?;
 
-    // Nothing to scan — and the rotating start below needs a non-empty list to take
-    // its remainder against.
+    // Nothing offered: no seed to admit, and no unserved entry to rotate onto.
     if seeds.is_empty() {
       return Ok(());
     }
 
-    // Start where the last call ran out of room and wrap, so a re-offered list is
-    // scanned round-robin rather than always from its head. Every entry is still
-    // examined exactly once per call, in the same order of predicates, so each one
-    // is classified — queued, deduped, dropped — exactly as before; only WHICH of
-    // them the cap sheds moves between calls.
-    let start = self.join_cursor % seeds.len();
-    let mut first_drop = None;
-    for offset in 0..seeds.len() {
-      let idx = (start + offset) % seeds.len();
-      let s = &seeds[idx];
+    // Admit by RANK, not by position. An entry's rank is its stable per-address key
+    // taken relative to the rotation, so which entries a full queue keeps depends
+    // only on the SET of addresses offered — never on the order this caller listed
+    // them in, nor on which caller offered them. Picking the lowest-ranked entries
+    // by repeated linear scan rather than by sorting leaves the caller's list
+    // untouched and allocates only this index list, whose length is bounded by the
+    // queue cap rather than by the length of the offer.
+    let mut admitted: MediumVec<usize> = MediumVec::new();
+    let mut room = self
+      .cfg
+      .max_pending_seeds
+      .saturating_sub(self.pending_seeds.len());
+    while room > 0 {
+      let mut best: Option<(usize, u64)> = None;
+      for (idx, seed) in seeds.iter().enumerate() {
+        // Skip a non-routable seed (unspecified/multicast/broadcast IP or port 0):
+        // it could only produce a doomed dial — the link layer's `connect` rejects
+        // the unspecified address and port 0, and the rest are addresses no dial
+        // can usefully reach. Queue only seeds a dial can actually complete.
+        if !socket_addr_is_routable(seed) {
+          continue;
+        }
 
-      // Drop a non-routable seed (unspecified/multicast/broadcast IP or port 0):
-      // it could only produce a doomed dial — the link layer's `connect` rejects
-      // the unspecified address and port 0, and the rest are addresses no dial can
-      // usefully reach. Queue only seeds a dial can actually complete.
-      //
-      // Not counted as a drop: it is a malformed seed, not shed load, and the
-      // engine has always discarded it silently.
-      if !socket_addr_is_routable(s) {
+        let rank = seed_rank_key(seed).wrapping_sub(self.join_rotation);
+        // Rank first, admissibility second. `>=` also discards ties, so repeats of
+        // one address within this offer resolve to the first of them, and the
+        // admissibility test — the costlier half of which walks the connection
+        // table — runs only for an entry that would actually win the slot.
+        if best.is_some_and(|(_, best_rank)| rank >= best_rank) {
+          continue;
+        }
+        // A repeat of an address this call already picked consumes no second slot;
+        // the pass below counts it as deduped rather than shed.
+        if admitted.iter().any(|&taken| seeds[taken] == *seed) {
+          continue;
+        }
+        if self.is_join_candidate(seed) {
+          best = Some((idx, rank));
+        }
+      }
+
+      let Some((idx, _)) = best else {
+        break;
+      };
+      admitted.push(idx);
+      room -= 1;
+    }
+
+    // Queue the admitted seeds in the order the caller listed them. Rank decides
+    // WHICH entries a full queue keeps; the caller's own order still decides the
+    // order they are dialed in, so a call that sheds nothing leaves the dial order
+    // exactly as it was offered.
+    admitted.sort_unstable();
+    for &idx in admitted.iter() {
+      self.pending_seeds.push_back(seeds[idx]);
+    }
+
+    // Classify every entry the admission pass did not take, exactly once each.
+    let mut first_unserved: Option<(u64, u64)> = None;
+    for (idx, seed) in seeds.iter().enumerate() {
+      // A non-routable seed is not counted as shed: it is a malformed seed rather
+      // than shed load, and the engine has always discarded it silently.
+      if !socket_addr_is_routable(seed) || admitted.contains(&idx) {
         continue;
       }
 
-      // Already queued: `join(&[a, a, a])` — or a caller re-offering its whole seed
-      // list — must not turn one address into several exchanges. Address-keyed, so
-      // the queue holds each destination at most once.
-      if self.pending_seeds.contains(s) {
+      if !self.is_join_candidate(seed) {
         self.join_seeds_deduped += 1;
         continue;
       }
 
-      // A JOIN exchange to this address is already under way: a second push/pull
-      // toward it would re-encode the WHOLE local membership for a peer we are
-      // mid-exchange with, and would collide at that peer's single reliable listener
-      // anyway (the second dial is RST during the first's handshake — see
-      // `send_reliable`). This is what bounds the retry loop: at most one join
-      // exchange per seed address is in flight at a time, so full-state encodings
-      // scale with completed exchanges, not with call rate. `Closing` is excluded
-      // because the machine has already finished that exchange, so a fresh attempt
-      // is legitimate.
-      //
-      // Scoped to join intent — `from_seed` — and NOT to any connection that happens
-      // to share the address. A user message or reliable ping to a seed is a
-      // different exchange with a different purpose: suppressing the seed against it
-      // discards the join outright (the call still returns `Ok`) and leaves a caller
-      // awaiting `is_joined()` with no attempt outstanding at all, until its own
-      // timeout. What the wider predicate bought was avoiding a dial that collides
-      // in the peer's handshake window; that collision merely fails the dial, and
-      // the caller's retry loop re-offers the seed — the same caveat `send_reliable`
-      // already documents for concurrent reliable streams to one peer.
-      if self
+      // Queue full. Shed the surplus and count it rather than failing the call: the
+      // return type carries no fitting variant, and truncating best-effort discovery
+      // intent is preferable to rejecting a whole seed list because part of it did
+      // not fit. The cap only bites on more distinct routable seeds at once than a
+      // small reliable pool could service within any sane join deadline.
+      self.join_seeds_dropped += 1;
+      let key = seed_rank_key(seed);
+      let rank = key.wrapping_sub(self.join_rotation);
+      if first_unserved.is_none_or(|(_, lowest)| rank < lowest) {
+        first_unserved = Some((key, rank));
+      }
+    }
+
+    // Only a call that actually shed a seed moves the rotation, and it moves to the
+    // lowest-ranked seed it had no room for: that seed ranks 0 on the next offer, so
+    // it is admitted ahead of every other entry, and successive offers sweep the
+    // whole address set. A call that fit everything it offered leaves the rotation
+    // alone — there is no unserved entry to resume from, and moving it would rotate
+    // an offer that never needed rotating.
+    if let Some((key, _)) = first_unserved {
+      self.join_rotation = key;
+    }
+    Ok(())
+  }
+
+  /// Whether this seed address still needs a place in the join queue.
+  ///
+  /// False once the address is already queued: `join(&[a, a, a])` — or a caller
+  /// re-offering its whole seed list — must not turn one address into several
+  /// exchanges, and the queue is address-keyed, so it holds each destination at
+  /// most once.
+  ///
+  /// False, too, while a JOIN exchange to this address is already under way: a
+  /// second push/pull toward it would re-encode the WHOLE local membership for a
+  /// peer we are mid-exchange with, and would collide at that peer's single
+  /// reliable listener anyway (the second dial is RST during the first's handshake
+  /// — see [`send_reliable`](Self::send_reliable)). This is what bounds the retry
+  /// loop: at most one join exchange per seed address is in flight at a time, so
+  /// full-state encodings scale with completed exchanges, not with call rate.
+  /// `Closing` is excluded because the machine has already finished that exchange,
+  /// so a fresh attempt is legitimate.
+  ///
+  /// Scoped to join intent — `from_seed` — and NOT to any connection that happens
+  /// to share the address. A user message or reliable ping to a seed is a different
+  /// exchange with a different purpose: suppressing the seed against it discards
+  /// the join outright (the call still returns `Ok`) and leaves a caller awaiting
+  /// `is_joined()` with no attempt outstanding at all, until its own timeout. What
+  /// the wider predicate bought was avoiding a dial that collides in the peer's
+  /// handshake window; that collision merely fails the dial, and the caller's retry
+  /// loop re-offers the seed — the same caveat `send_reliable` already documents
+  /// for concurrent reliable streams to one peer.
+  fn is_join_candidate(&self, seed: &SocketAddr) -> bool {
+    !self.pending_seeds.contains(seed)
+      && !self
         .plane
         .connections
         .values()
-        .any(|c| c.from_seed && c.peer == *s && c.state != ConnState::Closing)
-      {
-        self.join_seeds_deduped += 1;
-        continue;
-      }
-
-      // Queue full. Drop the surplus and count it rather than failing the call: the
-      // return type carries no fitting variant, and truncating best-effort discovery
-      // intent is preferable to rejecting a whole seed list because its tail did not
-      // fit. The cap only bites on more distinct routable seeds at once than a small
-      // reliable pool could service within any sane join deadline.
-      if self.pending_seeds.len() >= self.cfg.max_pending_seeds {
-        self.join_seeds_dropped += 1;
-        // Remember the FIRST entry this call had no room for: it is the one the next
-        // offer of the same list must start with, so the queue's slots move on to the
-        // seeds that have not had a turn yet.
-        if first_drop.is_none() {
-          first_drop = Some(idx);
-        }
-        continue;
-      }
-
-      self.pending_seeds.push_back(*s);
-    }
-
-    // Only a call that actually shed a seed advances the rotation. A call that fit
-    // everything it offered leaves the cursor alone: there is no unserved entry to
-    // resume from, and moving it would rotate the scan of a list that never needed
-    // rotating.
-    if let Some(idx) = first_drop {
-      self.join_cursor = idx;
-    }
-    Ok(())
+        .any(|c| c.from_seed && c.peer == *seed && c.state != ConnState::Closing)
   }
 
   /// Queue an application user-data payload for piggyback gossip to peers.
@@ -1577,7 +1642,7 @@ where
       plane: ReliablePlane::new(),
       gossip_recv,
       pending_seeds: VecDeque::new(),
-      join_cursor: 0,
+      join_rotation: 0,
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
       label,
