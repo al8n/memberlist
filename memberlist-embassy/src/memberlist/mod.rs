@@ -537,12 +537,15 @@ where
   /// The resolved seeds are REGISTERED with the node's join loop, which offers the
   /// union of every live join's seeds to the engine once per interval until each of
   /// them completes; this future then parks until `is_joined()`. Every parked join owns
-  /// a waker slot of its own, so both wake sources — a Runner that drained machine
-  /// events, and [`leave`](Self::leave) — reach EVERY one of them, however many joins
-  /// and however many tasks they are spread over. A call's seeds are withdrawn when its
-  /// future ends — returned, cancelled or dropped. A non-routable seed is dropped by
-  /// the engine. The caller owns the overall deadline (drive this under a `select` with
-  /// a timeout).
+  /// a waker entry of its own, so both wake sources — a Runner that drained an event
+  /// ADDING a member, and [`leave`](Self::leave) — reach EVERY one of them, however
+  /// many joins and however many tasks they are spread over. Nothing else wakes them:
+  /// the node's other traffic cannot change either answer this future re-checks, and
+  /// the re-offer below is paced by the Runner's own clock rather than by a wake.
+  ///
+  /// A call's seeds are withdrawn when its future ends — returned, cancelled or
+  /// dropped. A non-routable seed is dropped by the engine. The caller owns the
+  /// overall deadline (drive this under a `select` with a timeout).
   ///
   /// Offers are paced node-wide: at most one union offer per interval, on a clock
   /// measured from the node's last offer rather than from this call. A join registered
@@ -669,13 +672,14 @@ where
     let offer = self.shared.register_join_offer(&resolved);
     self.shared.wake_pump();
 
-    // Wait for convergence. The node notifies every parked join whenever the Runner
-    // drained machine events — which includes a seed exchange's terminal
-    // `ExchangeCompleted`, so a lost dial is observed here rather than waited out —
-    // and `leave()` notifies too. Those are the only two wake sources, and they are
-    // enough: neither of the checks below can change its answer without one of them.
-    // This join has its own waker slot, so it never depends on some other joiner
-    // having been woken in its place.
+    // Wait for convergence. The node notifies every parked join when the Runner
+    // drained an event that ADDED a member, and `leave()` notifies too. Those are the
+    // only two wake sources, and they are exactly enough: neither of the checks below
+    // can change its answer without one of them, and every other event a pump drains
+    // leaves both answers where they were. A seed exchange that failed needs no wake
+    // of its own — nothing here would re-dial it, and the re-offer that does is paced
+    // by the Runner's own offer clock. This join has its own waker entry, so it never
+    // depends on some other joiner having been woken in its place.
     loop {
       // Read the notify epoch BEFORE the checks below. The wait resolves at once when
       // the epoch has moved since, so a notify that lands after these checks have read
@@ -699,7 +703,7 @@ where
       if shared::is_joined(&self.shared) {
         return Ok(());
       }
-      self.shared.join_wait(offer.slot(), seen).await;
+      self.shared.join_wait(offer.id(), seen).await;
     }
   }
 
@@ -1116,6 +1120,18 @@ where
   #[inline]
   pub fn offer_join_seeds_now(&self) -> bool {
     self.shared.offer_join_seeds_at(time::now()).0
+  }
+
+  /// Drain the machine's pending events here and now, resolving the handle ops they
+  /// terminate and waking every parked [`join`](Self::join) if one of them added a
+  /// member.
+  ///
+  /// The SAME step the [`Runner`] takes after each pump, exposed for tests that drive
+  /// no run loop and would otherwise leave every emitted event queued in the machine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn drain_events_now(&self) {
+    self.shared.drain_events();
   }
 
   /// Replace the gossip+stream compression policy at runtime. Returns

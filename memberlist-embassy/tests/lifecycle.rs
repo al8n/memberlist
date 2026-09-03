@@ -1340,3 +1340,87 @@ fn parked_joins_on_distinct_tasks_stay_dormant_and_both_observe_leave() {
     Poll::Pending => panic!("the second join did not resume on the wake `leave` sent"),
   }
 }
+
+/// A parked join wakes for what can change its answer and for nothing else. The
+/// node's ordinary traffic drains through the same Runner step a membership change
+/// does, so a notify on ANY drained event fans a wake out to every live join for a
+/// re-check whose two conditions — the node's lifecycle and its member count — cannot
+/// have moved.
+///
+/// The unrelated burst here is the node's own metadata updates. They surface as
+/// `NodeUpdated` on a record the node already holds, so they add no member; they are
+/// real drained events, and they need neither a peer nor a clock to produce. The wake
+/// counts are the evidence, and the drained events are counted too so a burst that
+/// somehow produced nothing could not pass for a burst that woke nobody.
+#[test]
+fn unrelated_events_leave_parked_joins_dormant() {
+  use core::{
+    future::Future,
+    task::{Context, Poll},
+  };
+
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  // Clear whatever the node emitted while starting up, so what follows is only about
+  // the events this test drains.
+  ml.drain_events_now();
+  while ml.poll_event().is_some() {}
+
+  let counter = CountingWaker::new();
+  let waker = futures::task::waker(counter.clone());
+  let mut cx = Context::from_waker(&waker);
+
+  let seeds = [MaybeResolved::Resolved(addr(2, 7946))];
+  let mut joining = Box::pin(ml.join(&SocketAddrResolver, &seeds));
+  assert!(
+    joining.as_mut().poll(&mut cx).is_pending(),
+    "the join must park: the node has no peer to converge on"
+  );
+
+  // A burst of events that add no member, drained through the Runner's own path.
+  const BURST: usize = 8;
+  let meta = memberlist_proto::typed::Meta::from_static_str("m").expect("a one-byte meta");
+  for _ in 0..BURST {
+    ml.update_node_metadata(meta.clone())
+      .expect("a running node accepts a metadata update");
+  }
+  ml.drain_events_now();
+
+  let drained = core::iter::from_fn(|| ml.poll_event()).count();
+  assert!(
+    drained >= BURST,
+    "the burst must actually have produced events, got {drained}"
+  );
+  assert_eq!(
+    counter.count(),
+    0,
+    "no member was added, so no parked join may be woken by the node's own traffic"
+  );
+  assert!(
+    joining.as_mut().poll(&mut cx).is_pending(),
+    "and the join is still parked, with nothing to converge on"
+  );
+  assert_eq!(
+    counter.count(),
+    0,
+    "re-polling a parked join wakes nobody either"
+  );
+
+  // A membership addition, through the same path: exactly one wake, and the join
+  // resolves on it.
+  ml.inject_alive(SmolStr::new("peer"), addr(2, 7946));
+  ml.drain_events_now();
+  assert_eq!(
+    counter.count(),
+    1,
+    "the one event that adds a member wakes the parked join exactly once"
+  );
+  match joining.as_mut().poll(&mut cx) {
+    Poll::Ready(res) => res.expect("the node converged, so the join succeeds"),
+    Poll::Pending => panic!("the join did not resume on the wake the addition sent"),
+  }
+}

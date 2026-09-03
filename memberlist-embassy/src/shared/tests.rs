@@ -565,3 +565,81 @@ fn a_join_registering_after_another_ends_still_waits_out_the_interval() {
     "and it is offered at the end of that interval"
   );
 }
+
+/// A burst of joins that is cancelled must not leave its peak pinned behind the one
+/// small join that outlived it: both the seed registry and the waiter vector give
+/// their storage back as the burst's guards drop, so what the node holds — and what a
+/// notify walks — tracks the joins alive NOW.
+///
+/// Releasing only when the last join ends cannot do that. One surviving join, a
+/// single address of sixty-five, would hold the whole burst's capacity and its Θ(N)
+/// notify walk for as long as it lives, and a node whose joins never all end at once
+/// would never release any of it.
+#[test]
+fn a_survivor_does_not_pin_a_cancelled_bursts_capacity() {
+  const BURST: usize = 64;
+
+  let shared = shared_node("survivor", 1);
+
+  // The join that outlives the burst: one address of its own.
+  let survivor_seeds = [sa(200)];
+  let _survivor = shared.register_join_offer(&survivor_seeds);
+
+  // The burst, each join naming a distinct seed so the registry holds one entry per
+  // join and both its vectors grow to the peak.
+  let burst_seeds: Vec<[SocketAddr; 1]> = (0..BURST).map(|i| [sa(i as u8)]).collect();
+  let burst: Vec<_> = burst_seeds
+    .iter()
+    .map(|seeds| shared.register_join_offer(seeds))
+    .collect();
+
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    BURST + 1,
+    "the burst and the survivor are all registered"
+  );
+  assert_eq!(
+    shared.join_notify.waiters.borrow().len(),
+    BURST + 1,
+    "and each of them owns a waiter entry"
+  );
+  let peak = shared.join_offers.borrow().addrs.capacity();
+  assert!(
+    peak > BURST,
+    "the burst grew the registry to its peak, got a capacity of {peak}"
+  );
+
+  // Every one of them is cancelled; only the survivor is still offering.
+  drop(burst);
+
+  assert_eq!(
+    shared.join_offer_addr_count(),
+    1,
+    "only the survivor's address is still offered"
+  );
+  let waiters = shared.join_notify.waiters.borrow().len();
+  assert_eq!(
+    waiters, 1,
+    "a notify walks the live joins, not the burst's high-water mark, got {waiters} \
+     entries"
+  );
+
+  // The shrink rule (a quarter full, down to twice the length) settles at twice the
+  // live length; the assertion allows one allocator step above that and is still an
+  // order of magnitude below the peak it must not hold.
+  let offers = shared.join_offers.borrow();
+  let live = offers.addrs.len();
+  assert_eq!(live, 1, "one live address");
+  assert!(
+    offers.addrs.capacity() <= 4 * live && offers.counts.capacity() <= 4 * live,
+    "the survivor holds storage for the joins alive now, not for the cancelled \
+     burst: addrs {}/{live}, counts {}/{live} (peak was {peak})",
+    offers.addrs.capacity(),
+    offers.counts.capacity()
+  );
+  assert!(
+    shared.join_notify.waiters.borrow().capacity() <= 4,
+    "and so does the waiter vector, got a capacity of {}",
+    shared.join_notify.waiters.borrow().capacity()
+  );
+}
