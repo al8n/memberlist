@@ -355,6 +355,19 @@ pub struct Engine<I, C, R = SmallRng> {
   /// drives the actual exchange state, while this queue records which seeds are
   /// still waiting for a first contact attempt.
   pending_seeds: VecDeque<SocketAddr>,
+  /// Where the next [`join`](Self::join) scan starts within the offered seed list:
+  /// the index of the first entry the previous call had no room to queue, taken
+  /// modulo the length of whatever list is offered next.
+  ///
+  /// The rotation lives here, and not in a driver's retry loop, because the engine's
+  /// admission contract is that the caller re-offers its whole seed list and this
+  /// side dedups the repeats — a caller that had to reorder its own list to get past
+  /// the cap would need to know the cap, and every driver would need the same
+  /// bookkeeping. Scanning in caller order every time admits the same prefix forever:
+  /// a list longer than `max_pending_seeds` drops its tail on every offer, so a
+  /// reachable seed sitting behind one that keeps failing fast is never dialed at
+  /// all, however long the caller retries.
+  join_cursor: usize,
   /// Maps each outbound reliable exchange's [`ExchangeId`] to the [`StreamId`] the
   /// originating `send_reliable` / `join` / probe call returned, captured from the
   /// `Connect` action (which carries both ids). [`poll_event`](Self::poll_event)
@@ -933,6 +946,12 @@ where
   /// does not suppress the seed, since it is a different exchange and would leave
   /// the join with nothing outstanding.
   ///
+  /// Which seeds a full queue sheds rotates across calls: a scan resumes at the
+  /// entry the previous call first had no room for, and wraps, so repeated offers
+  /// of a list longer than the queue cap reach every entry round-robin. A caller
+  /// re-offering its list therefore never starves a reachable seed behind one that
+  /// keeps failing.
+  ///
   /// # Ordering
   ///
   /// A queued seed waits behind at most the dials that were already outstanding
@@ -952,7 +971,24 @@ where
     // during the graceful-leave drain, so queued seeds could never take effect.
     // Reject rather than enqueue work the pump would skip.
     self.ensure_running()?;
-    for s in seeds {
+
+    // Nothing to scan — and the rotating start below needs a non-empty list to take
+    // its remainder against.
+    if seeds.is_empty() {
+      return Ok(());
+    }
+
+    // Start where the last call ran out of room and wrap, so a re-offered list is
+    // scanned round-robin rather than always from its head. Every entry is still
+    // examined exactly once per call, in the same order of predicates, so each one
+    // is classified — queued, deduped, dropped — exactly as before; only WHICH of
+    // them the cap sheds moves between calls.
+    let start = self.join_cursor % seeds.len();
+    let mut first_drop = None;
+    for offset in 0..seeds.len() {
+      let idx = (start + offset) % seeds.len();
+      let s = &seeds[idx];
+
       // Drop a non-routable seed (unspecified/multicast/broadcast IP or port 0):
       // it could only produce a doomed dial — the link layer's `connect` rejects
       // the unspecified address and port 0, and the rest are addresses no dial can
@@ -1008,10 +1044,24 @@ where
       // reliable pool could service within any sane join deadline.
       if self.pending_seeds.len() >= self.cfg.max_pending_seeds {
         self.join_seeds_dropped += 1;
+        // Remember the FIRST entry this call had no room for: it is the one the next
+        // offer of the same list must start with, so the queue's slots move on to the
+        // seeds that have not had a turn yet.
+        if first_drop.is_none() {
+          first_drop = Some(idx);
+        }
         continue;
       }
 
       self.pending_seeds.push_back(*s);
+    }
+
+    // Only a call that actually shed a seed advances the rotation. A call that fit
+    // everything it offered leaves the cursor alone: there is no unserved entry to
+    // resume from, and moving it would rotate the scan of a list that never needed
+    // rotating.
+    if let Some(idx) = first_drop {
+      self.join_cursor = idx;
     }
     Ok(())
   }
@@ -1527,6 +1577,7 @@ where
       plane: ReliablePlane::new(),
       gossip_recv,
       pending_seeds: VecDeque::new(),
+      join_cursor: 0,
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
       label,

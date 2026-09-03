@@ -1663,6 +1663,79 @@ fn join_seeds_over_cap_are_dropped_and_counted() {
   );
 }
 
+/// A caller re-offering a seed list longer than the queue cap must reach every
+/// entry in it, not only the prefix that fits.
+///
+/// The starving shape: the first seed's dial fails instantly, so by the next offer
+/// it is neither queued nor mid-exchange and is admissible all over again. Scanning
+/// in caller order every time would refill the only queue slot with it and drop the
+/// reachable seed behind it, on every offer, forever. Resuming the scan where the
+/// previous call ran out of room queues the seed that missed its turn instead, so
+/// the reachable one is dialed on the very next offer.
+#[cfg(feature = "cidr")]
+#[test]
+fn re_offered_seeds_past_the_cap_are_admitted_round_robin() {
+  use memberlist_proto::CidrPolicy;
+
+  // The policy covers this node and `live`, but not `dead`: a blocked peer's dial is
+  // rejected before `connect`, which terminalizes the exchange and frees its slot in
+  // the same pump — the fast, total failure the rotation has to survive.
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7002);
+  let live = node_addr(7003);
+  let mut gossip = NoGossip;
+
+  // Two offers of the SAME list, exactly as a driver's retry loop makes them.
+  let mut offers = 0;
+  let mut failed_dead_exchanges = 0;
+  while offers < 2 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    engine.join(&[dead, live]).expect("join is accepted");
+    engine.pump(now, &mut gossip, &mut stream);
+    while let Some(ev) = engine.poll_event() {
+      if let memberlist_proto::event::Event::ExchangeCompleted(ec) = ev {
+        if *ec.peer() == dead && !ec.outcome().is_succeeded() {
+          failed_dead_exchanges += 1;
+        }
+      }
+    }
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed within two offers of the list, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    offers, 2,
+    "the reachable seed must reach the wire on the second offer"
+  );
+  assert_eq!(
+    failed_dead_exchanges, 1,
+    "the fast-failing seed must be attempted once, not once per offer"
+  );
+  assert!(
+    !stream.connects.iter().any(|(_, a)| *a == dead),
+    "a blocked seed is rejected before connect, so it may never reach the wire"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    2,
+    "each offer sheds exactly one seed — the one the single slot had no room for"
+  );
+}
+
 /// Seeds are handed to the machine as the pool can back them, plus ONE head that
 /// holds the queue's place in the dial order. Everything past the head stays a bare
 /// address — no bridge, no full-state encoding, no deadline — so a long seed list
