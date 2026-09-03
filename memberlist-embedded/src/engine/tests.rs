@@ -1663,12 +1663,13 @@ fn join_seeds_over_cap_are_dropped_and_counted() {
   );
 }
 
-/// Seeds are handed to the machine only as the pool can back them. A seed the
-/// pool cannot serve stays a bare address — no bridge, no full-state encoding, no
-/// deadline — and is admitted on a later pump, so a long seed list costs one
-/// encoding per slot rather than one per seed.
+/// Seeds are handed to the machine as the pool can back them, plus ONE head that
+/// holds the queue's place in the dial order. Everything past the head stays a bare
+/// address — no bridge, no full-state encoding, no deadline — so a long seed list
+/// costs one encoding per slot plus that single head, not one per seed. While the
+/// head is parked no further seed is admitted, so the exposure stays at one.
 #[test]
-fn join_admits_seeds_incrementally_to_pool_capacity() {
+fn join_admits_seeds_to_pool_capacity_plus_one_queue_head() {
   let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
   engine.plane_mut().pool.push(1);
   engine.set_listener(9);
@@ -1686,18 +1687,22 @@ fn join_admits_seeds_incrementally_to_pool_capacity() {
   engine.pump(now, &mut gossip, &mut stream);
   assert_eq!(
     engine.pending_seed_count(),
-    2,
-    "only the one seed the single free slot can back is admitted"
+    1,
+    "the single free slot backs one seed, and one more is admitted as the head"
   );
   assert_eq!(
     engine.pending_dial_count(),
-    0,
-    "an admitted seed takes the slot it was admitted against, so nothing parks"
+    1,
+    "the head parks; the seed admitted against the free slot took it"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the parked dial is the seed head"
   );
   assert_eq!(
     engine.outbound_correlation_len(),
-    1,
-    "exactly one exchange — and so one full-state encoding — was started"
+    2,
+    "two exchanges — and so two full-state encodings — for three seeds"
   );
   assert_eq!(
     stream.connects.len(),
@@ -1706,19 +1711,35 @@ fn join_admits_seeds_incrementally_to_pool_capacity() {
     stream.connects
   );
 
-  // A second slot appears: exactly one more seed is admitted.
+  // A second slot appears: it goes to the parked head, and the seed still queued
+  // behind it is NOT admitted, because a seed is already holding a place.
   engine.plane_mut().pool.push(6);
   engine.pump(now, &mut gossip, &mut stream);
   assert_eq!(
     engine.pending_seed_count(),
     1,
-    "the freed slot admits exactly one more seed"
+    "the last seed waits while a seed head is parked"
   );
   assert_eq!(
     stream.connects.len(),
     2,
-    "and exactly one more dial, got {:?}",
+    "the freed slot dials the head, got {:?}",
     stream.connects
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    2,
+    "and starts no further encoding"
+  );
+
+  // With the head dialed, nothing seed-originated is parked any more, so the next
+  // pump takes the last seed as the new head.
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_seed_count(), 0, "the queue drains");
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    3,
+    "one encoding per seed in total, spread across three pumps"
   );
 }
 
@@ -1737,32 +1758,37 @@ fn queued_seeds_with_a_free_slot_request_an_immediate_repump() {
     .listen(9, 7946, crate::SlotGen::START)
     .expect("mock listen succeeds");
 
-  // The one free slot is spoken for by a reliable send before the seed is queued.
+  // The one free slot is spoken for by a reliable send before the seeds are queued.
+  // Two seeds, so one is left as a bare address behind the head — the queue entry
+  // this test is about.
   engine
     .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"first"), now)
     .expect("send_reliable queues the exchange");
-  let a = node_addr(7003);
-  engine.join(&[a]).expect("join is accepted");
+  let head = node_addr(7003);
+  let waiting = node_addr(7004);
+  engine.join(&[head, waiting]).expect("join is accepted");
 
   let mut gossip = NoGossip;
   let wake = engine.pump(now, &mut gossip, &mut stream);
   assert_eq!(
     engine.pending_seed_count(),
     1,
-    "the send already claimed the only slot, so the seed stays queued"
+    "the send claimed the only slot, so the queue gives up only its head"
   );
   assert_eq!(
     stream.connects,
     std::vec![(5, node_addr(7002))],
-    "only the send was dialed"
+    "only the send was dialed; the seed head parks behind it"
   );
   assert!(
     wake.is_some_and(|w| w > now),
     "with an empty pool there is nothing to admit against, so no immediate re-pump"
   );
 
-  // The send's exchange deadline elapses: its slot is aborted and reaped back into
-  // the pool within this same tick, leaving a free slot and a still-queued seed.
+  // Both exchange deadlines elapse: the send's slot is aborted and reaped back into
+  // the pool within this same tick, and the parked head — which owns a deadline of
+  // its own from the moment it was admitted — is reaped with it, leaving a free slot
+  // and the still-queued seed.
   let later = now + stream_timeout + Duration::from_secs(1);
   let wake = engine.pump(later, &mut gossip, &mut stream);
   assert_eq!(
@@ -1770,18 +1796,22 @@ fn queued_seeds_with_a_free_slot_request_an_immediate_repump() {
     1,
     "the failed send's slot is reaped back in-tick"
   );
-  assert_eq!(engine.pending_seed_count(), 1, "the seed is still queued");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed behind the head is still queued"
+  );
   assert_eq!(
     wake,
     Some(later),
     "a queued seed with a free slot must ask for an immediate re-pump"
   );
 
-  // That re-pump admits it.
+  // That re-pump admits it against the reaped slot and dials it the same tick.
   engine.pump(later, &mut gossip, &mut stream);
   assert_eq!(engine.pending_seed_count(), 0, "the seed is admitted");
   assert!(
-    stream.connects.contains(&(5, a)),
+    stream.connects.contains(&(5, waiting)),
     "the reaped slot is spent on the queued seed, got {:?}",
     stream.connects
   );
@@ -1898,7 +1928,8 @@ fn send_reliable_reports_the_lifecycle_before_the_dial_backlog() {
 /// The bound applies to EVERY dial source, not just the application's. A
 /// protocol-paced dial requested while the caller has saturated the bound is
 /// failed through the machine's never-connected path — counted, and terminal —
-/// rather than parked past the cap, and never reaches the wire.
+/// rather than left parked past the cap, and never reaches the wire. The trim runs
+/// within the same pump the dial was requested in, so it is never dialed.
 #[test]
 fn machine_originated_connect_over_cap_is_failed_not_parked() {
   let cfg = admission_cfg().with_max_pending_dials(3);
@@ -1958,8 +1989,10 @@ fn machine_originated_connect_over_cap_is_failed_not_parked() {
 /// recorded before the correlation would leave the waiter hanging.
 ///
 /// This is also the one shape in which an application send admitted at the call
-/// site is still refused at the action drain: the listener replenishing itself
-/// from the pool takes the free slot the pre-check measured against.
+/// site is still refused after the action drain: the listener replenishing itself
+/// from the pool takes the free slot the pre-check measured against. The trim sheds
+/// the newest intent first, so it is the SECOND send — the one the pre-check
+/// admitted last — that is refused.
 #[test]
 fn over_cap_rejection_keeps_the_stream_id_correlation() {
   let cfg = admission_cfg().with_max_pending_dials(1);
@@ -2016,6 +2049,323 @@ fn over_cap_rejection_keeps_the_stream_id_correlation() {
     engine.outbound_correlation_len(),
     1,
     "the refused exchange's correlation entry is pruned, leaving only the parked send"
+  );
+}
+
+/// A queued seed cannot be starved by a caller that keeps sending. The queue's head
+/// becomes a real exchange at the pump that first cannot back it with a slot, so it
+/// sits in the machine's dial order AHEAD of every send issued afterwards and takes
+/// the next freed slot before any of them. Seeds behind the head stay bare
+/// addresses, and exactly one seed-originated exchange is outstanding while they do.
+#[test]
+fn a_queued_seed_takes_a_freed_slot_before_later_sends() {
+  let cfg = admission_cfg();
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // The one dial slot is spoken for before the join, so no seed can be backed by it.
+  let occupier = node_addr(7002);
+  engine
+    .send_reliable(occupier, bytes::Bytes::from_static(b"occupier"), now)
+    .expect("send_reliable queues the exchange");
+
+  let seed = node_addr(7003);
+  engine
+    .join(&[seed, node_addr(7004), node_addr(7005)])
+    .expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, occupier)],
+    "the older send takes the only slot"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the seed head parks; nothing else is outstanding"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the parked dial is the seed head"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "the seeds behind the head stay bare addresses"
+  );
+
+  // A steady application send rate, one per pump, each newer than the parked head.
+  let later_sends = [node_addr(7010), node_addr(7011), node_addr(7012)];
+  for to in later_sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"later"), now)
+      .expect("the sends stay within the default bound");
+    engine.pump(now, &mut gossip, &mut stream);
+  }
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "no further seed is admitted while the head is still parked"
+  );
+  assert_eq!(
+    engine.plane_mut().pending_dial_count(),
+    4,
+    "the head plus the three later sends are all waiting"
+  );
+
+  // A slot frees. It must go to the seed, not to any send issued after it.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, occupier), (6, seed)],
+    "the freed slot must dial the seed ahead of every later send, got {:?}",
+    stream.connects
+  );
+  for to in later_sends {
+    assert!(
+      !stream.connects.iter().any(|(_, peer)| *peer == to),
+      "no send issued after the seed's admission may be dialed before it ({to})"
+    );
+  }
+}
+
+/// `join` dedups against JOIN INTENT, not against any connection that happens to
+/// share the address. An application send or a reliable ping to a seed is a
+/// different exchange with a different purpose: suppressing the seed against one
+/// discards the join outright while still returning `Ok`, leaving a caller waiting
+/// on its own timeout with no attempt outstanding at all.
+#[test]
+fn join_dedups_against_join_intent_not_any_connection_to_the_address() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(60));
+  engine.plane_mut().pool.push(1);
+  engine.plane_mut().pool.push(2);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 2, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Two user messages, one per address, dialed on the pool's two slots.
+  let dialing_peer = node_addr(7002);
+  let half_closed_peer = node_addr(7003);
+  for to in [dialing_peer, half_closed_peer] {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"user"), now)
+      .expect("send_reliable queues the exchange");
+  }
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  // One stays mid-handshake; the other is driven to the half-closed stage a reply
+  // is still awaited in. Neither is a join.
+  let half_closed_eid = *engine
+    .plane_mut()
+    .connections
+    .iter()
+    .find(|(_, c)| c.peer == half_closed_peer)
+    .expect("the second send's connection")
+    .0;
+  engine
+    .plane_mut()
+    .connections
+    .get_mut(&half_closed_eid)
+    .expect("the second send's connection")
+    .state = ConnState::HalfClosed;
+  assert_eq!(
+    engine
+      .plane_mut()
+      .connections
+      .values()
+      .find(|c| c.peer == dialing_peer)
+      .map(|c| c.state),
+    Some(ConnState::Dialing),
+    "the first send is mid-handshake"
+  );
+
+  engine
+    .join(&[dialing_peer, half_closed_peer])
+    .expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "neither a dialing nor a half-closed user message may suppress its seed"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "and neither may be counted as a duplicate join"
+  );
+
+  // A JOIN exchange to the same address IS a reason to skip: one push/pull per seed
+  // at a time is what keeps the retry loop from re-encoding the whole membership.
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the queue's head became a join exchange"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the second seed waits behind the head"
+  );
+
+  engine.join(&[dialing_peer]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed with a live join exchange is not re-queued"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    1,
+    "and the skip is counted as the duplicate join it is"
+  );
+}
+
+/// The excess bound is evaluated over the parked set the drain LEAVES, not the one
+/// it starts from. The machine surfaces every `Connect` before any teardown of the
+/// same tick, so a tick that both reaps cap-saturating parked dials and emits a
+/// fresh protocol-paced dial would, measured inline, refuse the new dial against
+/// entries the same drain is about to remove — shedding liveness work while
+/// capacity was in fact being freed.
+#[test]
+fn a_fresh_connect_survives_a_tick_that_reaps_the_saturating_dials() {
+  let stream_timeout = Duration::from_millis(100);
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(stream_timeout)
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to target.
+  engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_dial_count(), 3, "the bound is saturated");
+  assert_eq!(engine.pending_dial_rejections(), 0, "nothing shed yet");
+  while engine.poll_event().is_some() {}
+
+  // One tick past BOTH the sends' exchange deadline and the push/pull interval: step
+  // 6 expires all three parked sends and mints the periodic push/pull, and the drain
+  // sees the fresh `Connect` before any of the three `Abort`s.
+  let t = now + stream_timeout + Duration::from_millis(50);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the fresh dial must not be shed against dials the same drain removed"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the three expired sends are gone and the fresh dial is parked in their place"
+  );
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the surviving parked dial is the machine's own, not a seed"
+  );
+}
+
+/// Over the cap, the trim sheds the NEWEST intent first and exempts the seed head,
+/// so what survives is the oldest application send plus the seed holding the join
+/// queue's place. Every shed send still resolves the `StreamId` its caller holds.
+#[test]
+fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
+  let cfg = admission_cfg().with_max_pending_dials(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // The listener's passive open has settled, so this pump consumes it and
+  // replenishes the listener from the pool: the free slot the sends were admitted
+  // against is gone by the time the actions drain, putting the parked set over the
+  // cap without any send having to be refused at the call site.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  let oldest = node_addr(7002);
+  engine
+    .send_reliable(oldest, bytes::Bytes::from_static(b"oldest"), now)
+    .expect("the first send is admitted");
+  let shed_first = engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"middle"), now)
+    .expect("the second send is admitted");
+  let shed_second = engine
+    .send_reliable(node_addr(7004), bytes::Bytes::from_static(b"newest"), now)
+    .expect("the third send is admitted");
+
+  // Queued last, so the seed's exchange is the NEWEST of the four — and still exempt.
+  engine.join(&[node_addr(7005)]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    2,
+    "two dials stood beyond the bound and were shed"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    2,
+    "the oldest send and the seed head remain parked"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the seed head is exempt from the trim however new it is"
+  );
+
+  let mut resolved = Vec::new();
+  while let Some(ev) = engine.poll_event() {
+    if matches!(ev, Event::ExchangeCompleted(_)) {
+      if let Some(sid) = engine.last_completed_send() {
+        resolved.push(sid);
+      }
+    }
+  }
+  resolved.sort_by_key(|s| s.as_u64());
+  let mut expected = std::vec![shed_first, shed_second];
+  expected.sort_by_key(|s| s.as_u64());
+  assert_eq!(
+    resolved, expected,
+    "each shed send's completion must resolve the StreamId its caller holds"
+  );
+
+  // A slot frees: it goes to the OLDEST survivor, proving the trim kept the right
+  // end of the queue. The seed's exchange is newer, so it waits one more turn.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    stream.connects.iter().any(|(_, peer)| *peer == oldest),
+    "the oldest surviving send is dialed, got {:?}",
+    stream.connects
   );
 }
 

@@ -165,6 +165,18 @@ pub struct Connection<C> {
   pub socket: Option<C>,
   /// The connection's lifecycle stage.
   pub state: ConnState,
+  /// The exchange was started from a queued join seed, rather than by an
+  /// application send or by the machine's own protocol pacing. Set once at
+  /// creation and carried unchanged through the connection's whole lifecycle
+  /// (`PendingDial` → `Dialing` → `Established` → `HalfClosed` → `Closing`), so
+  /// it answers "is a join exchange to this peer already under way" at any stage.
+  ///
+  /// Two engine policies read it. `join` dedups against join INTENT alone, so an
+  /// unrelated user message or reliable ping to a seed address no longer
+  /// suppresses the seed. And the parked-dial bound exempts seed-originated
+  /// entries: the engine admitted each against measured pool capacity, and the
+  /// oldest of them is what holds a queued seed's place in the dial FIFO.
+  pub from_seed: bool,
   /// Outbound bytes not yet fully written to the socket's tx ring. Holds
   /// partial-write remainders (backpressure) and bytes parked while the socket
   /// is still opening or the dial is deferred. Ordered oldest-first so
@@ -206,6 +218,7 @@ impl<C> Connection<C> {
       peer,
       socket: Some(socket),
       state: ConnState::Dialing,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
@@ -222,11 +235,25 @@ impl<C> Connection<C> {
       peer,
       socket: None,
       state: ConnState::PendingDial,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
       error_delivered: false,
       close_deadline: None,
+    }
+  }
+
+  /// A deferred dial for an exchange the engine started from a queued join seed:
+  /// [`Connection::pending_dial`] with [`from_seed`](Self::from_seed) set.
+  ///
+  /// Seed origin has to be recorded at the moment the exchange is parked, because
+  /// nothing else about the parked connection distinguishes a join push/pull from
+  /// an application send or a protocol-paced dial to the same address.
+  pub fn pending_dial_from_seed(peer: SocketAddr) -> Self {
+    Self {
+      from_seed: true,
+      ..Self::pending_dial(peer)
     }
   }
 
@@ -237,6 +264,7 @@ impl<C> Connection<C> {
       peer,
       socket: Some(socket),
       state: ConnState::Established,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
@@ -419,6 +447,20 @@ impl<C> ReliablePlane<C> {
       .values()
       .filter(|c| c.state == ConnState::PendingDial)
       .count()
+  }
+
+  /// Whether any join-seed exchange is currently parked in
+  /// [`ConnState::PendingDial`].
+  ///
+  /// The engine admits at most one seed past measured capacity per pump, so that
+  /// the oldest still-queued seed always holds a place in the dial FIFO ordered
+  /// ahead of every dial requested after it. This is the predicate that keeps that
+  /// to exactly one: while a seed is parked, the queue behind it waits.
+  pub fn has_parked_seed(&self) -> bool {
+    self
+      .connections
+      .values()
+      .any(|c| c.from_seed && c.state == ConnState::PendingDial)
   }
 }
 

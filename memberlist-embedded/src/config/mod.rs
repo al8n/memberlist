@@ -96,12 +96,20 @@ pub struct Options {
   /// at once.
   ///
   /// [`Engine::join`](crate::Engine::join) queues each routable seed it has not
-  /// already queued and is not already exchanging state with; the pump then
-  /// admits them a few at a time, as the reliable pool has room. This caps how
-  /// many may WAIT. A seed offered past the cap is dropped and counted
+  /// already queued and has no live join exchange to; the pump then admits them a
+  /// few at a time, as the reliable pool has room. This caps how many may WAIT. A
+  /// seed offered past the cap is dropped and counted
   /// ([`Engine::join_seeds_dropped`](crate::Engine::join_seeds_dropped)) rather
   /// than rejecting the call: a seed list is best-effort discovery intent, and the
   /// engine already drops non-routable seeds silently.
+  ///
+  /// A queued seed waits behind at most the dials already outstanding when the pump
+  /// admitted it, never behind ones requested later: alongside the seeds the pool
+  /// can immediately back, the pump admits the queue's HEAD as a real exchange, so
+  /// it holds a place in the machine's dial order ahead of every later request.
+  /// That is an ordering guarantee, not a delivery one — the head owns an exchange
+  /// deadline from admission and can expire while it waits, which the usual
+  /// retry-until-joined loop covers by re-offering it.
   ///
   /// The cap only bites on more than this many DISTINCT routable seeds queued at
   /// once. A small embedded pool could not service that many inside any sane join
@@ -116,11 +124,17 @@ pub struct Options {
   ///
   /// The bound is on the excess — parked dials minus free slots — not on the raw
   /// parked count, so free slots are never left idle by the cap: a burst of dials
-  /// with `F` free slots parks the first `F + max_pending_dials` and refuses the
-  /// rest. Each waiting dial holds its request bytes (up to one
+  /// with `F` free slots parks the first `F + max_pending_dials` and the rest is
+  /// shed. Each waiting dial holds its request bytes (up to one
   /// `max_stream_frame_size`) and a machine-side bridge until it is dialed or
   /// fails, so the excess is what actually costs memory on a node whose pool is
   /// already spoken for.
+  ///
+  /// It is enforced after each action drain, so the parked set it measures is the
+  /// one that survived this tick's teardowns rather than one still holding entries
+  /// the same drain is about to remove. The NEWEST intent is shed first, and join
+  /// seeds are exempt — the engine admitted each against measured pool capacity,
+  /// and the oldest holds a queued seed's place in the dial order.
   ///
   /// [`Engine::send_reliable`](crate::Engine::send_reliable) reports the bound at
   /// the call site as `UserDialBacklogFull` — backpressure, not a delivery
