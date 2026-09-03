@@ -543,9 +543,12 @@ where
   /// the node's other traffic cannot change either answer this future re-checks, and
   /// the re-offer below is paced by the Runner's own clock rather than by a wake.
   ///
-  /// A call's seeds are withdrawn when its future ends — returned, cancelled or
-  /// dropped. A non-routable seed is dropped by the engine. The caller owns the
-  /// overall deadline (drive this under a `select` with a timeout).
+  /// A call's REGISTRATION is withdrawn when its future ends — returned,
+  /// cancelled or dropped: no further node offer carries its seeds. Seeds the
+  /// engine already queued from an earlier offer are still admitted on later
+  /// pumps, and an exchange already started runs to its own deadline regardless.
+  /// A non-routable seed is dropped by the engine. The caller owns the overall
+  /// deadline (drive this under a `select` with a timeout).
   ///
   /// Offers are paced node-wide: at most one union offer per interval, on a clock
   /// measured from the node's last offer rather than from this call. A join registered

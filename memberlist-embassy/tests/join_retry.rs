@@ -159,6 +159,7 @@ async fn drive<T>(
 /// Drive `op` against one memberlist run loop, one embassy-net stack run loop, and
 /// the test timeout — the single-node counterpart of [`drive`], for a test whose
 /// only peer is an address no dial can reach.
+#[cfg(feature = "cidr")]
 async fn drive_solo<T>(
   op: impl core::future::Future<Output = T>,
   ml: Runner<'_, SmolStr, POOL_A>,
@@ -177,6 +178,7 @@ async fn drive_solo<T>(
 /// A seed-originated push/pull that fails is one dial attempt: the engine terminalizes
 /// the exchange the moment the dial is refused, so one such event is one trip to the
 /// wire (or, for a CIDR-blocked destination, one dial the policy refused in its place).
+#[cfg(feature = "cidr")]
 async fn count_failed_dials(
   ml: &Memberlist<SmolStr, SocketAddr>,
   window: Duration,
@@ -477,9 +479,11 @@ fn concurrent_joins_converge_on_a_seed_only_one_of_them_holds() {
 
 /// Observation window for each phase of the rate comparison — several offer
 /// intervals long, so a phase counts a handful of dials rather than one.
+#[cfg(feature = "cidr")]
 const RATE_WINDOW: Duration = Duration::from_millis(1000);
 /// How much later than the second join the third one registers, so the three are
 /// staggered across the offer interval rather than starting together.
+#[cfg(feature = "cidr")]
 const STAGGER: Duration = Duration::from_millis(120);
 
 /// Three joins naming one fast-failing seed dial it no more often than one join does.

@@ -471,10 +471,14 @@ impl<C> ReliablePlane<C> {
   /// Whether any join-seed exchange is currently parked in
   /// [`ConnState::PendingDial`].
   ///
-  /// The engine admits at most one seed past measured capacity per pump, so that
-  /// the oldest still-queued seed always holds a place in the dial FIFO ordered
-  /// ahead of every dial requested after it. This is the predicate that keeps that
-  /// to exactly one: while a seed is parked, the queue behind it waits.
+  /// The engine admits at most one seed PAST measured capacity per pump, so that
+  /// the oldest such seed always holds a place in the dial FIFO ordered ahead of
+  /// every dial requested after it. That is the only thing this predicate blocks —
+  /// a second head past capacity — not the total parked-seed population: bulk
+  /// seeds admitted against measured free slots can also remain parked, when a
+  /// slot one of them was admitted against is claimed first (a listener re-armed
+  /// within the same pump, say), so the parked-seed population is bounded by the
+  /// pool size plus one, exactly as `trim_pending_dials` documents.
   pub fn has_parked_seed(&self) -> bool {
     self
       .connections

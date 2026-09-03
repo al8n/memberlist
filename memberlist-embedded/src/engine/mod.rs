@@ -3637,12 +3637,21 @@ where
   /// caller.
   ///
   /// Refusal is `handle_dial_failed`, the machine's documented never-connected
-  /// path: the exchange terminalizes `Failed` and its `ExchangeCompleted` still
-  /// resolves the caller's `StreamId`, because the drain's correlation insert has
-  /// already happened. Its `Abort` reaches the next pump's drain and finds the
-  /// connection gone — a no-op, exactly like a synchronous 7d'' dial rejection.
+  /// path. For an exchange started through the coordinator's `start_*` wrappers
+  /// (a `send_reliable`), the exchange terminalizes `Failed` and its
+  /// `ExchangeCompleted` still resolves the caller's `StreamId`, because the
+  /// drain's correlation insert has already happened. A machine-scheduled
+  /// exchange — the periodic push/pull, the reliable-ping fallback — carries no
+  /// exchange kind and terminalizes on its `Abort` alone, emitting no
+  /// `ExchangeCompleted`. Either way the `Abort` reaches the next pump's drain
+  /// and finds the connection gone — a no-op, exactly like a synchronous 7d''
+  /// dial rejection.
   ///
-  /// O(P log P) in the parked population only when over the cap, O(1) otherwise.
+  /// O(P log P) to rank the parked population when over the cap, plus one
+  /// coordinator tick per shed entry — each `handle_dial_failed` runs the
+  /// coordinator's bridge/handshake/dial servicing, O(active bridges) — so
+  /// shedding `over` entries costs `over × O(active bridges)` on top of the
+  /// ranking. O(1) when under the cap.
   fn trim_pending_dials(&mut self, now: Instant) {
     let over = self
       .plane

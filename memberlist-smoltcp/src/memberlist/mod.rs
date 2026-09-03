@@ -1726,11 +1726,15 @@ where
   /// for instance by losing the race for the peer's single reliable listener, which
   /// RSTs the second concurrent connection in its handshake window — after which
   /// nothing for that seed is outstanding. Callers must therefore RE-OFFER the seed
-  /// list until `is_joined()`, which is safe at any rate: the engine dedups a seed
-  /// that is already queued or already covered by a live join-originated exchange,
-  /// so a re-offer never duplicates an attempt in flight. A caller running more than
-  /// one join loop should offer ONE merged list, because the engine's round-robin
-  /// over a full seed queue is fair across the addresses offered together.
+  /// list until `is_joined()`. A re-offer never duplicates an attempt that is still
+  /// in flight (the engine dedups a seed that is already queued or covered by a
+  /// live join-originated exchange), but it does NOT pace retries: a seed whose
+  /// dial fails immediately is re-queued by the very next offer, so a caller should
+  /// re-offer on a bounded cadence (a few hundred milliseconds is plenty; the
+  /// embassy driver uses 250 ms) rather than on every poll. A caller running more
+  /// than one join loop should offer ONE merged list, because the engine's
+  /// round-robin over a full seed queue is fair across the addresses offered
+  /// together.
   ///
   /// # Errors
   ///
