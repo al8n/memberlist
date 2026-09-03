@@ -1156,3 +1156,56 @@ fn join_after_leave_with_a_peer_still_rejects() {
     assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
   });
 }
+
+/// The guard above covers a join that STARTS after the leave. A join already
+/// parked awaiting convergence needs the same answer: `leave()` keeps the member
+/// list, so a waiter that consults membership alone when it resumes reports a
+/// successful join for a node that is leaving — the very state the method's
+/// opening guard rejects.
+///
+/// The wait is stepped by hand here (`poll` once to park it, `poll` again to
+/// resume it) so the leave lands strictly between the two, with no runner able to
+/// resolve the future in between. Membership is seeded through `inject_alive`, the
+/// same public API the guard test above uses, rather than a live exchange: what
+/// must be proven is the ORDER of the two checks when the wait resumes, and a
+/// real join would have to win a race against the leave to reach that state.
+#[test]
+fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  block_on(async {
+    // The node is not joined, so this makes its first offer and parks.
+    let seeds = [MaybeResolved::Resolved(addr(2, 7946))];
+    let mut joining = core::pin::pin!(ml.join(&SocketAddrResolver, &seeds));
+    assert!(
+      futures::poll!(joining.as_mut()).is_pending(),
+      "the join must park awaiting convergence, not resolve on its first offer"
+    );
+
+    // While it is parked, both halves of the trap fall into place: a peer makes
+    // `is_joined()` true, and another handle clone leaves without clearing it.
+    ml.inject_alive(SmolStr::new("peer"), addr(2, 7946));
+    assert!(
+      ml.is_joined(),
+      "the injected peer must make the node joined, or the test proves nothing"
+    );
+    ml.leave().expect("leave a running node");
+
+    // Past the quarter-second re-offer interval the parked wait is due on both its
+    // wake sources, so this poll runs the loop's checks.
+    Timer::after(Duration::from_millis(400)).await;
+    match futures::poll!(joining.as_mut()) {
+      core::task::Poll::Ready(res) => {
+        let err = res.expect_err("a parked join must not report success once the node has left");
+        assert!(err.is_not_running(), "expected NotRunning, got {err:?}");
+      }
+      core::task::Poll::Pending => {
+        panic!("the parked join did not resume after the re-offer interval elapsed")
+      }
+    }
+  });
+}

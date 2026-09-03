@@ -583,9 +583,13 @@ where
   /// concurrent with this call's seed resolution also yields `NotRunning`: the
   /// running state is re-checked before each unresolved seed, so no seed past the
   /// leave is resolved (a resolve already in flight when the leave lands completes,
-  /// but its result is discarded). Otherwise returns `Err(OpError::Resolve)` if the
-  /// resolver fails on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed
-  /// set resolves to no address.
+  /// but its result is discarded). A `leave()` while this future is already parked
+  /// awaiting convergence yields `NotRunning` too, and never `Ok`: the running state
+  /// is re-checked ahead of the membership test each time the wait resumes, so a
+  /// node that joined and was then left is reported as left rather than as a
+  /// successful join. Otherwise returns `Err(OpError::Resolve)` if the resolver fails
+  /// on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed set resolves to no
+  /// address.
   pub async fn join<Res>(&self, resolver: &Res, seeds: &[MaybeResolved<A>]) -> Result<(), OpError>
   where
     Res: AddressResolver<Address = A>,
@@ -673,6 +677,18 @@ where
       // dial → RST → event → dial as fast as the link can carry a SYN.
       let deadline = embassy_time::Instant::now() + RE_OFFER_INTERVAL;
       loop {
+        // Lifecycle before membership, on every pass through this loop. `leave()`
+        // does not clear the member list, so `is_joined()` still holds for a node
+        // that another handle clone left while this future was parked — and
+        // reporting a successful join for a node that is leaving would contradict
+        // the running guard this same method opens with. The engine's own state is
+        // the authority, so the check reads it rather than tracking the leave.
+        self
+          .shared
+          .engine
+          .borrow()
+          .ensure_running()
+          .map_err(|_| OpError::NotRunning)?;
         if shared::is_joined(&self.shared) {
           return Ok(());
         }
