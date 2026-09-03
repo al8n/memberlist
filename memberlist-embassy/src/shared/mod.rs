@@ -13,7 +13,10 @@
 
 use core::{
   cell::{Cell, RefCell},
+  future::Future,
   net::SocketAddr,
+  pin::Pin,
+  task::{Context, Poll, Waker},
   time::Duration,
 };
 
@@ -63,28 +66,31 @@ pub(crate) struct Waiters {
   pub(crate) sends: Vec<PendingSend>,
 }
 
-/// The node-wide floor on how often the live joins' seeds are offered to the
-/// engine, and the interval a parked join re-checks on.
+/// The node-wide floor on how often the live joins' seeds are offered to the engine.
 ///
-/// Both uses are the same bound seen from the two ends. Offering is a NODE-wide
-/// activity — one offer carries every live join's seeds — so this paces how fast a
-/// seed whose exchange just failed can be dialed again: a peer whose single reliable
-/// listener is occupied RSTs each dial at link speed, and an unpaced re-offer would
-/// spin dial → RST → event → dial with no floor at all. A quarter second holds that
-/// to one SYN per seed per interval, negligible next to a node's other traffic and
-/// far inside the seconds-long deadline a caller puts around a join.
+/// Offering is a NODE-wide activity — one offer carries every live join's seeds — so
+/// this paces how fast a seed whose exchange just failed can be dialed again: a peer
+/// whose single reliable listener is occupied RSTs each dial at link speed, and an
+/// unpaced re-offer would spin dial → RST → event → dial with no floor at all. A
+/// quarter second holds that to one SYN per seed per interval, negligible next to a
+/// node's other traffic and far inside the seconds-long deadline a caller puts around
+/// a join.
 ///
-/// It is also what a parked join waits on when no event wakes it. `join_wake` has a
-/// single consumer, so a pulse can go to another concurrent joiner; re-checking on
-/// this interval costs a missed waiter one interval rather than the caller's whole
-/// deadline. Latency in the common case comes from the wake, not from here — the
-/// Runner pulses it whenever it drained machine events.
-pub(crate) const JOIN_OFFER_INTERVAL_MILLIS: u64 = 250;
-
-/// [`JOIN_OFFER_INTERVAL_MILLIS`] as the machine-clock duration the offer pacing
-/// measures with. The driver's runtime-clock counterpart lives with the join future
-/// that waits on it, derived from the same constant so the two cannot drift.
-pub(crate) const JOIN_OFFER_INTERVAL: Duration = Duration::from_millis(JOIN_OFFER_INTERVAL_MILLIS);
+/// # Contract
+///
+/// The node makes AT MOST ONE union offer per interval, measured on a node-wide
+/// last-offer clock that keeps running across registrations: it is not reset when the
+/// registry empties, nor when a node leaves. A join registered within an interval of
+/// the last offer is therefore offered at the END of that interval — a first-offer
+/// delay of at most one interval — and never sooner.
+///
+/// Pacing on the offers alone, rather than on the registry's history, is what makes
+/// the floor deterministic. A clock forgotten whenever no join happened to be live
+/// would let a seed one join dropped and another re-offered inside the same interval
+/// be dialed twice, and would let a caller drive the dial rate as fast as it can
+/// start and cancel joins. What the bound has to hold down is what the node puts on
+/// the wire, so it is measured from the last thing the node put there.
+pub(crate) const JOIN_OFFER_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The distinct seed addresses of every live [`join`](crate::Memberlist::join)
 /// future, each counted by how many of those futures offer it.
@@ -100,11 +106,12 @@ pub(crate) const JOIN_OFFER_INTERVAL: Duration = Duration::from_millis(JOIN_OFFE
 /// Every address a live future offers is registered. Refusing one would put that
 /// future's seeds outside the offer the others ride in, which is precisely the
 /// unmerged interleaving the union exists to remove, so no constant bounds this
-/// registry. What bounds it instead is the SUM OF THE LIVE JOIN FUTURES' OWN
-/// RESOLVED SEED LISTS — memory the application already holds, since each live
-/// future owns its resolved list for as long as it is offering — and [`JoinOffer`]
-/// releases exactly what it registered on every exit path, so a future that is no
-/// longer offering leaves nothing behind.
+/// registry. What bounds it instead is the DISTINCT addresses held here plus the live
+/// join futures' OWN RESOLVED SEED LISTS — memory the application already holds,
+/// since each live future owns its resolved list for as long as it is offering, and
+/// [`JoinOffer`] borrows that list rather than copying it. [`JoinOffer`] releases
+/// exactly what it registered on every exit path, so a future that is no longer
+/// offering leaves nothing behind.
 #[derive(Default)]
 pub(crate) struct JoinOffers {
   /// The distinct offered addresses. This IS the union the node offers: the offer
@@ -164,18 +171,173 @@ impl JoinOffers {
 /// seeds in the union the running joins carry.
 pub(crate) struct JoinOffer<'a> {
   offers: &'a RefCell<JoinOffers>,
-  /// This future's own resolved seeds, deduplicated, in the order it offered them.
-  /// Every one of them is registered in `offers`, so `Drop` releases exactly the
-  /// set this guard took.
-  addrs: Vec<SocketAddr>,
+  /// The join future's OWN resolved seed list, borrowed for as long as the guard
+  /// lives — never copied. The future owns that list for the whole time it is
+  /// offering, so a copy here would hold every live join's seeds twice: F joins over
+  /// the same U addresses would cost `F × U` on top of the registry's `U`.
+  ///
+  /// Every occurrence in it was registered in `offers`, so `Drop` releases the same
+  /// number of references: an address repeated within one list is counted twice and
+  /// decremented twice, which balances without deduplicating anything.
+  addrs: &'a [SocketAddr],
+  /// The node-wide join notify this future parks on, and the waker slot it owns
+  /// there. The slot is released with the registration, so a join that has ended
+  /// leaves no waker behind for a notify to wake.
+  notify: &'a JoinNotify,
+  slot: usize,
+}
+
+impl JoinOffer<'_> {
+  /// The waker slot this join's waits park in.
+  #[inline]
+  pub(crate) fn slot(&self) -> usize {
+    self.slot
+  }
 }
 
 impl Drop for JoinOffer<'_> {
   fn drop(&mut self) {
-    let mut offers = self.offers.borrow_mut();
-    for addr in self.addrs.iter() {
-      offers.unregister(*addr);
+    {
+      let mut offers = self.offers.borrow_mut();
+      for addr in self.addrs {
+        offers.unregister(*addr);
+      }
     }
+    self.notify.release_slot(self.slot);
+  }
+}
+
+/// The node-wide join notify: one wake epoch plus one waker slot per live join.
+///
+/// Every live [`join`](crate::Memberlist::join) owns a slot for as long as it is
+/// offering, so a wake reaches EVERY parked join rather than one of them. A
+/// single-consumer signal cannot do that: storing a waker there REPLACES the one
+/// already held and wakes the displaced task, so two joins parked on distinct tasks
+/// wake each other forever with nothing behind it — a spin that starves the very
+/// Runner they are both waiting on, and one that a test polling both from a single
+/// task cannot see.
+///
+/// The epoch is what makes a wake impossible to lose. A join reads it BEFORE it
+/// checks the node's lifecycle and membership; its wait then resolves immediately if
+/// the epoch has moved since, so a notify landing between those checks and the park
+/// is observed rather than slept through.
+///
+/// Wake sources: every drained machine event, and [`leave`](crate::Memberlist::leave).
+#[derive(Default)]
+pub(crate) struct JoinNotify {
+  /// Bumped by every notify. A parked join compares it against the value it read
+  /// before its checks; any difference means something those checks may care about
+  /// has happened, so the wait resolves and the loop re-runs them.
+  epoch: Cell<u64>,
+  /// One slot per live join, indexed by the slot its [`JoinOffer`] holds. `None` is a
+  /// FREE slot: a live join always holds `Some`, seeded with a no-op waker when it
+  /// takes the slot, so a join that has not parked yet cannot have its slot handed to
+  /// a second join whose waker would then displace its own.
+  waiters: RefCell<Vec<Option<Waker>>>,
+}
+
+impl JoinNotify {
+  /// The current wake epoch.
+  #[inline]
+  fn epoch(&self) -> u64 {
+    self.epoch.get()
+  }
+
+  /// Take a slot for one live join: the first free one, or a new one at the end.
+  fn acquire_slot(&self) -> usize {
+    let mut waiters = self.waiters.borrow_mut();
+    // A no-op waker marks the slot taken before its join has ever parked. Waking it
+    // does nothing, and the join's first park replaces it with the real waker.
+    let taken = Some(Waker::noop().clone());
+    if let Some(pos) = waiters.iter().position(|slot| slot.is_none()) {
+      waiters[pos] = taken;
+      return pos;
+    }
+    waiters.push(taken);
+    waiters.len() - 1
+  }
+
+  /// Give one join's slot back, releasing the vector once no join holds one.
+  fn release_slot(&self, slot: usize) {
+    let mut waiters = self.waiters.borrow_mut();
+    if let Some(entry) = waiters.get_mut(slot) {
+      *entry = None;
+    }
+    if waiters.iter().all(Option::is_none) {
+      // No join is live, so nothing needs the capacity the busiest moment grew:
+      // release it beside the registry's rather than hold a node's peak concurrent
+      // join count for the rest of its uptime. A fresh empty vector allocates nothing.
+      *waiters = Vec::new();
+    }
+  }
+
+  /// Store `waker` in `slot` for the next notify, skipping the clone when the slot
+  /// already holds a waker that wakes the same task.
+  fn park(&self, slot: usize, waker: &Waker) {
+    let mut waiters = self.waiters.borrow_mut();
+    if slot >= waiters.len() {
+      // The guard that owns this slot lives for the whole wait, so the slot is always
+      // in range; growing rather than discarding the waker keeps a parked join
+      // wakeable even if that ever stopped holding.
+      waiters.resize_with(slot + 1, || None);
+    }
+    if let Some(entry) = waiters.get_mut(slot) {
+      match entry {
+        Some(held) if held.will_wake(waker) => {}
+        other => *other = Some(waker.clone()),
+      }
+    }
+  }
+
+  /// Bump the epoch and wake every parked join.
+  fn notify(&self) {
+    // Wrapping: a parked join compares epochs for INEQUALITY, so the counter only has
+    // to change. Wrapping keeps the arithmetic total instead of resting on a node
+    // never draining 2^64 event batches.
+    self.epoch.set(self.epoch.get().wrapping_add(1));
+
+    // Walk by index, taking a clone of each waker rather than holding the borrow
+    // across the wake: a waker runs code this module does not own, and one that
+    // re-entered the registry would alias the guard. The stored wakers stay where
+    // they are — a woken join re-polls and keeps the slot its guard owns.
+    let mut slot = 0;
+    loop {
+      let waker = {
+        let waiters = self.waiters.borrow();
+        match waiters.get(slot) {
+          None => break,
+          Some(entry) => entry.clone(),
+        }
+      };
+      if let Some(waker) = waker {
+        waker.wake();
+      }
+      slot += 1;
+    }
+  }
+}
+
+/// A parked [`join`](crate::Memberlist::join)'s wait for the next join notify.
+///
+/// Resolves as soon as the epoch differs from the one its join read before its
+/// checks — so a notify that landed in between is observed, not slept through — and
+/// otherwise parks the polling task's waker in the slot that join's [`JoinOffer`]
+/// owns. Every parked join has a slot of its own, so one notify wakes all of them.
+pub(crate) struct JoinWait<'a> {
+  notify: &'a JoinNotify,
+  slot: usize,
+  seen: u64,
+}
+
+impl Future for JoinWait<'_> {
+  type Output = ();
+
+  fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    if self.notify.epoch() != self.seen {
+      return Poll::Ready(());
+    }
+    self.notify.park(self.slot, cx.waker());
+    Poll::Pending
   }
 }
 
@@ -194,11 +356,11 @@ pub(crate) struct Shared<I, R = SmallRng> {
   /// because the pump drains EVERY mailbox each tick, so one pulse re-pumps all
   /// pending work regardless of which producer fired it.
   pub(crate) pump_wake: Signal<NoopRawMutex, ()>,
-  /// Pulsed by the Runner after it drains machine events (membership may have
-  /// changed), so a parked `join` re-checks `is_joined()`. A parked `join` also
-  /// races a short timer, so a missed pulse (this `Signal` wakes only one of
-  /// several concurrent joiners) costs at most that interval, never a hang.
-  pub(crate) join_wake: Signal<NoopRawMutex, ()>,
+  /// The node-wide join notify: bumped and fanned out to EVERY parked `join` after
+  /// the Runner drains machine events (membership may have changed) and on `leave`.
+  /// Each live join owns a waker slot, so no joiner depends on another one being
+  /// woken in its place.
+  pub(crate) join_notify: JoinNotify,
   /// Application-facing events the Runner drained from the machine, buffered for
   /// the handle's [`Memberlist::poll_event`](crate::Memberlist::poll_event).
   ///
@@ -216,9 +378,12 @@ pub(crate) struct Shared<I, R = SmallRng> {
   /// resolved seed lists they already hold — see [`JoinOffers`].
   pub(crate) join_offers: RefCell<JoinOffers>,
   /// When the node may make its next join offer, in the machine clock domain the
-  /// Runner pumps with. `None` means no offer is pending — either no join is live,
-  /// or none has been made yet — so the next registration is offered at once
-  /// instead of waiting out an interval measured against a join that has ended.
+  /// Runner pumps with. `None` means the node has never offered; otherwise this is
+  /// one [`JOIN_OFFER_INTERVAL`] past the last offer it made.
+  ///
+  /// The clock is node-wide and survives the registry emptying, so the interval
+  /// bounds the node's OFFERS rather than any one join's lifetime — see
+  /// [`JOIN_OFFER_INTERVAL`] for the contract that follows from it.
   ///
   /// Private to this module: it is the offer step's own bookkeeping, and every
   /// caller reaches it through [`Shared::offer_join_seeds_at`].
@@ -239,7 +404,7 @@ where
     Self {
       engine: RefCell::new(engine),
       pump_wake: Signal::new(),
-      join_wake: Signal::new(),
+      join_notify: JoinNotify::default(),
       app_events: RefCell::new(VecDeque::new()),
       waiters: RefCell::new(Waiters::default()),
       join_offers: RefCell::new(JoinOffers::default()),
@@ -250,26 +415,26 @@ where
   /// Register `seeds` as one live join future's offer and hand back the guard that
   /// releases them again when that future ends — returned, cancelled or dropped.
   ///
-  /// The seed list is deduplicated first, so one address repeated within it takes a
-  /// single reference and the guard's release balances its registration exactly.
-  pub(crate) fn register_join_offer(&self, seeds: &[SocketAddr]) -> JoinOffer<'_> {
-    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(seeds.len());
-    for seed in seeds {
-      if !addrs.contains(seed) {
-        addrs.push(*seed);
-      }
-    }
-
+  /// The guard BORROWS the caller's list: the join future owns its resolved seeds for
+  /// as long as it is offering, so the node's join memory is exactly those lists plus
+  /// the registry's distinct addresses, with no per-guard copy on top.
+  ///
+  /// Each occurrence in the list takes a reference and the guard releases the same
+  /// number, so a repeat within one list needs no deduplication here — the registry
+  /// holds one entry per distinct address either way, and the refcount balances.
+  pub(crate) fn register_join_offer<'a>(&'a self, seeds: &'a [SocketAddr]) -> JoinOffer<'a> {
     {
       let mut offers = self.join_offers.borrow_mut();
-      for addr in addrs.iter() {
-        offers.register(*addr);
+      for seed in seeds {
+        offers.register(*seed);
       }
     }
 
     JoinOffer {
       offers: &self.join_offers,
-      addrs,
+      addrs: seeds,
+      notify: &self.join_notify,
+      slot: self.join_notify.acquire_slot(),
     }
   }
 
@@ -287,8 +452,11 @@ where
   /// per pump iteration, immediately before `pump`, so an admitted seed gets its
   /// `Connect` in the very same pump.
   ///
-  /// Returns `(false, None)` — and forgets the pacing — when there is nothing to
-  /// offer: no live join, or a node that has left (which refuses offers anyway).
+  /// Returns `(false, None)` when there is nothing to offer: no live join, or a node
+  /// that has left (which refuses offers anyway). That case leaves the last-offer
+  /// clock alone — the interval paces the node's offers, not a join's lifetime, so a
+  /// join registered just after another one ended still waits out the rest of the
+  /// interval rather than being dialed inside it (see [`JOIN_OFFER_INTERVAL`]).
   /// Otherwise returns when the next offer is due, which the Runner folds into its
   /// sleep deadline so a node with live joins wakes to re-offer even when the
   /// machine has no earlier work of its own.
@@ -298,7 +466,6 @@ where
   pub(crate) fn offer_join_seeds_at(&self, now: Instant) -> (bool, Option<Instant>) {
     let offers = self.join_offers.borrow();
     if offers.addrs.is_empty() || self.engine.borrow().ensure_running().is_err() {
-      self.next_join_offer.set(None);
       return (false, None);
     }
 
@@ -337,13 +504,30 @@ where
     self.pump_wake.signal(());
   }
 
-  /// Wake a parked `join` (membership or the node's lifecycle may have changed).
+  /// Wake EVERY parked `join` (membership or the node's lifecycle may have changed).
   ///
-  /// Single-consumer, so this reaches one of several concurrent joiners; the others
-  /// re-check on their own interval backstop.
+  /// Each live join owns a waker slot, so this reaches all of them — no joiner waits
+  /// on another one having been woken in its place.
   #[inline]
-  pub(crate) fn wake_joins(&self) {
-    self.join_wake.signal(());
+  pub(crate) fn notify_join_waiters(&self) {
+    self.join_notify.notify();
+  }
+
+  /// The join notify's current epoch, which a join reads BEFORE its lifecycle and
+  /// membership checks so a notify racing them cannot be slept through.
+  #[inline]
+  pub(crate) fn join_epoch(&self) -> u64 {
+    self.join_notify.epoch()
+  }
+
+  /// Park the join owning `slot` until the notify moves past the epoch it read.
+  #[inline]
+  pub(crate) fn join_wait(&self, slot: usize, seen: u64) -> JoinWait<'_> {
+    JoinWait {
+      notify: &self.join_notify,
+      slot,
+      seen,
+    }
   }
 
   /// Register a pending ping waiter and return its reply signal.
@@ -368,8 +552,8 @@ where
   }
 
   /// Drain the machine's pending events, resolving any matched ping/send waiters,
-  /// buffering every event for the handle's `poll_event`, and pulsing `join_wake`
-  /// so parked `join`s re-check membership.
+  /// buffering every event for the handle's `poll_event`, and notifying every parked
+  /// `join` so they re-check membership.
   ///
   /// Called by the Runner once per loop, AFTER `pump` (so it sees this tick's
   /// freshly-emitted events). The Runner is the sole `poll_event` caller on the
@@ -417,7 +601,7 @@ where
       q.push_back(ev);
     }
     if any {
-      self.wake_joins();
+      self.notify_join_waiters();
     }
   }
 

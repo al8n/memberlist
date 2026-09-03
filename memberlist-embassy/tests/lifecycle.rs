@@ -11,6 +11,10 @@
 mod support;
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{
+  Arc,
+  atomic::{AtomicUsize, Ordering},
+};
 
 use embassy_futures::select::{Either, select};
 use embassy_net::{
@@ -1172,8 +1176,8 @@ fn join_after_leave_with_a_peer_still_rejects() {
 /// real join would have to win a race against the leave to reach that state.
 ///
 /// The resume is immediate rather than timed, which also pins the second half of
-/// the contract: `leave()` wakes a parked join, so it reports the departure without
-/// waiting out its backstop interval.
+/// the contract: `leave()` wakes a parked join, so it reports the departure at once
+/// rather than on some later re-check.
 #[test]
 fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
   let (dev, _peer) = pair();
@@ -1200,8 +1204,9 @@ fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
     );
     ml.leave().expect("leave a running node");
 
-    // The leave pulsed the join wake, so the parked wait is due immediately — no
-    // timer, so a resume that only the backstop could explain fails here.
+    // The leave notified the parked join, so its wait is due immediately. Nothing
+    // else can resume it — the wait has no timer under it — so a resume here can only
+    // be that notify.
     match futures::poll!(joining.as_mut()) {
       core::task::Poll::Ready(res) => {
         let err = res.expect_err("a parked join must not report success once the node has left");
@@ -1212,4 +1217,126 @@ fn join_waiter_reports_not_running_when_leave_lands_before_it_resumes() {
       }
     }
   });
+}
+
+/// A counting waker: one per parked join, so a test can see EXACTLY which join a
+/// wake reached.
+struct CountingWaker {
+  woken: AtomicUsize,
+}
+
+impl CountingWaker {
+  fn new() -> Arc<Self> {
+    Arc::new(Self {
+      woken: AtomicUsize::new(0),
+    })
+  }
+
+  fn count(&self) -> usize {
+    self.woken.load(Ordering::SeqCst)
+  }
+}
+
+impl futures::task::ArcWake for CountingWaker {
+  fn wake_by_ref(arc_self: &Arc<Self>) {
+    arc_self.woken.fetch_add(1, Ordering::SeqCst);
+  }
+}
+
+/// Two joins parked on DISTINCT tasks stay dormant while nothing happens, and a
+/// `leave()` wakes both of them.
+///
+/// A single-consumer signal cannot do either. Storing a waker on one replaces the
+/// waker already held and wakes the displaced task, so the two joins would wake each
+/// other on every poll with no event behind it — a spin that starves the Runner they
+/// are both waiting on, and one that never shows up under a harness where both
+/// futures share a parent waker. Each join therefore owns a waker slot of its own,
+/// and a notify fans out to every slot.
+///
+/// Both halves are asserted through the wakers themselves rather than through
+/// timing: each join is polled with its own counting waker, and the counts are the
+/// evidence — zero across a run of alternating polls, then exactly one each once
+/// `leave` notifies.
+#[test]
+fn parked_joins_on_distinct_tasks_stay_dormant_and_both_observe_leave() {
+  use core::{
+    future::Future,
+    task::{Context, Poll},
+  };
+
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = single_node(stack, &mut bufs);
+
+  let first_counter = CountingWaker::new();
+  let second_counter = CountingWaker::new();
+  let first_waker = futures::task::waker(first_counter.clone());
+  let second_waker = futures::task::waker(second_counter.clone());
+  let mut first_cx = Context::from_waker(&first_waker);
+  let mut second_cx = Context::from_waker(&second_waker);
+
+  let first_seeds = [MaybeResolved::Resolved(addr(2, 7946))];
+  let second_seeds = [MaybeResolved::Resolved(addr(3, 7946))];
+  let mut first = Box::pin(ml.join(&SocketAddrResolver, &first_seeds));
+  let mut second = Box::pin(ml.join(&SocketAddrResolver, &second_seeds));
+
+  // Park both. Each first poll resolves its seeds (the resolver never suspends),
+  // registers them, and waits on the node-wide notify.
+  assert!(
+    first.as_mut().poll(&mut first_cx).is_pending(),
+    "the first join must park: the node has no peer to converge on"
+  );
+  assert!(
+    second.as_mut().poll(&mut second_cx).is_pending(),
+    "and so must the second"
+  );
+
+  // Nothing happens. Re-polling them alternately must wake neither: a poll that
+  // displaced the other join's waker would show up here as a rising count, and in
+  // production as two futures re-waking each other forever.
+  for round in 0..4 {
+    assert!(
+      first.as_mut().poll(&mut first_cx).is_pending(),
+      "the first join stays parked (round {round})"
+    );
+    assert!(
+      second.as_mut().poll(&mut second_cx).is_pending(),
+      "the second join stays parked (round {round})"
+    );
+    assert_eq!(
+      (first_counter.count(), second_counter.count()),
+      (0, 0),
+      "no event occurred, so neither parked join may be woken (round {round})"
+    );
+  }
+
+  // One notify, and BOTH joins see it — exactly once each, since a wake leaves the
+  // slot in place for the next one rather than consuming it.
+  ml.leave().expect("leave a running node");
+  assert_eq!(
+    (first_counter.count(), second_counter.count()),
+    (1, 1),
+    "`leave` must wake every parked join, not one of them"
+  );
+
+  match first.as_mut().poll(&mut first_cx) {
+    Poll::Ready(res) => assert!(
+      res
+        .expect_err("a left node cannot report a successful join")
+        .is_not_running(),
+      "the first join reports the departure"
+    ),
+    Poll::Pending => panic!("the first join did not resume on the wake `leave` sent"),
+  }
+  match second.as_mut().poll(&mut second_cx) {
+    Poll::Ready(res) => assert!(
+      res
+        .expect_err("a left node cannot report a successful join")
+        .is_not_running(),
+      "the second join reports the departure"
+    ),
+    Poll::Pending => panic!("the second join did not resume on the wake `leave` sent"),
+  }
 }

@@ -180,8 +180,8 @@ where
         .pump(now, &mut gossip, &mut stream)
     };
 
-    // Resolve any handle ops whose terminal event the pump just emitted, and
-    // pulse `join_wake` so a parked `join` re-checks membership.
+    // Resolve any handle ops whose terminal event the pump just emitted, and notify
+    // every parked `join` so each of them re-checks membership.
     shared.drain_events();
 
     // Sleep no longer than the next join offer is due: with joins live but no

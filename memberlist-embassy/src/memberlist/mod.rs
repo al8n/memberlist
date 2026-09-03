@@ -12,7 +12,6 @@ use core::{marker::PhantomData, net::SocketAddr, time::Duration};
 use alloc::{rc::Rc, vec::Vec};
 
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
-use embassy_time::Timer;
 #[cfg(compression)]
 use memberlist_embedded::transform::CompressionOptions;
 use memberlist_embedded::{
@@ -49,15 +48,6 @@ use alloc::boxed::Box;
 /// tick rate, so no configurable value can overflow that chain into a wrapped,
 /// effectively-past deadline that would abort a TCP slot immediately.
 const MAX_SOCKET_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(86_400);
-
-/// [`JOIN_OFFER_INTERVAL`](shared::JOIN_OFFER_INTERVAL) in the `embassy-time` tick
-/// domain: how long a parked [`Memberlist::join`] waits before re-checking on its
-/// own when no wake reaches it.
-///
-/// Derived from the same millisecond constant the Runner paces its offers with, so
-/// the waiter's backstop and the node's offer rate cannot drift apart.
-const JOIN_WAIT_BACKSTOP: embassy_time::Duration =
-  embassy_time::Duration::from_millis(shared::JOIN_OFFER_INTERVAL_MILLIS);
 
 /// Floor a portable `core::Duration` to whole `embassy_time` ticks at `tick_hz`,
 /// exactly as [`embassy_time::Duration::from_ticks`] will store it.
@@ -546,12 +536,20 @@ where
   ///
   /// The resolved seeds are REGISTERED with the node's join loop, which offers the
   /// union of every live join's seeds to the engine once per interval until each of
-  /// them completes; this future then parks until `is_joined()`, woken by the Runner
-  /// whenever it drains machine events, with a timer backstop so a wake the
-  /// single-consumer signal delivered to another concurrent joiner never hangs this
-  /// one. A call's seeds are withdrawn when its future ends — returned, cancelled or
-  /// dropped. A non-routable seed is dropped by the engine. The caller owns the
-  /// overall deadline (drive this under a `select` with a timeout).
+  /// them completes; this future then parks until `is_joined()`. Every parked join owns
+  /// a waker slot of its own, so both wake sources — a Runner that drained machine
+  /// events, and [`leave`](Self::leave) — reach EVERY one of them, however many joins
+  /// and however many tasks they are spread over. A call's seeds are withdrawn when its
+  /// future ends — returned, cancelled or dropped. A non-routable seed is dropped by
+  /// the engine. The caller owns the overall deadline (drive this under a `select` with
+  /// a timeout).
+  ///
+  /// Offers are paced node-wide: at most one union offer per interval, on a clock
+  /// measured from the node's last offer rather than from this call. A join registered
+  /// within an interval of that offer therefore has its seeds dialed at the END of that
+  /// interval — a first-offer delay of at most one interval — which is also what keeps
+  /// a failing seed one join drops and another re-offers from being dialed twice inside
+  /// one interval.
   ///
   /// # Retry
   ///
@@ -668,16 +666,24 @@ where
     // exit path — a normal return, a `?`, or the caller dropping the future at one of
     // its awaits — so a join that is no longer running leaves nothing in the node's
     // offer behind it.
-    let _offer = self.shared.register_join_offer(&resolved);
+    let offer = self.shared.register_join_offer(&resolved);
     self.shared.wake_pump();
 
-    // Wait for convergence. The Runner pulses `join_wake` whenever it drained machine
-    // events — which includes a seed exchange's terminal `ExchangeCompleted`, so a
-    // lost dial is observed here without waiting out an interval — and `leave()`
-    // pulses it too. That signal has a single consumer, so a pulse can go to another
-    // concurrent joiner; the backstop timer is what bounds a missed one to an
-    // interval rather than to the caller's whole deadline.
+    // Wait for convergence. The node notifies every parked join whenever the Runner
+    // drained machine events — which includes a seed exchange's terminal
+    // `ExchangeCompleted`, so a lost dial is observed here rather than waited out —
+    // and `leave()` notifies too. Those are the only two wake sources, and they are
+    // enough: neither of the checks below can change its answer without one of them.
+    // This join has its own waker slot, so it never depends on some other joiner
+    // having been woken in its place.
     loop {
+      // Read the notify epoch BEFORE the checks below. The wait resolves at once when
+      // the epoch has moved since, so a notify that lands after these checks have read
+      // their state cannot be slept through — the loop simply re-runs them. Reading
+      // the epoch after the checks would leave exactly that window unobserved, and
+      // with no timer under the wait a lost notify would be a hang rather than a
+      // delay.
+      let seen = self.shared.join_epoch();
       // Lifecycle before membership, on every pass. `leave()` does not clear the
       // member list, so `is_joined()` still holds for a node another handle clone
       // left while this future was parked — and reporting a successful join for a
@@ -693,22 +699,15 @@ where
       if shared::is_joined(&self.shared) {
         return Ok(());
       }
-      // Ignoring the `Either`: whichever of the wake or the backstop fired, the loop
-      // re-checks the lifecycle and membership.
-      let _ = embassy_futures::select::select(
-        self.shared.join_wake.wait(),
-        Timer::after(JOIN_WAIT_BACKSTOP),
-      )
-      .await;
+      self.shared.join_wait(offer.slot(), seen).await;
     }
   }
 
   /// Begin leaving the cluster (gossip the departure). Returns immediately after
   /// enqueuing; the `LeftCluster` event surfaces via [`poll_event`](Self::poll_event).
   ///
-  /// A [`join`](Self::join) parked awaiting convergence is woken so it reports
-  /// `NotRunning` promptly rather than waiting out its backstop interval (the pulse
-  /// reaches one waiter; the backstop covers any others).
+  /// EVERY [`join`](Self::join) parked awaiting convergence is woken, so each of them
+  /// reports `NotRunning` at once rather than waiting on a wake that went elsewhere.
   ///
   /// Returns `Err(OpError::NotRunning)` if the node is not in a running state
   /// (already left or never started).
@@ -721,7 +720,7 @@ where
       .leave(now)
       .map_err(|_| OpError::NotRunning);
     self.shared.wake_pump();
-    self.shared.wake_joins();
+    self.shared.notify_join_waiters();
     r
   }
 
