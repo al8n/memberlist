@@ -2122,6 +2122,60 @@ fn selection_window_is_bounded_and_counts_stay_exact() {
   );
 }
 
+/// The ranking window a long offer runs never holds more than `max_pending_seeds + 1`
+/// candidates, even when every entry ranks ahead of everything already held.
+///
+/// That window is call-local scratch on a buffer sized inline for exactly that bound.
+/// An entry inserted BEFORE the worst one is popped holds one more than the bound for
+/// the length of the call, and nothing a caller can read would show it: the queue, the
+/// drop count and the rotation all come out identical either way. What it does do is
+/// push the buffer onto the heap — the allocation the bound exists to avoid on a
+/// device whose whole heap may be a few kilobytes.
+///
+/// A descending offer is the adversarial order. With the rotation unset, rank rises
+/// with the address, so every entry after the first ranks ahead of every candidate
+/// held and takes the insert-into-a-full-window path rather than being shed outright.
+#[test]
+fn a_descending_offer_never_holds_more_than_the_window_bound() {
+  const CAP: usize = 7;
+  const OFFERED: u32 = 20;
+
+  let cfg = admission_cfg().with_max_pending_seeds(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..OFFERED).rev().map(addr).collect();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    CAP,
+    "the queue must hold exactly the cap, however long the offer"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    u64::from(OFFERED) - CAP as u64,
+    "and every entry the cap turned away is counted exactly once"
+  );
+
+  assert_eq!(
+    engine.join_window_high_water,
+    CAP + 1,
+    "the window fills to the room the queue had plus the entry that names the next \
+     rotation, and never holds more than that at any point of the call"
+  );
+  assert!(
+    !engine.join_window_spilled,
+    "so the buffer sized inline for that bound never reached the heap"
+  );
+}
+
 /// An offer that finds NO free queue slot admits nothing, and costs the offered set
 /// no turn: the rotation stays on the entry that already ranked first, so the next
 /// offer with room admits exactly the address the full ones would have.

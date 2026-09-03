@@ -459,6 +459,17 @@ pub struct Engine<I, C, R = SmallRng> {
   /// and application sends that got past the `send_reliable` pre-check, and a join
   /// can never make it rise.
   pending_dial_rejections: u64,
+  /// The most candidates any [`join`](Self::join) call has held in its ranking
+  /// window at once, and whether that window ever left its inline storage.
+  ///
+  /// The window is a call-local buffer bounded by `max_pending_seeds + 1`, which no
+  /// caller and no counter can otherwise observe: an entry inserted past the bound
+  /// and popped again leaves the admissions and the drop counts identical, and shows
+  /// up only as a heap allocation on a device that has to avoid one.
+  #[cfg(test)]
+  pub(crate) join_window_high_water: usize,
+  #[cfg(test)]
+  pub(crate) join_window_spilled: bool,
   /// Count of pumps whose gossip view declared a receive capacity at or above the
   /// configured [`Options::gossip_read_cap`].
   ///
@@ -1012,14 +1023,22 @@ where
   ///
   /// A call holds at most `free queue slots + 1` candidates at a time — the one
   /// beyond the free slots is what names the next rotation — so its scratch is
-  /// bounded by `max_pending_seeds + 1` addresses however long the offer is. An
-  /// offer of `n` entries costs
+  /// bounded by `max_pending_seeds + 1` addresses however long the offer is. A full
+  /// window sheds its worst candidate BEFORE it takes a better one, so that bound
+  /// holds at every point of the call rather than only between entries.
+  ///
+  /// An offer of `n` entries costs
   /// `O(n × (queued seeds + live connections + free queue slots))`: every routable
   /// entry is checked against the seed queue and against the connection table before
-  /// it is ranked against the candidates the call is holding. On this tier those
-  /// three populations are the seed cap, the reliable pool size, and the seed cap
-  /// again, so none of them grows with the size of the cluster or with how often the
-  /// caller retries.
+  /// it is ranked against the candidates the call is holding. That connection scan
+  /// covers the WHOLE table, parked `PendingDial` entries included, so the population
+  /// it walks is the reliable pool size plus the [`Options::max_pending_dials`]
+  /// parked dials the trim allows beyond it, plus at most one parked seed head (the
+  /// pump admits one past the free pool, and only while no seed is parked already).
+  /// Queued seeds and free slots are both bounded by [`Options::max_pending_seeds`],
+  /// so the per-offer cost on this tier is
+  /// `O(n × (max_pending_seeds + pool + max_pending_dials))` — none of which grows
+  /// with the size of the cluster or with how often the caller retries.
   ///
   /// # Ordering
   ///
@@ -1090,24 +1109,36 @@ where
 
       let rank = cyclic_rank(seed, rotation);
       let at = best.partition_point(|(held, _)| cyclic_rank(held, rotation) < rank);
-      // `at == window` only when the buffer is already full and this entry ranks
-      // below every entry in it, since `at <= best.len() <= window` always.
-      if at == window {
-        // Queue full. Shed the surplus and count it rather than failing the call:
-        // the return type carries no fitting variant, and truncating best-effort
-        // discovery intent is preferable to rejecting a whole seed list because
-        // part of it did not fit. The cap only bites on more distinct routable
-        // seeds at once than a small reliable pool could service within any sane
-        // join deadline.
+      if best.len() == window {
+        // The window is full, so one of the two — this entry or the worst one held —
+        // has to go. Shed it and count it rather than failing the call: the return
+        // type carries no fitting variant, and truncating best-effort discovery
+        // intent is preferable to rejecting a whole seed list because part of it did
+        // not fit. The cap only bites on more distinct routable seeds at once than a
+        // small reliable pool could service within any sane join deadline.
         self.join_seeds_dropped += 1;
-        continue;
+        // `at == window` only when the buffer is full and this entry ranks below
+        // every entry in it, since `at <= best.len() <= window` always. Then the
+        // entry shed is this one; otherwise it is the worst entry held, which this
+        // insert would push off the end of the window anyway.
+        if at == window {
+          continue;
+        }
+        // Shed FIRST, then insert. Inserting into a full window and popping after
+        // would hold `window + 1` candidates — `max_pending_seeds + 2` — breaching
+        // the scratch bound this loop is documented to keep, and pushing the inline
+        // buffer sized for that bound onto the heap on the entry that overflows it.
+        best.pop();
       }
 
       best.insert(at, (*seed, idx));
-      if best.len() > window {
-        // The entry this one displaced off the end of the window is shed.
-        best.pop();
-        self.join_seeds_dropped += 1;
+
+      // The window's bound is invisible from outside the call, so record what it
+      // actually reached for the test that pins it.
+      #[cfg(test)]
+      {
+        self.join_window_high_water = self.join_window_high_water.max(best.len());
+        self.join_window_spilled |= best.spilled();
       }
     }
 
@@ -1711,6 +1742,10 @@ where
       seed_stream_ids: MediumVec::new(),
       join_seeds_dropped: 0,
       join_seeds_deduped: 0,
+      #[cfg(test)]
+      join_window_high_water: 0,
+      #[cfg(test)]
+      join_window_spilled: false,
       pending_dial_rejections: 0,
       gossip_over_cap_pumps: 0,
     })
