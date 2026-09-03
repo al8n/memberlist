@@ -377,6 +377,11 @@ pub struct Engine<I, C, R = SmallRng> {
   /// between two orders can land on the failing seed every single time. A rank key
   /// is a property of the address, so neither reordering nor which caller made the
   /// offer changes who gets the slot.
+  ///
+  /// One rotation serves the whole engine, and a call advances it only past entries
+  /// that call saw, so the round-robin sweeps whatever is offered together. A driver
+  /// running several join loops offers their union for that reason — see
+  /// [`join`](Self::join).
   join_rotation: u64,
   /// Maps each outbound reliable exchange's [`ExchangeId`] to the [`StreamId`] the
   /// originating `send_reliable` / `join` / probe call returned, captured from the
@@ -960,20 +965,24 @@ where
   /// each address carries a stable rank derived from the address itself, a call
   /// admits the lowest-ranked entries it has room for, and the rotation then moves
   /// to the first entry it had no room for, so that entry ranks first next time.
-  /// Repeated offers of one address set therefore admit its entries round-robin
+  /// Repeated offers of ONE address set therefore admit its entries round-robin
   /// over that stable order, every entry reached within
   /// `⌈distinct routable addresses ÷ free queue slots⌉` offers — no reachable seed
   /// can be starved behind one that keeps failing, however the caller orders the
-  /// list, however a re-resolution reorders it, and whichever caller makes a given
-  /// offer.
+  /// list, and however a re-resolution reorders it.
   ///
-  /// Offers of DIFFERENT address sets share the one rotation, and each moves it
-  /// past its own unserved entry, so a seed's turn can be deferred by the other
-  /// set's offers — and for an interleaving whose dials all fail inside the very
-  /// pump that made them, indefinitely. What keeps that from arising is the dedup
-  /// above: a seed admitted from one set stays deduped for the life of its
-  /// exchange, so a dial that takes any time at all leaves the turns in between to
-  /// the addresses that have not been tried.
+  /// That bound is over the addresses offered TOGETHER, because the rotation is
+  /// engine-wide and a call can only advance it past the entries that call saw. A
+  /// driver or application running several join loops must therefore offer the
+  /// UNION of their lists: `memberlist-embassy`'s `join` does, merging every live
+  /// join future's seeds into one offer, and `memberlist-smoltcp`'s asks its caller
+  /// for one merged list. Two loops that instead offer DISJOINT sets larger than the
+  /// queue cap alternately share the one rotation while neither ever names the
+  /// other's addresses, so each defers the other's turns — and for an interleaving
+  /// whose dials all fail inside the very pump that made them, indefinitely. What
+  /// softens it short of that is the dedup above: a seed admitted from one set stays
+  /// deduped for the life of its exchange, so a dial that takes any time at all
+  /// leaves the turns in between to the addresses that have not been tried.
   ///
   /// # Ordering
   ///

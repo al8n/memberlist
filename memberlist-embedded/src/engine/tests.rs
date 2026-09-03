@@ -1799,22 +1799,55 @@ fn reordered_re_offers_cannot_starve_a_reachable_seed() {
   );
 }
 
-/// Two callers offering DIFFERENT seed lists into one queue must not shut each
-/// other's entries out.
+/// Where a positional cursor lands when two disjoint lists are offered alternately,
+/// modelling the admission the rank rotation replaced: one engine-wide index into
+/// whichever list an offer presents, resumed on the entry the previous offer had no
+/// room for.
 ///
-/// A positional cursor cannot survive this at all: each list is scanned from the
-/// index the other list's offer left behind, so with a one-slot queue the two lists
-/// pin each other on their first entry and the reachable seed in `[dead1, live]` is
-/// never admitted, however long either caller retries. Ranks come from the
-/// addresses, so each offer sheds relative to the same order and the rotation walks
-/// on to entries that have not had a turn.
+/// The surrounding dynamics are the union test's own — one free queue slot, and
+/// every seed but `target` failing inside the pump that admitted it, so it is
+/// admissible all over again on the next offer. Returns the offer number that
+/// admits `target`, or `None` if `budget` offers pass without it.
+#[cfg(feature = "cidr")]
+fn positional_cursor_reaches(
+  lists: &[&[SocketAddr]],
+  target: SocketAddr,
+  budget: u64,
+) -> Option<u64> {
+  let mut cursor = 0usize;
+  for n in 0..budget {
+    let list = lists[(n as usize) % lists.len()];
+    // The single free slot goes to the first entry at or after the cursor.
+    let admitted = cursor % list.len();
+    if list[admitted] == target {
+      return Some(n + 1);
+    }
+    // The cursor resumes on the first entry this offer had no room for.
+    cursor = (admitted + 1) % list.len();
+  }
+  None
+}
+
+/// Two seed lists a caller would otherwise run separate join loops for must reach
+/// every reachable seed when they are offered TOGETHER as one list.
 ///
-/// The two lists share the one rotation, so a seed's turn can be deferred by the
-/// other list's offers: the reachable seed here is admitted on the third offer
-/// rather than the first, within the four distinct addresses on the rank circle.
+/// The rotation is engine-wide and a call advances it only past the entries that
+/// call saw, so the round-robin bound is over the addresses one offer names. Named
+/// together, `[dead1, live]` and `[dead2, dead3]` are four distinct addresses on one
+/// rank circle against a single free slot, so the bound is `⌈4 ÷ 1⌉` offers: `live`
+/// is dialed within four however the ranks happen to fall, and each offer sheds the
+/// three the slot had no room for.
+///
+/// The negative control is the design the rank key replaced. A positional cursor
+/// round-robins a single list perfectly well, but two disjoint lists offered
+/// alternately pin it: each list resumes at the index the other's offer left behind,
+/// so with one slot the cursor lands on a failing seed every single time and `live`
+/// is never admitted at all. That is the shape both halves of this contract remove —
+/// the rank key so an offered set sweeps whatever order it arrives in, and the
+/// driver's union so the two lists arrive as one set.
 #[cfg(feature = "cidr")]
 #[test]
-fn interleaved_offers_from_two_lists_reach_every_reachable_seed() {
+fn the_union_of_two_lists_offered_together_reaches_every_reachable_seed() {
   use memberlist_proto::CidrPolicy;
 
   let cfg = admission_cfg()
@@ -1835,15 +1868,14 @@ fn interleaved_offers_from_two_lists_reach_every_reachable_seed() {
   let dead2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 7004);
   let dead3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)), 7005);
   let live = node_addr(7003);
+  // The two lists as one offer, exactly as a driver that merges its live join loops
+  // hands them over.
+  let union = [dead1, live, dead2, dead3];
   let mut gossip = NoGossip;
 
   let mut offers = 0u64;
   while offers < 20 && !stream.connects.iter().any(|(_, a)| *a == live) {
-    if offers.is_multiple_of(2) {
-      engine.join(&[dead1, live]).expect("join is accepted");
-    } else {
-      engine.join(&[dead2, dead3]).expect("join is accepted");
-    }
+    engine.join(&union).expect("join is accepted");
     engine.pump(now, &mut gossip, &mut stream);
     while engine.poll_event().is_some() {}
     offers += 1;
@@ -1851,17 +1883,17 @@ fn interleaved_offers_from_two_lists_reach_every_reachable_seed() {
 
   assert!(
     stream.connects.iter().any(|(_, a)| *a == live),
-    "the reachable seed must be dialed despite the other list's offers, got {:?}",
+    "the reachable seed must be dialed once both lists are offered together, got {:?}",
     stream.connects
   );
   assert!(
     offers <= 4,
-    "the reachable seed must be reached within the four distinct addresses offered, took {offers}"
+    "four distinct addresses against one free slot bound the sweep at four offers, took {offers}"
   );
   assert_eq!(
     engine.join_seeds_dropped(),
-    offers,
-    "every offer holds two candidates and the queue one slot, so each sheds exactly one"
+    3 * offers,
+    "every offer holds four candidates and the queue one slot, so each sheds exactly three"
   );
   assert_eq!(
     engine.join_seeds_deduped(),
@@ -1873,6 +1905,20 @@ fn interleaved_offers_from_two_lists_reach_every_reachable_seed() {
     1,
     "only the routable seed reaches the wire, got {:?}",
     stream.connects
+  );
+
+  // The control is a working round-robin on ONE list — it reaches `live` on the
+  // second offer — so what pins it below is the alternation, not the model.
+  assert_eq!(
+    positional_cursor_reaches(&[&[dead1, live]], live, 20),
+    Some(2),
+    "a positional cursor sweeps a single list, so the model is not rigged to fail"
+  );
+  assert_eq!(
+    positional_cursor_reaches(&[&[dead1, live], &[dead2, dead3]], live, 20),
+    None,
+    "two disjoint lists offered alternately pin a positional cursor on a failing seed \
+     forever — the starvation the rank key and the driver's union remove"
   );
 }
 

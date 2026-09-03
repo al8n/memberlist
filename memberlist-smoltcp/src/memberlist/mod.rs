@@ -1728,7 +1728,9 @@ where
   /// nothing for that seed is outstanding. Callers must therefore RE-OFFER the seed
   /// list until `is_joined()`, which is safe at any rate: the engine dedups a seed
   /// that is already queued or already covered by a live join-originated exchange,
-  /// so a re-offer never duplicates an attempt in flight.
+  /// so a re-offer never duplicates an attempt in flight. A caller running more than
+  /// one join loop should offer ONE merged list, because the engine's round-robin
+  /// over a full seed queue is fair across the addresses offered together.
   ///
   /// # Errors
   ///
