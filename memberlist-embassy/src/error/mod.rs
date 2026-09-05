@@ -210,6 +210,15 @@ pub enum OpError {
   /// that can no longer arrive. Nothing on this handle can be retried into
   /// success; build a fresh node to resume.
   RunnerStopped,
+  /// The engine refused the operation for a reason that is neither the node's
+  /// lifecycle nor call-site backpressure. Carries the engine's own error.
+  ///
+  /// [`memberlist_proto::Error`] is `#[non_exhaustive]`, so a refusal this driver
+  /// does not translate is reported as itself rather than folded into one of the
+  /// answers a caller acts on: [`NotRunning`](Self::NotRunning) says retrying is
+  /// pointless and [`DialBacklogFull`](Self::DialBacklogFull) says pace and retry,
+  /// and neither is a safe guess for a refusal that means something else.
+  Rejected(memberlist_proto::Error),
   /// The engine refused a [`send_reliable`](crate::Memberlist::send_reliable) at
   /// the call site because reliable dials already wait
   /// [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials) beyond
@@ -259,6 +268,13 @@ impl OpError {
     matches!(self, OpError::RunnerStopped)
   }
 
+  /// Whether the engine refused the operation for a reason other than the node's
+  /// lifecycle or call-site backpressure.
+  #[inline]
+  pub const fn is_rejected(&self) -> bool {
+    matches!(self, OpError::Rejected(_))
+  }
+
   /// Whether a reliable send was refused because the dial backlog is full.
   #[inline]
   pub const fn is_dial_backlog_full(&self) -> bool {
@@ -288,6 +304,7 @@ impl fmt::Display for OpError {
         "the run loop driving this node is gone: nothing parked on it can complete, and no \
          further operation is accepted",
       ),
+      OpError::Rejected(e) => write!(f, "the engine refused the operation: {e}"),
       OpError::DialBacklogFull => f.write_str(
         "reliable dial backlog is full: the send was refused as backpressure, not a failure — \
          retry once outstanding exchanges complete",
@@ -304,6 +321,7 @@ impl std::error::Error for OpError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       OpError::Resolve(e) => Some(e.as_ref()),
+      OpError::Rejected(e) => Some(e),
       _ => None,
     }
   }

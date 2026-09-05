@@ -3,9 +3,10 @@
 //! `leave` running-state contract, the union concurrent `join` calls offer, and a
 //! multi-node join → leave → query run over the loopback harness.
 //!
-//! Plus the contract about what an awaiting op ANSWERS once its driver is gone:
-//! dropping the `Runner` future releases everything parked on it and refuses
-//! everything issued after it.
+//! Plus the two contracts about what an awaiting op ANSWERS: that dropping the
+//! `Runner` future releases everything parked on it and refuses everything after
+//! it, and that an engine refusal which is neither the lifecycle nor backpressure
+//! reaches the caller as itself rather than as one of those.
 //!
 //! Mirrors `loopback.rs`'s substrate (two paired embassy-net stacks driven under
 //! one `block_on`, raced against a wall-clock timeout). The single-node sweeps
@@ -17,7 +18,7 @@
 mod support;
 
 use core::{
-  net::{IpAddr, Ipv4Addr, SocketAddr},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
   task::Poll,
 };
 
@@ -1143,4 +1144,69 @@ fn dropping_a_polled_runner_fails_every_parked_operation() {
       None => panic!("a send issued after the teardown must not park"),
     }
   });
+}
+
+/// An engine refusal that is neither the node's lifecycle nor call-site backpressure
+/// must reach the caller AS ITSELF, not folded into one of those two answers.
+///
+/// The engine's error type is `#[non_exhaustive]`, so a driver that maps everything
+/// it does not recognise onto `NotRunning` tells the caller the node has left the
+/// cluster — the one answer that says retrying is pointless — for a refusal about
+/// something else entirely. Here the node is running, its backlog is empty, and the
+/// only thing wrong is the TARGET: a scoped IPv6 address the compact wire layout
+/// cannot encode, so the framed `Ping` to it could never be sent. The engine rejects
+/// it up front and the handle carries that verdict through.
+///
+/// `send_reliable`'s own engine surface offers no third refusal today — it answers
+/// the lifecycle, then the dial backlog, and every remaining path succeeds — so the
+/// arm that would carry one is exercised through `ping`, which shares it.
+#[test]
+fn engine_refusals_reach_the_caller_as_themselves() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, _run) = node(stack, &mut bufs, "refuser", 1, 1);
+
+  // A scoped IPv6 address (nonzero scope_id): wire-decoded addresses always decode
+  // that field to zero, so only a caller-supplied target can carry it.
+  let scoped = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 7946, 0, 1));
+
+  match ml
+    .ping(Node::new(SmolStr::new("scoped-peer"), scoped))
+    .now_or_never()
+  {
+    Some(Err(e)) => {
+      assert!(
+        e.is_rejected(),
+        "an unencodable ping target is the engine's own refusal, so it must be \
+         carried through as one, got {e}"
+      );
+      assert!(
+        !e.is_not_running(),
+        "the node is running: reporting the lifecycle here would tell the caller to \
+         stop, for a target it could simply change"
+      );
+      assert!(
+        !e.is_dial_backlog_full() && !e.is_runner_stopped() && !e.is_ping_timeout(),
+        "the refusal is about the target, not backpressure, the run loop or a \
+         deadline"
+      );
+      assert!(
+        std::error::Error::source(&e).is_some(),
+        "the carried engine error is the reported error's source"
+      );
+    }
+    Some(Ok(rtt)) => panic!("an unencodable ping target must not report an rtt ({rtt:?})"),
+    None => panic!("an unencodable ping target must be refused at the call site, not parked"),
+  }
+
+  // The refusal is registered nowhere: the node is untouched and still running, so
+  // an ordinary operation is still admitted and parks.
+  assert!(
+    ml.ping(Node::new(SmolStr::new("ordinary"), addr(9, 7946)))
+      .now_or_never()
+      .is_none(),
+    "a wire-encodable target is admitted and parks on its completion signal"
+  );
 }

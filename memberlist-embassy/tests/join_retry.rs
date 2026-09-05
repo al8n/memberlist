@@ -172,33 +172,46 @@ async fn drive_solo<T>(
   }
 }
 
-/// Count the seed dials to `peer` that failed over `window`, draining the handle's
-/// event queue as it goes.
+/// Count the seed dials to `peer` that failed over a `window` that STARTS at the
+/// first such dial, draining the handle's event queue as it goes.
 ///
 /// A seed-originated push/pull that fails is one dial attempt: the engine terminalizes
 /// the exchange the moment the dial is refused, so one such event is one trip to the
 /// wire (or, for a CIDR-blocked destination, one dial the policy refused in its place).
+///
+/// Anchoring the window on a dial rather than on the caller's own clock is what makes
+/// two counts comparable. The node offers on a free-running node-wide clock the caller
+/// cannot see, so a fixed window laid over it starts at an arbitrary phase and holds
+/// one more or one fewer offer purely by where it landed. Both phases here start at an
+/// offer instead, so both measure the same part of the same clock.
 #[cfg(feature = "cidr")]
 async fn count_failed_dials(
   ml: &Memberlist<SmolStr, SocketAddr>,
   window: Duration,
   peer: SocketAddr,
 ) -> usize {
-  let deadline = Instant::now() + window;
   let mut dials = 0;
-  while Instant::now() < deadline {
+  let mut deadline = None;
+  loop {
+    if let Some(deadline) = deadline
+      && Instant::now() >= deadline
+    {
+      return dials;
+    }
     match ml.poll_event() {
       Some(Event::ExchangeCompleted(ec)) => {
         if ec.kind() == ExchangeKind::PushPull && !ec.outcome().is_succeeded() && *ec.peer() == peer
         {
           dials += 1;
+          // The first dial anchors the window: everything counted after it is
+          // measured from an offer, not from whenever this call happened to start.
+          deadline.get_or_insert_with(|| Instant::now() + window);
         }
       }
       Some(_) => {}
-      None => Timer::after(Duration::from_millis(2)).await,
+      None => Timer::after(POLL_STEP).await,
     }
   }
-  dials
 }
 
 /// Poll `pred` until it holds or `budget` elapses, yielding between checks so the
@@ -477,14 +490,41 @@ fn concurrent_joins_converge_on_a_seed_only_one_of_them_holds() {
   );
 }
 
-/// Observation window for each phase of the rate comparison — several offer
-/// intervals long, so a phase counts a handful of dials rather than one.
+/// Observation window for each phase of the rate comparison, measured from the
+/// phase's FIRST dial — several offer intervals long, so a phase counts a handful of
+/// dials rather than one.
 #[cfg(feature = "cidr")]
 const RATE_WINDOW: Duration = Duration::from_millis(1000);
+/// How often a counting phase drains the handle's event queue, and so how late a
+/// dial can be OBSERVED relative to the offer that made it. It is part of the rate
+/// comparison's tolerance, not just a sleep.
+#[cfg(feature = "cidr")]
+const POLL_STEP: Duration = Duration::from_millis(2);
 /// How much later than the second join the third one registers, so the three are
 /// staggered across the offer interval rather than starting together.
 #[cfg(feature = "cidr")]
 const STAGGER: Duration = Duration::from_millis(120);
+/// How far the two phases' dial counts may legally differ.
+///
+/// Each phase is a window of [`RATE_WINDOW`] anchored on one of its own dials, laid
+/// over an offer clock the test cannot see. Two effects move a phase's count without
+/// any change in the rate being measured:
+///
+/// * the offer clock only ever runs SLOWER than its nominal quarter second — each
+///   offer schedules the next one from the pump's actual time, which is at or past
+///   the due time — so a late pump can push the last offer of a window out of it and
+///   the phase counts one fewer;
+/// * a dial is counted when the phase next drains the event queue, up to
+///   [`POLL_STEP`] after the offer that made it, and the anchor carries that lag
+///   too — so a window can also reach one offer further than the clock alone would
+///   put in it.
+///
+/// A window four intervals long therefore holds three to five dials for the SAME
+/// per-interval rate, and two such windows can differ by two. Anything beyond that
+/// is a rate that followed the number of callers; per-future re-offer loops, the
+/// regression this pins, would triple it.
+#[cfg(feature = "cidr")]
+const RATE_TOLERANCE: usize = 2;
 
 /// Three joins naming one fast-failing seed dial it no more often than one join does.
 ///
@@ -497,11 +537,17 @@ const STAGGER: Duration = Duration::from_millis(120);
 ///
 /// The comparison is the assertion. One join runs for a window and its dials are
 /// counted; two more joins naming the same seed then register at staggered points and
-/// the same window is counted again. Were each future to run its own re-offer loop,
-/// the three phases-apart loops would offer at three different phases of the interval
-/// and the count would rise with them; with one node-wide offer it does not move. The
-/// window is measured rather than assumed, so the test needs no copy of the driver's
-/// interval and stays honest if that interval changes.
+/// an identical window is counted again. Were each future to run its own re-offer
+/// loop, the three phases-apart loops would offer at three different phases of the
+/// interval and the count would rise with them; with one node-wide offer it does not
+/// move. The window is measured rather than assumed, so the test needs no copy of the
+/// driver's interval and stays honest if that interval changes.
+///
+/// Both windows are ANCHORED on a dial of their own phase, so both measure the same
+/// part of the same free-running offer clock rather than two arbitrary phases of it,
+/// and what remains of the alignment is the derived [`RATE_TOLERANCE`]. Comparing
+/// windows laid down on the caller's clock instead would let the boundary alone
+/// decide the counts, and could fail a node whose rate never moved.
 ///
 /// A's CIDR policy admits the paired link and nothing else, so the seed is a routable
 /// address the engine queues and dials, whose dial the policy then refuses inside the
@@ -588,10 +634,11 @@ fn staggered_joins_dial_a_shared_failing_seed_once_per_interval() {
       };
 
       assert!(
-        three <= one + 1,
+        three <= one + RATE_TOLERANCE,
         "three joins on one seed dialed it {three} times against {one} for a single \
-         join — the offer rate must not follow the number of callers (the +1 allows \
-         one interval boundary)"
+         join — the offer rate must not follow the number of callers (two windows \
+         over the same clock may differ by {RATE_TOLERANCE}; a per-join re-offer loop \
+         would treble the count)"
       );
     };
     drive_solo(op, run_a, &mut net_a).await;

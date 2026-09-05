@@ -99,6 +99,17 @@ fn op_error_variants_display_and_predicates() {
   assert!(!not_running.is_runner_stopped());
   assert!(!stopped.is_dial_backlog_full());
 
+  // The `Rejected` variant carries the engine's own refusal and forwards its source
+  // rather than folding it into one of the answers a caller acts on.
+  let rejected = OpError::Rejected(memberlist_proto::Error::UnencodablePingTarget);
+  assert!(rejected.is_rejected());
+  assert!(!rejected.to_string().is_empty());
+  assert!(rejected.source().is_some());
+  assert!(!rejected.is_not_running());
+  assert!(!rejected.is_dial_backlog_full());
+  assert!(!rejected.is_runner_stopped());
+  assert!(!not_running.is_rejected());
+
   // The `Resolve` variant boxes a generic error and forwards its source.
   let resolve = OpError::Resolve(Box::new(SampleResolveError));
   assert!(resolve.is_resolve());

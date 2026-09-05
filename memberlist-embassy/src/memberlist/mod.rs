@@ -775,7 +775,10 @@ where
   ///
   /// Returns [`OpError::RunnerStopped`] when the [`Runner`](crate::Runner) driving
   /// this node is gone — the probe would have nothing to send it or time it out —
-  /// and [`OpError::NotRunning`] when the node itself has left.
+  /// and [`OpError::NotRunning`] when the node itself has left. A target the engine
+  /// refuses for its own reason (a framed `Ping` past the gossip datagram budget, an
+  /// identity the compact wire layout cannot encode) is reported as
+  /// [`OpError::Rejected`] carrying that error, never as a lifecycle answer.
   pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration, OpError> {
     // Nothing would carry the probe or its deadline once the run loop is gone, so
     // refuse here rather than register a waiter that only the pump could ever
@@ -784,12 +787,16 @@ where
       return Err(OpError::RunnerStopped);
     }
     let now = time::now();
-    let ping_id: PingId = self
-      .shared
-      .engine
-      .borrow_mut()
-      .ping(node, now)
-      .map_err(|_| OpError::NotRunning)?;
+    let ping_id: PingId = match self.shared.engine.borrow_mut().ping(node, now) {
+      Ok(id) => id,
+      Err(memberlist_proto::Error::NotRunning) => return Err(OpError::NotRunning),
+      // The engine also refuses a target whose framed `Ping` would not fit one gossip
+      // datagram, or whose identity the compact wire layout cannot encode — and its
+      // error type is `#[non_exhaustive]`, so it may grow more. None of those is a
+      // lifecycle answer, and reporting them as one would tell the caller the node
+      // had left when it is running and the TARGET is what it cannot accept.
+      Err(e) => return Err(OpError::Rejected(e)),
+    };
     let reply = self.shared.register_ping(ping_id);
     self.shared.wake_pump();
     reply.wait().await
@@ -845,6 +852,11 @@ where
   ///   node is no longer in a running state (e.g. it has left the cluster).
   /// * [`OpError::RunnerStopped`] — the [`Runner`](crate::Runner) driving this node
   ///   is gone, so the exchange would have nothing to dial it or complete it.
+  /// * [`OpError::Rejected`] — the engine refused the send for some other reason,
+  ///   carried as the engine's own error. Its error type is `#[non_exhaustive]`, so
+  ///   a refusal this driver does not translate is reported as itself rather than
+  ///   reported as one of the answers above, each of which would tell the caller
+  ///   something specific and wrong.
   pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError>
   where
     // Dispatching a reliable exchange schedules gossip work that draws from the RNG.
@@ -870,7 +882,13 @@ where
       Err(memberlist_proto::Error::UserDialBacklogFull(_)) => {
         return Err(OpError::DialBacklogFull);
       }
-      Err(_) => return Err(OpError::NotRunning),
+      Err(memberlist_proto::Error::NotRunning) => return Err(OpError::NotRunning),
+      // The engine's error type is `#[non_exhaustive]`, so this arm is every refusal
+      // it may grow that is neither of the two above. Carrying it through is the only
+      // honest answer: reporting one of those would tell the caller either that
+      // retrying is pointless or that pacing will clear it, and a refusal that means
+      // something else supports neither claim.
+      Err(e) => return Err(OpError::Rejected(e)),
     };
     let reply = self.shared.register_send(sid);
     self.shared.wake_pump();
