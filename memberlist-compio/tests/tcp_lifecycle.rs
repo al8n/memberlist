@@ -617,6 +617,16 @@ async fn command_after_shutdown_returns_error_promptly() {
   );
 }
 
+/// Ceiling on each individually unbounded await in the command-flood test.
+///
+/// `dispatch_join` and `shutdown` both wait on the driver with no deadline of
+/// their own, so a driver that stops servicing its sockets makes them wait
+/// forever. Bounding them turns that class of regression into a prompt test
+/// failure rather than a run that lasts until the CI job is killed. The value
+/// is an order of magnitude above the operations' real cost on loopback, so it
+/// constrains nothing a healthy driver does.
+const CMD_FLOOD_AWAIT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Command flood must not starve network arms (recv / accept / timer).
 ///
 /// Many cloned `Memberlist` handles each issuing commands (e.g.
@@ -657,10 +667,20 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
 
   // Legitimate join through the seed's accept arm. Must complete
   // despite the command flood.
-  let count = joiner
-    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
-    .await
-    .expect("dispatch_join under cmd flood");
+  //
+  // Every await below carries a deadline. `dispatch_join` and `shutdown` are
+  // both unbounded by contract, so a driver that stops servicing its sockets
+  // under the flood would park here for as long as the harness allows — a
+  // regression has to surface as a failure in seconds, not as a job that runs
+  // until its timeout. The deadlines are far above the observed timings
+  // (convergence well under a second on loopback) and only bound pathology.
+  let count = compio::time::timeout(
+    CMD_FLOOD_AWAIT_DEADLINE,
+    joiner.dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)]),
+  )
+  .await
+  .expect("dispatch_join hung under cmd flood")
+  .expect("dispatch_join under cmd flood");
   assert_eq!(count, 1);
 
   let converged = tokio_like_wait(
@@ -675,8 +695,14 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
     seed.member_count()
   );
 
-  seed.shutdown().await.expect("seed shutdown");
-  joiner.shutdown().await.expect("joiner shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, seed.shutdown())
+    .await
+    .expect("seed shutdown hung under cmd flood")
+    .expect("seed shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, joiner.shutdown())
+    .await
+    .expect("joiner shutdown hung under cmd flood")
+    .expect("joiner shutdown");
 }
 
 /// Quiet shutdown — no network activity, no concurrent commands.

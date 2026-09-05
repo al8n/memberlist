@@ -11,7 +11,9 @@
 //! them without depending on the byte-stream plane (which is only compiled with
 //! a `tcp` / `tls-*` feature).
 
-use std::cell::Cell;
+use std::{cell::Cell, future::Future, pin::Pin};
+
+use compio::{buf::BufResult, net::UdpSocket};
 
 use memberlist_proto::event::Event;
 
@@ -145,6 +147,75 @@ pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: IpAddr) -> bool {
 #[cfg(not(feature = "cidr"))]
 pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: IpAddr) -> bool {
   false
+}
+
+/// One in-flight `recv_from` on a driver's gossip UDP socket, owning its
+/// buffer until the operation resolves. Boxed so [`PendingRecv`] can hold it
+/// across loop iterations at a stable address.
+pub(crate) type RecvFut<'a> =
+  Pin<Box<dyn Future<Output = BufResult<(usize, SocketAddr), Vec<u8>>> + 'a>>;
+
+/// A driver loop's single in-flight datagram receive.
+///
+/// Exactly ONE `recv_from` operation stays armed for the whole life of the
+/// loop, and it is re-armed only after it has resolved. The alternative —
+/// building a fresh `recv_from` every iteration and abandoning it whenever a
+/// non-recv select arm wins — is unsound on a completion-based backend
+/// (io_uring on Linux, IOCP on Windows), where the buffer is handed to the
+/// kernel at submit time rather than filled at poll time:
+///
+/// * A datagram the kernel has already delivered into the abandoned buffer is
+///   discarded, so inbound gossip is silently lost whenever the loop happens
+///   to service a command or a timer instead.
+/// * Each abandoned operation keeps a reference to the socket's shared
+///   descriptor until its cancellation is reaped. io_uring's cancellation is
+///   itself a submission-queue entry that is dropped when that queue is full,
+///   and a loop that resolves a ready arm without ever yielding to the runtime
+///   never lets the queue drain, so those operations are stranded permanently.
+///   `UdpSocket::close` waits for the descriptor's last reference, so a
+///   stranded operation makes the post-loop close — and with it the caller's
+///   `shutdown` — hang forever.
+///
+/// A readiness-based backend (epoll, kqueue) consumes nothing until the future
+/// is polled, which is why the defect is invisible outside io_uring/IOCP. This
+/// is the same discipline the stream driver's accept future already follows.
+///
+/// The borrowed socket must outlive the holder. A driver whose socket lives
+/// inside a struct it also borrows mutably each iteration passes a reference to
+/// a CLONE; one that owns the socket as a local passes it directly. Either way
+/// the pending future — and any clone it borrows — must be dropped before the
+/// post-loop close, which awaits the sole remaining reference to the descriptor.
+pub(crate) struct PendingRecv<'a> {
+  socket: &'a UdpSocket,
+  buf_len: usize,
+  fut: RecvFut<'a>,
+}
+
+impl<'a> PendingRecv<'a> {
+  /// Arm the first receive on `socket`.
+  pub(crate) fn new(socket: &'a UdpSocket, buf_len: usize) -> Self {
+    let fut = Box::pin(socket.recv_from(vec![0u8; buf_len]));
+    Self {
+      socket,
+      buf_len,
+      fut,
+    }
+  }
+
+  /// The pending operation, for polling inside a `select`.
+  pub(crate) fn fut(&mut self) -> &mut RecvFut<'a> {
+    &mut self.fut
+  }
+
+  /// Arm a fresh receive with a fresh buffer.
+  ///
+  /// Call this ONLY after the pending future has resolved: the resolved future
+  /// has released its buffer and its descriptor reference, so re-arming
+  /// strands nothing. Calling it on an unresolved future would reintroduce the
+  /// abandonment this type exists to prevent.
+  pub(crate) fn rearm(&mut self) {
+    self.fut = Box::pin(self.socket.recv_from(vec![0u8; self.buf_len]));
+  }
 }
 
 #[cfg(test)]

@@ -19,10 +19,8 @@
 use std::{
   cell::Cell,
   collections::{HashMap, HashSet},
-  future::Future,
   io,
   net::SocketAddr,
-  pin::Pin,
   rc::Rc,
   sync::Arc,
 };
@@ -55,7 +53,7 @@ use crate::{
   delegate::Delegate,
   driver::{
     options::{RuntimeOptions, capped_timer},
-    shared::{ExchangeId, cidr_blocks, dispatch_event_delegate, join_reply},
+    shared::{ExchangeId, PendingRecv, cidr_blocks, dispatch_event_delegate, join_reply},
   },
   error::{JoinFailed, MemberlistError, Result, UserDialBacklogFull},
   snapshot::{MemberlistSnapshot, SnapshotCell},
@@ -323,67 +321,6 @@ where
     .saturating_add(CHECKSUMED_WRAPPER_OVERHEAD)
     .min(GOSSIP_RECV_BUF_MAX)
     .max(endpoint.max_recv_udp_payload_size())
-}
-
-/// The driver's receive future for the shared UDP socket.
-///
-/// Exactly ONE `recv_from` operation stays armed for the whole life of the
-/// loop, and it is re-armed only after it has resolved. The alternative —
-/// building a fresh `recv_from` every iteration and abandoning it whenever a
-/// non-recv select arm wins — is unsound on a completion-based backend
-/// (io_uring on Linux, IOCP on Windows), where the buffer is handed to the
-/// kernel at submit time rather than filled at poll time:
-///
-/// * A datagram the kernel has already delivered into the abandoned buffer is
-///   discarded, so inbound gossip and QUIC handshake packets are silently lost
-///   whenever the loop happens to service a command or a timer instead.
-/// * Each abandoned operation keeps a reference to the socket's shared
-///   descriptor until its cancellation is reaped. io_uring's cancellation is
-///   itself a submission-queue entry that is dropped when that queue is full,
-///   and a command flood keeps the loop from ever yielding to the runtime, so
-///   the queue fills and those operations are stranded permanently. The
-///   post-loop `UdpSocket::close` waits for the descriptor's last reference,
-///   so a stranded operation makes shutdown hang forever.
-///
-/// A readiness-based backend (epoll, kqueue) consumes nothing until the future
-/// is polled, which is why the defect is invisible outside io_uring/IOCP.
-///
-/// The future borrows a CLONE of the driver's socket rather than
-/// `QuicDriverState::udp_socket` so that it can stay alive across the `&mut
-/// state` borrows the per-iteration drains take. Both the pending future and
-/// the clone must be dropped before the post-loop close, which awaits the sole
-/// remaining reference to the descriptor.
-struct PendingRecv<'a> {
-  socket: &'a UdpSocket,
-  buf_len: usize,
-  fut: RecvFut<'a>,
-}
-
-/// One in-flight `recv_from` on the driver's UDP socket, owning its buffer
-/// until the operation resolves. Boxed so [`PendingRecv`] can hold it across
-/// loop iterations at a stable address.
-type RecvFut<'a> = Pin<Box<dyn Future<Output = BufResult<(usize, SocketAddr), Vec<u8>>> + 'a>>;
-
-impl<'a> PendingRecv<'a> {
-  /// Arm the first receive on `socket`.
-  fn new(socket: &'a UdpSocket, buf_len: usize) -> Self {
-    let fut = Box::pin(socket.recv_from(vec![0u8; buf_len]));
-    Self {
-      socket,
-      buf_len,
-      fut,
-    }
-  }
-
-  /// Arm a fresh receive with a fresh buffer.
-  ///
-  /// Call this ONLY after the pending future has resolved: the resolved future
-  /// has released its buffer and its descriptor reference, so re-arming
-  /// strands nothing. Calling it on an unresolved future would reintroduce the
-  /// abandonment this type exists to prevent.
-  fn rearm(&mut self) {
-    self.fut = Box::pin(self.socket.recv_from(vec![0u8; self.buf_len]));
-  }
 }
 
 /// Single-owner QUIC driver task.
@@ -720,7 +657,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     // stream driver's pattern (pass individual `&mut` field refs, not the
     // whole packed state) so the compiler can see the disjoint splits.
     let mut recv_resolved = false;
-    let recv_fut = recv.fut.as_mut().fuse();
+    let recv_fut = recv.fut().as_mut().fuse();
     let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
     let cmd_fut = state.commands.recv_async().fuse();
     pin_mut!(recv_fut, timer_fut, cmd_fut);
@@ -1544,7 +1481,7 @@ where
   // delivery between them and lose whichever datagram went to the operation
   // that is then abandoned; re-polling the single armed operation cannot.
   {
-    let peek_recv = recv.fut.as_mut().fuse();
+    let peek_recv = recv.fut().as_mut().fuse();
     let peek_timer = compio::time::sleep(capped_timer(state.driver_opts.peek_budget())).fuse();
     pin_mut!(peek_recv, peek_timer);
     select_biased! {
