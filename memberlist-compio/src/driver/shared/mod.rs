@@ -11,7 +11,7 @@
 //! them without depending on the byte-stream plane (which is only compiled with
 //! a `tcp` / `tls-*` feature).
 
-use std::{cell::Cell, future::Future, pin::Pin};
+use std::{cell::Cell, future::Future, pin::Pin, time::Duration};
 
 use compio::{buf::BufResult, net::UdpSocket};
 
@@ -20,7 +20,7 @@ use memberlist_proto::event::Event;
 use crate::{delegate::Delegate, transport::runtime::CidrFilter};
 use core::task::Poll;
 use smallvec::SmallVec;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
@@ -216,6 +216,94 @@ impl<'a> PendingRecv<'a> {
   pub(crate) fn rearm(&mut self) {
     self.fut = Box::pin(self.socket.recv_from(vec![0u8; self.buf_len]));
   }
+}
+
+/// Payload of the teardown marker datagram.
+///
+/// The bytes are never interpreted: the marker is sent only after a driver
+/// loop has exited, and the receive it completes is discarded rather than fed
+/// to the endpoint. The pattern is fixed and private purely so a datagram seen
+/// while debugging is recognisable.
+const TEARDOWN_MARKER: [u8; 8] = [0xff, 0x00, 0x6d, 0x6c, 0x74, 0x64, 0x00, 0xff];
+
+/// Marker sends attempted before falling back to the drop-based path.
+const TEARDOWN_MARKER_ATTEMPTS: usize = 3;
+
+/// How long to wait for the pending receive after each marker send.
+const TEARDOWN_RECV_WAIT: Duration = Duration::from_secs(1);
+
+/// Ceiling on a driver's post-loop socket close.
+///
+/// The close is expected to be immediate once the last receive has been
+/// completed. The bound exists so that a teardown which could not complete it
+/// — a send failure, or a platform where the self-addressed datagram does not
+/// come back — degrades to a slow shutdown instead of a hung one.
+pub(crate) const TEARDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The socket's own address, as a destination it can send to.
+///
+/// A wildcard bind (`0.0.0.0` / `::`) is not a valid destination, so the
+/// matching loopback address is substituted; the port is the bound one either
+/// way. Returns `None` for an unbound socket, whose port would be zero.
+fn self_addressed_dest(socket: &UdpSocket) -> Option<SocketAddr> {
+  let local = socket.local_addr().ok()?;
+  if local.port() == 0 {
+    return None;
+  }
+  let ip = match local.ip() {
+    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ip => ip,
+  };
+  Some(SocketAddr::new(ip, local.port()))
+}
+
+/// Complete a driver's last pending receive so the socket can be closed.
+///
+/// Dropping an in-flight receive does NOT reliably end it on io_uring. The
+/// drop issues ONE best-effort `AsyncCancel` submission-queue entry, and
+/// unlike an ordinary operation push — which drains the queue and retries when
+/// it is full — that push is discarded with a warning if there is no room. The
+/// receive then stays in flight forever, holding a reference to the socket's
+/// shared descriptor, and the `UdpSocket::close` that follows waits on that
+/// last reference and never returns.
+///
+/// Sending the socket a datagram addressed to itself resolves the receive
+/// instead of cancelling it, which needs no free queue slot at drop time: the
+/// send is awaited, so it drives the runtime to submit and reap, and awaiting
+/// the receive afterwards reaps its completion. A resolved future cancels
+/// nothing when it is dropped, so the close that follows has no reference left
+/// to wait for.
+///
+/// The received bytes are discarded — the loop has already exited and nothing
+/// further is fed to the endpoint — so the marker is never interpreted, and a
+/// real datagram that happens to arrive first serves equally well.
+///
+/// Returns whether the receive was completed. `false` means the caller is back
+/// on the drop-based path and must bound its close with
+/// [`TEARDOWN_CLOSE_TIMEOUT`].
+pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> bool {
+  let Some(dest) = self_addressed_dest(recv.socket) else {
+    return false;
+  };
+  for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
+    let BufResult(res, _) = recv.socket.send_to(TEARDOWN_MARKER.to_vec(), dest).await;
+    if res.is_err() {
+      // A connected socket rejects a send to another address, and a send can
+      // fail outright on a torn-down interface. Neither is recoverable here.
+      return false;
+    }
+    // Awaiting the receive is what drives the runtime to submit and reap the
+    // completion. `timeout` borrows the pending future, so an elapsed attempt
+    // drops only the borrow and leaves the operation in flight to be retried.
+    if compio::time::timeout(TEARDOWN_RECV_WAIT, recv.fut().as_mut())
+      .await
+      .is_ok()
+    {
+      return true;
+    }
+  }
+  false
 }
 
 #[cfg(test)]

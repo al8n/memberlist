@@ -53,7 +53,10 @@ use crate::{
   delegate::Delegate,
   driver::{
     options::{RuntimeOptions, capped_timer},
-    shared::{ExchangeId, PendingRecv, cidr_blocks, dispatch_event_delegate, join_reply},
+    shared::{
+      ExchangeId, PendingRecv, TEARDOWN_CLOSE_TIMEOUT, cidr_blocks, complete_recv_before_close,
+      dispatch_event_delegate, join_reply,
+    },
   },
   error::{JoinFailed, MemberlistError, Result, UserDialBacklogFull},
   snapshot::{MemberlistSnapshot, SnapshotCell},
@@ -773,11 +776,17 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     }
   }
 
-  // Release the loop's receive before the close below. Dropping `recv`
-  // abandons at most the ONE operation that was still armed, and dropping
-  // `recv_socket` releases the descriptor reference its clone holds; the close
-  // waits for the last reference, so both must be gone before it runs.
-  drop(recv);
+  // Complete the loop's last receive rather than cancelling it: a dropped
+  // in-flight receive relies on a single best-effort io_uring cancellation that
+  // is discarded when the submission queue is full, and the close below would
+  // then wait forever for the descriptor's last reference. Dropping
+  // `recv_socket` afterwards releases the reference its clone holds, so the
+  // close sees the sole remaining one.
+  //
+  // Ignoring the outcome: the bounded close below is correct either way — a
+  // completed receive makes it immediate, and a failed marker leaves the
+  // timeout as the backstop.
+  let _ = complete_recv_before_close(recv).await;
   drop(recv_socket);
 
   // Cleanup. Order matches the stream driver's post-loop sequence
@@ -897,7 +906,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // kernel slot is released before the stashed reply fires below.
   //
   // Ignoring Err: a close error during teardown is unactionable.
-  let _ = state.udp_socket.close().await;
+  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, state.udp_socket.close()).await;
 
   // Ack any stashed Shutdown command reply.
   if let Some(reply) = state.shutdown_reply.take() {

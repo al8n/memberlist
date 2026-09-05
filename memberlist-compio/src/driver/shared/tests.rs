@@ -230,3 +230,86 @@ fn dispatch_handles_repeated_calls_on_shared_delegate() {
     assert_eq!(rec.log.borrow().len(), i + 1);
   }
 }
+
+/// Number of submission-queue entries staged to leave io_uring's ring full.
+///
+/// compio's default proactor capacity. An ordinary operation push drains the
+/// ring and retries when it is full, so the ring only ends up full after
+/// exactly a whole capacity of entries has been staged without the runtime
+/// getting a chance to submit them.
+const SATURATING_STAGED_OPS: usize = 1024;
+
+/// Stage `SATURATING_STAGED_OPS` receives without yielding, so every entry
+/// stays in the submission queue. The returned futures must be kept alive:
+/// dropping one issues the very cancellation this scenario starves.
+///
+/// On a readiness-based backend there is no submission queue and this is
+/// simply a set of pending receives, which is why the test that uses it
+/// asserts the same outcome on every platform.
+async fn saturate_submission_queue(socket: &compio::net::UdpSocket) -> Vec<super::RecvFut<'_>> {
+  let mut staged = Vec::with_capacity(SATURATING_STAGED_OPS);
+  for _ in 0..SATURATING_STAGED_OPS {
+    let mut fut: super::RecvFut<'_> = Box::pin(socket.recv_from(vec![0u8; 64]));
+    // Poll once to stage the operation without awaiting it.
+    let _ = futures_util::poll!(fut.as_mut());
+    staged.push(fut);
+  }
+  staged
+}
+
+/// A driver's last receive must be COMPLETED before the socket is closed, not
+/// cancelled.
+///
+/// io_uring's cancellation is a single best-effort submission-queue push that
+/// is silently discarded when the queue is full. A receive whose cancellation
+/// is lost stays in flight forever holding a reference to the socket's shared
+/// descriptor, and `close` waits on that last reference — so a drop-based
+/// teardown hangs under exactly the conditions staged here. Completing the
+/// receive with a self-addressed datagram needs no free queue slot, so the
+/// close that follows has nothing left to wait for.
+#[compio::test]
+async fn teardown_completes_last_receive_with_submission_queue_saturated() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let filler = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+  // Arm the receive the way the driver loop does, so its entry is staged
+  // before the queue fills.
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  let staged = saturate_submission_queue(&filler).await;
+
+  assert!(
+    complete_recv_before_close(recv).await,
+    "the teardown marker did not complete the pending receive",
+  );
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok(),
+    "close did not finish after the receive was completed",
+  );
+
+  drop(staged);
+}
+
+/// A wildcard bind is not a valid destination, so the marker is aimed at the
+/// matching loopback address on the bound port.
+#[compio::test]
+async fn self_addressed_dest_substitutes_loopback_for_a_wildcard_bind() {
+  let v4 = compio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+  let dest = self_addressed_dest(&v4).expect("bound socket has a destination");
+  assert_eq!(
+    dest.ip(),
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+  );
+  assert_eq!(dest.port(), v4.local_addr().unwrap().port());
+  assert_ne!(dest.port(), 0);
+}
+
+/// A concrete bind keeps its own address as the marker destination.
+#[compio::test]
+async fn self_addressed_dest_keeps_a_concrete_bind() {
+  let s = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  assert_eq!(self_addressed_dest(&s), s.local_addr().ok());
+}

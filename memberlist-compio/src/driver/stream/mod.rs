@@ -57,8 +57,9 @@ use crate::{
   driver::{
     options::{RuntimeOptions, StreamTransportOptions, capped_timer},
     shared::{
-      ExchangeId, PendingRecv, add_obs_payload, cidr_blocks, dispatch_event_delegate, join_reply,
-      observation_payload_bytes, yield_once,
+      ExchangeId, PendingRecv, TEARDOWN_CLOSE_TIMEOUT, add_obs_payload, cidr_blocks,
+      complete_recv_before_close, dispatch_event_delegate, join_reply, observation_payload_bytes,
+      yield_once,
     },
   },
   error::{JoinFailed, MemberlistError, Result},
@@ -1498,13 +1499,18 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // surfaced; a fully synchronous fix needs a compio `TcpListener` async-close.
   drop(listener);
 
-  // Release the loop's receive before the close below: dropping `recv` abandons
-  // at most the ONE operation still armed, and the close then awaits the
-  // socket's last descriptor reference.
-  drop(recv);
+  // Complete the loop's last receive rather than cancelling it: a dropped
+  // in-flight receive relies on a single best-effort io_uring cancellation that
+  // is discarded when the submission queue is full, and the close below would
+  // then wait forever for the socket's last descriptor reference.
+  //
+  // Ignoring the outcome: the bounded close below is correct either way — a
+  // completed receive makes it immediate, and a failed marker leaves the
+  // timeout as the backstop.
+  let _ = complete_recv_before_close(recv).await;
   // Ignoring Err: socket close on shutdown — the runtime tears down
   // file descriptors anyway and the error is unactionable.
-  let _ = gossip_socket.close().await;
+  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, gossip_socket.close()).await;
 
   // Now ack the shutdown caller — both bound ports have been released,
   // so the caller's `shutdown.await` returns to a state where an
