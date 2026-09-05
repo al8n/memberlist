@@ -127,6 +127,57 @@ async fn rebind_after_shutdown_releases_listener_port() {
   second.shutdown().await.expect("second shutdown");
 }
 
+/// Shutdown must release BOTH bound ports — the TCP listener and the UDP
+/// gossip socket — even when the io_uring submission ring is under pressure.
+///
+/// The driver ends its loop with one pending accept on the listener and one
+/// pending receive on the gossip socket. Cancelling either is a single
+/// best-effort submission-queue push that io_uring discards when the queue is
+/// full; a discarded cancellation strands the operation, which keeps a
+/// reference to its socket's descriptor and so keeps the port bound. The
+/// teardown therefore COMPLETES both operations before awaiting each close.
+///
+/// The rebinds below use the raw sockets rather than a second `Memberlist` so
+/// the assertion is the port itself, with no bind retry in between. The check
+/// is meaningful on every backend: a leaked listening handle surfaces as
+/// `WSAEACCES` on Windows and as an in-use address elsewhere.
+#[compio::test]
+async fn shutdown_releases_both_ports_under_submission_queue_pressure() {
+  let node = make_tcp("rebind-pressure", loopback_addr(0)).await;
+  let addr = node.advertise_address();
+
+  // Put the submission ring under pressure: these receives are staged without
+  // ever being awaited, so they occupy ring entries while the node tears down.
+  // They must stay alive — dropping one issues the very cancellation this
+  // scenario starves.
+  let filler = compio::net::UdpSocket::bind(loopback_addr(0))
+    .await
+    .expect("filler bind");
+  let mut staged = Vec::new();
+  for _ in 0..1024 {
+    let mut fut = Box::pin(filler.recv_from(vec![0u8; 64]));
+    let _ = futures_util::poll!(fut.as_mut());
+    staged.push(fut);
+  }
+
+  compio::time::timeout(Duration::from_secs(30), node.shutdown())
+    .await
+    .expect("shutdown hung under submission-queue pressure")
+    .expect("shutdown");
+
+  // Both ports must be free the instant shutdown returns.
+  let listener = compio::net::TcpListener::bind(addr)
+    .await
+    .expect("TCP listener port was not released by shutdown");
+  let gossip = compio::net::UdpSocket::bind(addr)
+    .await
+    .expect("UDP gossip port was not released by shutdown");
+
+  drop(listener);
+  drop(gossip);
+  drop(staged);
+}
+
 /// Same as the no-clone case, but a live clone outlives the
 /// `shutdown.await` — the shutdown ack must still fire only after the
 /// listener drops, so the rebind on the same address succeeds even

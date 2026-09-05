@@ -58,8 +58,8 @@ use crate::{
     options::{RuntimeOptions, StreamTransportOptions, capped_timer},
     shared::{
       ExchangeId, PendingRecv, TEARDOWN_CLOSE_TIMEOUT, add_obs_payload, cidr_blocks,
-      complete_recv_before_close, dispatch_event_delegate, join_reply, observation_payload_bytes,
-      yield_once,
+      complete_accept_before_close, complete_recv_before_close, dispatch_event_delegate,
+      join_reply, observation_payload_bytes, yield_once,
     },
   },
   error::{JoinFailed, MemberlistError, Result},
@@ -1480,33 +1480,34 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // The bridges were frozen and drained to disconnect inside
   // `freeze_and_drain_bridges_to_disconnected` above, so `bridges` is already
   // empty here — no separate close signal is needed.
-  // Drop the persistent accept future before the listener: it holds an
-  // in-flight accept borrowing `listener`, so the listener cannot be moved while
-  // it is alive. Cancelling a pending accept during shutdown is correct — a
-  // connection arriving as the driver tears down has nothing to be served.
-  drop(accept_fut);
-  // Drop the TCP reliable listener FIRST so the bound port is released
-  // immediately. The listener does not have an explicit close API
-  // distinct from drop — the local going out of scope here closes the
-  // file descriptor.
+  // Release both bound ports before acking the shutdown caller, and on each
+  // socket resolve its pending operation BEFORE awaiting the close.
   //
-  // Windows caveat: unlike the gossip UDP socket below (which gets an awaited
-  // `close()` because IOCP handle close is asynchronous), the listener has no
-  // such API, so its close rides `drop`. If IOCP closes the listening handle
-  // asynchronously, a same-port TCP rebind issued the instant `shutdown().await`
-  // returns could in principle race `AddrInUse`. In practice the integration
-  // suite rebinds on ephemeral ports (and retries `AddrInUse`), so this has not
-  // surfaced; a fully synchronous fix needs a compio `TcpListener` async-close.
-  drop(listener);
+  // A pending accept or receive that is merely dropped relies on one
+  // best-effort io_uring cancellation, which is discarded when the submission
+  // queue is full. The orphaned operation then keeps a reference to its
+  // socket's shared descriptor: a bare `drop` of the socket does not release
+  // the port at all, and an awaited `close` waits on that reference forever.
+  // Completing the operation instead — a self-addressed connect for the
+  // accept, a self-addressed datagram for the receive — needs no free queue
+  // slot, so the close that follows has nothing left to wait for.
+  //
+  // Ignoring the outcomes: the bounded closes are correct either way — a
+  // completed operation makes the close immediate, and a failed completion
+  // leaves the timeout as the backstop.
 
-  // Complete the loop's last receive rather than cancelling it: a dropped
-  // in-flight receive relies on a single best-effort io_uring cancellation that
-  // is discarded when the submission queue is full, and the close below would
-  // then wait forever for the socket's last descriptor reference.
-  //
-  // Ignoring the outcome: the bounded close below is correct either way — a
-  // completed receive makes it immediate, and a failed marker leaves the
-  // timeout as the backstop.
+  // Listener first: complete its accept, then close it.
+  let _ = complete_accept_before_close(accept_fut.as_mut(), &listener).await;
+  // The accept future borrows `listener`, so it must go before the close moves
+  // it. It has resolved (or never had an operation), so this cancels nothing.
+  drop(accept_fut);
+  // Ignoring Err: an awaited close is what releases the listening port on a
+  // completion-based backend, where a plain drop closes the handle
+  // asynchronously and a same-port rebind races the release. A close error
+  // during teardown is unactionable.
+  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, listener.close()).await;
+
+  // Then the gossip socket: complete its receive, then close it.
   let _ = complete_recv_before_close(recv).await;
   // Ignoring Err: socket close on shutdown — the runtime tears down
   // file descriptors anyway and the error is unactionable.

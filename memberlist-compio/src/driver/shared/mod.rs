@@ -241,12 +241,16 @@ const TEARDOWN_RECV_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const TEARDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The socket's own address, as a destination it can send to.
+fn self_addressed_dest(socket: &UdpSocket) -> Option<SocketAddr> {
+  self_addressed(socket.local_addr().ok()?)
+}
+
+/// A bound local address, as a destination it can be reached on.
 ///
 /// A wildcard bind (`0.0.0.0` / `::`) is not a valid destination, so the
 /// matching loopback address is substituted; the port is the bound one either
-/// way. Returns `None` for an unbound socket, whose port would be zero.
-fn self_addressed_dest(socket: &UdpSocket) -> Option<SocketAddr> {
-  let local = socket.local_addr().ok()?;
+/// way. Returns `None` for an unbound address, whose port would be zero.
+fn self_addressed(local: SocketAddr) -> Option<SocketAddr> {
   if local.port() == 0 {
     return None;
   }
@@ -300,6 +304,72 @@ pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> boo
       .await
       .is_ok()
     {
+      return true;
+    }
+  }
+  false
+}
+
+/// Complete a stream driver's pending accept so the listener can be closed.
+///
+/// The listener carries the same hazard as the gossip socket: a pending accept
+/// that is merely DROPPED relies on one best-effort `AsyncCancel` push, which
+/// io_uring discards when its submission queue is full. The orphaned accept
+/// keeps a reference to the listener's shared descriptor, so the port stays
+/// bound — a plain `drop` of the listener then does not release it at all, and
+/// an awaited `close` would wait on that reference forever. A driver that
+/// reports a successful shutdown while still holding the port makes an
+/// immediate rebind fail (`WSAEACCES` on Windows, `AddrInUse` elsewhere).
+///
+/// Connecting to the listener's own address resolves the accept instead of
+/// cancelling it, needing no free queue slot: both the connect and the accept
+/// are awaited, which drives the runtime to submit and reap. The accepted
+/// connection and the connecting side are dropped immediately — the driver
+/// loop has exited and nothing will be served on them.
+///
+/// A terminated future has already resolved and holds no operation, so there
+/// is nothing to complete and the listener can be closed directly.
+///
+/// Returns whether the listener has no operation left in flight. `false` means
+/// the caller is on the drop-based path and must bound its close with
+/// [`TEARDOWN_CLOSE_TIMEOUT`].
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+pub(crate) async fn complete_accept_before_close<F>(
+  mut accept: core::pin::Pin<&mut F>,
+  listener: &compio::net::TcpListener,
+) -> bool
+where
+  F: futures_util::future::FusedFuture + ?Sized,
+{
+  if accept.is_terminated() {
+    return true;
+  }
+  let Ok(local) = listener.local_addr() else {
+    return false;
+  };
+  let Some(dest) = self_addressed(local) else {
+    return false;
+  };
+  for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
+    let Ok(stream) = compio::net::TcpStream::connect(dest).await else {
+      // A listener whose address cannot be dialled (a torn-down interface, a
+      // refused loopback connect) leaves nothing to complete the accept with.
+      return false;
+    };
+    // Awaiting the accept is what drives the runtime to reap its completion.
+    // `timeout` borrows the pending future, so an elapsed attempt drops only
+    // the borrow and leaves the operation in flight for the next attempt.
+    let done = compio::time::timeout(TEARDOWN_RECV_WAIT, accept.as_mut())
+      .await
+      .is_ok();
+    // Drop the connecting side and anything it was accepted into: the loop has
+    // exited, so neither is served.
+    drop(stream);
+    if done {
       return true;
     }
   }

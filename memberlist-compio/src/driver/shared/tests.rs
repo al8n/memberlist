@@ -231,24 +231,34 @@ fn dispatch_handles_repeated_calls_on_shared_delegate() {
   }
 }
 
-/// Number of submission-queue entries staged to leave io_uring's ring full.
+/// compio's default proactor capacity, and so io_uring's submission ring size.
 ///
-/// compio's default proactor capacity. An ordinary operation push drains the
-/// ring and retries when it is full, so the ring only ends up full after
-/// exactly a whole capacity of entries has been staged without the runtime
-/// getting a chance to submit them.
-const SATURATING_STAGED_OPS: usize = 1024;
+/// compio does not re-export `ProactorBuilder` through its facade, so a test
+/// cannot ask for a smaller ring without taking a direct dependency on
+/// `compio-driver`; the default is assumed instead. If it ever changes, the
+/// saturation below stops leaving the ring full — which is precisely what
+/// `drop_based_teardown_does_not_complete_with_a_full_ring` detects.
+const PROACTOR_CAPACITY: usize = 1024;
 
-/// Stage `SATURATING_STAGED_OPS` receives without yielding, so every entry
-/// stays in the submission queue. The returned futures must be kept alive:
-/// dropping one issues the very cancellation this scenario starves.
+/// Stage `count` receives without yielding, so every entry stays in the
+/// submission queue. The returned futures must be kept alive: dropping one
+/// issues the very cancellation this scenario starves.
+///
+/// An ordinary operation push DRAINS the ring and retries when it finds it
+/// full, landing in an emptied ring. The ring is therefore only full after
+/// exactly `PROACTOR_CAPACITY` entries have been staged in total — counting
+/// the operation under test — so callers pass `PROACTOR_CAPACITY` minus what
+/// they have already staged. Staging one too many empties the ring and the
+/// scenario silently tests nothing.
 ///
 /// On a readiness-based backend there is no submission queue and this is
-/// simply a set of pending receives, which is why the test that uses it
-/// asserts the same outcome on every platform.
-async fn saturate_submission_queue(socket: &compio::net::UdpSocket) -> Vec<super::RecvFut<'_>> {
-  let mut staged = Vec::with_capacity(SATURATING_STAGED_OPS);
-  for _ in 0..SATURATING_STAGED_OPS {
+/// simply a set of pending receives.
+async fn stage_pending_receives(
+  socket: &compio::net::UdpSocket,
+  count: usize,
+) -> Vec<super::RecvFut<'_>> {
+  let mut staged = Vec::with_capacity(count);
+  for _ in 0..count {
     let mut fut: super::RecvFut<'_> = Box::pin(socket.recv_from(vec![0u8; 64]));
     // Poll once to stage the operation without awaiting it.
     let _ = futures_util::poll!(fut.as_mut());
@@ -277,7 +287,9 @@ async fn teardown_completes_last_receive_with_submission_queue_saturated() {
   let mut recv = PendingRecv::new(&socket, 64);
   let _ = futures_util::poll!(recv.fut().as_mut());
 
-  let staged = saturate_submission_queue(&filler).await;
+  // The receive above already occupies one ring entry, so one short of a full
+  // capacity of fillers leaves the ring exactly full.
+  let staged = stage_pending_receives(&filler, PROACTOR_CAPACITY - 1).await;
 
   assert!(
     complete_recv_before_close(recv).await,
@@ -312,4 +324,62 @@ async fn self_addressed_dest_substitutes_loopback_for_a_wildcard_bind() {
 async fn self_addressed_dest_keeps_a_concrete_bind() {
   let s = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
   assert_eq!(self_addressed_dest(&s), s.local_addr().ok());
+}
+
+/// The drop-based teardown is fine when the submission queue has room: the
+/// cancellation lands, the operation ends, and the close completes.
+///
+/// This is the control for the baseline below — together they show that the
+/// hang is caused by the full ring and not by the pending receive as such.
+#[compio::test]
+async fn drop_based_teardown_completes_when_the_ring_has_room() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+  drop(recv);
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok(),
+    "close did not finish even though the cancellation had room to be pushed",
+  );
+}
+
+/// Baseline proving that the staging above really does leave the ring full.
+///
+/// With the ring full, the cancellation issued by dropping the armed receive
+/// is discarded, the operation is stranded, and the close never completes.
+/// That is the exact condition
+/// `teardown_completes_last_receive_with_submission_queue_saturated` is there
+/// to survive; if this stops holding, the saturation arithmetic (or
+/// [`PROACTOR_CAPACITY`]) has drifted and that test is no longer covering
+/// anything.
+///
+/// Ignored by default because it asserts an io_uring-specific hang: on kqueue,
+/// IOCP, and io_uring's own polling fallback the cancellation is not a queue
+/// entry and the close completes, so an always-on assertion would fail on
+/// every other backend. Run it on Linux with io_uring reachable:
+/// `cargo test -p memberlist-compio --lib drop_based_teardown_does_not -- --ignored`
+#[compio::test]
+#[ignore = "asserts an io_uring-only hang; see the doc comment for how to run it"]
+async fn drop_based_teardown_does_not_complete_with_a_full_ring() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let filler = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+  let staged = stage_pending_receives(&filler, PROACTOR_CAPACITY - 1).await;
+
+  // The ring is full, so this cancellation is discarded.
+  drop(recv);
+
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_err(),
+    "close completed, so the cancellation was pushed: the ring was not full \
+     and the saturation no longer reproduces the stranding condition",
+  );
+
+  drop(staged);
 }
