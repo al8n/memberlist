@@ -273,8 +273,11 @@ pub(crate) struct JoinId(u64);
 ///
 /// Wake sources, and the whole set of them: a drained [`Event::NodeJoined`] — the one
 /// event that can add a member, and so the only one that can change the `is_joined()`
-/// a parked join is waiting on — and [`leave`](crate::Memberlist::leave), which
-/// changes the lifecycle answer the same join checks first. Ordinary traffic (user
+/// a parked join is waiting on — [`leave`](crate::Memberlist::leave), which changes
+/// the lifecycle answer the same join checks first, and the run loop's exit through
+/// [`Shared::fail_all_waiters`]. The third changes neither answer; it is a source
+/// because it removes the other two, and a join left parked on a wake that can no
+/// longer arrive would hang rather than get to re-check. Ordinary traffic (user
 /// packets, pings, sends, exchange completions) wakes nobody: it cannot change either
 /// answer, and the seed re-offer that a failed exchange leads to is paced by the
 /// Runner's own offer clock, not by a parked join re-polling.
@@ -582,6 +585,10 @@ where
   /// changes; a parked join re-checks exactly the lifecycle and the member count, so
   /// a wake for anything else is a fan-out over every live join that can only park
   /// them again (see [`JoinNotify`]).
+  ///
+  /// [`fail_all_waiters`](Self::fail_all_waiters) wakes the same joins without going
+  /// through here, because it is the one wake that is NOT about a changed answer: it
+  /// fires when the run loop ends and the two sources above can no longer arrive.
   #[inline]
   pub(crate) fn notify_join_waiters(&self) {
     self.join_notify.notify();
@@ -718,6 +725,19 @@ where
 
   /// Fail every parked waiter with `NotRunning` (used when the run loop stops, so
   /// no awaiting handle op hangs forever after teardown).
+  ///
+  /// A parked [`join`](crate::Memberlist::join) is not in these tables — it owns a
+  /// waker entry in [`JoinNotify`] instead — so it is WOKEN here rather than
+  /// resolved. Without that wake it would have no wake source left at all: its two
+  /// ordinary ones are a drained `NodeJoined` and `leave`, and both are reached
+  /// through the loop that has just ended.
+  ///
+  /// What the woken join then observes is the engine's business, not this call's.
+  /// Nothing here changes a lifecycle: a node that has left or shut down fails the
+  /// join's `ensure_running` check and the join returns `NotRunning`, but the engine
+  /// can still be running when the run loop ends — ending the loop does not end the
+  /// node — and such a join re-runs both checks, finds the membership it was waiting
+  /// on unchanged, and parks again on the new epoch.
   pub(crate) fn fail_all_waiters(&self) {
     let mut w = self.waiters.borrow_mut();
     let pings = core::mem::take(&mut w.pings);
@@ -729,6 +749,9 @@ where
     for s in sends {
       s.reply.signal(Err(OpError::NotRunning));
     }
+    // Joins park on the node-wide notify rather than in `waiters`, so signalling the
+    // tables above reaches none of them.
+    self.join_notify.notify();
   }
 }
 

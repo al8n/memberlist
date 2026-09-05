@@ -677,9 +677,12 @@ where
 
     // Wait for convergence. The node notifies every parked join when the Runner
     // drained an event that ADDED a member, and `leave()` notifies too. Those are the
-    // only two wake sources, and they are exactly enough: neither of the checks below
-    // can change its answer without one of them, and every other event a pump drains
-    // leaves both answers where they were. A seed exchange that failed needs no wake
+    // only two wake sources that can change an answer, and they are exactly enough:
+    // neither of the checks below can change its answer without one of them, and
+    // every other event a pump drains leaves both answers where they were. A run loop
+    // that ends notifies as well — not because it changed an answer, but because it
+    // took both of those sources away, so a join parked across it re-runs the
+    // lifecycle check instead of waiting on a wake that can no longer come. A seed exchange that failed needs no wake
     // of its own — nothing here would re-dial it, and the re-offer that does is paced
     // by the Runner's own offer clock. This join has its own waker entry, so it never
     // depends on some other joiner having been woken in its place.

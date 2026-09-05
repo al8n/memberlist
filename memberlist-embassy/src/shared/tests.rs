@@ -211,6 +211,79 @@ fn fail_all_waiters_resolves_every_parked_op_not_running() {
   assert!(w.pings.is_empty() && w.sends.is_empty());
 }
 
+/// Counts the wakes one parked future receives.
+///
+/// `Waker::from` needs `Send + Sync`, which rules out a `Cell`; the count is only
+/// ever read after the wake it is checking, so the ordering is immaterial.
+#[derive(Default)]
+struct WakeCounter {
+  wakes: core::sync::atomic::AtomicUsize,
+}
+
+impl WakeCounter {
+  fn count(&self) -> usize {
+    self.wakes.load(core::sync::atomic::Ordering::Relaxed)
+  }
+}
+
+impl alloc::task::Wake for WakeCounter {
+  fn wake(self: alloc::sync::Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+    self
+      .wakes
+      .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+  }
+}
+
+/// A join parked when the run loop ends must be WOKEN by `fail_all_waiters`.
+///
+/// Parked joins are not in the waiter tables that call resolves — each owns a waker
+/// entry in the node-wide join notify — and with a per-join waker there is no other
+/// joiner whose wake could stand in for this one. Its two ordinary wake sources, a
+/// drained `NodeJoined` and `leave`, both run on the loop that has just ended, so
+/// without the notify here the join has no wake source at all and parks forever.
+///
+/// The wake is what is asserted, not a verdict: this call resolves no lifecycle, so
+/// what the woken join decides is the engine's answer to `ensure_running` — here the
+/// engine is still running, which is exactly the case where the join re-checks and
+/// parks again rather than returning `NotRunning`.
+#[test]
+fn fail_all_waiters_wakes_a_parked_join() {
+  let shared = shared_node("t", 1);
+  let seeds = [sa(9)];
+  let offer = shared.register_join_offer(&seeds);
+
+  let counter = alloc::sync::Arc::new(WakeCounter::default());
+  let waker = core::task::Waker::from(counter.clone());
+  let mut cx = core::task::Context::from_waker(&waker);
+
+  // Park exactly as the join loop does: read the epoch, then poll the wait.
+  let seen = shared.join_epoch();
+  let mut wait = core::pin::pin!(shared.join_wait(offer.id(), seen));
+  assert!(
+    core::future::Future::poll(wait.as_mut(), &mut cx).is_pending(),
+    "a join with nothing to converge on parks"
+  );
+  assert_eq!(counter.count(), 0, "parking is not itself a wake");
+
+  shared.fail_all_waiters();
+
+  assert_eq!(
+    counter.count(),
+    1,
+    "the join parked when the run loop ended was not woken, so it had no wake \
+     source left at all"
+  );
+  assert!(
+    core::future::Future::poll(wait.as_mut(), &mut cx).is_ready(),
+    "the epoch moved, so the wait resolves and the join re-runs its lifecycle and \
+     membership checks"
+  );
+}
+
 /// The `is_joined` / `advertise_address` free helpers forward the engine's
 /// view: a fresh single-node engine is not joined and reports its advertise
 /// address.
