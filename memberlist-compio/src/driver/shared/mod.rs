@@ -229,8 +229,15 @@ const TEARDOWN_MARKER: [u8; 8] = [0xff, 0x00, 0x6d, 0x6c, 0x74, 0x64, 0x00, 0xff
 /// Marker sends attempted before falling back to the drop-based path.
 const TEARDOWN_MARKER_ATTEMPTS: usize = 3;
 
-/// How long to wait for the pending receive after each marker send.
-const TEARDOWN_RECV_WAIT: Duration = Duration::from_secs(1);
+/// Bound on EVERY individual await inside a teardown completion protocol.
+///
+/// These helpers exist so shutdown cannot hang, so none of their own awaits
+/// may be unbounded either. The submission queue cannot block a send or a
+/// connect — an ordinary push drains the ring and retries — but the kernel
+/// side can: an interface torn down mid-teardown, or a send that never
+/// completes, would otherwise park the teardown forever. An elapsed step is
+/// treated exactly like a failed one.
+const TEARDOWN_STEP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Ceiling on a driver's post-loop socket close.
 ///
@@ -291,16 +298,22 @@ pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> boo
     return false;
   };
   for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
-    let BufResult(res, _) = recv.socket.send_to(TEARDOWN_MARKER.to_vec(), dest).await;
-    if res.is_err() {
+    let sent = compio::time::timeout(
+      TEARDOWN_STEP_TIMEOUT,
+      recv.socket.send_to(TEARDOWN_MARKER.to_vec(), dest),
+    )
+    .await;
+    if !matches!(sent, Ok(BufResult(Ok(_), _))) {
       // A connected socket rejects a send to another address, and a send can
-      // fail outright on a torn-down interface. Neither is recoverable here.
+      // fail outright — or never complete — on a torn-down interface. None of
+      // those is recoverable here, and an elapsed send is treated as a failed
+      // one so the protocol cannot park on it.
       return false;
     }
     // Awaiting the receive is what drives the runtime to submit and reap the
     // completion. `timeout` borrows the pending future, so an elapsed attempt
     // drops only the borrow and leaves the operation in flight to be retried.
-    if compio::time::timeout(TEARDOWN_RECV_WAIT, recv.fut().as_mut())
+    if compio::time::timeout(TEARDOWN_STEP_TIMEOUT, recv.fut().as_mut())
       .await
       .is_ok()
     {
@@ -355,15 +368,19 @@ where
     return false;
   };
   for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
-    let Ok(stream) = compio::net::TcpStream::connect(dest).await else {
+    let Ok(Ok(stream)) =
+      compio::time::timeout(TEARDOWN_STEP_TIMEOUT, compio::net::TcpStream::connect(dest)).await
+    else {
       // A listener whose address cannot be dialled (a torn-down interface, a
       // refused loopback connect) leaves nothing to complete the accept with.
+      // An elapsed connect is treated as a failed one so the protocol cannot
+      // park on it.
       return false;
     };
     // Awaiting the accept is what drives the runtime to reap its completion.
     // `timeout` borrows the pending future, so an elapsed attempt drops only
     // the borrow and leaves the operation in flight for the next attempt.
-    let done = compio::time::timeout(TEARDOWN_RECV_WAIT, accept.as_mut())
+    let done = compio::time::timeout(TEARDOWN_STEP_TIMEOUT, accept.as_mut())
       .await
       .is_ok();
     // Drop the connecting side and anything it was accepted into: the loop has

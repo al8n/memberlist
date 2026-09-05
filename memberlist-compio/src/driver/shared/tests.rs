@@ -383,3 +383,87 @@ async fn drop_based_teardown_does_not_complete_with_a_full_ring() {
 
   drop(staged);
 }
+
+/// A future that never resolves and reports itself as UNTERMINATED.
+///
+/// `futures_util::future::pending` is fused the other way — it declares itself
+/// terminated precisely because it will never produce a value — which the
+/// accept helper short-circuits on. Standing in for an accept whose completion
+/// has not arrived needs the opposite: an operation that is still live, so the
+/// helper actually runs its attempt loop.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+struct Unresolved;
+
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+impl core::future::Future for Unresolved {
+  type Output = ();
+
+  fn poll(
+    self: core::pin::Pin<&mut Self>,
+    _: &mut core::task::Context<'_>,
+  ) -> core::task::Poll<Self::Output> {
+    core::task::Poll::Pending
+  }
+}
+
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+impl futures_util::future::FusedFuture for Unresolved {
+  fn is_terminated(&self) -> bool {
+    false
+  }
+}
+
+/// The accept-completion protocol gives up, it does not hang, when the
+/// operation it is trying to complete never resolves.
+///
+/// The helper exists so a driver's shutdown cannot hang, so every await inside
+/// it is bounded and an elapsed step is treated exactly like a failed one. A
+/// pending-forever future stands in for the pathological case the bound is
+/// there for: an accept whose completion never arrives, on a listener that is
+/// otherwise perfectly dialable. Without the bound on the accept await the
+/// first attempt would park here forever; with it, the attempt budget is spent
+/// and the caller is handed back onto the drop-based path, whose close is
+/// bounded by [`TEARDOWN_CLOSE_TIMEOUT`].
+///
+/// The elapsed-connect branch is not asserted here: the destination is derived
+/// from the listener's own bound address, so a test cannot aim the helper at
+/// something undialable without a second interface.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn teardown_accept_gives_up_when_the_operation_never_resolves() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let never = Unresolved;
+  futures_util::pin_mut!(never);
+
+  let started = std::time::Instant::now();
+  let completed = complete_accept_before_close(never, &listener).await;
+  let elapsed = started.elapsed();
+
+  assert!(
+    !completed,
+    "the helper claimed the accept was completed, but it never resolved",
+  );
+  // Each attempt spends at most one step bound on the accept; the connects are
+  // loopback and immediate. Twice the nominal budget leaves room for a loaded
+  // machine while still failing outright if an await has become unbounded.
+  assert!(
+    elapsed < TEARDOWN_STEP_TIMEOUT * (TEARDOWN_MARKER_ATTEMPTS as u32) * 2,
+    "the helper took {elapsed:?}, so an await inside it is no longer bounded",
+  );
+}
