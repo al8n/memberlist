@@ -467,3 +467,48 @@ async fn teardown_accept_gives_up_when_the_operation_never_resolves() {
     "the helper took {elapsed:?}, so an await inside it is no longer bounded",
   );
 }
+
+/// A listener whose accept has ALREADY resolved needs no completion protocol.
+///
+/// The stream driver reaches its teardown by either arm of a `select`, so on the
+/// arm that fired the accept the future is spent: it holds no operation, nothing
+/// keeps a reference to the listener's descriptor, and the close can go straight
+/// ahead. Short-circuiting is what keeps that ordinary path off the wire — without
+/// it every clean shutdown would open a self-connection it has no use for.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn teardown_accept_short_circuits_on_an_already_resolved_future() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let port = listener.local_addr().unwrap().port();
+
+  // `futures_util`'s pending future is fused as TERMINATED, which is exactly the
+  // shape a resolved accept presents to the helper.
+  let spent = futures_util::future::pending::<()>();
+  futures_util::pin_mut!(spent);
+
+  assert!(
+    complete_accept_before_close(spent, &listener).await,
+    "a spent accept holds no operation, so the listener is already closeable",
+  );
+  // The helper dialled nothing: the port is still the listener's own and no
+  // connection was accepted onto it.
+  assert_eq!(listener.local_addr().unwrap().port(), port);
+}
+
+/// An unbound address has no port to aim a completion at, so it yields no
+/// destination.
+///
+/// This is the sole gate on the `false` both helpers return before they attempt
+/// anything: with no destination there is no datagram to send and no address to
+/// dial, and the caller falls back to the bounded drop-based close. The predicate
+/// is asserted directly because a socket cannot be made to report port zero once
+/// the kernel has bound it.
+#[compio::test]
+async fn self_addressed_has_no_destination_for_an_unbound_address() {
+  assert!(self_addressed("127.0.0.1:0".parse().unwrap()).is_none());
+  assert!(self_addressed("[::]:0".parse().unwrap()).is_none());
+}
