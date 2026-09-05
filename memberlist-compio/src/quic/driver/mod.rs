@@ -19,8 +19,10 @@
 use std::{
   cell::Cell,
   collections::{HashMap, HashSet},
+  future::Future,
   io,
   net::SocketAddr,
+  pin::Pin,
   rc::Rc,
   sync::Arc,
 };
@@ -323,6 +325,67 @@ where
     .max(endpoint.max_recv_udp_payload_size())
 }
 
+/// The driver's receive future for the shared UDP socket.
+///
+/// Exactly ONE `recv_from` operation stays armed for the whole life of the
+/// loop, and it is re-armed only after it has resolved. The alternative —
+/// building a fresh `recv_from` every iteration and abandoning it whenever a
+/// non-recv select arm wins — is unsound on a completion-based backend
+/// (io_uring on Linux, IOCP on Windows), where the buffer is handed to the
+/// kernel at submit time rather than filled at poll time:
+///
+/// * A datagram the kernel has already delivered into the abandoned buffer is
+///   discarded, so inbound gossip and QUIC handshake packets are silently lost
+///   whenever the loop happens to service a command or a timer instead.
+/// * Each abandoned operation keeps a reference to the socket's shared
+///   descriptor until its cancellation is reaped. io_uring's cancellation is
+///   itself a submission-queue entry that is dropped when that queue is full,
+///   and a command flood keeps the loop from ever yielding to the runtime, so
+///   the queue fills and those operations are stranded permanently. The
+///   post-loop `UdpSocket::close` waits for the descriptor's last reference,
+///   so a stranded operation makes shutdown hang forever.
+///
+/// A readiness-based backend (epoll, kqueue) consumes nothing until the future
+/// is polled, which is why the defect is invisible outside io_uring/IOCP.
+///
+/// The future borrows a CLONE of the driver's socket rather than
+/// `QuicDriverState::udp_socket` so that it can stay alive across the `&mut
+/// state` borrows the per-iteration drains take. Both the pending future and
+/// the clone must be dropped before the post-loop close, which awaits the sole
+/// remaining reference to the descriptor.
+struct PendingRecv<'a> {
+  socket: &'a UdpSocket,
+  buf_len: usize,
+  fut: RecvFut<'a>,
+}
+
+/// One in-flight `recv_from` on the driver's UDP socket, owning its buffer
+/// until the operation resolves. Boxed so [`PendingRecv`] can hold it across
+/// loop iterations at a stable address.
+type RecvFut<'a> = Pin<Box<dyn Future<Output = BufResult<(usize, SocketAddr), Vec<u8>>> + 'a>>;
+
+impl<'a> PendingRecv<'a> {
+  /// Arm the first receive on `socket`.
+  fn new(socket: &'a UdpSocket, buf_len: usize) -> Self {
+    let fut = Box::pin(socket.recv_from(vec![0u8; buf_len]));
+    Self {
+      socket,
+      buf_len,
+      fut,
+    }
+  }
+
+  /// Arm a fresh receive with a fresh buffer.
+  ///
+  /// Call this ONLY after the pending future has resolved: the resolved future
+  /// has released its buffer and its descriptor reference, so re-arming
+  /// strands nothing. Calling it on an unresolved future would reintroduce the
+  /// abandonment this type exists to prevent.
+  fn rearm(&mut self) {
+    self.fut = Box::pin(self.socket.recv_from(vec![0u8; self.buf_len]));
+  }
+}
+
 /// Single-owner QUIC driver task.
 ///
 /// Drives the [`QuicEndpoint`] until the command channel closes (all
@@ -430,6 +493,12 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // the `gossip_mtu` and the QUIC config are set at construction time and never
   // reconfigured at runtime, so a single value computed up-front is correct.
   let recv_buf_len = recv_buf_len::<I, G>(&state.endpoint);
+
+  // The loop's single in-flight receive. See [`PendingRecv`] for why the
+  // operation is armed once and re-armed only after it resolves, and why it
+  // borrows a clone of the socket instead of `state.udp_socket`.
+  let recv_socket = state.udp_socket.clone();
+  let mut recv = PendingRecv::new(&recv_socket, recv_buf_len);
 
   // Arm the periodic probe / gossip / push-pull schedulers. Without this
   // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
@@ -605,7 +674,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     if let Some(t) = past_due_t
       && setup_now >= t
     {
-      if fire_timeout_with_drain::<I, G>(&mut state, recv_buf_len).await {
+      if fire_timeout_with_drain::<I, G>(&mut state, &mut recv).await {
         refresh_snapshot_if_changed::<I, G>(
           &state.endpoint,
           &state.snapshot,
@@ -637,23 +706,21 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
         .unwrap_or(idle)
     };
 
-    // Per-iteration fresh allocation: the recv future owns the buffer
-    // by value while pending and the buffer is returned via
-    // `BufResult`. On cancellation (any non-recv arm fires first) the
-    // in-flight syscall is dropped and the buffer is freed; the next
-    // iteration allocates fresh. Mirrors the stream driver's
-    // `recv_buf` allocation discipline.
+    // `recv_fut` re-polls the loop's single armed receive (see
+    // [`PendingRecv`]); when another arm wins, the `Fuse` wrapper is dropped
+    // but the operation underneath stays in flight, so nothing is abandoned
+    // and no datagram is lost. It is re-armed after the select only on the
+    // iterations where it actually resolved.
     //
-    // `recv_fut` holds an immutable borrow on `state.udp_socket` and
-    // `cmd_fut` holds one on `state.commands` for the duration of the
-    // select; the select arms therefore access mutating state only
-    // via `state.endpoint` / `state.shutdown_reply` (distinct fields,
-    // so the disjoint-field borrow split holds). The narrow-borrow
-    // `dispatch_command` signature mirrors the stream driver's
-    // pattern (pass individual `&mut` field refs, not the whole
-    // packed state) so the compiler can see the disjoint splits.
-    let recv_buf = vec![0u8; recv_buf_len];
-    let recv_fut = state.udp_socket.recv_from(recv_buf).fuse();
+    // `recv` is a local independent of `state`, and `cmd_fut` holds an
+    // immutable borrow on `state.commands` for the duration of the select; the
+    // select arms therefore access mutating state only via `state.endpoint` /
+    // `state.shutdown_reply` (distinct fields, so the disjoint-field borrow
+    // split holds). The narrow-borrow `dispatch_command` signature mirrors the
+    // stream driver's pattern (pass individual `&mut` field refs, not the
+    // whole packed state) so the compiler can see the disjoint splits.
+    let mut recv_resolved = false;
+    let recv_fut = recv.fut.as_mut().fuse();
     let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
     let cmd_fut = state.commands.recv_async().fuse();
     pin_mut!(recv_fut, timer_fut, cmd_fut);
@@ -675,6 +742,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
     //            recv flood starving cmd).
     select_biased! {
       gossip = recv_fut => {
+        recv_resolved = true;
         let BufResult(res, buf) = gossip;
         match res {
           Ok((n, src)) => {
@@ -697,9 +765,10 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
           Err(_) => {
             // Best-effort logging point would go here; a transient
             // recv error (ICMP unreachable surfacing as a syscall
-            // error on Linux, EAGAIN, etc.) is non-fatal — the next
-            // iteration re-arms recv with a fresh buffer. Mirrors
-            // the stream driver's silent-on-transient policy.
+            // error on Linux, EAGAIN, etc.) is non-fatal — the failed
+            // operation has resolved, so the re-arm below issues a
+            // fresh receive. Mirrors the stream driver's
+            // silent-on-transient policy.
           }
         }
       }
@@ -711,19 +780,13 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
         // `handle_timeout` inline + setting `dirty` defers the four-
         // surface flush to the next iter's iter-top dirty drain.
         //
-        // The peek-based `fire_timeout_with_drain` helper is NOT
-        // called here: it would build a SECOND `recv_from` SQE on
-        // `state.udp_socket` while the outer `recv_fut` SQE is still
-        // live in this iteration, and io_uring would deliver a
-        // racing datagram to whichever SQE the kernel picked. The
-        // outer `recv_fut` is dropped at the end of this loop
-        // iteration without ever being polled (the select already
-        // resolved on the timer arm) — a datagram routed to it
-        // would be lost. The peek discipline therefore runs only at
-        // the iter-top past-due site BEFORE `recv_fut` is built.
-        // The next iter-top past-due check + iter-top dirty drain
-        // jointly recover any deadline that was unresolved by this
-        // tick's `handle_timeout`.
+        // The armed receive is left in flight here rather than being
+        // re-armed: it holds the only outstanding operation on the
+        // socket, so a datagram the kernel delivers while this arm
+        // runs is retained and surfaces on a later iteration instead
+        // of being lost. The next iter-top past-due check + iter-top
+        // dirty drain jointly recover any deadline that was
+        // unresolved by this tick's `handle_timeout`.
         state.endpoint.handle_timeout(Instant::now());
         dirty = true;
       }
@@ -765,7 +828,20 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
         }
       }
     }
+
+    // Re-arm only on the iterations where the receive actually resolved. The
+    // select's borrows have ended here, so the pending future can be replaced.
+    if recv_resolved {
+      recv.rearm();
+    }
   }
+
+  // Release the loop's receive before the close below. Dropping `recv`
+  // abandons at most the ONE operation that was still armed, and dropping
+  // `recv_socket` releases the descriptor reference its clone holds; the close
+  // waits for the last reference, so both must be gone before it runs.
+  drop(recv);
+  drop(recv_socket);
 
   // Cleanup. Order matches the stream driver's post-loop sequence
   // (`memberlist-compio/src/driver.rs`):
@@ -1417,15 +1493,15 @@ async fn dispatch_command<I, G>(
 /// re-poll keeps a just-arrived Ack from being decided as a timeout.
 ///
 /// The bounded peek gives `recv` priority for the fire: a
-/// `select_biased!` between the recv future and a sleep timer polls
-/// recv first (so a buffered datagram wins) and falls through on the
-/// timer otherwise. The peek's timer must be a real sleep (not a
-/// zero-duration ready future) so io_uring has time to complete a
-/// freshly-submitted recv SQE — on completion-based io_uring the recv
-/// is ALWAYS Pending on first poll. The `peek_budget` default (1 ms;
-/// see [`crate::DEFAULT_PEEK_BUDGET`]) is comfortably above io_uring's
-/// completion latency for a kernel-buffered recv (~100 µs) while
-/// keeping the per-fire cost negligible.
+/// `select_biased!` between the loop's armed receive and a sleep timer
+/// polls recv first (so a buffered datagram wins) and falls through on
+/// the timer otherwise. The peek's timer must be a real sleep (not a
+/// zero-duration ready future) so a completion-based backend has time
+/// to surface a delivered datagram — on io_uring the receive stays
+/// Pending until the runtime reaps its completion. The `peek_budget`
+/// default (1 ms; see [`crate::DEFAULT_PEEK_BUDGET`]) is comfortably
+/// above io_uring's completion latency for a kernel-buffered recv
+/// (~100 µs) while keeping the per-fire cost negligible.
 ///
 /// After the peek the deadline is re-polled: a consumed datagram may
 /// have resolved it (a probe Ack landing the same tick the cumulative
@@ -1440,40 +1516,43 @@ async fn dispatch_command<I, G>(
 /// memberlist transmits, raw QUIC transmits) to fixed point.
 ///
 /// Mirrors the stream driver's iter-top peek + `fire_timeout_with_drain`
-/// pair (`memberlist-compio/src/driver.rs:602`); this is the only call
-/// site that can safely build a peek `recv_from` SQE (the timer-arm
-/// site already has the main loop's `recv_fut` SQE in flight on the
-/// same socket — a second SQE there would race the kernel's datagram
-/// delivery between two pending futures and lose the datagram if the
-/// outer `recv_fut` is dropped without being polled).
+/// pair. The peek borrows the loop's single armed receive rather than
+/// issuing one of its own, so only ever one operation is outstanding on
+/// the socket (see [`PendingRecv`]).
 ///
 /// Returns `true` iff any work was applied (the peek consumed a
 /// datagram, `handle_timeout` fired, OR `drain_actions` made
 /// progress), so the caller knows to republish the snapshot.
 async fn fire_timeout_with_drain<I, G>(
   state: &mut QuicDriverState<I, G>,
-  recv_buf_len: usize,
+  recv: &mut PendingRecv<'_>,
 ) -> bool
 where
   I: memberlist_proto::Id,
   G: rand::Rng,
 {
   let mut dirty = false;
+  let mut recv_resolved = false;
 
   // Bounded peek: at most one buffered datagram, at most peek_budget wait.
   // The peek's select_biased puts recv first so a kernel-buffered datagram
   // is always consumed if present. Scoped so the borrows release before
   // drain_actions takes &mut state.
+  //
+  // The peek re-polls the loop's ALREADY-ARMED receive rather than issuing a
+  // second one. Two concurrent receives on one socket would race the kernel's
+  // delivery between them and lose whichever datagram went to the operation
+  // that is then abandoned; re-polling the single armed operation cannot.
   {
-    let peek_buf = vec![0u8; recv_buf_len];
-    let peek_recv = state.udp_socket.recv_from(peek_buf).fuse();
+    let peek_recv = recv.fut.as_mut().fuse();
     let peek_timer = compio::time::sleep(capped_timer(state.driver_opts.peek_budget())).fuse();
     pin_mut!(peek_recv, peek_timer);
     select_biased! {
       gossip = peek_recv => {
+        recv_resolved = true;
         let BufResult(res, buf) = gossip;
-        // Best-effort: a transient recv error is non-fatal; the next iter's main
-        // recv arm re-arms with a fresh buffer, so only the Ok case has work.
+        // Best-effort: a transient recv error is non-fatal; the re-arm below
+        // issues a fresh receive, so only the Ok case has work.
         if let Ok((n, src)) = res {
           let received_at = Instant::now();
           // Same CIDR source filter as the main recv arm: a blocked source's
@@ -1485,10 +1564,13 @@ where
         }
       }
       _ = peek_timer => {
-        // No buffered datagram surfaced within the peek budget; fall through
-        // to the deadline-firing protocol below.
+        // No buffered datagram surfaced within the peek budget; the receive
+        // stays armed and falls through to the deadline-firing protocol below.
       }
     }
+  }
+  if recv_resolved {
+    recv.rearm();
   }
 
   // Re-poll the deadline AFTER the peek — a consumed datagram may have
