@@ -198,6 +198,18 @@ pub enum OpError {
   /// The machine rejected the operation because the node is not in a running
   /// state (e.g. it has already left the cluster).
   NotRunning,
+  /// The [`Runner`](crate::Runner) driving this node is gone: its `run` future was
+  /// dropped (a `select` that lost, a task teardown) or returned, so the pump that
+  /// is the only thing able to complete a parked operation will never run again.
+  ///
+  /// Terminal, and deliberately distinct from [`NotRunning`](Self::NotRunning):
+  /// that one says the NODE left the cluster, while this one says the node still
+  /// holds whatever state it had but has no driver left to advance it. Every
+  /// operation parked when the run future went away is failed with this, and every
+  /// later one is refused with it at the call site rather than parked on a wake
+  /// that can no longer arrive. Nothing on this handle can be retried into
+  /// success; build a fresh node to resume.
+  RunnerStopped,
   /// The engine refused a [`send_reliable`](crate::Memberlist::send_reliable) at
   /// the call site because reliable dials already wait
   /// [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials) beyond
@@ -240,6 +252,13 @@ impl OpError {
     matches!(self, OpError::NotRunning)
   }
 
+  /// Whether the operation was refused because the run loop driving this node is
+  /// gone.
+  #[inline]
+  pub const fn is_runner_stopped(&self) -> bool {
+    matches!(self, OpError::RunnerStopped)
+  }
+
   /// Whether a reliable send was refused because the dial backlog is full.
   #[inline]
   pub const fn is_dial_backlog_full(&self) -> bool {
@@ -265,6 +284,10 @@ impl fmt::Display for OpError {
       OpError::PingTimeout => f.write_str("ping timed out: no ack within the probe timeout"),
       OpError::SendFailed => f.write_str("reliable send failed"),
       OpError::NotRunning => f.write_str("node is not in a running state"),
+      OpError::RunnerStopped => f.write_str(
+        "the run loop driving this node is gone: nothing parked on it can complete, and no \
+         further operation is accepted",
+      ),
       OpError::DialBacklogFull => f.write_str(
         "reliable dial backlog is full: the send was refused as backpressure, not a failure — \
          retry once outstanding exchanges complete",

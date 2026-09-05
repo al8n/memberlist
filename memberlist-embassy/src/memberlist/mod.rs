@@ -576,7 +576,9 @@ where
   /// [`max_pending_seeds`](crate::Options::max_pending_seeds) are dropped and
   /// counted. Re-offers are additionally paced so a peer that RSTs every dial
   /// cannot drive a dial/fail/re-offer spin. Waiting stops when the node is joined
-  /// (`Ok`) or the node is no longer running (`Err(OpError::NotRunning)`).
+  /// (`Ok`), the node is no longer running (`Err(OpError::NotRunning)`), or the
+  /// [`Runner`](crate::Runner) re-offering the seeds is gone
+  /// (`Err(OpError::RunnerStopped)`).
   ///
   /// Concurrent joins SHARE that one offer, rather than each running a loop of their
   /// own. The engine's round-robin over a full seed queue guarantees only what ONE
@@ -600,13 +602,30 @@ where
   /// successful join. Otherwise returns `Err(OpError::Resolve)` if the resolver fails
   /// on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed set resolves to no
   /// address.
+  ///
+  /// Returns `Err(OpError::RunnerStopped)` — checked ahead of the lifecycle, at the
+  /// call and on every pass of the wait — once the [`Runner`](crate::Runner) driving
+  /// this node is gone. It is the stronger answer: the pump is what offers the seeds
+  /// and drains the membership this call waits on, so with it gone the join can
+  /// never converge whatever the node's own lifecycle says. A join already parked
+  /// when the run future is dropped is woken and returns it rather than waiting out
+  /// the caller's deadline.
   pub async fn join<Res>(&self, resolver: &Res, seeds: &[MaybeResolved<A>]) -> Result<(), OpError>
   where
     Res: AddressResolver<Address = A>,
   {
-    // Reject a left node before anything else. A node that joined and then left
-    // still has members, so the `is_joined` fast path below must not run first —
-    // it would mask the left state and report a bogus successful join.
+    // Reject a node whose run loop is gone before anything else, including the
+    // lifecycle. It is the stronger fact: the pump is what would carry this join to
+    // convergence, so with it gone no seed is dialed, no membership changes and no
+    // wake arrives — the answer cannot become anything else however the node's own
+    // lifecycle reads.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
+
+    // Then reject a left node. A node that joined and then left still has members,
+    // so the `is_joined` fast path below must not run first — it would mask the left
+    // state and report a bogus successful join.
     self
       .shared
       .engine
@@ -679,13 +698,15 @@ where
     // drained an event that ADDED a member, and `leave()` notifies too. Those are the
     // only two wake sources that can change an answer, and they are exactly enough:
     // neither of the checks below can change its answer without one of them, and
-    // every other event a pump drains leaves both answers where they were. A run loop
-    // that ends notifies as well — not because it changed an answer, but because it
-    // took both of those sources away, so a join parked across it re-runs the
-    // lifecycle check instead of waiting on a wake that can no longer come. A seed exchange that failed needs no wake
-    // of its own — nothing here would re-dial it, and the re-offer that does is paced
-    // by the Runner's own offer clock. This join has its own waker entry, so it never
-    // depends on some other joiner having been woken in its place.
+    // every other event a pump drains leaves both answers where they were. A run
+    // future that goes away notifies as well — not because it changed either of
+    // those answers, but because it took both sources away and left a third,
+    // terminal answer in their place, so a join parked across it wakes, reads that
+    // answer and returns instead of waiting on a wake that can no longer come. A
+    // seed exchange that failed needs no wake of its own — nothing here would re-dial
+    // it, and the re-offer that does is paced by the Runner's own offer clock. This
+    // join has its own waker entry, so it never depends on some other joiner having
+    // been woken in its place.
     loop {
       // Read the notify epoch BEFORE the checks below. The wait resolves at once when
       // the epoch has moved since, so a notify that lands after these checks have read
@@ -694,6 +715,16 @@ where
       // with no timer under the wait a lost notify would be a hang rather than a
       // delay.
       let seen = self.shared.join_epoch();
+      // The run loop going away is checked first and AFTER the epoch read, which is
+      // what makes the wake it sends impossible to lose: the stop sets this flag and
+      // only then notifies, so a stop landing between this check and the park moves
+      // the epoch, resolves the wait at once, and the re-run reads the flag. Without
+      // the check the woken join would find both answers below unchanged — the
+      // engine can still be running when its runner is gone — and park again on a
+      // wake that can no longer come.
+      if self.shared.runner_stopped() {
+        return Err(OpError::RunnerStopped);
+      }
       // Lifecycle before membership, on every pass. `leave()` does not clear the
       // member list, so `is_joined()` still holds for a node another handle clone
       // left while this future was parked — and reporting a successful join for a
@@ -741,7 +772,17 @@ where
   /// Issues the ping on the engine (correlation token: [`PingId`]) and parks on a
   /// per-request signal the Runner fires on the matching `PingCompleted` /
   /// `PingFailed`.
+  ///
+  /// Returns [`OpError::RunnerStopped`] when the [`Runner`](crate::Runner) driving
+  /// this node is gone — the probe would have nothing to send it or time it out —
+  /// and [`OpError::NotRunning`] when the node itself has left.
   pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration, OpError> {
+    // Nothing would carry the probe or its deadline once the run loop is gone, so
+    // refuse here rather than register a waiter that only the pump could ever
+    // resolve.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
     let now = time::now();
     let ping_id: PingId = self
       .shared
@@ -802,11 +843,19 @@ where
   ///   without success (dial failure, decode/record fault, or deadline).
   /// * [`OpError::NotRunning`] — the machine refused the operation because the
   ///   node is no longer in a running state (e.g. it has left the cluster).
+  /// * [`OpError::RunnerStopped`] — the [`Runner`](crate::Runner) driving this node
+  ///   is gone, so the exchange would have nothing to dial it or complete it.
   pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError>
   where
     // Dispatching a reliable exchange schedules gossip work that draws from the RNG.
     R: Rng,
   {
+    // Refuse before the engine builds an exchange: with the run loop gone nothing
+    // dials the peer, and the completion this call would park on is only ever
+    // emitted by the pump.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
     let now = time::now();
     let dispatched = self
       .shared

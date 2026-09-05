@@ -86,9 +86,27 @@ where
 {
   /// Drive the node forever: pump the engine and run the `N` workers concurrently.
   ///
-  /// Never returns under normal operation; spawn it as an embassy task (or drive
-  /// it with `select` against an operation in a test). On the rare path where the
-  /// pump loop itself ends, every parked handle op is failed so nothing hangs.
+  /// Spawn it as an embassy task, or drive it with `select` against an operation in
+  /// a test. The loop itself diverges — the `-> !` is literal, and nothing inside
+  /// ever completes.
+  ///
+  /// # Teardown
+  ///
+  /// The way this future ENDS, then, is the caller dropping it: a `select` that
+  /// lost, or a task teardown. That path is the guarantee. Once the future is
+  /// dropped, the pump that is the only thing able to complete a parked handle op
+  /// is gone, so the node is marked stopped and everything waiting on it is
+  /// released at once: parked [`ping`](crate::Memberlist::ping) /
+  /// [`send_reliable`](crate::Memberlist::send_reliable) calls resolve with
+  /// [`OpError::RunnerStopped`](crate::OpError::RunnerStopped), parked
+  /// [`join`](crate::Memberlist::join) calls are woken and return the same, and
+  /// every later handle op is refused with it at the call site instead of parking
+  /// on a wake that can no longer arrive.
+  ///
+  /// That release is carried by a guard inside the future, so it holds on every
+  /// exit path — but the guard, like the rest of an `async fn` body, exists only
+  /// once the future has been POLLED. A future built and dropped without ever being
+  /// polled has driven nothing and marks nothing.
   pub async fn run(self) -> ! {
     let Runner {
       shared,
@@ -100,6 +118,14 @@ where
       teardown_timeout,
       mut free,
     } = self;
+
+    // Arm the teardown BEFORE anything can park on this loop. From here on every way
+    // out of the future — the drop that is the only real one, and the returns below
+    // that the diverging arms make unreachable — releases every handle op waiting on
+    // the pump.
+    let _stopped = StopOnDrop {
+      shared: shared.as_ref(),
+    };
 
     // Build the N worker futures, each owning a distinct `&mut TcpSocket` (via
     // `each_mut`, which yields `N` non-aliasing mutable refs) paired with its
@@ -131,11 +157,34 @@ where
     )
     .await;
 
-    // Unreachable: both arms diverge. Kept so the type is `-> !` and, defensively,
-    // so any future change that lets the loop end does not silently leave parked
-    // handle ops hanging.
-    shared.fail_all_waiters();
+    // Unreachable: both arms diverge, so the type is `-> !`. Nothing has to be
+    // released here — the guard above covers this exit alongside every other one.
     core::unreachable!("the run loop and workers never complete")
+  }
+}
+
+/// Releases the node's run loop on every way out of [`Runner::run`], including the
+/// only one that actually happens: the caller DROPPING the future.
+///
+/// The loop diverges, so the `fail_all_waiters` call a `-> !` function could place
+/// after it is unreachable — a parked join, ping or send would sit on a wake that
+/// the dropped pump can no longer deliver. `Drop` is what runs on a cancellation,
+/// and it marks the node stopped before releasing anything, so a woken join reads a
+/// terminal answer rather than re-checking two answers that have not moved and
+/// parking again.
+struct StopOnDrop<'a, I, R>
+where
+  I: memberlist_proto::Id,
+{
+  shared: &'a Shared<I, R>,
+}
+
+impl<I, R> Drop for StopOnDrop<'_, I, R>
+where
+  I: memberlist_proto::Id,
+{
+  fn drop(&mut self) {
+    self.shared.stop_runner();
   }
 }
 

@@ -3,6 +3,10 @@
 //! `leave` running-state contract, the union concurrent `join` calls offer, and a
 //! multi-node join → leave → query run over the loopback harness.
 //!
+//! Plus the contract about what an awaiting op ANSWERS once its driver is gone:
+//! dropping the `Runner` future releases everything parked on it and refuses
+//! everything issued after it.
+//!
 //! Mirrors `loopback.rs`'s substrate (two paired embassy-net stacks driven under
 //! one `block_on`, raced against a wall-clock timeout). The single-node sweeps
 //! exercise the sync forwards that need no peer (construction installs the local
@@ -12,7 +16,10 @@
 
 mod support;
 
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::{
+  net::{IpAddr, Ipv4Addr, SocketAddr},
+  task::Poll,
+};
 
 use embassy_futures::select::{Either, select};
 use embassy_net::{
@@ -25,8 +32,8 @@ use futures::{FutureExt, executor::block_on, poll};
 #[cfg(compression)]
 use memberlist_embassy::CompressionOptions;
 use memberlist_embassy::{
-  EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, OpError, Options, Runner,
-  SocketAddrResolver, TransformOptions, event::Event, now,
+  EndpointOptions, GOSSIP_READ_CAP, InitError, MaybeResolved, Memberlist, Node, OpError, Options,
+  Runner, SocketAddrResolver, TransformOptions, event::Event, now,
 };
 use memberlist_embedded::InitError as EngineInitError;
 use memberlist_proto::{SeedableRng, SmallRng, typed::State};
@@ -995,4 +1002,145 @@ fn join_then_query_then_leave_over_loopback() {
     "A must not consider the departed B Alive"
   );
   assert!(ml_a.is_alive(&a_id), "A is still Alive to itself");
+}
+
+/// An on-link address no node answers, so an operation aimed at it can only be
+/// ended by the run loop that owns its deadline.
+fn silent(last: u8) -> SocketAddr {
+  addr(last, 7946)
+}
+
+/// Dropping a polled `Runner::run` future must release EVERY operation parked on it
+/// and refuse every later one, rather than leave the caller waiting on a pump that
+/// no longer exists.
+///
+/// The run loop diverges, so the only way it ends is the caller dropping the future
+/// — a `select` that lost, a task teardown. Nothing behind a parked op can happen
+/// after that: a join's seeds are re-offered by the pump, a ping's ack and its
+/// timeout are drained by the pump, and a reliable send's completion event is
+/// emitted by the pump. A parked join is the sharpest case of all, because waking it
+/// is not enough on its own: it re-checks the node's lifecycle and its membership,
+/// and a node whose runner is gone has changed NEITHER — the engine is still
+/// running, the member count is where it was — so without a terminal state to read
+/// it would simply park again on the new epoch and hang until the caller's own
+/// deadline.
+///
+/// Every op here is polled to its park while the run future is alive, and each is
+/// aimed at an address no peer answers, so nothing but the teardown can resolve it.
+#[test]
+fn dropping_a_polled_runner_fails_every_parked_operation() {
+  let (dev, _peer) = pair();
+  let mut res = StackResources::<{ POOL + 2 }>::new();
+  let (stack, _net) = build_stack(dev, &mut res, 1, 0x1111_2222);
+  let mut bufs = NodeBufs::new();
+  let (ml, run) = node(stack, &mut bufs, "stopped", 1, 1);
+
+  let peer = silent(9);
+  let seeds = [MaybeResolved::Resolved(peer)];
+
+  block_on(async {
+    // Boxed so the future can be DROPPED here, mid-test, rather than at the end of
+    // the scope holding it.
+    let mut run = Box::pin(run.run());
+    // The guard that carries the teardown lives in the future's body, which — like
+    // any `async fn` — starts on the first poll. A few polls run the pump loop to
+    // its first park.
+    for i in 0..3 {
+      assert!(
+        poll!(run.as_mut()).is_pending(),
+        "the run loop diverges, so poll {i} cannot complete it"
+      );
+    }
+
+    // Park one of each awaiting op on the live run loop.
+    let mut joining = Box::pin(ml.join(&SocketAddrResolver, &seeds));
+    assert!(
+      poll!(joining.as_mut()).is_pending(),
+      "a join whose only seed never answers cannot converge, so it parks"
+    );
+    let mut pinging = Box::pin(ml.ping(Node::new(SmolStr::new("silent"), peer)));
+    assert!(
+      poll!(pinging.as_mut()).is_pending(),
+      "a ping to a silent peer parks on its completion signal"
+    );
+    let mut sending = Box::pin(ml.send_reliable(peer, bytes::Bytes::from_static(b"parked")));
+    assert!(
+      poll!(sending.as_mut()).is_pending(),
+      "a reliable send to a silent peer parks on its completion signal"
+    );
+
+    // The run future goes away exactly as a lost `select` arm or a torn-down task
+    // would take it.
+    drop(run);
+
+    match poll!(joining.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the parked join must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(())) => panic!("a join that never converged must not report success"),
+      Poll::Pending => panic!(
+        "the parked join was left waiting on a pump that no longer exists — it must \
+         be woken and answered by the teardown"
+      ),
+    }
+    match poll!(pinging.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the parked ping must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(rtt)) => panic!("a ping no peer acked must not report an rtt ({rtt:?})"),
+      Poll::Pending => panic!("the parked ping was left waiting on a pump that no longer exists"),
+    }
+    match poll!(sending.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the parked send must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(())) => panic!("a send that never completed must not report success"),
+      Poll::Pending => panic!("the parked send was left waiting on a pump that no longer exists"),
+    }
+
+    // The parked ops released their registrations on the way out, so the node's
+    // join offer holds nothing behind them.
+    drop(joining);
+    assert_eq!(
+      ml.join_offer_addr_count(),
+      0,
+      "the answered join released the seed it was offering"
+    );
+
+    // And nothing new is accepted: each op is refused at the call site rather than
+    // parked on a wake that can no longer arrive.
+    match ml.join(&SocketAddrResolver, &seeds).now_or_never() {
+      Some(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "a join issued after the teardown must be refused, got {e}"
+      ),
+      Some(Ok(())) => panic!("a join must not report success on a node with no run loop"),
+      None => panic!("a join issued after the teardown must not park"),
+    }
+    match ml
+      .ping(Node::new(SmolStr::new("silent"), peer))
+      .now_or_never()
+    {
+      Some(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "a ping issued after the teardown must be refused, got {e}"
+      ),
+      Some(Ok(rtt)) => panic!("a ping must not report an rtt ({rtt:?}) with no run loop"),
+      None => panic!("a ping issued after the teardown must not park"),
+    }
+    match ml
+      .send_reliable(peer, bytes::Bytes::from_static(b"after"))
+      .now_or_never()
+    {
+      Some(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "a send issued after the teardown must be refused, got {e}"
+      ),
+      Some(Ok(())) => panic!("a send must not report success on a node with no run loop"),
+      None => panic!("a send issued after the teardown must not park"),
+    }
+  });
 }

@@ -88,6 +88,17 @@ fn op_error_variants_display_and_predicates() {
   assert!(!backlog.is_not_running());
   assert!(!not_running.is_dial_backlog_full());
 
+  let stopped = OpError::RunnerStopped;
+  assert!(!stopped.to_string().is_empty());
+  assert!(stopped.is_runner_stopped());
+  assert!(stopped.source().is_none());
+  // A gone run loop and a left node are different facts about different things —
+  // the driver and the cluster membership — so neither answers for the other, and
+  // neither is the retryable backpressure.
+  assert!(!stopped.is_not_running());
+  assert!(!not_running.is_runner_stopped());
+  assert!(!stopped.is_dial_backlog_full());
+
   // The `Resolve` variant boxes a generic error and forwards its source.
   let resolve = OpError::Resolve(Box::new(SampleResolveError));
   assert!(resolve.is_resolve());

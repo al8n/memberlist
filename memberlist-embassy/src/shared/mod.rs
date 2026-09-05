@@ -274,10 +274,12 @@ pub(crate) struct JoinId(u64);
 /// Wake sources, and the whole set of them: a drained [`Event::NodeJoined`] — the one
 /// event that can add a member, and so the only one that can change the `is_joined()`
 /// a parked join is waiting on — [`leave`](crate::Memberlist::leave), which changes
-/// the lifecycle answer the same join checks first, and the run loop's exit through
-/// [`Shared::fail_all_waiters`]. The third changes neither answer; it is a source
-/// because it removes the other two, and a join left parked on a wake that can no
-/// longer arrive would hang rather than get to re-check. Ordinary traffic (user
+/// the lifecycle answer the same join checks first, and the run future going away
+/// through [`Shared::stop_runner`] (it returned, or was dropped by a `select` that
+/// lost or a task teardown). The third does not change either of the first two
+/// answers; it is a source because it removes both, and it gives the woken join a
+/// third, terminal answer of its own — the stopped flag `stop_runner` sets before it
+/// wakes anyone — so the join returns rather than parking again. Ordinary traffic (user
 /// packets, pings, sends, exchange completions) wakes nobody: it cannot change either
 /// answer, and the seed re-offer that a failed exchange leads to is paced by the
 /// Runner's own offer clock, not by a parked join re-polling.
@@ -462,6 +464,23 @@ pub(crate) struct Shared<I, R = SmallRng> {
   /// Private to this module: it is the offer step's own bookkeeping, and every
   /// caller reaches it through [`Shared::offer_join_seeds_at`].
   next_join_offer: Cell<Option<Instant>>,
+  /// Whether the [`Runner`](crate::Runner) driving this node is gone: its `run`
+  /// future returned, or — the way out its `-> !` signature cannot express — was
+  /// DROPPED, by a `select` that lost or by a task teardown.
+  ///
+  /// Terminal and one-way. The pump is the only thing that completes a parked
+  /// handle op, so once it is gone nothing behind a park can ever resolve: every
+  /// op parked at the transition is failed, and every later one is refused with
+  /// [`OpError::RunnerStopped`] rather than parked on a wake that cannot come.
+  ///
+  /// Distinct from the engine's own lifecycle, which the handle ops check
+  /// separately: a node that has LEFT answers [`OpError::NotRunning`], and a node
+  /// whose runner is gone may never have left at all.
+  ///
+  /// Private to this module: [`Shared::stop_runner`] is the only way to set it, so
+  /// the flag and the release of everything parked on the runner always happen
+  /// together and in that order.
+  runner_stopped: Cell<bool>,
 }
 
 /// Cap on the buffered application-event queue. A never-draining application then
@@ -483,7 +502,27 @@ where
       waiters: RefCell::new(Waiters::default()),
       join_offers: RefCell::new(JoinOffers::default()),
       next_join_offer: Cell::new(None),
+      runner_stopped: Cell::new(false),
     }
+  }
+
+  /// Whether the run loop driving this node is gone — see
+  /// [`runner_stopped`](Self::runner_stopped) the field for what that means for a
+  /// handle op.
+  #[inline]
+  pub(crate) fn runner_stopped(&self) -> bool {
+    self.runner_stopped.get()
+  }
+
+  /// Mark the run loop terminally gone and release everything parked on it.
+  ///
+  /// The ORDER is load-bearing: the flag is set BEFORE the waiters are failed, so
+  /// every op this call reaches — a parked ping/send resolving its signal, a parked
+  /// join re-running its checks on the wake — observes the terminal state and
+  /// reports it, instead of parking again on a wake that can no longer arrive.
+  pub(crate) fn stop_runner(&self) {
+    self.runner_stopped.set(true);
+    self.fail_all_waiters();
   }
 
   /// Register `seeds` as one live join future's offer and hand back the guard that
@@ -589,6 +628,8 @@ where
   /// [`fail_all_waiters`](Self::fail_all_waiters) wakes the same joins without going
   /// through here, because it is the one wake that is NOT about a changed answer: it
   /// fires when the run loop ends and the two sources above can no longer arrive.
+  /// The join it wakes then reads the terminal state
+  /// [`stop_runner`](Self::stop_runner) recorded first, and returns.
   #[inline]
   pub(crate) fn notify_join_waiters(&self) {
     self.join_notify.notify();
@@ -723,31 +764,42 @@ where
     }
   }
 
-  /// Fail every parked waiter with `NotRunning` (used when the run loop stops, so
-  /// no awaiting handle op hangs forever after teardown).
+  /// Fail every parked waiter and wake every parked join, so no awaiting handle op
+  /// is left on a wake that can no longer arrive.
+  ///
+  /// The reason follows the runner's state. Once [`stop_runner`](Self::stop_runner)
+  /// has recorded the run loop as gone, it is [`OpError::RunnerStopped`]: this node
+  /// has no driver left, so nothing the caller does can turn the op into a success.
+  /// Otherwise it is [`OpError::NotRunning`], the engine's own lifecycle answer.
   ///
   /// A parked [`join`](crate::Memberlist::join) is not in these tables — it owns a
   /// waker entry in [`JoinNotify`] instead — so it is WOKEN here rather than
   /// resolved. Without that wake it would have no wake source left at all: its two
   /// ordinary ones are a drained `NodeJoined` and `leave`, and both are reached
-  /// through the loop that has just ended.
-  ///
-  /// What the woken join then observes is the engine's business, not this call's.
-  /// Nothing here changes a lifecycle: a node that has left or shut down fails the
-  /// join's `ensure_running` check and the join returns `NotRunning`, but the engine
-  /// can still be running when the run loop ends — ending the loop does not end the
-  /// node — and such a join re-runs both checks, finds the membership it was waiting
-  /// on unchanged, and parks again on the new epoch.
+  /// through the loop that has just ended. Because the stopped flag is set before
+  /// this call, the woken join re-runs its checks, sees the terminal state and
+  /// returns `RunnerStopped` rather than finding both of its ordinary answers
+  /// unchanged and parking again on the new epoch.
   pub(crate) fn fail_all_waiters(&self) {
+    // One read for the whole call: the flag is set before the waiters are released,
+    // so every op failed here gets the same, already-settled answer.
+    let stopped = self.runner_stopped.get();
+    let reason = || {
+      if stopped {
+        OpError::RunnerStopped
+      } else {
+        OpError::NotRunning
+      }
+    };
     let mut w = self.waiters.borrow_mut();
     let pings = core::mem::take(&mut w.pings);
     let sends = core::mem::take(&mut w.sends);
     drop(w);
     for p in pings {
-      p.reply.signal(Err(OpError::NotRunning));
+      p.reply.signal(Err(reason()));
     }
     for s in sends {
-      s.reply.signal(Err(OpError::NotRunning));
+      s.reply.signal(Err(reason()));
     }
     // Joins park on the node-wide notify rather than in `waiters`, so signalling the
     // tables above reaches none of them.

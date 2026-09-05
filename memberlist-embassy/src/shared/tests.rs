@@ -284,6 +284,76 @@ fn fail_all_waiters_wakes_a_parked_join() {
   );
 }
 
+/// `stop_runner` records the terminal state BEFORE it releases anything, so every
+/// op it reaches reads that state rather than the lifecycle.
+///
+/// The order is the whole point. A parked ping/send is resolved by this call, and a
+/// parked join is only WOKEN by it — the join then re-runs its own checks, and the
+/// engine here is still running, so the flag is the only thing that can stop it
+/// parking again. Setting the flag afterwards would leave exactly that gap.
+#[test]
+fn stop_runner_marks_the_node_before_it_releases_anything() {
+  let mut shared = shared_node("t", 1);
+  let now = Instant::from_origin(Duration::from_secs(1));
+
+  let ping_id = shared
+    .engine
+    .get_mut()
+    .ping(memberlist_proto::Node::new(SmolStr::new("p"), sa(2)), now)
+    .expect("issued while running");
+  let sid = shared
+    .engine
+    .get_mut()
+    .send_reliable(sa(3), bytes::Bytes::from_static(b"x"), now)
+    .expect("issued while running");
+
+  let ping_reply = shared.register_ping(ping_id);
+  let send_reply = shared.register_send(sid);
+
+  let seeds = [sa(9)];
+  let offer = shared.register_join_offer(&seeds);
+  let counter = alloc::sync::Arc::new(WakeCounter::default());
+  let waker = core::task::Waker::from(counter.clone());
+  let mut cx = core::task::Context::from_waker(&waker);
+  let seen = shared.join_epoch();
+  let mut wait = core::pin::pin!(shared.join_wait(offer.id(), seen));
+  assert!(
+    core::future::Future::poll(wait.as_mut(), &mut cx).is_pending(),
+    "a join with nothing to converge on parks"
+  );
+
+  assert!(
+    !shared.runner_stopped(),
+    "a node whose run loop is still driving it is not stopped"
+  );
+
+  shared.stop_runner();
+
+  assert!(
+    shared.runner_stopped(),
+    "the flag is what every later handle op reads, so it must survive the call"
+  );
+  assert!(
+    matches!(ping_reply.try_take(), Some(Err(OpError::RunnerStopped))),
+    "the parked ping reports the gone run loop, not the node's lifecycle — the node \
+     never left"
+  );
+  assert!(
+    matches!(send_reply.try_take(), Some(Err(OpError::RunnerStopped))),
+    "the parked send reports the gone run loop, not the node's lifecycle"
+  );
+  assert_eq!(
+    counter.count(),
+    1,
+    "the parked join was not woken, so it had no wake source left at all"
+  );
+  assert!(
+    core::future::Future::poll(wait.as_mut(), &mut cx).is_ready(),
+    "the epoch moved, so the join's wait resolves and it re-runs its checks — where \
+     the flag set above is the answer"
+  );
+}
+
 /// The `is_joined` / `advertise_address` free helpers forward the engine's
 /// view: a fresh single-node engine is not joined and reports its advertise
 /// address.
