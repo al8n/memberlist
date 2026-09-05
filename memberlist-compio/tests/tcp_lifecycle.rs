@@ -16,9 +16,9 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  NodeDelegate, Options, PingDelegate, RuntimeOptions, SocketAddrResolver, StreamTransportOptions,
-  TcpTransport, TcpTransportOptions, VoidDelegate,
+  ConflictDelegate, Delegate, EndpointTuning, EventDelegate, FirstAddrResolver, MaybeResolved,
+  Memberlist, MemberlistOptions, NodeDelegate, Options, PingDelegate, RuntimeOptions,
+  SocketAddrResolver, StreamTransportOptions, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -36,6 +36,49 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr>
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  );
+  Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
+}
+
+/// Broadcast retransmit multiplier for a node whose queued user payload a test
+/// must observe on a peer.
+///
+/// A queued user broadcast rides the UNRELIABLE gossip plane and carries no
+/// ack: the gossip scheduler drains it once per tick and drops it for good once
+/// it has been selected `retransmit_mult * ceil(log10(num_members + 1))` times.
+/// At the default multiplier of 4 in a two-node cluster that is 4 selections,
+/// so the payload only exists for `4 * gossip_interval` = 800ms after it is
+/// queued. A peer that loses those four datagrams never receives the payload,
+/// and waiting longer cannot recover it — the sender has already discarded it.
+/// Raising the multiplier keeps the payload in the queue, re-gossiped every
+/// interval, for the whole span a test is willing to wait, so the assertion
+/// depends on ONE of many datagrams landing instead of on all four landing.
+const OBSERVED_BROADCAST_RETRANSMIT_MULT: u32 = 15;
+
+/// The span over which [`OBSERVED_BROADCAST_RETRANSMIT_MULT`] keeps re-gossiping
+/// a queued payload: 15 selections at the 200ms default gossip interval. Every
+/// observation deadline below is derived from this term.
+const OBSERVED_BROADCAST_TRANSMIT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Like [`make_tcp`] but with the broadcast retransmit multiplier raised to
+/// [`OBSERVED_BROADCAST_RETRANSMIT_MULT`], for a node whose queued user
+/// broadcast a peer must be observed receiving.
+async fn make_tcp_retransmitting(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  )
+  .with_memberlist(
+    MemberlistOptions::new()
+      .with_tuning(EndpointTuning::new().with_retransmit_mult(OBSERVED_BROADCAST_RETRANSMIT_MULT)),
   );
   Memberlist::new(
     opts,
@@ -1199,8 +1242,13 @@ impl Delegate for SlowUserMsgDelegate {
 /// stays far under the cap — so the slow first handler only DELAYS delivery, it
 /// does not lose the payload. Here node B's first `notify_user_msg` sleeps ~2s;
 /// A queues a user broadcast that periodic gossip carries to B. Despite the
-/// slow first delivery, B's delegate EVENTUALLY records the payload within a
-/// generous window. Stream-backend parity for the QUIC test of the same name.
+/// slow first delivery, B's delegate EVENTUALLY records the payload.
+/// Stream-backend parity for the QUIC test of the same name.
+///
+/// The observation task dispatches events sequentially, so the stalled FIRST
+/// delivery is always the one that records the payload: no later delivery can
+/// overtake it. That is what keeps the assertion a statement about the stalled
+/// handler even though A keeps re-gossiping the payload.
 ///
 /// Honest scope: this guards eventual delivery under handler latency for a
 /// payload that fits the buffer — not the bounded channel's drop accounting
@@ -1208,8 +1256,10 @@ impl Delegate for SlowUserMsgDelegate {
 /// tests cover directly.
 #[compio::test]
 async fn slow_user_msg_delegate_still_observes_broadcast() {
-  // Node A is a normal VoidDelegate node; it queues the broadcast.
-  let a = make_tcp("slowuser-a", loopback_addr(0)).await;
+  // Node A is a normal VoidDelegate node; it queues the broadcast, so it needs
+  // the raised retransmit multiplier that keeps the payload re-gossiped for
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW.
+  let a = make_tcp_retransmitting("slowuser-a", loopback_addr(0)).await;
 
   // Node B carries the slow-user-msg observation delegate; built inline like
   // `make_tcp` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
@@ -1259,9 +1309,15 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
     .expect("queue user broadcast acks Ok");
 
   // B's delegate must EVENTUALLY record the payload despite its first
-  // notify_user_msg sleeping ~2s. The unbounded observation channel buffers
-  // the event for the slow handler — it is never dropped. A generous 6s window
-  // absorbs the gossip-interval stagger plus the 2s handler stall.
+  // notify_user_msg sleeping ~2s. The observation channel buffers the event
+  // for the slow handler — it is never dropped.
+  //
+  // Deadline terms: the last useful gossip of the payload leaves A at
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW; the delivery that lands then still owes
+  // the 2s handler stall before it records; the remaining second is scheduling
+  // margin. Waiting past this sum would be pointless rather than merely
+  // generous — once the transmission window closes A has discarded the payload,
+  // so a delivery that has not happened by then can never happen.
   let saw = tokio_like_wait(
     || {
       user_msgs
@@ -1270,7 +1326,7 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
         .iter()
         .any(|b| b.as_ref() == b"slow-payload")
     },
-    Duration::from_secs(6),
+    OBSERVED_BROADCAST_TRANSMIT_WINDOW + Duration::from_secs(2) + Duration::from_secs(1),
   )
   .await;
   assert!(
