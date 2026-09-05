@@ -62,12 +62,18 @@ jobs:
       - name: Build all fuzz targets
         # The core gate: every target must compile under nightly + the sanitizer
         # runtime. This alone closes the "targets never compile-checked" gap.
-        run: cargo +nightly fuzz build --fuzz-dir memberlist-proto/fuzz
+        # `--target` is explicit because cargo-fuzz defaults it to the triple it
+        # was itself built for, and the prebuilt binary is musl; AddressSanitizer
+        # cannot link against a statically linked libc, so it needs the gnu target.
+        run: cargo +nightly fuzz build --fuzz-dir memberlist-proto/fuzz --target x86_64-unknown-linux-gnu
 
       - name: Smoke run each target
         # A short bounded run per target as a regression gate: fail loud if a
         # target panics or aborts on a discovered input. The nightly schedule
         # fuzzes each target far longer; the push/PR gate stays brief.
+        # `--target` is explicit for the same reason as the build step: the
+        # prebuilt cargo-fuzz reports its own musl triple as the default, and
+        # AddressSanitizer needs the gnu target to link against glibc.
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
             duration=300
@@ -76,7 +82,8 @@ jobs:
           fi
           for target in parse_messages decode_compound decode_incoming unwrap_transforms; do
             echo "::group::fuzz ${target} (${duration}s)"
-            cargo +nightly fuzz run --fuzz-dir memberlist-proto/fuzz "${target}" -- \
+            cargo +nightly fuzz run --fuzz-dir memberlist-proto/fuzz \
+              --target x86_64-unknown-linux-gnu "${target}" -- \
               -max_total_time="${duration}" -rss_limit_mb=4096
             echo "::endgroup::"
           done
