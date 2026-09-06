@@ -756,9 +756,20 @@ where
   /// EVERY [`join`](Self::join) parked awaiting convergence is woken, so each of them
   /// reports `NotRunning` at once rather than waiting on a wake that went elsewhere.
   ///
-  /// Returns `Err(OpError::NotRunning)` if the node is not in a running state
-  /// (already left or never started).
+  /// Returns [`OpError::RunnerStopped`] — checked ahead of the lifecycle, as in
+  /// [`join`](Self::join) / [`ping`](Self::ping) / [`send_reliable`](Self::send_reliable)
+  /// — once the [`Runner`](crate::Runner) driving this node is gone, and
+  /// `Err(OpError::NotRunning)` if the node is not in a running state (already left
+  /// or never started).
   pub fn leave(&self) -> Result<(), OpError> {
+    // Refuse before the engine records anything. A leave is only half done when it
+    // returns: the departure still has to be gossiped and the `LeftCluster` event
+    // still has to be drained, and the pump is what does both. With the run loop
+    // gone, `Ok(())` would report a departure no peer will ever hear, and promise a
+    // `poll_event` answer that can never be produced.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
     let now = time::now();
     let r = self
       .shared

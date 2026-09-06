@@ -1179,6 +1179,10 @@ fn assert_join_refused(
 /// single poll. Nothing in this test drives any run loop — neither memberlist's nor
 /// either stack's — so the teardown is the only thing that can answer these ops, and
 /// each seed is aimed at an address no node here holds.
+///
+/// The ops issued AFTER the drop are checked too, `leave` among them: every handle
+/// operation whose completion the pump owns must refuse a node whose pump is gone,
+/// not just the ones that were already parked.
 #[test]
 fn dropping_an_unpolled_runner_fails_parked_operations() {
   let (dev_a, dev_b) = pair();
@@ -1269,9 +1273,25 @@ fn dropping_an_unpolled_runner_fails_parked_operations() {
       "B's answered join released the seed it was offering"
     );
 
-    // And nothing new is accepted on either node.
+    // And nothing new is accepted on either node — a leave included. A leave is
+    // only half done when it returns: the departure still has to be gossiped and
+    // the `LeftCluster` event still has to be drained, and the gone pump does
+    // neither, so reporting success would promise both.
     assert_join_refused(&ml_a, &seeds, "A");
     assert_join_refused(&ml_b, &seeds, "B");
+    for (ml, node) in [(&ml_a, "A"), (&ml_b, "B")] {
+      match ml.leave() {
+        Err(e) => assert!(
+          e.is_runner_stopped(),
+          "a leave issued after {node}'s runner was dropped must report the gone \
+           run loop, got {e}"
+        ),
+        Ok(()) => panic!(
+          "a leave must not report success on {node}, whose departure nothing would \
+           gossip and whose LeftCluster event nothing would surface"
+        ),
+      }
+    }
   });
 }
 
