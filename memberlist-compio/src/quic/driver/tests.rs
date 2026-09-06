@@ -1430,8 +1430,8 @@ async fn reliable_over_cap_repeated_bounded_and_per_peer() {
 /// instead of a `Ok(())` the caller would read as "rebind now".
 ///
 /// A QUIC node binds exactly one socket — the reliable plane rides the same UDP
-/// socket as gossip — so the single receive-completion proof decides the whole
-/// reply, and the error names the gossip socket alone. The fallback is
+/// socket as gossip — so that single close decides the whole reply, and the
+/// error names the gossip socket alone. A close that never finishes is
 /// unreachable against a healthy loopback socket, so it is forced through the
 /// seam; the happy path (and the rebind it licenses) is covered by the QUIC
 /// lifecycle suite.
@@ -1459,9 +1459,9 @@ async fn shutdown_reports_unproven_release_for_the_quic_gossip_socket() {
 
   // The driver task runs on the thread that spawned it, so the seam this test
   // sets is the one its own driver reads.
-  crate::driver::shared::set_force_teardown_fallback(true);
+  crate::driver::shared::set_force_close_never_finishes(true);
   let res = node.shutdown().await;
-  crate::driver::shared::set_force_teardown_fallback(false);
+  crate::driver::shared::set_force_close_never_finishes(false);
 
   match res {
     Err(MemberlistError::ShutdownReleaseUnproven(e)) => assert_eq!(
@@ -1471,4 +1471,41 @@ async fn shutdown_reports_unproven_release_for_the_quic_gossip_socket() {
     ),
     other => panic!("expected an unproven-release shutdown reply, got {other:?}"),
   }
+}
+
+/// A QUIC teardown whose marker protocol fell back to the drop-based path still
+/// proves its socket released.
+///
+/// The stream driver's companion covers the same contract with a real rebind;
+/// here the point is that the QUIC driver reads the same verdict — the close
+/// alone — so a node that cannot deliver its self-addressed marker is not told
+/// its only port may still be bound.
+#[compio::test]
+async fn shutdown_proves_release_when_the_quic_marker_protocol_falls_back() {
+  use crate::{
+    FirstAddrResolver, MaybeResolved, Memberlist, Options, QuicTransport, QuicTransportOptions,
+    SocketAddrResolver,
+  };
+
+  let node: Memberlist<smol_str::SmolStr, SocketAddr> = Memberlist::new(
+    Options::<QuicTransport<smol_str::SmolStr, SocketAddr>>::new(
+      QuicTransportOptions::<smol_str::SmolStr, SocketAddr>::new()
+        .with_local_id(smol_str::SmolStr::new("quic-fallback-release"))
+        .with_advertise_addr(MaybeResolved::Resolved(addr(0)))
+        .with_quic_config(test_quic_options()),
+    ),
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct quic memberlist");
+
+  // The driver task runs on the thread that spawned it, so the seam this test
+  // sets is the one its own driver reads.
+  crate::driver::shared::set_force_teardown_fallback(true);
+  let res = node.shutdown().await;
+  crate::driver::shared::set_force_teardown_fallback(false);
+
+  res.expect("a marker that could not be delivered must not make a closed port unproven");
 }

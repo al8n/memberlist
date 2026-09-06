@@ -632,20 +632,41 @@ fn marker_source_matches_the_destination_interface_on_an_ephemeral_port() {
   }
 }
 
-/// Release is proven only by BOTH halves: a completed operation and a close
-/// that returned `Ok` within its bound.
+/// Release is proven by the awaited close and by nothing else.
 ///
-/// The `completed = false` arm is the one that matters. An abandoned operation
-/// may still own the descriptor even though the close returned promptly — on a
-/// readiness-based backend it genuinely is gone, but nothing observable
-/// distinguishes that from a completion-based backend whose cancellation was
-/// discarded, so the conservative answer is the only sound one.
+/// The close waits for its descriptor's last reference before closing it, so a
+/// close that returned `Ok` within its bound has already established that no
+/// operation still owns the fd. A close that errored has established nothing.
 #[compio::test]
-async fn release_is_proven_only_by_a_completed_operation_and_an_ok_close() {
-  assert!(close_and_prove_release(true, async { Ok(()) }).await);
-  assert!(!close_and_prove_release(false, async { Ok(()) }).await);
+async fn release_is_proven_by_a_close_that_returned_ok() {
+  assert!(close_and_prove_release(async { Ok(()) }).await);
+  assert!(!close_and_prove_release(async { Err(std::io::Error::other("close failed")) }).await);
+}
+
+/// A marker protocol that fell back to the drop-based path does NOT make the
+/// close that follows unprovable.
+///
+/// This is the regression the verdict change exists for. The completion
+/// protocol is what makes the close able to finish where a cancellation may be
+/// discarded; where drop-based cancellation works — or where the ring simply
+/// had room — the socket closes in microseconds without it. A node in an
+/// environment that cannot deliver the marker at all (a sandbox refusing the
+/// throwaway bind, an undeliverable self-addressed datagram) must still be told
+/// its port is free, or every `shutdown().await.expect(..)` would panic there.
+#[compio::test]
+async fn a_fallback_marker_does_not_make_a_closed_socket_unprovable() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  set_force_teardown_fallback(true);
+  let completed = complete_recv_before_close(recv).await;
+  set_force_teardown_fallback(false);
+  assert!(!completed, "the seam must report the fallback path");
+
   assert!(
-    !close_and_prove_release(true, async { Err(std::io::Error::other("close failed")) }).await
+    close_and_prove_release(socket.close()).await,
+    "a socket that closed cleanly is released, whatever the marker protocol did"
   );
 }
 
@@ -659,7 +680,7 @@ async fn release_is_proven_only_by_a_completed_operation_and_an_ok_close() {
 async fn a_close_that_never_finishes_is_bounded_and_proves_nothing() {
   let started = std::time::Instant::now();
   let proven =
-    close_and_prove_release(true, futures_util::future::pending::<std::io::Result<()>>()).await;
+    close_and_prove_release(futures_util::future::pending::<std::io::Result<()>>()).await;
   let elapsed = started.elapsed();
 
   assert!(!proven, "an unfinished close cannot prove the port is free");

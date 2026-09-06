@@ -334,9 +334,10 @@ fn marker_source(dest: SocketAddr) -> SocketAddr {
 /// real datagram that happens to arrive first serves equally well.
 ///
 /// Returns whether the receive was completed. `false` means the caller is back
-/// on the drop-based path: the receive may still hold the descriptor, so the
-/// close that follows cannot prove the port was released and the shutdown
-/// caller is told so (see [`shutdown_release_reply`]).
+/// on the drop-based path, where the close that follows rests on the backend's
+/// own cancellation — reliable on a readiness-based backend, best-effort on
+/// io_uring. It is not itself a verdict on the port: that is the awaited close's
+/// (see [`close_and_prove_release`]).
 pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> bool {
   #[cfg(test)]
   if force_teardown_fallback() {
@@ -406,9 +407,9 @@ pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> boo
 /// is nothing to complete and the listener can be closed directly.
 ///
 /// Returns whether the listener has no operation left in flight. `false` means
-/// the caller is on the drop-based path: the accept may still hold the
-/// descriptor, so the close that follows cannot prove the port was released
-/// and the shutdown caller is told so (see [`shutdown_release_reply`]).
+/// the caller is on the drop-based path, where the close that follows rests on
+/// the backend's own cancellation. It is not itself a verdict on the port: that
+/// is the awaited close's (see [`close_and_prove_release`]).
 #[cfg(any(
   feature = "tcp",
   feature = "tls-rustls-ring",
@@ -463,26 +464,50 @@ where
 /// Close one of a driver's bound sockets and report whether its release was
 /// PROVEN.
 ///
-/// `completed` is whether the socket's pending operation was completed rather
-/// than abandoned, as reported by [`complete_recv_before_close`] /
-/// [`complete_accept_before_close`]. The close is awaited under
-/// [`TEARDOWN_CLOSE_TIMEOUT`] either way — it is what releases the port on a
-/// completion-based backend, where a plain drop closes the handle
-/// asynchronously and a same-port rebind races the release.
+/// The proof is the awaited close ITSELF. `compio`'s socket close first waits
+/// for the descriptor's last reference — an operation in flight holds a clone of
+/// it until its completion is reaped — and only then submits the close and
+/// awaits that. So a close that returned `Ok` within [`TEARDOWN_CLOSE_TIMEOUT`]
+/// has already established both halves: no operation still owns the fd, and the
+/// kernel has released the port. A close that errored, or that ran out its
+/// bound, has established neither, and the caller must not tell the shutdown
+/// caller the port is free.
 ///
-/// Release is proven only when BOTH hold: an abandoned operation may still own
-/// the descriptor, and a close that errored or ran out its bound has not been
-/// observed to finish. Either way the caller must not tell the shutdown caller
-/// the port is free.
-pub(crate) async fn close_and_prove_release<F>(completed: bool, close: F) -> bool
+/// The completion protocols ([`complete_recv_before_close`] /
+/// [`complete_accept_before_close`]) run first, but their outcome is NOT part of
+/// the verdict: they are the MEANS by which the close can finish at all on a
+/// backend that may discard a cancellation. Where cancellation on drop is
+/// reliable — or where the submission queue simply had room — the close returns
+/// promptly without them, so folding their outcome in would report a released
+/// port as unproven for every node whose marker could not be delivered: a
+/// sandbox refusing the throwaway bind, an undeliverable self-addressed
+/// datagram, a loaded machine running out both step bounds.
+pub(crate) async fn close_and_prove_release<F>(close: F) -> bool
 where
   F: Future<Output = std::io::Result<()>>,
 {
-  let closed = matches!(
+  #[cfg(test)]
+  if force_close_never_finishes() {
+    // Drop the real close un-polled and wait the bound out on a future that can
+    // never resolve — what a close still parked on a descriptor an abandoned
+    // operation owns looks like. The socket moves into its close future, so
+    // dropping that future leaks the descriptor for the rest of the process,
+    // which is precisely the state being staged and costs a test binary one fd.
+    drop(close);
+    return matches!(
+      compio::time::timeout(
+        TEARDOWN_CLOSE_TIMEOUT,
+        core::future::pending::<std::io::Result<()>>()
+      )
+      .await,
+      Ok(Ok(()))
+    );
+  }
+
+  matches!(
     compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, close).await,
     Ok(Ok(()))
-  );
-  completed && closed
+  )
 }
 
 /// The reply a driver's teardown owes its shutdown caller, given what each of
@@ -534,6 +559,33 @@ pub(crate) fn set_force_teardown_fallback(on: bool) {
 #[cfg(test)]
 fn force_teardown_fallback() -> bool {
   FORCE_TEARDOWN_FALLBACK.with(|f| f.get())
+}
+
+#[cfg(test)]
+thread_local! {
+  /// Test seam: force every teardown close onto the path where it never
+  /// finishes.
+  ///
+  /// A close that cannot complete needs an operation the backend never reaps,
+  /// which a test cannot stage against a live driver without breaking the
+  /// driver itself. With this set, [`close_and_prove_release`] drops the real
+  /// close and waits out [`TEARDOWN_CLOSE_TIMEOUT`] on a future that never
+  /// resolves, so a driver-level test can assert the reply a teardown sends for
+  /// a port whose release was genuinely never observed.
+  static FORCE_CLOSE_NEVER_FINISHES: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set the never-finishing-close seam for the current thread. The driver task
+/// runs on the thread that spawned it, so a test sets this for its own driver
+/// only.
+#[cfg(test)]
+pub(crate) fn set_force_close_never_finishes(on: bool) {
+  FORCE_CLOSE_NEVER_FINISHES.with(|f| f.set(on));
+}
+
+#[cfg(test)]
+fn force_close_never_finishes() -> bool {
+  FORCE_CLOSE_NEVER_FINISHES.with(|f| f.get())
 }
 
 #[cfg(test)]

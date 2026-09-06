@@ -1493,22 +1493,24 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // accept, a self-addressed datagram for the receive — needs no free queue
   // slot, so the close that follows has nothing left to wait for.
   //
-  // Each socket's release is PROVEN only when its operation completed and its
-  // bounded close then returned Ok. The two proofs decide the shutdown
-  // caller's reply below: a teardown that fell back to the drop-based path, or
-  // whose close ran out its bound, may still be holding the port, and saying
-  // `Ok(())` there would promise a rebind that fails.
+  // That completion is the MEANS, never the verdict: whether it succeeded says
+  // nothing about the port on a backend whose drop-based cancellation works.
+  // Each close waits for its descriptor's last reference before closing it, so
+  // a close that returns Ok inside its bound is itself the proof — by whichever
+  // path it got there. Those two proofs decide the shutdown caller's reply
+  // below: a close that errored or ran out its bound may still be holding the
+  // port, and saying `Ok(())` there would promise a rebind that fails.
 
   // Listener first: complete its accept, then close it.
-  let accept_completed = complete_accept_before_close(accept_fut.as_mut(), &listener).await;
+  complete_accept_before_close(accept_fut.as_mut(), &listener).await;
   // The accept future borrows `listener`, so it must go before the close moves
   // it. It has resolved (or never had an operation), so this cancels nothing.
   drop(accept_fut);
-  let listener_released = close_and_prove_release(accept_completed, listener.close()).await;
+  let listener_released = close_and_prove_release(listener.close()).await;
 
   // Then the gossip socket: complete its receive, then close it.
-  let recv_completed = complete_recv_before_close(recv).await;
-  let gossip_released = close_and_prove_release(recv_completed, gossip_socket.close()).await;
+  complete_recv_before_close(recv).await;
+  let gossip_released = close_and_prove_release(gossip_socket.close()).await;
 
   // Now ack the shutdown caller. `Ok(())` means both bound ports were observed
   // released, so the caller's `shutdown.await` returns to a state where an

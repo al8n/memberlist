@@ -784,10 +784,10 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // afterwards releases the reference its clone holds, so the close sees the
   // sole remaining one.
   //
-  // The outcome is carried to the close below: a receive that was completed
-  // (rather than abandoned to the fallback) is half the proof that the port
-  // was released, which is what the shutdown caller is told.
-  let recv_completed = complete_recv_before_close(recv).await;
+  // Completing it is the MEANS by which the close below can finish, not a
+  // verdict on the port: the close waits for the descriptor's last reference
+  // before closing it, so its own outcome is what the shutdown caller is told.
+  complete_recv_before_close(recv).await;
   drop(recv_socket);
 
   // Cleanup. Order matches the stream driver's post-loop sequence
@@ -908,7 +908,7 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   //
   // A QUIC node binds ONE socket: the reliable plane rides the same UDP socket
   // as gossip, so this single proof decides the whole shutdown reply.
-  let gossip_released = close_and_prove_release(recv_completed, state.udp_socket.close()).await;
+  let gossip_released = close_and_prove_release(state.udp_socket.close()).await;
 
   // Ack any stashed Shutdown command reply. `Ok(())` only if the port was
   // observed released; otherwise the node is stopped all the same, but the
