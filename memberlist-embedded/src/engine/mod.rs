@@ -353,8 +353,24 @@ pub struct Engine<I, C, R = SmallRng> {
   /// expire while it waits. Keeping the queue on the engine (rather than the
   /// reliable plane) because join intent is an engine-level policy — the machine
   /// drives the actual exchange state, while this queue records which seeds are
-  /// still waiting for a first contact attempt.
+  /// still waiting for a first contact attempt. Reserved at its cap at
+  /// construction, so queuing a seed never grows it.
   pending_seeds: VecDeque<SocketAddr>,
+  /// Ranking scratch for [`join`](Self::join), allocated ONCE at construction with
+  /// capacity `max_pending_seeds + 1` and reused by every call.
+  ///
+  /// A call holds at most `free queue slots + 1` candidates — the one past the free
+  /// slots is what names the next rotation — and the ranking sheds its worst
+  /// candidate BEFORE taking a better one, so the length never exceeds that
+  /// capacity at any point of any call, however long the offer. Owning the buffer
+  /// rather than building one per call is what keeps `join` allocation-free on a
+  /// device whose whole heap may be a few kilobytes: the one allocation happens at
+  /// construction, where a driver can account for it.
+  ///
+  /// Emptied at the start of each call, and moved out and back around the ranking
+  /// loop — which needs `&mut self` for the dedup counter — so the reserved
+  /// capacity survives every call.
+  join_window: Vec<(SocketAddr, usize)>,
   /// Where the next [`join`](Self::join) admission starts in the address order:
   /// the address of the first seed the previous call had no room for, or `None`
   /// while no call has yet had to shed anything.
@@ -460,16 +476,15 @@ pub struct Engine<I, C, R = SmallRng> {
   /// `send_reliable` pre-check, and a join can never make it rise.
   pending_dial_rejections: u64,
   /// The most candidates any [`join`](Self::join) call has held in its ranking
-  /// window at once, and whether that window ever left its inline storage.
+  /// window at once.
   ///
-  /// The window is a call-local buffer bounded by `max_pending_seeds + 1`, which no
-  /// caller and no counter can otherwise observe: an entry inserted past the bound
-  /// and popped again leaves the admissions and the drop counts identical, and shows
-  /// up only as a heap allocation on a device that has to avoid one.
+  /// The window is bounded by `max_pending_seeds + 1`, and no caller and no counter
+  /// can otherwise observe that bound: an entry inserted past it and popped again
+  /// leaves the admissions and the drop counts identical, and shows up only as a
+  /// growth of the `join_window` capacity construction reserved — the allocation
+  /// the bound exists to avoid on a device that has to.
   #[cfg(test)]
   pub(crate) join_window_high_water: usize,
-  #[cfg(test)]
-  pub(crate) join_window_spilled: bool,
   /// Count of pumps whose gossip view declared a receive capacity at or above the
   /// configured [`Options::gossip_read_cap`].
   ///
@@ -1023,10 +1038,12 @@ where
   /// as neither.
   ///
   /// A call holds at most `free queue slots + 1` candidates at a time — the one
-  /// beyond the free slots is what names the next rotation — so its scratch is
-  /// bounded by `max_pending_seeds + 1` addresses however long the offer is. A full
-  /// window sheds its worst candidate BEFORE it takes a better one, so that bound
-  /// holds at every point of the call rather than only between entries.
+  /// beyond the free slots is what names the next rotation — so the ranking never
+  /// needs room for more than `max_pending_seeds + 1` addresses however long the
+  /// offer is. A full window sheds its worst candidate BEFORE it takes a better one,
+  /// so that bound holds at every point of the call rather than only between
+  /// entries. The engine owns ONE buffer of exactly that capacity, reserved at
+  /// construction and reused: no `join` allocates.
   ///
   /// An offer of `n` entries costs
   /// `O(n × (queued seeds + live connections + free queue slots))`: every routable
@@ -1075,8 +1092,9 @@ where
     //
     // One pass keeps the best `room + 1` candidates in rank order. The entry beyond
     // `room` is what names the next rotation, so identifying it costs no second pass
-    // over the offer, and holding only that many keeps the scratch bounded by the
-    // queue cap however long the offer is. The caller's list is never reordered.
+    // over the offer, and holding only that many keeps the ranking within the
+    // engine's reserved scratch however long the offer is. The caller's list is
+    // never reordered.
     let room = self
       .cfg
       .max_pending_seeds
@@ -1085,7 +1103,13 @@ where
     // Read once: every rank in this call is taken from the same point, and the
     // rotation only moves after the whole offer has been ranked against it.
     let rotation = self.join_rotation;
-    let mut best: MediumVec<(SocketAddr, usize)> = MediumVec::new();
+    // Move the scratch out for the ranking loop, which also needs `&mut self` for
+    // the dedup counter, and put it back before returning — the one return below is
+    // the only exit, so the reserved capacity always comes home. Construction sized
+    // it to `max_pending_seeds + 1`, and `window` never exceeds that, so the loop
+    // cannot grow it.
+    let mut best = core::mem::take(&mut self.join_window);
+    best.clear();
 
     for (idx, seed) in seeds.iter().enumerate() {
       // Skip a non-routable seed (unspecified/multicast/broadcast IP or port 0):
@@ -1129,8 +1153,9 @@ where
         }
         // Shed FIRST, then insert. Inserting into a full window and popping after
         // would hold `window + 1` candidates — `max_pending_seeds + 2` — breaching
-        // the scratch bound this loop is documented to keep, and pushing the inline
-        // buffer sized for that bound onto the heap on the entry that overflows it.
+        // the bound this loop is documented to keep, and growing the scratch past
+        // the capacity construction reserved for it: an allocation, on the entry
+        // that overflows it, on a device the bound exists to keep allocation-free.
         best.pop();
       }
 
@@ -1141,7 +1166,6 @@ where
       #[cfg(test)]
       {
         self.join_window_high_water = self.join_window_high_water.max(best.len());
-        self.join_window_spilled |= best.spilled();
       }
     }
 
@@ -1169,6 +1193,11 @@ where
     for &(addr, _) in best.iter() {
       self.pending_seeds.push_back(addr);
     }
+
+    // Return the scratch with its capacity intact so the next call ranks into the
+    // same allocation.
+    best.clear();
+    self.join_window = best;
     Ok(())
   }
 
@@ -1730,12 +1759,20 @@ where
       .set_checksum_options(transform.checksum)
       .map_err(InitError::Checksum)?;
 
+    // Reserve both join-admission buffers at their configured bounds, so the join
+    // path allocates here — once, where a driver can account for it — and never on a
+    // `join` or a pump. The queue holds at most `max_pending_seeds` addresses, and
+    // the ranking window at most one more (the entry that names the next rotation).
+    let pending_seeds = VecDeque::with_capacity(cfg.max_pending_seeds);
+    let join_window = Vec::with_capacity(cfg.max_pending_seeds.saturating_add(1));
+
     Ok(Self {
       endpoint,
       cfg,
       plane: ReliablePlane::new(),
       gossip_recv,
-      pending_seeds: VecDeque::new(),
+      pending_seeds,
+      join_window,
       join_rotation: None,
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
@@ -1747,8 +1784,6 @@ where
       join_seeds_deduped: 0,
       #[cfg(test)]
       join_window_high_water: 0,
-      #[cfg(test)]
-      join_window_spilled: false,
       pending_dial_rejections: 0,
       gossip_over_cap_pumps: 0,
     })

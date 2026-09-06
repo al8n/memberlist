@@ -2125,12 +2125,12 @@ fn selection_window_is_bounded_and_counts_stay_exact() {
 /// The ranking window a long offer runs never holds more than `max_pending_seeds + 1`
 /// candidates, even when every entry ranks ahead of everything already held.
 ///
-/// That window is call-local scratch on a buffer sized inline for exactly that bound.
-/// An entry inserted BEFORE the worst one is popped holds one more than the bound for
-/// the length of the call, and nothing a caller can read would show it: the queue, the
+/// That window is the engine's own scratch, reserved at exactly that bound. An entry
+/// inserted BEFORE the worst one is popped holds one more than the bound for the
+/// length of the call, and nothing a caller can read would show it: the queue, the
 /// drop count and the rotation all come out identical either way. What it does do is
-/// push the buffer onto the heap — the allocation the bound exists to avoid on a
-/// device whose whole heap may be a few kilobytes.
+/// grow the scratch past its reservation — the allocation the bound exists to avoid
+/// on a device whose whole heap may be a few kilobytes.
 ///
 /// A descending offer is the adversarial order. With the rotation unset, rank rises
 /// with the address, so every entry after the first ranks ahead of every candidate
@@ -2151,6 +2151,7 @@ fn a_descending_offer_never_holds_more_than_the_window_bound() {
     )
   };
   let seeds: Vec<SocketAddr> = (0..OFFERED).rev().map(addr).collect();
+  let reserved = engine.join_window.capacity();
   engine.join(&seeds).expect("join is accepted");
 
   assert_eq!(
@@ -2170,9 +2171,81 @@ fn a_descending_offer_never_holds_more_than_the_window_bound() {
     "the window fills to the room the queue had plus the entry that names the next \
      rotation, and never holds more than that at any point of the call"
   );
-  assert!(
-    !engine.join_window_spilled,
-    "so the buffer sized inline for that bound never reached the heap"
+  assert_eq!(
+    engine.join_window.capacity(),
+    reserved,
+    "so the scratch reserved at construction still holds the ranking, unchanged"
+  );
+}
+
+/// At the SHIPPED default cap, an offer far longer than the queue ranks entirely
+/// inside the scratch construction reserved: the window fills to
+/// `max_pending_seeds + 1` and the buffer never grows.
+///
+/// This is the bound that matters on the tier this crate targets. A call-local
+/// buffer would have to hold 33 candidates here, so every such `join` would reach
+/// the heap — silently, since the queue, the drop count and the rotation all come out
+/// the same either way. Owning one buffer of exactly that capacity moves the single
+/// allocation to construction, where a driver can account for it.
+///
+/// A descending offer is the adversarial order (see the sibling test): every entry
+/// after the first ranks ahead of everything held, so each takes the
+/// insert-into-a-full-window path rather than being shed outright.
+#[test]
+fn a_default_cap_offer_ranks_inside_the_scratch_reserved_at_construction() {
+  const OFFERED: u32 = 40;
+
+  let cfg = admission_cfg();
+  let cap = cfg.max_pending_seeds;
+  assert_eq!(
+    cap,
+    crate::DEFAULT_MAX_PENDING_SEEDS,
+    "this pins the SHIPPED default, so it must be the default the crate ships"
+  );
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  assert_eq!(
+    engine.join_window.capacity(),
+    cap + 1,
+    "construction reserves the whole bound: the cap's worth of room plus the entry \
+     that names the next rotation"
+  );
+  let reserved = engine.join_window.capacity();
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..OFFERED).rev().map(addr).collect();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.join_window_high_water,
+    cap + 1,
+    "the window fills to the full bound and never holds more at any point of the call"
+  );
+  assert_eq!(
+    engine.join_window.capacity(),
+    reserved,
+    "and having filled it, the ranking still did not grow the scratch — the join \
+     allocated nothing"
+  );
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    cap,
+    "the queue holds exactly the cap"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    u64::from(OFFERED) - cap as u64,
+    "and every entry it had no room for is counted once — including the one the \
+     rotation now resumes from, which is why an over-long offer into an EMPTY queue \
+     already moves this counter"
   );
 }
 
