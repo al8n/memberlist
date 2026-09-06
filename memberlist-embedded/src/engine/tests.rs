@@ -7117,3 +7117,95 @@ fn two_connections_in_one_pump_junk_then_refutation_does_not_flap() {
 
   assert_b_refuted_over_reliable(&mut engine);
 }
+
+/// An empty offer is accepted and changes nothing.
+///
+/// A caller that filters its own seed list — or retries with whatever it has
+/// left — can reach `join` with nothing to offer. There is no seed to admit and
+/// no unserved entry to rotate onto, so the call must leave the queue, the
+/// rotation and the counters exactly as it found them rather than moving the
+/// rotation off an offer that was never ranked.
+#[test]
+fn join_with_no_seeds_is_accepted_and_changes_nothing() {
+  let (mut engine, _now) = engine_with_stream_timeout(Duration::from_secs(30));
+
+  // Queue something first, so the assertions below distinguish "left alone"
+  // from "empty because nothing was ever offered".
+  engine.join(&[node_addr(7002)]).expect("join is accepted");
+  let queued = engine.pending_seed_count();
+  let deduped = engine.join_seeds_deduped();
+  let dropped = engine.join_seeds_dropped();
+  let rotation = engine.join_rotation;
+
+  engine.join(&[]).expect("an empty offer is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    queued,
+    "an empty offer must neither queue nor drop an already-queued seed"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    deduped,
+    "an empty offer holds no duplicate to count"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    dropped,
+    "an empty offer sheds nothing"
+  );
+  assert_eq!(
+    engine.join_rotation, rotation,
+    "an empty offer has no unserved entry, so the rotation must not move"
+  );
+}
+
+/// A seed naming no routable destination is discarded silently, per entry.
+///
+/// The link layer's connect rejects the unspecified address and port 0, and a
+/// multicast or broadcast destination is one no dial can usefully reach — such
+/// a seed could only produce a doomed exchange. It is malformed input rather
+/// than load the cap turned away, so it is counted as neither shed nor
+/// duplicate, and the routable entries offered beside it are still admitted.
+#[test]
+fn join_skips_a_non_routable_seed() {
+  let (mut engine, _now) = engine_with_stream_timeout(Duration::from_secs(30));
+
+  let unroutable = [
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7946),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), 7946),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)), 7946),
+    node_addr(0),
+  ];
+  engine.join(&unroutable).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "a seed no dial can reach must not take a queue slot"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "a malformed seed is not a duplicate"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    0,
+    "a malformed seed is not load the cap turned away"
+  );
+  assert_eq!(
+    engine.join_rotation, None,
+    "an offer that queued nothing has no unserved entry to rotate onto"
+  );
+
+  // The skip is per entry: a routable seed listed beside one still queues.
+  engine
+    .join(&[unroutable[0], node_addr(7002)])
+    .expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the routable seed in the same offer must still be admitted"
+  );
+}

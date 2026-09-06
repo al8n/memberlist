@@ -305,6 +305,55 @@ async fn teardown_completes_last_receive_with_submission_queue_saturated() {
   drop(staged);
 }
 
+/// The receive-completion protocol gives up, it does not hang, when the marker
+/// it sends cannot reach the socket it is trying to complete.
+///
+/// This is the receive-side twin of the accept protocol's give-up test: the
+/// helper exists so a driver's shutdown cannot hang, so its own awaits are
+/// bounded and an elapsed step is treated exactly like a failed one. Connecting
+/// the socket stages that pathological case without a second interface — the
+/// kernel then discards every datagram from any other source, and the marker
+/// necessarily comes from another one, since sending it from the socket being
+/// closed is the hazard the protocol exists to avoid. Both attempts are spent,
+/// and the caller is handed back onto the drop-based path.
+#[compio::test]
+async fn teardown_recv_gives_up_when_the_marker_cannot_be_delivered() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let peer = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  socket
+    .connect(peer.local_addr().unwrap())
+    .await
+    .expect("a bound loopback socket connects");
+
+  // Arm the receive the way the driver loop does.
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  let started = std::time::Instant::now();
+  let completed = complete_recv_before_close(recv).await;
+  let elapsed = started.elapsed();
+
+  assert!(
+    !completed,
+    "the helper claimed the receive was completed, but no marker could reach it",
+  );
+  // A step bound elapsed at least once, so the protocol really ran the marker
+  // attempts rather than short-circuiting before them.
+  assert!(
+    elapsed >= TEARDOWN_STEP_TIMEOUT,
+    "the helper returned in {elapsed:?}, so it never awaited the receive",
+  );
+  // Each attempt spends at most one step bound on the send and one on the
+  // receive. Twice the nominal budget leaves room for a loaded machine while
+  // still failing outright if an await has become unbounded.
+  assert!(
+    elapsed < TEARDOWN_STEP_TIMEOUT * (TEARDOWN_MARKER_ATTEMPTS as u32) * 2 * 2,
+    "the helper took {elapsed:?}, so an await inside it is no longer bounded",
+  );
+
+  drop(peer);
+}
+
 /// A wildcard bind is not a valid destination, so the marker is aimed at the
 /// matching loopback address on the bound port.
 #[compio::test]
