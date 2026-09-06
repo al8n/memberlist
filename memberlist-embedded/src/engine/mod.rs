@@ -466,6 +466,17 @@ pub struct Engine<I, C, R = SmallRng> {
   /// reliable ping to the address is not counted here and does not suppress the
   /// seed.
   join_seeds_deduped: u64,
+  /// Count of admitted join seeds the machine refused to start an exchange for.
+  ///
+  /// `start_push_pull` hands back an inert [`StreamId`] — no intent registered, no
+  /// `Connect` queued, a `DialAborted` event its only trace — when the framed
+  /// request exceeds `max_stream_frame_size` (a membership that outgrew one frame)
+  /// or the endpoint is no longer running. The pump detects it as the absence of a
+  /// `Connect`: a seed whose `StreamId` is still unmatched when the action drain
+  /// ends started nothing, and is counted here. Each such seed is CONSUMED from the
+  /// queue, so a caller's retry-until-joined loop re-offers it (nothing dedups it —
+  /// there is no exchange to dedup against).
+  join_seeds_refused: u64,
   /// Count of parked dials trimmed after the pump's dial site because more than
   /// [`Options::max_pending_dials`] of them were still waiting on a pool that could
   /// back none of them. Each was terminalized through the machine's never-connected
@@ -586,6 +597,10 @@ where
   /// has not yet handed to the machine. Seeds are admitted as the reliable pool
   /// has room, so a non-zero value simply means discovery intent is still waiting
   /// on capacity.
+  ///
+  /// A seed LEAVING the queue is not by itself proof that an exchange started: the
+  /// machine can refuse one, and that case is counted separately by
+  /// [`join_seeds_refused`](Self::join_seeds_refused).
   #[inline]
   pub fn pending_seed_count(&self) -> usize {
     self.pending_seeds.len()
@@ -608,6 +623,22 @@ where
   #[inline]
   pub fn join_seeds_deduped(&self) -> u64 {
     self.join_seeds_deduped
+  }
+
+  /// Diagnostic count of admitted join seeds the machine refused to start an
+  /// exchange for — most plainly, a local membership that no longer fits one
+  /// `max_stream_frame_size` frame, which an identically-configured peer would
+  /// reject before decoding.
+  ///
+  /// Such a seed leaves the queue and produces no dial: no `Connect`, no parked
+  /// connection, and nothing counted by [`pending_seed_count`](Self::pending_seed_count)
+  /// or [`join_seeds_dropped`](Self::join_seeds_dropped). The retry-until-joined
+  /// loop re-offers it — there is no exchange in flight to dedup it against — so a
+  /// steadily rising value on a node that never joins is the signal that the frame
+  /// cap, not reachability, is what is blocking it.
+  #[inline]
+  pub fn join_seeds_refused(&self) -> u64 {
+    self.join_seeds_refused
   }
 
   /// Diagnostic count of parked dials trimmed by the parked-dial ceiling
@@ -1782,6 +1813,7 @@ where
       seed_stream_ids: MediumVec::new(),
       join_seeds_dropped: 0,
       join_seeds_deduped: 0,
+      join_seeds_refused: 0,
       #[cfg(test)]
       join_window_high_water: 0,
       pending_dial_rejections: 0,
@@ -3290,6 +3322,16 @@ where
   /// dial bytes need no additional tick. The `StreamId` is not a driver-facing
   /// token here — the dial itself is correlated by the `ExchangeId` the `Connect`
   /// carries — it is purely the origin tag the drain matches on.
+  ///
+  /// The returned id can also be INERT: `start_push_pull` registers no intent and
+  /// queues no `Connect` when the framed request exceeds `max_stream_frame_size` (a
+  /// membership that outgrew one frame) or the endpoint is no longer running, and
+  /// says so only through a `DialAborted` on the application event queue, which the
+  /// engine must not consume. Recording the id regardless is what makes that case
+  /// legible: 7a matches and removes every id whose `Connect` surfaced, so whatever
+  /// is left when the drain ends is exactly this pump's refusals, counted into
+  /// [`join_seeds_refused`](Self::join_seeds_refused) there. The seed itself is
+  /// already off the queue either way; the caller's retry loop re-offers it.
   fn admit_seed(&mut self, seed: SocketAddr, now: Instant) {
     let sid = self.endpoint.start_push_pull(seed, PushPullKind::Join, now);
     self.seed_stream_ids.push(sid);
@@ -3605,9 +3647,16 @@ where
     self.api_dials_since_pump = 0;
     // The seed origin tags are spent for the same reason. Every seed phase 5
     // admitted this pump surfaced its `Connect` in the loop above and was matched
-    // there; an admission whose `start_push_pull` failed before registering any
-    // intent never produces one, so its id would otherwise linger and could be
-    // matched by an unrelated exchange once `StreamId`s wrap.
+    // there; an admission whose `start_push_pull` started no exchange never produces
+    // one, so its id would otherwise linger and could be matched by an unrelated
+    // exchange once `StreamId`s wrap.
+    //
+    // That residue IS the refusal signal, and the only one the engine may read: the
+    // machine's own is a `DialAborted` on the application event queue, which the
+    // engine must not consume. Every id still here started nothing — no intent, no
+    // `Connect`, no parked connection — while its seed left the queue, so count it
+    // before clearing, and let the caller's re-offer re-queue the address.
+    self.join_seeds_refused += self.seed_stream_ids.len() as u64;
     self.seed_stream_ids.clear();
   }
 

@@ -1599,6 +1599,11 @@ fn join_dedups_duplicate_seeds_within_and_across_calls() {
     1,
     "one seed address must produce exactly one outbound exchange"
   );
+  assert_eq!(
+    engine.join_seeds_refused(),
+    0,
+    "a seed the machine does start an exchange for is not a refusal"
+  );
 
   // Offered again while the exchange it started is still live: still one exchange.
   engine.join(&[a]).expect("join is accepted");
@@ -2246,6 +2251,117 @@ fn a_default_cap_offer_ranks_inside_the_scratch_reserved_at_construction() {
     "and every entry it had no room for is counted once — including the one the \
      rotation now resumes from, which is why an over-long offer into an EMPTY queue \
      already moves this counter"
+  );
+}
+
+/// A seed the machine refuses to start an exchange for is counted, and costs the
+/// queue its slot without producing a dial.
+///
+/// `start_push_pull` hands back an INERT `StreamId` — no intent registered, no
+/// `Connect` queued, a `DialAborted` on the application event queue its only trace —
+/// once the framed join request exceeds `max_stream_frame_size`, which is every seed
+/// a node whose membership outgrew one frame offers. Uncounted that is silent: the
+/// seed leaves the queue, nothing is dialed, and neither the drop nor the dedup
+/// counter moves, so a caller retrying until joined can only observe that it never
+/// joins. The engine may not read the machine's own signal — the `DialAborted` is
+/// the application's event — so it reads the absence of a `Connect` instead.
+#[test]
+fn a_seed_whose_join_frame_exceeds_the_cap_is_counted_and_starts_nothing() {
+  // Above the floor construction enforces (this node's own state at its worst-case
+  // meta) and far below what a few hundred members frame to.
+  const FRAME_CAP: usize = 1024;
+  const MEMBERS: u32 = 200;
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_max_stream_frame_size(FRAME_CAP);
+  let (mut engine, now) = engine_from(admission_cfg(), ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  // Grow the membership past what one frame can carry: the join request pushes the
+  // FULL local state, so from here every join frame is over the cap.
+  for i in 0..MEMBERS {
+    engine.inject_alive(
+      SmolStr::new(std::format!("peer-{i}")),
+      SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+        7946,
+      ),
+      now,
+    );
+  }
+  assert_eq!(
+    engine.num_members(),
+    MEMBERS as usize + 1,
+    "every injected peer must be a member, or the frame would not be over the cap"
+  );
+
+  let seed = node_addr(7002);
+  engine.join(&[seed]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed queues normally — `join` cannot know the frame will not fit"
+  );
+
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.join_seeds_refused(),
+    1,
+    "the pump admitted the seed, the machine started nothing for it, and that is \
+     what this counts"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "the seed is CONSUMED by the admission, refused or not"
+  );
+  assert!(
+    stream.connects.is_empty(),
+    "a refused seed opens no dial, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "and parks no connection, so it spends nothing the parked-dial ceiling measures"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    0,
+    "an inert id registers no outbound exchange to correlate a completion against"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    0,
+    "the queue had room, so this is not a shed seed"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "and no exchange to the address exists, so it is not a duplicate either"
+  );
+
+  // Nothing dedups a refused seed — there is no exchange in flight to dedup against
+  // — so the retry-until-joined loop re-queues it, and it is refused again. That is
+  // the loop an operator watching only this counter can recognise.
+  engine.join(&[seed]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the re-offer queues the address again"
+  );
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.join_seeds_refused(),
+    2,
+    "and the second admission is refused and counted exactly like the first"
   );
 }
 
