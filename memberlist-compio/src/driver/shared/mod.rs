@@ -17,10 +17,10 @@ use compio::{buf::BufResult, net::UdpSocket};
 
 use memberlist_proto::event::Event;
 
-use crate::{delegate::Delegate, transport::runtime::CidrFilter};
+use crate::{delegate::Delegate, error::UnreleasedSocket, transport::runtime::CidrFilter};
 use core::task::Poll;
 use smallvec::SmallVec;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
@@ -227,7 +227,15 @@ impl<'a> PendingRecv<'a> {
 const TEARDOWN_MARKER: [u8; 8] = [0xff, 0x00, 0x6d, 0x6c, 0x74, 0x64, 0x00, 0xff];
 
 /// Marker sends attempted before falling back to the drop-based path.
-const TEARDOWN_MARKER_ATTEMPTS: usize = 3;
+///
+/// Two, not more: every step inside an attempt is bounded by
+/// [`TEARDOWN_STEP_TIMEOUT`], so each further attempt adds that bound twice to
+/// the worst-case shutdown, and a marker neither of two attempts can land is
+/// not going to land on a third — it is a loopback (or same-interface) datagram
+/// aimed at an address the socket is already bound to. The worst case the whole
+/// teardown can reach is stated on
+/// [`Memberlist::shutdown`](crate::Memberlist::shutdown).
+const TEARDOWN_MARKER_ATTEMPTS: usize = 2;
 
 /// Bound on EVERY individual await inside a teardown completion protocol.
 ///
@@ -278,6 +286,22 @@ fn self_addressed(local: SocketAddr) -> Option<SocketAddr> {
   }
 }
 
+/// The address a teardown marker is sent FROM: `dest`'s own address on an
+/// ephemeral port.
+///
+/// Same family, same interface address, and — for IPv6 — the same `scope_id`
+/// and `flowinfo`, so a link-local or interface-bound destination is reachable
+/// from it. The port is zero: the source socket is thrown away as soon as the
+/// marker has been sent, so it needs no stable identity.
+fn marker_source(dest: SocketAddr) -> SocketAddr {
+  match dest {
+    SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), 0)),
+    SocketAddr::V6(v6) => {
+      SocketAddr::V6(SocketAddrV6::new(*v6.ip(), 0, v6.flowinfo(), v6.scope_id()))
+    }
+  }
+}
+
 /// Complete a driver's last pending receive so the socket can be closed.
 ///
 /// Dropping an in-flight receive does NOT reliably end it on io_uring. The
@@ -288,35 +312,57 @@ fn self_addressed(local: SocketAddr) -> Option<SocketAddr> {
 /// shared descriptor, and the `UdpSocket::close` that follows waits on that
 /// last reference and never returns.
 ///
-/// Sending the socket a datagram addressed to itself resolves the receive
+/// Delivering the socket a datagram addressed to itself resolves the receive
 /// instead of cancelling it, which needs no free queue slot at drop time: the
 /// send is awaited, so it drives the runtime to submit and reap, and awaiting
 /// the receive afterwards reaps its completion. A resolved future cancels
 /// nothing when it is dropped, so the close that follows has no reference left
 /// to wait for.
 ///
+/// The marker is sent from a THROWAWAY socket, never from the socket being
+/// closed. Every await here is bounded, and an elapsed await drops its future
+/// — which, on both completion-based backends, strands an operation on
+/// whichever socket issued it. Sending from the gossip socket would therefore
+/// strand an operation on the very descriptor the close is waiting on, so a
+/// send that merely ran slow would produce exactly the hang this protocol
+/// exists to prevent. Stranding one on the throwaway socket instead costs a
+/// single descriptor and its ephemeral port, held until the process exits, and
+/// nothing rebinds either.
+///
 /// The received bytes are discarded — the loop has already exited and nothing
 /// further is fed to the endpoint — so the marker is never interpreted, and a
 /// real datagram that happens to arrive first serves equally well.
 ///
 /// Returns whether the receive was completed. `false` means the caller is back
-/// on the drop-based path and must bound its close with
-/// [`TEARDOWN_CLOSE_TIMEOUT`].
+/// on the drop-based path: the receive may still hold the descriptor, so the
+/// close that follows cannot prove the port was released and the shutdown
+/// caller is told so (see [`shutdown_release_reply`]).
 pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> bool {
+  #[cfg(test)]
+  if force_teardown_fallback() {
+    return false;
+  }
   let Some(dest) = self_addressed_dest(recv.socket) else {
+    return false;
+  };
+  let Ok(Ok(marker)) =
+    compio::time::timeout(TEARDOWN_STEP_TIMEOUT, UdpSocket::bind(marker_source(dest))).await
+  else {
+    // No source socket, no marker. The bind is a local operation that only
+    // fails when the interface the destination names is gone, in which case
+    // the datagram could not have been delivered either.
     return false;
   };
   for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
     let sent = compio::time::timeout(
       TEARDOWN_STEP_TIMEOUT,
-      recv.socket.send_to(TEARDOWN_MARKER.to_vec(), dest),
+      marker.send_to(TEARDOWN_MARKER.to_vec(), dest),
     )
     .await;
     if !matches!(sent, Ok(BufResult(Ok(_), _))) {
-      // A connected socket rejects a send to another address, and a send can
-      // fail outright — or never complete — on a torn-down interface. None of
-      // those is recoverable here, and an elapsed send is treated as a failed
-      // one so the protocol cannot park on it.
+      // A send can fail outright — or never complete — on a torn-down
+      // interface. Neither is recoverable here, and an elapsed send is treated
+      // as a failed one so the protocol cannot park on it.
       return false;
     }
     // Awaiting the receive is what drives the runtime to submit and reap the
@@ -349,12 +395,20 @@ pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> boo
 /// connection and the connecting side are dropped immediately — the driver
 /// loop has exited and nothing will be served on them.
 ///
+/// The dial runs on a FRESH `TcpStream`, independent of the listener, for the
+/// same reason the datagram marker runs on a throwaway socket: the connect is
+/// bounded, and an elapsed connect drops its future, stranding an operation on
+/// whichever socket issued it. On the connecting socket that costs one
+/// descriptor which nothing rebinds; on the listener it would be the hang this
+/// protocol exists to prevent.
+///
 /// A terminated future has already resolved and holds no operation, so there
 /// is nothing to complete and the listener can be closed directly.
 ///
 /// Returns whether the listener has no operation left in flight. `false` means
-/// the caller is on the drop-based path and must bound its close with
-/// [`TEARDOWN_CLOSE_TIMEOUT`].
+/// the caller is on the drop-based path: the accept may still hold the
+/// descriptor, so the close that follows cannot prove the port was released
+/// and the shutdown caller is told so (see [`shutdown_release_reply`]).
 #[cfg(any(
   feature = "tcp",
   feature = "tls-rustls-ring",
@@ -367,6 +421,10 @@ pub(crate) async fn complete_accept_before_close<F>(
 where
   F: futures_util::future::FusedFuture + ?Sized,
 {
+  #[cfg(test)]
+  if force_teardown_fallback() {
+    return false;
+  }
   if accept.is_terminated() {
     return true;
   }
@@ -400,6 +458,82 @@ where
     }
   }
   false
+}
+
+/// Close one of a driver's bound sockets and report whether its release was
+/// PROVEN.
+///
+/// `completed` is whether the socket's pending operation was completed rather
+/// than abandoned, as reported by [`complete_recv_before_close`] /
+/// [`complete_accept_before_close`]. The close is awaited under
+/// [`TEARDOWN_CLOSE_TIMEOUT`] either way — it is what releases the port on a
+/// completion-based backend, where a plain drop closes the handle
+/// asynchronously and a same-port rebind races the release.
+///
+/// Release is proven only when BOTH hold: an abandoned operation may still own
+/// the descriptor, and a close that errored or ran out its bound has not been
+/// observed to finish. Either way the caller must not tell the shutdown caller
+/// the port is free.
+pub(crate) async fn close_and_prove_release<F>(completed: bool, close: F) -> bool
+where
+  F: Future<Output = std::io::Result<()>>,
+{
+  let closed = matches!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, close).await,
+    Ok(Ok(()))
+  );
+  completed && closed
+}
+
+/// The reply a driver's teardown owes its shutdown caller, given what each of
+/// its sockets could be proven to have released.
+///
+/// `listener` is the reliable-plane listener's proof, or `None` for a driver
+/// that has no listener (the QUIC driver, whose reliable plane rides the same
+/// UDP socket as gossip). `Ok(())` means every bound port was observed
+/// released, so an immediate rebind on the same address succeeds; anything else
+/// is [`MemberlistError::ShutdownReleaseUnproven`] naming the socket(s) whose
+/// release could not be established. The node is stopped in both cases — the
+/// difference is only whether the caller may rebind straight away.
+pub(crate) fn shutdown_release_reply(
+  listener: Option<bool>,
+  gossip: bool,
+) -> crate::error::Result<()> {
+  let unreleased = match (listener.unwrap_or(true), gossip) {
+    (true, true) => return Ok(()),
+    (false, true) => UnreleasedSocket::Listener,
+    (true, false) => UnreleasedSocket::Gossip,
+    (false, false) => UnreleasedSocket::Both,
+  };
+  Err(crate::error::MemberlistError::ShutdownReleaseUnproven(
+    crate::error::ShutdownReleaseUnproven::new(unreleased),
+  ))
+}
+
+#[cfg(test)]
+thread_local! {
+  /// Test seam: force both completion protocols straight onto the drop-based
+  /// fallback.
+  ///
+  /// The fallback is only reachable behind a torn-down interface or a starved
+  /// submission queue, neither of which a test can stage against a live driver
+  /// without also breaking the machinery it is trying to observe. With this
+  /// set, both helpers report failure having attempted nothing, so a
+  /// driver-level test can assert the reply a teardown sends when it cannot
+  /// prove its sockets were released.
+  static FORCE_TEARDOWN_FALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set the forced-fallback seam for the current thread. The driver task runs on
+/// the thread that spawned it, so a test sets this for its own driver only.
+#[cfg(test)]
+pub(crate) fn set_force_teardown_fallback(on: bool) {
+  FORCE_TEARDOWN_FALLBACK.with(|f| f.set(on));
+}
+
+#[cfg(test)]
+fn force_teardown_fallback() -> bool {
+  FORCE_TEARDOWN_FALLBACK.with(|f| f.get())
 }
 
 #[cfg(test)]

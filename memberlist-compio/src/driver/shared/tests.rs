@@ -355,13 +355,15 @@ async fn drop_based_teardown_completes_when_the_ring_has_room() {
 /// [`PROACTOR_CAPACITY`]) has drifted and that test is no longer covering
 /// anything.
 ///
-/// Ignored by default because it asserts an io_uring-specific hang: on kqueue,
-/// IOCP, and io_uring's own polling fallback the cancellation is not a queue
-/// entry and the close completes, so an always-on assertion would fail on
-/// every other backend. Run it on Linux with io_uring reachable:
-/// `cargo test -p memberlist-compio --lib drop_based_teardown_does_not -- --ignored`
+/// Ignored by default, and compiled only on Linux, because it asserts an
+/// io_uring-specific hang: on kqueue, IOCP, and io_uring's own polling fallback
+/// the cancellation is not a queue entry and the close completes, so an
+/// always-on assertion would fail on every other backend. The Linux CI lane
+/// runs it explicitly:
+/// `cargo test -p memberlist-compio --lib driver::shared -- --ignored`
+#[cfg(target_os = "linux")]
 #[compio::test]
-#[ignore = "asserts an io_uring-only hang; see the doc comment for how to run it"]
+#[ignore = "asserts an io_uring-only hang; the Linux CI lane runs it with --ignored"]
 async fn drop_based_teardown_does_not_complete_with_a_full_ring() {
   let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
   let filler = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -377,8 +379,12 @@ async fn drop_based_teardown_does_not_complete_with_a_full_ring() {
     compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
       .await
       .is_err(),
-    "close completed, so the cancellation was pushed: the ring was not full \
-     and the saturation no longer reproduces the stranding condition",
+    "close completed, so the cancellation was pushed. Either this runner is not \
+     actually on io_uring (a sandbox that blocks io_uring_setup, or a kernel \
+     missing an opcode, drops compio onto its polling driver), or the \
+     saturation arithmetic has drifted and the ring was never full — in which \
+     case teardown_completes_last_receive_with_submission_queue_saturated is \
+     no longer covering anything",
   );
 
   drop(staged);
@@ -549,4 +555,144 @@ fn self_addressed_substitutes_ipv6_loopback_for_a_wildcard_bind() {
     std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
   );
   assert_eq!(dest.port(), 7946);
+}
+
+/// The throwaway marker socket binds the destination's own address on an
+/// ephemeral port, so it sits on the same interface (and, for IPv6, in the same
+/// scope) as the socket the marker has to reach.
+#[test]
+fn marker_source_matches_the_destination_interface_on_an_ephemeral_port() {
+  let v4 = marker_source("127.0.0.1:7946".parse().expect("v4 dest"));
+  assert_eq!(v4.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+  assert_eq!(v4.port(), 0, "the source socket needs no stable identity");
+
+  let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+    "fe80::1".parse().expect("link-local"),
+    7946,
+    7,
+    3,
+  ));
+  match marker_source(scoped) {
+    SocketAddr::V6(v6) => {
+      assert_eq!(v6.ip(), &"fe80::1".parse::<std::net::Ipv6Addr>().unwrap());
+      assert_eq!(v6.port(), 0);
+      assert_eq!(v6.scope_id(), 3, "the source must sit in the same scope");
+      assert_eq!(v6.flowinfo(), 7);
+    }
+    other => panic!("expected a v6 source, got {other}"),
+  }
+}
+
+/// Release is proven only by BOTH halves: a completed operation and a close
+/// that returned `Ok` within its bound.
+///
+/// The `completed = false` arm is the one that matters. An abandoned operation
+/// may still own the descriptor even though the close returned promptly — on a
+/// readiness-based backend it genuinely is gone, but nothing observable
+/// distinguishes that from a completion-based backend whose cancellation was
+/// discarded, so the conservative answer is the only sound one.
+#[compio::test]
+async fn release_is_proven_only_by_a_completed_operation_and_an_ok_close() {
+  assert!(close_and_prove_release(true, async { Ok(()) }).await);
+  assert!(!close_and_prove_release(false, async { Ok(()) }).await);
+  assert!(
+    !close_and_prove_release(true, async { Err(std::io::Error::other("close failed")) }).await
+  );
+}
+
+/// A close that never finishes is bounded, and an unfinished close proves
+/// nothing.
+///
+/// This is the arm that keeps a shutdown from hanging on a descriptor an
+/// abandoned operation still owns: the caller waits [`TEARDOWN_CLOSE_TIMEOUT`]
+/// and then reports the port unproven rather than parking forever.
+#[compio::test]
+async fn a_close_that_never_finishes_is_bounded_and_proves_nothing() {
+  let started = std::time::Instant::now();
+  let proven =
+    close_and_prove_release(true, futures_util::future::pending::<std::io::Result<()>>()).await;
+  let elapsed = started.elapsed();
+
+  assert!(!proven, "an unfinished close cannot prove the port is free");
+  assert!(
+    elapsed >= TEARDOWN_CLOSE_TIMEOUT,
+    "the close was not actually awaited for its full bound ({elapsed:?})",
+  );
+  assert!(
+    elapsed < TEARDOWN_CLOSE_TIMEOUT * 2,
+    "the close bound did not hold: waited {elapsed:?}",
+  );
+}
+
+/// The shutdown reply names exactly the socket(s) whose release was not proven,
+/// and is `Ok(())` only when every one of them was.
+#[test]
+fn shutdown_reply_names_the_sockets_whose_release_was_not_proven() {
+  use crate::error::{MemberlistError, UnreleasedSocket};
+
+  assert!(shutdown_release_reply(Some(true), true).is_ok());
+  // A QUIC driver binds no listener, so its gossip socket decides alone.
+  assert!(shutdown_release_reply(None, true).is_ok());
+
+  let cases = [
+    (Some(false), true, UnreleasedSocket::Listener),
+    (Some(true), false, UnreleasedSocket::Gossip),
+    (Some(false), false, UnreleasedSocket::Both),
+    (None, false, UnreleasedSocket::Gossip),
+  ];
+  for (listener, gossip, expected) in cases {
+    match shutdown_release_reply(listener, gossip) {
+      Err(MemberlistError::ShutdownReleaseUnproven(e)) => assert_eq!(
+        e.socket(),
+        expected,
+        "listener={listener:?} gossip={gossip} named the wrong socket",
+      ),
+      other => panic!("expected an unproven-release reply, got {other:?}"),
+    }
+  }
+}
+
+/// The forced-fallback seam short-circuits both completion protocols.
+///
+/// It is the only way a test can reach the drop-based path against a live
+/// driver, so the seam itself is asserted here: without this, the driver-level
+/// tests that depend on it could pass because the protocol succeeded for an
+/// unrelated reason.
+#[compio::test]
+async fn the_forced_fallback_seam_short_circuits_both_completion_protocols() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  set_force_teardown_fallback(true);
+  let completed = complete_recv_before_close(recv).await;
+  set_force_teardown_fallback(false);
+  assert!(!completed, "the seam must report the fallback path");
+
+  // Nothing was staged against the socket beyond the armed receive, so the
+  // ordinary drop-based close still finishes and the test cannot hang.
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok()
+  );
+}
+
+/// The accept protocol's seam short-circuits even the already-terminated
+/// case, which otherwise returns `true` without touching the network.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn the_forced_fallback_seam_short_circuits_a_spent_accept() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let spent = futures_util::future::pending::<()>();
+  futures_util::pin_mut!(spent);
+
+  set_force_teardown_fallback(true);
+  let completed = complete_accept_before_close(spent, &listener).await;
+  set_force_teardown_fallback(false);
+  assert!(!completed, "the seam must report the fallback path");
 }

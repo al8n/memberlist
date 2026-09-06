@@ -54,8 +54,8 @@ use crate::{
   driver::{
     options::{RuntimeOptions, capped_timer},
     shared::{
-      ExchangeId, PendingRecv, TEARDOWN_CLOSE_TIMEOUT, cidr_blocks, complete_recv_before_close,
-      dispatch_event_delegate, join_reply,
+      ExchangeId, PendingRecv, cidr_blocks, close_and_prove_release, complete_recv_before_close,
+      dispatch_event_delegate, join_reply, shutdown_release_reply,
     },
   },
   error::{JoinFailed, MemberlistError, Result, UserDialBacklogFull},
@@ -777,16 +777,17 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   }
 
   // Complete the loop's last receive rather than cancelling it: a dropped
-  // in-flight receive relies on a single best-effort io_uring cancellation that
-  // is discarded when the submission queue is full, and the close below would
-  // then wait forever for the descriptor's last reference. Dropping
-  // `recv_socket` afterwards releases the reference its clone holds, so the
-  // close sees the sole remaining one.
+  // in-flight receive relies on a single best-effort cancellation — an io_uring
+  // submission-queue entry that is discarded when the queue is full, a Windows
+  // `CancelIoEx` whose completion arrives later — and the close below would
+  // then wait for the descriptor's last reference. Dropping `recv_socket`
+  // afterwards releases the reference its clone holds, so the close sees the
+  // sole remaining one.
   //
-  // Ignoring the outcome: the bounded close below is correct either way — a
-  // completed receive makes it immediate, and a failed marker leaves the
-  // timeout as the backstop.
-  let _ = complete_recv_before_close(recv).await;
+  // The outcome is carried to the close below: a receive that was completed
+  // (rather than abandoned to the fallback) is half the proof that the port
+  // was released, which is what the shutdown caller is told.
+  let recv_completed = complete_recv_before_close(recv).await;
   drop(recv_socket);
 
   // Cleanup. Order matches the stream driver's post-loop sequence
@@ -905,14 +906,17 @@ pub(crate) async fn quic_driver_loop<I, D, G>(
   // driver does for its gossip socket) drains the close to completion, so the
   // kernel slot is released before the stashed reply fires below.
   //
-  // Ignoring Err: a close error during teardown is unactionable.
-  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, state.udp_socket.close()).await;
+  // A QUIC node binds ONE socket: the reliable plane rides the same UDP socket
+  // as gossip, so this single proof decides the whole shutdown reply.
+  let gossip_released = close_and_prove_release(recv_completed, state.udp_socket.close()).await;
 
-  // Ack any stashed Shutdown command reply.
+  // Ack any stashed Shutdown command reply. `Ok(())` only if the port was
+  // observed released; otherwise the node is stopped all the same, but the
+  // caller is told it may not rebind this address yet.
   if let Some(reply) = state.shutdown_reply.take() {
     // Ignoring Err: the caller dropped its reply receiver; nothing
     // to surface.
-    let _ = reply.send(Ok(()));
+    let _ = reply.send(shutdown_release_reply(None, gossip_released));
   }
   // `state` (and with it `obs_tx`) drops here, closing the observation
   // channel; the observation task drains any buffered events and exits.

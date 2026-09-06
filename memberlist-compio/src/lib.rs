@@ -85,7 +85,7 @@ pub use driver::options::{
 pub use error::UserDialBacklogFull;
 pub use error::{
   GossipMtuTooSmall, InvalidAdvertiseAddr, InvalidGossipMtu, InvalidOption, JoinFailed,
-  MemberlistError, Result,
+  MemberlistError, Result, ShutdownReleaseUnproven, UnreleasedSocket,
 };
 pub use events::EventStream;
 pub use memberlist::Memberlist;

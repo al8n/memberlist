@@ -57,9 +57,9 @@ use crate::{
   driver::{
     options::{RuntimeOptions, StreamTransportOptions, capped_timer},
     shared::{
-      ExchangeId, PendingRecv, TEARDOWN_CLOSE_TIMEOUT, add_obs_payload, cidr_blocks,
+      ExchangeId, PendingRecv, add_obs_payload, cidr_blocks, close_and_prove_release,
       complete_accept_before_close, complete_recv_before_close, dispatch_event_delegate,
-      join_reply, observation_payload_bytes, yield_once,
+      join_reply, observation_payload_bytes, shutdown_release_reply, yield_once,
     },
   },
   error::{JoinFailed, MemberlistError, Result},
@@ -1484,41 +1484,42 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // socket resolve its pending operation BEFORE awaiting the close.
   //
   // A pending accept or receive that is merely dropped relies on one
-  // best-effort io_uring cancellation, which is discarded when the submission
-  // queue is full. The orphaned operation then keeps a reference to its
+  // best-effort cancellation — an io_uring submission-queue entry that is
+  // discarded when the queue is full, a Windows `CancelIoEx` whose completion
+  // arrives later. The orphaned operation then keeps a reference to its
   // socket's shared descriptor: a bare `drop` of the socket does not release
   // the port at all, and an awaited `close` waits on that reference forever.
   // Completing the operation instead — a self-addressed connect for the
   // accept, a self-addressed datagram for the receive — needs no free queue
   // slot, so the close that follows has nothing left to wait for.
   //
-  // Ignoring the outcomes: the bounded closes are correct either way — a
-  // completed operation makes the close immediate, and a failed completion
-  // leaves the timeout as the backstop.
+  // Each socket's release is PROVEN only when its operation completed and its
+  // bounded close then returned Ok. The two proofs decide the shutdown
+  // caller's reply below: a teardown that fell back to the drop-based path, or
+  // whose close ran out its bound, may still be holding the port, and saying
+  // `Ok(())` there would promise a rebind that fails.
 
   // Listener first: complete its accept, then close it.
-  let _ = complete_accept_before_close(accept_fut.as_mut(), &listener).await;
+  let accept_completed = complete_accept_before_close(accept_fut.as_mut(), &listener).await;
   // The accept future borrows `listener`, so it must go before the close moves
   // it. It has resolved (or never had an operation), so this cancels nothing.
   drop(accept_fut);
-  // Ignoring Err: an awaited close is what releases the listening port on a
-  // completion-based backend, where a plain drop closes the handle
-  // asynchronously and a same-port rebind races the release. A close error
-  // during teardown is unactionable.
-  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, listener.close()).await;
+  let listener_released = close_and_prove_release(accept_completed, listener.close()).await;
 
   // Then the gossip socket: complete its receive, then close it.
-  let _ = complete_recv_before_close(recv).await;
-  // Ignoring Err: socket close on shutdown — the runtime tears down
-  // file descriptors anyway and the error is unactionable.
-  let _ = compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, gossip_socket.close()).await;
+  let recv_completed = complete_recv_before_close(recv).await;
+  let gossip_released = close_and_prove_release(recv_completed, gossip_socket.close()).await;
 
-  // Now ack the shutdown caller — both bound ports have been released,
-  // so the caller's `shutdown.await` returns to a state where an
-  // immediate rebind on the same address succeeds.
+  // Now ack the shutdown caller. `Ok(())` means both bound ports were observed
+  // released, so the caller's `shutdown.await` returns to a state where an
+  // immediate rebind on the same address succeeds; otherwise the node is still
+  // stopped but the caller is told which socket it must not rebind yet.
   if let Some(reply) = shutdown_reply {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = reply.send(Ok(()));
+    let _ = reply.send(shutdown_release_reply(
+      Some(listener_released),
+      gossip_released,
+    ));
   }
 }
 
