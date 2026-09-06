@@ -59,8 +59,26 @@ use crate::{
 /// RNG (defaulting to [`SmallRng`](memberlist_proto::SmallRng)). Built by
 /// [`Memberlist::new`](crate::Memberlist::new), which hands back the paired
 /// [`Memberlist`](crate::Memberlist) handle.
-pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng> {
+///
+/// Dropping the `Runner` marks the node's run loop terminally gone — see
+/// [`run`](Self::run)'s teardown contract, which holds from construction whether or
+/// not the loop was ever driven.
+pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng>
+where
+  I: memberlist_proto::Id,
+{
   pub(crate) shared: Rc<Shared<I, R>>,
+  /// Fails everything parked on this node's run loop when the `Runner` goes away.
+  ///
+  /// A field rather than a local in [`run`](Self::run)'s body so it is armed from
+  /// construction: the handle can park an op as soon as the node exists, which is
+  /// before the run future is built and long before it is first polled. `run` moves
+  /// it into the body, so the one guard covers the whole life of the run loop.
+  ///
+  /// It holds an [`Rc`] of its own rather than borrowing the field above, both to be
+  /// `'static` in this struct and so the shared state it marks outlives every other
+  /// field's drop.
+  pub(crate) stop_guard: StopOnDrop<I, R>,
   pub(crate) udp: UdpSocket<'a>,
   pub(crate) tcp: [TcpSocket<'a>; N],
   pub(crate) mailboxes: [RefCell<Mailbox>; N],
@@ -103,13 +121,17 @@ where
   /// every later handle op is refused with it at the call site instead of parking
   /// on a wake that can no longer arrive.
   ///
-  /// That release is carried by a guard inside the future, so it holds on every
-  /// exit path — but the guard, like the rest of an `async fn` body, exists only
-  /// once the future has been POLLED. A future built and dropped without ever being
-  /// polled has driven nothing and marks nothing.
+  /// That release is carried by a guard the [`Runner`] holds as a field from the
+  /// moment it was built, which this body moves in and keeps for its whole life. So
+  /// the contract above covers the node from construction, not from the first poll:
+  /// dropping the `Runner` without ever calling `run`, dropping this future before
+  /// it is polled, and dropping it mid-flight all release the same way. A handle op
+  /// can park as soon as the node exists, and from that same moment something is
+  /// there to answer it.
   pub async fn run(self) -> ! {
     let Runner {
       shared,
+      stop_guard,
       udp,
       mut tcp,
       mailboxes,
@@ -119,13 +141,12 @@ where
       mut free,
     } = self;
 
-    // Arm the teardown BEFORE anything can park on this loop. From here on every way
-    // out of the future — the drop that is the only real one, and the returns below
-    // that the diverging arms make unreachable — releases every handle op waiting on
-    // the pump.
-    let _stopped = StopOnDrop {
-      shared: shared.as_ref(),
-    };
+    // Carry the construction-time teardown guard into the body, so every way out of
+    // the future — the drop that is the only real one, and the returns below that the
+    // diverging arms make unreachable — releases every handle op waiting on the pump.
+    // The destructuring above already moved it out of a `Runner` that no longer
+    // exists, so this binding is what keeps it armed for the loop's lifetime.
+    let _stopped = stop_guard;
 
     // Build the N worker futures, each owning a distinct `&mut TcpSocket` (via
     // `each_mut`, which yields `N` non-aliasing mutable refs) paired with its
@@ -163,8 +184,11 @@ where
   }
 }
 
-/// Releases the node's run loop on every way out of [`Runner::run`], including the
-/// only one that actually happens: the caller DROPPING the future.
+/// Releases the node's run loop when the [`Runner`] that owns it goes away — as a
+/// field of the `Runner` itself, so it covers every way that can happen: the caller
+/// DROPPING the [`run`](Runner::run) future (the only way that loop ends), dropping
+/// the future before it is ever polled, and dropping the `Runner` without having
+/// called `run` at all.
 ///
 /// The loop diverges, so the `fail_all_waiters` call a `-> !` function could place
 /// after it is unreachable — a parked join, ping or send would sit on a wake that
@@ -172,14 +196,28 @@ where
 /// and it marks the node stopped before releasing anything, so a woken join reads a
 /// terminal answer rather than re-checking two answers that have not moved and
 /// parking again.
-struct StopOnDrop<'a, I, R>
+pub(crate) struct StopOnDrop<I, R>
 where
   I: memberlist_proto::Id,
 {
-  shared: &'a Shared<I, R>,
+  /// Owned, not borrowed: the guard is a field of the `Runner` (and then a local in
+  /// the run future), so it cannot borrow the state it marks, and holding the state
+  /// alive is what lets it mark it from any drop order.
+  shared: Rc<Shared<I, R>>,
 }
 
-impl<I, R> Drop for StopOnDrop<'_, I, R>
+impl<I, R> StopOnDrop<I, R>
+where
+  I: memberlist_proto::Id,
+{
+  /// Arm the guard on a node's shared state, at construction of the `Runner` that
+  /// carries it.
+  pub(crate) fn new(shared: Rc<Shared<I, R>>) -> Self {
+    Self { shared }
+  }
+}
+
+impl<I, R> Drop for StopOnDrop<I, R>
 where
   I: memberlist_proto::Id,
 {

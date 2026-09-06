@@ -274,9 +274,10 @@ pub(crate) struct JoinId(u64);
 /// Wake sources, and the whole set of them: a drained [`Event::NodeJoined`] — the one
 /// event that can add a member, and so the only one that can change the `is_joined()`
 /// a parked join is waiting on — [`leave`](crate::Memberlist::leave), which changes
-/// the lifecycle answer the same join checks first, and the run future going away
-/// through [`Shared::stop_runner`] (it returned, or was dropped by a `select` that
-/// lost or a task teardown). The third does not change either of the first two
+/// the lifecycle answer the same join checks first, and the run loop going away
+/// through [`Shared::stop_runner`] (its future returned, or was dropped by a `select`
+/// that lost or a task teardown, or the `Runner` carrying it was dropped before it
+/// was ever driven). The third does not change either of the first two
 /// answers; it is a source because it removes both, and it gives the woken join a
 /// third, terminal answer of its own — the stopped flag `stop_runner` sets before it
 /// wakes anyone — so the join returns rather than parking again. Ordinary traffic (user
@@ -466,7 +467,8 @@ pub(crate) struct Shared<I, R = SmallRng> {
   next_join_offer: Cell<Option<Instant>>,
   /// Whether the [`Runner`](crate::Runner) driving this node is gone: its `run`
   /// future returned, or — the way out its `-> !` signature cannot express — was
-  /// DROPPED, by a `select` that lost or by a task teardown.
+  /// DROPPED, by a `select` that lost or by a task teardown, or the `Runner` was
+  /// dropped before it was ever run.
   ///
   /// Terminal and one-way. The pump is the only thing that completes a parked
   /// handle op, so once it is gone nothing behind a park can ever resolve: every

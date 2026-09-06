@@ -1146,6 +1146,135 @@ fn dropping_a_polled_runner_fails_every_parked_operation() {
   });
 }
 
+/// A freshly issued `join` on a node whose run loop is gone must be refused at the
+/// call site rather than parked on a wake that can no longer arrive.
+fn assert_join_refused(
+  ml: &Memberlist<SmolStr, SocketAddr>,
+  seeds: &[MaybeResolved<SocketAddr>],
+  node: &str,
+) {
+  match ml.join(&SocketAddrResolver, seeds).now_or_never() {
+    Some(Err(e)) => assert!(
+      e.is_runner_stopped(),
+      "a join issued after {node}'s runner was dropped must be refused, got {e}"
+    ),
+    Some(Ok(())) => panic!("a join must not report success on {node}, which has no run loop"),
+    None => panic!("a join issued after {node}'s runner was dropped must not park"),
+  }
+}
+
+/// Dropping a `Runner` that was never polled must release everything parked on it
+/// too — the teardown covers the node from construction, not from the first poll.
+///
+/// `Memberlist::new` hands back the handle and the `Runner` together, so from that
+/// moment a `join` / `ping` / `send_reliable` can park on a pump that has not run a
+/// single poll: the integrator has still to spawn the run task, and a spawn the
+/// executor refuses (no free task slot) drops the `Runner` it was handed. A teardown
+/// armed only inside `run`'s body marks nothing in that window, because the body of
+/// an `async fn` starts at the FIRST POLL — so an op parked in it would wait on a
+/// pump that is never coming, on a node the handle still reports as running.
+///
+/// Both shapes of that drop are checked, on a node each: A's `Runner` goes away with
+/// `run` never called on it, and B's `run` future is built and dropped without a
+/// single poll. Nothing in this test drives any run loop — neither memberlist's nor
+/// either stack's — so the teardown is the only thing that can answer these ops, and
+/// each seed is aimed at an address no node here holds.
+#[test]
+fn dropping_an_unpolled_runner_fails_parked_operations() {
+  let (dev_a, dev_b) = pair();
+  let mut res_a = StackResources::<{ POOL + 2 }>::new();
+  let mut res_b = StackResources::<{ POOL + 2 }>::new();
+  let (stack_a, _net_a) = build_stack(dev_a, &mut res_a, 1, 0x1111_2222);
+  let (stack_b, _net_b) = build_stack(dev_b, &mut res_b, 2, 0x3333_4444);
+
+  let mut bufs_a = NodeBufs::new();
+  let mut bufs_b = NodeBufs::new();
+  let (ml_a, run_a) = node(stack_a, &mut bufs_a, "never-run", 1, 1);
+  let (ml_b, run_b) = node(stack_b, &mut bufs_b, "never-polled", 2, 2);
+
+  let peer = silent(9);
+  let seeds = [MaybeResolved::Resolved(peer)];
+
+  block_on(async {
+    // Park the ops FIRST, so each one is waiting before its runner goes away — the
+    // window a body-only guard leaves open.
+    let mut joining_a = Box::pin(ml_a.join(&SocketAddrResolver, &seeds));
+    assert!(
+      poll!(joining_a.as_mut()).is_pending(),
+      "a join parks on convergence whether or not its run loop has been polled"
+    );
+    let mut sending_a = Box::pin(ml_a.send_reliable(peer, bytes::Bytes::from_static(b"parked")));
+    assert!(
+      poll!(sending_a.as_mut()).is_pending(),
+      "a reliable send parks on a completion signal only the pump ever fires"
+    );
+    let mut joining_b = Box::pin(ml_b.join(&SocketAddrResolver, &seeds));
+    assert!(
+      poll!(joining_b.as_mut()).is_pending(),
+      "B's join parks the same way as A's"
+    );
+
+    // A: the `Runner` itself is dropped, `run` never called on it.
+    drop(run_a);
+    // B: the run future is built and dropped with no poll in between, so its body —
+    // and anything a body-only guard would arm there — never ran at all.
+    let run_b = run_b.run();
+    drop(run_b);
+
+    match poll!(joining_a.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the join parked on A must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(())) => panic!("a join that never converged must not report success"),
+      Poll::Pending => panic!(
+        "the join parked on A was left waiting on a run loop that was dropped before \
+         it ever ran — the teardown must answer it"
+      ),
+    }
+    match poll!(sending_a.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the send parked on A must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(())) => panic!("a send that never completed must not report success"),
+      Poll::Pending => panic!(
+        "the send parked on A was left waiting on a run loop that was dropped before \
+         it ever ran"
+      ),
+    }
+    match poll!(joining_b.as_mut()) {
+      Poll::Ready(Err(e)) => assert!(
+        e.is_runner_stopped(),
+        "the join parked on B must report the gone run loop, got {e}"
+      ),
+      Poll::Ready(Ok(())) => panic!("a join that never converged must not report success"),
+      Poll::Pending => panic!(
+        "the join parked on B was left waiting on a run future that was dropped before \
+         its first poll — the teardown must answer it"
+      ),
+    }
+
+    // The answered joins released the seeds they were offering on the way out.
+    drop(joining_a);
+    drop(joining_b);
+    assert_eq!(
+      ml_a.join_offer_addr_count(),
+      0,
+      "A's answered join released the seed it was offering"
+    );
+    assert_eq!(
+      ml_b.join_offer_addr_count(),
+      0,
+      "B's answered join released the seed it was offering"
+    );
+
+    // And nothing new is accepted on either node.
+    assert_join_refused(&ml_a, &seeds, "A");
+    assert_join_refused(&ml_b, &seeds, "B");
+  });
+}
+
 /// An engine refusal that is neither the node's lifecycle nor call-site backpressure
 /// must reach the caller AS ITSELF, not folded into one of those two answers.
 ///

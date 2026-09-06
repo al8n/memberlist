@@ -32,7 +32,7 @@ use crate::{
   gossip_io::EmbassyGossip,
   mailbox::{Command, Mailbox},
   resolver::AddressResolver,
-  runner::Runner,
+  runner::{Runner, StopOnDrop},
   shared::{self, Shared},
   stream_io::{SlotId, SlotWake},
   time,
@@ -489,6 +489,12 @@ where
     let shared = Rc::new(Shared::new(engine));
     let runner = Runner {
       shared: shared.clone(),
+      // Arm the run loop's teardown HERE rather than inside `Runner::run`'s body: the
+      // handle below can park a `join` / `ping` / `send_reliable` from this point on,
+      // which is before the run future exists and before anything polls it. Armed with
+      // the node, the guard answers every one of those ops however the `Runner` ends —
+      // driven and then dropped, or dropped without ever being run.
+      stop_guard: StopOnDrop::new(shared.clone()),
       udp: udp_socket,
       tcp: tcp_sockets,
       mailboxes,
