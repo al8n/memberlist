@@ -489,16 +489,27 @@ pub struct Engine<I, C, R = SmallRng> {
   /// reliable ping to the address is not counted here and does not suppress the
   /// seed.
   join_seeds_deduped: u64,
-  /// Count of admitted join seeds the machine refused to start an exchange for.
+  /// Count of admitted join seeds for which the machine surfaced no `Connect` in
+  /// the admitting pump.
   ///
-  /// `start_push_pull` hands back an inert [`StreamId`] — no intent registered, no
-  /// `Connect` queued, a `DialAborted` event its only trace — when the framed
-  /// request exceeds `max_stream_frame_size` (a membership that outgrew one frame)
-  /// or the endpoint is no longer running. The pump detects it as the absence of a
-  /// `Connect`: a seed whose `StreamId` is still unmatched when the action drain
-  /// ends started nothing, and is counted here. Each such seed is CONSUMED from the
+  /// That absence is the whole definition, and the only signal the engine may read:
+  /// the machine reports these through `DialAborted` on the application event
+  /// queue, which the engine must not consume. A seed whose `StreamId` is still
+  /// unmatched when the action drain ends started nothing — no intent, no `Connect`,
+  /// no parked connection — and is counted here. Each such seed is CONSUMED from the
   /// queue, so a caller's retry-until-joined loop re-offers it (nothing dedups it —
   /// there is no exchange to dedup against).
+  ///
+  /// The reachable instances on this tier are the two `start_push_pull` refusals: a
+  /// framed request past `max_stream_frame_size` (a membership that outgrew one
+  /// frame), and an endpoint that is no longer running. The machine has other paths
+  /// that surface no `Connect` for an admitted exchange — `service_dials` retires an
+  /// intent whose deadline had already elapsed, or whose `dial_context` or dialer
+  /// construction failed, and `service_handshake_completions` purges a queued
+  /// `Connect` for an exchange it has just failed — which a driver on this tier
+  /// cannot reach today (its records are raw, and its `stream_timeout` is non-zero),
+  /// but nothing enforces that. The counter is stated as the absence so it stays
+  /// truthful if one of them ever becomes reachable.
   join_seeds_refused: u64,
   /// Count of parked dials trimmed after the pump's dial site because more than
   /// [`Options::max_pending_dials`] of them were still waiting on a pool that could
@@ -655,10 +666,10 @@ where
     self.join_seeds_deduped
   }
 
-  /// Diagnostic count of admitted join seeds the machine refused to start an
-  /// exchange for — most plainly, a local membership that no longer fits one
-  /// `max_stream_frame_size` frame, which an identically-configured peer would
-  /// reject before decoding.
+  /// Diagnostic count of admitted join seeds for which the machine surfaced no
+  /// `Connect` in the admitting pump — most plainly, a local membership that no
+  /// longer fits one `max_stream_frame_size` frame, which an identically-configured
+  /// peer would reject before decoding.
   ///
   /// Such a seed leaves the queue and produces no dial: no `Connect`, no parked
   /// connection, and nothing counted by [`pending_seed_count`](Self::pending_seed_count)
@@ -666,6 +677,12 @@ where
   /// loop re-offers it — there is no exchange in flight to dedup it against — so a
   /// steadily rising value on a node that never joins is the signal that the frame
   /// cap, not reachability, is what is blocking it.
+  ///
+  /// The other reachable instance is an endpoint that is no longer running. The
+  /// machine has further paths that surface no `Connect` for an admitted exchange
+  /// (a retired dial intent, a purged `Connect` on a settled handshake); none is
+  /// reachable from this tier's configuration today, and each would be counted here
+  /// if it became so.
   #[inline]
   pub fn join_seeds_refused(&self) -> u64 {
     self.join_seeds_refused
@@ -3697,9 +3714,14 @@ where
     //
     // That residue IS the refusal signal, and the only one the engine may read: the
     // machine's own is a `DialAborted` on the application event queue, which the
-    // engine must not consume. Every id still here started nothing — no intent, no
-    // `Connect`, no parked connection — while its seed left the queue, so count it
-    // before clearing, and let the caller's re-offer re-queue the address.
+    // engine must not consume. So what is counted is exactly the absence of a
+    // `Connect` in this pump, whatever produced it — the two `start_push_pull`
+    // refusals this tier can reach (an over-`max_stream_frame_size` frame, an
+    // endpoint no longer running) and any machine path that retires or purges an
+    // admitted exchange's `Connect` before the drain sees it. Every id still here
+    // started nothing — no intent, no `Connect`, no parked connection — while its
+    // seed left the queue, so count it before clearing, and let the caller's
+    // re-offer re-queue the address.
     self.join_seeds_refused += self.seed_stream_ids.len() as u64;
     self.seed_stream_ids.clear();
   }
