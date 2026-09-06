@@ -256,17 +256,26 @@ fn self_addressed_dest(socket: &UdpSocket) -> Option<SocketAddr> {
 ///
 /// A wildcard bind (`0.0.0.0` / `::`) is not a valid destination, so the
 /// matching loopback address is substituted; the port is the bound one either
-/// way. Returns `None` for an unbound address, whose port would be zero.
+/// way. Every other address is returned UNCHANGED rather than re-spelled: an
+/// IPv6 `SocketAddr` carries a `scope_id` and a `flowinfo` that
+/// [`SocketAddr::new`] cannot express, and a link-local bind (`fe80::...%en0`)
+/// is reachable ONLY through its scope — dropping it would aim the marker at an
+/// address the kernel cannot route to, and the teardown would fall back to the
+/// leaky drop-based path on exactly the binds that need it least. Returns
+/// `None` for an unbound address, whose port would be zero.
 fn self_addressed(local: SocketAddr) -> Option<SocketAddr> {
   if local.port() == 0 {
     return None;
   }
-  let ip = match local.ip() {
-    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-    ip => ip,
-  };
-  Some(SocketAddr::new(ip, local.port()))
+  match local {
+    SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+      Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), v4.port()))
+    }
+    SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+      Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), v6.port()))
+    }
+    concrete => Some(concrete),
+  }
 }
 
 /// Complete a driver's last pending receive so the socket can be closed.

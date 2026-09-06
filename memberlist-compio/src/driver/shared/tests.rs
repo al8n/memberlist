@@ -512,3 +512,41 @@ async fn self_addressed_has_no_destination_for_an_unbound_address() {
   assert!(self_addressed("127.0.0.1:0".parse().unwrap()).is_none());
   assert!(self_addressed("[::]:0".parse().unwrap()).is_none());
 }
+
+/// A concrete IPv6 bind is returned UNCHANGED, keeping the `scope_id` and
+/// `flowinfo` a `SocketAddr::new` round trip would silently drop.
+///
+/// A link-local destination (`fe80::/10`) is only reachable through its scope:
+/// stripped of it, the marker send fails to route and the teardown falls back
+/// to the drop-based path on a node that had nothing wrong with it.
+#[test]
+fn self_addressed_keeps_the_ipv6_scope_and_flow() {
+  let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+    "fe80::1".parse().expect("link-local"),
+    7946,
+    7,
+    3,
+  ));
+  let dest = self_addressed(scoped).expect("a bound address has a destination");
+  assert_eq!(dest, scoped, "the destination must round-trip untouched");
+  match dest {
+    SocketAddr::V6(v6) => {
+      assert_eq!(v6.scope_id(), 3, "the scope id is what makes it routable");
+      assert_eq!(v6.flowinfo(), 7);
+    }
+    other => panic!("expected a v6 destination, got {other}"),
+  }
+}
+
+/// A wildcard IPv6 bind is not a destination, so `::1` is substituted on the
+/// bound port — the v6 mirror of the v4 substitution.
+#[test]
+fn self_addressed_substitutes_ipv6_loopback_for_a_wildcard_bind() {
+  let dest = self_addressed("[::]:7946".parse().expect("wildcard v6"))
+    .expect("a bound address has a destination");
+  assert_eq!(
+    dest.ip(),
+    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+  );
+  assert_eq!(dest.port(), 7946);
+}
