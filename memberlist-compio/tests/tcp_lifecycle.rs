@@ -128,7 +128,7 @@ async fn rebind_after_shutdown_releases_listener_port() {
 }
 
 /// Shutdown must release BOTH bound ports — the TCP listener and the UDP
-/// gossip socket — even when the io_uring submission ring is under pressure.
+/// gossip socket — with a ring's worth of receives staged alongside the node.
 ///
 /// The driver ends its loop with one pending accept on the listener and one
 /// pending receive on the gossip socket. Cancelling either is a single
@@ -137,19 +137,26 @@ async fn rebind_after_shutdown_releases_listener_port() {
 /// reference to its socket's descriptor and so keeps the port bound. The
 /// teardown therefore COMPLETES both operations before awaiting each close.
 ///
+/// What this proves is the RELEASE, on every backend: after `shutdown()`
+/// returns `Ok`, both ports rebind. It does NOT prove the full-ring axis. The
+/// staged receives fill the submission queue at the moment they are staged, but
+/// the first await inside the teardown drains it — an ordinary operation push
+/// retries into an emptied ring, unlike the cancellation this scenario is
+/// about. The full-ring condition itself is covered by the `#[ignore]`d
+/// `driver::shared` baseline, which the Linux CI lane runs with `--ignored`.
+///
 /// The rebinds below use the raw sockets rather than a second `Memberlist` so
 /// the assertion is the port itself, with no bind retry in between. The check
 /// is meaningful on every backend: a leaked listening handle surfaces as
 /// `WSAEACCES` on Windows and as an in-use address elsewhere.
 #[compio::test]
-async fn shutdown_releases_both_ports_under_submission_queue_pressure() {
+async fn shutdown_releases_both_ports_with_a_rings_worth_of_receives_staged() {
   let node = make_tcp("rebind-pressure", loopback_addr(0)).await;
   let addr = node.advertise_address();
 
-  // Put the submission ring under pressure: these receives are staged without
-  // ever being awaited, so they occupy ring entries while the node tears down.
-  // They must stay alive — dropping one issues the very cancellation this
-  // scenario starves.
+  // Stage a ring's worth of receives: they are never awaited, so they occupy
+  // ring entries while the node tears down. They must stay alive — dropping one
+  // issues the very cancellation this scenario starves.
   let filler = compio::net::UdpSocket::bind(loopback_addr(0))
     .await
     .expect("filler bind");
@@ -162,8 +169,8 @@ async fn shutdown_releases_both_ports_under_submission_queue_pressure() {
 
   compio::time::timeout(Duration::from_secs(30), node.shutdown())
     .await
-    .expect("shutdown hung under submission-queue pressure")
-    .expect("shutdown");
+    .expect("shutdown hung with a ring's worth of receives staged")
+    .expect("shutdown proved both ports released");
 
   // Both ports must be free the instant shutdown returns.
   let listener = compio::net::TcpListener::bind(addr)
