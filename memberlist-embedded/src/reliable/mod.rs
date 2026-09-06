@@ -165,6 +165,18 @@ pub struct Connection<C> {
   pub socket: Option<C>,
   /// The connection's lifecycle stage.
   pub state: ConnState,
+  /// The exchange was started from a queued join seed, rather than by an
+  /// application send or by the machine's own protocol pacing. Set once at
+  /// creation and carried unchanged through the connection's whole lifecycle
+  /// (`PendingDial` → `Dialing` → `Established` → `HalfClosed` → `Closing`), so
+  /// it answers "is a join exchange to this peer already under way" at any stage.
+  ///
+  /// Two engine policies read it. `join` dedups against join INTENT alone, so an
+  /// unrelated user message or reliable ping to a seed address no longer
+  /// suppresses the seed. And the parked-dial bound exempts seed-originated
+  /// entries: the engine admitted each against measured pool capacity, and the
+  /// oldest of them is what holds a queued seed's place in the dial FIFO.
+  pub from_seed: bool,
   /// Outbound bytes not yet fully written to the socket's tx ring. Holds
   /// partial-write remainders (backpressure) and bytes parked while the socket
   /// is still opening or the dial is deferred. Ordered oldest-first so
@@ -206,6 +218,7 @@ impl<C> Connection<C> {
       peer,
       socket: Some(socket),
       state: ConnState::Dialing,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
@@ -222,11 +235,25 @@ impl<C> Connection<C> {
       peer,
       socket: None,
       state: ConnState::PendingDial,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
       error_delivered: false,
       close_deadline: None,
+    }
+  }
+
+  /// A deferred dial for an exchange the engine started from a queued join seed:
+  /// [`Connection::pending_dial`] with [`from_seed`](Self::from_seed) set.
+  ///
+  /// Seed origin has to be recorded at the moment the exchange is parked, because
+  /// nothing else about the parked connection distinguishes a join push/pull from
+  /// an application send or a protocol-paced dial to the same address.
+  pub fn pending_dial_from_seed(peer: SocketAddr) -> Self {
+    Self {
+      from_seed: true,
+      ..Self::pending_dial(peer)
     }
   }
 
@@ -237,6 +264,7 @@ impl<C> Connection<C> {
       peer,
       socket: Some(socket),
       state: ConnState::Established,
+      from_seed: false,
       out: VecDeque::new(),
       fin_pending: false,
       eof_delivered: false,
@@ -419,6 +447,43 @@ impl<C> ReliablePlane<C> {
       .values()
       .filter(|c| c.state == ConnState::PendingDial)
       .count()
+  }
+
+  /// Number of parked ([`ConnState::PendingDial`]) exchanges that did NOT come from
+  /// a join seed — the caller- and protocol-originated dials the engine's
+  /// parked-dial ceiling is measured over.
+  ///
+  /// A seed-originated entry is the engine's OWN admission against measured pool
+  /// capacity, so it stands outside that bound: counting it would let a join
+  /// admitted after a burst push the burst's own dials over the ceiling, and the
+  /// newest of them would be shed for a head younger than every one of them. Use
+  /// [`pending_dial_count`](Self::pending_dial_count) wherever the whole parked
+  /// population is what matters instead — spending free slots, and the engine's
+  /// end-of-tick invariant.
+  pub fn pending_non_seed_dial_count(&self) -> usize {
+    self
+      .connections
+      .values()
+      .filter(|c| !c.from_seed && c.state == ConnState::PendingDial)
+      .count()
+  }
+
+  /// Whether any join-seed exchange is currently parked in
+  /// [`ConnState::PendingDial`].
+  ///
+  /// The engine admits at most one seed PAST measured capacity per pump, so that
+  /// the oldest such seed always holds a place in the dial FIFO ordered ahead of
+  /// every dial requested after it. That is the only thing this predicate blocks —
+  /// a second head past capacity — not the total parked-seed population: bulk
+  /// seeds admitted against measured free slots can also remain parked, when a
+  /// slot one of them was admitted against is claimed first (a listener re-armed
+  /// within the same pump, say), so the parked-seed population is bounded by the
+  /// pool size plus one, exactly as `trim_pending_dials` documents.
+  pub fn has_parked_seed(&self) -> bool {
+    self
+      .connections
+      .values()
+      .any(|c| c.from_seed && c.state == ConnState::PendingDial)
   }
 }
 

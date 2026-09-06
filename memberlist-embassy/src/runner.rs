@@ -4,11 +4,11 @@
 //! One embassy task owns the [`Runner`] and calls [`Runner::run`]. Inside, two
 //! kinds of future run concurrently under one `join`:
 //!
-//! - the **pump loop** — re-pump the engine over a fresh
-//!   [`EmbassyGossip`](crate::EmbassyGossip) + [`EmbassyStream`](crate::EmbassyStream)
-//!   view, drain the machine's events to resolve parked handle ops, then sleep on
-//!   whichever of {UDP recv-ready, a worker/handle pump-wake, the folded deadline
-//!   timer} fires first;
+//! - the **pump loop** — make the node's paced join offer, re-pump the engine over a
+//!   fresh [`EmbassyGossip`](crate::EmbassyGossip) +
+//!   [`EmbassyStream`](crate::EmbassyStream) view, drain the machine's events to
+//!   resolve parked handle ops, then sleep on whichever of {UDP recv-ready, a
+//!   worker/handle pump-wake, the folded deadline timer} fires first;
 //! - the **N workers** — each [`run_slot`](crate::worker::run_slot) owns one
 //!   `TcpSocket` and its `RefCell<Mailbox>`, looping internally forever.
 //!
@@ -59,8 +59,26 @@ use crate::{
 /// RNG (defaulting to [`SmallRng`](memberlist_proto::SmallRng)). Built by
 /// [`Memberlist::new`](crate::Memberlist::new), which hands back the paired
 /// [`Memberlist`](crate::Memberlist) handle.
-pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng> {
+///
+/// Dropping the `Runner` marks the node's run loop terminally gone — see
+/// [`run`](Self::run)'s teardown contract, which holds from construction whether or
+/// not the loop was ever driven.
+pub struct Runner<'a, I, const N: usize, R = memberlist_proto::SmallRng>
+where
+  I: memberlist_proto::Id,
+{
   pub(crate) shared: Rc<Shared<I, R>>,
+  /// Fails everything parked on this node's run loop when the `Runner` goes away.
+  ///
+  /// A field rather than a local in [`run`](Self::run)'s body so it is armed from
+  /// construction: the handle can park an op as soon as the node exists, which is
+  /// before the run future is built and long before it is first polled. `run` moves
+  /// it into the body, so the one guard covers the whole life of the run loop.
+  ///
+  /// It holds an [`Rc`] of its own rather than borrowing the field above, both to be
+  /// `'static` in this struct and so the shared state it marks outlives every other
+  /// field's drop.
+  pub(crate) stop_guard: StopOnDrop<I, R>,
   pub(crate) udp: UdpSocket<'a>,
   pub(crate) tcp: [TcpSocket<'a>; N],
   pub(crate) mailboxes: [RefCell<Mailbox>; N],
@@ -86,12 +104,34 @@ where
 {
   /// Drive the node forever: pump the engine and run the `N` workers concurrently.
   ///
-  /// Never returns under normal operation; spawn it as an embassy task (or drive
-  /// it with `select` against an operation in a test). On the rare path where the
-  /// pump loop itself ends, every parked handle op is failed so nothing hangs.
+  /// Spawn it as an embassy task, or drive it with `select` against an operation in
+  /// a test. The loop itself diverges — the `-> !` is literal, and nothing inside
+  /// ever completes.
+  ///
+  /// # Teardown
+  ///
+  /// The way this future ENDS, then, is the caller dropping it: a `select` that
+  /// lost, or a task teardown. That path is the guarantee. Once the future is
+  /// dropped, the pump that is the only thing able to complete a parked handle op
+  /// is gone, so the node is marked stopped and everything waiting on it is
+  /// released at once: parked [`ping`](crate::Memberlist::ping) /
+  /// [`send_reliable`](crate::Memberlist::send_reliable) calls resolve with
+  /// [`OpError::RunnerStopped`](crate::OpError::RunnerStopped), parked
+  /// [`join`](crate::Memberlist::join) calls are woken and return the same, and
+  /// every later handle op is refused with it at the call site instead of parking
+  /// on a wake that can no longer arrive.
+  ///
+  /// That release is carried by a guard the [`Runner`] holds as a field from the
+  /// moment it was built, which this body moves in and keeps for its whole life. So
+  /// the contract above covers the node from construction, not from the first poll:
+  /// dropping the `Runner` without ever calling `run`, dropping this future before
+  /// it is polled, and dropping it mid-flight all release the same way. A handle op
+  /// can park as soon as the node exists, and from that same moment something is
+  /// there to answer it.
   pub async fn run(self) -> ! {
     let Runner {
       shared,
+      stop_guard,
       udp,
       mut tcp,
       mailboxes,
@@ -100,6 +140,13 @@ where
       teardown_timeout,
       mut free,
     } = self;
+
+    // Carry the construction-time teardown guard into the body, so every way out of
+    // the future — the drop that is the only real one, and the returns below that the
+    // diverging arms make unreachable — releases every handle op waiting on the pump.
+    // The destructuring above already moved it out of a `Runner` that no longer
+    // exists, so this binding is what keeps it armed for the loop's lifetime.
+    let _stopped = stop_guard;
 
     // Build the N worker futures, each owning a distinct `&mut TcpSocket` (via
     // `each_mut`, which yields `N` non-aliasing mutable refs) paired with its
@@ -131,16 +178,61 @@ where
     )
     .await;
 
-    // Unreachable: both arms diverge. Kept so the type is `-> !` and, defensively,
-    // so any future change that lets the loop end does not silently leave parked
-    // handle ops hanging.
-    shared.fail_all_waiters();
+    // Unreachable: both arms diverge, so the type is `-> !`. Nothing has to be
+    // released here — the guard above covers this exit alongside every other one.
     core::unreachable!("the run loop and workers never complete")
   }
 }
 
-/// The engine-pump half of [`Runner::run`]: re-pump on each wake and resolve
-/// parked handle ops from the drained events.
+/// Releases the node's run loop when the [`Runner`] that owns it goes away — as a
+/// field of the `Runner` itself, so it covers every way that can happen: the caller
+/// DROPPING the [`run`](Runner::run) future (the only way that loop ends), dropping
+/// the future before it is ever polled, and dropping the `Runner` without having
+/// called `run` at all.
+///
+/// The loop diverges, so the `fail_all_waiters` call a `-> !` function could place
+/// after it is unreachable — a parked join, ping or send would sit on a wake that
+/// the dropped pump can no longer deliver. `Drop` is what runs on a cancellation,
+/// and it marks the node stopped before releasing anything, so a woken join reads a
+/// terminal answer rather than re-checking two answers that have not moved and
+/// parking again.
+pub(crate) struct StopOnDrop<I, R>
+where
+  I: memberlist_proto::Id,
+{
+  /// Owned, not borrowed: the guard is a field of the `Runner` (and then a local in
+  /// the run future), so it cannot borrow the state it marks, and holding the state
+  /// alive is what lets it mark it from any drop order.
+  shared: Rc<Shared<I, R>>,
+}
+
+impl<I, R> StopOnDrop<I, R>
+where
+  I: memberlist_proto::Id,
+{
+  /// Arm the guard on a node's shared state, at construction of the `Runner` that
+  /// carries it.
+  pub(crate) fn new(shared: Rc<Shared<I, R>>) -> Self {
+    Self { shared }
+  }
+}
+
+impl<I, R> Drop for StopOnDrop<I, R>
+where
+  I: memberlist_proto::Id,
+{
+  fn drop(&mut self) {
+    self.shared.stop_runner();
+  }
+}
+
+/// The engine-pump half of [`Runner::run`]: offer the live joins' seeds when an
+/// offer is due, re-pump on each wake, and resolve parked handle ops from the
+/// drained events.
+///
+/// The join offer belongs here rather than in the join futures because it is
+/// node-wide: one offer per interval carries every live join's seeds, so concurrent
+/// joins neither multiply the work nor re-dial one shared seed once per call.
 async fn pump_loop<I, R>(
   shared: &Shared<I, R>,
   udp: &UdpSocket<'_>,
@@ -156,6 +248,13 @@ where
   loop {
     let now = time::now();
 
+    // Make the node's ONE join offer for this interval, carrying the union of every
+    // live `join` future's seeds. It runs immediately before the pump so a seed the
+    // engine admits gets its `Connect` in that same pump, and it is here rather than
+    // in the join futures because offering is node-wide: F concurrent joins cost one
+    // offer and one dial per seed per interval, not F of each.
+    let next_offer = shared.offer_join_seeds(now);
+
     // Pump the engine over a fresh view of the gossip socket and the slot
     // mailboxes. The pump is synchronous: its borrows of the engine and the
     // mailboxes complete here, before the `.await` below.
@@ -168,9 +267,17 @@ where
         .pump(now, &mut gossip, &mut stream)
     };
 
-    // Resolve any handle ops whose terminal event the pump just emitted, and
-    // pulse `join_wake` so a parked `join` re-checks membership.
+    // Resolve any handle ops whose terminal event the pump just emitted, and notify
+    // every parked `join` so each of them re-checks membership.
     shared.drain_events();
+
+    // Sleep no longer than the next join offer is due: with joins live but no
+    // machine work scheduled, that offer is the only thing this loop has to wake
+    // for.
+    let next = match (next, next_offer) {
+      (Some(machine), Some(offer)) => Some(machine.min(offer)),
+      (machine, offer) => machine.or(offer),
+    };
 
     // Wait for the next thing worth re-pumping for: an inbound gossip datagram, a
     // worker/handle pump-wake, or the folded deadline. A worker pulses

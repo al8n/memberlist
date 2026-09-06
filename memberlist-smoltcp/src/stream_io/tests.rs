@@ -176,7 +176,7 @@ fn teardown_done(
   view.teardown_done(node.3, g)
 }
 
-/// #161: after `abort`, the handle is NOT reusable (`teardown_done` reports
+/// After `abort`, the handle is NOT reusable (`teardown_done` reports
 /// `false`) until a stack poll has dispatched the RST — so a same-pump
 /// reallocation cannot suppress the pending reset by re-`listen`/`connect`ing the
 /// handle (which `reset()`s the socket and drops the queued RST). Once the RST has
@@ -207,7 +207,7 @@ fn abort_then_immediate_reallocation_waits_for_rst_egress() {
   );
   assert!(
     !teardown_done(&mut a, SlotGen::START),
-    "an aborted handle is NOT reusable until its RST has egressed (#161)"
+    "an aborted handle is NOT reusable until its RST has egressed"
   );
 
   // Poll A's stack until the RST is dispatched and the tuple cleared.

@@ -152,15 +152,18 @@ fn gossip_seed_from(interface_seed: u64, advertise: &SocketAddr) -> u64 {
 ///
 /// The `Options` name collision: the driver's `crate::Options` carries
 /// link-layer sizing (socket buffers, UDP arenas, `tcp_pool_size`) that stays on
-/// the driver, while `memberlist_embedded::Options` carries only the port and
-/// close timeout (plus the CIDR policy) the engine reads directly. Built once,
-/// up front, so the same value drives both the construction preflight
+/// the driver, while `memberlist_embedded::Options` carries the protocol policy
+/// the engine reads directly — the port, the close timeout, the per-pump gossip
+/// work ceiling, the two reliable-dial admission ceilings, and the CIDR policy.
+/// Built once, up front, so the same value drives both the construction preflight
 /// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
 fn embedded_options(cfg: &Options) -> memberlist_embedded::Options {
   let opts = memberlist_embedded::Options::new()
     .with_port(cfg.port)
     .with_close_timeout(cfg.close_timeout)
-    .with_gossip_read_cap(cfg.gossip_read_cap);
+    .with_gossip_read_cap(cfg.gossip_read_cap)
+    .with_max_pending_seeds(cfg.max_pending_seeds)
+    .with_max_pending_dials(cfg.max_pending_dials);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]
@@ -1719,6 +1722,20 @@ where
   /// (unspecified/multicast/broadcast IP or port 0) is dropped by the engine: it
   /// could only produce a doomed dial.
   ///
+  /// One call is an offer, not an attempt guarantee: a seed dial can still fail —
+  /// for instance by losing the race for the peer's single reliable listener, which
+  /// RSTs the second concurrent connection in its handshake window — after which
+  /// nothing for that seed is outstanding. Callers must therefore RE-OFFER the seed
+  /// list until `is_joined()`. A re-offer never duplicates an attempt that is still
+  /// in flight (the engine dedups a seed that is already queued or covered by a
+  /// live join-originated exchange), but it does NOT pace retries: a seed whose
+  /// dial fails immediately is re-queued by the very next offer, so a caller should
+  /// re-offer on a bounded cadence (a few hundred milliseconds is plenty; the
+  /// embassy driver uses 250 ms) rather than on every poll. A caller running more
+  /// than one join loop should offer ONE merged list, because the engine's
+  /// round-robin over a full seed queue is fair across the addresses offered
+  /// together.
+  ///
   /// # Errors
   ///
   /// Returns [`JoinError::Control`] (`NotRunning`) after `leave()` — a left node
@@ -1902,10 +1919,12 @@ where
   ///    own reaping becomes visible to the engine that reads the sockets next.
   /// 4. **Engine pump** — the engine runs every protocol phase over a
   ///    [`SmoltcpGossip`] + [`SmoltcpStream`] view of the just-ticked sockets:
-  ///    reap closing sockets, accept inbound and replenish the listener,
-  ///    rebalance deferred dials, drain UDP gossip ingress through the codec,
-  ///    pump reliable ingress, drain join seeds, fire machine timers, then drain
-  ///    stream actions and TCP/UDP egress. See
+  ///    reap closing sockets, accept inbound and replenish the listener, drain UDP
+  ///    gossip ingress through the codec, pump reliable ingress, self-heal the
+  ///    listener, admit join seeds against free pool capacity, fire machine timers
+  ///    (the pump's single membership sweep), drain stream actions (every dial
+  ///    parks), then rebalance — the pump's SOLE dial site, after the tick — and
+  ///    TCP/UDP egress. See
   ///    [`Engine::pump`](memberlist_embedded::Engine::pump) for the full ordered
   ///    phase list. It runs on EVERY poll, whatever the device is doing.
   /// 5. **Egress again** — put what the pump just produced on the wire in this
@@ -1992,8 +2011,9 @@ where
     // `rearm_reaped_listener` expresses the reap as an occupancy RETIRE + REACQUIRE
     // (abort → `Aborting` → the reap frees it once the RST egress is acknowledged →
     // re-`listen` a fresh occupancy), NOT a raw in-place re-listen. That is what
-    // closes #161 for the listener too: the reaping stack tick already emitted
-    // the abort RST (its tuple is cleared), so the retired occupancy is acknowledged
+    // keeps the listener's aborted socket from being reused before its RST has
+    // egressed: the reaping stack tick already emitted the abort RST (its tuple
+    // is cleared), so the retired occupancy is acknowledged
     // and the listener re-armed THIS poll; re-`listen`ing in place a socket whose
     // RST had NOT yet egressed would `reset()` it and suppress that RST. A socket
     // mid-handshake (`SynReceived`, still `is_open()`) or a healthy `Listen` is left

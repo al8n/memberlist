@@ -16,9 +16,9 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  NodeDelegate, Options, PingDelegate, RuntimeOptions, SocketAddrResolver, StreamTransportOptions,
-  TcpTransport, TcpTransportOptions, VoidDelegate,
+  ConflictDelegate, Delegate, EndpointTuning, EventDelegate, FirstAddrResolver, MaybeResolved,
+  Memberlist, MemberlistOptions, NodeDelegate, Options, PingDelegate, RuntimeOptions,
+  SocketAddrResolver, StreamTransportOptions, TcpTransport, TcpTransportOptions, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -36,6 +36,49 @@ async fn make_tcp(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr>
     TcpTransportOptions::<SmolStr, SocketAddr>::new()
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  );
+  Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
+}
+
+/// Broadcast retransmit multiplier for a node whose queued user payload a test
+/// must observe on a peer.
+///
+/// A queued user broadcast rides the UNRELIABLE gossip plane and carries no
+/// ack: the gossip scheduler drains it once per tick and drops it for good once
+/// it has been selected `retransmit_mult * ceil(log10(num_members + 1))` times.
+/// At the default multiplier of 4 in a two-node cluster that is 4 selections,
+/// so the payload only exists for `4 * gossip_interval` = 800ms after it is
+/// queued. A peer that loses those four datagrams never receives the payload,
+/// and waiting longer cannot recover it — the sender has already discarded it.
+/// Raising the multiplier keeps the payload in the queue, re-gossiped every
+/// interval, for the whole span a test is willing to wait, so the assertion
+/// depends on ONE of many datagrams landing instead of on all four landing.
+const OBSERVED_BROADCAST_RETRANSMIT_MULT: u32 = 15;
+
+/// The span over which [`OBSERVED_BROADCAST_RETRANSMIT_MULT`] keeps re-gossiping
+/// a queued payload: 15 selections at the 200ms default gossip interval. Every
+/// observation deadline below is derived from this term.
+const OBSERVED_BROADCAST_TRANSMIT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Like [`make_tcp`] but with the broadcast retransmit multiplier raised to
+/// [`OBSERVED_BROADCAST_RETRANSMIT_MULT`], for a node whose queued user
+/// broadcast a peer must be observed receiving.
+async fn make_tcp_retransmitting(id: &str, addr: SocketAddr) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr)),
+  )
+  .with_memberlist(
+    MemberlistOptions::new()
+      .with_tuning(EndpointTuning::new().with_retransmit_mult(OBSERVED_BROADCAST_RETRANSMIT_MULT)),
   );
   Memberlist::new(
     opts,
@@ -82,6 +125,64 @@ async fn rebind_after_shutdown_releases_listener_port() {
   // Same port, same address — must succeed.
   let second = make_tcp("second", addr).await;
   second.shutdown().await.expect("second shutdown");
+}
+
+/// Shutdown must release BOTH bound ports — the TCP listener and the UDP
+/// gossip socket — with a ring's worth of receives staged alongside the node.
+///
+/// The driver ends its loop with one pending accept on the listener and one
+/// pending receive on the gossip socket. Cancelling either is a single
+/// best-effort submission-queue push that io_uring discards when the queue is
+/// full; a discarded cancellation strands the operation, which keeps a
+/// reference to its socket's descriptor and so keeps the port bound. The
+/// teardown therefore COMPLETES both operations before awaiting each close.
+///
+/// What this proves is the RELEASE, on every backend: after `shutdown()`
+/// returns `Ok`, both ports rebind. It does NOT prove the full-ring axis. The
+/// staged receives fill the submission queue at the moment they are staged, but
+/// the first await inside the teardown drains it — an ordinary operation push
+/// retries into an emptied ring, unlike the cancellation this scenario is
+/// about. The full-ring condition itself is covered by the `#[ignore]`d
+/// `driver::shared` baseline, which the Linux CI lane runs with `--ignored`.
+///
+/// The rebinds below use the raw sockets rather than a second `Memberlist` so
+/// the assertion is the port itself, with no bind retry in between. The check
+/// is meaningful on every backend: a leaked listening handle surfaces as
+/// `WSAEACCES` on Windows and as an in-use address elsewhere.
+#[compio::test]
+async fn shutdown_releases_both_ports_with_a_rings_worth_of_receives_staged() {
+  let node = make_tcp("rebind-pressure", loopback_addr(0)).await;
+  let addr = node.advertise_address();
+
+  // Stage a ring's worth of receives: they are never awaited, so they occupy
+  // ring entries while the node tears down. They must stay alive — dropping one
+  // issues the very cancellation this scenario starves.
+  let filler = compio::net::UdpSocket::bind(loopback_addr(0))
+    .await
+    .expect("filler bind");
+  let mut staged = Vec::new();
+  for _ in 0..1024 {
+    let mut fut = Box::pin(filler.recv_from(vec![0u8; 64]));
+    let _ = futures_util::poll!(fut.as_mut());
+    staged.push(fut);
+  }
+
+  compio::time::timeout(Duration::from_secs(30), node.shutdown())
+    .await
+    .expect("shutdown hung with a ring's worth of receives staged")
+    .expect("shutdown proved both ports released");
+
+  // Both ports must be free the instant shutdown returns.
+  let listener = compio::net::TcpListener::bind(addr)
+    .await
+    .expect("TCP listener port was not released by shutdown");
+  let gossip = compio::net::UdpSocket::bind(addr)
+    .await
+    .expect("UDP gossip port was not released by shutdown");
+
+  drop(listener);
+  drop(gossip);
+  drop(staged);
 }
 
 /// Same as the no-clone case, but a live clone outlives the
@@ -574,6 +675,16 @@ async fn command_after_shutdown_returns_error_promptly() {
   );
 }
 
+/// Ceiling on each individually unbounded await in the command-flood test.
+///
+/// `dispatch_join` and `shutdown` both wait on the driver with no deadline of
+/// their own, so a driver that stops servicing its sockets makes them wait
+/// forever. Bounding them turns that class of regression into a prompt test
+/// failure rather than a run that lasts until the CI job is killed. The value
+/// is an order of magnitude above the operations' real cost on loopback, so it
+/// constrains nothing a healthy driver does.
+const CMD_FLOOD_AWAIT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Command flood must not starve network arms (recv / accept / timer).
 ///
 /// Many cloned `Memberlist` handles each issuing commands (e.g.
@@ -614,10 +725,20 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
 
   // Legitimate join through the seed's accept arm. Must complete
   // despite the command flood.
-  let count = joiner
-    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
-    .await
-    .expect("dispatch_join under cmd flood");
+  //
+  // Every await below carries a deadline. `dispatch_join` and `shutdown` are
+  // both unbounded by contract, so a driver that stops servicing its sockets
+  // under the flood would park here for as long as the harness allows — a
+  // regression has to surface as a failure in seconds, not as a job that runs
+  // until its timeout. The deadlines are far above the observed timings
+  // (convergence well under a second on loopback) and only bound pathology.
+  let count = compio::time::timeout(
+    CMD_FLOOD_AWAIT_DEADLINE,
+    joiner.dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)]),
+  )
+  .await
+  .expect("dispatch_join hung under cmd flood")
+  .expect("dispatch_join under cmd flood");
   assert_eq!(count, 1);
 
   let converged = tokio_like_wait(
@@ -632,8 +753,14 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
     seed.member_count()
   );
 
-  seed.shutdown().await.expect("seed shutdown");
-  joiner.shutdown().await.expect("joiner shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, seed.shutdown())
+    .await
+    .expect("seed shutdown hung under cmd flood")
+    .expect("seed shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, joiner.shutdown())
+    .await
+    .expect("joiner shutdown hung under cmd flood")
+    .expect("joiner shutdown");
 }
 
 /// Quiet shutdown — no network activity, no concurrent commands.
@@ -1199,8 +1326,13 @@ impl Delegate for SlowUserMsgDelegate {
 /// stays far under the cap — so the slow first handler only DELAYS delivery, it
 /// does not lose the payload. Here node B's first `notify_user_msg` sleeps ~2s;
 /// A queues a user broadcast that periodic gossip carries to B. Despite the
-/// slow first delivery, B's delegate EVENTUALLY records the payload within a
-/// generous window. Stream-backend parity for the QUIC test of the same name.
+/// slow first delivery, B's delegate EVENTUALLY records the payload.
+/// Stream-backend parity for the QUIC test of the same name.
+///
+/// The observation task dispatches events sequentially, so the stalled FIRST
+/// delivery is always the one that records the payload: no later delivery can
+/// overtake it. That is what keeps the assertion a statement about the stalled
+/// handler even though A keeps re-gossiping the payload.
 ///
 /// Honest scope: this guards eventual delivery under handler latency for a
 /// payload that fits the buffer — not the bounded channel's drop accounting
@@ -1208,8 +1340,10 @@ impl Delegate for SlowUserMsgDelegate {
 /// tests cover directly.
 #[compio::test]
 async fn slow_user_msg_delegate_still_observes_broadcast() {
-  // Node A is a normal VoidDelegate node; it queues the broadcast.
-  let a = make_tcp("slowuser-a", loopback_addr(0)).await;
+  // Node A is a normal VoidDelegate node; it queues the broadcast, so it needs
+  // the raised retransmit multiplier that keeps the payload re-gossiped for
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW.
+  let a = make_tcp_retransmitting("slowuser-a", loopback_addr(0)).await;
 
   // Node B carries the slow-user-msg observation delegate; built inline like
   // `make_tcp` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
@@ -1259,9 +1393,15 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
     .expect("queue user broadcast acks Ok");
 
   // B's delegate must EVENTUALLY record the payload despite its first
-  // notify_user_msg sleeping ~2s. The unbounded observation channel buffers
-  // the event for the slow handler — it is never dropped. A generous 6s window
-  // absorbs the gossip-interval stagger plus the 2s handler stall.
+  // notify_user_msg sleeping ~2s. The observation channel buffers the event
+  // for the slow handler — it is never dropped.
+  //
+  // Deadline terms: the last useful gossip of the payload leaves A at
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW; the delivery that lands then still owes
+  // the 2s handler stall before it records; the remaining second is scheduling
+  // margin. Waiting past this sum would be pointless rather than merely
+  // generous — once the transmission window closes A has discarded the payload,
+  // so a delivery that has not happened by then can never happen.
   let saw = tokio_like_wait(
     || {
       user_msgs
@@ -1270,7 +1410,7 @@ async fn slow_user_msg_delegate_still_observes_broadcast() {
         .iter()
         .any(|b| b.as_ref() == b"slow-payload")
     },
-    Duration::from_secs(6),
+    OBSERVED_BROADCAST_TRANSMIT_WINDOW + Duration::from_secs(2) + Duration::from_secs(1),
   )
   .await;
   assert!(

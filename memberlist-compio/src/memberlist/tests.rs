@@ -141,3 +141,94 @@ async fn dropping_last_handle_runs_orderly_teardown() {
        orderly teardown instead of being cancelled mid-flight"
   );
 }
+
+/// A stream-driver teardown that cannot prove its ports were released reports
+/// that, instead of a `Ok(())` the caller would read as "rebind now".
+///
+/// The whole reason the driver holds the shutdown ack until after the closes is
+/// so a caller may rebind the same address the instant `shutdown().await`
+/// returns. A close that never finishes — one still parked on a descriptor an
+/// abandoned operation owns — leaves the port bound until the process exits, so
+/// the ack has to say so. That state is unreachable against a healthy loopback
+/// socket, so it is forced through the seam; the happy path is covered by
+/// `shutdown_proves_release_and_the_address_rebinds`, which rebinds for real.
+#[compio::test]
+async fn shutdown_reports_unproven_release_for_both_stream_sockets() {
+  let node = spawn_node("unproven-release").await;
+
+  // The driver task runs on the thread that spawned it, so the seam this test
+  // sets is the one its own driver reads.
+  crate::driver::shared::set_force_close_never_finishes(true);
+  let res = node.shutdown().await;
+  crate::driver::shared::set_force_close_never_finishes(false);
+
+  match res {
+    Err(MemberlistError::ShutdownReleaseUnproven(e)) => assert_eq!(
+      e.socket(),
+      crate::error::UnreleasedSocket::Both,
+      "a stream node binds a listener and a gossip socket, and neither close was observed",
+    ),
+    other => panic!("expected an unproven-release shutdown reply, got {other:?}"),
+  }
+}
+
+/// A teardown whose marker protocols fell back to the drop-based path still
+/// proves both ports released, and the address really does rebind.
+///
+/// The completion protocols exist to make each close ABLE to finish on a backend
+/// that may discard a cancellation; where drop-based cancellation is reliable —
+/// or where the submission queue simply had room — the close finishes without
+/// them, and the close is what proves the port free. Folding their outcome into
+/// the verdict would report a released port as unproven on any node that cannot
+/// deliver the marker (a sandbox refusing the throwaway bind, an undeliverable
+/// self-addressed datagram, both step bounds elapsing on a loaded machine), and
+/// every `shutdown().await.expect(..)` in this suite would panic there.
+#[compio::test]
+async fn shutdown_proves_release_when_the_marker_protocol_falls_back() {
+  let node = spawn_node("fallback-release").await;
+  let addr = node.advertise_address();
+
+  // The driver task runs on the thread that spawned it, so the seam this test
+  // sets is the one its own driver reads.
+  crate::driver::shared::set_force_teardown_fallback(true);
+  let res = node.shutdown().await;
+  crate::driver::shared::set_force_teardown_fallback(false);
+
+  res.expect("a marker that could not be delivered must not make a closed port unproven");
+
+  // And the answer is not merely optimistic: both ports really are free.
+  let listener = compio::net::TcpListener::bind(addr)
+    .await
+    .expect("the listening port was proven released");
+  let gossip = compio::net::UdpSocket::bind(addr)
+    .await
+    .expect("the gossip port was proven released");
+  drop(listener);
+  drop(gossip);
+}
+
+/// The ordinary teardown still proves both ports free, and the address really
+/// is rebindable the moment the ack lands.
+///
+/// The companion to the forced-fallback case above: it pins that the new proof
+/// is not vacuously failing — a healthy node completes its accept and its
+/// receive, both closes return, and `Ok(())` is followed by a successful
+/// rebind of the very same address.
+#[compio::test]
+async fn shutdown_proves_release_and_the_address_rebinds() {
+  let node = spawn_node("proven-release").await;
+  let addr = node.advertise_address();
+  node
+    .shutdown()
+    .await
+    .expect("shutdown proves both releases");
+
+  let listener = compio::net::TcpListener::bind(addr)
+    .await
+    .expect("the listening port was proven released");
+  let gossip = compio::net::UdpSocket::bind(addr)
+    .await
+    .expect("the gossip port was proven released");
+  drop(listener);
+  drop(gossip);
+}

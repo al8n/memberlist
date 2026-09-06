@@ -93,6 +93,7 @@ fn every_variant_displays_and_debugs() {
     MemberlistError::ReplyClosed,
     MemberlistError::PingTimeout,
     MemberlistError::SendFailed,
+    MemberlistError::ShutdownReleaseUnproven(ShutdownReleaseUnproven::new(UnreleasedSocket::Both)),
     MemberlistError::InvalidLabel(label_err),
   ];
 
@@ -150,4 +151,62 @@ fn from_conversions_select_the_right_variant() {
 
   let from_frame: MemberlistError = memberlist_proto::FrameError::Empty.into();
   assert!(matches!(from_frame, MemberlistError::Frame(_)));
+}
+
+// Each socket a teardown can leave unproven names itself distinctly: the
+// caller reads the name to decide which address it must not rebind straight
+// away, so a shared or ambiguous phrasing would make the error unactionable.
+#[test]
+fn unreleased_socket_names_each_bound_socket() {
+  assert_eq!(UnreleasedSocket::Listener.to_string(), "the TCP listener");
+  assert_eq!(
+    UnreleasedSocket::Gossip.to_string(),
+    "the UDP gossip socket"
+  );
+  assert_eq!(
+    UnreleasedSocket::Both.to_string(),
+    "the TCP listener and the UDP gossip socket"
+  );
+  assert!(!format!("{:?}", UnreleasedSocket::Both).is_empty());
+}
+
+// The payload carries the affected socket through to the caller, and its
+// Display says both what is in doubt (the release) and what that costs (an
+// immediate rebind on the same address).
+#[test]
+fn shutdown_release_unproven_accessors_and_display() {
+  for socket in [
+    UnreleasedSocket::Listener,
+    UnreleasedSocket::Gossip,
+    UnreleasedSocket::Both,
+  ] {
+    let payload = ShutdownReleaseUnproven::new(socket);
+    assert_eq!(payload.socket(), socket);
+
+    let shown = format!("{payload}");
+    assert!(
+      shown.contains(&socket.to_string()),
+      "Display must name the socket in doubt: {shown}"
+    );
+    assert!(
+      shown.contains("rebind"),
+      "Display must state the consequence for the caller: {shown}"
+    );
+    assert!(!format!("{payload:?}").is_empty());
+  }
+}
+
+// The variant renders its payload verbatim and adds no source: the node is
+// stopped and nothing failed underneath, so there is no inner error to chain.
+#[test]
+fn shutdown_release_unproven_variant_shows_its_payload_and_has_no_source() {
+  let payload = ShutdownReleaseUnproven::new(UnreleasedSocket::Gossip);
+  let err = MemberlistError::ShutdownReleaseUnproven(payload);
+
+  assert_eq!(err.to_string(), payload.to_string());
+  assert!(std::error::Error::source(&err).is_none());
+  assert!(matches!(
+    err,
+    MemberlistError::ShutdownReleaseUnproven(p) if p.socket() == UnreleasedSocket::Gossip
+  ));
 }

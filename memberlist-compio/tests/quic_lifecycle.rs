@@ -18,9 +18,9 @@ use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
 use futures_util::StreamExt;
 use memberlist_compio::{
-  ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  MemberlistError, NodeDelegate, Options, PingDelegate, QuicOptions, QuicTransport,
-  QuicTransportOptions, SocketAddrResolver, VoidDelegate,
+  ConflictDelegate, Delegate, EndpointTuning, EventDelegate, FirstAddrResolver, MaybeResolved,
+  Memberlist, MemberlistError, MemberlistOptions, NodeDelegate, Options, PingDelegate, QuicOptions,
+  QuicTransport, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use rustls::RootCertStore;
@@ -55,6 +55,50 @@ async fn make_quic_at(
       .with_local_id(SmolStr::new(id))
       .with_advertise_addr(MaybeResolved::Resolved(addr))
       .with_quic_config(qcfg),
+  );
+  Memberlist::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("bind quic memberlist")
+}
+
+/// Broadcast retransmit multiplier for a node whose queued user payload a test
+/// must observe on a peer.
+///
+/// A queued user broadcast rides the UNRELIABLE gossip plane and carries no
+/// ack: the gossip scheduler drains it once per tick and drops it for good once
+/// it has been selected `retransmit_mult * ceil(log10(num_members + 1))` times.
+/// At the default multiplier of 4 in a two-node cluster that is 4 selections,
+/// so the payload only exists for `4 * gossip_interval` = 800ms after it is
+/// queued. A peer that loses those four datagrams never receives the payload,
+/// and waiting longer cannot recover it — the sender has already discarded it.
+/// Raising the multiplier keeps the payload in the queue, re-gossiped every
+/// interval, for the whole span a test is willing to wait, so the assertion
+/// depends on ONE of many datagrams landing instead of on all four landing.
+const OBSERVED_BROADCAST_RETRANSMIT_MULT: u32 = 15;
+
+/// The span over which [`OBSERVED_BROADCAST_RETRANSMIT_MULT`] keeps re-gossiping
+/// a queued payload: 15 selections at the 200ms default gossip interval. Every
+/// observation deadline below is derived from this term.
+const OBSERVED_BROADCAST_TRANSMIT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Like [`make_quic`] but with the broadcast retransmit multiplier raised to
+/// [`OBSERVED_BROADCAST_RETRANSMIT_MULT`], for a node whose queued user
+/// broadcast a peer must be observed receiving.
+async fn make_quic_retransmitting(id: &str, qcfg: QuicOptions) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<QuicTransport<SmolStr, SocketAddr>>::new(
+    QuicTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
+      .with_quic_config(qcfg),
+  )
+  .with_memberlist(
+    MemberlistOptions::new()
+      .with_tuning(EndpointTuning::new().with_retransmit_mult(OBSERVED_BROADCAST_RETRANSMIT_MULT)),
   );
   Memberlist::new(
     opts,
@@ -338,6 +382,16 @@ async fn command_after_shutdown_returns_error_promptly() {
   );
 }
 
+/// Ceiling on each individually unbounded await in the command-flood test.
+///
+/// `dispatch_join` and `shutdown` both wait on the driver with no deadline of
+/// their own, so a driver that stops servicing its socket makes them wait
+/// forever. Bounding them turns that class of regression into a prompt test
+/// failure rather than a run that lasts until the CI job is killed. The value
+/// is an order of magnitude above the operations' real cost on loopback, so it
+/// constrains nothing a healthy driver does.
+const CMD_FLOOD_AWAIT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Command flood must not starve network arms (recv / timer).
 ///
 /// Many cloned `Memberlist` handles each issuing commands (e.g.
@@ -383,10 +437,20 @@ async fn cmd_flood_does_not_starve_recv_or_timer_under_join() {
 
   // Legitimate join through the seed's recv arm. Must complete
   // despite the command flood.
-  let count = joiner
-    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
-    .await
-    .expect("dispatch_join under cmd flood");
+  //
+  // Every await below carries a deadline. `dispatch_join` and `shutdown` are
+  // both unbounded by contract, so a driver that stops servicing its socket
+  // under the flood would park here for as long as the harness allows — a
+  // regression has to surface as a failure in seconds, not as a job that runs
+  // until its timeout. The deadlines are far above the observed timings
+  // (convergence well under a second on loopback) and only bound pathology.
+  let count = compio::time::timeout(
+    CMD_FLOOD_AWAIT_DEADLINE,
+    joiner.dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)]),
+  )
+  .await
+  .expect("dispatch_join hung under cmd flood")
+  .expect("dispatch_join under cmd flood");
   assert_eq!(count, 1);
 
   // Wider deadline than TCP: QUIC handshake latency.
@@ -402,8 +466,14 @@ async fn cmd_flood_does_not_starve_recv_or_timer_under_join() {
     seed.member_count()
   );
 
-  seed.shutdown().await.expect("seed shutdown");
-  joiner.shutdown().await.expect("joiner shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, seed.shutdown())
+    .await
+    .expect("seed shutdown hung under cmd flood")
+    .expect("seed shutdown");
+  compio::time::timeout(CMD_FLOOD_AWAIT_DEADLINE, joiner.shutdown())
+    .await
+    .expect("joiner shutdown hung under cmd flood")
+    .expect("joiner shutdown");
 }
 
 /// Quiet shutdown — no network activity, no concurrent commands.
@@ -1142,8 +1212,12 @@ impl Delegate for SlowUserMsgDelegate {
 /// stays far under the cap — so the slow first handler only DELAYS delivery, it
 /// does not lose the payload. Here node B's first `notify_user_msg` sleeps ~2s;
 /// A queues a user broadcast that periodic gossip carries to B. Despite the
-/// slow first delivery, B's delegate EVENTUALLY records the payload within a
-/// generous window.
+/// slow first delivery, B's delegate EVENTUALLY records the payload.
+///
+/// The observation task dispatches events sequentially, so the stalled FIRST
+/// delivery is always the one that records the payload: no later delivery can
+/// overtake it. That is what keeps the assertion a statement about the stalled
+/// handler even though A keeps re-gossiping the payload.
 ///
 /// Honest scope: this guards eventual delivery under handler latency for a
 /// payload that fits the buffer — not the bounded channel's drop accounting
@@ -1157,8 +1231,10 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
   let qcfg_a = support::build_quic_config(cert.clone(), key.clone_key(), roots.clone());
   let qcfg_b = support::build_quic_config(cert, key, roots);
 
-  // Node A is a normal VoidDelegate node; it queues the broadcast.
-  let a = make_quic("slowuser-a", qcfg_a).await;
+  // Node A is a normal VoidDelegate node; it queues the broadcast, so it needs
+  // the raised retransmit multiplier that keeps the payload re-gossiped for
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW.
+  let a = make_quic_retransmitting("slowuser-a", qcfg_a).await;
 
   // Node B carries the slow-user-msg observation delegate; built inline like
   // `make_quic` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
@@ -1209,9 +1285,15 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
     .expect("queue user broadcast acks Ok");
 
   // B's delegate must EVENTUALLY record the payload despite its first
-  // notify_user_msg sleeping ~2s. The unbounded observation channel buffers
-  // the event for the slow handler — it is never dropped. A generous 6s window
-  // absorbs the gossip-interval stagger plus the 2s handler stall.
+  // notify_user_msg sleeping ~2s. The observation channel buffers the event
+  // for the slow handler — it is never dropped.
+  //
+  // Deadline terms: the last useful gossip of the payload leaves A at
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW; the delivery that lands then still owes
+  // the 2s handler stall before it records; the remaining second is scheduling
+  // margin. Waiting past this sum would be pointless rather than merely
+  // generous — once the transmission window closes A has discarded the payload,
+  // so a delivery that has not happened by then can never happen.
   let saw = wait_until(
     || {
       user_msgs
@@ -1220,7 +1302,7 @@ async fn quic_slow_user_msg_delegate_still_observes_broadcast() {
         .iter()
         .any(|b| b.as_ref() == b"slow-payload")
     },
-    Duration::from_secs(6),
+    OBSERVED_BROADCAST_TRANSMIT_WINDOW + Duration::from_secs(2) + Duration::from_secs(1),
   )
   .await;
   assert!(

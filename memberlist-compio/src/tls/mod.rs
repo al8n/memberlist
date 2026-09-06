@@ -252,48 +252,11 @@ where
     let advertise_socket = crate::options::canonical_advertise(advertise_socket);
 
     // memberlist reaches a node at ONE advertised address, so the UDP gossip
-    // socket and the TLS-over-TCP reliable listener MUST share a port. Bind the
-    // listener first to claim an OS-assigned free port, then bind the gossip
-    // socket to that same port. Binding UDP first and reusing its port for TCP
-    // races: an ephemeral UDP port can land on a TCP port still in TIME_WAIT
-    // (the spaces are independent), failing the TCP bind with AddrInUse. For an
-    // ephemeral (`:0`) advertise we retry the pair on a fresh port when the UDP
-    // bind fails transiently: AddrInUse from the port-space race, or
-    // PermissionDenied (Windows WSAEACCES) when the listener's OS-assigned port
-    // falls in a UDP excluded range — CI hypervisors reserve disjoint TCP/UDP
-    // ranges, so a TCP-bindable port can still be UDP-forbidden. A fixed
-    // (nonzero) port is a single attempt, so a genuine conflict surfaces to the
-    // caller instead of looping.
-    const EPHEMERAL_BIND_RETRIES: usize = 16;
-    let ephemeral = advertise_socket.port() == 0;
-    let (tcp_listener, advertise_socket, gossip_socket) = {
-      let mut attempt = 0usize;
-      loop {
-        let tcp_listener = TcpListener::bind(advertise_socket)
-          .await
-          .map_err(MemberlistError::Io)?;
-        let bound = tcp_listener.local_addr().map_err(MemberlistError::Io)?;
-        match UdpSocket::bind(bound).await {
-          Ok(gossip_socket) => break (tcp_listener, bound, gossip_socket),
-          Err(e)
-            if ephemeral
-              && matches!(e.kind(), ErrorKind::AddrInUse | ErrorKind::PermissionDenied)
-              && attempt < EPHEMERAL_BIND_RETRIES =>
-          {
-            // Release the claimed TCP port and retry on a fresh ephemeral pair.
-            // On Windows `drop` closes asynchronously (IOCP), so the port would
-            // linger and the retries — especially many in parallel during a test
-            // run — would exhaust the ephemeral pool before finding a
-            // UDP-bindable port; `close().await` releases it synchronously first.
-            // Ignoring Err: this attempt's listener is being discarded regardless
-            // and a fresh pair is rebound, so a close error is not actionable.
-            let _ = tcp_listener.close().await;
-            attempt += 1;
-          }
-          Err(e) => return Err(MemberlistError::Io(e)),
-        }
-      }
-    };
+    // socket and the TLS-over-TCP reliable listener MUST share a port. Claiming
+    // a port both protocols will accept — and getting past the ones only one of
+    // them will — is the shared helper's job.
+    let (tcp_listener, advertise_socket, gossip_socket) =
+      crate::transport::bind::bind_stream_pair(advertise_socket).await?;
 
     Ok(Self {
       local_id,

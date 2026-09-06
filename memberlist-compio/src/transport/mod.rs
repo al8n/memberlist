@@ -16,6 +16,12 @@ use crate::{
   resolver::{AdvertiseAddrResolver, Resolver},
 };
 
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+pub(crate) mod bind;
 pub mod runtime;
 pub use runtime::TransportRuntime;
 

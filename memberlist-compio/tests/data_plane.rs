@@ -33,9 +33,9 @@ use std::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use memberlist_compio::{
-  Channel, ConflictDelegate, Delegate, EventDelegate, FirstAddrResolver, MaybeResolved, Memberlist,
-  MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate, Options, PingDelegate,
-  RuntimeOptions, SocketAddrResolver, TcpTransport, TcpTransportOptions,
+  Channel, ConflictDelegate, Delegate, EndpointTuning, EventDelegate, FirstAddrResolver,
+  MaybeResolved, Memberlist, MemberlistError, MemberlistOptions, MergeDelegate, NodeDelegate,
+  Options, PingDelegate, RuntimeOptions, SocketAddrResolver, TcpTransport, TcpTransportOptions,
 };
 use memberlist_proto::{event::Event, typed::NodeState};
 use smol_str::SmolStr;
@@ -148,6 +148,50 @@ async fn make_seed(id: &str) -> Memberlist<SmolStr, SocketAddr> {
   .expect("construct seed")
 }
 
+/// Broadcast retransmit multiplier for a node whose queued user payload a test
+/// must observe on a peer.
+///
+/// A queued user broadcast rides the UNRELIABLE gossip plane and carries no
+/// ack: the gossip scheduler drains it once per tick and drops it for good once
+/// it has been selected `retransmit_mult * ceil(log10(num_members + 1))` times.
+/// At the default multiplier of 4 in a two-node cluster that is 4 selections,
+/// so the payload only exists for `4 * gossip_interval` = 800ms after it is
+/// queued. A peer that loses those four datagrams never receives the payload,
+/// and waiting longer cannot recover it — the sender has already discarded it.
+/// Raising the multiplier keeps the payload in the queue, re-gossiped every
+/// interval, for the whole span a test is willing to wait, so the assertion
+/// depends on ONE of many datagrams landing instead of on all four landing.
+const OBSERVED_BROADCAST_RETRANSMIT_MULT: u32 = 15;
+
+/// The span over which [`OBSERVED_BROADCAST_RETRANSMIT_MULT`] keeps re-gossiping
+/// a queued payload: 15 selections at the 200ms default gossip interval. The
+/// observation deadlines of the tests that queue a broadcast are derived from
+/// this term.
+const OBSERVED_BROADCAST_TRANSMIT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Like [`make_seed`] but with the broadcast retransmit multiplier raised to
+/// [`OBSERVED_BROADCAST_RETRANSMIT_MULT`], for a seed whose queued user
+/// broadcast a peer must be observed receiving.
+async fn make_retransmitting_seed(id: &str) -> Memberlist<SmolStr, SocketAddr> {
+  let opts = Options::<TcpTransport<SmolStr, SocketAddr>>::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap())),
+  )
+  .with_memberlist(
+    MemberlistOptions::new()
+      .with_tuning(EndpointTuning::new().with_retransmit_mult(OBSERVED_BROADCAST_RETRANSMIT_MULT)),
+  );
+  Memberlist::new(
+    opts,
+    memberlist_compio::VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct retransmitting seed")
+}
+
 /// Build a [`RecordingDelegate`]-backed node bound to `127.0.0.1:0`.
 async fn make_recording_node(
   id: &str,
@@ -224,10 +268,10 @@ fn updates_contain(updates: &UpdateRecords, id: &str, meta: &[u8]) -> bool {
 ///
 /// This is end-to-end gossip dissemination — the command acks, then the
 /// payload rides the periodic gossip path (armed at driver-loop entry) to the
-/// peer. A generous window absorbs the gossip-interval stagger.
+/// peer.
 #[compio::test]
 async fn queue_user_broadcast_disseminates_to_peer() {
-  let seed = make_seed("ub-seed").await;
+  let seed = make_retransmitting_seed("ub-seed").await;
   let seed_addr = *seed.local_node().addr_ref();
   assert_ne!(seed_addr.port(), 0, "seed must have a concrete port");
 
@@ -254,10 +298,13 @@ async fn queue_user_broadcast_disseminates_to_peer() {
     .await
     .expect("queue user broadcast acks Ok");
 
-  // Periodic gossip then carries the queued broadcast to the peer.
+  // Periodic gossip then carries the queued broadcast to the peer. The deadline
+  // is the transmission window plus scheduling margin: past that the seed has
+  // discarded the payload, so a delivery that has not happened can never happen
+  // and a longer wait would only slow the suite down.
   let saw = wait_until(
     || records_contain(&user_msgs, b"hello"),
-    Duration::from_secs(5),
+    OBSERVED_BROADCAST_TRANSMIT_WINDOW + Duration::from_secs(2),
   )
   .await;
   assert!(
@@ -902,7 +949,10 @@ async fn bounded_observation_channel_caps_payload_bytes_not_count() {
 /// but NEITHER app-data event.
 #[compio::test]
 async fn app_data_reaches_delegate_but_not_eventstream() {
-  let seed = make_seed("ad-seed").await;
+  // The seed queues the user broadcast, so it needs the raised retransmit
+  // multiplier that keeps the payload re-gossiped for
+  // OBSERVED_BROADCAST_TRANSMIT_WINDOW.
+  let seed = make_retransmitting_seed("ad-seed").await;
   seed
     .set_local_state(Bytes::from_static(b"remote-state-x"))
     .await
@@ -938,10 +988,12 @@ async fn app_data_reaches_delegate_but_not_eventstream() {
   // Both app-data hooks must fire on the delegate: the join push/pull merge and
   // the gossiped broadcast. This is the proof the events were produced and
   // delivered — so their absence from the stream below is suppression, not a
-  // race where they simply never happened.
+  // race where they simply never happened. The merge rides the reliable join
+  // exchange; only the broadcast is gossip-paced, so the deadline is that
+  // transmission window plus scheduling margin.
   let delivered = wait_until(
     || records_contain(&merges, b"remote-state-x") && records_contain(&user_msgs, b"user-packet-y"),
-    Duration::from_secs(6),
+    OBSERVED_BROADCAST_TRANSMIT_WINDOW + Duration::from_secs(2),
   )
   .await;
   assert!(

@@ -84,7 +84,7 @@ impl StreamIo for SmoltcpStream<'_, '_> {
     // (`socket/tcp.rs`: the Closed-state RST arm, then `if self.state == Closed {
     // self.tuple = None }`). So `Closed && remote_endpoint().is_some()` is exactly
     // "an abort whose RST has not yet egressed" — NOT reusable, or re-`listen` /
-    // re-`connect` would `reset()` the socket and suppress the pending RST (#161).
+    // re-`connect` would `reset()` the socket and suppress the pending RST.
     // A clean `TimeWait` (state != Closed) has no RST pending and IS reusable, as is
     // a freshly-reset `Closed` socket with no tuple. Verified against smoltcp 0.13.1.
     let set = self.sockets.borrow();

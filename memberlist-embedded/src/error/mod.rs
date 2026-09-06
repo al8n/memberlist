@@ -56,6 +56,32 @@ pub enum InitError {
   /// fail construction with a capacity error naming a ceiling nothing can meet.
   /// Must be non-zero.
   ZeroGossipReadCap,
+  /// [`Options::max_pending_seeds`](crate::Options::max_pending_seeds) is zero.
+  ///
+  /// The cap is the join-seed queue ceiling, and `join` admits a seed only while
+  /// the queue is below it, so a zero cap queues nothing: every `join` would
+  /// return `Ok` having silently dropped every seed, and the node could never
+  /// reach a cluster it was not told about by gossip. Must be non-zero.
+  ZeroMaxPendingSeeds,
+  /// [`Options::max_pending_seeds`](crate::Options::max_pending_seeds) exceeds
+  /// [`MAX_PENDING_SEEDS_CEILING`](crate::MAX_PENDING_SEEDS_CEILING).
+  ///
+  /// The cap is not only an admission bound: construction RESERVES the seed
+  /// queue, the join ranking window and the per-pump seed id set at it, so the
+  /// configured number is allocated whether or not a seed is ever offered. A
+  /// value taken from a runtime source would otherwise reach the allocator
+  /// unscreened, and a failed allocation on `no_std` + `alloc` aborts the process
+  /// rather than returning here. The configured value is carried for diagnostics.
+  MaxPendingSeedsTooLarge(usize),
+  /// [`Options::max_pending_dials`](crate::Options::max_pending_dials) is zero.
+  ///
+  /// The cap bounds how many reliable dials may wait BEYOND what the free pool
+  /// could take, and a dial is admitted only while that excess is below it. Zero
+  /// therefore refuses every dial the pool cannot absorb at once — including the
+  /// first dial made while the pool is momentarily empty — so a node with a busy
+  /// reliable plane could neither join nor send a reliable message. Must be
+  /// non-zero.
+  ZeroMaxPendingDials,
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
   /// A driver sizes its gossip arenas from
@@ -160,6 +186,14 @@ impl fmt::Display for InitError {
       InitError::ZeroPort => f.write_str("port is zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
       InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
+      InitError::ZeroMaxPendingSeeds => f.write_str("max_pending_seeds must be non-zero"),
+      InitError::MaxPendingSeedsTooLarge(cap) => write!(
+        f,
+        "max_pending_seeds {cap} exceeds the maximum of {} (the join buffers are \
+         reserved at it during construction)",
+        crate::MAX_PENDING_SEEDS_CEILING
+      ),
+      InitError::ZeroMaxPendingDials => f.write_str("max_pending_dials must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::GossipRecvCapacityTooLarge(n) => write!(
         f,
