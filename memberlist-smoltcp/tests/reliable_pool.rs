@@ -1244,10 +1244,12 @@ fn slow_but_progressing_close_is_hard_capped_by_close_timeout() {
 ///
 /// The hub node `b` has `tcp_pool_size = 2`: one socket is its listener, leaving
 /// exactly ONE dial socket. It joins TWO reachable seeds `a1` and `a2` in a single
-/// `join`, and the lone dial socket can back only one of them: the first is
-/// admitted and dialed, the second waits — as a queued seed, since join intent is
-/// admitted against real pool capacity rather than encoded into a bridge that
-/// could not be dialed. Both seeds are real nodes wired to `b` through a broadcast
+/// `join`, and the lone dial socket can back only one of them: the first is admitted
+/// against that free slot and dialed, the second is admitted as the seed queue's
+/// HEAD — the one admission the pump makes past measured capacity, so that the queue
+/// holds a place in the machine's dial order ahead of every later request — and its
+/// `Connect` therefore parks in `PendingDial` with no socket, which is the state the
+/// witness below reads. Both seeds are real nodes wired to `b` through a broadcast
 /// hub (each on the shared `/24`, reachable; the two seeds are NOT wired to each
 /// other). With every periodic scheduler disabled, `b` can learn a seed ONLY via
 /// its own direct push/pull to it — so reaching all three members proves BOTH
@@ -1346,9 +1348,13 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   .expect("join from a running node");
 
   // Witness that the second exchange was genuinely deferred rather than running
-  // alongside the first: the single dial socket cannot back both, so `b` must pass
-  // through a poll where it has learned exactly one of the two seeds.
-  let mut saw_one_seed_at_a_time = false;
+  // alongside the first: with one dial socket for two dials, `b` must pass through a
+  // poll holding an exchange in `PendingDial` — requested, but with no socket
+  // assigned. Read the parked count itself rather than a membership size: `b` passes
+  // through a two-member state whenever its two exchanges merely complete at
+  // different instants, which says nothing about whether either ever waited for a
+  // socket.
+  let mut saw_a_deferred_dial = false;
 
   // Drive all three nodes purely by the deadlines `poll` returns: advance the
   // clock to the soonest FUTURE instant any node asked to be woken at, never a
@@ -1362,8 +1368,8 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
     let n1 = a1.poll(clk.now(), &mut d1);
     let n2 = a2.poll(clk.now(), &mut d2);
 
-    if b.num_members() == 2 {
-      saw_one_seed_at_a_time = true;
+    if b.pending_dial_count() >= 1 {
+      saw_a_deferred_dial = true;
     }
 
     // `b` learns a seed only by completing its direct push/pull to it; all three
@@ -1403,10 +1409,9 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   }
 
   assert!(
-    saw_one_seed_at_a_time,
-    "`b` never passed through a two-member state — the single dial socket should \
-     not have backed both seeds at once, so the contended-socket scenario was not \
-     exercised"
+    saw_a_deferred_dial,
+    "`b` never held an exchange in `PendingDial` — the lone dial socket was never \
+     contended, so the scenario under test did not occur"
   );
   assert!(
     converged,

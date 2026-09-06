@@ -455,9 +455,15 @@ pub struct Engine<I, C, R = SmallRng> {
   /// this pump has surfaced its `Connect` by then, and one that failed before ever
   /// reaching a `Connect` never will.
   seed_stream_ids: MediumVec<StreamId>,
-  /// Count of join seeds dropped because [`Options::max_pending_seeds`] was already
-  /// reached. Non-zero means a caller offered more distinct routable seeds at once
-  /// than the queue admits, and the surplus was discarded rather than queued.
+  /// Count of offered join-seed entries one call had no room to queue: the surplus
+  /// beyond the free queue slots that call found, plus the entry it leaves the
+  /// rotation on.
+  ///
+  /// The room a call has is [`Options::max_pending_seeds`] minus what is already
+  /// queued, so this rises both when a full queue turns a whole offer away and when
+  /// a single over-long offer meets an EMPTY one: 40 distinct routable seeds at the
+  /// default cap of 32 record 8 — the 7 that ranked past the 33-entry window, and
+  /// the one the next offer resumes the rotation from.
   join_seeds_dropped: u64,
   /// Count of join seeds skipped because the same address was already queued or
   /// already had a live (non-`Closing`) JOIN exchange under way. This is the
@@ -606,9 +612,16 @@ where
     self.pending_seeds.len()
   }
 
-  /// Diagnostic count of join seeds discarded because the queue was already at
-  /// [`Options::max_pending_seeds`]. A non-zero value means a caller offered more
-  /// distinct routable seeds at once than the queue admits.
+  /// Diagnostic count of offered join-seed entries a call had no room to queue: the
+  /// surplus beyond the free queue slots it found — [`Options::max_pending_seeds`]
+  /// minus what was already queued — plus the entry the rotation resumes from.
+  ///
+  /// A non-zero value therefore means one offer carried more distinct routable
+  /// seeds than the queue could take at that moment, whether because the queue was
+  /// already full or because that single offer was longer than the whole cap: 40
+  /// distinct routable seeds offered to an EMPTY queue at the default cap of 32
+  /// record 8 (the 7 that ranked past the 33-entry window, and the one the next
+  /// offer resumes from).
   #[inline]
   pub fn join_seeds_dropped(&self) -> u64 {
     self.join_seeds_dropped
@@ -647,10 +660,16 @@ where
   /// protocol-originated parked dials: it is enforced after the pump's dial site has
   /// spent every free slot, newest intent first, so at most `max_pending_dials` of
   /// them are parked once any pump returns. Join seeds stand outside it (at most one
-  /// head waits past measured capacity). Application sends are refused at the
-  /// [`send_reliable`](Self::send_reliable) call site before they can reach it, so a
-  /// non-zero value usually means protocol-paced dial work (a periodic push/pull, a
-  /// reliable-ping fallback) was shed under a caller-driven backlog.
+  /// head waits past measured capacity), so a join can never make this rise.
+  ///
+  /// What it counts is every OTHER dial source shed under a caller-driven backlog:
+  /// protocol-paced work (a periodic push/pull, a reliable-ping fallback) and the
+  /// application sends that got past the [`send_reliable`](Self::send_reliable)
+  /// pre-check. That pre-check is a call-site signal, not the authority — it credits
+  /// the slots free at call time to the backlog, and a pump that spends one of them
+  /// elsewhere (the listener replenishing itself, an older seed head taking one in
+  /// the dial FIFO) leaves more parked than the check admitted for. A send shed here
+  /// reports through its `ExchangeCompleted { Failed }` like any other dial failure.
   #[inline]
   pub fn pending_dial_rejections(&self) -> u64 {
     self.pending_dial_rejections
@@ -1039,11 +1058,14 @@ where
   /// of a re-offered set `S` is admitted within `⌈|S| ÷ r⌉` offers that each find at
   /// least `r` free queue slots. An offer that finds the queue FULL admits nothing —
   /// it sheds every entry it ranked and leaves the rotation on the lowest-ranked of
-  /// them, which is the entry that already ranked first — so it neither counts
-  /// toward that bound nor costs the set a turn. No reachable seed can therefore be
-  /// starved behind one that keeps failing, however the caller orders the list,
-  /// however a re-resolution reorders it, and however many offers meet a full
-  /// queue.
+  /// them — so it neither counts toward that bound nor costs the set a turn. That
+  /// lowest-ranked entry is the one that already ranked first whenever it is still a
+  /// candidate; when it is not — it is already queued, or a JOIN exchange to it is
+  /// already under way — the rotation advances to the lowest-ranked entry that is,
+  /// and the entry it passed over is one already being served rather than one that
+  /// lost a turn. No reachable seed can therefore be starved behind one that keeps
+  /// failing, however the caller orders the list, however a re-resolution reorders
+  /// it, and however many offers meet a full queue.
   ///
   /// That bound is over the addresses offered TOGETHER, because the rotation is
   /// engine-wide and a call can only advance it past the entries that call saw. A
@@ -3731,12 +3753,23 @@ where
   /// and finds the connection gone — a no-op, exactly like a synchronous 7d''
   /// dial rejection.
   ///
-  /// O(P log P) to rank the parked population when over the cap, plus one
-  /// coordinator tick per shed entry — each `handle_dial_failed` runs the
-  /// coordinator's bridge/handshake/dial servicing, O(active bridges) — so
-  /// shedding `over` entries costs `over × O(active bridges)` on top of the
-  /// ranking. O(1) when under the cap.
+  /// O(1) while the connection table itself is within the cap — the common case,
+  /// and the one the gate below reads. Above it, O(live connections) to count the
+  /// parked non-seed dials, plus, when that count is over the cap, O(P log P) to
+  /// rank the parked population and one coordinator tick per shed entry — each
+  /// `handle_dial_failed` runs the coordinator's bridge/handshake/dial servicing,
+  /// O(active bridges) — so shedding `over` entries costs `over × O(active bridges)`
+  /// on top of the ranking.
   fn trim_pending_dials(&mut self, now: Instant) {
+    // The parked non-seed dials are a subset of the connection table, so a table
+    // within the ceiling is trivially within it. Check the length the map already
+    // tracks before walking it: every pump reaches this phase, and all but the
+    // backlogged ones would otherwise pay a full scan to learn there is nothing to
+    // shed.
+    if self.plane.connections.len() <= self.cfg.max_pending_dials {
+      return;
+    }
+
     let over = self
       .plane
       .pending_non_seed_dial_count()
